@@ -79,33 +79,15 @@ here.
 | `execute_read(&graph, query, &opts)` | `kglite::api::session::execute_read` | Run a read query. |
 | `execute_mut(&mut graph, query, &opts)` | `kglite::api::session::execute_mut` | Run a mutation. |
 
-## Dataset loaders (feature-gated)
+## Dataset loaders
 
-```toml
-kglite = { features = ["sec", "sodir", "wikidata"] }
-```
-
-| Feature | Module | What it loads |
-|---|---|---|
-| `sec` | `kglite::api::datasets::sec` | SEC EDGAR filings (quarterly index, bulk submissions, Form 4 / 13F, Exhibit 21, 8-K). |
-| `sodir` | `kglite::api::datasets::sodir` | Norwegian Continental Shelf petroleum data (Sodir FactMaps REST). |
-| `wikidata` | `kglite::api::datasets::wikidata` | Wikimedia `latest-truthy.nt.bz2` dump fetcher (resumable). |
-
-Each submodule re-exports the same surface the Python wheel uses
-via `_sec_internal` / `_sodir_internal` / `_wikidata_internal`:
-workdir + storage-mode types, error + Result aliases, the HTTP
-client, the async fetch entry points, and (for SEC) the extract
-pipeline + size-prediction helpers. All `fetch_*` entries are
-`async` — bindings need a tokio runtime to drive them.
-
-**Lifecycle orchestration (cache short-circuit, mode selection,
-retry budgets) is NOT in core.** Each binding wraps the building
-blocks in its own language idiom; the Python wheel's wrappers
-(`kglite/datasets/*/wrapper.py`) are the reference implementation.
-See [`implementing-a-binding.md`](implementing-a-binding.md) →
-"Wrapping a dataset for your binding".
-
-Polars-io style: opt in only to what you use.
+The pre-packaged dataset loaders (SEC EDGAR, Sodir, Wikidata) are no
+longer part of the kglite core API surface — they live in the
+separate kglite-datasets project, and `kglite::api::datasets::*` (and
+the `sec` / `sodir` / `wikidata` Cargo features) have been removed.
+kglite loads the graphs those loaders produce via the ordinary
+lifecycle API. To ingest RDF directly, use the kept RDF/N-Triples
+loaders.
 
 ## Semver
 
@@ -131,7 +113,6 @@ kglite::                    (the crate root)
 ├── api::                   (this stable surface)
 │   ├── cypher::            (parse / plan / execute primitives)
 │   └── session::           (canonical Cypher pipeline + transactions)
-├── datasets::              (sec / sodir / wikidata, feature-gated)
 ├── datatypes::             (internal — use api::Value)
 ├── error                   (internal — use api::KgError)
 ├── graph::                 (internal — engine submodules)

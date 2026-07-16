@@ -27,7 +27,6 @@ Domain-specific surfaces — pull them in when your data has the shape:
 | {doc}`semantic-search` | …you want fuzzy / meaning-based lookup. `text_score()` in Cypher, embedding model registration. |
 | {doc}`graph-algorithms` | …you need PageRank, community detection, shortest paths, centrality. |
 | {doc}`traversal-hierarchy` | …your graph has parent-child / ancestor structure. `set_parent_type`, `*` walks, hierarchical Cypher. |
-| {doc}`datasets` | …you want pre-built graphs of public sources (Wikidata, Sodir). One-call lifecycle wrappers. |
 
 ## Power-user / less common
 

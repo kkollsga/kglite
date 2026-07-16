@@ -30,7 +30,6 @@ guides/cypher
 guides/mcp-servers
 guides/mcp-skills
 guides/durable-apps
-guides/datasets
 guides/blueprints
 guides/querying
 guides/traversal-hierarchy
@@ -42,7 +41,6 @@ guides/import-export
 guides/ai-agents
 guides/okf
 guides/recipes
-guides/sec
 ```
 
 ## Python-specific topics

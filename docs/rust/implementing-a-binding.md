@@ -302,17 +302,16 @@ JSON; the Java side parses with Jackson / Gson / `JsonParser`.
   `cypher_result_row_count`, `cypher_result_free`.
 - **Error introspection**: `status_code_name`,
   `status_code_neo4j_status`, `status_code_http_status`.
-- **Datasets**: per-loader fetchers + extract pipelines for SEC
-  EDGAR, Sodir, Wikidata (each feature-gated behind a `KGLITE_FEATURE_*`
-  preprocessor define).
 - **Embedder**: `embedder_fastembed_new` (feature-gated),
   `embedder_free`, `session_set_embedder`.
 - **ABI version**: `kglite_abi_version()` for startup checks.
 
-That's ~30 C functions total. Phase H added the surface in three
-sub-phases (H.2 skeleton, H.3 Sodir + embedder, H.3a SEC +
-Wikidata); future iterations can extend with per-filing fetchers
-or user-supplied embedder callbacks as bindings ask.
+Phase H built out this surface across several sub-phases (H.2
+skeleton, then embedder + the rest). The pre-packaged dataset
+loaders (SEC EDGAR, Sodir, Wikidata) are no longer part of the
+kglite core — they live in the separate kglite-datasets project and
+are not exported through the C ABI; kglite loads the graphs those
+loaders produce via the ordinary lifecycle functions.
 
 #### Alternatives if kglite-c doesn't fit
 
@@ -504,42 +503,25 @@ code-intelligence graph (Function / Class / Module / etc. nodes,
 CALLS / DEFINES / IMPORTS edges). The kglite MCP server uses this
 to answer "what functions call X" queries about a codebase.
 
-### 4. Use a dataset loader (feature-gated)
-
-```toml
-[dependencies]
-kglite = { version = "0.11", features = ["sec", "sodir", "wikidata"] }
-```
-
-Each loader is opt-in via its Cargo feature; the building blocks
-land in `kglite::api::datasets::{sec, sodir, wikidata}`:
+### 4. Load RDF / N-Triples
 
 ```rust
-use kglite::api::datasets::sec::{
-    SecClient, Workdir, YearRange,
-    fetch_quarterly_master_idx, fetch_submissions_bulk,
-    run_all, SliceSpec, predict_graph_size_gb, pick_storage_mode,
-};
-
-let wd = Workdir::new("/tmp/sec");
-let client = SecClient::new("YourBinding/1.0 contact@example.com")?;
-
-// All fetch_* entries are async — driven from a tokio runtime
-// you manage in your binding.
-fetch_quarterly_master_idx(
-    &client, &wd, YearRange::new(2020, 2024), /*current_year*/ 2024, /*current_quarter*/ 4,
-).await?;
-
-// Plan storage mode from a size estimate:
-let gb = predict_graph_size_gb(5, 0, None, true, true, true);
-let mode = pick_storage_mode(gb);  // "memory" | "mapped" | "disk"
+use kglite::api::load_file; // plus the RDF/N-Triples loaders
 ```
 
-The full lifecycle orchestration (cache management, mode selection,
-retry policies, ticker resolution) lives in each binding's wrapper.
-See the next section for the pattern.
+The kept RDF loaders (`load_rdf` / `load_ntriples`) ingest Turtle /
+N-Triples / N-Quads / TriG directly, including Wikidata-scale
+`latest-truthy` dumps streamed straight into a disk-backed graph.
+Reach for these when your binding builds a graph from RDF sources.
 
-## Wrapping a dataset for your binding
+The pre-packaged dataset loaders (SEC EDGAR, Sodir, Wikidata) are no
+longer part of the kglite core API surface — they live in the
+separate kglite-datasets project. kglite loads the graphs those
+loaders produce via the ordinary lifecycle API (`load_file`), so a
+binding that wants that data either reads a pre-built `.kgl` /
+disk-graph or binds to kglite-datasets separately.
+
+## Wrapping a graph source for your binding
 
 ### The boundary rule
 
@@ -550,95 +532,21 @@ Before any code: there is one rule about where things go.
 > two or more wrappers would write identically belongs in
 > `kglite::api::*`.
 
-That rule is the lens for every decision below. PyO3 marshalling
+That rule is the lens for every wrapper decision. PyO3 marshalling
 goes in the Python wrapper because no Go binding would use it. A
-JSON parser for SEC's `company_tickers.json` goes in core because
-every binding parses the same JSON. A `tqdm` progress display goes
-in the Python wrapper because Go uses channels and JS uses event
-emitters for the same purpose. The cache-freshness check ("is the
-local dump older than the remote one") goes in core because every
-binding asks the same question the same way.
+generic JSON/RDF parser goes in core because every binding parses
+the same input. A `tqdm` progress display goes in the Python wrapper
+because Go uses channels and JS uses event emitters for the same
+purpose. A cache-freshness check ("is the local file older than the
+remote one") goes in core because every binding asks the same
+question the same way.
 
-If you find yourself writing logic in a wrapper that another
-binding would copy verbatim, stop and file it as a core lift.
-
-### The shared lifecycle shape
-
-The three reference wrappers (`kglite/datasets/sec/wrapper.py`,
-`kglite/datasets/sodir/wrapper.py`, `kglite/datasets/wikidata.py`)
-all follow the same six-step lifecycle, even though their per-step
-implementations differ:
-
-1. **Workdir layout** — decide where raw / processed / built files
-   live on disk. Each dataset has a `Workdir` type in core
-   (`kglite::api::datasets::sec::Workdir`, etc.) — your binding
-   wraps it.
-2. **Cache short-circuit** — if a fresh build exists for the
-   requested storage mode, load and return early without
-   re-fetching. The freshness rules live in core (Wikidata: mtime
-   + remote HEAD probe; Sodir: cooldown_days; SEC: presence of
-   `graph/{mode}/`); your binding decides only when to bypass via
-   a `force_rebuild` flag.
-3. **Fetch** — call the engine's `fetch_*` functions for whatever
-   raw payloads are missing. All `fetch_*` entries are async; if
-   your binding doesn't manage a tokio runtime, use the
-   `*_blocking` variants in core (they spin up a single-thread
-   runtime per call).
-4. **Extract / preprocess** — for SEC, call `run_all`; for Sodir,
-   `fetch_all` does fetch + preprocess in one shot; for Wikidata,
-   the dump is the processed form (no separate extract).
-5. **Build** — for SEC + Sodir, call `kglite::api::blueprint::build`
-   on the loaded blueprint; for Wikidata, call
-   `KnowledgeGraph::load_ntriples` on the dump.
-6. **Cache + return** — save the built graph (`save_graph`),
-   stamp build-time metadata into the graph dir, return the handle.
-
-### Reference implementations
-
-- **SEC** (largest, most complex): `kglite/datasets/sec/wrapper.py`
-  (~600 LOC after the 2026-05-25 lifts). Three-tier cache
-  (`raw/` → `processed/` → `graph/{mode}/`). Three storage modes
-  (memory / mapped / disk). Per-form-type dispatch reads
-  `processed/filing_index.csv` and groups filings into buckets via
-  `kglite::api::datasets::sec::resolve_fetch_buckets` (which uses
-  the canonical `_FORM_BUCKETS` table in core, NOT a wrapper-side
-  copy). Ticker resolution uses
-  `kglite::api::datasets::sec::parse_tickers_json`.
-- **Sodir** (medium): `kglite/datasets/sodir/wrapper.py` (~280 LOC).
-  Two-tier cache (`csv/` + `graph/`). Two modes (memory / disk).
-  Blueprint with optional user complement file persisted in workdir.
-- **Wikidata** (smallest): `kglite/datasets/wikidata.py` (~300 LOC).
-  Single-file dump cache. Process-local cache for Jupyter rerun-
-  cell ergonomics — that part stays in the Python wrapper because
-  it's Python-specific (Go would use `sync.Map`, JS a module-level
-  `Map`, etc.).
-
-### A Go binding wrapping SEC would have…
-
-The same six lifecycle steps, ~150 LOC of Go calling into the
-same Rust building blocks. The form-type bucketing is the
-canonical table in `kglite::api::datasets::sec::all_buckets`
-(materialized once at binding-load time); the ticker parser is
-`kglite::api::datasets::sec::parse_tickers_json`. Your Go
-binding's contribution is the Go-idiomatic ergonomics around them:
-
-- `kglite::api::Workdir::new(p)` wrapped in your binding's
-  `kglite.OpenSEC(p, opts)` constructor
-- A progress event channel (`chan ProgressEvent`) instead of tqdm
-- Go-native error wrapping (`fmt.Errorf("sec fetch: %w", err)`)
-  around the `KgError` you receive
-- `sync.Map` for any process-local caching equivalent to Python's
-  `_PROCESS_CACHE` (Wikidata)
-- cgo / napi / JNI marshalling of `Workdir`, `SecClient`, etc.
-  across the FFI boundary
-
-What you **don't** write: the form-type table, the ticker JSON
-parser, the cache-freshness rules, the cooldown semantics, the
-HTTP rate-limit token bucket (built into `SecClient` /
-`ArcGISClient` / `WikidataClient`), the resumable download logic,
-the blueprint loader, the build pipeline, the Cypher pipeline.
-All of those live in `kglite::api::*` and are shared across every
-binding.
+If you find yourself writing logic in a wrapper that another binding
+would copy verbatim, stop and file it as a core lift. (The
+pre-packaged dataset loaders were the original worked example of
+this doctrine; they have since been extracted wholesale into the
+separate kglite-datasets project, so they are no longer part of the
+core API a binding wraps.)
 
 ### The audit history
 
@@ -655,18 +563,18 @@ existing bindings handle them.
 
 ### Process-local cache
 
-Loading a large graph (Wikidata at 1.4B triples) takes minutes.
-In Jupyter or any REPL-like environment, the user wants
-`kg = wikidata.open(...)` to return the *same instance* on
-re-execution instead of reloading.
+Loading a large graph (a Wikidata-scale dump at 1.4B triples) takes
+minutes. In Jupyter or any REPL-like environment, the user wants a
+re-opened graph to return the *same instance* on re-execution
+instead of reloading.
 
-The Python wheel does this via a module-level dict in
-`kglite/datasets/wikidata.py:_PROCESS_CACHE` keyed on
-`(workdir, entity_limit)`. Each binding has its own idiom:
+A binding does this via a module-level cache keyed on the load
+parameters (e.g. `(path, entity_limit)`). Each binding has its own
+idiom:
 
 | Language | Idiom |
 |---|---|
-| Python | Module-level `dict` (used by wikidata.py) |
+| Python | Module-level `dict` |
 | Go | `sync.Map` in a package-level var |
 | JS / Node | Module-level `Map` |
 | JVM | `ConcurrentHashMap` in a singleton |
@@ -776,7 +684,7 @@ by depending on `kglite`:
 | Blueprint loader + builder | `kglite::api::blueprint` | ~5,000 |
 | `.kgl` format reader + writer (v3, v4) | `kglite::api::{load_file, save_graph}` | ~3,000 |
 | Code-graph builder (tree-sitter) | the `codingest` crate | ~4,000 |
-| Dataset fetchers (SEC, Sodir, Wikidata) | `kglite::datasets::*` (feature-gated) | ~8,000 |
+| RDF / N-Triples loaders | `kglite::api` (`load_rdf`, `load_ntriples`) | — |
 | Embedder trait + FastEmbed adapter | `kglite::api::Embedder`, `FastEmbedAdapter` | ~600 |
 | Cypher result types + path/node/rel | `kglite::api::{Value, NodeValue, RelValue, PathValue}` | ~2,000 |
 
@@ -790,7 +698,6 @@ Your binding contributes:
 | Lifecycle (open, close, save, snapshot) | Thin wrapper around the engine functions |
 | Optional: lazy result iterator | If your binding has any |
 | Optional: embedder wrapper for user-provided embedders | If your binding lets users plug in custom embedders |
-| Optional: dataset wrapper layer | If your binding cares about specific datasets |
 
 The hard parts — correctness of Cypher, snapshot isolation,
 OCC conflict detection, format portability — you inherit.

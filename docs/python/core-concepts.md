@@ -38,7 +38,8 @@ segment artifacts into a top-level `disk_graph_meta.json` so
 
 **When optimizing**, in-memory wins. Disk and mapped exist for
 data that's too big to keep on the heap; they're not "faster"
-backends. For Wikidata-scale workflows, see {doc}`guides/datasets`.
+backends. For Wikidata-scale workflows, see the `load_ntriples`
+section of {doc}`guides/data-loading`.
 
 ### Choosing a storage mode
 

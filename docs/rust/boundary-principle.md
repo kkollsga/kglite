@@ -21,10 +21,14 @@ Concrete examples:
 - `tqdm` progress display, `_PROCESS_CACHE` dict for Jupyter rerun-
   cell ergonomics → Python wrapper. Go uses channels, JS uses a
   module-level `Map`.
-- SEC form-string → bucket mapping, ticker JSON parser, cache-
-  freshness decision tree, blocking/async runtime bridge → core
-  (`kglite::api::*`). Every binding asks the same questions the
-  same way.
+- Generic input parsers (RDF/N-Triples folding, blueprint JSON),
+  cache-freshness decision trees, the blocking/async runtime bridge
+  → core (`kglite::api::*`). Every binding asks the same questions
+  the same way. (The pre-packaged dataset loaders — SEC form-string
+  → bucket mapping, ticker JSON parser, and the rest — were the
+  original worked example of this rule; they have since been
+  extracted wholesale into the separate kglite-datasets project and
+  are no longer part of the kglite core API.)
 
 The principle applies in both directions, with **different
 postures for each**:
@@ -201,6 +205,13 @@ binding author validates the surface better than a synthetic
 500-LOC sketch. The cgo / napi / JNI examples in
 `implementing-a-binding.md` give them a starting point.
 
+The dataset ABI those H.3 / H.3a phases built (the
+`kglite_datasets_*` functions) has since been removed: the
+pre-packaged dataset loaders (SEC EDGAR, Sodir, Wikidata) were
+extracted into the separate kglite-datasets project, so the current
+C ABI no longer exports them and the surface count above is
+historical.
+
 The boundary-principle posture above (active-design + cypher-first +
 use-case-checked) applies to the Rust `api::*` surface AND the C
 ABI we expose through it. Same rules: per-query features go via
@@ -213,8 +224,8 @@ appear in the C ABI.
 
 `kglite::api::session::execute_read` / `execute_mut` are
 **synchronous**. The Cypher pipeline runs to completion on the
-calling thread. Async fetchers (`fetch_*` in `kglite::api::datasets::*`)
-have `*_blocking` companions for callers without a tokio runtime.
+calling thread. Any async core call exposes a `*_blocking` companion
+for callers without a tokio runtime.
 
 This is deliberate. Each binding chooses its own async/threading
 model on top:

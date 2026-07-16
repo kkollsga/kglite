@@ -443,16 +443,12 @@ an env var:
 KGLITE_BUILD_DEBUG=1 python build_graph.py
 ```
 
-For Wikidata or Sodir specifically, prefer the bundled lifecycle
-wrappers — they handle download, cooldown, and resume on top of
-`load_ntriples`:
-
-```python
-from kglite.datasets import wikidata
-g = wikidata.open("/data/wd")
-```
-
-See the {doc}`datasets` guide for full coverage.
+For Wikidata or Sodir specifically, the pre-packaged dataset
+loaders (SEC EDGAR, Sodir, Wikidata) live in the separate
+kglite-datasets project; they handle download, cooldown, and resume
+on top of `load_ntriples`, and kglite loads the graphs they produce.
+To fetch and build the RDF yourself, use `load_ntriples` (above) on
+the dump directly.
 
 ## Blueprints
 

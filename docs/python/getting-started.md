@@ -133,24 +133,21 @@ register automatically. See {doc}`guides/mcp-servers`.
 
 ## Loading a Public Dataset
 
-KGLite ships one-call wrappers for well-known public sources. Each
-handles download, caching, cooldown, and graph build:
+The pre-packaged dataset loaders (SEC EDGAR, Sodir, Wikidata) live
+in the separate kglite-datasets project; kglite loads the graphs
+they produce. Point KGLite at a graph one of those loaders built
+and open it like any other:
 
 ```python
-from kglite.datasets import wikidata, sodir
+import kglite
 
-# Wikidata: parallel-decoded multistream bz2 → disk-cached graph
-g = wikidata.open("/data/wd")                              # full graph
-g = wikidata.open("/data/wd", entity_limit_millions=100)   # 100M slice
-
-# Sodir: petroleum-domain graph, in-memory by default
-g = sodir.open("/data/sodir")
+# Open a graph a kglite-datasets loader produced.
+g = kglite.load("/data/wd")
 ```
 
-Re-running just loads the cached graph — sub-second on Wikidata
-slices, ~2 s for the full Sodir graph. See {doc}`guides/datasets`
-for the full API including cooldown semantics, complement
-blueprints, and parallel-fetch tuning.
+To load public RDF sources directly with the kept loaders, use
+`kglite.load_rdf(...)` / `KnowledgeGraph(...).load_ntriples(...)` —
+see {doc}`guides/data-loading`.
 
 ## Next Steps
 

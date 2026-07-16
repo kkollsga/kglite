@@ -35,7 +35,7 @@ in; once it's in, you query with Cypher.
 
 - **[Python guide](python/index.md)** — `pip install kglite`, then
   `import kglite`. The headline track; covers data loading, Cypher,
-  the MCP server, datasets, agents.
+  the MCP server, agents.
 - **[Rust guide](rust/index.md)** — embed the engine in a Rust
   binary (`cargo add kglite`). For graph-as-a-library use cases
   without the Python wheel.

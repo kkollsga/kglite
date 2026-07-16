@@ -684,12 +684,18 @@ its directory:
 
 ```python
 # One-off ingestion (e.g. from Wikidata's truthy.nt.bz2 dump):
-from kglite.datasets import wikidata
+import kglite
 
-# Streams the dump, materialises a disk graph in `/data/wikidata-graph/`.
-# Returns a Path to the directory.
-graph_dir = wikidata.fetch_truthy("/data/wikidata-graph/", predicates={"P31", "P279"})
+# Streams the dump straight into a disk-backed graph in
+# `/data/wikidata-graph/`.
+g = kglite.KnowledgeGraph(storage="disk", path="/data/wikidata-graph/")
+g.load_ntriples("latest-truthy.nt.bz2", languages=["en"], verbose=True)
 ```
+
+(The pre-packaged dataset loaders — SEC EDGAR, Sodir, Wikidata —
+live in the separate kglite-datasets project and wrap this same
+`load_ntriples` path with download/cooldown/resume; kglite loads
+the graphs they produce.)
 
 Then run the MCP server against the directory (not a single file):
 

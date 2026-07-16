@@ -82,7 +82,6 @@ maps to underscored prefixes:
 | `kglite::api::load_file` | `kglite_load_file` | `kglite_load_file(*const c_char) → *mut KgliteGraph` |
 | `kglite::api::session::execute_read` | `kglite_session_execute_read` | … |
 | `kglite::api::cypher::parse_cypher` | `kglite_cypher_parse` | … |
-| `kglite::api::datasets::sec::fetch_company_facts_blocking` | `kglite_datasets_sec_fetch_company_facts` | (blocking by default at C boundary) |
 | `kglite::api::KgErrorCode::neo4j_status_code` | `kglite_error_code_neo4j_status` | … |
 
 Opaque-handle struct types use `Kglite` PascalCase + the unit name:
@@ -274,11 +273,11 @@ These wrap `KgErrorCode::{as_str, neo4j_status_code, http_status_code}`.
 
 ### 6. Sync only — bindings own async
 
-The C ABI is fully synchronous. Async fetchers in
-`kglite::api::datasets::*::*_blocking` are exposed (the
-`_blocking` companions added in Phase 5). Raw async crossings are
-NOT in v1 — Go uses goroutines, JS uses worker threads, JVM uses
-thread pools, each over their own runtime.
+The C ABI is fully synchronous. Any async core call is exposed
+through its `_blocking` companion (the `_blocking` pattern added in
+Phase 5). Raw async crossings are NOT in v1 — Go uses goroutines,
+JS uses worker threads, JVM uses thread pools, each over their own
+runtime.
 
 If a binding wants async I/O, it spawns the sync C call from a
 thread / coroutine / async-task in its own runtime. This is
@@ -441,26 +440,19 @@ binding pattern end-to-end with the H.4 Go PoC.
 
 ---
 
-## H.3 surface (datasets + embedder, after H.2)
+## H.3 surface (embedder, after H.2)
 
 Once H.2 is shipped + the Go PoC validates the surface, H.3 adds:
 
-### Datasets (per loader)
+### Datasets
 
-```c
-// SEC EDGAR
-KgliteStatusCode kglite_datasets_sec_workdir_new(const char* path, KgliteSecWorkdir** out);
-KgliteStatusCode kglite_datasets_sec_fetch_quarterly_master_idx(...);  // sync wrapper over async
-KgliteStatusCode kglite_datasets_sec_run_all(...);
-KgliteStatusCode kglite_datasets_sec_resolve_fetch_buckets(const char* form_types_json, char** out_active_json, char** out_unmatched_json);
-
-// Sodir
-KgliteStatusCode kglite_datasets_sodir_fetch_all(...);
-
-// Wikidata
-KgliteStatusCode kglite_datasets_wikidata_ensure_dump(...);
-KgliteStatusCode kglite_datasets_wikidata_decide_cache_freshness(...);
-```
+The pre-packaged dataset loaders (SEC EDGAR, Sodir, Wikidata) are no
+longer part of the kglite core API surface — they live in the
+separate kglite-datasets project, and the C ABI no longer exports
+`kglite_datasets_*` functions. kglite loads the graphs those loaders
+produce via the ordinary lifecycle functions (`kglite_load_file`,
+etc.). A non-Rust binding that wants dataset ingestion binds to
+kglite-datasets separately.
 
 ### Embedder (concrete impls only in v1)
 

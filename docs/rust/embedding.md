@@ -155,20 +155,15 @@ snapshot/working CoW + OCC live here exactly once.
 See `docs/rust/session.md` for the full session
 abstraction guide.
 
-### Dataset loaders (feature-gated)
+### Dataset loaders
 
-```toml
-kglite = { features = ["sec", "sodir", "wikidata"] }
-```
-
-```rust
-use kglite::datasets::sec::{SecClient, fetch_quarterly_master_idx};
-use kglite::datasets::sodir::{ArcGISClient, fetch_all};
-use kglite::datasets::wikidata::{ensure_dump};
-```
-
-Each loader is opt-in via its Cargo feature so you only pay for
-what you use. Polars-io pattern.
+The pre-packaged dataset loaders (SEC EDGAR, Sodir, Wikidata) are no
+longer part of the kglite core — they live in the separate
+kglite-datasets project, and the `sec` / `sodir` / `wikidata` Cargo
+features and `kglite::datasets::*` modules have been removed. kglite
+loads the graphs those loaders produce via the ordinary lifecycle
+API (`kglite::api::load_file`, etc.). To ingest RDF directly, use the
+kept RDF/N-Triples loaders instead.
 
 ### `KnowledgeGraph` is NOT in the core
 
@@ -215,9 +210,8 @@ The path for a new language binding (Go, TypeScript, JVM) is:
 
 1. **Create a new sibling crate** — `crates/kglite-go/`, or
    wherever your binding's natural home is.
-2. **Depend on kglite** — `kglite = { path = "../kglite",
-   features = ["sec", "sodir"] }` (opt in to the datasets you
-   need).
+2. **Depend on kglite** — `kglite = { path = "../kglite" }`
+   (enable the optional feature flags your binding needs).
 3. **Author your bridge** — cgo / napi / JNI handles that
    marshal between your language's types and `kglite::api::*`.
 4. **Wrap the binding-ergonomic state** in your language's
@@ -278,7 +272,6 @@ development needed per binding.
 | Item | Stability |
 |---|---|
 | `kglite::api::*` | **Semver-stable** within a minor. Breaking changes are announced + version-bumped. |
-| `kglite::datasets::{sec,sodir,wikidata}::*` (feature-gated) | Stable — these were standalone published crates pre-G.3a; their API surface is preserved post-merge. |
 | `kglite::error::*` | Stable (KgError variants may grow but won't be removed without a major bump). |
 | `kglite::graph::*` (raw module path) | **Internal**. Subject to reorganization. Always go through `api::*` re-exports. |
 | `kglite::datatypes::*` (raw module path) | Internal — use `api::{Value, NodeValue, PathValue, RelValue}`. |

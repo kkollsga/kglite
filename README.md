@@ -61,25 +61,12 @@ structural validators that compose with Cypher.
 > standalone CLI-only install, use `pip install kglite-cli` or `cargo install
 > kglite-cli`.
 
-> ### Codebase → Claude
+> ### Public datasets → graph
 >
-> [**`examples/codebase_to_claude_mcp.ipynb`**](https://github.com/kkollsga/kglite/blob/main/examples/codebase_to_claude_mcp.ipynb)
-> clones a GitHub repo, parses it into a code knowledge graph, and
-> registers a workspace MCP server in Claude Desktop.
-
-> ### SEC filings → graph
->
-> ```python
-> from kglite.datasets.sec import SEC
-> g = SEC.fetch("./sec", "13F-HR", "TSLA", years=2,
->               user_agent="Your Name your@email.com")
-> ```
->
-> `SEC.fetch` downloads the named forms for the named companies and
-> returns a Cypher-queryable graph — Form 4 insider transactions,
-> 13F holdings, SC 13D stakes, DEF 14A board composition, 8-K events.
-> **→ [`examples/sec_to_claude_mcp.ipynb`](https://github.com/kkollsga/kglite/blob/main/examples/sec_to_claude_mcp.ipynb)
-> · [SEC guide](https://kglite.readthedocs.io/en/latest/python/guides/sec.html).**
+> Pre-packaged loaders for SEC EDGAR filings, Wikidata, and Sodir
+> petroleum data live in the separate **kglite-datasets** project.
+> Each handles the *fetch + build + cache* cycle and returns a
+> Cypher-queryable `KnowledgeGraph` that kglite serves and queries.
 
 ## Use cases
 
@@ -87,12 +74,6 @@ The same agent-facing surface works whether the graph holds legal
 precedents, a Wikidata slice, a SQL warehouse, a RAG corpus, or a
 parsed codebase.
 
-- 🏦 **SEC EDGAR.** `SEC.fetch(path, forms, companies, years=2)`
-  builds a US-public-company graph from the SEC's free data: insider
-  transactions (Form 4), institutional holdings (13F), activist
-  stakes (SC 13D), board composition (DEF 14A), 8-K events — with
-  XBRL financials and Exhibit 21 subsidiaries via `SEC.open`. **→
-  [SEC guide](https://kglite.readthedocs.io/en/latest/python/guides/sec.html).**
 - 🏛️ **Domain knowledge for agents.** Legal precedents + citations,
   regulatory rules, medical ontologies, manufacturing BOMs, scientific
   catalogues — anything with structure becomes a queryable graph an
@@ -106,11 +87,12 @@ parsed codebase.
   graph on top of your warehouse and the agent reasons over the
   relationships without you writing a server. **→
   [Data Loading guide](https://kglite.readthedocs.io/en/latest/python/guides/data-loading.html).**
-- 🌐 **Public datasets.** `wikidata.open(path)` and `sodir.open(path)`
-  handle the *fetch + build + cache* cycle. Mapped and disk storage
-  query graphs that don't fit in RAM — a billion-edge Wikidata graph
-  on a 16 GB laptop. **→ See [Bundled datasets](#bundled-datasets)
-  below.**
+- 🌐 **Public datasets.** Pre-packaged loaders for SEC EDGAR, Wikidata,
+  and Sodir live in the separate **kglite-datasets** project — they
+  handle the *fetch + build + cache* cycle and return a queryable
+  `KnowledgeGraph`. kglite's mapped and disk storage then query graphs
+  that don't fit in RAM — a billion-edge Wikidata graph on a 16 GB
+  laptop. **→ See [Public datasets](#public-datasets) below.**
 - 📚 **RAG with structure.** Documents, chunks, entities, and the
   edges between them in one graph. Combine `text_score()` vector
   similarity with Cypher traversal — *"find court cases semantically
@@ -123,10 +105,9 @@ parsed codebase.
   languages into Function / Class / Module / Route nodes with
   web-framework route detection (Flask, FastAPI, Django). Build from
   any git revision, or merge several into one multi-revision graph for
-  structural diffs (multi-rev builds). kglite serves and queries those graphs. See the
-  [notebook above](https://github.com/kkollsga/kglite/blob/main/examples/codebase_to_claude_mcp.ipynb)
-  for the full code → Claude Desktop workflow. **→
-  codingest project.**
+  structural diffs (multi-rev builds). kglite serves and queries those graphs. **The
+  builder and the code → Claude Desktop workflow live in the codingest
+  project.**
 - 🤝 **A shared graph as an agent contract.** One `.kgl` can be the
   two-way contract between collaborating agents (e.g. a *research* agent
   that batch-rebuilds specs and *coding* agents that plan and mutate
@@ -179,12 +160,12 @@ questions traverse it.
 | **`describe()` schema for LLM prompts**    | ✅                                 | —                                                   | —                  | —                  | —                      |
 | **Embeddable in Rust** (no Python in build) | pure-Rust [`kglite`](https://crates.io/crates/kglite) crate | [`lbug`](https://crates.io/crates/lbug) bindings to the C++ engine | — | ✅ | — |
 | **Codebase → graph parser**                | 14 languages, route detection     | —                                                   | —                  | —                  | —                      |
-| **Bundled public datasets**                | SEC EDGAR, Wikidata, Sodir        | —                                                   | toy graphs only    | —                  | —                      |
+| **Public dataset loaders**                 | SEC EDGAR, Wikidata, Sodir (via the companion kglite-datasets project) | — | toy graphs only    | —                  | —                      |
 | **License**                                | MIT                               | MIT                                                 | BSD-3              | Apache-2           | GPLv3                  |
 
 **Pick KGLite** when you want one embedded package that combines Python and
 pure-Rust Cypher APIs with a bundled MCP binary, prompt-shaped `describe()`, a
-14-language code-graph parser, bundled datasets, and agent-contract primitives:
+14-language code-graph parser, companion dataset loaders, and agent-contract primitives:
 role-scoped writes (`write_scope`), ownership layers, `set_instructions`, and
 `CALL ready_set(...)`. **Pick LadybugDB** when columnar analytical scans and
 its broader language ecosystem are the priority; it also provides Rust
@@ -344,83 +325,18 @@ Net effect: the agent comes pre-loaded with how to use your graph,
 rather than discovering it through trial-and-error. **→
 [AI Agents guide](https://kglite.readthedocs.io/en/latest/python/guides/ai-agents.html).**
 
-## Bundled datasets
+## Public datasets
 
-Three wrappers turn well-known public sources into queryable graphs
-without writing a loader. Each handles the *fetch + build + cache*
-cycle, returns a `KnowledgeGraph` you can `cypher()` against, and
-respects a per-dataset cooldown so re-running just reloads the cached
-graph in seconds. KGLite is independent of the upstream
-organisations — see each module docstring for non-affiliation notes.
-**→ [Datasets guide](https://kglite.readthedocs.io/en/latest/python/guides/datasets.html).**
-
-### SEC EDGAR
-
-US-public-company knowledge graph from the SEC's free public data —
-all 14M historical filings + per-filing payload parsing for Form 4
-(insider transactions), 13F-HR (institutional holdings), SC 13D
-(activist stakes), DEF 14A (board composition), XBRL company facts
-(financial metrics), 10-K Exhibit 21 (subsidiaries), 8-K cover pages
-(material event Item codes):
-
-```python
-from kglite.datasets.sec import SEC
-
-# SEC.fetch — name the forms, the companies, a span; get a graph back.
-g = SEC.fetch("/data/sec", ["4", "8-K", "DEF 14A"], ["AAPL", "TSLA"],
-              years=2, user_agent="Your Name your@email.com")
-
-# SEC.open — full control: separate filing-index vs. payload spans,
-# storage mode, and the include_* flags (XBRL financials, Exhibit 21
-# subsidiaries).
-g = SEC.open("/data/sec", years=10, detailed=2,
-             user_agent="Your Name your@email.com")
-
-# Full universe — drop `companies`; auto-escalates to mode="disk".
-g = SEC.open("/data/sec", years="all", detailed=5,
-             user_agent="Your Name your@email.com")
-```
-
-Two dozen-plus typed node types — Company, Person, Filing,
-InsiderTransaction, Holding, InstitutionalHolding, CorporateEvent,
-Compensation, Role, MetricFact, Subsidiary and more — wired by typed
-edges, every fact node tracing back to its source filing. Three-tier
-`raw` / `processed` / `graph/{mode}` cache
-— `raw` is immutable, `processed` regenerates only when its `raw`
-source changes, `graph/{mode}/` reuses on reopen unless
-`force_rebuild=True`. SEC's 10 req/s fair-access policy is enforced
-by an internal token-bucket rate limiter; the `user_agent` arg is
-mandatory (SEC returns 403 without it).
-
-Source data is public domain (US Govt work) — redistribute the built
-`.kgl` however you like. **→
-[SEC guide](https://kglite.readthedocs.io/en/latest/python/guides/sec.html).**
-
-### Wikidata
-
-Single-stream `latest-truthy.nt.bz2` from
-[dumps.wikimedia.org](https://dumps.wikimedia.org/wikidatawiki/entities/) —
-parallel-decoded with a bit-level block scanner, parsed, built into a
-queryable graph in one call:
-
-```python
-from kglite.datasets import wikidata
-
-g = wikidata.open("/data/wd")                                    # full graph
-g = wikidata.open("/data/wd", entity_limit_millions=100)         # 100M slice
-g = wikidata.open("/data/wd", storage="memory",                  # in-memory, fast tests
-                  entity_limit_millions=10)
-```
-
-### Sodir (Norwegian Offshore Directorate)
-
-Petroleum-domain example dataset — `sodir.open("/data/sodir")` returns
-a queryable graph of fields, wellbores, discoveries, licences,
-stratigraphy and 28 more node types from the public ArcGIS REST
-FeatureServer at [factmaps.sodir.no](https://factmaps.sodir.no/api/rest/services/DataService).
-Built in ~30 s on first run, cached after. Useful as a worked example
-of `complement_blueprint` (extend a baseline schema without touching
-the canonical types) — **→ [Datasets guide](https://kglite.readthedocs.io/en/latest/python/guides/datasets.html).**
+Pre-packaged loaders that turn well-known public sources into queryable
+graphs — **SEC EDGAR** filings (insider transactions, institutional
+holdings, board composition, XBRL financials), **Wikidata** (the full
+`latest-truthy` RDF dump, parallel-decoded and built into a billion-edge
+graph), and **Sodir** (Norwegian Offshore Directorate petroleum data) —
+live in the separate **kglite-datasets** project. Each handles the
+*fetch + build + cache* cycle and returns a `KnowledgeGraph` you can
+`cypher()` against; kglite serves and queries the graphs they produce.
+The kglite engine itself links zero network code — the loaders are an
+opt-in companion install.
 
 ## Recipes
 
@@ -536,8 +452,8 @@ for deployment.
 For **non-Rust language bindings** (Go via cgo, JavaScript via napi,
 JVM via JNI, .NET via P/Invoke), the
 [`crates/kglite-c`](https://github.com/kkollsga/kglite/tree/main/crates/kglite-c)
-crate exposes the engine through a stable C ABI — 30 `extern "C"`
-functions covering lifecycle / Cypher / datasets / embedder, plus a
+crate exposes the engine through a stable C ABI — 35 `extern "C"`
+functions covering lifecycle / Cypher / embedder, plus a
 cbindgen-generated `kglite.h`. See
 [`docs/rust/c-abi.md`](https://kglite.readthedocs.io/en/latest/rust/c-abi.html)
 for the design and
@@ -549,12 +465,6 @@ for cgo / napi / JNI worked examples.
 The [`examples/`](https://github.com/kkollsga/kglite/tree/main/examples)
 directory has runnable, self-contained artifacts:
 
-- **[`codebase_to_claude_mcp.ipynb`](https://github.com/kkollsga/kglite/blob/main/examples/codebase_to_claude_mcp.ipynb)**
-  — clone an open-source repo, parse it into a code knowledge graph,
-  register a workspace MCP server in Claude Desktop.
-- **[`sec_to_claude_mcp.ipynb`](https://github.com/kkollsga/kglite/blob/main/examples/sec_to_claude_mcp.ipynb)**
-  — build a graph of SEC filings with `SEC.fetch`, query it, register
-  it as a Claude Desktop MCP server.
 - **[`open_source_workspace_mcp.yaml`](https://github.com/kkollsga/kglite/blob/main/examples/open_source_workspace_mcp.yaml)**
   — annotated workspace-mode manifest for the github-clone-tracker
   pattern. Walked through in the
@@ -568,9 +478,6 @@ directory has runnable, self-contained artifacts:
 - **[`legal_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/legal_graph.py)**
   — end-to-end `add_nodes` / `add_connections` from pandas DataFrames,
   covering laws, regulations, court decisions with citation edges.
-- **[`code_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/code_graph.py)**
-  — build a code knowledge graph from a source directory via
-  a code-graph builder such as codingest.
 - **[`spatial_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/spatial_graph.py)**
   — declarative CSV→graph loading via a JSON blueprint; lat/lon
   coordinates and pipeline-path traversal queries.
@@ -631,7 +538,7 @@ Quick reference. Each links into the appropriate guide.
 | **[AI integration](https://kglite.readthedocs.io/en/latest/python/guides/ai-agents.html)** | `describe()` introspection, MCP server, agent prompts |
 | **Code analysis** | serve + query 14-language code graphs built by the codingest project — functions, classes, calls, imports, web-framework routes |
 | **[OKF ingestion](https://kglite.readthedocs.io/en/latest/python/guides/okf.html)** | Markdown + YAML-frontmatter bundles (`kglite.okf`) — Open Knowledge Format, Claude memory dirs, skills, Obsidian vaults → frontmatter as properties, links as typed edges |
-| **[Bundled datasets](https://kglite.readthedocs.io/en/latest/python/guides/datasets.html)** | Fetch-build-cache wrappers for public sources — SEC EDGAR filings, Wikidata, Sodir (Norwegian Offshore Directorate) — each returns a queryable `KnowledgeGraph` |
+| **Public dataset loaders** | Fetch-build-cache loaders for public sources — SEC EDGAR filings, Wikidata, Sodir (Norwegian Offshore Directorate) — live in the companion kglite-datasets project; each returns a queryable `KnowledgeGraph` kglite serves |
 
 ## Documentation
 
@@ -645,7 +552,6 @@ Full docs at **[kglite.readthedocs.io](https://kglite.readthedocs.io)**
 - [Graph algorithms](https://kglite.readthedocs.io/en/latest/python/guides/graph-algorithms.html) — shortest path, PageRank, community detection
 - [Semantic Search](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html) — embeddings, vector search, hybrid retrieval
 - [OKF ingestion](https://kglite.readthedocs.io/en/latest/python/guides/okf.html) — `okf.build`, markdown knowledge bases & agent memory
-- [Datasets](https://kglite.readthedocs.io/en/latest/python/guides/datasets.html) — SEC, Wikidata, Sodir wrappers
 - [MCP server config](https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html) — manifests, skills, extensions
 - [Spatial](https://kglite.readthedocs.io/en/latest/python/guides/spatial.html) · [Timeseries](https://kglite.readthedocs.io/en/latest/python/guides/timeseries.html) · [Blueprints](https://kglite.readthedocs.io/en/latest/python/guides/blueprints.html) · [Import/Export](https://kglite.readthedocs.io/en/latest/python/guides/import-export.html) · [Traversal & hierarchy](https://kglite.readthedocs.io/en/latest/python/guides/traversal-hierarchy.html) · [AI Agents](https://kglite.readthedocs.io/en/latest/python/guides/ai-agents.html)
 - [Recipes index](https://kglite.readthedocs.io/en/latest/python/guides/recipes.html) — copy-paste patterns for common shapes
