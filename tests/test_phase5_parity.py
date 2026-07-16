@@ -98,11 +98,12 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 42_310_576,  # 0.13.4 darwin baseline
-    "linux": 64_656_000,  # 0.10.26 estimate: 0.9.52 Linux .so (59,529,016) scaled by
-    # the same +8.6% as the macOS recapture. Linux has no strip so the bundled
-    # server likely adds more in absolute terms — refresh with the real value on
-    # the next CI run (the 0.10.0–0.10.25 Linux baseline was never recaptured).
+    "darwin": 19_767_648,  # post-code_tree-removal darwin capture (2026-07-16)
+    "linux": 30_200_000,  # estimate: pre-removal Linux baseline (64,656,000)
+    # scaled by the same −53% the macOS removal measured. Deliberately
+    # recaptured DOWNWARD in the same change that deleted the builder — the
+    # old ceiling would have let ~22 MB of regression pass silently. Refresh
+    # with the real value on the next CI run.
 }
 
 
@@ -145,6 +146,11 @@ def test_binary_size_regression():
                       boundaries, bounded executor guards, and guarded lazy
                       result materialization account for the growth since the
                       prior published baseline.
+      - post-0.13.4:  19,767,648 bytes (≈18.9 MB, macOS .dylib) — a 53%
+                      SHRINK: the in-tree code_tree builder and all 15
+                      tree-sitter grammars moved to the standalone codingest
+                      project. Baseline deliberately recaptured downward so
+                      the +10% budget guards the new, smaller binary.
 
       - 0.13.1:       41,367,232 bytes (≈39.5 MB). The 33 KB increase adds
                       fused grouped/global count operators, mutation-safe
