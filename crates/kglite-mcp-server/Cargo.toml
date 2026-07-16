@@ -42,7 +42,7 @@ mcp-methods = { version = "0.3.50", default-features = false, features = ["serve
 # strips path and falls back to the version requirement, keeping
 # this in lockstep with the kglite core version.
 # Verified: `cargo tree -p kglite-mcp-server | grep pyo3` → empty.
-kglite = { version = "0.13", path = "../kglite", default-features = false }
+kglite = { version = "0.14", path = "../kglite", default-features = false }
 
 # rmcp re-export for the dynamic tool registration path.
 rmcp = { version = "1.6", features = ["server", "macros", "transport-io", "schemars"] }

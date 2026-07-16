@@ -13,7 +13,7 @@ resolver = "2"
 # `version.workspace = true`, so a release bumps this one line instead of
 # six. All published crates ship in lockstep at the same version.
 [workspace.package]
-version = "0.13.4"
+version = "0.14.0"
 
 # Phase G.4 — workspace root is now virtual (no `[package]`).
 # Polars-style layout: each crate has its own home under

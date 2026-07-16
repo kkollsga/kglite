@@ -5,7 +5,7 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.14.0] - 2026-07-16
 
 > Migration guide for both removals: `docs/python/migrations/0.13-to-0.14.md` — pin-back escape (`pip install "kglite<0.14"`), per-surface table. Accessing `kglite.code_tree` / `kglite.datasets` / `build_code_tree` / `repo_tree` now raises a guided error naming the fix (tombstones, removed in 0.15).
 

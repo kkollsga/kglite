@@ -32,7 +32,7 @@ rdf = ["kglite/rdf"]
 # opted into here per the [features] block above. Path dep for
 # workspace builds; `cargo publish` strips the path and falls back
 # to the version requirement.
-kglite = { version = "0.13", path = "../kglite", default-features = false }
+kglite = { version = "0.14", path = "../kglite", default-features = false }
 
 # Serde stack — needed to serialize Value to JSON at the C
 # boundary (the design doc fixes JSON-at-boundary for nested
