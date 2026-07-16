@@ -340,9 +340,10 @@ impl KnowledgeGraph {
                     &selection,
                     &embedding_property,
                     &query_vector,
-                    top_k,
-                    metric,
-                    exact,
+                    &kglite_core::api::algorithms::VectorSearchOptions::default()
+                        .with_top_k(top_k)
+                        .with_metric(metric)
+                        .with_exact(exact),
                 )
             })
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;

@@ -38,6 +38,49 @@ pub struct VectorSearchResult {
     pub score: f32,
 }
 
+/// Tunable options for [`vector_search`]. The selection, embedding property,
+/// and query vector are positional (primary inputs); the ranking knobs live
+/// here. Construct via [`VectorSearchOptions::default`] then the `with_*`
+/// builders, e.g. `VectorSearchOptions::default().with_top_k(20)`.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct VectorSearchOptions {
+    /// Number of results to return (default `10`).
+    pub top_k: usize,
+    /// Distance metric (default [`DistanceMetric::Cosine`]).
+    pub metric: DistanceMetric,
+    /// Force a full exact scan, bypassing any HNSW index (default `false`).
+    pub exact: bool,
+}
+
+impl Default for VectorSearchOptions {
+    fn default() -> Self {
+        Self {
+            top_k: 10,
+            metric: DistanceMetric::Cosine,
+            exact: false,
+        }
+    }
+}
+
+impl VectorSearchOptions {
+    /// Set the number of results to return.
+    pub fn with_top_k(mut self, top_k: usize) -> Self {
+        self.top_k = top_k;
+        self
+    }
+    /// Set the distance metric.
+    pub fn with_metric(mut self, metric: DistanceMetric) -> Self {
+        self.metric = metric;
+        self
+    }
+    /// Force an exact full scan (bypass HNSW).
+    pub fn with_exact(mut self, exact: bool) -> Self {
+        self.exact = exact;
+        self
+    }
+}
+
 /// Threshold for switching to parallel search via rayon.
 const PARALLEL_THRESHOLD: usize = 10_000;
 
@@ -68,10 +111,13 @@ pub fn vector_search(
     selection: &CurrentSelection,
     embedding_property: &str,
     query_vector: &[f32],
-    top_k: usize,
-    metric: DistanceMetric,
-    exact: bool,
+    options: &VectorSearchOptions,
 ) -> Result<Vec<VectorSearchResult>, String> {
+    let VectorSearchOptions {
+        top_k,
+        metric,
+        exact,
+    } = *options;
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.

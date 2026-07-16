@@ -161,10 +161,6 @@
       "classification": "test"
     },
     {
-      "identity": "crates/kglite/src/graph/algorithms/graph_algorithms.rs::fn:all_paths:pub fn all_paths( graph: &DirGraph, source: NodeIndex, target: NodeIndex, max_hops: usize, max_results: Option<usize>, connection_types: Option<&[String]>, via_types: Option<&[String]>, deadline: Interrupt, ) -> Vec<Vec<NodeIndex>>::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
       "identity": "crates/kglite/src/graph/algorithms/graph_algorithms.rs::fn:find_all_paths_recursive:fn find_all_paths_recursive( graph: &DirGraph, current: NodeIndex, target: NodeIndex, remaining_hops: usize, current_path: &mut Vec<NodeIndex>, visited: &mut HashSet<NodeIndex>, results: &mut Vec<Vec<NodeIndex>>, max_results: Option<usize>, connection_types: Option<&[InternedKey]>, via_types: &Optio::clippy::only_used_in_recursion",
       "classification": "transitional"
     },

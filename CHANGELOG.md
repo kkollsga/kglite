@@ -54,6 +54,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (Rust API): `kglite::api::algorithms` now takes per-family options
+  structs instead of long positional parameter lists.** `pagerank`,
+  `betweenness_centrality`, `closeness_centrality`, `degree_centrality`,
+  `louvain_communities`, `label_propagation`, `shortest_path`, `all_paths`,
+  `shortest_path_weighted`, `shortest_path_cost_weighted`, and `vector_search`
+  drop their trailing tunable parameters (damping/tolerance/normalized/
+  sample_size/resolution/connection_types/scope/via_types/interrupt/metric/…)
+  in favour of a single `&…Options` argument — `PagerankOptions`,
+  `CentralityOptions` (betweenness + closeness), `DegreeCentralityOptions`,
+  `CommunityOptions` (louvain + leiden), `LabelPropagationOptions`,
+  `PathOptions` (all four shortest-path finders), `AllPathsOptions`, and
+  `VectorSearchOptions`. Only the graph handle and genuinely primary inputs
+  (path endpoints, weight/embedding property, query vector, selection) stay
+  positional. Each struct is `#[non_exhaustive]` with an `impl Default`
+  (defaults match the prior common-call values, e.g. pagerank damping `0.85`)
+  and `with_*` builders, so future tuning knobs can be added without breaking
+  callers: `pagerank(&g, &PagerankOptions::default().with_damping_factor(0.9))`.
+  The **Python (`graph.pagerank(...)`, `graph.vector_search(...)`, …) and
+  Cypher (`CALL pagerank({...})`) surfaces are unchanged** — same kwargs,
+  same defaults, same results; only direct Rust callers of
+  `kglite::api::algorithms` need to migrate.
 - **Rust API: code-entity read helpers moved to `kglite::api::code_entities`.**
   `resolve_code_entity`, `find_code_entities`, `source_location`,
   `code_entity_context`, `SourceLookup`/`SourceLocation`, and the

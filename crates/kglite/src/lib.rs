@@ -248,12 +248,14 @@ pub mod api {
             connected_components, degree_centrality, get_node_info, get_path_connections,
             label_propagation, louvain_communities, node_degree, pagerank, shortest_path,
             shortest_path_cost, shortest_path_cost_batch, shortest_path_cost_weighted,
-            shortest_path_weighted, weakly_connected_components, CentralityResult, CommunityResult,
-            PathNodeInfo, PathResult,
+            shortest_path_weighted, weakly_connected_components, AllPathsOptions,
+            CentralityOptions, CentralityResult, CommunityOptions, CommunityResult,
+            DegreeCentralityOptions, LabelPropagationOptions, PagerankOptions, PathNodeInfo,
+            PathOptions, PathResult,
         };
         pub use crate::graph::algorithms::hnsw::HnswParams;
         pub use crate::graph::algorithms::vector::{
-            vector_search, DistanceMetric, VectorSearchResult,
+            vector_search, DistanceMetric, VectorSearchOptions, VectorSearchResult,
         };
         pub use crate::graph::algorithms::Interrupt;
     }

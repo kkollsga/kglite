@@ -122,7 +122,11 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         if not isinstance(pkg, str) or not pkg or pkg == manifest["package"]:
             raise ValueError(f"companion package invalid: {pkg!r}")
         cargo_features(pkg)  # raises if the workspace package does not exist
-        if not isinstance(baseline, str) or not baseline.startswith("tests/api-baselines/rust/") or baseline in baselines:
+        if (
+            not isinstance(baseline, str)
+            or not baseline.startswith("tests/api-baselines/rust/")
+            or baseline in baselines
+        ):
             raise ValueError(f"companion {pkg}: invalid or duplicate baseline {baseline!r}")
         baselines.add(baseline)
 

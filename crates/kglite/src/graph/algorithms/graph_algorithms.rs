@@ -171,6 +171,100 @@ pub struct PathNodeInfo {
     pub id: Value,
 }
 
+/// Tunable options for the single-path finders — [`shortest_path`],
+/// [`shortest_path_directed`], [`shortest_path_weighted`], and
+/// [`shortest_path_cost_weighted`] — all of which take the same
+/// edge-type / via-type / interrupt knobs. The endpoints (and, for the
+/// weighted finders, the weight property) stay positional as primary inputs.
+/// Construct via [`PathOptions::default`] then the `with_*` builders.
+#[derive(Clone, Default)]
+#[non_exhaustive]
+pub struct PathOptions<'a> {
+    /// Only traverse edges of these connection types (`None` = all edges).
+    pub connection_types: Option<&'a [String]>,
+    /// Only route through nodes of these types (`None` = any node).
+    pub via_types: Option<&'a [String]>,
+    /// Deadline + cooperative-cancellation bundle.
+    pub interrupt: Interrupt,
+}
+
+impl<'a> PathOptions<'a> {
+    /// Restrict traversal to the given connection types.
+    pub fn with_connection_types(mut self, connection_types: &'a [String]) -> Self {
+        self.connection_types = Some(connection_types);
+        self
+    }
+    /// Restrict routing to the given intermediate node types.
+    pub fn with_via_types(mut self, via_types: &'a [String]) -> Self {
+        self.via_types = Some(via_types);
+        self
+    }
+    /// Set the deadline + cancellation bundle.
+    pub fn with_interrupt(mut self, interrupt: Interrupt) -> Self {
+        self.interrupt = interrupt;
+        self
+    }
+}
+
+/// Tunable options for [`all_paths`] — the single-path [`PathOptions`] knobs
+/// plus the path-enumeration bounds (`max_hops`, `max_results`) that only make
+/// sense when enumerating every path.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct AllPathsOptions<'a> {
+    /// Maximum path length (hop count) to search (default `5`).
+    pub max_hops: usize,
+    /// Stop after finding this many paths (`None` = unlimited); bounds OOM on
+    /// dense graphs.
+    pub max_results: Option<usize>,
+    /// Only traverse edges of these connection types (`None` = all edges).
+    pub connection_types: Option<&'a [String]>,
+    /// Only route through nodes of these types (`None` = any node).
+    pub via_types: Option<&'a [String]>,
+    /// Deadline + cooperative-cancellation bundle.
+    pub interrupt: Interrupt,
+}
+
+impl Default for AllPathsOptions<'_> {
+    fn default() -> Self {
+        Self {
+            max_hops: 5,
+            max_results: None,
+            connection_types: None,
+            via_types: None,
+            interrupt: Interrupt::default(),
+        }
+    }
+}
+
+impl<'a> AllPathsOptions<'a> {
+    /// Set the maximum path length (hop count).
+    pub fn with_max_hops(mut self, max_hops: usize) -> Self {
+        self.max_hops = max_hops;
+        self
+    }
+    /// Cap the number of paths returned.
+    pub fn with_max_results(mut self, max_results: usize) -> Self {
+        self.max_results = Some(max_results);
+        self
+    }
+    /// Restrict traversal to the given connection types.
+    pub fn with_connection_types(mut self, connection_types: &'a [String]) -> Self {
+        self.connection_types = Some(connection_types);
+        self
+    }
+    /// Restrict routing to the given intermediate node types.
+    pub fn with_via_types(mut self, via_types: &'a [String]) -> Self {
+        self.via_types = Some(via_types);
+        self
+    }
+    /// Set the deadline + cancellation bundle.
+    pub fn with_interrupt(mut self, interrupt: Interrupt) -> Self {
+        self.interrupt = interrupt;
+        self
+    }
+}
+
 /// Find the shortest path between two nodes using undirected BFS.
 /// This treats the graph as undirected, finding connections in either direction.
 /// Returns None if no path exists.
@@ -182,10 +276,13 @@ pub fn shortest_path(
     graph: &DirGraph,
     source: NodeIndex,
     target: NodeIndex,
-    connection_types: Option<&[String]>,
-    via_types: Option<&[String]>,
-    deadline: Interrupt,
+    options: &PathOptions,
 ) -> Option<PathResult> {
+    let PathOptions {
+        connection_types,
+        via_types,
+        interrupt: deadline,
+    } = *options;
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -608,10 +705,13 @@ pub fn shortest_path_directed(
     graph: &DirGraph,
     source: NodeIndex,
     target: NodeIndex,
-    connection_types: Option<&[String]>,
-    via_types: Option<&[String]>,
-    deadline: Interrupt,
+    options: &PathOptions,
 ) -> Option<PathResult> {
+    let PathOptions {
+        connection_types,
+        via_types,
+        interrupt: deadline,
+    } = *options;
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -697,17 +797,19 @@ pub fn shortest_path_directed(
 /// * `max_results` - Stop after finding this many paths (prevents OOM on dense graphs)
 /// * `connection_types` - Only traverse edges of these types (None = all)
 /// * `via_types` - Only traverse through nodes of these types (None = all)
-#[allow(clippy::too_many_arguments)]
 pub fn all_paths(
     graph: &DirGraph,
     source: NodeIndex,
     target: NodeIndex,
-    max_hops: usize,
-    max_results: Option<usize>,
-    connection_types: Option<&[String]>,
-    via_types: Option<&[String]>,
-    deadline: Interrupt,
+    options: &AllPathsOptions,
 ) -> Vec<Vec<NodeIndex>> {
+    let AllPathsOptions {
+        max_hops,
+        max_results,
+        connection_types,
+        via_types,
+        interrupt: deadline,
+    } = *options;
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -1591,7 +1693,7 @@ pub fn get_path_connections(graph: &DirGraph, path: &[NodeIndex]) -> Vec<Option<
 
 /// Check if two nodes are connected (directly or indirectly)
 pub fn are_connected(graph: &DirGraph, source: NodeIndex, target: NodeIndex) -> bool {
-    shortest_path(graph, source, target, None, None, Interrupt::default()).is_some()
+    shortest_path(graph, source, target, &PathOptions::default()).is_some()
 }
 
 /// Calculate the degree (number of connections) for a node
@@ -1642,10 +1744,13 @@ pub fn shortest_path_weighted(
     source: NodeIndex,
     target: NodeIndex,
     weight_property: &str,
-    connection_types: Option<&[String]>,
-    via_types: Option<&[String]>,
-    deadline: Interrupt,
+    options: &PathOptions,
 ) -> Option<WeightedPathResult> {
+    let PathOptions {
+        connection_types,
+        via_types,
+        interrupt: deadline,
+    } = *options;
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -1766,24 +1871,13 @@ pub fn shortest_path_cost_weighted(
     source: NodeIndex,
     target: NodeIndex,
     weight_property: &str,
-    connection_types: Option<&[String]>,
-    via_types: Option<&[String]>,
-    deadline: Interrupt,
+    options: &PathOptions,
 ) -> Option<f64> {
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
-    shortest_path_weighted(
-        graph,
-        source,
-        target,
-        weight_property,
-        connection_types,
-        via_types,
-        deadline,
-    )
-    .map(|r| r.weight)
+    shortest_path_weighted(graph, source, target, weight_property, options).map(|r| r.weight)
 }
 
 /// Sum of edge weights for all nodes in a community.

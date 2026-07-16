@@ -97,14 +97,14 @@
     {
       "path": "crates/kglite/src/graph/algorithms/centrality.rs",
       "qualified_name": "crate::betweenness_centrality",
-      "lines": 286,
+      "lines": 289,
       "branches": 26,
       "nesting": 6
     },
     {
       "path": "crates/kglite/src/graph/algorithms/centrality.rs",
       "qualified_name": "crate::closeness_centrality",
-      "lines": 257,
+      "lines": 260,
       "branches": 20,
       "nesting": 5
     },
@@ -391,7 +391,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/shortest_path.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_shortest_path_match",
-      "lines": 253,
+      "lines": 243,
       "branches": 35,
       "nesting": 3
     },

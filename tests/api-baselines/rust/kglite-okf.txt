@@ -13,6 +13,38 @@ pub fn kglite::api::algorithms::DistanceMetric::clone(&self) -> kglite::api::alg
 impl core::fmt::Debug for kglite::api::algorithms::DistanceMetric
 pub fn kglite::api::algorithms::DistanceMetric::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for kglite::api::algorithms::DistanceMetric
+#[non_exhaustive] pub struct kglite::api::algorithms::AllPathsOptions<'a>
+pub kglite::api::algorithms::AllPathsOptions::connection_types: core::option::Option<&'a [alloc::string::String]>
+pub kglite::api::algorithms::AllPathsOptions::interrupt: kglite::api::algorithms::Interrupt
+pub kglite::api::algorithms::AllPathsOptions::max_hops: usize
+pub kglite::api::algorithms::AllPathsOptions::max_results: core::option::Option<usize>
+pub kglite::api::algorithms::AllPathsOptions::via_types: core::option::Option<&'a [alloc::string::String]>
+impl<'a> kglite::api::algorithms::AllPathsOptions<'a>
+pub fn kglite::api::algorithms::AllPathsOptions<'a>::with_connection_types(self, connection_types: &'a [alloc::string::String]) -> Self
+pub fn kglite::api::algorithms::AllPathsOptions<'a>::with_interrupt(self, interrupt: kglite::api::algorithms::Interrupt) -> Self
+pub fn kglite::api::algorithms::AllPathsOptions<'a>::with_max_hops(self, max_hops: usize) -> Self
+pub fn kglite::api::algorithms::AllPathsOptions<'a>::with_max_results(self, max_results: usize) -> Self
+pub fn kglite::api::algorithms::AllPathsOptions<'a>::with_via_types(self, via_types: &'a [alloc::string::String]) -> Self
+impl core::default::Default for kglite::api::algorithms::AllPathsOptions<'_>
+pub fn kglite::api::algorithms::AllPathsOptions<'_>::default() -> Self
+impl<'a> core::clone::Clone for kglite::api::algorithms::AllPathsOptions<'a>
+pub fn kglite::api::algorithms::AllPathsOptions<'a>::clone(&self) -> kglite::api::algorithms::AllPathsOptions<'a>
+#[non_exhaustive] pub struct kglite::api::algorithms::CentralityOptions<'a>
+pub kglite::api::algorithms::CentralityOptions::connection_types: core::option::Option<&'a [alloc::string::String]>
+pub kglite::api::algorithms::CentralityOptions::interrupt: kglite::api::algorithms::Interrupt
+pub kglite::api::algorithms::CentralityOptions::normalized: bool
+pub kglite::api::algorithms::CentralityOptions::sample_size: core::option::Option<usize>
+pub kglite::api::algorithms::CentralityOptions::scope: core::option::Option<&'a std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>>
+impl<'a> kglite::api::algorithms::CentralityOptions<'a>
+pub fn kglite::api::algorithms::CentralityOptions<'a>::with_connection_types(self, connection_types: &'a [alloc::string::String]) -> Self
+pub fn kglite::api::algorithms::CentralityOptions<'a>::with_interrupt(self, interrupt: kglite::api::algorithms::Interrupt) -> Self
+pub fn kglite::api::algorithms::CentralityOptions<'a>::with_normalized(self, normalized: bool) -> Self
+pub fn kglite::api::algorithms::CentralityOptions<'a>::with_sample_size(self, sample_size: usize) -> Self
+pub fn kglite::api::algorithms::CentralityOptions<'a>::with_scope(self, scope: &'a std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>) -> Self
+impl core::default::Default for kglite::api::algorithms::CentralityOptions<'_>
+pub fn kglite::api::algorithms::CentralityOptions<'_>::default() -> Self
+impl<'a> core::clone::Clone for kglite::api::algorithms::CentralityOptions<'a>
+pub fn kglite::api::algorithms::CentralityOptions<'a>::clone(&self) -> kglite::api::algorithms::CentralityOptions<'a>
 pub struct kglite::api::algorithms::CentralityResult
 pub kglite::api::algorithms::CentralityResult::node_idx: petgraph::graph_impl::NodeIndex
 pub kglite::api::algorithms::CentralityResult::score: f64
@@ -20,6 +52,22 @@ impl core::clone::Clone for kglite::api::algorithms::CentralityResult
 pub fn kglite::api::algorithms::CentralityResult::clone(&self) -> kglite::api::algorithms::CentralityResult
 impl core::fmt::Debug for kglite::api::algorithms::CentralityResult
 pub fn kglite::api::algorithms::CentralityResult::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct kglite::api::algorithms::CommunityOptions<'a>
+pub kglite::api::algorithms::CommunityOptions::connection_types: core::option::Option<&'a [alloc::string::String]>
+pub kglite::api::algorithms::CommunityOptions::interrupt: kglite::api::algorithms::Interrupt
+pub kglite::api::algorithms::CommunityOptions::resolution: f64
+pub kglite::api::algorithms::CommunityOptions::scope: core::option::Option<&'a std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>>
+pub kglite::api::algorithms::CommunityOptions::weight_property: core::option::Option<&'a str>
+impl<'a> kglite::api::algorithms::CommunityOptions<'a>
+pub fn kglite::api::algorithms::CommunityOptions<'a>::with_connection_types(self, connection_types: &'a [alloc::string::String]) -> Self
+pub fn kglite::api::algorithms::CommunityOptions<'a>::with_interrupt(self, interrupt: kglite::api::algorithms::Interrupt) -> Self
+pub fn kglite::api::algorithms::CommunityOptions<'a>::with_resolution(self, resolution: f64) -> Self
+pub fn kglite::api::algorithms::CommunityOptions<'a>::with_scope(self, scope: &'a std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>) -> Self
+pub fn kglite::api::algorithms::CommunityOptions<'a>::with_weight_property(self, weight_property: &'a str) -> Self
+impl core::default::Default for kglite::api::algorithms::CommunityOptions<'_>
+pub fn kglite::api::algorithms::CommunityOptions<'_>::default() -> Self
+impl<'a> core::clone::Clone for kglite::api::algorithms::CommunityOptions<'a>
+pub fn kglite::api::algorithms::CommunityOptions<'a>::clone(&self) -> kglite::api::algorithms::CommunityOptions<'a>
 pub struct kglite::api::algorithms::CommunityResult
 pub kglite::api::algorithms::CommunityResult::assignments: alloc::vec::Vec<kglite::graph::algorithms::community::CommunityAssignment>
 pub kglite::api::algorithms::CommunityResult::levels: alloc::vec::Vec<alloc::vec::Vec<kglite::graph::algorithms::community::CommunityAssignment>>
@@ -27,6 +75,20 @@ pub kglite::api::algorithms::CommunityResult::modularity: f64
 pub kglite::api::algorithms::CommunityResult::num_communities: usize
 impl core::fmt::Debug for kglite::api::algorithms::CommunityResult
 pub fn kglite::api::algorithms::CommunityResult::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct kglite::api::algorithms::DegreeCentralityOptions<'a>
+pub kglite::api::algorithms::DegreeCentralityOptions::connection_types: core::option::Option<&'a [alloc::string::String]>
+pub kglite::api::algorithms::DegreeCentralityOptions::interrupt: kglite::api::algorithms::Interrupt
+pub kglite::api::algorithms::DegreeCentralityOptions::normalized: bool
+pub kglite::api::algorithms::DegreeCentralityOptions::scope: core::option::Option<&'a std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>>
+impl<'a> kglite::api::algorithms::DegreeCentralityOptions<'a>
+pub fn kglite::api::algorithms::DegreeCentralityOptions<'a>::with_connection_types(self, connection_types: &'a [alloc::string::String]) -> Self
+pub fn kglite::api::algorithms::DegreeCentralityOptions<'a>::with_interrupt(self, interrupt: kglite::api::algorithms::Interrupt) -> Self
+pub fn kglite::api::algorithms::DegreeCentralityOptions<'a>::with_normalized(self, normalized: bool) -> Self
+pub fn kglite::api::algorithms::DegreeCentralityOptions<'a>::with_scope(self, scope: &'a std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>) -> Self
+impl core::default::Default for kglite::api::algorithms::DegreeCentralityOptions<'_>
+pub fn kglite::api::algorithms::DegreeCentralityOptions<'_>::default() -> Self
+impl<'a> core::clone::Clone for kglite::api::algorithms::DegreeCentralityOptions<'a>
+pub fn kglite::api::algorithms::DegreeCentralityOptions<'a>::clone(&self) -> kglite::api::algorithms::DegreeCentralityOptions<'a>
 pub struct kglite::api::algorithms::HnswParams
 pub kglite::api::algorithms::HnswParams::ef_construction: usize
 pub kglite::api::algorithms::HnswParams::ef_search: usize
@@ -56,6 +118,38 @@ pub fn kglite::api::algorithms::Interrupt::from(deadline: core::option::Option<s
 impl core::default::Default for kglite::api::algorithms::Interrupt
 pub fn kglite::api::algorithms::Interrupt::default() -> kglite::api::algorithms::Interrupt
 impl core::marker::Copy for kglite::api::algorithms::Interrupt
+#[non_exhaustive] pub struct kglite::api::algorithms::LabelPropagationOptions<'a>
+pub kglite::api::algorithms::LabelPropagationOptions::connection_types: core::option::Option<&'a [alloc::string::String]>
+pub kglite::api::algorithms::LabelPropagationOptions::interrupt: kglite::api::algorithms::Interrupt
+pub kglite::api::algorithms::LabelPropagationOptions::max_iterations: usize
+pub kglite::api::algorithms::LabelPropagationOptions::scope: core::option::Option<&'a std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>>
+impl<'a> kglite::api::algorithms::LabelPropagationOptions<'a>
+pub fn kglite::api::algorithms::LabelPropagationOptions<'a>::with_connection_types(self, connection_types: &'a [alloc::string::String]) -> Self
+pub fn kglite::api::algorithms::LabelPropagationOptions<'a>::with_interrupt(self, interrupt: kglite::api::algorithms::Interrupt) -> Self
+pub fn kglite::api::algorithms::LabelPropagationOptions<'a>::with_max_iterations(self, max_iterations: usize) -> Self
+pub fn kglite::api::algorithms::LabelPropagationOptions<'a>::with_scope(self, scope: &'a std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>) -> Self
+impl core::default::Default for kglite::api::algorithms::LabelPropagationOptions<'_>
+pub fn kglite::api::algorithms::LabelPropagationOptions<'_>::default() -> Self
+impl<'a> core::clone::Clone for kglite::api::algorithms::LabelPropagationOptions<'a>
+pub fn kglite::api::algorithms::LabelPropagationOptions<'a>::clone(&self) -> kglite::api::algorithms::LabelPropagationOptions<'a>
+#[non_exhaustive] pub struct kglite::api::algorithms::PagerankOptions<'a>
+pub kglite::api::algorithms::PagerankOptions::connection_types: core::option::Option<&'a [alloc::string::String]>
+pub kglite::api::algorithms::PagerankOptions::damping_factor: f64
+pub kglite::api::algorithms::PagerankOptions::interrupt: kglite::api::algorithms::Interrupt
+pub kglite::api::algorithms::PagerankOptions::max_iterations: usize
+pub kglite::api::algorithms::PagerankOptions::scope: core::option::Option<&'a std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>>
+pub kglite::api::algorithms::PagerankOptions::tolerance: f64
+impl<'a> kglite::api::algorithms::PagerankOptions<'a>
+pub fn kglite::api::algorithms::PagerankOptions<'a>::with_connection_types(self, connection_types: &'a [alloc::string::String]) -> Self
+pub fn kglite::api::algorithms::PagerankOptions<'a>::with_damping_factor(self, damping_factor: f64) -> Self
+pub fn kglite::api::algorithms::PagerankOptions<'a>::with_interrupt(self, interrupt: kglite::api::algorithms::Interrupt) -> Self
+pub fn kglite::api::algorithms::PagerankOptions<'a>::with_max_iterations(self, max_iterations: usize) -> Self
+pub fn kglite::api::algorithms::PagerankOptions<'a>::with_scope(self, scope: &'a std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>) -> Self
+pub fn kglite::api::algorithms::PagerankOptions<'a>::with_tolerance(self, tolerance: f64) -> Self
+impl core::default::Default for kglite::api::algorithms::PagerankOptions<'_>
+pub fn kglite::api::algorithms::PagerankOptions<'_>::default() -> Self
+impl<'a> core::clone::Clone for kglite::api::algorithms::PagerankOptions<'a>
+pub fn kglite::api::algorithms::PagerankOptions<'a>::clone(&self) -> kglite::api::algorithms::PagerankOptions<'a>
 pub struct kglite::api::algorithms::PathNodeInfo
 pub kglite::api::algorithms::PathNodeInfo::id: kglite::datatypes::values::Value
 pub kglite::api::algorithms::PathNodeInfo::node_type: alloc::string::String
@@ -64,6 +158,18 @@ impl core::clone::Clone for kglite::api::algorithms::PathNodeInfo
 pub fn kglite::api::algorithms::PathNodeInfo::clone(&self) -> kglite::api::algorithms::PathNodeInfo
 impl core::fmt::Debug for kglite::api::algorithms::PathNodeInfo
 pub fn kglite::api::algorithms::PathNodeInfo::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct kglite::api::algorithms::PathOptions<'a>
+pub kglite::api::algorithms::PathOptions::connection_types: core::option::Option<&'a [alloc::string::String]>
+pub kglite::api::algorithms::PathOptions::interrupt: kglite::api::algorithms::Interrupt
+pub kglite::api::algorithms::PathOptions::via_types: core::option::Option<&'a [alloc::string::String]>
+impl<'a> kglite::api::algorithms::PathOptions<'a>
+pub fn kglite::api::algorithms::PathOptions<'a>::with_connection_types(self, connection_types: &'a [alloc::string::String]) -> Self
+pub fn kglite::api::algorithms::PathOptions<'a>::with_interrupt(self, interrupt: kglite::api::algorithms::Interrupt) -> Self
+pub fn kglite::api::algorithms::PathOptions<'a>::with_via_types(self, via_types: &'a [alloc::string::String]) -> Self
+impl<'a> core::clone::Clone for kglite::api::algorithms::PathOptions<'a>
+pub fn kglite::api::algorithms::PathOptions<'a>::clone(&self) -> kglite::api::algorithms::PathOptions<'a>
+impl<'a> core::default::Default for kglite::api::algorithms::PathOptions<'a>
+pub fn kglite::api::algorithms::PathOptions<'a>::default() -> kglite::api::algorithms::PathOptions<'a>
 pub struct kglite::api::algorithms::PathResult
 pub kglite::api::algorithms::PathResult::cost: usize
 pub kglite::api::algorithms::PathResult::path: alloc::vec::Vec<petgraph::graph_impl::NodeIndex>
@@ -71,6 +177,20 @@ impl core::clone::Clone for kglite::api::algorithms::PathResult
 pub fn kglite::api::algorithms::PathResult::clone(&self) -> kglite::api::algorithms::PathResult
 impl core::fmt::Debug for kglite::api::algorithms::PathResult
 pub fn kglite::api::algorithms::PathResult::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct kglite::api::algorithms::VectorSearchOptions
+pub kglite::api::algorithms::VectorSearchOptions::exact: bool
+pub kglite::api::algorithms::VectorSearchOptions::metric: kglite::api::algorithms::DistanceMetric
+pub kglite::api::algorithms::VectorSearchOptions::top_k: usize
+impl kglite::api::algorithms::VectorSearchOptions
+pub fn kglite::api::algorithms::VectorSearchOptions::with_exact(self, exact: bool) -> Self
+pub fn kglite::api::algorithms::VectorSearchOptions::with_metric(self, metric: kglite::api::algorithms::DistanceMetric) -> Self
+pub fn kglite::api::algorithms::VectorSearchOptions::with_top_k(self, top_k: usize) -> Self
+impl core::clone::Clone for kglite::api::algorithms::VectorSearchOptions
+pub fn kglite::api::algorithms::VectorSearchOptions::clone(&self) -> kglite::api::algorithms::VectorSearchOptions
+impl core::default::Default for kglite::api::algorithms::VectorSearchOptions
+pub fn kglite::api::algorithms::VectorSearchOptions::default() -> Self
+impl core::fmt::Debug for kglite::api::algorithms::VectorSearchOptions
+pub fn kglite::api::algorithms::VectorSearchOptions::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::algorithms::VectorSearchResult
 pub kglite::api::algorithms::VectorSearchResult::node_idx: petgraph::graph_impl::NodeIndex
 pub kglite::api::algorithms::VectorSearchResult::score: f32
@@ -78,24 +198,24 @@ impl core::clone::Clone for kglite::api::algorithms::VectorSearchResult
 pub fn kglite::api::algorithms::VectorSearchResult::clone(&self) -> kglite::api::algorithms::VectorSearchResult
 impl core::fmt::Debug for kglite::api::algorithms::VectorSearchResult
 pub fn kglite::api::algorithms::VectorSearchResult::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub fn kglite::api::algorithms::all_paths(graph: &kglite::api::DirGraph, source: petgraph::graph_impl::NodeIndex, target: petgraph::graph_impl::NodeIndex, max_hops: usize, max_results: core::option::Option<usize>, connection_types: core::option::Option<&[alloc::string::String]>, via_types: core::option::Option<&[alloc::string::String]>, deadline: kglite::api::algorithms::Interrupt) -> alloc::vec::Vec<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
+pub fn kglite::api::algorithms::all_paths(graph: &kglite::api::DirGraph, source: petgraph::graph_impl::NodeIndex, target: petgraph::graph_impl::NodeIndex, options: &kglite::api::algorithms::AllPathsOptions<'_>) -> alloc::vec::Vec<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
 pub fn kglite::api::algorithms::are_connected(graph: &kglite::api::DirGraph, source: petgraph::graph_impl::NodeIndex, target: petgraph::graph_impl::NodeIndex) -> bool
-pub fn kglite::api::algorithms::betweenness_centrality(graph: &kglite::api::DirGraph, normalized: bool, sample_size: core::option::Option<usize>, connection_types: core::option::Option<&[alloc::string::String]>, scope: core::option::Option<&std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>>, deadline: kglite::api::algorithms::Interrupt) -> core::result::Result<alloc::vec::Vec<kglite::api::algorithms::CentralityResult>, alloc::string::String>
-pub fn kglite::api::algorithms::closeness_centrality(graph: &kglite::api::DirGraph, normalized: bool, sample_size: core::option::Option<usize>, connection_types: core::option::Option<&[alloc::string::String]>, scope: core::option::Option<&std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>>, deadline: kglite::api::algorithms::Interrupt) -> core::result::Result<alloc::vec::Vec<kglite::api::algorithms::CentralityResult>, alloc::string::String>
+pub fn kglite::api::algorithms::betweenness_centrality(graph: &kglite::api::DirGraph, options: &kglite::api::algorithms::CentralityOptions<'_>) -> core::result::Result<alloc::vec::Vec<kglite::api::algorithms::CentralityResult>, alloc::string::String>
+pub fn kglite::api::algorithms::closeness_centrality(graph: &kglite::api::DirGraph, options: &kglite::api::algorithms::CentralityOptions<'_>) -> core::result::Result<alloc::vec::Vec<kglite::api::algorithms::CentralityResult>, alloc::string::String>
 pub fn kglite::api::algorithms::connected_components(graph: &kglite::api::DirGraph) -> alloc::vec::Vec<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
-pub fn kglite::api::algorithms::degree_centrality(graph: &kglite::api::DirGraph, normalized: bool, connection_types: core::option::Option<&[alloc::string::String]>, scope: core::option::Option<&std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>>, deadline: kglite::api::algorithms::Interrupt) -> core::result::Result<alloc::vec::Vec<kglite::api::algorithms::CentralityResult>, alloc::string::String>
+pub fn kglite::api::algorithms::degree_centrality(graph: &kglite::api::DirGraph, options: &kglite::api::algorithms::DegreeCentralityOptions<'_>) -> core::result::Result<alloc::vec::Vec<kglite::api::algorithms::CentralityResult>, alloc::string::String>
 pub fn kglite::api::algorithms::get_node_info(graph: &kglite::api::DirGraph, node_idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::algorithms::PathNodeInfo>
 pub fn kglite::api::algorithms::get_path_connections(graph: &kglite::api::DirGraph, path: &[petgraph::graph_impl::NodeIndex]) -> alloc::vec::Vec<core::option::Option<alloc::string::String>>
-pub fn kglite::api::algorithms::label_propagation(graph: &kglite::api::DirGraph, max_iterations: usize, connection_types: core::option::Option<&[alloc::string::String]>, scope: core::option::Option<&std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>>, deadline: kglite::api::algorithms::Interrupt) -> core::result::Result<kglite::api::algorithms::CommunityResult, alloc::string::String>
-pub fn kglite::api::algorithms::louvain_communities(graph: &kglite::api::DirGraph, weight_property: core::option::Option<&str>, resolution: f64, connection_types: core::option::Option<&[alloc::string::String]>, scope: core::option::Option<&std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>>, deadline: kglite::api::algorithms::Interrupt) -> core::result::Result<kglite::api::algorithms::CommunityResult, alloc::string::String>
+pub fn kglite::api::algorithms::label_propagation(graph: &kglite::api::DirGraph, options: &kglite::api::algorithms::LabelPropagationOptions<'_>) -> core::result::Result<kglite::api::algorithms::CommunityResult, alloc::string::String>
+pub fn kglite::api::algorithms::louvain_communities(graph: &kglite::api::DirGraph, options: &kglite::api::algorithms::CommunityOptions<'_>) -> core::result::Result<kglite::api::algorithms::CommunityResult, alloc::string::String>
 pub fn kglite::api::algorithms::node_degree(graph: &kglite::api::DirGraph, node: petgraph::graph_impl::NodeIndex) -> usize
-pub fn kglite::api::algorithms::pagerank(graph: &kglite::api::DirGraph, damping_factor: f64, max_iterations: usize, tolerance: f64, connection_types: core::option::Option<&[alloc::string::String]>, scope: core::option::Option<&std::collections::hash::set::HashSet<petgraph::graph_impl::NodeIndex>>, deadline: kglite::api::algorithms::Interrupt) -> core::result::Result<alloc::vec::Vec<kglite::api::algorithms::CentralityResult>, alloc::string::String>
-pub fn kglite::api::algorithms::shortest_path(graph: &kglite::api::DirGraph, source: petgraph::graph_impl::NodeIndex, target: petgraph::graph_impl::NodeIndex, connection_types: core::option::Option<&[alloc::string::String]>, via_types: core::option::Option<&[alloc::string::String]>, deadline: kglite::api::algorithms::Interrupt) -> core::option::Option<kglite::api::algorithms::PathResult>
+pub fn kglite::api::algorithms::pagerank(graph: &kglite::api::DirGraph, options: &kglite::api::algorithms::PagerankOptions<'_>) -> core::result::Result<alloc::vec::Vec<kglite::api::algorithms::CentralityResult>, alloc::string::String>
+pub fn kglite::api::algorithms::shortest_path(graph: &kglite::api::DirGraph, source: petgraph::graph_impl::NodeIndex, target: petgraph::graph_impl::NodeIndex, options: &kglite::api::algorithms::PathOptions<'_>) -> core::option::Option<kglite::api::algorithms::PathResult>
 pub fn kglite::api::algorithms::shortest_path_cost(graph: &kglite::api::DirGraph, source: petgraph::graph_impl::NodeIndex, target: petgraph::graph_impl::NodeIndex) -> core::option::Option<usize>
 pub fn kglite::api::algorithms::shortest_path_cost_batch(graph: &kglite::api::DirGraph, pairs: &[(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)]) -> alloc::vec::Vec<core::option::Option<usize>>
-pub fn kglite::api::algorithms::shortest_path_cost_weighted(graph: &kglite::api::DirGraph, source: petgraph::graph_impl::NodeIndex, target: petgraph::graph_impl::NodeIndex, weight_property: &str, connection_types: core::option::Option<&[alloc::string::String]>, via_types: core::option::Option<&[alloc::string::String]>, deadline: kglite::api::algorithms::Interrupt) -> core::option::Option<f64>
-pub fn kglite::api::algorithms::shortest_path_weighted(graph: &kglite::api::DirGraph, source: petgraph::graph_impl::NodeIndex, target: petgraph::graph_impl::NodeIndex, weight_property: &str, connection_types: core::option::Option<&[alloc::string::String]>, via_types: core::option::Option<&[alloc::string::String]>, deadline: kglite::api::algorithms::Interrupt) -> core::option::Option<kglite::graph::algorithms::graph_algorithms::WeightedPathResult>
-pub fn kglite::api::algorithms::vector_search(graph: &kglite::api::DirGraph, selection: &kglite::api::CurrentSelection, embedding_property: &str, query_vector: &[f32], top_k: usize, metric: kglite::api::algorithms::DistanceMetric, exact: bool) -> core::result::Result<alloc::vec::Vec<kglite::api::algorithms::VectorSearchResult>, alloc::string::String>
+pub fn kglite::api::algorithms::shortest_path_cost_weighted(graph: &kglite::api::DirGraph, source: petgraph::graph_impl::NodeIndex, target: petgraph::graph_impl::NodeIndex, weight_property: &str, options: &kglite::api::algorithms::PathOptions<'_>) -> core::option::Option<f64>
+pub fn kglite::api::algorithms::shortest_path_weighted(graph: &kglite::api::DirGraph, source: petgraph::graph_impl::NodeIndex, target: petgraph::graph_impl::NodeIndex, weight_property: &str, options: &kglite::api::algorithms::PathOptions<'_>) -> core::option::Option<kglite::graph::algorithms::graph_algorithms::WeightedPathResult>
+pub fn kglite::api::algorithms::vector_search(graph: &kglite::api::DirGraph, selection: &kglite::api::CurrentSelection, embedding_property: &str, query_vector: &[f32], options: &kglite::api::algorithms::VectorSearchOptions) -> core::result::Result<alloc::vec::Vec<kglite::api::algorithms::VectorSearchResult>, alloc::string::String>
 pub fn kglite::api::algorithms::weakly_connected_components(graph: &kglite::api::DirGraph, deadline: kglite::api::algorithms::Interrupt) -> core::result::Result<alloc::vec::Vec<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>, alloc::string::String>
 pub mod kglite::api::blueprint
 pub enum kglite::api::blueprint::ComputeOp

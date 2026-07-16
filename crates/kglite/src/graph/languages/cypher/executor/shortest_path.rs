@@ -246,30 +246,20 @@ impl<'a> CypherExecutor<'a> {
                         .collect(),
                     }
                 } else {
+                    let path_opts = ga::PathOptions {
+                        connection_types,
+                        via_types: None,
+                        interrupt: self.interrupt(),
+                    };
                     let single = match edge_direction {
-                        EdgeDirection::Both => ga::shortest_path(
-                            self.graph,
-                            source_idx,
-                            target_idx,
-                            connection_types,
-                            None,
-                            self.interrupt(),
-                        ),
+                        EdgeDirection::Both => {
+                            ga::shortest_path(self.graph, source_idx, target_idx, &path_opts)
+                        }
                         EdgeDirection::Outgoing => ga::shortest_path_directed(
-                            self.graph,
-                            source_idx,
-                            target_idx,
-                            connection_types,
-                            None,
-                            self.interrupt(),
+                            self.graph, source_idx, target_idx, &path_opts,
                         ),
                         EdgeDirection::Incoming => ga::shortest_path_directed(
-                            self.graph,
-                            target_idx,
-                            source_idx,
-                            connection_types,
-                            None,
-                            self.interrupt(),
+                            self.graph, target_idx, source_idx, &path_opts,
                         )
                         .map(|mut pr| {
                             pr.path.reverse();

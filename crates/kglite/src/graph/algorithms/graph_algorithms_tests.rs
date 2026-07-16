@@ -93,14 +93,7 @@ fn build_disconnected_graph() -> (DirGraph, Vec<petgraph::graph::NodeIndex>) {
 #[test]
 fn test_shortest_path_adjacent() {
     let (graph, indices) = build_chain_graph();
-    let result = shortest_path(
-        &graph,
-        indices[0],
-        indices[1],
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    );
+    let result = shortest_path(&graph, indices[0], indices[1], &PathOptions::default());
     assert!(result.is_some());
     let path = result.unwrap();
     assert_eq!(path.cost, 1);
@@ -110,14 +103,7 @@ fn test_shortest_path_adjacent() {
 #[test]
 fn test_shortest_path_multi_hop() {
     let (graph, indices) = build_chain_graph();
-    let result = shortest_path(
-        &graph,
-        indices[0],
-        indices[4],
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    );
+    let result = shortest_path(&graph, indices[0], indices[4], &PathOptions::default());
     assert!(result.is_some());
     let path = result.unwrap();
     assert_eq!(path.cost, 4);
@@ -127,14 +113,7 @@ fn test_shortest_path_multi_hop() {
 #[test]
 fn test_shortest_path_same_node() {
     let (graph, indices) = build_chain_graph();
-    let result = shortest_path(
-        &graph,
-        indices[0],
-        indices[0],
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    );
+    let result = shortest_path(&graph, indices[0], indices[0], &PathOptions::default());
     assert!(result.is_some());
     let path = result.unwrap();
     assert_eq!(path.cost, 0);
@@ -144,14 +123,7 @@ fn test_shortest_path_same_node() {
 #[test]
 fn test_shortest_path_not_found() {
     let (graph, indices) = build_disconnected_graph();
-    let result = shortest_path(
-        &graph,
-        indices[0],
-        indices[2],
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    );
+    let result = shortest_path(&graph, indices[0], indices[2], &PathOptions::default());
     assert!(result.is_none());
 }
 
@@ -159,14 +131,7 @@ fn test_shortest_path_not_found() {
 fn test_shortest_path_reverse_direction() {
     // BFS is undirected, so B -> A should find a path even though edge is A -> B
     let (graph, indices) = build_chain_graph();
-    let result = shortest_path(
-        &graph,
-        indices[4],
-        indices[0],
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    );
+    let result = shortest_path(&graph, indices[4], indices[0], &PathOptions::default());
     assert!(result.is_some());
     assert_eq!(result.unwrap().cost, 4);
 }
@@ -182,11 +147,7 @@ fn test_all_paths_basic() {
         &graph,
         indices[0],
         indices[2],
-        5,
-        None,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
+        &AllPathsOptions::default().with_max_hops(5),
     );
     assert!(!paths.is_empty());
     // There should be a path of length 2: A -> B -> C
@@ -201,11 +162,7 @@ fn test_all_paths_limited_hops() {
         &graph,
         indices[0],
         indices[2],
-        1,
-        None,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
+        &AllPathsOptions::default().with_max_hops(1),
     );
     assert!(paths.is_empty()); // Can't reach C in 1 hop
 }
@@ -217,11 +174,7 @@ fn test_all_paths_triangle() {
         &graph,
         indices[0],
         indices[2],
-        3,
-        None,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
+        &AllPathsOptions::default().with_max_hops(3),
     );
     // Multiple paths possible in a triangle
     assert!(!paths.is_empty());
@@ -235,11 +188,9 @@ fn test_all_paths_max_results() {
         &graph,
         indices[0],
         indices[2],
-        3,
-        Some(1),
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
+        &AllPathsOptions::default()
+            .with_max_hops(3)
+            .with_max_results(1),
     );
     assert_eq!(paths.len(), 1);
 }
@@ -251,21 +202,15 @@ fn test_all_paths_max_results_none_unlimited() {
         &graph,
         indices[0],
         indices[2],
-        3,
-        Some(1),
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
+        &AllPathsOptions::default()
+            .with_max_hops(3)
+            .with_max_results(1),
     );
     let unlimited = all_paths(
         &graph,
         indices[0],
         indices[2],
-        3,
-        None,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
+        &AllPathsOptions::default().with_max_hops(3),
     );
     assert!(unlimited.len() >= limited.len());
 }
@@ -298,14 +243,7 @@ fn test_shortest_path_connection_type_filter() {
     graph.graph.add_edge(indices[0], indices[2], edge3);
 
     // Without filter: shortest path is A->C via SKIP (1 hop)
-    let result = shortest_path(
-        &graph,
-        indices[0],
-        indices[2],
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    );
+    let result = shortest_path(&graph, indices[0], indices[2], &PathOptions::default());
     assert_eq!(result.unwrap().cost, 1);
 
     // With NEXT filter: must go A->B->C (2 hops)
@@ -314,9 +252,7 @@ fn test_shortest_path_connection_type_filter() {
         &graph,
         indices[0],
         indices[2],
-        Some(&next_only),
-        None,
-        crate::graph::algorithms::Interrupt::default(),
+        &PathOptions::default().with_connection_types(&next_only),
     );
     assert_eq!(result.unwrap().cost, 2);
 
@@ -326,9 +262,7 @@ fn test_shortest_path_connection_type_filter() {
         &graph,
         indices[0],
         indices[2],
-        Some(&skip_only),
-        None,
-        crate::graph::algorithms::Interrupt::default(),
+        &PathOptions::default().with_connection_types(&skip_only),
     );
     assert_eq!(result.unwrap().cost, 1);
 }
@@ -591,15 +525,9 @@ fn test_node_degree() {
 #[test]
 fn test_betweenness_centrality_chain() {
     let (graph, indices) = build_chain_graph();
-    let results = betweenness_centrality(
-        &graph,
-        false,
-        None,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
+    let results =
+        betweenness_centrality(&graph, &CentralityOptions::default().with_normalized(false))
+            .unwrap();
     assert_eq!(results.len(), 5);
     // Middle node (index 2) should have highest betweenness in a chain
     let middle_score = results
@@ -621,11 +549,9 @@ fn test_betweenness_centrality_with_sampling() {
     // With sample_size, stride-based sampling should still find the middle node
     let results = betweenness_centrality(
         &graph,
-        false,
-        Some(3),
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
+        &CentralityOptions::default()
+            .with_normalized(false)
+            .with_sample_size(3),
     )
     .unwrap();
     assert_eq!(results.len(), 5);
@@ -646,10 +572,7 @@ fn test_degree_centrality() {
     let (graph, indices) = build_chain_graph();
     let results = degree_centrality(
         &graph,
-        false,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
+        &DegreeCentralityOptions::default().with_normalized(false),
     )
     .unwrap();
     assert_eq!(results.len(), 5);
@@ -663,16 +586,7 @@ fn test_degree_centrality() {
 #[test]
 fn test_pagerank_basic() {
     let (graph, _) = build_triangle_graph();
-    let results = pagerank(
-        &graph,
-        0.85,
-        100,
-        1e-6,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
+    let results = pagerank(&graph, &PagerankOptions::default()).unwrap();
     assert_eq!(results.len(), 3);
     // All nodes in a symmetric triangle should have roughly equal PageRank
     let scores: Vec<f64> = results.iter().map(|r| r.score).collect();
@@ -687,15 +601,8 @@ fn test_pagerank_basic() {
 #[test]
 fn test_closeness_centrality_chain() {
     let (graph, indices) = build_chain_graph();
-    let results = closeness_centrality(
-        &graph,
-        false,
-        None,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
+    let results =
+        closeness_centrality(&graph, &CentralityOptions::default().with_normalized(false)).unwrap();
     assert_eq!(results.len(), 5);
     // Middle node should have highest closeness
     let middle = results
@@ -721,10 +628,9 @@ fn test_centrality_scope_restricts_nodes_and_edges() {
 
     let deg = degree_centrality(
         &graph,
-        false,
-        None,
-        Some(&scope),
-        crate::graph::algorithms::Interrupt::default(),
+        &DegreeCentralityOptions::default()
+            .with_normalized(false)
+            .with_scope(&scope),
     )
     .unwrap();
     assert_eq!(deg.len(), 3, "only scoped nodes returned");
@@ -735,16 +641,7 @@ fn test_centrality_scope_restricts_nodes_and_edges() {
     assert_eq!(score_of(indices[3]), 1.0);
 
     // Excluded nodes never appear in any scoped algorithm's output.
-    let pr = pagerank(
-        &graph,
-        0.85,
-        100,
-        1e-6,
-        None,
-        Some(&scope),
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
+    let pr = pagerank(&graph, &PagerankOptions::default().with_scope(&scope)).unwrap();
     let pr_nodes: std::collections::HashSet<_> = pr.iter().map(|r| r.node_idx).collect();
     assert_eq!(pr_nodes, scope);
 }
@@ -752,16 +649,7 @@ fn test_centrality_scope_restricts_nodes_and_edges() {
 #[test]
 fn test_pagerank_empty_graph() {
     let graph = DirGraph::new();
-    let results = pagerank(
-        &graph,
-        0.85,
-        100,
-        1e-6,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
+    let results = pagerank(&graph, &PagerankOptions::default()).unwrap();
     assert!(results.is_empty());
 }
 
@@ -834,15 +722,7 @@ fn community_of(result: &CommunityResult, idx: petgraph::graph::NodeIndex) -> us
 #[test]
 fn test_louvain_multilevel_two_communities() {
     let (graph, ix) = build_two_triangle_bridge();
-    let r = louvain_communities(
-        &graph,
-        None,
-        1.0,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
+    let r = louvain_communities(&graph, &CommunityOptions::default()).unwrap();
     assert_eq!(r.num_communities, 2, "two triangles → two communities");
     assert!(
         r.modularity > 0.0,
@@ -860,15 +740,7 @@ fn test_louvain_multilevel_two_communities() {
 #[test]
 fn test_louvain_exposes_hierarchy_levels() {
     let (graph, _) = build_two_triangle_bridge();
-    let r = louvain_communities(
-        &graph,
-        None,
-        1.0,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
+    let r = louvain_communities(&graph, &CommunityOptions::default()).unwrap();
     assert!(!r.levels.is_empty(), "hierarchy levels present");
     // last level == flat assignments (best partition)
     assert_eq!(r.levels.last().unwrap().len(), r.assignments.len());
@@ -881,24 +753,8 @@ fn test_louvain_exposes_hierarchy_levels() {
 #[test]
 fn test_louvain_deterministic() {
     let (graph, _) = build_two_triangle_bridge();
-    let a = louvain_communities(
-        &graph,
-        None,
-        1.0,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
-    let b = louvain_communities(
-        &graph,
-        None,
-        1.0,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
+    let a = louvain_communities(&graph, &CommunityOptions::default()).unwrap();
+    let b = louvain_communities(&graph, &CommunityOptions::default()).unwrap();
     assert_eq!(a.num_communities, b.num_communities);
     let ca: Vec<usize> = a.assignments.iter().map(|x| x.community_id).collect();
     let cb: Vec<usize> = b.assignments.iter().map(|x| x.community_id).collect();
@@ -909,15 +765,7 @@ fn test_louvain_deterministic() {
 fn test_louvain_empty_and_isolated() {
     // empty
     let g = DirGraph::new();
-    let r = louvain_communities(
-        &g,
-        None,
-        1.0,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
+    let r = louvain_communities(&g, &CommunityOptions::default()).unwrap();
     assert_eq!(r.num_communities, 0);
     assert!(r.levels.is_empty());
     // isolated nodes (no edges) → each its own community, modularity 0
@@ -935,15 +783,7 @@ fn test_louvain_empty_and_isolated() {
             .entry_or_default("Node".to_string())
             .push(idx);
     }
-    let r3 = louvain_communities(
-        &g3,
-        None,
-        1.0,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
+    let r3 = louvain_communities(&g3, &CommunityOptions::default()).unwrap();
     assert_eq!(r3.num_communities, 3);
     assert_eq!(r3.modularity, 0.0);
 }
@@ -997,15 +837,7 @@ fn assert_all_communities_connected(graph: &DirGraph, result: &CommunityResult) 
 #[test]
 fn test_leiden_two_communities() {
     let (graph, ix) = build_two_triangle_bridge();
-    let r = leiden_communities(
-        &graph,
-        None,
-        1.0,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
+    let r = leiden_communities(&graph, &CommunityOptions::default()).unwrap();
     assert_eq!(r.num_communities, 2);
     assert!(r.modularity > 0.0);
     assert_eq!(community_of(&r, ix[0]), community_of(&r, ix[1]));
@@ -1016,52 +848,20 @@ fn test_leiden_two_communities() {
 #[test]
 fn test_leiden_communities_well_connected() {
     let (graph, _) = build_two_triangle_bridge();
-    let r = leiden_communities(
-        &graph,
-        None,
-        1.0,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
+    let r = leiden_communities(&graph, &CommunityOptions::default()).unwrap();
     assert_all_communities_connected(&graph, &r);
 
     // also on a chain and a triangle — the invariant must always hold
     let (chain, _) = build_chain_graph();
-    let rc = leiden_communities(
-        &chain,
-        None,
-        1.0,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
+    let rc = leiden_communities(&chain, &CommunityOptions::default()).unwrap();
     assert_all_communities_connected(&chain, &rc);
 }
 
 #[test]
 fn test_leiden_deterministic() {
     let (graph, _) = build_two_triangle_bridge();
-    let a = leiden_communities(
-        &graph,
-        None,
-        1.0,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
-    let b = leiden_communities(
-        &graph,
-        None,
-        1.0,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
+    let a = leiden_communities(&graph, &CommunityOptions::default()).unwrap();
+    let b = leiden_communities(&graph, &CommunityOptions::default()).unwrap();
     let ca: Vec<usize> = a.assignments.iter().map(|x| x.community_id).collect();
     let cb: Vec<usize> = b.assignments.iter().map(|x| x.community_id).collect();
     assert_eq!(ca, cb);
@@ -1070,24 +870,8 @@ fn test_leiden_deterministic() {
 #[test]
 fn test_leiden_hierarchy_and_modularity_vs_louvain() {
     let (graph, _) = build_two_triangle_bridge();
-    let lei = leiden_communities(
-        &graph,
-        None,
-        1.0,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
-    let lou = louvain_communities(
-        &graph,
-        None,
-        1.0,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
+    let lei = leiden_communities(&graph, &CommunityOptions::default()).unwrap();
+    let lou = louvain_communities(&graph, &CommunityOptions::default()).unwrap();
     assert!(!lei.levels.is_empty());
     assert_eq!(lei.levels.last().unwrap().len(), lei.assignments.len());
     // Leiden modularity should be competitive with Louvain (≥ within fp slack).
@@ -1102,15 +886,7 @@ fn test_leiden_hierarchy_and_modularity_vs_louvain() {
 #[test]
 fn test_leiden_empty_and_isolated() {
     let g = DirGraph::new();
-    let r = leiden_communities(
-        &g,
-        None,
-        1.0,
-        None,
-        None,
-        crate::graph::algorithms::Interrupt::default(),
-    )
-    .unwrap();
+    let r = leiden_communities(&g, &CommunityOptions::default()).unwrap();
     assert_eq!(r.num_communities, 0);
     assert!(r.levels.is_empty());
 }

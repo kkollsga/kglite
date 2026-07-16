@@ -10,7 +10,26 @@ use crate::graph::{
     centrality_results_to_dataframe, centrality_results_to_py_dict, community_results_to_py,
     KnowledgeGraph,
 };
+use kglite_core::api::algorithms::{Interrupt, PathOptions};
 use kglite_core::api::PlanStep;
+
+/// Assemble a [`PathOptions`] from the wheel's optional connection/via-type
+/// args, keeping the Python kwarg surface identical while the core takes an
+/// options struct.
+fn path_options<'a>(
+    connection_types: Option<&'a [String]>,
+    via_types: Option<&'a [String]>,
+    interrupt: Interrupt,
+) -> PathOptions<'a> {
+    let mut opts = PathOptions::default().with_interrupt(interrupt);
+    if let Some(ct) = connection_types {
+        opts = opts.with_connection_types(ct);
+    }
+    if let Some(vt) = via_types {
+        opts = opts.with_via_types(vt);
+    }
+    opts
+}
 
 #[pymethods]
 impl KnowledgeGraph {
@@ -92,9 +111,7 @@ impl KnowledgeGraph {
                 source_idx,
                 target_idx,
                 &prop,
-                connection_types.as_deref(),
-                via_types.as_deref(),
-                deadline,
+                &path_options(connection_types.as_deref(), via_types.as_deref(), deadline),
             );
             return Ok(match result {
                 Some(wp) => {
@@ -134,9 +151,7 @@ impl KnowledgeGraph {
             &self.inner,
             source_idx,
             target_idx,
-            connection_types.as_deref(),
-            via_types.as_deref(),
-            deadline,
+            &path_options(connection_types.as_deref(), via_types.as_deref(), deadline),
         );
 
         match result {
@@ -233,9 +248,7 @@ impl KnowledgeGraph {
                     source_idx,
                     target_idx,
                     &prop,
-                    None,
-                    None,
-                    kglite_core::api::algorithms::Interrupt::default(),
+                    &PathOptions::default(),
                 ) {
                     Some(w) => w.into_pyobject(py)?.unbind().into_any(),
                     None => py.None(),
@@ -374,9 +387,7 @@ impl KnowledgeGraph {
             &self.inner,
             source_idx,
             target_idx,
-            connection_types.as_deref(),
-            via_types.as_deref(),
-            deadline,
+            &path_options(connection_types.as_deref(), via_types.as_deref(), deadline),
         ) {
             Some(path_result) => {
                 // Extract just the IDs - no PyDict creation per node
@@ -455,9 +466,7 @@ impl KnowledgeGraph {
             &self.inner,
             source_idx,
             target_idx,
-            connection_types.as_deref(),
-            via_types.as_deref(),
-            deadline,
+            &path_options(connection_types.as_deref(), via_types.as_deref(), deadline),
         ) {
             Some(path_result) => {
                 let indices: Vec<usize> = path_result.path.iter().map(|idx| idx.index()).collect();
@@ -536,15 +545,23 @@ impl KnowledgeGraph {
         );
 
         // Find all paths
+        let mut all_paths_opts = kglite_core::api::algorithms::AllPathsOptions::default()
+            .with_max_hops(max_hops)
+            .with_interrupt(deadline);
+        if let Some(mr) = max_results {
+            all_paths_opts = all_paths_opts.with_max_results(mr);
+        }
+        if let Some(ct) = connection_types.as_deref() {
+            all_paths_opts = all_paths_opts.with_connection_types(ct);
+        }
+        if let Some(vt) = via_types.as_deref() {
+            all_paths_opts = all_paths_opts.with_via_types(vt);
+        }
         let paths = kglite_core::api::algorithms::all_paths(
             &self.inner,
             source_idx,
             target_idx,
-            max_hops,
-            max_results,
-            connection_types.as_deref(),
-            via_types.as_deref(),
-            deadline,
+            &all_paths_opts,
         );
 
         // Convert to Python output
@@ -798,14 +815,16 @@ impl KnowledgeGraph {
         let inner = Arc::clone(&self.inner);
         let results = py
             .detach(move || {
-                kglite_core::api::algorithms::betweenness_centrality(
-                    &inner,
-                    normalized,
-                    sample_size,
-                    connection_types.as_deref(),
-                    None,
-                    deadline,
-                )
+                let mut opts = kglite_core::api::algorithms::CentralityOptions::default()
+                    .with_normalized(normalized)
+                    .with_interrupt(deadline);
+                if let Some(ss) = sample_size {
+                    opts = opts.with_sample_size(ss);
+                }
+                if let Some(ct) = connection_types.as_deref() {
+                    opts = opts.with_connection_types(ct);
+                }
+                kglite_core::api::algorithms::betweenness_centrality(&inner, &opts)
             })
             .map_err(|e: String| {
                 crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
@@ -873,15 +892,15 @@ impl KnowledgeGraph {
         let inner = Arc::clone(&self.inner);
         let results = py
             .detach(move || {
-                kglite_core::api::algorithms::pagerank(
-                    &inner,
-                    damping,
-                    max_iter,
-                    tol,
-                    connection_types.as_deref(),
-                    None,
-                    deadline,
-                )
+                let mut opts = kglite_core::api::algorithms::PagerankOptions::default()
+                    .with_damping_factor(damping)
+                    .with_max_iterations(max_iter)
+                    .with_tolerance(tol)
+                    .with_interrupt(deadline);
+                if let Some(ct) = connection_types.as_deref() {
+                    opts = opts.with_connection_types(ct);
+                }
+                kglite_core::api::algorithms::pagerank(&inner, &opts)
             })
             .map_err(|e: String| {
                 crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
@@ -941,13 +960,13 @@ impl KnowledgeGraph {
         let inner = Arc::clone(&self.inner);
         let results = py
             .detach(move || {
-                kglite_core::api::algorithms::degree_centrality(
-                    &inner,
-                    normalized,
-                    connection_types.as_deref(),
-                    None,
-                    deadline,
-                )
+                let mut opts = kglite_core::api::algorithms::DegreeCentralityOptions::default()
+                    .with_normalized(normalized)
+                    .with_interrupt(deadline);
+                if let Some(ct) = connection_types.as_deref() {
+                    opts = opts.with_connection_types(ct);
+                }
+                kglite_core::api::algorithms::degree_centrality(&inner, &opts)
             })
             .map_err(|e: String| {
                 crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
@@ -1013,14 +1032,16 @@ impl KnowledgeGraph {
         let inner = Arc::clone(&self.inner);
         let results = py
             .detach(move || {
-                kglite_core::api::algorithms::closeness_centrality(
-                    &inner,
-                    normalized,
-                    sample_size,
-                    connection_types.as_deref(),
-                    None,
-                    deadline,
-                )
+                let mut opts = kglite_core::api::algorithms::CentralityOptions::default()
+                    .with_normalized(normalized)
+                    .with_interrupt(deadline);
+                if let Some(ss) = sample_size {
+                    opts = opts.with_sample_size(ss);
+                }
+                if let Some(ct) = connection_types.as_deref() {
+                    opts = opts.with_connection_types(ct);
+                }
+                kglite_core::api::algorithms::closeness_centrality(&inner, &opts)
             })
             .map_err(|e: String| {
                 crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
@@ -1068,15 +1089,19 @@ impl KnowledgeGraph {
         let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
         );
-        let result = kglite_core::api::algorithms::louvain_communities(
-            &self.inner,
-            weight_property.as_deref(),
-            res,
-            connection_types.as_deref(),
-            None,
-            deadline,
-        )
-        .map_err(|e: String| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?;
+        let mut opts = kglite_core::api::algorithms::CommunityOptions::default()
+            .with_resolution(res)
+            .with_interrupt(deadline);
+        if let Some(wp) = weight_property.as_deref() {
+            opts = opts.with_weight_property(wp);
+        }
+        if let Some(ct) = connection_types.as_deref() {
+            opts = opts.with_connection_types(ct);
+        }
+        let result = kglite_core::api::algorithms::louvain_communities(&self.inner, &opts)
+            .map_err(|e: String| {
+                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+            })?;
         community_results_to_py(py, &self.inner, result)
     }
 
@@ -1102,14 +1127,15 @@ impl KnowledgeGraph {
         let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
         );
-        let result = kglite_core::api::algorithms::label_propagation(
-            &self.inner,
-            max_iter,
-            connection_types.as_deref(),
-            None,
-            deadline,
-        )
-        .map_err(|e: String| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?;
+        let mut opts = kglite_core::api::algorithms::LabelPropagationOptions::default()
+            .with_max_iterations(max_iter)
+            .with_interrupt(deadline);
+        if let Some(ct) = connection_types.as_deref() {
+            opts = opts.with_connection_types(ct);
+        }
+        let result = kglite_core::api::algorithms::label_propagation(&self.inner, &opts).map_err(
+            |e: String| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)),
+        )?;
         community_results_to_py(py, &self.inner, result)
     }
 

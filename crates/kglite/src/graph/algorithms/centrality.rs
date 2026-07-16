@@ -19,6 +19,182 @@ pub struct CentralityResult {
     pub score: f64,
 }
 
+/// Tunable options for [`pagerank`]. Construct via
+/// [`PagerankOptions::default`] then the `with_*` builders, e.g.
+/// `PagerankOptions::default().with_damping_factor(0.9)`. `#[non_exhaustive]`
+/// so new knobs can be added without breaking callers.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct PagerankOptions<'a> {
+    /// Probability of following a link each iteration (default `0.85`).
+    pub damping_factor: f64,
+    /// Maximum power-iteration count before returning (default `100`).
+    pub max_iterations: usize,
+    /// Convergence threshold on the per-iteration score delta (default `1e-6`).
+    pub tolerance: f64,
+    /// Only traverse edges of these connection types (`None` = all edges).
+    pub connection_types: Option<&'a [String]>,
+    /// Restrict the scoring universe to this node set (`None` = whole graph).
+    pub scope: Option<&'a NodeScope>,
+    /// Deadline + cooperative-cancellation bundle.
+    pub interrupt: Interrupt,
+}
+
+impl Default for PagerankOptions<'_> {
+    fn default() -> Self {
+        Self {
+            damping_factor: 0.85,
+            max_iterations: 100,
+            tolerance: 1e-6,
+            connection_types: None,
+            scope: None,
+            interrupt: Interrupt::default(),
+        }
+    }
+}
+
+impl<'a> PagerankOptions<'a> {
+    /// Set the damping factor (probability of following a link).
+    pub fn with_damping_factor(mut self, damping_factor: f64) -> Self {
+        self.damping_factor = damping_factor;
+        self
+    }
+    /// Set the maximum power-iteration count.
+    pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
+        self.max_iterations = max_iterations;
+        self
+    }
+    /// Set the convergence tolerance.
+    pub fn with_tolerance(mut self, tolerance: f64) -> Self {
+        self.tolerance = tolerance;
+        self
+    }
+    /// Restrict traversal to the given connection types.
+    pub fn with_connection_types(mut self, connection_types: &'a [String]) -> Self {
+        self.connection_types = Some(connection_types);
+        self
+    }
+    /// Restrict the scoring universe to the given node set.
+    pub fn with_scope(mut self, scope: &'a NodeScope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+    /// Set the deadline + cancellation bundle.
+    pub fn with_interrupt(mut self, interrupt: Interrupt) -> Self {
+        self.interrupt = interrupt;
+        self
+    }
+}
+
+/// Tunable options for [`betweenness_centrality`] and
+/// [`closeness_centrality`] — the two centrality measures that share the same
+/// knob shape (both support sampling). Construct via
+/// [`CentralityOptions::default`] then the `with_*` builders.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct CentralityOptions<'a> {
+    /// Normalize scores to a comparable range (default `true`).
+    pub normalized: bool,
+    /// Sample this many source nodes for a faster approximation on large
+    /// graphs (`None` = exact, use every node).
+    pub sample_size: Option<usize>,
+    /// Only traverse edges of these connection types (`None` = all edges).
+    pub connection_types: Option<&'a [String]>,
+    /// Restrict the scoring universe to this node set (`None` = whole graph).
+    pub scope: Option<&'a NodeScope>,
+    /// Deadline + cooperative-cancellation bundle.
+    pub interrupt: Interrupt,
+}
+
+impl Default for CentralityOptions<'_> {
+    fn default() -> Self {
+        Self {
+            normalized: true,
+            sample_size: None,
+            connection_types: None,
+            scope: None,
+            interrupt: Interrupt::default(),
+        }
+    }
+}
+
+impl<'a> CentralityOptions<'a> {
+    /// Toggle score normalization.
+    pub fn with_normalized(mut self, normalized: bool) -> Self {
+        self.normalized = normalized;
+        self
+    }
+    /// Set the source-node sample size (approximate mode).
+    pub fn with_sample_size(mut self, sample_size: usize) -> Self {
+        self.sample_size = Some(sample_size);
+        self
+    }
+    /// Restrict traversal to the given connection types.
+    pub fn with_connection_types(mut self, connection_types: &'a [String]) -> Self {
+        self.connection_types = Some(connection_types);
+        self
+    }
+    /// Restrict the scoring universe to the given node set.
+    pub fn with_scope(mut self, scope: &'a NodeScope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+    /// Set the deadline + cancellation bundle.
+    pub fn with_interrupt(mut self, interrupt: Interrupt) -> Self {
+        self.interrupt = interrupt;
+        self
+    }
+}
+
+/// Tunable options for [`degree_centrality`]. Degree is exact and O(1) per
+/// node, so it has no `sample_size` knob (unlike [`CentralityOptions`]).
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct DegreeCentralityOptions<'a> {
+    /// Normalize by `(n - 1)` for values in `[0, 1]` (default `true`).
+    pub normalized: bool,
+    /// Only count edges of these connection types (`None` = all edges).
+    pub connection_types: Option<&'a [String]>,
+    /// Restrict the scoring universe to this node set (`None` = whole graph).
+    pub scope: Option<&'a NodeScope>,
+    /// Deadline + cooperative-cancellation bundle.
+    pub interrupt: Interrupt,
+}
+
+impl Default for DegreeCentralityOptions<'_> {
+    fn default() -> Self {
+        Self {
+            normalized: true,
+            connection_types: None,
+            scope: None,
+            interrupt: Interrupt::default(),
+        }
+    }
+}
+
+impl<'a> DegreeCentralityOptions<'a> {
+    /// Toggle score normalization.
+    pub fn with_normalized(mut self, normalized: bool) -> Self {
+        self.normalized = normalized;
+        self
+    }
+    /// Restrict counting to the given connection types.
+    pub fn with_connection_types(mut self, connection_types: &'a [String]) -> Self {
+        self.connection_types = Some(connection_types);
+        self
+    }
+    /// Restrict the scoring universe to the given node set.
+    pub fn with_scope(mut self, scope: &'a NodeScope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+    /// Set the deadline + cancellation bundle.
+    pub fn with_interrupt(mut self, interrupt: Interrupt) -> Self {
+        self.interrupt = interrupt;
+        self
+    }
+}
+
 /// Calculate betweenness centrality for all nodes in the graph.
 ///
 /// Betweenness centrality measures how often a node lies on the shortest path
@@ -37,12 +213,15 @@ pub struct CentralityResult {
 /// @procedure: betweenness_centrality
 pub fn betweenness_centrality(
     graph: &DirGraph,
-    normalized: bool,
-    sample_size: Option<usize>,
-    connection_types: Option<&[String]>,
-    scope: Option<&NodeScope>,
-    deadline: Interrupt,
+    options: &CentralityOptions,
 ) -> Result<Vec<CentralityResult>, String> {
+    let CentralityOptions {
+        normalized,
+        sample_size,
+        connection_types,
+        scope,
+        interrupt: deadline,
+    } = *options;
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -336,13 +515,16 @@ pub fn betweenness_centrality(
 /// @procedure: pagerank
 pub fn pagerank(
     graph: &DirGraph,
-    damping_factor: f64,
-    max_iterations: usize,
-    tolerance: f64,
-    connection_types: Option<&[String]>,
-    scope: Option<&NodeScope>,
-    deadline: Interrupt,
+    options: &PagerankOptions,
 ) -> Result<Vec<CentralityResult>, String> {
+    let PagerankOptions {
+        damping_factor,
+        max_iterations,
+        tolerance,
+        connection_types,
+        scope,
+        interrupt: deadline,
+    } = *options;
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -502,11 +684,14 @@ pub fn pagerank(
 /// @procedure: degree_centrality
 pub fn degree_centrality(
     graph: &DirGraph,
-    normalized: bool,
-    connection_types: Option<&[String]>,
-    scope: Option<&NodeScope>,
-    deadline: Interrupt,
+    options: &DegreeCentralityOptions,
 ) -> Result<Vec<CentralityResult>, String> {
+    let DegreeCentralityOptions {
+        normalized,
+        connection_types,
+        scope,
+        interrupt: deadline,
+    } = *options;
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -585,12 +770,15 @@ pub fn degree_centrality(
 /// @procedure: closeness_centrality
 pub fn closeness_centrality(
     graph: &DirGraph,
-    normalized: bool,
-    sample_size: Option<usize>,
-    connection_types: Option<&[String]>,
-    scope: Option<&NodeScope>,
-    deadline: Interrupt,
+    options: &CentralityOptions,
 ) -> Result<Vec<CentralityResult>, String> {
+    let CentralityOptions {
+        normalized,
+        sample_size,
+        connection_types,
+        scope,
+        interrupt: deadline,
+    } = *options;
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.

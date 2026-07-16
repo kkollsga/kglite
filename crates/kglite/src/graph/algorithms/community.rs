@@ -33,6 +33,116 @@ pub struct CommunityResult {
     pub levels: Vec<Vec<CommunityAssignment>>,
 }
 
+/// Tunable options for the modularity-optimizing community detectors
+/// [`louvain_communities`] and [`leiden_communities`] — they share the same
+/// knob shape (weighted, resolution-parameterized, hierarchical). Construct
+/// via [`CommunityOptions::default`] then the `with_*` builders. Label
+/// propagation has a different shape ([`LabelPropagationOptions`]).
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct CommunityOptions<'a> {
+    /// Edge property read as the weight (`None` = every edge weighs `1.0`).
+    pub weight_property: Option<&'a str>,
+    /// Resolution parameter; higher values yield more, smaller communities
+    /// (default `1.0`).
+    pub resolution: f64,
+    /// Only traverse edges of these connection types (`None` = all edges).
+    pub connection_types: Option<&'a [String]>,
+    /// Restrict the community universe to this node set (`None` = whole graph).
+    pub scope: Option<&'a NodeScope>,
+    /// Deadline + cooperative-cancellation bundle.
+    pub interrupt: Interrupt,
+}
+
+impl Default for CommunityOptions<'_> {
+    fn default() -> Self {
+        Self {
+            weight_property: None,
+            resolution: 1.0,
+            connection_types: None,
+            scope: None,
+            interrupt: Interrupt::default(),
+        }
+    }
+}
+
+impl<'a> CommunityOptions<'a> {
+    /// Read edge weights from the given property.
+    pub fn with_weight_property(mut self, weight_property: &'a str) -> Self {
+        self.weight_property = Some(weight_property);
+        self
+    }
+    /// Set the resolution parameter.
+    pub fn with_resolution(mut self, resolution: f64) -> Self {
+        self.resolution = resolution;
+        self
+    }
+    /// Restrict traversal to the given connection types.
+    pub fn with_connection_types(mut self, connection_types: &'a [String]) -> Self {
+        self.connection_types = Some(connection_types);
+        self
+    }
+    /// Restrict the community universe to the given node set.
+    pub fn with_scope(mut self, scope: &'a NodeScope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+    /// Set the deadline + cancellation bundle.
+    pub fn with_interrupt(mut self, interrupt: Interrupt) -> Self {
+        self.interrupt = interrupt;
+        self
+    }
+}
+
+/// Tunable options for [`label_propagation`]. Unweighted and iteration-bounded
+/// (no resolution / weight knobs — a different shape from [`CommunityOptions`]).
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct LabelPropagationOptions<'a> {
+    /// Maximum propagation sweeps before stopping (default `100`).
+    pub max_iterations: usize,
+    /// Only traverse edges of these connection types (`None` = all edges).
+    pub connection_types: Option<&'a [String]>,
+    /// Restrict the community universe to this node set (`None` = whole graph).
+    pub scope: Option<&'a NodeScope>,
+    /// Deadline + cooperative-cancellation bundle.
+    pub interrupt: Interrupt,
+}
+
+impl Default for LabelPropagationOptions<'_> {
+    fn default() -> Self {
+        Self {
+            max_iterations: 100,
+            connection_types: None,
+            scope: None,
+            interrupt: Interrupt::default(),
+        }
+    }
+}
+
+impl<'a> LabelPropagationOptions<'a> {
+    /// Set the maximum sweep count.
+    pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
+        self.max_iterations = max_iterations;
+        self
+    }
+    /// Restrict traversal to the given connection types.
+    pub fn with_connection_types(mut self, connection_types: &'a [String]) -> Self {
+        self.connection_types = Some(connection_types);
+        self
+    }
+    /// Restrict the community universe to the given node set.
+    pub fn with_scope(mut self, scope: &'a NodeScope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+    /// Set the deadline + cancellation bundle.
+    pub fn with_interrupt(mut self, interrupt: Interrupt) -> Self {
+        self.interrupt = interrupt;
+        self
+    }
+}
+
 // ── Shared community-detection primitives (Louvain + Leiden) ──────────────
 
 /// Compact weighted adjacency list: `adj[i]` = neighbours of compact node `i` as
@@ -638,12 +748,15 @@ fn build_community_result(
 /// @procedure: louvain_communities
 pub fn louvain_communities(
     graph: &DirGraph,
-    weight_property: Option<&str>,
-    resolution: f64,
-    connection_types: Option<&[String]>,
-    scope: Option<&NodeScope>,
-    deadline: Interrupt,
+    options: &CommunityOptions,
 ) -> Result<CommunityResult, String> {
+    let CommunityOptions {
+        weight_property,
+        resolution,
+        connection_types,
+        scope,
+        interrupt: deadline,
+    } = *options;
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -829,12 +942,15 @@ fn leiden_levels<S: NeighborSource>(
 /// @procedure: leiden_communities
 pub fn leiden_communities(
     graph: &DirGraph,
-    weight_property: Option<&str>,
-    resolution: f64,
-    connection_types: Option<&[String]>,
-    scope: Option<&NodeScope>,
-    deadline: Interrupt,
+    options: &CommunityOptions,
 ) -> Result<CommunityResult, String> {
+    let CommunityOptions {
+        weight_property,
+        resolution,
+        connection_types,
+        scope,
+        interrupt: deadline,
+    } = *options;
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -877,11 +993,14 @@ pub fn leiden_communities(
 /// @procedure: label_propagation
 pub fn label_propagation(
     graph: &DirGraph,
-    max_iterations: usize,
-    connection_types: Option<&[String]>,
-    scope: Option<&NodeScope>,
-    deadline: Interrupt,
+    options: &LabelPropagationOptions,
 ) -> Result<CommunityResult, String> {
+    let LabelPropagationOptions {
+        max_iterations,
+        connection_types,
+        scope,
+        interrupt: deadline,
+    } = *options;
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
