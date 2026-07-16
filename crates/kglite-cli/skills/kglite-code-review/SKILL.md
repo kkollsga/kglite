@@ -10,6 +10,10 @@ diff, source reading, and literal-text search; it does not replace them.
 
 ## Review workflow
 
+> **Prerequisite:** the `codingest` CLI must be on PATH — `pip install codingest`
+> (bundles the CLI alongside the Python API) or `cargo install codingest-cli`.
+
+
 1. Inspect the diff and repository guidance first. Identify changed symbols and
    the base/head revisions.
 2. Build or refresh the graph without executing repository code:
