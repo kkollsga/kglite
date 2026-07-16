@@ -10,7 +10,7 @@ mkdir -p "$(dirname "$repo_dir")"
 git clone --filter=blob:none --no-checkout \
   'https://github.com/<owner>/<repo>.git' "$repo_dir"
 git -C "$repo_dir" fetch origin '<revision>'
-kglite code-tree build "$repo_dir" --rev '<revision>' \
+codingest build "$repo_dir" --rev '<revision>' \
   --output "$repo_dir/.kglite/code-review.kgl" --format json
 ```
 

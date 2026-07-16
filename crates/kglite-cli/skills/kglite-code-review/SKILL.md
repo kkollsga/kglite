@@ -15,13 +15,13 @@ diff, source reading, and literal-text search; it does not replace them.
 2. Build or refresh the graph without executing repository code:
 
    ```bash
-   kglite code-tree build . --output .kglite/code-review.kgl --format json
+   codingest build . --output .kglite/code-review.kgl --format json
    ```
 
    For a committed comparison, use one graph spanning both revisions:
 
    ```bash
-   kglite code-tree build . --revs '<base>' '<head>' \
+   codingest build . --revs '<base>' '<head>' \
      --output .kglite/code-review.kgl --format json
    ```
 
@@ -45,7 +45,7 @@ diff, source reading, and literal-text search; it does not replace them.
 6. Before reusing an artifact, check freshness:
 
    ```bash
-   kglite code-tree status --output .kglite/code-review.kgl --format json
+   codingest status --output .kglite/code-review.kgl --format json
    ```
 
 See [queries.md](references/queries.md) for query patterns,
