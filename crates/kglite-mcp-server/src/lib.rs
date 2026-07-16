@@ -411,6 +411,150 @@ fn graph_result_footer(
     }
 }
 
+/// Github-workspace wiring: clone-and-track activation builds the code
+/// graph through the injected builder ([`CodeTreeHooks`]); without one,
+/// activation still binds source tools and the activation summary carries
+/// the builder-unavailable note.
+fn github_workspace(
+    canon: PathBuf,
+    stale_after_days: u32,
+    graph_state: &GraphState,
+) -> Result<workspace::Workspace> {
+    let gs = graph_state.clone();
+    let hook: workspace::PostActivateHook = Arc::new(move |path, name| {
+        tracing::info!(repo = name, "code_tree::build on activate");
+        if !gs.has_code_tree_hooks() {
+            tracing::warn!("no code-tree builder injected; source tools only");
+            return Ok(());
+        }
+        gs.build_code_tree(path)
+    });
+    // Revs-aware hook (mcp-methods 0.3.49 `with_post_activate_revs`):
+    // fired instead of the plain hook when `repo_management(revs=…)` is
+    // called, with the resolved revspecs (oldest→newest, HEAD last).
+    // Builds ONE multi-rev graph via `build_code_tree_revs` (B.2b). The
+    // plain hook above stays the HEAD-only default; only a `revs`
+    // request reaches this path.
+    let gs_revs = graph_state.clone();
+    let revs_hook: PostActivateRevsHook = Arc::new(move |path, name, revs| {
+        tracing::info!(repo = name, revs = ?revs, "code_tree::build_revs on activate");
+        gs_revs.build_code_tree_revs(path, revs)
+    });
+    // Opening steer: append the graph mini-map to the activation
+    // message. The post-activate hook above builds the graph first, so
+    // counts are live when this runs. Chained before the workspace is
+    // cloned into `options` (framework caveat). Correctness of the
+    // single active-graph slot across A→B→A repo swaps is owned by
+    // mcp-methods ≥0.3.47 (its skip gate tracks the currently-active
+    // built root, so a re-bind of a different root always rebuilds).
+    let gs_sum = graph_state.clone();
+    let summary: workspace::ActivationSummaryHook =
+        Arc::new(move |_path, _name| gs_sum.activation_summary());
+    Ok(
+        workspace::Workspace::open(canon, stale_after_days, Some(hook))
+            .context("workspace init failed")?
+            .with_post_activate_revs(revs_hook)
+            .with_activation_summary(summary),
+    )
+}
+
+/// Local-workspace wiring (`set_root_dir` root swaps).
+///
+/// mcp-methods `Workspace::open_local(root, hook)` STORES the post-activate
+/// hook but does NOT fire it at open — verified against mcp-methods 0.3.42
+/// `src/server/workspace.rs`: `open_local` (`:145`) just stores
+/// `post_activate`; the hook fires only inside `activate()` (`:491-492`),
+/// which `set_root_dir` calls on every swap. So every fire reaching these
+/// closures is a real user activate — build the code graph on each.
+///
+/// History (do not re-add): an older mcp-methods contract fired the hook
+/// synchronously inside `open` with the wide `workspace.root` (~360k
+/// files), parsing everything before returning and blowing past Claude
+/// Desktop's 60s `initialize` window. We added an `initial_activate_seen`
+/// deferral to swallow that one boot fire. mcp-methods has since removed
+/// the boot fire (`open_local` no longer calls the hook), so the deferral
+/// was instead swallowing the user's FIRST `set_root_dir` — leaving the
+/// graph permanently unbuilt in local mode ("No active graph" on every
+/// graph tool). Operator inbox 2026-06-23 (+ original 2026-06-06 repro).
+/// Deferral removed; building eagerly is safe because mcp-methods no
+/// longer fires at boot.
+fn local_workspace(
+    root: PathBuf,
+    graph_state: &GraphState,
+    local_active_root: &Arc<RwLock<Option<PathBuf>>>,
+) -> Result<workspace::Workspace> {
+    // Active root is captured in a shared RwLock so the watch callback
+    // (spawn_mode_watcher) can scope its rebuilds.
+    let gs = graph_state.clone();
+    let active_root_for_hook = local_active_root.clone();
+    let hook: workspace::PostActivateHook = Arc::new(move |path, name| {
+        // Poison-recovering lock policy (see tools::read_lock) — a
+        // panicked holder must not silently stop root updates.
+        *tools::write_lock(&active_root_for_hook) = Some(path.to_path_buf());
+        tracing::info!(repo = name, "code_tree::build on local-workspace activate");
+        // No injected builder: activation still succeeds (source
+        // tools bind) and the activation summary carries the
+        // builder-unavailable note — erroring here would make the
+        // framework skip that summary.
+        if !gs.has_code_tree_hooks() {
+            tracing::warn!("no code-tree builder injected; source tools only");
+            return Ok(());
+        }
+        // Surface a build failure instead of leaving the tools to
+        // report a bare "No active graph" (operator ask, 2026-06-23).
+        if let Err(e) = gs.build_code_tree(path) {
+            tracing::error!(
+                repo = name,
+                root = %path.display(),
+                error = %e,
+                "local-workspace code_tree build failed"
+            );
+            return Err(e);
+        }
+        Ok(())
+    });
+    // Revs-aware hook (mcp-methods 0.3.49): fired instead of the plain
+    // hook when `set_root_dir(revs=…)` is called, with the resolved
+    // revspecs (oldest→newest, HEAD last). Builds ONE multi-rev graph
+    // via `build_code_tree_revs` (B.2b) and updates the shared active
+    // root the same way the plain hook does, so the watch callback can
+    // still scope its rebuilds. The plain hook stays the single-rev
+    // default; only a `revs` request reaches this path.
+    let gs_revs = graph_state.clone();
+    let active_root_for_revs_hook = local_active_root.clone();
+    let revs_hook: PostActivateRevsHook = Arc::new(move |path, name, revs| {
+        *tools::write_lock(&active_root_for_revs_hook) = Some(path.to_path_buf());
+        tracing::info!(
+            repo = name,
+            revs = ?revs,
+            "code_tree::build_revs on local-workspace activate"
+        );
+        if let Err(e) = gs_revs.build_code_tree_revs(path, revs) {
+            tracing::error!(
+                repo = name,
+                root = %path.display(),
+                error = %e,
+                "local-workspace multi-rev code_tree build failed"
+            );
+            return Err(e);
+        }
+        Ok(())
+    });
+    // Opening steer: mini-map on the activation message (see
+    // github_workspace). Correctness of the single active-graph slot
+    // across A→B→A `set_root_dir` swaps is owned by mcp-methods ≥0.3.47:
+    // its skip gate tracks the currently-active built root (not every
+    // root ever hydrated), so re-binding a different root always
+    // re-fires the build hook, and a same-root re-bind still cheap-skips.
+    let gs_sum = graph_state.clone();
+    let summary: workspace::ActivationSummaryHook =
+        Arc::new(move |_path, _name| gs_sum.activation_summary());
+    Ok(workspace::Workspace::open_local(root, Some(hook))
+        .context("local-workspace init failed")?
+        .with_post_activate_revs(revs_hook)
+        .with_activation_summary(summary))
+}
+
 /// Apply mode-specific bindings — source roots, workspace handle, initial
 /// graph load/build — onto `options`, returning the transformed value.
 fn bind_mode(
@@ -480,135 +624,11 @@ fn bind_mode(
         }
         Mode::Workspace { dir } => {
             let canon = dir.canonicalize().unwrap_or_else(|_| dir.clone());
-            let gs = graph_state.clone();
-            let hook: workspace::PostActivateHook = Arc::new(move |path, name| {
-                tracing::info!(repo = name, "code_tree::build on activate");
-                if !gs.has_code_tree_hooks() {
-                    tracing::warn!("no code-tree builder injected; source tools only");
-                    return Ok(());
-                }
-                gs.build_code_tree(path)
-            });
-            // Revs-aware hook (mcp-methods 0.3.49 `with_post_activate_revs`):
-            // fired instead of the plain hook when `repo_management(revs=…)` is
-            // called, with the resolved revspecs (oldest→newest, HEAD last).
-            // Builds ONE multi-rev graph via `build_code_tree_revs` (B.2b). The
-            // plain hook above stays the HEAD-only default; only a `revs`
-            // request reaches this path.
-            let gs_revs = graph_state.clone();
-            let revs_hook: PostActivateRevsHook = Arc::new(move |path, name, revs| {
-                tracing::info!(repo = name, revs = ?revs, "code_tree::build_revs on activate");
-                gs_revs.build_code_tree_revs(path, revs)
-            });
-            // Opening steer: append the graph mini-map to the activation
-            // message. The post-activate hook above builds the graph first, so
-            // counts are live when this runs. Chained before the workspace is
-            // cloned into `options` (framework caveat). Correctness of the
-            // single active-graph slot across A→B→A repo swaps is owned by
-            // mcp-methods ≥0.3.47 (its skip gate tracks the currently-active
-            // built root, so a re-bind of a different root always rebuilds).
-            let gs_sum = graph_state.clone();
-            let summary: workspace::ActivationSummaryHook =
-                Arc::new(move |_path, _name| gs_sum.activation_summary());
-            let ws = workspace::Workspace::open(canon, cli.stale_after_days, Some(hook))
-                .context("workspace init failed")?
-                .with_post_activate_revs(revs_hook)
-                .with_activation_summary(summary);
+            let ws = github_workspace(canon, cli.stale_after_days, graph_state)?;
             options = options.with_workspace(ws);
         }
         Mode::LocalWorkspace { root, .. } => {
-            // mcp-methods `Workspace::open_local(root, hook)` STORES the
-            // post-activate hook but does NOT fire it at open — verified
-            // against mcp-methods 0.3.42 `src/server/workspace.rs`:
-            // `open_local` (`:145`) just stores `post_activate`; the hook
-            // fires only inside `activate()` (`:491-492`), which
-            // `set_root_dir` calls on every swap. So every fire reaching this
-            // closure is a real user activate — build the code-tree on each.
-            //
-            // History (do not re-add): an older mcp-methods contract fired
-            // the hook synchronously inside `open` with the wide
-            // `workspace.root` (~360k files), parsing everything before
-            // returning and blowing past Claude Desktop's 60s `initialize`
-            // window. We added an `initial_activate_seen` deferral to swallow
-            // that one boot fire. mcp-methods has since removed the boot fire
-            // (`open_local` no longer calls the hook), so the deferral was
-            // instead swallowing the user's FIRST `set_root_dir` — leaving the
-            // graph permanently unbuilt in local mode ("No active graph" on
-            // every graph tool). Operator inbox 2026-06-23 (+ original
-            // 2026-06-06 repro). Deferral removed; building eagerly is safe
-            // because mcp-methods no longer fires at boot.
-            //
-            // Active root is captured in a shared RwLock so the watch
-            // callback (later in this fn) can scope its rebuilds.
-            let gs = graph_state.clone();
-            let active_root_for_hook = local_active_root.clone();
-            let hook: workspace::PostActivateHook = Arc::new(move |path, name| {
-                // Poison-recovering lock policy (see tools::read_lock) — a
-                // panicked holder must not silently stop root updates.
-                *tools::write_lock(&active_root_for_hook) = Some(path.to_path_buf());
-                tracing::info!(repo = name, "code_tree::build on local-workspace activate");
-                // No injected builder: activation still succeeds (source
-                // tools bind) and the activation summary carries the
-                // builder-unavailable note — erroring here would make the
-                // framework skip that summary.
-                if !gs.has_code_tree_hooks() {
-                    tracing::warn!("no code-tree builder injected; source tools only");
-                    return Ok(());
-                }
-                // Surface a build failure instead of leaving the tools to
-                // report a bare "No active graph" (operator ask, 2026-06-23).
-                if let Err(e) = gs.build_code_tree(path) {
-                    tracing::error!(
-                        repo = name,
-                        root = %path.display(),
-                        error = %e,
-                        "local-workspace code_tree build failed"
-                    );
-                    return Err(e);
-                }
-                Ok(())
-            });
-            // Revs-aware hook (mcp-methods 0.3.49): fired instead of the plain
-            // hook when `set_root_dir(revs=…)` is called, with the resolved
-            // revspecs (oldest→newest, HEAD last). Builds ONE multi-rev graph
-            // via `build_code_tree_revs` (B.2b) and updates the shared active
-            // root the same way the plain hook does, so the watch callback can
-            // still scope its rebuilds. The plain hook stays the single-rev
-            // default; only a `revs` request reaches this path.
-            let gs_revs = graph_state.clone();
-            let active_root_for_revs_hook = local_active_root.clone();
-            let revs_hook: PostActivateRevsHook = Arc::new(move |path, name, revs| {
-                *tools::write_lock(&active_root_for_revs_hook) = Some(path.to_path_buf());
-                tracing::info!(
-                    repo = name,
-                    revs = ?revs,
-                    "code_tree::build_revs on local-workspace activate"
-                );
-                if let Err(e) = gs_revs.build_code_tree_revs(path, revs) {
-                    tracing::error!(
-                        repo = name,
-                        root = %path.display(),
-                        error = %e,
-                        "local-workspace multi-rev code_tree build failed"
-                    );
-                    return Err(e);
-                }
-                Ok(())
-            });
-            // Opening steer: mini-map on the activation message (see the
-            // github-workspace arm above). Chained before the clone into
-            // `options`. Correctness of the single active-graph slot across
-            // A→B→A `set_root_dir` swaps is owned by mcp-methods ≥0.3.47: its
-            // skip gate tracks the currently-active built root (not every root
-            // ever hydrated), so re-binding a different root always re-fires
-            // the build hook, and a same-root re-bind still cheap-skips.
-            let gs_sum = graph_state.clone();
-            let summary: workspace::ActivationSummaryHook =
-                Arc::new(move |_path, _name| gs_sum.activation_summary());
-            let ws = workspace::Workspace::open_local(root.clone(), Some(hook))
-                .context("local-workspace init failed")?
-                .with_post_activate_revs(revs_hook)
-                .with_activation_summary(summary);
+            let ws = local_workspace(root.clone(), graph_state, local_active_root)?;
             options = options.with_workspace(ws);
         }
         Mode::Bare => {
