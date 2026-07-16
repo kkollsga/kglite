@@ -2000,7 +2000,6 @@ version = "0.13.4"
 dependencies = [
  "cbindgen",
  "kglite",
- "serde",
  "serde_json",
 ]
 
@@ -2039,7 +2038,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2055,7 +2053,6 @@ dependencies = [
  "petgraph",
  "pyo3",
  "regex",
- "serde",
  "serde_json",
  "tempfile",
 ]

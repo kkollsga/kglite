@@ -68,7 +68,6 @@ clap = { version = "4", features = ["derive"] }
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # CSV-over-HTTP server (extensions.csv_http_server). hyper 1.x with
 # its server adapter from hyper-util — both are already in the
