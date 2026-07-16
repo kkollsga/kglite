@@ -573,3 +573,36 @@ __all__ = [
     "InternerCollisionError",
     "InternalError",
 ]
+
+
+# ── Removal tombstones (0.14) ────────────────────────────────────────
+# NOT a compat shim: nothing old works through these — they turn the bare
+# AttributeError a migrating user would hit into the two-line fix. The
+# code-side analogue of the sanctioned "detect and refuse with a clear
+# message" data-format pattern. Time-boxed: DELETE in 0.15.
+# (`hasattr()` feature-probing still returns False — AttributeError.)
+
+_TOMBSTONES = {
+    "code_tree": (
+        "kglite 0.14 removed the built-in code-graph builder.\n"
+        '  quick fix:  pip install "kglite<0.14"   (everything back as it was)\n'
+        "  new home:   the codingest project (CLI + MCP server) — "
+        "https://github.com/kkollsga/codingest\n"
+        "  migration:  https://kglite.readthedocs.io/en/latest/python/migrations/0.13-to-0.14.html"
+    ),
+    "datasets": (
+        "kglite 0.14 moved the dataset loaders (sec/sodir/wikidata) to the "
+        "kglite-datasets package.\n"
+        '  quick fix:  pip install "kglite<0.14"   (everything back as it was)\n'
+        "  drop-in:    pip install kglite-datasets   (then: import kglite_datasets)\n"
+        "  migration:  https://kglite.readthedocs.io/en/latest/python/migrations/0.13-to-0.14.html"
+    ),
+}
+_TOMBSTONES["build_code_tree"] = _TOMBSTONES["code_tree"]
+_TOMBSTONES["repo_tree"] = _TOMBSTONES["code_tree"]
+
+
+def __getattr__(name):  # noqa: N807 — module-level __getattr__ (PEP 562)
+    if name in _TOMBSTONES:
+        raise AttributeError(f"kglite.{name} no longer exists.\n{_TOMBSTONES[name]}")
+    raise AttributeError(f"module 'kglite' has no attribute {name!r}")

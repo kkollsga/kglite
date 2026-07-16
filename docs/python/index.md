@@ -58,6 +58,9 @@ guides/recipes
 
 - **[Neo4j → KGLite](migrations/neo4j-to-kglite.md)** — evaluate or
   adopt KGLite from an existing Neo4j database / driver code.
+- **[0.13 → 0.14](migrations/0.13-to-0.14.md)** — the handover release:
+  code-graph building moved to codingest, dataset loaders to
+  kglite-datasets. Escape hatches and per-surface migration table.
 - **[MCP 0.6 → 0.9](migrations/mcp-0.6-to-0.9.md)** — older MCP
   server users.
 - **[MCP pre-0.9.20](migrations/mcp-pre-0.9.20.md)** — the
@@ -73,6 +76,7 @@ error-handling
 value-projection
 platform-support
 migrations/neo4j-to-kglite
+migrations/0.13-to-0.14
 migrations/mcp-0.6-to-0.9
 migrations/mcp-pre-0.9.20
 ```
