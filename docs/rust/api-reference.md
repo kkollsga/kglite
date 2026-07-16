@@ -7,7 +7,32 @@ move between minor releases.
 
 For per-symbol API docs (function signatures, struct fields,
 trait method docs), use **[docs.rs/kglite](https://docs.rs/kglite)**.
-This page is the curated inventory.
+This page is the curated inventory. If you're building a library
+that *produces* kglite graphs, see [Building on kglite](building-on-kglite.md).
+
+## Stability policy
+
+`kglite::api::*` — and the `kglite-mcp-server` library surface — are
+**exact-baseline-locked in CI** (cargo-public-api, pinned nightly): accidental
+drift cannot merge, because the generated public-API listing is diffed against a
+committed baseline on every PR. The `include/kglite.h` C header is drift-checked
+the same way (cbindgen vs the committed header).
+
+Pre-1.0, the policy is:
+
+- **PATCH releases never break the API** — additive or internal only.
+- **MINOR releases may break it deliberately.** Every intentional break ships
+  with a `CHANGELOG.md` entry and, when user-visible, a migration guide. The
+  minor bump *is* the pre-1.0 breaking-change signal — we never patch-bump a
+  removal.
+- New options land under **0.14's options-struct convention** (`*Options`
+  structs, `#[non_exhaustive]` + `Default`), so adding an option is a
+  non-breaking change rather than a signature break.
+
+**1.0 criterion:** the 0.14 surface — after the options-struct pass on
+`api::algorithms` — soaks across releases without needing a breaking correction.
+When the curated facade proves stable in the field, we cut 1.0 and the pre-1.0
+"minor may break" latitude ends.
 
 ## Engine types
 
