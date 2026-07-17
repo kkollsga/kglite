@@ -33,7 +33,7 @@ There is a single question that picks your tier:
 | Version coupling | python `kglite>=X` (input-format floor) | crate pin + format-floor rule + pin hygiene |
 | Producer language | any | Rust (until P2) |
 | Wheel carries engine? | no | yes |
-| Reference | kglite-datasets | codingest |
+| Reference | kglite-datasets, sonagram (music) | codingest |
 
 When unsure, start at P3. You only pay for P1 if you can name the build pass that
 must query the half-built graph.

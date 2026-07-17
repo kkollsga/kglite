@@ -40,6 +40,10 @@ released and versioned on its own cadence:
   query the `.kgl` here. Requires kglite ≥ 0.14.
 - **[kglite-datasets](https://kglite-datasets.readthedocs.io)** —
   fetch-build-cache loaders for public registries (SEC EDGAR, Wikidata, Sodir).
+- **[sonagram](https://sonagram.readthedocs.io)** — turns a local music
+  library into a kglite knowledge graph via sonara audio analysis (tempo,
+  energy, mood, key); AI agents curate playlists over it through a simple
+  bundled skill and CLI (`pip install sonagram`).
 
 **Upgrading from 0.13?** The code-graph builder and dataset loaders moved out
 of the wheel in 0.14 — see the
