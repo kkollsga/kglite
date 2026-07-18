@@ -128,7 +128,19 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) RETURN p.city AS city, count(*) AS n LIMIT 2",
         None,
     ),
+    (
+        "trigger_push_limit_into_aggregate_with",
+        "social_graph",
+        "MATCH (p:Person) WITH p.city AS city, count(*) AS n LIMIT 2 RETURN city, n",
+        None,
+    ),
     ("trigger_anchored_edge_count", "social_graph", "MATCH ({id: 1})-[:KNOWS]->(p) RETURN count(*) AS n", None),
+    (
+        "trigger_anchored_edge_count_reverse",
+        "social_graph",
+        "MATCH (p)<-[:KNOWS]-({id: 1}) RETURN count(*) AS n",
+        None,
+    ),
     ("trigger_count_short_circuit", "social_graph", "MATCH (p:Person) RETURN count(*) AS n", None),
     (
         "count_all_edges_untyped",
@@ -198,6 +210,12 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (a:Person)-[:KNOWS]->(b:Person) WITH a, count(b) AS n RETURN a.name AS name, n ORDER BY n DESC LIMIT 3",
         None,
     ),
+    (
+        "trigger_match_with_top_k_ascending",
+        "social_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) WITH a, count(b) AS n RETURN a.name AS name, n ORDER BY n ASC LIMIT 3",
+        None,
+    ),
     ("trigger_node_scan_aggregate", "social_graph", "MATCH (p:Person) RETURN sum(p.age) AS total", None),
     (
         "fused_property_node_scan_aggregate",
@@ -222,6 +240,12 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "trigger_predicate_reorder",
         "social_graph",
         "MATCH (p) WHERE EXISTS((p)-[:KNOWS]->()) AND p:Person RETURN p.title AS title",
+        None,
+    ),
+    (
+        "trigger_predicate_reorder_or",
+        "social_graph",
+        "MATCH (p) WHERE EXISTS((p)-[:KNOWS]->()) OR p:Company RETURN p.title AS title",
         None,
     ),
     # ── push_where_into_match ──
@@ -263,6 +287,12 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "or_chain_to_in",
         "social_graph",
         "MATCH (p:Person) WHERE p.city = 'Oslo' OR p.city = 'Bergen' OR p.city = 'Stavanger' RETURN p.name AS n",
+        None,
+    ),
+    (
+        "or_chain_reversed_literals",
+        "social_graph",
+        "MATCH (p:Person) WHERE 'Oslo' = p.city OR 'Bergen' = p.city RETURN p.name AS n",
         None,
     ),
     # ── extract_pushable_rel_predicates ──
@@ -335,6 +365,12 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "multi_match_group_agg",
         "social_graph",
         "MATCH (p:Person) MATCH (c:Company) RETURN p.city AS city, count(c) AS n",
+        None,
+    ),
+    (
+        "multi_match_two_property_group",
+        "social_graph",
+        "MATCH (p:Person) MATCH (c:Company) RETURN p.city AS city, p.age AS age, count(c) AS n",
         None,
     ),
     # ── reorder_match_clauses + optimize_pattern_start_node ──
@@ -1967,6 +2003,22 @@ def test_optimized_matches_naive(
         f"Pass list: kglite.cypher_pass_names()"
     )
 
+    # Every pass must remain an optional optimization. Run the complete corpus
+    # with each pass disabled in isolation so one pass cannot silently become
+    # load-bearing for another pass's correctness. This is intentionally the
+    # full corpus rather than a representative cohort: 30 passes × the current
+    # corpus is cheap, and failures identify the exact query/pass pair.
+    for pass_name in kglite.cypher_pass_names():
+        isolated = _normalize(g.cypher(query, disabled_passes=[pass_name], **kwargs).to_list())
+        assert isolated == naive, (
+            f"Single-pass isolation divergence on `{name}` with `{pass_name}` disabled:\n"
+            f"  query:     {query}\n"
+            f"  isolated:  {isolated[:5]}{'...' if len(isolated) > 5 else ''} ({len(isolated)} rows)\n"
+            f"  naive:     {naive[:5]}{'...' if len(naive) > 5 else ''} ({len(naive)} rows)\n"
+            f"  diff (in isolated but not naive): {[r for r in isolated if r not in naive][:3]}\n"
+            f"  diff (in naive but not isolated): {[r for r in naive if r not in isolated][:3]}"
+        )
+
 
 # ── Known divergences (xfail) ────────────────────────────────────────
 #
@@ -2025,6 +2077,21 @@ PASS_TRIGGER_CASES: dict[str, tuple[str, str]] = {
     "mark_skip_target_type_check": ("differential", "anchored_three_hop"),
 }
 
+# Independent shapes for shared-corpus passes which otherwise had only one
+# positive trigger. These are deliberately different branches (reversed
+# equality operands, WITH vs RETURN, reverse direction, ascending vs
+# descending, OR vs AND) so a narrow gate regression cannot hide behind two
+# near-identical queries.
+PASS_SECONDARY_TRIGGER_CASES: dict[str, str] = {
+    "fold_or_to_in": "or_chain_reversed_literals",
+    "push_where_into_match.2": "or_chain_reversed_literals",
+    "desugar_multi_match_return_aggregate": "multi_match_two_property_group",
+    "push_limit_into_aggregate": "trigger_push_limit_into_aggregate_with",
+    "fuse_anchored_edge_count": "trigger_anchored_edge_count_reverse",
+    "fuse_match_with_aggregate_top_k": "trigger_match_with_top_k_ascending",
+    "reorder_predicates_by_cost": "trigger_predicate_reorder_or",
+}
+
 
 def test_every_registered_pass_has_a_trigger_case() -> None:
     assert set(PASS_TRIGGER_CASES) == set(kglite.cypher_pass_names())
@@ -2049,6 +2116,17 @@ def test_every_registered_pass_has_a_trigger_case() -> None:
     [(pass_name, case_id) for pass_name, (source, case_id) in PASS_TRIGGER_CASES.items() if source == "differential"],
 )
 def test_registered_pass_changes_its_trigger_plan(pass_name, case_id, request) -> None:
+    cases = {entry[0]: entry for entry in DIFFERENTIAL_QUERIES}
+    _, fixture, query, params = cases[case_id]
+    graph = request.getfixturevalue(fixture)
+    kwargs = {"params": params} if params else {}
+    plan = graph.cypher(f"EXPLAIN {query}", **kwargs).to_list()
+    operations = [row["operation"] for row in plan]
+    assert f"OptimizerPass {pass_name}" in operations
+
+
+@pytest.mark.parametrize("pass_name,case_id", PASS_SECONDARY_TRIGGER_CASES.items())
+def test_thin_pass_changes_an_independent_trigger_plan(pass_name, case_id, request) -> None:
     cases = {entry[0]: entry for entry in DIFFERENTIAL_QUERIES}
     _, fixture, query, params = cases[case_id]
     graph = request.getfixturevalue(fixture)
@@ -2085,23 +2163,6 @@ def test_known_divergences(
     # Unreachable, but documents what we'd assert when fixed:
     g = request.getfixturevalue(fixture)
     assert _normalize(g.cypher(query).to_list()) == _normalize(g.cypher(query, disable_optimizer=True).to_list())
-
-
-# Per-pass bisection check: a representative cohort query must produce
-# correct rows when ANY single pass is disabled. Catches passes that
-# silently became load-bearing for correctness (a fusion pass should
-# never affect rows — only speed). When a pass appears here that would
-# affect correctness in isolation, that's a real bug to fix.
-@pytest.mark.differential
-@pytest.mark.parametrize("pass_name", kglite.cypher_pass_names())
-def test_disabling_single_pass_preserves_correctness(pass_name: str, social_graph) -> None:
-    """Each pass, disabled in isolation, must produce the same rows as the naive baseline."""
-    query = "MATCH (p:Person) WITH p.city AS city, count(p) AS n RETURN city, n ORDER BY n DESC LIMIT 5"
-    baseline = _normalize(social_graph.cypher(query, disable_optimizer=True).to_list())
-    actual = _normalize(social_graph.cypher(query, disabled_passes=[pass_name]).to_list())
-    assert actual == baseline, (
-        f"Disabling pass `{pass_name}` produced different rows:\n  baseline: {baseline}\n  actual:   {actual}"
-    )
 
 
 # ── Mutation differential ────────────────────────────────────────────
