@@ -375,6 +375,20 @@ pub fn add_edges_from_specs(
     specs: Vec<EdgeSpec>,
 ) -> Result<EdgeSpecReport, String> {
     use std::collections::BTreeMap;
+    let mut interned_names = vec!["updated_at"];
+    for spec in &specs {
+        interned_names.extend([
+            spec.source_type.as_str(),
+            spec.target_type.as_str(),
+            spec.edge_type.as_str(),
+        ]);
+        interned_names.extend(spec.properties.keys().map(String::as_str));
+    }
+    preflight_interner_names(graph, interned_names)?;
+    graph
+        .prepare_disk_mutation()
+        .map_err(|e| format!("disk mutation lease failed: {e}"))?;
+
     // Group by (source_type, target_type, edge_type) for deterministic,
     // one-lookup-one-batch-per-group processing.
     type EdgeRows = Vec<(Value, Value, HashMap<String, Value>)>;
@@ -2073,6 +2087,10 @@ fn compute_aggregate(expr: &str, values: &[f64], count: usize) -> Value {
         Value::Null
     }
 }
+
+#[cfg(test)]
+#[path = "maintain_edge_spec_tests.rs"]
+mod edge_spec_tests;
 
 #[cfg(test)]
 mod id_index_tests {
