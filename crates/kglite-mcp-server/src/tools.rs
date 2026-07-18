@@ -691,7 +691,7 @@ impl GraphState {
     /// Resolve a code-entity qualified name to its source location via
     /// `KnowledgeGraph::source_location`. Used by the `read_code_source`
     /// tool to bridge the qualified-name → file path lookup.
-    pub fn source_lookup(
+    pub(crate) fn source_lookup(
         &self,
         qualified_name: &str,
         node_type: Option<&str>,

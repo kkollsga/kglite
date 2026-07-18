@@ -3,7 +3,30 @@ pub struct kglite_mcp_server::CodeTreeHooks
 pub kglite_mcp_server::CodeTreeHooks::build: alloc::boxed::Box<(dyn core::ops::function::Fn(&std::path::Path, bool) -> anyhow::Result<alloc::sync::Arc<kglite::graph::dir_graph::DirGraph>, alloc::string::String> + core::marker::Send + core::marker::Sync)>
 pub kglite_mcp_server::CodeTreeHooks::build_revs: alloc::boxed::Box<(dyn core::ops::function::Fn(&std::path::Path, &[alloc::string::String], bool) -> anyhow::Result<(alloc::sync::Arc<kglite::graph::dir_graph::DirGraph>, alloc::vec::Vec<alloc::string::String>), alloc::string::String> + core::marker::Send + core::marker::Sync)>
 pub kglite_mcp_server::CodeTreeHooks::is_code_file: alloc::boxed::Box<(dyn core::ops::function::Fn(&std::path::Path) -> bool + core::marker::Send + core::marker::Sync)>
+pub struct kglite_mcp_server::DomainGraphState
+impl kglite_mcp_server::DomainGraphState
+pub fn kglite_mcp_server::DomainGraphState::has_node_type(&self, node_type: &str) -> bool
+pub fn kglite_mcp_server::DomainGraphState::has_property(&self, node_type: &str, property: &str) -> bool
+pub fn kglite_mcp_server::DomainGraphState::run_cypher(&self, query: &str, params: &serde_json::map::Map<alloc::string::String, serde_json::value::Value>) -> alloc::string::String
+pub fn kglite_mcp_server::DomainGraphState::schema(&self) -> core::option::Option<(u64, u64)>
+pub fn kglite_mcp_server::DomainGraphState::with_graph<F, T>(&self, operation: F) -> core::option::Option<T> where F: core::ops::function::FnOnce(&kglite::graph::handle::KnowledgeGraph) -> T
+impl core::clone::Clone for kglite_mcp_server::DomainGraphState
+pub fn kglite_mcp_server::DomainGraphState::clone(&self) -> kglite_mcp_server::DomainGraphState
+pub struct kglite_mcp_server::DomainToolRegistry<'a>
+impl kglite_mcp_server::DomainToolRegistry<'_>
+pub fn kglite_mcp_server::DomainToolRegistry<'_>::graph_state(&self) -> &kglite_mcp_server::DomainGraphState
+pub fn kglite_mcp_server::DomainToolRegistry<'_>::register_route(&mut self, route: rmcp::handler::server::router::tool::ToolRoute<mcp_methods::server::server::McpServer>) -> anyhow::Result<()>
+pub fn kglite_mcp_server::DomainToolRegistry<'_>::register_typed_tool<T, F>(&mut self, name: &'static str, description: &'static str, handler: F) -> anyhow::Result<()> where T: for<'de> serde_core::de::Deserialize<'de> + schemars::JsonSchema + core::default::Default + core::marker::Send + core::marker::Sync + 'static, F: core::ops::function::Fn(T) -> alloc::string::String + core::marker::Send + core::marker::Sync + 'static
+pub struct kglite_mcp_server::ServerExtensions
+impl kglite_mcp_server::ServerExtensions
+pub fn kglite_mcp_server::ServerExtensions::new() -> Self
+pub fn kglite_mcp_server::ServerExtensions::with_code_tree_hooks(self, hooks: kglite_mcp_server::CodeTreeHooks) -> Self
+pub fn kglite_mcp_server::ServerExtensions::with_domain_tools<F>(self, registrar: F) -> Self where F: for<'a> core::ops::function::Fn(&mut kglite_mcp_server::DomainToolRegistry<'a>) -> anyhow::Result<()> + core::marker::Send + core::marker::Sync + 'static
+impl core::default::Default for kglite_mcp_server::ServerExtensions
+pub fn kglite_mcp_server::ServerExtensions::default() -> kglite_mcp_server::ServerExtensions
 pub fn kglite_mcp_server::run<I, T>(args: I) -> anyhow::Result<()> where I: core::iter::traits::collect::IntoIterator<Item = T>, T: core::convert::Into<std::ffi::os_str::OsString> + core::clone::Clone
 pub fn kglite_mcp_server::run_with_code_tree_hooks<I, T>(args: I, hooks: core::option::Option<kglite_mcp_server::CodeTreeHooks>) -> anyhow::Result<()> where I: core::iter::traits::collect::IntoIterator<Item = T>, T: core::convert::Into<std::ffi::os_str::OsString> + core::clone::Clone
 pub fn kglite_mcp_server::run_with_embedder_factory<I, T>(args: I, factory: core::option::Option<kglite_mcp_server::PyEmbedderFactory>) -> anyhow::Result<()> where I: core::iter::traits::collect::IntoIterator<Item = T>, T: core::convert::Into<std::ffi::os_str::OsString> + core::clone::Clone
+pub fn kglite_mcp_server::run_with_extensions<I, T>(args: I, extensions: kglite_mcp_server::ServerExtensions) -> anyhow::Result<()> where I: core::iter::traits::collect::IntoIterator<Item = T>, T: core::convert::Into<std::ffi::os_str::OsString> + core::clone::Clone
+pub type kglite_mcp_server::DomainToolRegistrar = (dyn for<'a> core::ops::function::Fn(&mut kglite_mcp_server::DomainToolRegistry<'a>) -> anyhow::Result<()> + core::marker::Send + core::marker::Sync + 'static)
 pub type kglite_mcp_server::PyEmbedderFactory = alloc::boxed::Box<(dyn core::ops::function::Fn(&str) -> anyhow::Result<alloc::sync::Arc<dyn kglite::graph::embedder::Embedder>, alloc::string::String> + core::marker::Send)>

@@ -57,6 +57,146 @@ pub use crate::tools::CodeTreeHooks;
 use crate::tools::GraphState;
 use kglite::api::storage::StorageMode;
 
+/// Read-oriented handle to the graph slot shared by KGLite's MCP tools.
+///
+/// Clones remain attached to graph activation and reloads. Domain handlers can
+/// inspect schema, borrow the active graph for a typed read, or execute a
+/// parameterised read query without gaining access to server lifecycle state.
+#[derive(Clone)]
+pub struct DomainGraphState {
+    inner: GraphState,
+}
+
+impl DomainGraphState {
+    /// Current `(node_count, edge_count)`, or `None` when no graph is active.
+    pub fn schema(&self) -> Option<(u64, u64)> {
+        self.inner.schema()
+    }
+
+    /// Whether the active graph declares at least one node of this type.
+    pub fn has_node_type(&self, node_type: &str) -> bool {
+        self.inner.has_node_type(node_type)
+    }
+
+    /// Whether the active graph declares this property on the node type.
+    pub fn has_property(&self, node_type: &str, property: &str) -> bool {
+        self.inner.has_property(node_type, property)
+    }
+
+    /// Borrow the active graph for a typed, read-only operation.
+    pub fn with_graph<F, T>(&self, operation: F) -> Option<T>
+    where
+        F: FnOnce(&kglite::api::KnowledgeGraph) -> T,
+    {
+        self.inner.with_kg(operation)
+    }
+
+    /// Run a parameterised read query against the active graph.
+    pub fn run_cypher(
+        &self,
+        query: &str,
+        params: &serde_json::Map<String, serde_json::Value>,
+    ) -> String {
+        self.inner.run_cypher_template(query, params, None)
+    }
+}
+
+/// Boot-time registry exposed to downstream domain-tool extensions.
+///
+/// The registry deliberately exposes registration rather than the whole
+/// [`McpServer`]: downstreams can add their own tools and close over the active
+/// [`GraphState`], but cannot replace KGLite's generic graph/Cypher routes.
+pub struct DomainToolRegistry<'a> {
+    server: &'a mut McpServer,
+    graph_state: DomainGraphState,
+}
+
+impl DomainToolRegistry<'_> {
+    /// The live graph slot shared by KGLite's built-in tools.
+    ///
+    /// Clone this cheap handle into domain-tool handlers. It follows graph
+    /// activation and reloads, unlike capturing the graph active at boot.
+    pub fn graph_state(&self) -> &DomainGraphState {
+        &self.graph_state
+    }
+
+    /// Register a typed domain tool without allowing an existing route to be
+    /// replaced. The handler follows `mcp-methods`' errors-as-values contract.
+    pub fn register_typed_tool<T, F>(
+        &mut self,
+        name: &'static str,
+        description: &'static str,
+        handler: F,
+    ) -> Result<()>
+    where
+        T: for<'de> serde::Deserialize<'de>
+            + schemars::JsonSchema
+            + Default
+            + Send
+            + Sync
+            + 'static,
+        F: Fn(T) -> String + Send + Sync + 'static,
+    {
+        self.ensure_name_available(name)?;
+        self.server
+            .register_typed_tool::<T, F>(name, description, handler);
+        Ok(())
+    }
+
+    /// Register a fully custom rmcp route, for handlers that need capabilities
+    /// beyond [`register_typed_tool`](Self::register_typed_tool).
+    pub fn register_route(
+        &mut self,
+        route: rmcp::handler::server::router::tool::ToolRoute<McpServer>,
+    ) -> Result<()> {
+        self.ensure_name_available(route.attr.name.as_ref())?;
+        self.server.tool_router_mut().add_route(route);
+        Ok(())
+    }
+
+    fn ensure_name_available(&mut self, name: &str) -> Result<()> {
+        if self.server.tool_router_mut().has_route(name) {
+            anyhow::bail!(
+                "downstream domain tool {name:?} conflicts with an already-registered KGLite or manifest tool"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Downstream callback invoked once after KGLite and manifest tools are
+/// registered and before skills are finalised and the stdio server starts.
+pub type DomainToolRegistrar =
+    dyn for<'a> Fn(&mut DomainToolRegistry<'a>) -> Result<()> + Send + Sync + 'static;
+
+/// Optional boot-time extension points for binaries embedding this server.
+#[derive(Default)]
+pub struct ServerExtensions {
+    code_tree_hooks: Option<CodeTreeHooks>,
+    domain_tools: Option<Box<DomainToolRegistrar>>,
+}
+
+impl ServerExtensions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Inject an external code-tree builder for workspace build/watch paths.
+    pub fn with_code_tree_hooks(mut self, hooks: CodeTreeHooks) -> Self {
+        self.code_tree_hooks = Some(hooks);
+        self
+    }
+
+    /// Register downstream-owned domain tools against KGLite's live graph.
+    pub fn with_domain_tools<F>(mut self, registrar: F) -> Self
+    where
+        F: for<'a> Fn(&mut DomainToolRegistry<'a>) -> Result<()> + Send + Sync + 'static,
+    {
+        self.domain_tools = Some(Box::new(registrar));
+        self
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "kglite-mcp-server",
@@ -236,7 +376,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    run_with_options(args, None, None)
+    run_with_options(args, None, ServerExtensions::default())
 }
 
 /// Like [`run`], but with an optional Python-embedder factory for the
@@ -248,7 +388,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    run_with_options(args, factory, None)
+    run_with_options(args, factory, ServerExtensions::default())
 }
 
 /// Like [`run`], but with an external code-tree builder ([`CodeTreeHooks`]).
@@ -261,13 +401,34 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    run_with_options(args, None, hooks)
+    run_with_options(
+        args,
+        None,
+        ServerExtensions {
+            code_tree_hooks: hooks,
+            domain_tools: None,
+        },
+    )
+}
+
+/// Run the server with downstream boot-time extension points.
+///
+/// Domain tools are registered after KGLite's built-ins and manifest Cypher
+/// tools, but before skill finalisation. This lets `tool_registered:` skill
+/// predicates see downstream tools while keeping the generic graph/Cypher
+/// routes owned and protected by KGLite.
+pub fn run_with_extensions<I, T>(args: I, extensions: ServerExtensions) -> Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    run_with_options(args, None, extensions)
 }
 
 fn run_with_options<I, T>(
     args: I,
     factory: Option<PyEmbedderFactory>,
-    code_tree_hooks: Option<CodeTreeHooks>,
+    extensions: ServerExtensions,
 ) -> Result<()>
 where
     I: IntoIterator<Item = T>,
@@ -286,7 +447,41 @@ where
         .enable_all()
         .build()
         .context("failed to build tokio runtime")?;
-    runtime.block_on(run_async(cli, factory, code_tree_hooks))
+    runtime.block_on(run_async(cli, factory, extensions))
+}
+
+fn register_domain_tools(
+    server: &mut McpServer,
+    graph_state: GraphState,
+    registrar: Option<Box<DomainToolRegistrar>>,
+) -> Result<()> {
+    if let Some(registrar) = registrar {
+        let mut registry = DomainToolRegistry {
+            server,
+            graph_state: DomainGraphState { inner: graph_state },
+        };
+        registrar(&mut registry)?;
+    }
+    Ok(())
+}
+
+fn register_extension_tools(
+    server: &mut McpServer,
+    graph_state: &GraphState,
+    manifest: Option<&Manifest>,
+    csv_http: &Option<Arc<csv_http::CsvHttpConfig>>,
+    domain_tools: Option<Box<DomainToolRegistrar>>,
+) -> Result<()> {
+    if let Some(manifest) = manifest {
+        let runner = cypher_tools::make_runner(graph_state.clone(), csv_http.clone());
+        let registered = cypher_tools::register_cypher_tools(server, manifest, runner)
+            .context("YAML cypher tool registration failed")?;
+        if registered > 0 {
+            tracing::info!(count = registered, "manifest cypher tools registered");
+        }
+    }
+    register_domain_tools(server, graph_state.clone(), domain_tools)
+        .context("downstream domain-tool registration failed")
 }
 
 /// Fail fast on bad mode-specific path arguments before any expensive setup.
@@ -756,8 +951,12 @@ fn spawn_mode_watcher(
 async fn run_async(
     cli: Cli,
     py_embedder_factory: Option<PyEmbedderFactory>,
-    code_tree_hooks: Option<CodeTreeHooks>,
+    extensions: ServerExtensions,
 ) -> Result<()> {
+    let ServerExtensions {
+        code_tree_hooks,
+        domain_tools,
+    } = extensions;
     init_tracing();
     let mode = pick_mode(&cli);
     validate_mode_paths(&mode, &cli)?;
@@ -964,20 +1163,15 @@ async fn run_async(
         }
     }
 
-    // YAML-declared `tools[].cypher` entries. The mcp-methods framework
-    // parses them into `manifest.tools` but stays domain-agnostic and
-    // doesn't know how to run Cypher — so the kglite shim owns the
-    // registration loop, using the framework's now-public
-    // `build_tool_attr` plus an in-shim runner that dispatches into the
-    // active graph's `cypher(template, params=args)` method.
-    if let Some(m) = manifest.as_ref() {
-        let runner = cypher_tools::make_runner(graph_state.clone(), csv_http_arc.clone());
-        let registered = cypher_tools::register_cypher_tools(&mut server, m, runner)
-            .context("YAML cypher tool registration failed")?;
-        if registered > 0 {
-            tracing::info!(count = registered, "manifest cypher tools registered");
-        }
-    }
+    // Register YAML Cypher tools, then downstream domain routes. Keeping this
+    // before skill finalisation makes every route visible to predicates.
+    register_extension_tools(
+        &mut server,
+        &graph_state,
+        manifest.as_ref(),
+        &csv_http_arc,
+        domain_tools,
+    )?;
 
     let _watch_handle = spawn_mode_watcher(&mode, &graph_state, &local_active_root)?;
 
@@ -1345,5 +1539,100 @@ mod cli_contract_tests {
         let error = Cli::try_parse_from(["kglite-mcp-server", "--trust-tools"])
             .expect_err("removed no-op flag must not parse");
         assert!(error.to_string().contains("--trust-tools"));
+    }
+}
+
+#[cfg(test)]
+mod domain_tool_tests {
+    use super::*;
+    use mcp_methods::server::{SkillSource, SkillsSource};
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Default, Deserialize, JsonSchema)]
+    struct DomainArgs {
+        value: Option<String>,
+    }
+
+    #[test]
+    fn registrar_receives_live_state_and_adds_a_tool() {
+        let called = Arc::new(AtomicBool::new(false));
+        let called_by_registrar = called.clone();
+        let extensions = ServerExtensions::new().with_domain_tools(move |registry| {
+            assert!(registry.graph_state().schema().is_none());
+            called_by_registrar.store(true, Ordering::SeqCst);
+            registry.register_typed_tool::<DomainArgs, _>(
+                "domain_test",
+                "Domain test tool.",
+                |args| args.value.unwrap_or_else(|| "ok".to_string()),
+            )
+        });
+        let mut server = McpServer::new(ServerOptions::default());
+
+        register_domain_tools(&mut server, GraphState::new(false), extensions.domain_tools)
+            .expect("register downstream tool");
+
+        assert!(called.load(Ordering::SeqCst));
+        assert!(server.tool_router_mut().has_route("domain_test"));
+    }
+
+    #[test]
+    fn registrar_cannot_replace_an_existing_tool() {
+        let extensions = ServerExtensions::new().with_domain_tools(|registry| {
+            registry.register_typed_tool::<DomainArgs, _>(
+                "ping",
+                "Must not replace the framework ping.",
+                |_| "replacement".to_string(),
+            )
+        });
+        let mut server = McpServer::new(ServerOptions::default());
+
+        let error =
+            register_domain_tools(&mut server, GraphState::new(false), extensions.domain_tools)
+                .expect_err("duplicate route must fail");
+
+        assert!(error.to_string().contains("conflicts"));
+        assert!(server.tool_router_mut().has_route("ping"));
+    }
+
+    #[test]
+    fn registered_domain_tool_satisfies_skill_predicate() {
+        const DOMAIN_SKILL: &str = r#"---
+name: domain_test
+description: Domain test methodology.
+applies_when:
+  tool_registered: domain_test
+---
+
+# Domain test
+
+Use the registered domain tool.
+"#;
+        let extensions = ServerExtensions::new().with_domain_tools(|registry| {
+            registry.register_typed_tool::<DomainArgs, _>(
+                "domain_test",
+                "Domain test tool.",
+                |_| "ok".to_string(),
+            )
+        });
+        let mut server = McpServer::new(ServerOptions::default());
+        register_domain_tools(&mut server, GraphState::new(false), extensions.domain_tools)
+            .expect("register downstream tool");
+        let skills_source = SkillsSource::Sources(vec![SkillSource::Bundled]);
+        let skills = SkillRegistry::new()
+            .add_bundled(BundledSkill {
+                name: "domain_test",
+                body: DOMAIN_SKILL,
+            })
+            .layer_dirs(&skills_source, std::path::Path::new("manifest.yaml"))
+            .expect("enable bundled domain skill")
+            .finalise()
+            .expect("resolve domain skill");
+
+        serve_prompts(&skills, &mut server);
+
+        let prompts = server.prompt_router_mut().list_all();
+        assert!(prompts.iter().any(|prompt| prompt.name == "domain_test"));
     }
 }

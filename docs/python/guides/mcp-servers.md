@@ -477,60 +477,48 @@ integration, see **Building a downstream binary** below.
 
 ## Building a downstream binary
 
-When the manifest tiers aren't enough — you need conditional tool
-registration based on graph schema, custom transports, or tools that
-need to share state with the kglite-specific dispatch — build a
-*downstream binary* on top of the pure-Rust [`mcp-methods`](https://crates.io/crates/mcp-methods)
-crate. `kglite-mcp-server` itself is exactly that: a small Rust
-crate (see [`crates/kglite-mcp-server`](https://github.com/kkollsga/kglite/tree/main/crates/kglite-mcp-server))
-that registers `cypher_query` / `graph_overview` / `save_graph` /
-`read_code_source` / `explore` on top of the framework's source /
-GitHub / workspace surface.
+When manifest Cypher templates aren't enough — domain logic needs to share the
+active graph, materialize files, or conditionally register tools — embed the
+`kglite-mcp-server` library and add tools through `ServerExtensions`. KGLite
+still owns graph/Cypher/source tools, manifests, skills, watchers, and stdio;
+the downstream binary owns only its domain methods.
 
-The shape (using mcp-methods 0.3.30+ from crates.io):
+The shape:
 
 ```rust
-use mcp_methods::server::{McpServer, ServerOptions, load_manifest};
+use kglite_mcp_server::{run_with_extensions, ServerExtensions};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let manifest = load_manifest(std::path::Path::new("manifest.yaml"))?;
-    let options = ServerOptions::from_manifest(&manifest, "My Server")
-        .with_static_source_roots(vec!["/path/to/data".into()]);
-    let mut server = McpServer::new(options);
-
-    // Register your domain tools (typed args via #[derive(Deserialize)]):
-    server.register_typed_tool::<MyArgs, _>(
-        "my_tool",
-        "What the tool does.",
-        |args: MyArgs| async move {
-            // ... your logic ...
-            Ok(format!("response body"))
-        },
-    );
-
-    server.serve(rmcp::transport::stdio()).await?;
-    Ok(())
+fn main() -> anyhow::Result<()> {
+    let extensions = ServerExtensions::new().with_domain_tools(|registry| {
+        let graph = registry.graph_state().clone();
+        registry.register_typed_tool::<MyArgs, _>(
+            "my_tool",
+            "What the domain tool does.",
+            move |args| my_domain_logic(&graph, args),
+        )
+    });
+    run_with_extensions(std::env::args_os(), extensions)
 }
 ```
 
-For the canonical worked example with full setup, see the
-[mcp-methods downstream-binary guide](https://mcp-methods.readthedocs.io/en/latest/guides/downstream-binary.html)
-or the runnable
-[`examples/downstream_binary/`](https://github.com/kkollsga/mcp-methods/tree/main/examples/downstream_binary)
-in the mcp-methods repo.
+The registry rejects names already owned by KGLite or manifest tools. It also
+offers `register_route` for a custom rmcp `ToolRoute` while preserving the same
+collision check. See the compiling
+[`domain_tools.rs`](https://github.com/kkollsga/kglite/blob/main/crates/kglite-mcp-server/examples/domain_tools.rs)
+example. If you need to replace KGLite tools or change its stdio transport,
+build a separate server directly on
+[`mcp-methods`](https://crates.io/crates/mcp-methods); that is a server fork,
+not domain-tool composition.
 
-Adding a new tool to `kglite-mcp-server` itself is a single
-registration call in `crates/kglite-mcp-server/src/tools.rs` (~5
-lines). When deciding between manifest vs downstream binary:
+When deciding between a manifest and a composed downstream binary:
 
 | Need | Manifest | Downstream binary |
 |---|---|---|
 | Read-only tools (Cypher templates, source access) | ✅ | overkill |
-| Custom Python tool logic | ✅ (`python:` tier) | works too |
-| Tool registration conditional on graph schema | ⚠️ no | ✅ |
-| Custom rmcp transports / middleware | ❌ | ✅ |
-| Replacing `cypher_query` / `graph_overview` | ❌ | ✅ |
+| Executable Rust/domain logic | ❌ | ✅ |
+| Tool registration conditional on active graph | ❌ | ✅ |
+| Custom rmcp transports / middleware | ❌ | separate server |
+| Replacing `cypher_query` / `graph_overview` | ❌ | ❌ |
 
 Most projects never need a downstream binary.
 

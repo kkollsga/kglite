@@ -207,6 +207,7 @@ pub fn kglite::api::algorithms::degree_centrality(graph: &kglite::api::DirGraph,
 pub fn kglite::api::algorithms::get_node_info(graph: &kglite::api::DirGraph, node_idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::algorithms::PathNodeInfo>
 pub fn kglite::api::algorithms::get_path_connections(graph: &kglite::api::DirGraph, path: &[petgraph::graph_impl::NodeIndex]) -> alloc::vec::Vec<core::option::Option<alloc::string::String>>
 pub fn kglite::api::algorithms::label_propagation(graph: &kglite::api::DirGraph, options: &kglite::api::algorithms::LabelPropagationOptions<'_>) -> core::result::Result<kglite::api::algorithms::CommunityResult, alloc::string::String>
+pub fn kglite::api::algorithms::leiden_communities(graph: &kglite::api::DirGraph, options: &kglite::api::algorithms::CommunityOptions<'_>) -> core::result::Result<kglite::api::algorithms::CommunityResult, alloc::string::String>
 pub fn kglite::api::algorithms::louvain_communities(graph: &kglite::api::DirGraph, options: &kglite::api::algorithms::CommunityOptions<'_>) -> core::result::Result<kglite::api::algorithms::CommunityResult, alloc::string::String>
 pub fn kglite::api::algorithms::node_degree(graph: &kglite::api::DirGraph, node: petgraph::graph_impl::NodeIndex) -> usize
 pub fn kglite::api::algorithms::pagerank(graph: &kglite::api::DirGraph, options: &kglite::api::algorithms::PagerankOptions<'_>) -> core::result::Result<alloc::vec::Vec<kglite::api::algorithms::CentralityResult>, alloc::string::String>
