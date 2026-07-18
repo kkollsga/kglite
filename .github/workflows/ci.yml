@@ -433,6 +433,7 @@ jobs:
       - name: Build candidate wheel before measurement
         run: |
           .venv/bin/maturin build --release --out "$RUNNER_TEMP/candidate-wheel"
+          .venv/bin/python scripts/check_wheel_license.py --expected-name kglite "$RUNNER_TEMP/candidate-wheel/*.whl"
           CANDIDATE_WHEEL=$(find "$RUNNER_TEMP/candidate-wheel" -name '*.whl' -print -quit)
           CANDIDATE_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "kglite") | .version')
           .venv/bin/python -m pip install "$CANDIDATE_WHEEL"

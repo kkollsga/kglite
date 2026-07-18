@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Write provenance:** `git_sha` and `modified_by` now flow through sessions,
   transactions, DataFrame node/edge writes, replacements, and connector bulk
   helpers for schema types that opt into `auto_timestamp`.
+- **Release verification:** published main and standalone CLI wheels are now
+  checked for exact MIT metadata and an unmodified embedded LICENSE.
 
 ## [0.14.1] - 2026-07-18
 

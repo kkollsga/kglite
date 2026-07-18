@@ -9,6 +9,10 @@ from pathlib import Path
 import sys
 import zipfile
 
+from check_wheel_license import inspect_wheel_license
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _wheel_paths(arguments: list[str]) -> list[Path]:
     paths: list[Path] = []
@@ -24,6 +28,7 @@ def _wheel_paths(arguments: list[str]) -> list[Path]:
 
 
 def inspect_wheel(path: Path) -> None:
+    inspect_wheel_license(path, expected_name="kglite", license_path=REPO_ROOT / "LICENSE")
     with zipfile.ZipFile(path) as wheel:
         names = wheel.namelist()
         extensions = [name for name in names if name.startswith("kglite/") and name.endswith((".so", ".pyd"))]
