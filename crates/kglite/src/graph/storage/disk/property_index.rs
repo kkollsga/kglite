@@ -729,13 +729,13 @@ impl PropertyIndex {
 mod tests {
     use super::*;
 
+    static TMP_DIR_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     fn tmp_dir() -> PathBuf {
         let p = std::env::temp_dir().join(format!(
-            "kglite_prop_idx_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "kglite_prop_idx_{}_{}",
+            std::process::id(),
+            TMP_DIR_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         ));
         fs::create_dir_all(&p).unwrap();
         p
