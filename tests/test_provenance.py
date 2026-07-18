@@ -10,12 +10,13 @@ so writes stay deterministic. Queryable via `n.updated_at` for stale checks.
 import time
 
 import pandas as pd
+import pytest
 
 import kglite
 
 
-def _opted_graph():
-    g = kglite.KnowledgeGraph()
+def _opted_graph(storage="default", path=None):
+    g = kglite.KnowledgeGraph(storage=storage, path=path)
     g.define_schema({"nodes": {"Task": {"auto_timestamp": True}, "Other": {}}})
     return g
 
@@ -159,6 +160,49 @@ def test_git_sha_only_on_opted_in_types():
     assert g.cypher("MATCH (n:Other {id: 1}) RETURN n.git_sha AS s").to_dicts()[0]["s"] is None
 
 
+@pytest.mark.parametrize("storage", ["default", "mapped", "disk"])
+def test_add_nodes_provenance_covers_create_update_and_scope_cleanup(storage, tmp_path):
+    path = str(tmp_path / "graph") if storage == "disk" else None
+    g = _opted_graph(storage, path)
+    g.add_nodes(
+        pd.DataFrame([{"id": 1, "value": "first"}]),
+        "Task",
+        "id",
+        git_sha="batch-create",
+        modified_by="loader",
+    )
+    created = g.cypher("MATCH (n:Task {id: 1}) RETURN n.git_sha AS s, n.modified_by AS m").to_dicts()[0]
+    assert created == {"s": "batch-create", "m": "loader"}
+
+    g.add_nodes(
+        pd.DataFrame([{"id": 1, "value": "second"}]),
+        "Task",
+        "id",
+        git_sha="batch-update",
+        modified_by="reviewer",
+    )
+    updated = g.cypher("MATCH (n:Task {id: 1}) RETURN n.git_sha AS s, n.modified_by AS m").to_dicts()[0]
+    assert updated == {"s": "batch-update", "m": "reviewer"}
+
+    g.add_nodes(pd.DataFrame([{"id": 2}]), "Task", "id")
+    clean = g.cypher("MATCH (n:Task {id: 2}) RETURN n.git_sha AS s, n.modified_by AS m").to_dicts()[0]
+    assert clean == {"s": None, "m": None}
+
+
+def test_session_and_transaction_writes_accept_provenance():
+    session = _opted_graph().session()
+    session.execute("CREATE (:Task {id: 1})", git_sha="session-sha", modified_by="server")
+    session_row = session.cypher("MATCH (n:Task {id: 1}) RETURN n.git_sha AS s, n.modified_by AS m").to_dicts()[0]
+    assert session_row == {"s": "session-sha", "m": "server"}
+
+    graph = _opted_graph()
+    tx = graph.begin()
+    tx.cypher("CREATE (:Task {id: 2})", git_sha="tx-sha", modified_by="transaction")
+    tx.commit()
+    tx_row = graph.cypher("MATCH (n:Task {id: 2}) RETURN n.git_sha AS s, n.modified_by AS m").to_dicts()[0]
+    assert tx_row == {"s": "tx-sha", "m": "transaction"}
+
+
 # --- edges / connections (phase 4) -------------------------------------------
 
 
@@ -192,6 +236,97 @@ def test_add_connections_edge_stamps():
     g = _edge_graph()
     g.add_connections(pd.DataFrame([{"s": 1, "t": 2}]), "LINKS", "N", "s", "N", "t")
     assert _edge_updated_at(g, "LINKS") is not None
+
+
+def test_add_and_replace_connections_accept_provenance():
+    g = _edge_graph()
+    g.cypher("CREATE (:N {id: 3})")
+    g.add_connections(
+        pd.DataFrame([{"s": 1, "t": 2}]),
+        "LINKS",
+        "N",
+        "s",
+        "N",
+        "t",
+        git_sha="edge-add",
+        modified_by="loader",
+    )
+    g.replace_connections(
+        pd.DataFrame([{"s": 1, "t": 3}]),
+        "LINKS",
+        "N",
+        "s",
+        "N",
+        "t",
+        git_sha="edge-replace",
+        modified_by="sync",
+    )
+    rows = g.cypher(
+        "MATCH (a:N {id: 1})-[r:LINKS]->(b:N) RETURN b.id AS id, r.git_sha AS s, r.modified_by AS m"
+    ).to_dicts()
+    assert rows == [{"id": 3, "s": "edge-replace", "m": "sync"}]
+
+
+def test_connector_bulk_helpers_accept_provenance():
+    g = kglite.KnowledgeGraph()
+    g.define_schema(
+        {
+            "nodes": {"Task": {"auto_timestamp": True}},
+            "connections": {
+                "LINKS": {"source": "Task", "target": "Task", "auto_timestamp": True},
+                "SOURCED": {"source": "Task", "target": "Task", "auto_timestamp": True},
+            },
+        }
+    )
+    g.add_nodes_bulk(
+        [
+            {
+                "node_type": "Task",
+                "unique_id_field": "id",
+                "node_title_field": "id",
+                "data": pd.DataFrame([{"id": 1}, {"id": 2}]),
+            }
+        ],
+        git_sha="bulk-nodes",
+        modified_by="connector",
+    )
+    node_shas = g.cypher("MATCH (n:Task) RETURN n.git_sha AS s, n.modified_by AS m ORDER BY n.id").to_dicts()
+    assert node_shas == [
+        {"s": "bulk-nodes", "m": "connector"},
+        {"s": "bulk-nodes", "m": "connector"},
+    ]
+
+    g.add_connections_bulk(
+        [
+            {
+                "source_type": "Task",
+                "target_type": "Task",
+                "connection_name": "LINKS",
+                "data": pd.DataFrame([{"source_id": 1, "target_id": 2}]),
+            }
+        ],
+        git_sha="bulk-edges",
+        modified_by="connector",
+    )
+    g.add_connections_from_source(
+        [
+            {
+                "source_type": "Task",
+                "target_type": "Task",
+                "connection_name": "SOURCED",
+                "data": pd.DataFrame([{"source_id": 2, "target_id": 1}]),
+            }
+        ],
+        git_sha="source-edges",
+        modified_by="router",
+    )
+    edge_shas = g.cypher(
+        "MATCH ()-[r]->() RETURN type(r) AS t, r.git_sha AS s, r.modified_by AS m ORDER BY t"
+    ).to_dicts()
+    assert edge_shas == [
+        {"t": "LINKS", "s": "bulk-edges", "m": "connector"},
+        {"t": "SOURCED", "s": "source-edges", "m": "router"},
+    ]
 
 
 def test_edge_set_bumps_and_advances():

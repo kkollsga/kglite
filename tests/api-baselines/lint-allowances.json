@@ -117,7 +117,7 @@
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/session.rs::fn:execute:fn execute( &self, py: Python<'_>, query: &str, to_df: bool, params: Option<&Bound<'_, PyDict>>, timeout_ms: Option<u64>, max_rows: Option<usize>, write_scope: Option<Vec<String>>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "identity": "crates/kglite-py/src/graph/pyapi/session.rs::fn:execute:fn execute( &self, py: Python<'_>, query: &str, to_df: bool, params: Option<&Bound<'_, PyDict>>, timeout_ms: Option<u64>, max_rows: Option<usize>, write_scope: Option<Vec<String>>, git_sha: Option<String>, modified_by: Option<String>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
       "classification": "boundary"
     },
     {
@@ -133,7 +133,7 @@
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/transaction.rs::fn:cypher:fn cypher( &mut self, py: Python<'_>, query: &str, params: Option<&Bound<'_, PyDict>>, to_df: bool, timeout_ms: Option<u64>, max_rows: Option<usize>, write_scope: Option<Vec<String>>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "identity": "crates/kglite-py/src/graph/pyapi/transaction.rs::fn:cypher:fn cypher( &mut self, py: Python<'_>, query: &str, params: Option<&Bound<'_, PyDict>>, to_df: bool, timeout_ms: Option<u64>, max_rows: Option<usize>, write_scope: Option<Vec<String>>, git_sha: Option<String>, modified_by: Option<String>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
       "classification": "boundary"
     },
     {

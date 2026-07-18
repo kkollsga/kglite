@@ -162,6 +162,47 @@ fn build_connection_df_from_pandas(
     Ok((df_result, temporal_cfg))
 }
 
+fn validate_connection_input_mode(
+    has_data: bool,
+    has_query: bool,
+    has_extra_properties: bool,
+    has_columns: bool,
+    has_skip_columns: bool,
+    has_column_types: bool,
+) -> PyResult<()> {
+    if has_data && has_query {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Cannot specify both 'data' and 'query'. Use one or the other.",
+        ));
+    }
+    if !has_data && !has_query {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Must specify either 'data' (DataFrame) or 'query' (Cypher query string).",
+        ));
+    }
+    if has_data && has_extra_properties {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "extra_properties is only supported with query mode, not data mode.",
+        ));
+    }
+    if has_query && has_columns {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "'columns' is only supported with data mode, not query mode.",
+        ));
+    }
+    if has_query && has_skip_columns {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "'skip_columns' is only supported with data mode, not query mode.",
+        ));
+    }
+    if has_query && has_column_types {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "'column_types' is only supported with data mode, not query mode.",
+        ));
+    }
+    Ok(())
+}
+
 /// Shared body of `add_connections` (replace=false) and
 /// `replace_connections` (replace=true). The two methods are identical
 /// except for the core call: `replace` first prunes the existing edges
@@ -188,44 +229,20 @@ fn write_connections(
     column_types: Option<&Bound<'_, PyDict>>,
     query: Option<String>,
     extra_properties: Option<&Bound<'_, PyDict>>,
+    git_sha: Option<String>,
+    modified_by: Option<String>,
 ) -> PyResult<Py<PyAny>> {
     use crate::datatypes::values::DataFrame as KgDataFrame;
 
-    // Validate: exactly one of data or query must be provided
     let has_data = data.as_ref().map(|d| !d.is_none()).unwrap_or(false);
-
-    if has_data && query.is_some() {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Cannot specify both 'data' and 'query'. Use one or the other.",
-        ));
-    }
-    if !has_data && query.is_none() {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Must specify either 'data' (DataFrame) or 'query' (Cypher query string).",
-        ));
-    }
-    if has_data && extra_properties.is_some() {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "extra_properties is only supported with query mode, not data mode.",
-        ));
-    }
-    if query.is_some() {
-        if columns.is_some() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "'columns' is only supported with data mode, not query mode.",
-            ));
-        }
-        if skip_columns.is_some() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "'skip_columns' is only supported with data mode, not query mode.",
-            ));
-        }
-        if column_types.is_some() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "'column_types' is only supported with data mode, not query mode.",
-            ));
-        }
-    }
+    validate_connection_input_mode(
+        has_data,
+        query.is_some(),
+        extra_properties.is_some(),
+        columns.is_some(),
+        skip_columns.is_some(),
+        column_types.is_some(),
+    )?;
 
     // ── Query path: run Cypher, convert to internal DataFrame ──
     if let Some(query_str) = query {
@@ -308,33 +325,35 @@ fn write_connections(
 
         // Everything past this point is pure Rust — run off-GIL.
         let result = detach_mutation(py, || {
-            if replace {
-                kglite_core::api::mutation::replace_connections(
-                    &mut *graph,
-                    df_result,
-                    connection_type.clone(),
-                    source_type,
-                    source_id_field,
-                    target_type,
-                    target_id_field,
-                    source_title_field,
-                    target_title_field,
-                    conflict_handling,
-                )
-            } else {
-                kglite_core::api::mutation::add_connections(
-                    &mut *graph,
-                    df_result,
-                    connection_type.clone(),
-                    source_type,
-                    source_id_field,
-                    target_type,
-                    target_id_field,
-                    source_title_field,
-                    target_title_field,
-                    conflict_handling,
-                )
-            }
+            graph.with_write_provenance(git_sha.as_deref(), modified_by.as_deref(), |graph| {
+                if replace {
+                    kglite_core::api::mutation::replace_connections(
+                        graph,
+                        df_result,
+                        connection_type.clone(),
+                        source_type,
+                        source_id_field,
+                        target_type,
+                        target_id_field,
+                        source_title_field,
+                        target_title_field,
+                        conflict_handling,
+                    )
+                } else {
+                    kglite_core::api::mutation::add_connections(
+                        graph,
+                        df_result,
+                        connection_type.clone(),
+                        source_type,
+                        source_id_field,
+                        target_type,
+                        target_id_field,
+                        source_title_field,
+                        target_title_field,
+                        conflict_handling,
+                    )
+                }
+            })
         })?;
 
         kg.cursor.selection.clear();
@@ -370,33 +389,35 @@ fn write_connections(
 
     // The converted frame is pure Rust — apply the batch off-GIL.
     let result = detach_mutation(py, || {
-        if replace {
-            kglite_core::api::mutation::replace_connections(
-                &mut *graph,
-                df_result,
-                connection_type.clone(),
-                source_type,
-                source_id_field,
-                target_type,
-                target_id_field,
-                source_title_field,
-                target_title_field,
-                conflict_handling,
-            )
-        } else {
-            kglite_core::api::mutation::add_connections(
-                &mut *graph,
-                df_result,
-                connection_type.clone(),
-                source_type,
-                source_id_field,
-                target_type,
-                target_id_field,
-                source_title_field,
-                target_title_field,
-                conflict_handling,
-            )
-        }
+        graph.with_write_provenance(git_sha.as_deref(), modified_by.as_deref(), |graph| {
+            if replace {
+                kglite_core::api::mutation::replace_connections(
+                    graph,
+                    df_result,
+                    connection_type.clone(),
+                    source_type,
+                    source_id_field,
+                    target_type,
+                    target_id_field,
+                    source_title_field,
+                    target_title_field,
+                    conflict_handling,
+                )
+            } else {
+                kglite_core::api::mutation::add_connections(
+                    graph,
+                    df_result,
+                    connection_type.clone(),
+                    source_type,
+                    source_id_field,
+                    target_type,
+                    target_id_field,
+                    source_title_field,
+                    target_title_field,
+                    conflict_handling,
+                )
+            }
+        })
     })?;
 
     // Merge temporal config into graph (auto-detected from validFrom/validTo column types)
@@ -559,24 +580,32 @@ fn convert_dataframe<'py>(
 
 /// Apply the converted node batch with the GIL released — the DataFrame is
 /// already pure Rust at this point, so the insert runs off-GIL.
-fn apply_node_batch(
-    py: Python<'_>,
-    graph: &mut DirGraph,
+struct NodeBatchInput {
     df: DataFrame,
-    node_type: &str,
+    node_type: String,
     unique_id_field: String,
     node_title_field: Option<String>,
     conflict_handling: Option<String>,
+}
+
+fn apply_node_batch(
+    py: Python<'_>,
+    graph: &mut DirGraph,
+    input: NodeBatchInput,
+    provenance: (Option<String>, Option<String>),
 ) -> PyResult<NodeOperationReport> {
+    let (git_sha, modified_by) = provenance;
     detach_mutation(py, || {
-        kglite_core::api::mutation::add_nodes(
-            &mut *graph,
-            df,
-            node_type.to_string(),
-            unique_id_field,
-            node_title_field,
-            conflict_handling,
-        )
+        graph.with_write_provenance(git_sha.as_deref(), modified_by.as_deref(), |graph| {
+            kglite_core::api::mutation::add_nodes(
+                graph,
+                input.df,
+                input.node_type,
+                input.unique_id_field,
+                input.node_title_field,
+                input.conflict_handling,
+            )
+        })
     })
 }
 
@@ -972,7 +1001,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     dict with 'nodes_created', 'nodes_updated', 'nodes_skipped',
     ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
-    #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=false, labels=None, managed_reload=false))]
+    #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=false, labels=None, managed_reload=false, git_sha=None, modified_by=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_nodes(
         &mut self,
@@ -988,6 +1017,8 @@ impl KnowledgeGraph {
         nullable_int_downcast: bool,
         labels: Option<Vec<String>>,
         managed_reload: bool,
+        git_sha: Option<String>,
+        modified_by: Option<String>,
     ) -> PyResult<Py<PyAny>> {
         let py = data.py();
         // Managed-reload guard: a managed reload (research rebuilding from
@@ -1038,11 +1069,14 @@ impl KnowledgeGraph {
         let result = apply_node_batch(
             py,
             graph,
-            converted.df,
-            &node_type,
-            unique_id_field.clone(),
-            node_title_field,
-            conflict_handling,
+            NodeBatchInput {
+                df: converted.df,
+                node_type: node_type.clone(),
+                unique_id_field: unique_id_field.clone(),
+                node_title_field,
+                conflict_handling,
+            },
+            (git_sha, modified_by),
         )?;
         register_feature_configs(
             graph,
@@ -1229,7 +1263,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     dict with 'connections_created', 'connections_skipped',
     ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
-    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None))]
+    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_connections(
         &mut self,
@@ -1248,6 +1282,8 @@ impl KnowledgeGraph {
         column_types: Option<&Bound<'_, PyDict>>,
         query: Option<String>,
         extra_properties: Option<&Bound<'_, PyDict>>,
+        git_sha: Option<String>,
+        modified_by: Option<String>,
     ) -> PyResult<Py<PyAny>> {
         write_connections(
             py,
@@ -1267,6 +1303,8 @@ impl KnowledgeGraph {
             column_types,
             query,
             extra_properties,
+            git_sha,
+            modified_by,
         )
     }
 
@@ -1315,7 +1353,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     dict with 'connections_created', 'connections_skipped',
     ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
-    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None))]
+    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None))]
     #[allow(clippy::too_many_arguments)]
     fn replace_connections(
         &mut self,
@@ -1334,6 +1372,8 @@ impl KnowledgeGraph {
         column_types: Option<&Bound<'_, PyDict>>,
         query: Option<String>,
         extra_properties: Option<&Bound<'_, PyDict>>,
+        git_sha: Option<String>,
+        modified_by: Option<String>,
     ) -> PyResult<Py<PyAny>> {
         write_connections(
             py,
@@ -1353,6 +1393,8 @@ impl KnowledgeGraph {
             column_types,
             query,
             extra_properties,
+            git_sha,
+            modified_by,
         )
     }
 
@@ -1515,7 +1557,14 @@ impl KnowledgeGraph {
     ///     stats = graph.add_nodes_bulk(nodes)
     ///     # {'Person': 100, 'Company': 50}
     ///     ```
-    fn add_nodes_bulk(&mut self, py: Python<'_>, nodes: &Bound<'_, PyList>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (nodes, *, git_sha=None, modified_by=None))]
+    fn add_nodes_bulk(
+        &mut self,
+        py: Python<'_>,
+        nodes: &Bound<'_, PyList>,
+        git_sha: Option<String>,
+        modified_by: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
         let result_dict = PyDict::new(py);
 
         for item in nodes.iter() {
@@ -1566,14 +1615,16 @@ impl KnowledgeGraph {
 
             // Converted frame is pure Rust — apply off-GIL.
             let report = detach_mutation(py, || {
-                kglite_core::api::mutation::add_nodes(
-                    &mut *graph,
-                    df_result,
-                    node_type.clone(),
-                    unique_id_field,
-                    Some(node_title_field),
-                    None,
-                )
+                graph.with_write_provenance(git_sha.as_deref(), modified_by.as_deref(), |graph| {
+                    kglite_core::api::mutation::add_nodes(
+                        graph,
+                        df_result,
+                        node_type.clone(),
+                        unique_id_field,
+                        Some(node_title_field),
+                        None,
+                    )
+                })
             })?;
 
             result_dict.set_item(&node_type, report.nodes_created + report.nodes_updated)?;
@@ -1609,12 +1660,21 @@ impl KnowledgeGraph {
     ///     stats = graph.add_connections_bulk(connections)
     ///     # {'WORKS_AT': 500, 'KNOWS': 1200}
     ///     ```
+    #[pyo3(signature = (connections, *, git_sha=None, modified_by=None))]
     fn add_connections_bulk(
         &mut self,
         py: Python<'_>,
         connections: &Bound<'_, PyList>,
+        git_sha: Option<String>,
+        modified_by: Option<String>,
     ) -> PyResult<Py<PyAny>> {
-        self.add_connections_internal(py, connections, false)
+        self.add_connections_internal(
+            py,
+            connections,
+            false,
+            git_sha.as_deref(),
+            modified_by.as_deref(),
+        )
     }
 
     /// Add connections, automatically filtering to only those where
@@ -1645,12 +1705,21 @@ impl KnowledgeGraph {
     /// stats = graph.add_connections_from_source(all_connections)
     /// ```
     /// ```
+    #[pyo3(signature = (connections, *, git_sha=None, modified_by=None))]
     fn add_connections_from_source(
         &mut self,
         py: Python<'_>,
         connections: &Bound<'_, PyList>,
+        git_sha: Option<String>,
+        modified_by: Option<String>,
     ) -> PyResult<Py<PyAny>> {
-        self.add_connections_internal(py, connections, true)
+        self.add_connections_internal(
+            py,
+            connections,
+            true,
+            git_sha.as_deref(),
+            modified_by.as_deref(),
+        )
     }
 
     /// Internal helper for bulk connection loading
@@ -1659,6 +1728,8 @@ impl KnowledgeGraph {
         py: Python<'_>,
         connections: &Bound<'_, PyList>,
         filter_to_loaded: bool,
+        git_sha: Option<&str>,
+        modified_by: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let result_dict = PyDict::new(py);
         let loaded_types: std::collections::HashSet<String> = if filter_to_loaded {
@@ -1748,18 +1819,20 @@ impl KnowledgeGraph {
 
             // Converted frame is pure Rust — apply off-GIL.
             let report = detach_mutation(py, || {
-                kglite_core::api::mutation::add_connections(
-                    &mut *graph,
-                    df_result,
-                    connection_name.clone(),
-                    source_type,
-                    source_id_field,
-                    target_type,
-                    target_id_field,
-                    None, // source_title_field
-                    None, // target_title_field
-                    None, // conflict_handling
-                )
+                graph.with_write_provenance(git_sha, modified_by, |graph| {
+                    kglite_core::api::mutation::add_connections(
+                        graph,
+                        df_result,
+                        connection_name.clone(),
+                        source_type,
+                        source_id_field,
+                        target_type,
+                        target_id_field,
+                        None, // source_title_field
+                        None, // target_title_field
+                        None, // conflict_handling
+                    )
+                })
             })?;
 
             result_dict.set_item(&connection_name, report.connections_created)?;

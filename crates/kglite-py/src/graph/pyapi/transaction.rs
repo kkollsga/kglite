@@ -91,8 +91,9 @@ impl Transaction {
             .is_some_and(CoreTransaction::is_read_only)
     }
 
+    // Python boundary mirrors the public query option surface.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (query, params=None, to_df=false, timeout_ms=None, max_rows=None, write_scope=None))]
+    #[pyo3(signature = (query, params=None, to_df=false, timeout_ms=None, max_rows=None, write_scope=None, git_sha=None, modified_by=None))]
     fn cypher(
         &mut self,
         py: Python<'_>,
@@ -102,6 +103,8 @@ impl Transaction {
         timeout_ms: Option<u64>,
         max_rows: Option<usize>,
         write_scope: Option<Vec<String>>,
+        git_sha: Option<String>,
+        modified_by: Option<String>,
     ) -> PyResult<Py<PyAny>> {
         let write_scope_set: Option<std::collections::HashSet<String>> =
             write_scope.map(|v| v.into_iter().collect());
@@ -209,8 +212,8 @@ impl Transaction {
             // (separate working copy + atomic-swap commit). The deadline applies.
             cancel: None,
             write_scope: write_scope_set.as_ref(),
-            git_sha: None,
-            modified_by: None,
+            git_sha: git_sha.as_deref(),
+            modified_by: modified_by.as_deref(),
         };
 
         let result = if is_mut {

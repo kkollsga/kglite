@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Inline records:** `from_records(..., on_missing_endpoint=...)` can now
   `"drop"` edges with absent endpoints or reject the complete build atomically
   with `"error"`; the existing `"vivify"` behavior remains the default.
+- **Write provenance:** `git_sha` and `modified_by` now flow through sessions,
+  transactions, DataFrame node/edge writes, replacements, and connector bulk
+  helpers for schema types that opt into `auto_timestamp`.
 
 ## [0.14.1] - 2026-07-18
 

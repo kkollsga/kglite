@@ -10,6 +10,28 @@ use crate::datatypes::values::Value;
 use crate::graph::schema::SchemaDefinition;
 
 impl DirGraph {
+    /// Run one write with caller-supplied freshness provenance, restoring the
+    /// prior context after the callback returns (including `Result::Err`).
+    /// This is shared by Cypher execution and direct bulk mutation bindings;
+    /// nested scopes restore their caller rather than clearing it.
+    pub fn with_write_provenance<R>(
+        &mut self,
+        git_sha: Option<&str>,
+        modified_by: Option<&str>,
+        write: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous_git_sha =
+            std::mem::replace(&mut self.active_git_sha, git_sha.map(str::to_string));
+        let previous_modified_by = std::mem::replace(
+            &mut self.active_modified_by,
+            modified_by.map(str::to_string),
+        );
+        let result = write(self);
+        self.active_git_sha = previous_git_sha;
+        self.active_modified_by = previous_modified_by;
+        result
+    }
+
     /// Set the schema definition for this graph
     pub fn set_schema(&mut self, schema: SchemaDefinition) {
         self.schema_definition = Some(schema);
@@ -87,8 +109,8 @@ impl DirGraph {
     /// The reserved provenance properties to stamp on a write: `updated_at`
     /// (wall-clock now, a `Timestamp` matching `datetime()`) plus the
     /// caller-supplied `git_sha`/`modified_by` when set on the current mutation
-    /// (via `ExecuteOptions` → `active_git_sha`/`active_modified_by`). One clock
-    /// read per call. Engine owns these keys — callers overwrite any user value.
+    /// (via `ExecuteOptions` or [`Self::with_write_provenance`]). One clock read
+    /// per call. Engine owns these keys — callers overwrite any user value.
     pub(crate) fn provenance_props(&self) -> Vec<(&'static str, Value)> {
         let mut v = Vec::with_capacity(3);
         v.push((
@@ -139,5 +161,28 @@ impl DirGraph {
             .get(channel.unwrap_or(""))
             .or_else(|| self.graph_instructions.get(""))
             .map(String::as_str)
+    }
+}
+
+#[cfg(test)]
+mod provenance_scope_tests {
+    use super::*;
+
+    #[test]
+    fn nested_scope_restores_prior_context_after_error() {
+        let mut graph = DirGraph::new();
+        graph.active_git_sha = Some("outer".to_string());
+        graph.active_modified_by = Some("owner".to_string());
+
+        let result: Result<(), &str> =
+            graph.with_write_provenance(Some("inner"), Some("worker"), |graph| {
+                assert_eq!(graph.active_git_sha.as_deref(), Some("inner"));
+                assert_eq!(graph.active_modified_by.as_deref(), Some("worker"));
+                Err("failed")
+            });
+
+        assert_eq!(result, Err("failed"));
+        assert_eq!(graph.active_git_sha.as_deref(), Some("outer"));
+        assert_eq!(graph.active_modified_by.as_deref(), Some("owner"));
     }
 }

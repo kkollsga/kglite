@@ -354,22 +354,20 @@ pub fn execute_mut(
         // mutation, then clear it unconditionally (even on error) so it never
         // leaks into a later execution on the same working copy.
         graph.active_write_scope = opts.write_scope.cloned();
-        graph.active_git_sha = opts.git_sha.map(str::to_string);
-        graph.active_modified_by = opts.modified_by.map(str::to_string);
-        let r = if opts.max_rows.is_some() {
-            cypher::executor::write::execute_mutable_bounded(
-                graph,
-                &parsed,
-                params,
-                interrupt,
-                opts.max_rows,
-            )
-        } else {
-            cypher::execute_mutable(graph, &parsed, params, interrupt)
-        };
+        let r = graph.with_write_provenance(opts.git_sha, opts.modified_by, |graph| {
+            if opts.max_rows.is_some() {
+                cypher::executor::write::execute_mutable_bounded(
+                    graph,
+                    &parsed,
+                    params,
+                    interrupt,
+                    opts.max_rows,
+                )
+            } else {
+                cypher::execute_mutable(graph, &parsed, params, interrupt)
+            }
+        });
         graph.active_write_scope = None;
-        graph.active_git_sha = None;
-        graph.active_modified_by = None;
         let r = match r {
             Ok(result) => result,
             Err(message) => {

@@ -873,7 +873,7 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
 
     // Data loading
     xml.push_str("  <group name=\"loading\">\n");
-    xml.push_str("    <method sig=\"add_nodes(df, type, id_field, title_field, columns=None, column_types=None, timeseries=None)\">Load nodes from DataFrame.</method>\n");
+    xml.push_str("    <method sig=\"add_nodes(df, type, id_field, title_field, columns=None, column_types=None, timeseries=None, git_sha=None, modified_by=None)\">Load nodes from DataFrame with optional write provenance.</method>\n");
     xml.push_str("    <method sig=\"add_connections(df, conn_type, source_type, source_id, target_type, target_id)\">Load edges from DataFrame.</method>\n");
     xml.push_str("    <method sig=\"extend(other, conflict_handling='update')\">Merge another in-memory KnowledgeGraph into this one in place (node identity (type,id); unions secondary labels; dedups edges on (type,src,tgt)). Returns a report dict.</method>\n");
     xml.push_str("    <method sig=\"kglite.from_blueprint(path, verbose=False)\">Build graph from JSON blueprint + CSVs.</method>\n");
@@ -1220,12 +1220,12 @@ pub(super) fn write_fluent_topic_loading(xml: &mut String) {
         "    <desc>Load nodes and connections from DataFrames or blueprint files.</desc>\n",
     );
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"add_nodes(df, type, id_field, title_field, columns=None, column_types=None, conflict_handling='skip', timeseries=None)\">Load nodes. conflict_handling: 'update'|'replace'|'skip'|'preserve'|'sum'. column_types maps columns to spatial/temporal types.</m>\n");
-    xml.push_str("      <m sig=\"add_connections(data, conn_type, source_type, source_id_field, target_type, target_id_field, columns=None, skip_columns=None, conflict_handling='update', query=None, extra_properties=None)\">Load edges from DataFrame (data=df) or Cypher query (data=None, query='MATCH...RETURN...'). columns=None keeps all non-skipped DataFrame columns; columns=[...] is an explicit property whitelist. conflict_handling: 'update'|'replace'|'skip'|'preserve'|'sum'. extra_properties stamps static props onto query-mode edges.</m>\n");
+    xml.push_str("      <m sig=\"add_nodes(df, type, id_field, title_field, columns=None, column_types=None, conflict_handling='skip', timeseries=None, git_sha=None, modified_by=None)\">Load nodes. conflict_handling: 'update'|'replace'|'skip'|'preserve'|'sum'. Provenance is stamped on auto_timestamp types.</m>\n");
+    xml.push_str("      <m sig=\"add_connections(data, conn_type, source_type, source_id_field, target_type, target_id_field, columns=None, skip_columns=None, conflict_handling='update', query=None, extra_properties=None, git_sha=None, modified_by=None)\">Load edges from DataFrame or a read query. Provenance is stamped on auto_timestamp edge types.</m>\n");
     xml.push_str("      <m sig=\"replace_connections(data, conn_type, source_type, source_id_field, target_type, target_id_field, ...)\">Atomic edge upsert: prune each source node's existing conn_type edges, then add the input's. Same args as add_connections; use to re-sync a derived edge set idempotently.</m>\n");
-    xml.push_str("      <m sig=\"add_nodes_bulk(specs)\">Bulk load multiple node types: [{'node_type': ..., 'data': df, ...}].</m>\n");
+    xml.push_str("      <m sig=\"add_nodes_bulk(specs, git_sha=None, modified_by=None)\">Bulk load multiple node types with optional provenance.</m>\n");
     xml.push_str(
-        "      <m sig=\"add_connections_bulk(specs)\">Bulk load multiple connection types.</m>\n",
+        "      <m sig=\"add_connections_bulk(specs, git_sha=None, modified_by=None)\">Bulk load multiple connection types with optional provenance.</m>\n",
     );
     xml.push_str("      <m sig=\"kglite.from_blueprint(path, verbose=False)\">Build graph from JSON blueprint + CSVs.</m>\n");
     xml.push_str("      <m sig=\"kglite.from_records(spec, on_missing_endpoint='vivify')\">Build from inline JSON records. Missing endpoints: 'vivify'|'drop'|'error' (atomic).</m>\n");
@@ -1350,6 +1350,7 @@ pub(super) fn write_fluent_topic_transactions(xml: &mut String) {
     xml.push_str("    <methods>\n");
     xml.push_str("      <m sig=\"begin()\">Read-write transaction. Use as context manager.</m>\n");
     xml.push_str("      <m sig=\"begin_read()\">Read-only transaction (O(1) cost, no copy). Use as context manager.</m>\n");
+    xml.push_str("      <m sig=\"tx.cypher(query, git_sha=None, modified_by=None)\">Execute in a transaction; provenance applies to opted-in writes.</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"read-write\">with graph.begin() as tx: tx.select('Person').update({'verified': True})</ex>\n");
