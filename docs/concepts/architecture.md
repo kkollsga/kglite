@@ -143,10 +143,11 @@ parsing.
 
 ## Persistence
 
-`.kgl` snapshots use the RGF v4 container:
+`.kgl` snapshots use the current RGF v5 container:
 
 ```text
-magic RGF\x04
+magic RGF\x05
+codec tag (Postcard)
 core-data version (u32 LE)
 JSON metadata length + metadata
 zstd-compressed topology section
@@ -154,8 +155,8 @@ zstd-compressed column sections by node type
 optional embeddings, timeseries, and secondary-label sections
 ```
 
-Container and core-data versions are separate. RGF v3 is detected and refused
-with a rebuild message; it is not silently interpreted as v4. Within v4,
+Container, codec, and core-data versions are separate. RGF v4 remains readable;
+RGF v3 is detected and refused with a rebuild message. Within v5,
 metadata additions use serde defaults where compatible, while incompatible
 embedded cache layouts are detected explicitly. Index definitions are stored
 so non-persistent index structures can be rebuilt on load.

@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Documentation and onboarding accuracy.** README/ReadTheDocs now lead with
+  install, first-query, and high-level navigation paths; persistence,
+  transaction, timeout, multi-label, MCP/Bolt, Rust, and C-ABI guidance has
+  been reconciled with the shipped interfaces. Agent-facing Cypher
+  introspection no longer lists supported `FOREACH`/`CALL {}` features as
+  limitations or suggests that `SET n.type` retypes a node.
 - **MCP manifest bundled-tool overrides now apply to the completed router.**
   `hidden: true` removes a tool from discovery and rejects direct calls even
   when the route is registered by KGLite or a downstream extension; description

@@ -7,12 +7,41 @@
 [![License: MIT](https://img.shields.io/pypi/l/kglite)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
 [![Docs](https://img.shields.io/readthedocs/kglite)](https://kglite.readthedocs.io)
 
-KGLite is an embedded, Cypher-queryable knowledge graph for Python, built
-so you can hand it to an LLM agent. `pip install kglite`, shape your data as
-DataFrames, and query it with Cypher — your first graph in seconds. The 18 MB
-wheel links **zero network code** and ships a bundled MCP server, a
-`describe()` method that emits a system-prompt-shaped schema, and structural
-validators that compose with Cypher.
+KGLite is an embedded, Cypher-queryable knowledge graph for Python and Rust,
+built so the same graph can serve an application, an analyst, or an LLM agent.
+The Python wheel has no required Python runtime dependencies; the graph engine
+runs in-process without an external database service. The distribution also
+includes a CLI and MCP server, prompt-shaped `describe()` introspection, and
+structural validators that compose with Cypher.
+
+## Start here
+
+**Install → build one graph → query it:**
+
+```bash
+pip install kglite
+```
+
+```python
+import kglite
+
+graph = kglite.from_records({"nodes": [{
+    "type": "Person", "id_field": "id", "title_field": "name",
+    "records": [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}],
+}]})
+print(graph.cypher("MATCH (p:Person) RETURN p.name ORDER BY p.name").to_dicts())
+```
+
+Choose the path that matches what you are doing:
+
+- **[Getting Started](https://kglite.readthedocs.io/en/latest/python/getting-started.html)** — install, first graph, storage choices
+- **[Python API](https://kglite.readthedocs.io/en/latest/autoapi/kglite/index.html)** · **[Cypher](https://kglite.readthedocs.io/en/latest/reference/cypher-reference.html)** · **[Fluent API](https://kglite.readthedocs.io/en/latest/reference/fluent-api.html)**
+- **[MCP and agents](https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html)** · **[Rust](https://kglite.readthedocs.io/en/latest/rust/index.html)** · **[Operators](https://kglite.readthedocs.io/en/latest/operators/index.html)**
+- **[0.13 → 0.14 migration](https://kglite.readthedocs.io/en/latest/python/migrations/0.13-to-0.14.html)** · **[all documentation](https://kglite.readthedocs.io)**
+
+For DataFrame loading, install the optional pandas integration with
+`pip install "kglite[pandas]"`; the complete walkthrough is in
+**[Quick Start](#quick-start)**.
 
 > kglite is a **pure-Rust knowledge graph engine**
 > ([`crates/kglite`](https://github.com/kkollsga/kglite/tree/main/crates/kglite))
@@ -199,7 +228,7 @@ graph.add_connections(knows, connection_type="KNOWS",
                       source_type="Person", source_id_field="src",
                       target_type="Person", target_id_field="tgt")
 
-# Query — returns a ResultView (lazy; data stays in Rust until accessed).
+# Query — returns a ResultView; eligible projections stay lazy until accessed.
 for row in graph.cypher("""
     MATCH (p:Person) WHERE p.age > 30
     RETURN p.name AS name, p.city AS city
@@ -235,9 +264,10 @@ loads real CSVs end to end.
 
 ## Serve it to an agent
 
-The skill above is the zero-configuration review path. Use the MCP server when
-you want a graph kept warm across many calls, typed tool schemas, watch-mode
-refresh, root switching, or cached public-repository and source tools.
+Use the KGLite MCP server when you want a graph kept warm across many calls,
+with typed graph-query and lifecycle tools. Code-graph construction, repository
+cloning, and code-watch workflows belong to **codingest-mcp**, which embeds the
+same KGLite graph-serving surface.
 
 ### One command — any `.kgl` becomes an MCP server
 
@@ -245,11 +275,10 @@ refresh, root switching, or cached public-repository and source tools.
 kglite-mcp-server --graph path/to/graph.kgl
 ```
 
-The server exposes `cypher_query`, `graph_overview`, schema
-introspection, structural validators, and source-file tools over MCP
-stdio. Drop it into Claude Desktop / Cursor / any MCP-capable client
-and your graph is queryable. Works on every graph kglite can build —
-your own, Wikidata, Sodir, code graphs.
+The server exposes `cypher_query`, `graph_overview`, schema introspection, and
+structural validators over MCP stdio. When a valid `source_root` is configured,
+it also exposes source-file read/search tools. Drop it into Claude Desktop,
+Cursor, or another MCP-capable client and any KGLite graph is queryable.
 
 When you register it, point `command` at the **absolute path** to the
 binary (`/abs/path/to/venv/bin/kglite-mcp-server`), not a bare name — a
@@ -278,6 +307,7 @@ beside `wikidata.kgl`) and the server auto-loads it at boot.
 ```yaml
 name: Wikidata Explorer
 source_root: /path/to/related/source        # exposes read/grep/list
+skills: true                                # load bundled + project tool guidance
 trust:
   allow_embedder: true
 extensions:
@@ -295,8 +325,8 @@ No fork required for most customisation. **→
 
 ### Teach the MCP agent with bundled tool skills
 
-Markdown skill files (`<basename>.skills/*.md`) ship methodology for
-each tool. The agent reads `cypher_query.md` at session start to learn
+With `skills: true`, Markdown skill files (`<basename>.skills/*.md`) provide
+methodology for each tool. The agent reads `cypher_query.md` to learn
 your schema conventions, `read_code_source.md` to know when to drill
 into source vs. query the graph, etc. Three layers compose:
 kglite-bundled defaults + your project's `.skills/` overrides +
@@ -315,11 +345,19 @@ graphs — **SEC EDGAR** filings (insider transactions, institutional
 holdings, board composition, XBRL financials), **Wikidata** (the full
 `latest-truthy` RDF dump, parallel-decoded and built into a billion-edge
 graph), and **Sodir** (Norwegian Offshore Directorate petroleum data) —
-live in the companion **kglite-datasets** project. Each handles the
+live in the companion **[kglite-datasets](https://kglite-datasets.readthedocs.io)**
+project. Install it separately with `pip install kglite-datasets`; its Python
+package supplies the dataset-specific loaders while KGLite supplies the graph:
+
+```python
+import kglite_datasets  # choose a loader from the companion documentation
+```
+
+Each loader handles the
 *fetch + build + cache* cycle and returns a `KnowledgeGraph` you can
 `cypher()` against; kglite serves and queries the graphs they produce.
-The kglite engine itself links zero network code — the loaders are an
-opt-in companion install.
+The core graph engine does not require network access; fetching public data is
+an explicit companion-project operation.
 
 ## Recipes
 
@@ -386,20 +424,17 @@ Rust binary without the Python wheel in your build:
 ```toml
 # Cargo.toml
 [dependencies]
-kglite = "0.10"
+kglite = "0.14"
 ```
 
 ```rust
-use kglite::api::{load_file, session, Value};
+use kglite::api::{io::load_file, session, Value};
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let graph = load_file("my_graph.kgl")?;     // same .kgl as Python writes
     let params = HashMap::new();
-    let opts = session::ExecuteOptions {
-        params: &params, deadline: None, max_rows: None,
-        lazy_eligible: false, disabled_passes: None, embedder: None,
-    };
+    let opts = session::ExecuteOptions::eager(&params);
     let outcome = session::execute_read(
         &graph,
         "MATCH (p:Person) RETURN p.name LIMIT 5",
@@ -415,7 +450,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 Zero PyO3 in the dependency tree:
-`cargo tree -p your-crate | grep pyo3` → empty.
+`cargo tree -p your-crate | rg pyo3` → empty.
 
 - **[Rust quickstart](https://kglite.readthedocs.io/en/latest/rust/index.html)**
   — load + query + transaction examples.
@@ -435,9 +470,9 @@ for deployment.
 For **non-Rust language bindings** (Go via cgo, JavaScript via napi,
 JVM via JNI, .NET via P/Invoke), the
 [`crates/kglite-c`](https://github.com/kkollsga/kglite/tree/main/crates/kglite-c)
-crate exposes the engine through a stable C ABI — 35 `extern "C"`
-functions covering lifecycle / Cypher / embedder, plus a
-cbindgen-generated `kglite.h`. See
+crate exposes the engine through a stable C ABI covering lifecycle, sessions,
+Cypher, results, persistence, and embedders, plus a cbindgen-generated
+`kglite.h`. See
 [`docs/rust/c-abi.md`](https://kglite.readthedocs.io/en/latest/rust/c-abi.html)
 for the design and
 [`docs/rust/implementing-a-binding.md`](https://kglite.readthedocs.io/en/latest/rust/implementing-a-binding.html)
@@ -474,33 +509,9 @@ directory has runnable, self-contained artifacts:
 
 ## Benchmarks
 
-KGLite builds and queries Wikidata-scale graphs on a laptop. Measured
-with [`benchmarks/wiki_benchmark.py`](https://github.com/kkollsga/kglite/blob/main/benchmarks/wiki_benchmark.py)
-on an M-series MacBook.
-
-**Ingest** — full pipeline from compressed N-Triples to a queryable graph:
-
-| dataset   | triples | nodes  | edges  | ingest  | throughput       | peak RAM |
-|-----------|--------:|-------:|-------:|--------:|------------------|---------:|
-| wiki100m  |  100 M  |  938 K |  748 K |   29 s  | 3.4 M triples/s  |  1.3 GB  |
-| wiki500m  |  500 M  |  5.6 M |  6.7 M |  157 s  | 3.2 M triples/s  |  5.2 GB  |
-| wiki1000m |    1 B  | 14.7 M | 15.4 M |  395 s  | 2.5 M triples/s  |  7.0 GB  |
-
-Reloading a saved 1 B-triple graph from disk (7 GB on-disk): **3.5 s**.
-
-**Query latency on the 1 B-triple graph** (mapped storage):
-
-| Cypher                                                              |     wall |
-|---------------------------------------------------------------------|---------:|
-| `MATCH (n)-[:P31]->(:human) RETURN count(n)` — typed aggregation    |   0.5 ms |
-| `MATCH (a)-[:P31]->(b)-[:P279]->(c) LIMIT 10` — 2-hop typed         |   0.9 ms |
-| `MATCH (a)-[:P31]->(b {nid:'Q64'}) RETURN a LIMIT 20` — pivot       |     1 ms |
-| `MATCH (a)-[:P31]->(:human)` `MATCH (a)-[:P27]->(c) LIMIT 10` — join |   44 ms |
-
-Disk and mapped storage build at the same speed; mapped wins on
-small-result queries (in-memory inverted index), disk wins on
-unbounded typed traversals (sorted-CSR mmap I/O). No server, no
-tuning, same Python process as your code.
+Reproducible, versioned comparisons live in **[BENCHMARKS.md](BENCHMARKS.md)**.
+Run the public harness with `python benchmarks/benchmark.py`; maintainer-only
+storage and release-regression probes live under `tests/benchmarks/`.
 
 ## Key Features
 
@@ -567,15 +578,14 @@ fallback.
 
 ## Stability
 
-KGLite is Beta software, versioned under [SemVer](https://semver.org/).
-The Python API surface and the supported Cypher dialect have been
-largely stable across the `0.9` → `0.10` line; the occasional breaking
-change (e.g. the `0.10.10` node-id semantics unification) is called out
-prominently in the changelog. The Beta label reflects API maturity, not
-engine reliability — the storage and query engine are covered by parity
-oracles and a differential Cypher corpus on every change. Breaking changes
-are announced in
-[CHANGELOG.md](https://github.com/kkollsga/kglite/blob/main/CHANGELOG.md).
+KGLite is beta software and remains pre-1.0. Patch releases preserve public
+source APIs; a 0.x minor release may make an intentional breaking source-API
+change when it is documented with a migration path. Saved graph files have a
+separate format lifecycle: a release either reads an older format or refuses it
+with an explicit rebuild/migration error. See the current
+[0.13 → 0.14 migration guide](https://kglite.readthedocs.io/en/latest/python/migrations/0.13-to-0.14.html)
+and [CHANGELOG.md](https://github.com/kkollsga/kglite/blob/main/CHANGELOG.md).
+Storage parity and differential Cypher oracles run on every change.
 
 ## License
 

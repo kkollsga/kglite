@@ -1435,11 +1435,9 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
     xml.push_str("  <patterns>(n:Label), (n {prop: val}), (a)-[:TYPE]-&gt;(b), (a)-[:T*1..3]-&gt;(b), [x IN list WHERE pred | expr], n {.p1, .p2}</patterns>\n");
 
     xml.push_str("  <limitations>\n");
-    xml.push_str("    <item feature=\"FOREACH\" workaround=\"UNWIND list AS x CREATE/SET ... (equivalent result)\"/>\n");
-    xml.push_str("    <item feature=\"CALL {} subqueries\" workaround=\"Use WITH chaining or multiple cypher() calls\"/>\n");
     xml.push_str("    <item feature=\"LOAD CSV\" workaround=\"Use Python pandas/csv, then CREATE nodes from dicts\"/>\n");
     xml.push_str("    <item feature=\"CREATE INDEX\" note=\"Type indices are automatic; no manual index management needed\"/>\n");
-    xml.push_str("    <item feature=\"Multi-label nodes\" note=\"Supported since 0.10.5. Each node has a primary type (set at creation, immutable) plus optional secondary labels via SET n:Label / CREATE (n:A:B) / g.add_label(...). MATCH (n:A:B) AND-intersects. Retype via SET n.type = 'NewType'.\"/>\n");
+    xml.push_str("    <item feature=\"Primary-type mutation\" note=\"Each node has an immutable primary type plus optional secondary labels via SET n:Label / CREATE (n:A:B) / g.add_label(...). MATCH (n:A:B) AND-intersects. SET n.type writes a property; recreate or migrate the node to change its primary type.\"/>\n");
     xml.push_str("    <item feature=\"Variable-length weighted paths\" note=\"Unweighted variable-length paths (*1..3) are supported\"/>\n");
     xml.push_str("  </limitations>\n");
     xml.push_str("  <hint>Use graph_overview(cypher=['MATCH','cluster','spatial',...]) for detailed docs with examples.</hint>\n");

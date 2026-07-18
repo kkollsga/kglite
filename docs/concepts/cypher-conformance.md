@@ -80,7 +80,7 @@ Exit code: 0 if every query passes (modulo intentional divergences);
 ## Interpreting output
 
 ```
-summary: 201 checked — pass_result=199, fail_result=2,
+summary: N checked — pass_result=N-2, fail_result=2,
 fixture_activation=19, skip_kglite_extension=4
 
 FAIL membership_unknown: columns or rows differ

@@ -21,7 +21,7 @@
 #include <stdbool.h>
 
 /**
- * C-ABI-side error code. Variants 1-16 map 1:1 to
+ * C-ABI-side error code. Variants 1-17 map by meaning to
  * [`kglite::api::KgErrorCode`]; variants 100+ are C-ABI-specific
  * (invalid UTF-8 at the boundary, null pointer, OOM — conditions
  * that don't have a corresponding `KgErrorCode` because they

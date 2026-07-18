@@ -13,14 +13,13 @@ or [Rust guide](../rust/index.md).
   petgraph storage, indexes, the query pipeline.
 - **[Design decisions](design-decisions.md)** — the label
   model, why Cypher over SQL, transaction model.
-- **[Multi-label rationale](multi-label-rationale.md)** — why
-  kglite chose single-label (vs Neo4j's multi-label).
+- **[Multi-label rationale](multi-label-rationale.md)** — why KGLite uses an
+  immutable primary type plus optional secondary labels.
 - **[Cypher conformance](cypher-conformance.md)** — what subset
   of Cypher kglite supports + three-valued logic + the
   conformance harness.
-- **[Concurrency](concurrency.md)** — the single-owner contract,
-  `freeze()` snapshots for lock-free concurrent reads, `Arc<DirGraph>`
-  mutation semantics, and GIL handling.
+- **[Concurrency](concurrency.md)** — direct graph ownership, shared sessions,
+  optimistic commits, snapshots, and disk-backed generation semantics.
 - **[Generated project facts](../_generated/project-facts.md)** — workspace,
   package, CI, storage, format, and benchmark facts derived from source.
 

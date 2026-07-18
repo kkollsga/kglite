@@ -1,224 +1,55 @@
 # Adding a storage backend
 
-This guide walks through adding a new storage backend to KGLite. The
-example used here is `RecordingGraph`, the validation wrapper shipped
-in Phase 6 of the 0.8.0 refactor — a "real" backend built on top of
-the public trait surface that proves the architecture is actually
-open/closed.
+This is contributor guidance for a new production storage mode. Read
+[Architecture](architecture.md) and [Concurrency](concurrency.md) first: a
+backend participates in query execution, persistence, lifecycle, and the
+single-writer/stable-reader contract—not only trait dispatch.
 
-## TL;DR
+## Core traits
 
-Adding a backend is a **3-src-file change**:
+`crates/kglite/src/graph/storage/mod.rs` defines:
 
-1. **Own file** — `crates/kglite/src/graph/storage/<name>.rs`: a struct + `impl GraphRead for Name` (+ optionally `impl GraphWrite for Name`).
-2. **Enum variant** — `crates/kglite/src/graph/storage/backend.rs`: a new `GraphBackend::Name(...)` arm in the dispatch enum.
-3. **Re-export** — `crates/kglite/src/graph/storage/mod.rs`: `pub mod <name>; pub use <name>::Name;`.
+- `GraphRead` for counts, lookup, iteration, properties, and traversal.
+- `GraphWrite: GraphRead` for mutations.
 
-Plus a parity test in `tests/test_phaseN_parity.py` that wraps your
-backend in the existing cross-mode oracle.
+`GraphRead` uses generic associated iterator types and is not object-safe. Use
+`&impl GraphRead`, never `&dyn GraphRead`. Add a genuinely shared operation to
+the trait first, then implement it for every backend.
 
-## Pattern overview
+## Integration checklist
 
-KGLite's storage layer is anchored on two traits:
+1. Implement the storage type and its `GraphRead`/`GraphWrite` behavior under
+   `graph/storage/`.
+2. Add dispatch in `storage/backend.rs` and exports in `storage/mod.rs`.
+3. Wire construction/configuration in `storage/config.rs` and the API storage
+   facade. Decide what `is_memory`/`is_mapped`/`is_disk` means for the mode.
+4. Integrate open/save/copy/compaction semantics. Portable `.kgl` snapshots and
+   disk-generation directories have different publication lifecycles.
+5. Preserve indexes, schema, interner identity, tombstones, overlays, writer
+   leases, and stable readers across save/reopen.
+6. Add mode construction at every binding surface only if it is a user-facing
+   backend; keep binding-specific parsing outside the core.
 
-- `GraphRead` — read-side API (counts, per-node properties, iteration,
-  neighbour lookup, backend-kind predicates, edge accessors).
-- `GraphWrite: GraphRead` — mutations (add/remove node/edge,
-  `node_weight_mut`, `edge_weight_mut`, `update_row_id`).
+## RecordingGraph is a decorator, not a fourth storage mode
 
-Both live in `crates/kglite/src/graph/storage/mod.rs`. Iterator methods use generic
-associated types (GATs) — see the "GATs and object-safety" section of
-the trait doc. The trait is **not object-safe**; `&dyn GraphRead` does
-not compile. All consumers take `&impl GraphRead`.
+`storage/recording.rs` is the production WAL write-capture wrapper. Reads
+forward without logging or locking. Mutation methods append `RawOp` values to a
+buffer so durable in-memory lifecycle code can publish/replay them. It is useful
+for learning GAT forwarding and wrapper transparency, but it does not teach the
+construction/persistence work required by a new backend.
 
-The `GraphBackend` enum in `storage/backend.rs` is a **4-arm dispatcher** that
-routes to the per-backend `impl GraphRead` / `impl GraphWrite` impls
-(currently `MemoryGraph`, `MappedGraph`, `DiskGraph`, and
-`RecordingGraph` as the wrapping variant).
+## Required verification
 
-## Worked example: RecordingGraph
+- Rust trait/unit tests for every operation and iterator lifetime.
+- `tests/test_storage_parity.py` plus `tests/test_phase{1,2,3}_parity.py` for
+  memory/mapped/disk equivalence.
+- Persistence, copy-independence, lifecycle, concurrency, and sidecar-integrity
+  suites relevant to the mode.
+- Small in-memory benchmarks before changing shared planner/executor paths;
+  in-memory remains the performance gate.
+- `cargo build --lib`, `make lint`, `make test-full`, and the CI-only C-ABI/API
+  profile checks described in `AGENTS.md`.
 
-RecordingGraph is a thin wrapper backend that logs every `GraphRead`
-method call to a `Mutex<Vec<&'static str>>` while forwarding every
-call to an inner backend. It's generic over any `G: GraphRead`, so
-you can wrap a Memory / Mapped / Disk graph and get a read-audit
-log for free. It's Rust-only (no Python constructor reaches it) — the
-parity matrix for it lives in `crates/kglite/src/graph/storage/recording.rs::tests`.
-
-### 1. Write the backend module
-
-File: `crates/kglite/src/graph/storage/recording.rs`.
-
-```rust
-use crate::graph::storage::{GraphRead, GraphWrite};
-use std::sync::Mutex;
-
-pub struct RecordingGraph<G> {
-    pub(crate) inner: G,
-    log: Mutex<Vec<&'static str>>,
-}
-
-impl<G: GraphRead> RecordingGraph<G> {
-    pub fn new(inner: G) -> Self {
-        RecordingGraph {
-            inner,
-            log: Mutex::new(Vec::new()),
-        }
-    }
-
-    pub fn log(&self) -> Vec<&'static str> {
-        self.log.lock().unwrap().clone()
-    }
-}
-
-impl<G: GraphRead> GraphRead for RecordingGraph<G> {
-    // Associated types forward directly — GATs just thread through.
-    type NodeIndicesIter<'a> = G::NodeIndicesIter<'a> where Self: 'a;
-    type EdgesIter<'a> = G::EdgesIter<'a> where Self: 'a;
-    // ...one per iterator-returning method...
-
-    fn node_count(&self) -> usize {
-        self.log.lock().unwrap().push("node_count");
-        self.inner.node_count()
-    }
-
-    // ...etc for every trait method. The body is always:
-    //   1. push the method name into the log
-    //   2. forward to `self.inner`
-}
-
-// GraphWrite passthrough (mutations don't log — scope decision).
-impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
-    fn add_node(&mut self, data: NodeData) -> NodeIndex {
-        self.inner.add_node(data)
-    }
-    // ...etc...
-}
-```
-
-Key points:
-
-- **Generic over `G`** — you don't have to know the concrete backend at compile time.
-- **GATs forward directly** — `type NodeIndicesIter<'a> = G::NodeIndicesIter<'a>`.
-- **`Mutex` not `RefCell`** — PyO3 requires the outer `KnowledgeGraph` class to be `Send`, and `RefCell: !Send`.
-- **`log` is `Vec<&'static str>`, not a typed `ReadOp` enum** — simpler, equally testable.
-
-### 2. Add the enum variant
-
-File: `crates/kglite/src/graph/storage/backend.rs`.
-
-```rust
-pub enum GraphBackend {
-    Memory(MemoryGraph),
-    Mapped(MappedGraph),
-    Disk(Box<DiskGraph>),
-    // New variant, boxed to avoid infinite recursion on the generic
-    // (GraphBackend contains a RecordingGraph<GraphBackend>).
-    Recording(Box<RecordingGraph<GraphBackend>>),
-}
-```
-
-And extend every `impl GraphRead for GraphBackend` method with the
-fourth arm:
-
-```rust
-impl GraphRead for GraphBackend {
-    fn node_count(&self) -> usize {
-        match self {
-            Self::Memory(g) => GraphRead::node_count(g),
-            Self::Mapped(g) => GraphRead::node_count(g),
-            Self::Disk(g) => GraphRead::node_count(g.as_ref()),
-            Self::Recording(rg) => GraphRead::node_count(rg.as_ref()),
-        }
-    }
-    // ...
-}
-```
-
-The `is_memory` / `is_mapped` / `is_disk` helpers should **look through
-the wrapper** — `GraphBackend::Recording(wrapping Memory)` should
-report `is_memory() == true` so downstream call sites that gate on
-backend kind continue to work:
-
-```rust
-fn is_memory(&self) -> bool {
-    match self {
-        Self::Memory(_) => true,
-        Self::Recording(rg) => GraphRead::is_memory(rg.as_ref()),
-        _ => false,
-    }
-}
-```
-
-### 3. Register the module
-
-File: `crates/kglite/src/graph/storage/mod.rs`.
-
-```rust
-pub mod recording;
-pub use recording::RecordingGraph;
-```
-
-That's the whole PR surface. Total LoC: ~500 (the wrapper is mostly
-mechanical forwarding).
-
-## Testing
-
-Every new backend should pass the **cross-backend parity oracle**.
-Phases 1–6 each ship a `tests/test_phaseN_parity.py` file; the
-relevant one for your phase asserts behaviour identity across backends
-for a curated query set. A new backend joins the parametrization:
-
-```python
-@pytest.fixture(params=["memory", "mapped", "disk", "my_new_backend"])
-def kg(request):
-    ...
-```
-
-For Rust-only backends like `RecordingGraph` (no Python constructor),
-the tests live inline in the backend's own `.rs` file under
-`#[cfg(test)] mod tests`:
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn logs_node_count() {
-        let mem = MemoryGraph::default();
-        let rg = RecordingGraph::new(mem);
-        let _ = rg.node_count();
-        assert_eq!(rg.log(), vec!["node_count"]);
-    }
-
-    // ...one per GraphRead method + one cross-backend parity matrix...
-}
-```
-
-`RecordingGraph` ships with 13 unit tests covering the full trait
-surface on each of the three production backends it can wrap.
-
-## File-count budget
-
-The centralized source-quality gate (`scripts/check_source_quality.py`)
-keeps backend dispatch exceptions explicit and rejects stale allowances. A
-wrapper backend normally touches only these three source files:
-
-- own file (`crates/kglite/src/graph/storage/recording.rs`)
-- enum + dispatch (`crates/kglite/src/graph/storage/backend.rs`)
-- re-export (`crates/kglite/src/graph/storage/mod.rs`)
-
-Anything more than that means either (a) the new backend couldn't
-express itself in the existing trait surface (add the method to the
-trait + implement for every backend, not just yours), or (b) the
-backend leaked concrete-type matches somewhere outside the dispatch
-layer. Both require design revisions.
-
-## Reading more
-
-- `crates/kglite/src/graph/storage/mod.rs` — the `GraphRead` / `GraphWrite` trait surface.
-- `crates/kglite/src/graph/storage/recording.rs` — the worked example from this guide.
-- `crates/kglite/src/graph/storage/impls.rs` — the three production backends' trait impls (Memory / Mapped / Disk).
-- `crates/kglite/src/graph/storage/backend.rs` — the 4-arm `GraphBackend` dispatcher.
-- `dev_workfolder/dev-documentation/todo.md` Phase 6 Report-out (gitignored, repo-checkout only) — lessons learned from RecordingGraph's implementation.
+Start at `storage/mod.rs`, `storage/backend.rs`, and the closest existing
+backend. Do not copy internal implementation details across modes when a trait
+operation or mode-specific strategy can state the contract directly.

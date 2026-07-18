@@ -1,9 +1,7 @@
 # Value projection — how RETURN materialises
 
-> Companion to [`bolt-implementation.md`](https://github.com/kkollsga/kglite/blob/main/docs/history/bolt-implementation.md)
-> Phase A.1. Reference for reviewers of the executor / projection code,
-> and for implementers of future bindings (Bolt server in
-> `crates/kglite-bolt-server`, Arrow exporter, Polars adapter).
+> Reference for reviewers of the executor/projection code and implementers of
+> bindings or structured-result adapters.
 
 This page documents what happens between a Cypher `RETURN` clause and
 a Python dict in your hand. It explains the `Value` enum, the
@@ -12,8 +10,7 @@ serialised `.kgl` format, and the contract that bindings consume.
 
 ## The `Value` enum
 
-Defined at `crates/kglite/src/datatypes/values.rs`. Fourteen variants today (Phase
-A.1 added five):
+Defined at `crates/kglite/src/datatypes/values.rs`. Sixteen variants today:
 
 | Variant | What it carries | Bolt PackStream analogue |
 |---|---|---|
@@ -23,7 +20,8 @@ A.1 added five):
 | `Float64(f64)` | IEEE 754 double | FLOAT (`0xC1`) |
 | `UniqueId(u32)` | node-id-style integer | INT (cast to i64) |
 | `String(String)` | UTF-8 | STRING (sized) |
-| `DateTime(NaiveDate)` | calendar date (no time-of-day yet) | Struct `0x44` (Date) |
+| `DateTime(NaiveDate)` | calendar date | Struct `0x44` (Date) |
+| `Timestamp(NaiveDateTime)` | date + time-of-day, second precision | local date-time structure |
 | `Point { lat, lon }` | 2D geographical point | Struct `0x58` (Point2D, srid=4326) |
 | `Duration { months, days, seconds }` | Neo4j-shape calendar duration | Struct `0x45` (Duration) |
 | **`NodeRef(u32)`** | **transient internal handle (see below)** | — never crosses the boundary |
@@ -33,9 +31,8 @@ A.1 added five):
 | **`List(Vec<Value>)`** | ordered heterogeneous list | LIST (sized) |
 | **`Map(BTreeMap<String, Value>)`** | string-keyed map (deterministic order) | MAP (sized) |
 
-Phase A.1 / C5 bumped the `.kgl` format from v3 → v4 to mark the enum
-extension. Old v3 files are **rejected** by the v4 binary with a clear
-"rebuild your graph" error — no read-compat path.
+Persistence uses the explicitly versioned RGF v5/Postcard container. The
+current reader accepts v5/v4 and rejects v3 with a clear rebuild error.
 
 ## `NodeRef` vs `Node` — transient vs materialised
 
@@ -96,8 +93,7 @@ CypherResult     rows: [[ Value::Node(...) ]]
   │
   ▼
 Python boundary  preprocess_values_owned wraps each Value in
-                 PreProcessedValue::Plain (single-variant enum
-                 post-Phase A.1 / C7a)
+                 PreProcessedValue::Plain
   │
   ▼
 py_out::value_to_py(py, &Value::Node(node_val)) →
@@ -117,7 +113,7 @@ behaviours in lockstep.
 ## At the Python boundary
 
 `crates/kglite-py/src/datatypes/py_out.rs::value_to_py` recursively converts the
-fourteen `Value` variants to Python objects. The shapes consumers
+sixteen `Value` variants to Python objects. The shapes consumers
 see:
 
 ```python
@@ -137,42 +133,39 @@ see:
 [{"P": {"id": "alice", "title": "Alice", "age": 30, "city": "Oslo"}}]
 ```
 
-**What changed from pre-A.1**: `RETURN n` used to return
-`Value::String(node.title)` — a plain title string. `labels(n)` used
-to return a JSON-encoded string `'["Person"]'` that a Python-side
-inference hack auto-parsed back into a list (based on the leading
-`[`). Both surfaces are now native; the inference hack is deleted.
+`RETURN n` and `labels(n)` expose native structured values. Bindings should not
+infer types by parsing JSON-looking strings.
 
 The lazy `ResultView` path is preserved: when the planner flags a
 terminal `RETURN` as `lazy_eligible`, per-cell materialisation runs
 on Python access (cached via `Mutex<Vec<Option<Vec<PreProcessedValue>>>>`).
-The cell shape got richer post-A.1 (one `Box<NodeValue>` per node
-projection, vs. one `u32` pre-A.1) — see the Performance note at the
-bottom of `docs/history/bolt-implementation.md`.
+Node projections materialise one `Box<NodeValue>` per accessed cell; release
+performance baselines cover this path.
 
 ## In `.kgl` files
 
-The `.kgl` v4 format (Phase A.1 / C5) is a binary container:
+The current `.kgl` format is an RGF v5 binary container:
 
 ```
-[0..4]    Magic: b"RGF\x04"
-[4..8]    core_data_version: u32 LE (== 2 for the post-A.1 layout)
+[0..4]    Magic: b"RGF\x05"
+[4]       codec tag: Postcard
+[...]     core_data_version (currently 3)
 [8..12]   metadata_length: u32 LE
 [12..N]   JSON metadata (column schemas, section sizes, all config)
 [section] topology.zst — graph structure without node properties
 [section] columns_<Type>.zst — packed property columns per type
 [section] embeddings.zst (optional)
 [section] timeseries.zst (optional)
+[section] secondary labels / vector-index metadata (optional)
 ```
 
 `Value` serialises via `serde` with a discriminant tagged by
 variant position. The order in `crates/kglite/src/datatypes/values.rs` is
 intentionally stable for the first 9 variants (Null=0 .. Duration=8)
-so any future enum changes append at the end (variants 9..=14
-today). The format-version + magic-byte bump in C5 makes the
-break explicit: a v3 binary cannot read a v4 file (unknown
-discriminants 9..=13 mid-stream), and the v4 binary refuses v3 files
-outright with a documented error rather than silently misinterpreting.
+so future enum changes append at the end (Timestamp is discriminant 15).
+The container and codec tags make compatibility explicit: the current reader
+selects v5/Postcard or the supported v4 legacy decoder by header and refuses v3
+rather than guessing.
 
 The `tests/test_phase4_parity.py::test_kgl_v3_golden_hash` byte-level
 tripwire fires on any drift in the saved layout; the
@@ -182,10 +175,10 @@ hard-break error message.
 ## For binding implementers
 
 If you're writing a binding that consumes `CypherResult` from Rust —
-the Bolt server (`crates/kglite-bolt-server`, Phase C), an Arrow
+the Bolt server (`crates/kglite-bolt-server`), an Arrow
 exporter, a Polars adapter, a JNI bridge, anything that reads
 `Vec<Vec<Value>>` and produces a downstream shape — your value-mapping
-layer is responsible for the 15 variants.
+layer is responsible for all 16 variants.
 
 The reference table at the top of this page maps each variant to its
 Bolt PackStream analogue. For other targets:
@@ -204,9 +197,9 @@ Bolt PackStream analogue. For other targets:
   may add a tagged-union accessor for performance-critical
   row-by-row consumption; the JSON-at-boundary path is fine for
   the common-case query sizes. See
-  [`docs/rust/c-abi.md`](../rust/c-abi.md) §7.
+  [`docs/rust/c-abi.md`](../rust/c-abi.md).
 
-The `Value::type_name() -> &'static str` method (added in C7a, at
+The `Value::type_name() -> &'static str` method (at
 `crates/kglite/src/datatypes/values.rs`) returns the canonical PascalCase variant
 name — useful for binding-side dispatch tables. The `impl Display`
 gives a debug-shaped string suitable for log lines and error
@@ -227,8 +220,6 @@ explicitly.
 
 ## See also
 
-- `docs/history/bolt-implementation.md` — Phase A.1 plan + the broader Bolt
-  implementation roadmap.
 - `docs/concepts/multi-label-rationale.md` — multi-label nodes
   shipped in 0.10.5. `labels()` now returns `[primary, ...secondaries]`.
 - `docs/concepts/design-decisions.md` — the "why" behind the

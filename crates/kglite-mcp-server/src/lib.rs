@@ -1,9 +1,8 @@
 //! `kglite-mcp-server` — single MCP server for KGLite knowledge graphs.
 //!
-//! Layers three kglite-specific tools on top of the generic
-//! `mcp-server` framework: `cypher_query`, `graph_overview`, and
-//! `save_graph`. All three close over a [`GraphState`] holding the
-//! active `KnowledgeGraph` Python object.
+//! Layers KGLite graph/query/source tools on top of the generic `mcp-server`
+//! framework. The graph tools close over a [`GraphState`] holding the active
+//! pure-Rust graph.
 //!
 //! ## Two frontends, one library
 //!
@@ -22,10 +21,10 @@
 //!
 //! Modes:
 //! - `--graph X.kgl` — load a pre-built graph file at boot.
-//! - `--workspace DIR` — multi-repo. Post-activate hook runs
-//!   `kglite.code_tree.build()` on each cloned repo.
-//! - `--watch DIR` — file-watcher mode. Change handler rebuilds the
-//!   code-tree graph and atomic-swaps the active slot.
+//! - `--workspace DIR` — multi-repo source workspace. Code-graph construction
+//!   requires injected [`CodeTreeHooks`] (for example from `codingest-mcp`).
+//! - `--watch DIR` — file-watcher mode. With injected builder hooks, changes
+//!   rebuild and atomically swap the active graph.
 //! - `--source-root DIR` — generic file-tree mode (no graph).
 //! - bare — framework + manifest tools only.
 

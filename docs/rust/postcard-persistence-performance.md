@@ -1,4 +1,13 @@
-# Postcard persistence performance gate
+---
+orphan: true
+---
+
+# Historical: Postcard persistence performance gate
+
+This is archived release evidence for the 0.13.3-to-Postcard migration, not a
+current benchmark or a command recipe for building today's release. Use
+`BENCHMARKS.md` and the repository's current benchmark baselines for present
+performance work.
 
 Measured 2026-07-15 on an Apple M4 Mac mini. This is the release gate for the
 bincode-to-Postcard persistence migration; it is not a general product

@@ -3,7 +3,10 @@
 KGLite supports a substantial Cypher subset. This page covers the essentials — see the [full Cypher reference](../../reference/cypher-reference.md) for complete documentation of every clause and function.
 
 ```{note}
-**Label model:** Each node has one immutable **primary** type plus optional secondary labels (multi-label since 0.10.5). `CREATE (n:A:B)`, `SET n:B`, `REMOVE n:B`, and `MATCH (n:A:B)` all work; `labels(n)` returns a list with the primary type first. Change the primary type via `SET n.type = 'NewType'`.
+**Label model:** Each node has one immutable **primary** type plus optional
+secondary labels. `CREATE (n:A:B)`, `SET n:B`, `REMOVE n:B`, and
+`MATCH (n:A:B)` all work; `labels(n)` returns a list with the primary type
+first. `SET n.type` writes an ordinary property—it does not retype the node.
 ```
 
 ## Basic Queries
@@ -101,11 +104,11 @@ zero-row mystery into an actionable typo hint.
 ### Timeouts and row caps
 
 ```python
-# Abort after 500 ms; rows reflect the partial set, diagnostics['timed_out'] is True
+# Abort after 500 ms; raises kglite.CypherTimeoutError (no partial result)
 graph.cypher(long_query, timeout_ms=500)
 
 # Cap intermediate rows and retained collection/work growth. Exceeding the
-# cap raises an error; writes roll back the complete statement.
+# cap raises an error. Use Session/Transaction for rollback-safe writes.
 graph.cypher(broad_query, max_rows=1000)
 
 # Set graph-wide defaults (per-query args still override)
@@ -314,8 +317,9 @@ MATCH (a:Agent {id: $id}) SET a:Verified:Reviewer    -- add several
 MATCH (a:Agent {id: $id}) REMOVE a:Verified         -- remove one
 ```
 
-The primary label is immutable through `SET`/`REMOVE`. To
-retype a node, use the type property:
+The primary label is immutable through `SET`/`REMOVE`. To change it, recreate
+the node under the new primary type and migrate its properties and edges.
+This query only writes a property and therefore does **not** retype the node:
 
 ```cypher
 MATCH (n:Article {id: $id}) SET n.type = 'BlogPost'
@@ -367,24 +371,16 @@ graph.cypher("""
 """)
 ```
 
-## Supported Cypher Subset
+## Supported Cypher surface
 
-| Category | Supported |
-|----------|-----------|
-| **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CALL { ... }` (read subqueries), `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN` |
-| **Patterns** | Node `(n:Type)`, multi-label `(n:Type:Role)` (AND-intersect), relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val}`, `p = shortestPath(...)` |
-| **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern }`, `EXISTS(( pattern ))` |
-| **Subqueries** | `count{ pattern }` (degree / filtered neighbour counts), `EXISTS{ pattern }`, `CALL { ... }` read subqueries — uncorrelated (cartesian-combined) + correlated (`CALL { WITH p ... }`, per outer row); v1 excludes writes / `UNION` / unit subqueries in the body |
-| **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `type`, `id`, `labels`, `coalesce`, `count`, `sum`, `avg`, `min`, `max`, `collect`, `std`, `text_score` |
-| **Spatial** | `point`, `distance`, `contains`, `intersects`, `centroid`, `area`, `perimeter`, `latitude`, `longitude` |
-| **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args |
-| **CALL procedures** | Graph algorithms (`pagerank`, `betweenness`, `degree`, `closeness`, `louvain`, `label_propagation`, `connected_components`, `cluster`); structural validators (`orphan_node`, `self_loop`, `cycle_2step`, `missing_required_edge`, `missing_inbound_edge`, `duplicate_title`); code graphs (`affected_tests` for transitive test impact); planner (`refresh_stats` for cardinality cache refresh); `list_procedures` to enumerate. Map-syntax parameters: `CALL pagerank({damping_factor: 0.85})` |
-| **Label mutation** | `SET n:Label`, `SET n:A:B` (multi), `REMOVE n:Label`, `CREATE (n:A:B)`; primary label is immutable via these — use `SET n.type = 'NewType'` to retype |
-| **Not supported** | `FOREACH`, variable-length path filters |
+The machine-checked [Cypher reference](../../reference/cypher-reference.md)
+is the authority for clauses, expressions, procedures, and intentional
+divergences. In particular, updating `FOREACH` bodies are supported; do not
+use older subset lists copied from release notes as a compatibility contract.
 
 ## Structural-validator CALL procedures
 
-Six procedures surface data-integrity gaps without writing
+Fourteen procedures surface data-integrity gaps without writing
 `WHERE NOT EXISTS` patterns yourself. Each binds `node` (or
 `node_a, node_b`) — compose freely with WHERE / ORDER BY / LIMIT /
 aggregation as you would any Cypher row.

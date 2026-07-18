@@ -1,760 +1,127 @@
 # Implementing a binding
 
-This document is the **deep-dive companion** to
-[`embedding.md`](embedding.md) and [`session.md`](session.md). Those
-two cover the broad shape of the engine and the canonical Cypher
-pipeline. This document covers the concerns that surface specifically
-when you sit down to write a new wrapper — error mapping, embedder
-implementation, dataset wrapping patterns, the bridge-layer choice.
+Choose the boundary by implementation language:
 
-If you only want to embed kglite from a Rust binary, start with
-[`embedding.md`](embedding.md) and stop there. If you want to
-publish a Go, JavaScript, JVM, or other-language binding that other
-people will depend on — read this one.
+- A Rust-side wrapper (PyO3, Bolt, MCP, a Rust service) calls
+  `kglite::api::*` directly.
+- A non-Rust wrapper (cgo, napi, JNI, P/Invoke, Swift FFI) calls the supported
+  [`kglite-c` ABI](c-abi.md).
 
-## Reference implementations
+Precompiled C ABI libraries are not currently attached to releases; non-Rust
+bindings must build and package the matching `kglite-c` library for each target.
 
-KGLite ships **three working bindings**. They are the canonical
-worked examples; every pattern in this guide is grounded in one of
-them.
+Do not bind internal `graph::*`/`datatypes::*` modules or recreate the query
+pipeline in the wrapper.
 
-| Binding | Path | Audience | Bridge style |
-|---|---|---|---|
-| **`kglite-py`** | `crates/kglite-py/` | `pip install kglite` users; Jupyter; the bundled MCP server | PyO3 (Rust → CPython C ABI) |
-| **`kglite-bolt-server`** | `crates/kglite-bolt-server/` | Anything that talks the Neo4j Bolt protocol — `cypher-shell`, the official drivers, Neo4j Browser | Network protocol (no in-process binding; you connect over TCP) |
-| **`kglite-mcp-server`** | `crates/kglite-mcp-server/` | LLM agents speaking the Model Context Protocol | Network protocol (stdio or TCP) |
+## Boundary principle
 
-When in doubt about an unfamiliar concern, the right move is to grep
-the existing binding crates for how they handled it. They are the
-deployed answer.
+Core owns synchronous, binding-independent behavior: graph lifecycle, storage
+configuration, typed errors, the session/transaction state machine, the
+canonical Cypher pipeline, and embedder registration. Wrappers own runtime
+idioms: async scheduling, wire/value conversion, display/error formatting,
+iteration/chunking, logging, teardown, authentication, and transport.
 
-## The bridge-layer choice
+Cypher is the first choice for query-expressible features. Add direct API only
+for lifecycle/configuration/registration work Cypher cannot express. Read the
+full [boundary principle](boundary-principle.md) before adding a surface.
 
-Your binding needs to get values across the language boundary. KGLite
-the engine is a Rust library — it doesn't know your language exists.
-You have three options:
+## Rust-side wrapper
 
-### Option 1 — Rust-to-Rust direct (no bridge)
+```rust
+use kglite::api::{io::load_file, session::{execute_read, ExecuteOptions}};
+use std::collections::HashMap;
 
-The simplest case. Your "binding" is another Rust crate (a CLI tool,
-a custom server, a worker process). You depend on `kglite` directly,
-call `kglite::api::*` functions, get back native Rust types. No FFI,
-no marshalling, no glue.
-
-```toml
-[dependencies]
-kglite = "0.11"
+let graph = load_file("graph.kgl")?;
+let params = HashMap::new();
+let opts = ExecuteOptions::eager(&params);
+let outcome = execute_read(&graph, "MATCH (n) RETURN count(n)", &opts)?;
 ```
 
-Everything in this guide still applies, but the FFI sections are
-informational rather than required.
+Use `api::session::{execute_read, execute_mut}` so parsing, schema validation,
+optimizer passes, budgets, cancellation, write scope, and provenance remain
+identical across wrappers. Use `Session`/`Transaction` when failed mutations
+must not publish.
 
-The bolt-server crate is the canonical worked example of this style.
-It depends on `kglite` directly, wraps `Session` in its own
-connection-state struct, and never crosses a language boundary.
+`ExecuteOptions::cancel` has the lifetime required by the public signature; do
+not hand it an ordinary request-local atomic. A wrapper can enforce its own
+request deadline or own a cancellation flag with a sufficiently long lifetime.
 
-### Option 2 — Language-specific FFI (the common case)
+RDF ingestion is feature-gated and lives under
+`kglite::api::io::{load_rdf, load_ntriples}`. Code-graph construction belongs
+to codingest; link its own documentation rather than promising an unverified
+function signature here.
 
-You're writing a Go binding (cgo), a Node binding (napi-rs), a JVM
-binding (jni-rs), a .NET binding (com-rs), etc. Each language
-has a runtime-specific Rust crate that handles the lowest-level
-marshalling.
+## Non-Rust wrapper
 
-Your binding becomes a Rust crate that:
+Include the generated header and use only exported functions:
 
-1. Depends on `kglite` (the engine) **and** on the language-specific
-   FFI crate (`napi`, `jni`, `pyo3`, etc.).
-2. Wraps `kglite::api::*` functions with the FFI macros for the
-   target runtime.
-3. Builds as a `cdylib` (or whatever your runtime wants) and is
-   loaded into the host process.
-
-The pyapi crate (`crates/kglite-py/`) is the canonical worked example.
-It's a 5k-line crate that wraps everything you'd want from Python:
-`KnowledgeGraph` PyClass, `Selection` PyClass, NumPy/Pandas conversion,
-async/GIL handling, the works. A Go binding aiming for similar
-completeness would be similar size.
-
-For the smaller-bridge approach (just the engine, no ergonomics) the
-crate is more like 1k lines — see the `cgo sketch` in
-[embedding.md](embedding.md#non-rust-bindings-via-the-c-abi).
-
-### Option 3 — Use the `kglite-c` crate (the canonical non-Rust path)
-
-`crates/kglite-c/` exposes `kglite::api::*` through a stable C ABI.
-Every language with FFI (Go, JavaScript, JVM, .NET, …) can bind to
-kglite through a single C header without writing Rust.
-
-The conventions are fixed in [`c-abi.md`](c-abi.md); the short
-version:
-
-- `kglite_` prefix on every function.
-- Opaque-handle pattern: `KgliteGraph*` / `KgliteSession*` /
-  `KgliteCypherResult*` / `KgliteEmbedder*` / `KgliteSecClient*`.
-- Errno-style errors: every fallible function returns
-  `KgliteStatusCode` (0 = OK) with out-parameters for both the
-  result handle and an owned error-message string. 16 status
-  variants map 1:1 to `KgErrorCode`; three are C-ABI-specific
-  (`KGLITE_STATUS_CODE_INVALID_UTF8`, `_NULL_POINTER`, `_OUT_OF_MEMORY`).
-- Memory: caller frees every `*mut T` handle via the type's
-  `kglite_<type>_free`; every owned out-string via the single
-  `kglite_free_string`.
-- Sync-only: bindings own their async/threading. Async dataset
-  fetchers expose `*_blocking` companions.
-- JSON-at-boundary: parameters in, rows out, dataset reports out —
-  all as JSON strings. Caller parses with their language's stdlib
-  JSON facility.
-
-#### Setup
-
-```toml
-# Cargo.toml of an in-Rust consumer
-[dependencies]
-kglite-c = "0.13"     # cdylib + staticlib + rlib
-```
-
-For non-Rust consumers, link against `libkglite_c.{so,dylib,dll}`
-and include the header that ships at
-`crates/kglite-c/include/kglite.h`. Build the platform library from
-the `kglite-c` source crate with `cargo build --release -p kglite-c`.
-Precompiled C ABI libraries are not currently attached to releases; the
-generated header is committed in the repository and included with the source
-crate.
-
-#### Worked example — cgo (Go)
-
-```go
-package kglite
-
-/*
-#cgo LDFLAGS: -lkglite_c
-#include <stdlib.h>
+```c
 #include "kglite.h"
-*/
-import "C"
 
-import (
-    "encoding/json"
-    "errors"
-    "fmt"
-    "unsafe"
-)
-
-type Graph struct {
-    handle *C.KgliteGraph
-}
-
-func LoadFile(path string) (*Graph, error) {
-    cpath := C.CString(path)
-    defer C.free(unsafe.Pointer(cpath))
-
-    var graph *C.KgliteGraph
-    var errMsg *C.char
-    rc := C.kglite_load_file(cpath, &graph, &errMsg)
-    if rc != C.KGLITE_STATUS_CODE_OK {
-        defer C.kglite_free_string(errMsg)
-        return nil, fmt.Errorf("load_file: %s", C.GoString(errMsg))
-    }
-    return &Graph{handle: graph}, nil
-}
-
-func (g *Graph) Close() {
-    C.kglite_graph_free(g.handle)
-    g.handle = nil
-}
-
-type Session struct {
-    handle *C.KgliteSession
-}
-
-func (g *Graph) NewSession() (*Session, error) {
-    var sess *C.KgliteSession
-    rc := C.kglite_session_new(g.handle, &sess)
-    if rc != C.KGLITE_STATUS_CODE_OK {
-        return nil, errors.New("session_new failed")
-    }
-    // Graph ownership moved into the session.
-    g.handle = nil
-    return &Session{handle: sess}, nil
-}
-
-func (s *Session) Cypher(query string, params map[string]any) ([]map[string]any, error) {
-    cquery := C.CString(query)
-    defer C.free(unsafe.Pointer(cquery))
-
-    var cparams *C.char
-    if params != nil {
-        paramJSON, _ := json.Marshal(params)
-        cparams = C.CString(string(paramJSON))
-        defer C.free(unsafe.Pointer(cparams))
-    }
-
-    var result *C.KgliteCypherResult
-    var errMsg *C.char
-    rc := C.kglite_session_execute_read(s.handle, cquery, cparams, &result, &errMsg)
-    if rc != C.KGLITE_STATUS_CODE_OK {
-        defer C.kglite_free_string(errMsg)
-        return nil, fmt.Errorf("execute_read: %s", C.GoString(errMsg))
-    }
-    defer C.kglite_cypher_result_free(result)
-
-    rowsJSON := C.kglite_cypher_result_rows_json(result)
-    defer C.kglite_free_string(rowsJSON)
-
-    var rows []map[string]any
-    if err := json.Unmarshal([]byte(C.GoString(rowsJSON)), &rows); err != nil {
-        return nil, err
-    }
-    return rows, nil
+KgliteGraph *graph = NULL;
+const char *error = NULL;
+KgliteStatusCode status = kglite_load_file("graph.kgl", &graph, &error);
+if (status != KGLITE_STATUS_CODE_OK) {
+    /* copy/map error, then */
+    kglite_free_string(error);
 }
 ```
 
-#### Worked example — napi-rs (Node.js)
-
-```rust
-// crates/kglite-js/src/lib.rs (in a hypothetical kglite-js crate)
-use napi::bindgen_prelude::*;
-use napi_derive::napi;
-use std::ffi::CString;
-
-#[napi]
-pub struct Graph {
-    inner: *mut kglite_c::KgliteGraph,
-}
-
-#[napi]
-impl Graph {
-    #[napi(factory)]
-    pub fn load_file(path: String) -> Result<Self> {
-        let c_path = CString::new(path).map_err(|e| Error::from_reason(e.to_string()))?;
-        let mut graph: *mut kglite_c::KgliteGraph = std::ptr::null_mut();
-        let mut err_msg: *const std::ffi::c_char = std::ptr::null();
-        let rc = unsafe {
-            kglite_c::kglite_load_file(
-                c_path.as_ptr(),
-                &mut graph as *mut _,
-                &mut err_msg as *mut _,
-            )
-        };
-        if rc != kglite_c::KgliteStatusCode::Ok {
-            let msg = unsafe { std::ffi::CStr::from_ptr(err_msg) }.to_string_lossy().to_string();
-            unsafe { kglite_c::kglite_free_string(err_msg) };
-            return Err(Error::from_reason(msg));
-        }
-        Ok(Self { inner: graph })
-    }
-
-    // ... session / cypher methods follow the same shape ...
-}
-
-impl Drop for Graph {
-    fn drop(&mut self) {
-        if !self.inner.is_null() {
-            unsafe { kglite_c::kglite_graph_free(self.inner) };
-        }
-    }
-}
-```
-
-A pure-JS consumer (no Rust at all) can link against
-`libkglite_c.so` via `ffi-napi` or `koffi`, calling the C
-functions directly with the same shapes.
-
-#### Worked example — JNI (JVM)
-
-```java
-// Java / Kotlin / Scala — through a JNI shim crate. The shim
-// is ~500 LOC of jni-rs glue similar to the cgo shape above.
-
-public class Graph implements AutoCloseable {
-    private long handle;  // opaque *mut KgliteGraph
-
-    public static Graph loadFile(String path) {
-        return new Graph(KgliteJni.loadFile(path));
-    }
-
-    public Session newSession() {
-        return new Session(KgliteJni.sessionNew(handle));
-        // handle is moved into session; do not close graph after this.
-    }
-
-    @Override
-    public void close() {
-        if (handle != 0) {
-            KgliteJni.graphFree(handle);
-            handle = 0;
-        }
-    }
-}
-```
-
-The JNI native crate would call `kglite_c::kglite_*` functions
-through `jni-rs` bindings, mapping the JVM `long` handles to
-`*mut KgliteX` round-trip casts. Cypher result rows come back as
-JSON; the Java side parses with Jackson / Gson / `JsonParser`.
-
-#### What kglite-c hands you (v1 surface)
-
-- **Lifecycle**: `load_file`, `save_graph`, `graph_free`.
-- **Session**: `session_new`, `session_execute_read`,
-  `session_execute_mut`, `session_free`. Plus `session_set_embedder`.
-- **Result**: `cypher_result_columns_json`, `cypher_result_rows_json`,
-  `cypher_result_row_count`, `cypher_result_free`.
-- **Error introspection**: `status_code_name`,
-  `status_code_neo4j_status`, `status_code_http_status`.
-- **Embedder**: `embedder_fastembed_new` (feature-gated),
-  `embedder_free`, `session_set_embedder`.
-- **ABI version**: `kglite_abi_version()` for startup checks.
-
-Phase H built out this surface across several sub-phases (H.2
-skeleton, then embedder + the rest). The pre-packaged dataset
-loaders (SEC EDGAR, Sodir, Wikidata) are no longer part of the
-kglite core — they live in the separate kglite-datasets project and
-are not exported through the C ABI; kglite loads the graphs those
-loaders produce via the ordinary lifecycle functions.
-
-#### Alternatives if kglite-c doesn't fit
-
-- **Use the existing PyO3 wrapper indirectly** (your binding calls
-  Python which calls kglite — slow and weird, but works today).
-- **Use the network protocols.** If your binding is HTTP/RPC-shaped,
-  the Bolt server or MCP server are already canonical wire formats —
-  your "binding" becomes a Bolt/MCP client in your target language,
-  zero compiled code required.
-
-## Error mapping
-
-Every kglite API call returns `Result<T, KgError>`. `KgError` is a
-typed enum with 17 variants; each variant has a stable
-`KgErrorCode` discriminant. Your binding maps these to its target
-language's idiomatic error types. The file-I/O variants are worth
-surfacing distinctly: `FileNotFound`, `FileFormat` (corrupt /
-truncated / wrong-format `.kgl` — what `load_file` / `load_kgl_bytes`
-return on a bad file), and `FileIo` (permission, mid-read) — so a
-consumer can tell "rebuild from source" from "create new".
-
-The table below is the recommended mapping. The "Recoverable?"
-column is from the agent's POV — should the binding's caller
-retry? rewrite? give up?
-
-| `KgErrorCode` | When it fires | Recoverable? | Suggested language idiom |
-|---|---|---|---|
-| `CypherSyntax` | Tokenizer / parser rejected the query string | **No** — the query is malformed | Type/usage error (`TypeError`, `IllegalArgumentException`, `SyntaxError`) |
-| `CypherTimeout` | Query exceeded its `timeout_ms` budget | **Maybe** — retry with longer budget or rewrite | Timeout error (`TimeoutError`, `DeadlineExceeded`) |
-| `Cancelled` | Caller flipped `ExecuteOptions.cancel` mid-run (e.g. Ctrl-C, client disconnect) | **No** — the caller asked to stop | Interrupt / cancel idiom (`KeyboardInterrupt`, cancelled-context, abort status) |
-| `CypherExecution` | Mutation conflict, predicate panic, etc. | **Sometimes** — context-dependent | Runtime error |
-| `CypherTypeMismatch` | A param was the wrong type for an operator | **No** — fix the call site | Type error |
-| `Schema` | Query references unknown label/property/index | **No** — schema mismatch | Validation error |
-| `Validation` | Bulk-mutation row failed validation (FK, unique, type) | **No** for that row — others may succeed | Validation error per row |
-| `Expr` | Blueprint expression failed to evaluate | **No** — fix the expression | Validation error |
-| `NodeNotFound` | Lookup by ID/name returned nothing | **No** — caller's domain logic | KeyError / NotFoundError |
-| `ConnectionNotFound` | Same, for edges | **No** | KeyError / NotFoundError |
-| `PropertyNotFound` | Property doesn't exist on the node | **No** | KeyError / NotFoundError |
-| `FileNotFound` | Path passed to `load_file` doesn't exist | **No** | FileNotFoundError / IOError |
-| `FileFormat` | File exists but isn't a valid `.kgl` (wrong magic, version, checksum) | **No** | Format / parse error |
-| `FileIo` | Filesystem error during read/write | **Maybe** — retry on transient (disk full, network FS) | IO error |
-| `InvalidArgument` | Function argument was wrong (out of range, malformed) | **No** | ValueError / IllegalArgumentException |
-| `MissingArgument` | Required argument was None / null | **No** | TypeError / NullPointerException |
-| `Internal` | Should-never-happen invariant violation | **No** — report as bug | InternalError |
-
-`KgError::Display` already produces a human-readable message; bindings
-typically expose both the code (for programmatic dispatch) and the
-message (for the user). The pyapi crate's `crates/kglite-py/src/error_py.rs` is the
-canonical mapping — every Python exception type kglite raises is a
-mechanical projection of `KgErrorCode`.
-
-The bolt-server's `crates/kglite-bolt-server/src/error_map.rs` maps each variant into a
-Bolt `ClientError` with a Neo4j-style status code prefix
-(`Neo.ClientError.Schema.SchemaNotFound`, etc.). Use it as a
-reference if your binding needs wire-protocol-shaped errors.
-
-## Implementing the Embedder trait
-
-KGLite's `text_score()` Cypher function needs to embed user queries
-at lookup time. The engine doesn't ship a specific embedder — you
-plug in your own via the `kglite::api::Embedder` trait.
-
-The trait has two required methods plus three optional ones:
-
-```rust
-pub trait Embedder: Send + Sync {
-    fn dimension(&self) -> usize;
-    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String>;
-    fn model_id(&self) -> Option<String> { None }       // optional (provenance)
-    fn load(&self) -> Result<(), String> { Ok(()) }     // optional
-    fn unload(&self) {}                                  // optional
-}
-```
-
-The contract:
-
-- **`dimension`** — the output vector size (e.g. 384 for
-  all-MiniLM, 1024 for bge-m3). The engine validates this against
-  user-supplied vectors at `set_embeddings()` time, so it has to be
-  fixed for the embedder's lifetime.
-- **`embed(texts)`** — embed a batch. Return one vector per input
-  text, each of length `dimension()`. Errors go back to the user via
-  `KgError::CypherExecution`.
-- **`model_id`** — optional (defaults to `None`). The model's stable id
-  (e.g. `"BAAI/bge-m3"`); when present it's stamped onto the embedding
-  store as provenance and surfaced via `embedding_info()`. Implement it
-  if your embedder can name its model.
-- **`load` / `unload`** — optional lifecycle hooks. Called before /
-  after each embedding pass. Use these for lazy model loading + idle
-  cooldown if your embedder is expensive to keep resident.
-
-### Two existing implementations to copy from
-
-**`FastEmbedAdapter`** (`crates/kglite/src/graph/embedder/fastembed.rs`)
-— wraps the `fastembed-rs` crate for local ONNX inference. ~200 lines,
-gated on the `fastembed` Cargo feature. Concrete implementation of
-lazy `load` + idle `unload` with a cooldown timer.
-
-**`PyEmbedderAdapter`** (in `crates/kglite-py/src/graph/embedder/py_adapter.rs`) — wraps
-a user-supplied Python class implementing the embedder protocol. The
-adapter acquires the GIL for `embed()` calls and translates between
-Python lists and Rust vectors. Showed up as the pattern for any
-binding that wants to let users plug in their own embedder.
-
-### Pattern: HTTP-API-backed embedder
-
-If your binding wants to wrap a hosted embedding API (OpenAI,
-Cohere, Voyage, etc.):
-
-```rust
-use kglite::api::Embedder;
-use std::sync::Mutex;
-
-pub struct OpenAiEmbedder {
-    api_key: String,
-    model: String,                     // "text-embedding-3-small" → 1536
-    dimension: usize,
-    client: reqwest::blocking::Client,
-}
-
-impl Embedder for OpenAiEmbedder {
-    fn dimension(&self) -> usize { self.dimension }
-
-    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-        // POST to /v1/embeddings, parse the response, return.
-        // The session module passes one batch at a time; you don't
-        // need to chunk further unless your API limits batch size.
-        // …
-    }
-    // No load/unload — HTTP client is cheap to keep around.
-}
-```
-
-Your binding then exposes a constructor in its native language
-that returns `Box<dyn Embedder>` (or wraps it in the binding's
-own embedder type, with `Arc<dyn Embedder>` underneath).
-
-## Loading data
-
-Four ways to populate a `DirGraph`. Bindings expose whichever subset
-fits their audience.
-
-### 1. Read a `.kgl` file written by any other binding
-
-```rust
-use kglite::api::io::load_file;
-
-let graph = load_file("snapshot.kgl")?;  // → Arc<DirGraph>
-```
-
-`.kgl` is the cross-binding portable format. A graph saved by Python
-(`kg.save("snapshot.kgl")`) reads cleanly here. A graph saved by your
-Go binding will read in Python. The format is versioned (`v3`, `v4`)
-and the engine handles version negotiation transparently.
-
-### 2. Build from a blueprint + CSVs
-
-The blueprint is a JSON/YAML schema spec; the engine reads it,
-streams the referenced CSVs, materializes nodes + connections.
-
-```rust
-use kglite::api::blueprint::{load_blueprint_file, build, Blueprint};
-use kglite::api::DirGraph;
-use std::path::Path;
-
-let blueprint: Blueprint = load_blueprint_file(Path::new("schema.json"))?;
-let mut graph = DirGraph::new();
-let report = build(&mut graph, &blueprint, Path::new("./data/csv/"))?;
-println!("built {} nodes, {} connections", report.nodes_in, report.connections_in);
-```
-
-`Blueprint` carries the full schema spec; `BuildReport` carries
-counts + validation errors. The Python wheel's `from_blueprint`
-wraps these two functions with path resolution + `lock_schema` + a
-PyO3-flavored progress callback (see
-`crates/kglite-py/src/graph/pyapi/blueprint.rs:23`); your binding
-will likely want the same shape in its own language idiom.
-
-### 3. Build from a source tree (code intelligence)
-
-```rust
-use codingest::build_code_tree; // the standalone builder crate
-
-let graph = build_code_tree(Path::new("./my_project/"), /* options */)?;
-```
-
-This walks a source tree with tree-sitter parsers and produces a
-code-intelligence graph (Function / Class / Module / etc. nodes,
-CALLS / DEFINES / IMPORTS edges). The kglite MCP server uses this
-to answer "what functions call X" queries about a codebase.
-
-### 4. Load RDF / N-Triples
-
-```rust
-use kglite::api::io::load_file; // plus the RDF/N-Triples loaders
-```
-
-The kept RDF loaders (`load_rdf` / `load_ntriples`) ingest Turtle /
-N-Triples / N-Quads / TriG directly, including Wikidata-scale
-`latest-truthy` dumps streamed straight into a disk-backed graph.
-Reach for these when your binding builds a graph from RDF sources.
-
-The pre-packaged dataset loaders (SEC EDGAR, Sodir, Wikidata) are no
-longer part of the kglite core API surface — they live in the
-separate kglite-datasets project. kglite loads the graphs those
-loaders produce via the ordinary lifecycle API (`load_file`), so a
-binding that wants that data either reads a pre-built `.kgl` /
-disk-graph or binds to kglite-datasets separately.
-
-## Wrapping a graph source for your binding
-
-### The boundary rule
-
-Before any code: there is one rule about where things go.
-
-> **A wrapper only contains code that is specific to its environment
-> and cannot be used by any other sibling wrapper.** Anything that
-> two or more wrappers would write identically belongs in
-> `kglite::api::*`.
-
-That rule is the lens for every wrapper decision. PyO3 marshalling
-goes in the Python wrapper because no Go binding would use it. A
-generic JSON/RDF parser goes in core because every binding parses
-the same input. A `tqdm` progress display goes in the Python wrapper
-because Go uses channels and JS uses event emitters for the same
-purpose. A cache-freshness check ("is the local file older than the
-remote one") goes in core because every binding asks the same
-question the same way.
-
-If you find yourself writing logic in a wrapper that another binding
-would copy verbatim, stop and file it as a core lift. (The
-pre-packaged dataset loaders were the original worked example of
-this doctrine; they have since been extracted wholesale into the
-separate kglite-datasets project, so they are no longer part of the
-core API a binding wraps.)
-
-### The audit history
-
-The `kglite::api` surface was sized against the wheel's PyO3 methods
-in May 2026 (the binding-framework sprint that produced 0.10.0
-through 0.10.3). The current shape reflects which items every
-binding would write identically vs which are tailored to one
-environment.
-
-## Binding-side patterns cookbook
-
-Patterns that surface in every binding, with notes on how the
-existing bindings handle them.
-
-### Process-local cache
-
-Loading a large graph (a Wikidata-scale dump at 1.4B triples) takes
-minutes. In Jupyter or any REPL-like environment, the user wants a
-re-opened graph to return the *same instance* on re-execution
-instead of reloading.
-
-A binding does this via a module-level cache keyed on the load
-parameters (e.g. `(path, entity_limit)`). Each binding has its own
-idiom:
-
-| Language | Idiom |
-|---|---|
-| Python | Module-level `dict` |
-| Go | `sync.Map` in a package-level var |
-| JS / Node | Module-level `Map` |
-| JVM | `ConcurrentHashMap` in a singleton |
-| Rust binary | `once_cell::sync::Lazy<DashMap<…>>` |
-
-Cache invalidation key should include anything that affects what
-gets loaded — workdir path, entity limits, source-file mtime if
-relevant.
-
-### Lazy result materialization
-
-Cypher queries can return millions of rows. The session module's
-`execute_read` returns a fully-materialized `CypherResult` by
-default — fine for small results, ruinous for large ones.
-
-For large results, the engine has a lazy path: set
-`ExecuteOptions.lazy_eligible = true` and the returned
-`CypherResult` will have a `lazy: Some(LazyResultDescriptor)`.
-Your binding's result-iteration code then calls back into the
-engine row-by-row instead of materializing upfront.
-
-The Python wheel's `ResultView`
-(`crates/kglite-py/src/graph/pyapi/result_view.rs`) is the canonical
-lazy materializer. Bolt-server's `ResultStream`
-does the same thing for the wire protocol. If your binding doesn't
-have a lazy materializer, pass `lazy_eligible = false` — otherwise
-you'll silently see empty `result.rows` for any non-`ORDER BY`
-query.
-
-### Value type conversion
-
-`kglite::api::Value` is the engine's universal value type (scalar
-variants + `List` + `Map` + graph-specific `Node` / `Relationship` /
-`Path`). Your binding needs to translate at the FFI boundary.
-
-The pattern in every existing binding:
-
-1. Define a binding-native value type (`PreProcessedValue` in
-   pyapi, `BoltValue` in bolt-server, JSON in mcp-server).
-2. Write a `From<Value> for YourValue` impl (and reverse if your
-   binding accepts user-supplied params).
-3. Pattern-match every `Value` variant. Forgetting one is a
-   runtime error.
-
-The pyapi crate's `crates/kglite-py/src/datatypes/py_out.rs` is the
-densest example — it handles NumPy and Pandas type coercion on top
-of basic conversion.
-
-### Progress callbacks
-
-Long-running operations (dataset fetch, blueprint build) take
-seconds-to-minutes. Users want progress.
-
-The engine's `BuildReport` carries final counts but doesn't emit
-per-row progress. Bindings emit their own progress by:
-
-- Wrapping the fetch / build call in a thread that periodically
-  reads a shared counter
-- Or calling small batches in a loop and reporting between them
-
-The Python wheel uses `tqdm` with explicit batch-size control on
-the fetch side and a `verbose=True` flag for build-time prints. A
-Go binding might use a `chan struct{}` for progress events with
-a separate goroutine consuming them.
-
-This is genuinely binding-specific — no shared abstraction is
-likely to help. Pick the idiom your audience expects.
-
-### Cancellation / interruptible queries
-
-`ExecuteOptions.cancel: Option<&AtomicBool>` is the engine-agnostic
-cancellation primitive. The engine polls it at the same checkpoints it
-polls the query deadline (pattern-matcher scans + expansions); once the
-flag is set, the run aborts and the call returns `KgError::Cancelled`
-(`KgErrorCode::Cancelled` → HTTP 499, Neo
-`Neo.ClientError.Transaction.Terminated`). Leave it `None`
-(`ExecuteOptions::eager` does) and queries are deadline-bounded only.
-
-How you *flip* the flag is binding-specific — it's part of the
-async/threading/signal model each binding owns:
-
-- The **Python wheel** installs a scoped `SIGINT` (Ctrl-C) handler for
-  the duration of a query that flips a process-global `AtomicBool`, then
-  restores the previous handler; `KgError::Cancelled` is mapped to
-  Python's builtin `KeyboardInterrupt`. (Read paths only; mutations stay
-  deadline-bounded.)
-- A **server** binding typically wires the flag to a request-cancellation
-  token (client disconnect, gRPC `tokio::select!` on the cancel future, a
-  deadline-exceeded watcher) and maps `Cancelled` onto its protocol's
-  cancel/abort status.
-
-Because `cancel` is a `&AtomicBool`, the flag must outlive the
-`execute_*` call — a `'static` global (the wheel's choice) or a flag
-owned by the request scope both work. The previous SIGINT disposition,
-or whatever you replaced, is yours to restore.
-
-## What you don't need to write
-
-The work that's already done. Your binding inherits all of this
-by depending on `kglite`:
-
-| Component | Where it lives | LOC |
-|---|---|---|
-| Cypher parser + planner + executor | `kglite::api::cypher` | ~15,000 |
-| Snapshot/working CoW + OCC | `kglite::api::session` | ~1,500 |
-| Schema validation pipeline | `kglite::api::cypher::validate_schema` | ~800 |
-| Blueprint loader + builder | `kglite::api::blueprint` | ~5,000 |
-| `.kgl` format reader + writer (v3, v4) | `kglite::api::io::{load_file, save_graph}` | ~3,000 |
-| Code-graph builder (tree-sitter) | the `codingest` crate | ~4,000 |
-| RDF / N-Triples loaders | `kglite::api` (`load_rdf`, `load_ntriples`) | — |
-| Embedder trait + FastEmbed adapter | `kglite::api::Embedder`, `FastEmbedAdapter` | ~600 |
-| Cypher result types + path/node/rel | `kglite::api::{Value, NodeValue, RelValue, PathValue}` | ~2,000 |
-
-Your binding contributes:
-
-| Component | Notes |
-|---|---|
-| Language-native graph handle wrapping `Arc<DirGraph>` | The thin facade your users hold |
-| Value type marshalling (`Value` ↔ your native type) | Mechanical but error-prone — write tests |
-| Error mapping (`KgError` → your error type) | Use the table above |
-| Lifecycle (open, close, save, snapshot) | Thin wrapper around the engine functions |
-| Optional: lazy result iterator | If your binding has any |
-| Optional: embedder wrapper for user-provided embedders | If your binding lets users plug in custom embedders |
-
-The hard parts — correctness of Cypher, snapshot isolation,
-OCC conflict detection, format portability — you inherit.
-
-## Cross-binding portability checklist
-
-A `.kgl` file written by your binding should load cleanly in any
-other binding. To stay portable:
-
-- **Use `kglite::api::io::save_graph`** (not your own format). It's
-  versioned, checksummed, and bumps along with the engine.
-- **Don't bundle binding-ergonomic state** in the graph itself.
-  Selection caches, default timeouts, progress callbacks — these
-  are per-binding overlays. Save the `DirGraph`, let each binding
-  add its own state on load.
-- **If you write custom values into Map / List**, stick to the
-  scalar variants `Value` already supports. Don't smuggle a JSON
-  string in expecting another binding to parse it; use a proper
-  variant.
-- **Validate after save.** Round-trip your test fixtures
-  (your-binding → `.kgl` → Python → `.kgl` → your-binding) at
-  least once per release. The `tests/test_phase4_parity.py`
-  suite is the model.
-
-## Roadmap
-
-What the binding-author experience needs that isn't done yet,
-roughly in priority order. File issues for the ones that block
-your specific binding:
-
-- **Phase H — a `kglite-c` crate** exposing the engine through a
-  stable C ABI. Unlocks bindings in any FFI-capable language
-  without each one rolling its own `extern "C"` layer.
-- **Selection / fluent-API in core.** Today's wheel exposes a
-  fluent `select() / where() / sort()` builder; unclear how much
-  of the builder lives in core vs. the PyO3 layer. Punted unless
-  a binding asks for it.
-- **Result streaming via the C ABI.** If/when Phase H lands,
-  there's a design question about how to stream the lazy
-  materializer across a C boundary.
-- **Graph algorithms exposed in `api::*`.** Shortest path,
-  centrality, community detection — what's implemented internally
-  vs. aspirational needs verification (audit punchlist item #8).
-
-If you build a binding and discover a real gap, file an issue —
-that's the right signal for promoting an item from the maintainer's
-deferred-items list into actual work.
-
-## See also
-
-- [`embedding.md`](embedding.md) — full embedder guide, polars-
-  style split rationale, quick start.
-- [`session.md`](session.md) — canonical Cypher pipeline + CoW
-  transaction reference.
-- [`api-reference.md`](api-reference.md) — manifest of stable
-  surface items with semver guarantees.
-- [Cypher reference](../reference/cypher-reference.md) — the
-  Cypher subset kglite supports.
-- `CLAUDE.md` (repo root) — engineering conventions for changes
-  to the engine itself.
+Wrap opaque handles with deterministic `close`/`free` plus a defensive
+finalizer. Every returned Rust string uses `kglite_free_string`; every graph,
+session, result, and embedder uses its matching free function. Decode result
+JSON before freeing its owning result handle.
+
+ABI v1 supports sessions, read/mutation options, and atomic mutation batches.
+It does not expose explicit transaction begin/commit calls. Model explicit
+transactions only after the ABI grows a real handle contract; never invent
+`kglite_session_begin` in wrapper code.
+
+## Values and errors
+
+Rust wrappers map all `Value` variants explicitly, including Timestamp, List,
+Map, Node, Relationship, and Path. Non-Rust wrappers decode the JSON result
+shape supplied by `kglite-c`.
+
+Preserve `KgErrorCode`/`KgliteStatusCode` and the human message separately.
+Map all 17 engine codes, including cancellation, plus the C-boundary codes for
+invalid UTF-8/null pointers. Do not infer categories from message text.
+
+## Storage and persistence
+
+Expose memory/mapped/disk choice without changing semantics. The current `.kgl`
+writer emits RGF v5 with an explicit Postcard codec; readers accept supported
+v4 files and reject v3 with a rebuild message. A binding must not serialize
+internal structs independently or promise compatibility broader than the core
+reader.
+
+For cross-package handoff, the declared consumer version floor must read the
+format written by the linked engine. Verify the exact artifact in a clean
+consumer package, not only from the workspace source tree.
+
+## Surface checklist
+
+1. Lifecycle: create/open/load/save/bytes/free and storage configuration.
+2. Query: canonical session pipeline, parameters, budgets, typed results.
+3. Transactions/concurrency: snapshots, serialized shared writes, OCC mapping.
+4. Errors: stable codes, messages, null/UTF-8/allocation failures.
+5. Optional capabilities: embedder, RDF, blueprint, schema/introspection.
+6. Documentation: copy-paste install and first-query example for the target.
+
+Avoid mirroring every Python convenience method. Cypher exposes algorithms,
+procedures, spatial/temporal/text functions, and most per-query features to all
+bindings without a larger ABI.
+
+## Verification
+
+- Compile a downstream consumer against the packaged crate/header/library.
+- Exercise create/query/mutate/save/reload and every owned-result cleanup path.
+- Test malformed UTF-8/null pointers for FFI wrappers.
+- Test concurrent reads, serialized writes, conflicts, deadlines, row budgets,
+  cancellation, and read-only rejection.
+- Run storage parity and format round trips for memory/mapped/disk.
+- Diff the Rust public API or generated C header in CI; update the baseline only
+  for an intentional reviewed change.
+
+See [API reference](api-reference.md), [Session](session.md),
+[Embedding](embedding.md), and [C ABI](c-abi.md).

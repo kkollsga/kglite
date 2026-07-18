@@ -47,7 +47,7 @@ stability posture; kglite's CI locks against accidental drift on all of them.
 |---|---|---|
 | **Engine facade** — `kglite::api::*` | The curated Rust surface: `DirGraph`, `Value`, `session::*`, `io::{save_graph, load_file}`, error types, `code_entities`. | Exact-baseline-locked in CI (cargo-public-api, pinned nightly). Additive within a minor line; deliberate breaks ship on a MINOR bump with a migration guide. See the [API reference](api-reference.md). |
 | **MCP server library** — `kglite-mcp-server` | `run`, `run_with_embedder_factory`, `run_with_code_tree_hooks`, `run_with_extensions`, `CodeTreeHooks`, `ServerExtensions`, `DomainToolRegistry`, `DomainGraphState`, `DomainGraphContext`. The seams a producer/domain MCP server builds on. | Public-API baseline + hook/registrar-semantics unit tests. Same MINOR-break posture as the engine facade. |
-| **`.kgl` file format** | The persisted graph format that P1 handoff and all persistence use. | Versioned (`v3`, `v4`, …). Readers stay backward-compatible or refuse an old format with a clear rebuild message; a format bump lands with its decoder. |
+| **`.kgl` file format** | The persisted graph format that handoff and all persistence use. | Current RGF v5/Postcard; v4 remains readable and v3 is refused with a clear rebuild message. |
 | **Python top-level** — `kglite.*` | `kglite.load`, `kglite.from_blueprint`, `kglite.from_records`, `KnowledgeGraph` methods. The P3 entry points and the P1 handoff target. | Contract-tested + stubtest against `kglite/__init__.pyi`. |
 | **C ABI** — `include/kglite.h` | The `extern "C"` surface for non-Rust bindings. | cbindgen header-drift check in CI; see the [C ABI guide](c-abi.md). |
 
@@ -132,8 +132,8 @@ and call its top-level `load(path)` — the returned object is a real
 
 **The format-floor rule.** Your declared floor `kglite>=X` must name a version
 whose *reader* understands the format your linked engine *writes*. If your crate
-links an engine that writes `.kgl` v4, `kglite>=X` must be a version that reads
-v4 — otherwise the handoff `load()` fails at runtime for exactly the users who
+links an engine that writes `.kgl` v5, `kglite>=X` must be a version that reads
+v5 — otherwise the handoff `load()` fails at runtime for exactly the users who
 took the floor literally.
 
 **Pin hygiene.** Re-check your kglite pin — and transitive pins that must move in

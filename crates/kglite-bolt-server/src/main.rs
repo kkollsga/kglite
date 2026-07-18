@@ -1,12 +1,8 @@
 //! `kglite-bolt-server` — Bolt v5.x wire protocol server for kglite graphs.
 //!
-//! Phase B skeleton: real clap CLI, real graph load, real `BoltServer::builder()`
-//! boot with a SIGINT shutdown future. The `BoltBackend` impl in
-//! [`backend`] is stubbed with `unimplemented!()` bodies tagged to their
-//! retiring Phase C sub-phase, so the first real Bolt message panics
-//! that connection task. The listener itself comes up cleanly — which is
-//! what `tests/test_bolt_server_smoke.py::test_bolt_handshake_and_verify_connectivity`
-//! consumes (and xfail-strictly, until Phase C.1 lands).
+//! Loads or creates a KGLite graph and serves the documented Cypher dialect
+//! through Bolt v5.x, including sessions, transactions, routing, optional TLS,
+//! optional basic authentication, and graceful shutdown.
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -69,10 +65,7 @@ struct Cli {
     #[arg(long, default_value_t = 7687)]
     port: u16,
 
-    /// Reject all mutation queries (Phase C.5 enforces this at the
-    /// `execute` boundary; until then the flag is parsed and stored
-    /// but has no effect — real Bolt messages already panic the
-    /// connection task).
+    /// Reject all mutation queries at the execute boundary.
     #[arg(long, default_value_t = false)]
     readonly: bool,
 
@@ -106,7 +99,7 @@ struct Cli {
     max_message_size: usize,
 
     /// Address returned in `route()` responses to cluster-aware
-    /// drivers using `neo4j://` URIs (Phase F #5). Drivers will
+    /// drivers using `neo4j://` URIs. Drivers will
     /// reconnect to this `host:port` for subsequent sessions, so
     /// it must be reachable from the client's network. Defaults
     /// to `<bind>:<port>`; override when bound to `0.0.0.0` behind
@@ -115,7 +108,7 @@ struct Cli {
     #[arg(long, value_name = "HOST:PORT")]
     advertise_addr: Option<String>,
 
-    /// Path to a PEM-encoded TLS certificate (Phase F #6).
+    /// Path to a PEM-encoded TLS certificate.
     /// When set, the server speaks TLS-wrapped Bolt on the bound
     /// port. Drivers connect with `bolt+s://` or `neo4j+s://`.
     /// Both --tls-cert and --tls-key must be present together.
@@ -180,12 +173,12 @@ async fn main() -> Result<()> {
     );
 
     // The backend stores the DirGraph behind its own Arc<Mutex<>> for
-    // the commit-swap pattern (Phase C.5). Unwrap the Arc — if no
+    // commit-swap. Unwrap the Arc — if no
     // other refs (typical for fresh load), try_unwrap succeeds;
     // otherwise we deep-clone (one-time cost at boot).
     let dir = Arc::try_unwrap(dir_arc).unwrap_or_else(|arc| (*arc).clone());
-    // Phase F #5: address advertised in route() responses for
-    // neo4j:// (cluster-aware) drivers. Default: format the bind
+    // Address advertised in route() responses for neo4j:// (cluster-aware)
+    // drivers. Default: format the bind
     // address; override via --advertise-addr.
     let advertised_addr = cli
         .advertise_addr
@@ -209,8 +202,7 @@ async fn main() -> Result<()> {
         builder = builder.idle_timeout(Duration::from_secs(secs));
     }
 
-    // Phase F #6: TLS support. When --tls-cert + --tls-key are set,
-    // wrap the listener in TLS so drivers can connect via bolt+s://
+    // When --tls-cert + --tls-key are set, wrap the listener in TLS so drivers can connect via bolt+s://
     // or neo4j+s://. The cert/key are read once at startup; reload
     // requires a restart. For HA setups the typical pattern is a
     // reverse proxy (nginx, Caddy) terminating TLS instead.
@@ -233,8 +225,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Phase C.6: wire `--auth basic` to a BasicAuthValidator. `--auth
-    // none` leaves the validator unset — boltr accepts any LOGON
+    // Wire `--auth basic` to a BasicAuthValidator. `--auth none` leaves the validator unset — boltr accepts any LOGON
     // credentials in that mode (test #1 connects with default
     // ("neo4j", "password") which is fine).
     if matches!(cli.auth, AuthScheme::Basic) {

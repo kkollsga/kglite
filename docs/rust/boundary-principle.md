@@ -172,47 +172,13 @@ trait or a `GraphHandle` struct directly — they see a C function
 signature in `kglite.h`. For *those* bindings, the standardization
 is the C ABI shape itself.
 
-**Phase H — the `kglite-c` crate — shipped in 0.10.3.** What landed
-across H.1–H.5:
-
-1. **H.1 — C ABI design** (`docs/rust/c-abi.md`). Conventions:
-   `kglite_*` naming, opaque-handle pattern (empty `#[repr(C)]`
-   facade + private `XState` sidecar), errno-style errors mapping
-   1:1 to `KgErrorCode`, owned out-strings freed via a single
-   `kglite_free_string`, JSON-at-boundary for nested `Value`
-   shapes, sync-only ABI (bindings own their own async).
-
-2. **H.2 — `kglite-c` skeleton + cbindgen.** Workspace member at
-   `crates/kglite-c/`. Top-12 entry points: lifecycle / session /
-   Cypher / result accessors / error introspection / ABI version.
-   cbindgen runs in `build.rs` and writes
-   `include/kglite.h`.
-
-3. **H.3 — Sodir + embedder ABI.** First dataset wrapper +
-   fastembed factory + `kglite_session_set_embedder`. Locked in
-   the feature-gating convention (cbindgen `[defines]` maps
-   `feature = X` to `KGLITE_FEATURE_X` preprocessor define).
-
-4. **H.3a — SEC + Wikidata ABI.** Completed the dataset surface
-   symmetrically. Total surface: 30 `extern "C"` functions, 6
-   opaque-handle types, 952-line generated header.
-
-5. **H.5 — release coordination.** Header-drift CI gate (fresh
-   cbindgen run vs committed header). `publish_crates.yml`
-   extended with a 4th publish step. `implementing-a-binding.md`
-   rewritten with cgo / napi / JNI worked examples.
-
-H.4 (Go PoC consumer) was **deferred** — the first real non-Rust
-binding author validates the surface better than a synthetic
-500-LOC sketch. The cgo / napi / JNI examples in
-`implementing-a-binding.md` give them a starting point.
-
-The dataset ABI those H.3 / H.3a phases built (the
-`kglite_datasets_*` functions) has since been removed: the
-pre-packaged dataset loaders (SEC EDGAR, Sodir, Wikidata) were
-extracted into the separate kglite-datasets project, so the current
-C ABI no longer exports them and the surface count above is
-historical.
+The `kglite-c` crate shipped in 0.10.3 and is now the supported non-Rust
+boundary. It uses `kglite_*` names, opaque handles, typed status codes,
+Rust-owned strings freed by the matching exported function, JSON for nested
+result values, and a synchronous ABI. Its generated `kglite.h` is the exact
+surface authority and header drift is CI-gated. Dataset-specific C functions
+were removed when dataset loaders moved to the separate `kglite-datasets`
+project.
 
 The boundary-principle posture above (active-design + cypher-first +
 use-case-checked) applies to the Rust `api::*` surface AND the C
@@ -290,8 +256,6 @@ queued):
 - `ParamUnmarshaller` trait — Rust-side trait that non-Rust bindings can't see; helps only future Rust-side wrappers (not yet)
 - `QueryContext` — `temporal_context` is wheel-only today
 
-See `docs/rust/implementing-a-binding.md` → "Wrapping a dataset for
-your binding" for the worked dataset example. (The reverse-audit
-methodology — strict posture, test the signature not the
-consumer count — is recorded in the maintainer's local audit
-under `dev_workfolder/dev-documentation/audits/`.)
+See `docs/rust/implementing-a-binding.md` for the current binding boundary and
+worked examples. The test is the public signature and use case, not today's
+consumer count.

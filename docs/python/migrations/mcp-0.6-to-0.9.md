@@ -86,7 +86,7 @@ under the new kglite produces a fresh 0.9.x-compatible `.kgl`. If
 you don't have the build pipeline anymore, fluent-API or Cypher
 `CREATE` against an empty `KnowledgeGraph()` is the supported way
 to rebuild from source data — see the
-[Graph construction guide](https://kglite.readthedocs.io/en/latest/guides/graph-construction.html).
+[Data loading guide](../guides/data-loading.md).
 
 ## Five operating modes
 
@@ -276,11 +276,10 @@ tools:
     hidden: true                # drop from tools/list + reject calls
 ```
 
-The 12 bundled tools: `cypher_query`, `graph_overview`, `ping`,
-`read_code_source`, `save_graph`, `read_source`, `grep`,
-`list_source`, `repo_management`, `set_root_dir`, `github_issues`,
-`github_api`. Unknown names fail at boot with the valid catalogue
-listed in stderr.
+The bundled catalogue has expanded since this migration. Unknown names fail at
+boot with the valid catalogue listed in stderr; use that runtime catalogue and
+the current {doc}`MCP guide <../guides/mcp-servers>` instead of copying an old
+fixed tool list.
 
 ## Common migration gotchas
 

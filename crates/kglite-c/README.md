@@ -1,138 +1,95 @@
-# kglite-c — C ABI for kglite
+# kglite-c — C ABI for KGLite
 
-Stable `extern "C"` surface over the [kglite](https://crates.io/crates/kglite)
-knowledge graph engine. Non-Rust bindings (Go via cgo, JavaScript via
-napi, JVM via JNI, .NET via P/Invoke) consume a single C header
-(`include/kglite.h`) rather than re-implementing wrappers in their
-host language.
+`kglite-c` is the supported C boundary for non-Rust bindings such as cgo,
+napi, JNI, P/Invoke, and Swift FFI. The pure-Rust engine owns Cypher, storage,
+sessions, and persistence; this crate exposes a curated synchronous ABI through
+the generated [`include/kglite.h`](include/kglite.h).
 
-This crate is glue. The engine itself (Cypher pipeline, transaction
-model, storage backends) lives in the sibling
-`kglite` crate. `kglite-c` exposes a curated subset of
-`kglite::api::*` via `#[no_mangle] extern "C"` functions plus
-cbindgen-generated header.
+The generated header is the exact symbol, signature, status, and ownership
+authority. Header drift is checked in CI. Precompiled C ABI libraries are not
+currently attached to releases, so build and package the matching source for
+each target platform:
 
-## Status: Phase H.2 (skeleton)
+```bash
+cargo build -p kglite-c --release
+```
 
-This is the initial skeleton — top-12 entry points (lifecycle /
-session / Cypher / result accessors / error introspection / ABI
-version). See `docs/rust/c-abi.md` for the design conventions and
-the full Phase H roadmap (H.3 embedder, H.4 Go PoC
-consumer, H.5 release coordination).
-
-## Use from C
+## Minimal C example
 
 ```c
 #include <stdio.h>
 #include "kglite.h"
 
 int main(void) {
-    KgliteGraph* graph = NULL;
-    const char* err = NULL;
-    KgliteStatusCode rc = kglite_load_file("graph.kgl", &graph, &err);
-    if (rc != KGLITE_OK) {
-        fprintf(stderr, "load failed: %s\n", err);
-        kglite_free_string(err);
+    KgliteGraph *graph = NULL;
+    const char *error = NULL;
+    KgliteStatusCode status = kglite_load_file("graph.kgl", &graph, &error);
+    if (status != KGLITE_STATUS_CODE_OK) {
+        fprintf(stderr, "%s\n", error ? error : "load failed");
+        kglite_free_string(error);
         return 1;
     }
 
-    KgliteSession* session = NULL;
-    kglite_session_new(graph, &session);
-    // session takes ownership of graph; do NOT call kglite_graph_free
-
-    KgliteCypherResult* result = NULL;
-    rc = kglite_session_execute_read(
-        session,
-        "MATCH (n) RETURN count(n)",
-        NULL,                       // no params
-        &result,
-        &err
-    );
-    if (rc != KGLITE_OK) {
-        fprintf(stderr, "query failed: %s\n", err);
-        kglite_free_string(err);
-        kglite_session_free(session);
-        return rc;
+    KgliteSession *session = NULL;
+    status = kglite_session_new(graph, &session); /* moves graph ownership */
+    if (status != KGLITE_STATUS_CODE_OK) {
+        kglite_graph_free(graph);
+        return 1;
     }
 
-    const char* cols = kglite_cypher_result_columns_json(result);
-    const char* rows = kglite_cypher_result_rows_json(result);
-    printf("columns: %s\n", cols);
-    printf("rows: %s\n", rows);
-    kglite_free_string(cols);
-    kglite_free_string(rows);
+    KgliteCypherResult *result = NULL;
+    status = kglite_session_execute_read(
+        session,
+        "MATCH (n) RETURN count(n) AS count",
+        NULL,
+        &result,
+        &error
+    );
+    if (status != KGLITE_STATUS_CODE_OK) {
+        fprintf(stderr, "%s\n", error ? error : "query failed");
+        kglite_free_string(error);
+        kglite_session_free(session);
+        return 1;
+    }
 
+    const char *rows = kglite_cypher_result_rows_json(result);
+    printf("%s\n", rows);
+    kglite_free_string(rows);
     kglite_cypher_result_free(result);
     kglite_session_free(session);
     return 0;
 }
 ```
 
-## Use from Go (sketch — full Phase H.4 PoC pending)
+## Ownership
 
-```go
-// #cgo LDFLAGS: -lkglite_c
-// #include <kglite.h>
-import "C"
+- Input pointers are borrowed for the duration of the call.
+- A successful `kglite_session_new` takes ownership of its graph handle.
+- Opaque result/session/graph/embedder handles use their matching `*_free`
+  function.
+- Every returned Rust-owned string uses `kglite_free_string` exactly once.
+- Null-safe free calls are allowed; double-free and foreign-allocator pointers
+  are not.
 
-func main() {
-    var graph *C.KgliteGraph
-    var errMsg *C.char
-    rc := C.kglite_load_file(C.CString("graph.kgl"), &graph, &errMsg)
-    // ...
-}
-```
+Fallible calls reset non-null output slots before validation. Valid calls that
+panic inside Rust are contained and reported as `KGLITE_STATUS_CODE_INTERNAL`;
+dangling or invalid caller pointers remain outside the ABI contract.
 
-## Memory ownership
+## Errors and runtime model
 
-Every function documents who owns what. The rules:
-
-- Arguments by `*const c_char` / `*const T` — borrowed for the call.
-- Arguments by `*mut T` (opaque handle) — borrowed for the call,
-  caller still owns.
-- Return values by `*mut T` — caller OWNS, must free via
-  `kglite_<type>_free`.
-- Return values by `*const c_char` — caller OWNS, must free via
-  `kglite_free_string`.
-- Return values by-value primitives — no ownership concern.
-
-## Error handling
-
-errno-style: every fallible function returns `KgliteStatusCode`
-(`KGLITE_OK == 0` on success), with out-params for both the result
-handle and an optional error message string. The error message,
-when present, is owned and must be freed via `kglite_free_string`.
-
-`KgliteStatusCode` variants 1-16 map 1:1 to `kglite::api::KgErrorCode`
-variants. Bindings can pull the canonical human-readable name,
-the Neo4j `Neo.ClientError.*` status code, or the HTTP status code
-via:
-
-```c
-const char* kglite_status_code_name(KgliteStatusCode);
-const char* kglite_status_code_neo4j_status(KgliteStatusCode);
-uint16_t    kglite_status_code_http_status(KgliteStatusCode);
-```
-
-## Sync only
-
-The C ABI is fully synchronous. Bindings own their own async/threading
-model — Go uses goroutines, JS uses worker threads, JVM uses thread
-pools, each wrapping the sync C calls. Any long-running engine calls
-run to completion on the calling thread; bindings release their own
-runtime's equivalent of the GIL around them.
-
-Fallible calls initialize every non-null output slot before validation. Rust
-panics caused by valid calls are contained at the boundary and reported as
-`KGLITE_STATUS_CODE_INTERNAL`; invalid or dangling caller pointers remain
-outside the ABI contract.
+`KgliteStatusCode` contains engine status codes 1–17 plus boundary-only 100+
+codes for conditions such as invalid UTF-8 and null pointers. Preserve the code
+and message separately; do not classify failures by parsing text. The ABI is
+synchronous, so each binding owns async scheduling, logging, display, and
+teardown conventions.
 
 ## Versioning
 
-`kglite-c` versions track `kglite`'s minor version. The
-`kglite_abi_version()` function returns the runtime ABI version
-for binding-author sanity checks.
+`kglite-c` follows the workspace version. `kglite_abi_version()` reports the
+linked runtime version, and the `.kgl` reader/writer follows the engine's saved
+format lifecycle. See the [C ABI guide](../../docs/rust/c-abi.md) and
+[binding guide](../../docs/rust/implementing-a-binding.md).
 
 ## License
 
-MIT (matches `kglite`).
+MIT, matching the KGLite workspace.

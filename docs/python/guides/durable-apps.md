@@ -183,9 +183,10 @@ keep writes on the single durable `KnowledgeGraph` (there they're serialized and
   `storage="disk"` raises `ValueError`. Crash-safe durable writes apply to the
   in-memory model; use `storage="disk"` for the larger-than-RAM case (without
   per-write WAL durability).
-- **Durability is per *committed* mutation.** A statement that errors out
-  commits nothing. For multi-statement atomicity, wrap the work in a
-  transaction ({doc}`/python/transactions`) and commit once.
+- **Durability records successful mutations.** Direct `cypher()` writes execute
+  in place, so use `Session.execute()` or a transaction when an error or
+  timeout must roll back the complete mutation. Commit related statements once
+  ({doc}`/python/transactions`).
 
 ## See also
 

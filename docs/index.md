@@ -1,14 +1,31 @@
 # KGLite
 
-An embedded Cypher dialect for LLM-agent workloads. A knowledge
-graph that runs inside your Python process — load data, query with
-Cypher, hand the graph to an agent via the bundled MCP server. No
-server to run, no infrastructure to manage, one `.kgl` file to ship.
+An embedded Cypher dialect for LLM-agent workloads. A knowledge graph that
+runs inside your process — load data, query with Cypher, and hand the graph to
+an agent via the bundled MCP server. The embedded path needs no database
+service; one `.kgl` file can move between Python and Rust bindings.
 
 The engine is a pure-Rust crate (`kglite`); the wheel
 (`pip install kglite`) is a PyO3 wrapper around it. Bolt and MCP
 protocol servers are standalone Rust binaries that wrap the same
 engine. The `.kgl` file format is portable across all bindings.
+
+## Start here
+
+1. Install `kglite` (Python) or add the `kglite` crate (Rust).
+2. Build a graph with inline records, DataFrames, Cypher, or a companion
+   project such as codingest/kglite-datasets.
+3. Query with Cypher or the fluent API; use `Session`/`Transaction` when a
+   failed mutation must roll back.
+4. Save a `.kgl`, or serve it through the CLI, MCP, or Bolt binary.
+
+**[Python quickstart](python/getting-started.md)** ·
+**[Cypher reference](reference/cypher-reference.md)** ·
+**[Fluent API](reference/fluent-api.md)** ·
+**[Rust quickstart](rust/index.md)** ·
+**[Operators and deployment](operators/index.md)** ·
+**[Reference](reference/index.md)** ·
+**[0.13 → 0.14 migration](python/migrations/0.13-to-0.14.md)**
 
 ```{rubric} Cypher first
 ```
@@ -22,7 +39,7 @@ in; once it's in, you query with Cypher.
 
 | | |
 |---|---|
-| Embedded, in-process | No server, no network; `import` and go |
+| Embedded, in-process | No database service; `import` and go |
 | LLM-agent surface | Bundled MCP server + `describe()` schema for system prompts |
 | Cypher subset, honest semantics | Querying + mutations + `text_score()` for semantic search |
 | In-memory by default | Mapped + disk modes for Wikidata-scale; in-memory is the design centre |
@@ -62,10 +79,10 @@ Pin back anytime with `pip install "kglite<0.14"`.
 - **[Rust guide](rust/index.md)** — embed the engine in a Rust
   binary (`cargo add kglite`). For graph-as-a-library use cases
   without the Python wheel.
-- **[Operators](operators/index.md)** — running the Bolt server
-  (Neo4j wire compat for cluster-aware drivers).
-- **[Reference](reference/cypher-reference.md)** — Cypher subset
-  reference + fluent API reference + auto-generated Python API.
+- **[Operators](operators/index.md)** — choose and run the CLI, MCP, or Bolt
+  binary; storage, auth/TLS, and deployment guidance.
+- **[Reference](reference/index.md)** — Python, Cypher, fluent, Rust, C ABI,
+  and CLI reference surfaces.
 - **[Concepts](concepts/architecture.md)** — architecture +
   design decisions + contributor docs.
 
@@ -98,9 +115,7 @@ operators/index
 :caption: Reference
 :hidden:
 
-reference/cypher-reference
-reference/fluent-api
-autoapi/index
+reference/index
 ```
 
 ```{toctree}

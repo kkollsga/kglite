@@ -109,10 +109,10 @@ keyword arguments worth knowing:
 |---|---|
 | `columns=[...]` | Whitelist DataFrame columns to ingest. Default `None` = all columns. |
 | `skip_columns=[...]` | Inverse: drop these columns before ingest. |
-| `column_types={'col': 'datetime'}` | Force a column's storage type. Most common values: `'datetime'`, `'point'`, `'embedding'`. |
+| `column_types={...}` | Spatial roles use `location.lat/lon`, `point.<name>.lat/lon`, `geometry`, or `shape.<name>`; ordinary values are inferred. |
 | `conflict_handling='update'` | What to do when a row's id already exists. See [Loading in passes](#loading-in-passes) for the full table. |
 | `timeseries={...}` | Inline timeseries declaration — see the [Timeseries guide](timeseries.md). |
-| `nullable_int_downcast=True` | Convert pandas nullable ints (`Int64`) to native `int64` even when the column has no nulls. |
+| `nullable_int_downcast=True` | Convert Float64 columns whose non-null values are all whole numbers into Int64 columns. |
 
 Every call returns a report dict:
 
@@ -129,7 +129,7 @@ without you needing to inspect the report.
 
 ## Property Mapping
 
-When adding nodes, `unique_id_field` and `node_title_field` are **mapped** to `id` and `title`. The original column names become **aliases** — they work in Cypher queries and `filter()`, but results always use the canonical names.
+When adding nodes, `unique_id_field` and `node_title_field` are **mapped** to `id` and `title`. The original column names become **aliases** — they work in Cypher queries and fluent `where()`, but results always use the canonical names.
 
 | Your DataFrame Column | Stored As | Alias? |
 |-----------------------|-----------|--------|

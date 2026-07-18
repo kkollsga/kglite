@@ -3,9 +3,19 @@
 KGLite's independently implemented Cypher dialect runs **in-process** (no
 server). It provides a tested openCypher-compatible subset plus explicitly
 classified KGLite and GQL-style extensions; it is not a complete openCypher or
-Neo4j implementation. For a quick overview, see the [Cypher guide](https://kglite.readthedocs.io/en/latest/guides/cypher.html).
+Neo4j implementation. For a quick overview, see the [Cypher guide](https://kglite.readthedocs.io/en/latest/python/guides/cypher.html).
 
-> **Label model:** Each node has one immutable **primary** type plus optional secondary labels (multi-label since 0.10.5). `CREATE (n:A:B)`, `SET n:B`, `REMOVE n:B`, and `MATCH (n:A:B)` all work; `labels(n)` returns a list with the primary type first. Change the primary type via `SET n.type = 'NewType'` (`REMOVE n:Primary` errors deliberately).
+**Start with:** [Getting Started](https://kglite.readthedocs.io/en/latest/python/getting-started.html) ·
+[Cypher guide](https://kglite.readthedocs.io/en/latest/python/guides/cypher.html) ·
+[dialect contract](#cypher-dialect-contract) · [Python API](https://kglite.readthedocs.io/en/latest/autoapi/kglite/index.html) ·
+[Fluent API](https://kglite.readthedocs.io/en/latest/reference/fluent-api.html) ·
+[0.13 → 0.14 migration](https://kglite.readthedocs.io/en/latest/python/migrations/0.13-to-0.14.html)
+
+> **Label model:** Each node has one immutable **primary** type plus optional
+> secondary labels. `CREATE (n:A:B)`, `SET n:B`, `REMOVE n:B`, and
+> `MATCH (n:A:B)` all work; `labels(n)` returns the primary type first.
+> `SET n.type = 'NewType'` only writes a property—it does not retype the node.
+> To change the primary type, migrate/recreate the node under the new schema.
 
 ## Feature coverage
 
@@ -347,7 +357,7 @@ the `summary` column are scored as `vector_score(a, 'summary_emb', …)`.
 
 ## Spatial Functions
 
-Built-in spatial functions for geographic queries. All node-aware functions auto-resolve geometry and location via [spatial types](https://kglite.readthedocs.io/en/latest/guides/spatial.html).
+Built-in spatial functions for geographic queries. All node-aware functions auto-resolve geometry and location via [spatial types](https://kglite.readthedocs.io/en/latest/python/guides/spatial.html).
 
 | Function | Returns | Description |
 |----------|---------|-------------|
@@ -1617,16 +1627,22 @@ Every `cypher()` call attaches lightweight execution diagnostics to the returned
 ```python
 result = graph.cypher("MATCH (n:Country {label: 'Norway'}) RETURN n.nid")
 print(result.diagnostics)
-# {'elapsed_ms': 3, 'timed_out': False, 'timeout_ms': 10000}
+# {'elapsed_ms': 3, 'timed_out': False, 'timeout_ms': 180000}
 ```
 
 Keys:
 
 - `elapsed_ms` — wall-clock duration in milliseconds.
-- `timed_out` — `True` when the deadline fired (rows reflect the partial set).
+- `timed_out` — `False` on every successful result. A fired deadline raises
+  `CypherTimeoutError`, so no partial `ResultView` is returned.
 - `timeout_ms` — the deadline that was in effect, or `None` when no deadline applied.
 
-`timeout_ms` resolution: explicit `cypher(..., timeout_ms=N)` > `kg.set_default_timeout(ms)` > backend-aware default (Disk 10_000, Mapped 60_000, Memory none). Pass `timeout_ms=0` to disable the deadline entirely for one call. Expanding, aggregation, set-operation, subquery-join, procedure, and mutation loops poll cooperatively at least every 4,096 work units; an interrupted session mutation is rolled back as one statement.
+`timeout_ms` resolution: explicit `cypher(..., timeout_ms=N)` >
+`kg.set_default_timeout(ms)` > the Python default of 180,000 ms. Pass
+`timeout_ms=0` to disable the deadline for one call. Expanding, aggregation,
+set-operation, subquery-join, procedure, and mutation loops poll cooperatively.
+Use `Session.execute()` or `Transaction` when a failed/timed-out mutation must
+roll back; direct `KnowledgeGraph.cypher()` writes execute in place.
 
 ## Indexes
 
@@ -1828,7 +1844,7 @@ the structural forms regardless of any same-named property.
 
 ### Identity (`id`) and prefixed-id datasets (`nid`)
 
-`n.id` is the node's **unique identity** and behaves identically in every
+`n.id` is the node's **indexed logical identity** and behaves identically in every
 storage mode (in-memory / mapped / disk). `CREATE (n {id: X})` and
 `add_nodes(unique_id_field='id')` both make `X` the identity; `MATCH (n {id: X})`
 finds it; it survives save → load. `id` is unique by convention — if duplicate
@@ -1845,7 +1861,11 @@ Query by the string form via `{nid: 'Q42'}` (or by the integer via `{id: 42}`)
 — `{id: 'Q42'}` does **not** match (ids are integers). `n.id → 42`,
 `n.nid → 'Q42'`, in every mode.
 
-## Supported Cypher Subset
+## Selected syntax summary
+
+This compact table is a non-exhaustive orientation aid. The versioned,
+machine-checked source of truth is the [Cypher Dialect Contract](#cypher-dialect-contract)
+below; do not infer absence from this shorter list.
 
 | Category | Supported |
 |----------|-----------|
@@ -1977,8 +1997,8 @@ compatible subset.
 |---------|--------|-------|-----------|
 | Labels per node | One primary type + secondary labels | Multiple equal labels | Primary type drives indexing (`type_indices`); secondary labels are additive (0.10.5+) |
 | `labels(n)` return type | `List[String]` (primary first) | `List[String]` | Matches Neo4j since 0.10.5 |
-| `SET n:Label` | Supported (adds a secondary label) | Supported | Primary type is immutable via label ops — change it with `SET n.type = 'NewType'` |
-| Storage | In-memory (petgraph) | Disk-based | Embedded use case, explicit `save()`/`load()` |
-| Transactions | Snapshot isolation + OCC | Full ACID | GIL serializes Python access; OCC catches conflicts |
-| Indexing | Type indices + vector index | Schema indexes | Automatic type-based lookup, no manual `CREATE INDEX` |
+| `SET n:Label` | Supported (adds a secondary label) | Supported | Primary type is immutable; changing it requires node migration/recreation |
+| Storage | In-memory, mmap-backed, or disk CSR | Disk-based | One Cypher engine spans all three embedded storage modes |
+| Transactions | Snapshot isolation + OCC through `Session` / `Transaction` | Full ACID | Native session coordination is binding-independent; direct graph writes are in-place |
+| Indexing | Type, equality, range, composite, and vector indexes through APIs | Schema indexes | Cypher `CREATE INDEX` syntax is unsupported; use Python/Rust APIs |
 | `LOAD CSV` | Not supported | Supported | Python ecosystem (pandas) preferred for data loading |

@@ -1,6 +1,9 @@
 # Using with AI Agents
 
-KGLite is designed to work as a self-contained knowledge layer for AI agents. No external database, no server process, no network — just a Python object with a Cypher interface that an agent can query directly.
+KGLite is designed to work as a self-contained knowledge layer for AI agents.
+In-process use needs no external database or server: it is a Python object with
+a Cypher interface that an agent can query directly. Network-backed data
+sources and optional model downloads remain explicit choices.
 
 ## The Idea
 
@@ -93,7 +96,10 @@ graph.cypher("""
 
 - **Inventory mode** (`describe()`): node types as compact descriptors `TypeName[size,complexity,flags]` sorted by count, connection map, Cypher extensions. Core/supporting type tiers hide child types behind `+N` suffixes. For small graphs (≤15 types), full detail is inlined automatically. The `<extensions>` block carries `<algorithms>` and `<rules>` hint lines pointing the agent at the available `CALL` procedures (graph algorithms + structural validators).
 - **Focused mode** (`describe(types=['Field'])`): detailed properties with types, connection topology, timeseries/spatial config, supporting children, and sample nodes.
-- **Cypher reference** (`describe(cypher=True)`): full language reference including all supported clauses, operators, built-in functions, predicates, and procedures (including the six structural validators). Drill into a single procedure with `describe(cypher=['orphan_node'])`.
+- **Cypher reference** (`describe(cypher=True)`): full language reference
+  including supported clauses, operators, built-in functions, predicates, and
+  the structural-validator catalogue. Drill into a single procedure with
+  `describe(cypher=['orphan_node'])`.
 
 ### Reading the XML
 

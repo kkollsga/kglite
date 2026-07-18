@@ -23,7 +23,7 @@ labels, cross-type predicates).
 
 | Surface | Shape |
 |---|---|
-| Storage | `NodeData.extra_labels: Vec<InternedKey>` (`#[serde(default)]` for back-compat with 0.10.4 saves) |
+| Storage | `NodeData.extra_labels: Vec<InternedKey>` plus a persisted secondary-label section |
 | Index | `DirGraph.secondary_label_index: HashMap<InternedKey, Vec<NodeIndex>>` + `has_secondary_labels: bool` fast-skip |
 | Choke-point API | `DirGraph::add_node_label` / `remove_node_label` / `node_labels` — both indexes always update together |
 | `GraphRead` trait | `node_labels_of(idx) -> Vec<InternedKey>` |
@@ -32,7 +32,7 @@ labels, cross-type predicates).
 | Python pymethods | `g.add_label(node_type, ids, label)` / `g.remove_label(...)` for direct batch ops |
 | `add_nodes` kwarg | `labels: list[str]` applies uniform secondary labels to every row in the batch |
 | `labels(n)` | Returns `[primary, ...secondaries]` in insertion order (was single-element list since 0.9.52) |
-| Save / load | Bincode-default field; existing 0.10.4 files load with empty `extra_labels`; round-trips preserve secondaries |
+| Save / load | RGF v5/Postcard carries a dedicated secondary-label section; supported v4 inputs load and round-trips preserve secondaries |
 | Test surface | `tests/test_multi_label.py` covers CREATE, SET, REMOVE, MATCH AND-intersect, idempotence, primary-removal-error, save+load, the pymethods, and the `add_nodes(labels=...)` kwarg |
 
 ## Why a primary type
@@ -44,9 +44,9 @@ type), the `type_indices` mmap-friendly CSR, and the per-type
 property schema. Secondary labels are a parallel index over those
 same nodes, not a second columnar layout.
 
-To retype a node, set the `type` property: `SET n.type =
-'NewType'`. Removing the primary label via `REMOVE n:Primary`
-errors deliberately.
+`SET n.type = 'NewType'` only writes a property; it does not migrate the
+primary type, column schema, or indexes. Retyping requires recreating/migrating
+the node. Removing the primary label via `REMOVE n:Primary` errors deliberately.
 
 ## Backend coverage
 
@@ -103,14 +103,9 @@ taxonomies + status-as-label) was that trigger; the work shipped
 in 0.10.5 across six commits (storage foundation → read-side
 Cypher → mutation surface → `add_nodes` kwarg → docs → release).
 
-The three "stepping stones" identified in the original deferral:
-
-1. **`Value::List(Vec<Value>)`** — shipped 0.10.0 Phase A.
-2. **Subtype-edge planner rewrite** — not built; the
-   classifications-as-label use case kglite-docs actually needs
-   doesn't require it.
-3. **`GraphRead::node_types_of`** — landed as `node_labels_of` in
-   the Phase 1 commit of this release.
+The enabling pieces are native `Value::List(Vec<Value>)` projection and the
+`GraphRead::node_labels_of` storage contract. A subtype-edge planner rewrite
+was not needed for classification labels.
 
 Tests covering the index-consistency invariant the original
 rationale called out live in `tests/test_multi_label.py` and the

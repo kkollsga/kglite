@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Verify your build has zero pyo3:
 
 ```bash
-cargo tree -p your-crate | grep pyo3   # → (empty)
+cargo tree -p your-crate | rg pyo3   # → (empty)
 ```
 
 ## Transactions
@@ -108,8 +108,7 @@ cargo run -p kglite --example embedded_session
   the conflict.
 Source-tree construction is provided by the separate `codingest` crate.
 
-Both examples are pyo3-free; `cargo tree -p kglite --example
-embedded_basic | grep pyo3` returns empty.
+Both examples are pyo3-free; `cargo tree -p kglite | rg pyo3` returns empty.
 
 ## Where to go next
 
@@ -152,5 +151,4 @@ c-abi
 api-reference
 boundary-principle
 concurrency-verification
-postcard-persistence-performance
 ```

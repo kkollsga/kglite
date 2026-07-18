@@ -194,7 +194,7 @@ spot-checked against a live Neo4j via `scripts/cypher_conformance.py`
 | Neo4j form | KGLite status | Workaround / note |
 |---|---|---|
 | Arbitrary label sets | One **primary** type + optional secondary labels (since 0.10.5) | `CREATE (n:A:B)`, `SET n:B`, `REMOVE n:B`, `MATCH (n:A:B)` all work; `labels(n)` returns a **list**, primary first |
-| Retype a node by swapping labels | Primary type is immutable via label ops | `SET n.type = 'NewType'`; `REMOVE n:Primary` errors deliberately |
+| Retype a node by swapping labels | Primary type is immutable via label ops | Recreate/migrate the node under the new primary type; `SET n.type` only writes a property |
 | Per-row label assignment at load | `add_nodes(labels=[...])` applies uniform secondary labels to the batch | `g.add_label(node_type, ids, label)` for batches after load |
 | `id(n)` returns an internal integer | `id(n)` / `n.id` returns the node's **identity** | See identity note below |
 

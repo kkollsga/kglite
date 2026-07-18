@@ -11,7 +11,7 @@ use crate::strings::alloc_c_string;
 use kglite::api::KgErrorCode;
 use std::ffi::c_char;
 
-/// C-ABI-side error code. Variants 1-16 map 1:1 to
+/// C-ABI-side error code. Variants 1-17 map by meaning to
 /// [`kglite::api::KgErrorCode`]; variants 100+ are C-ABI-specific
 /// (invalid UTF-8 at the boundary, null pointer, OOM — conditions
 /// that don't have a corresponding `KgErrorCode` because they
@@ -21,7 +21,7 @@ use std::ffi::c_char;
 pub enum KgliteStatusCode {
     Ok = 0,
 
-    // 1-16: mirror KgErrorCode, same order as declared there.
+    // 1-16 preserve the original ABI order; Cancelled was appended as 17.
     CypherSyntax = 1,
     CypherTimeout = 2,
     CypherExecution = 3,

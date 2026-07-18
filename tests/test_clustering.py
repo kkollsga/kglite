@@ -454,12 +454,15 @@ class TestDescribeCypherTiers:
         assert "contains" in desc
         assert "<examples>" in desc
 
-    def test_tier2_has_limitations(self):
+    def test_tier2_has_current_limitations(self):
         g = KnowledgeGraph()
         desc = g.describe(cypher=True)
         assert "<limitations>" in desc
-        assert "FOREACH" in desc
-        assert "subqueries" in desc.lower()
+        assert "LOAD CSV" in desc
+        assert "CREATE INDEX" in desc
+        assert 'feature="FOREACH"' not in desc
+        assert 'name="CALL { }"' in desc
+        assert "read subquery" in desc.lower()
 
     def test_tier2_has_spatial_functions(self):
         g = KnowledgeGraph()

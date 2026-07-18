@@ -2,17 +2,35 @@
 
 Full fluent (method-chaining) API supported by KGLite. For Cypher queries, see the [Cypher Reference](https://kglite.readthedocs.io/en/latest/reference/cypher-reference.html). For a quick overview, see the [documentation](https://kglite.readthedocs.io).
 
+**Start with:** [Getting Started](https://kglite.readthedocs.io/en/latest/python/getting-started.html) ·
+[Data loading](#data-loading) · [Filtering](#selection--filtering) ·
+[Traversal](#traversal) · [Retrieval](#data-retrieval) ·
+[Algorithms](#graph-algorithms) · [Mutations](#mutation) ·
+[Transactions](#transactions) · [Persistence](#persistence) ·
+[Introspection](#schema--introspection) ·
+[Python API](https://kglite.readthedocs.io/en/latest/autoapi/kglite/index.html)
+
 > **Selection model:** The fluent API is selection-based. Most methods return a new `KnowledgeGraph` with an updated selection — no data is materialised until you call a retrieval method (`collect()`, `to_df()`, etc.). This makes query chains fast even on large graphs.
 
 ---
 
 ## Data Loading
 
+DataFrame methods use the optional pandas integration:
+
+```bash
+pip install "kglite[pandas]"
+```
+
 ```python
 import kglite
 import pandas as pd
 
 graph = kglite.KnowledgeGraph()
+people_df = pd.DataFrame({"person_id": [1, 2], "name": ["Alice", "Bob"], "age": [30, 35], "city": ["Oslo", "Bergen"]})
+companies_df = pd.DataFrame({"company_id": [10], "name": ["Acme"]})
+works_df = pd.DataFrame({"person_id": [1, 2], "company_id": [10, 10]})
+df = people_df
 
 # Load nodes from a DataFrame
 graph.add_nodes(df, 'Person', 'person_id', 'name')
@@ -67,7 +85,12 @@ graph.add_connections_bulk([
      'connection_name': 'WORKS_AT', 'data': works_df},
 ])
 
-# Auto-filtering — silently skips connections whose types aren't loaded
+# Auto-filtering — silently skips connections whose types are not loaded
+connection_specs = [{
+    'connection_name': 'WORKS_AT', 'source_type': 'Person',
+    'target_type': 'Company', 'source_id_field': 'person_id',
+    'target_id_field': 'company_id', 'data': works_df,
+}]
 graph.add_connections_from_source(connection_specs)
 ```
 
@@ -1307,7 +1330,7 @@ print(graph.describe(cypher=['cluster', 'MATCH']))    # detailed topic docs
 graph.set_parent_type('ProductionProfile', 'Field')
 
 # MCP server quickstart
-print(KnowledgeGraph.explain_mcp())
+print(kglite.KnowledgeGraph.explain_mcp())
 ```
 
 ---
@@ -1401,7 +1424,7 @@ graph.report_history()    # all reports
 | **Filtering** | `where`, `where_any`, `where_connected`, etc. | WHERE clause |
 | **Aggregation** | `statistics()`, `count()`, `calculate()` | `count()`, `sum()`, `avg()` in RETURN |
 | **Mutations** | `update()` (batch property update) | CREATE, SET, DELETE, REMOVE, MERGE |
-| **Transactions** | `begin()`, `begin_read()` | Implicit (each `cypher()` is atomic) |
+| **Transactions** | `begin()`, `begin_read()`, `session()` | `Session.execute()` / `Transaction` provide rollback; direct `cypher()` writes execute in place |
 | **Schema** | `define_schema()`, `validate_schema()` | N/A |
 | **Set operations** | `union`, `intersection`, `difference`, `symmetric_difference` | `UNION` (result-level only) |
 | **Indexes** | `create_index`, `create_range_index`, `create_composite_index` | Auto-maintained |

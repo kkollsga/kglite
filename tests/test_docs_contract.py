@@ -16,7 +16,8 @@ GENERATED = REPO_ROOT / "docs" / "_generated" / "project-facts.md"
 
 def _active_markdown() -> list[Path]:
     docs = [path for path in (REPO_ROOT / "docs").rglob("*.md") if "history" not in path.parts]
-    return [REPO_ROOT / "README.md", REPO_ROOT / "CONTRIBUTING.md", *docs]
+    crate_readmes = sorted((REPO_ROOT / "crates").glob("*/README.md"))
+    return [REPO_ROOT / "README.md", REPO_ROOT / "CONTRIBUTING.md", *crate_readmes, *docs]
 
 
 def _prose_without_code(text: str) -> str:
@@ -75,6 +76,67 @@ def test_dataframe_walkthroughs_name_the_pandas_extra() -> None:
         "docs/python/guides/data-loading.md",
     ):
         assert "kglite[pandas]" in (REPO_ROOT / relative).read_text(encoding="utf-8")
+
+
+def test_readme_leads_with_install_query_and_reference_paths() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    start = readme.index("## Start here")
+    ecosystem = readme.index("## Ecosystem")
+    onboarding = readme[start:ecosystem]
+    assert start < 2_000, "README onboarding drifted below the opening screen"
+    for required in (
+        "pip install kglite",
+        "kglite.from_records",
+        "Getting Started",
+        "Python API",
+        "Cypher",
+        "MCP and agents",
+        "Operators",
+        "all documentation",
+    ):
+        assert required in onboarding
+
+
+def test_docs_home_leads_with_high_level_routes() -> None:
+    index = (REPO_ROOT / "docs" / "index.md").read_text(encoding="utf-8")
+    start = index.index("## Start here")
+    for required in ("Python", "Cypher", "MCP", "Rust", "Operators", "Reference"):
+        assert required in index[start : start + 2_500]
+
+
+def test_python_guide_navigation_includes_every_guide() -> None:
+    guide_dir = REPO_ROOT / "docs" / "python" / "guides"
+    guide_index = (REPO_ROOT / "docs" / "python" / "index.md").read_text(encoding="utf-8")
+    missing = [
+        path.stem
+        for path in sorted(guide_dir.glob("*.md"))
+        if path.name != "index.md" and f"guides/{path.stem}" not in guide_index
+    ]
+    assert not missing, f"Python guides missing from the ReadTheDocs navigation: {missing}"
+
+
+def test_retired_documentation_contracts_do_not_return() -> None:
+    active = "\n".join(path.read_text(encoding="utf-8") for path in _active_markdown())
+    retired = (
+        "returning partial results",
+        "That's seven tools",
+        "The 12 bundled tools",
+        "Change the primary type via `SET n.type",
+        "use `SET n.type = 'NewType'` to retype",
+        "use ``SET n.type = 'NewType'`` to retype",
+        "including the six structural validators",
+        "kglite_string_free",
+        '35 `extern "C"`',
+        '30 `extern "C"`',
+        "KGLITE_OK",
+        "Status: Phase",
+    )
+    assert not [claim for claim in retired if claim in active]
+
+    topics = (REPO_ROOT / "crates" / "kglite" / "src" / "graph" / "introspection" / "topics.rs").read_text(
+        encoding="utf-8"
+    )
+    assert 'feature=\\"FOREACH\\"' not in topics
 
 
 def test_documented_make_commands_are_real_targets() -> None:

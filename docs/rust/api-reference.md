@@ -38,10 +38,12 @@ When the curated facade proves stable in the field, we cut 1.0 and the pre-1.0
 
 | Item | Path | Purpose |
 |---|---|---|
-| `DirGraph` | `kglite::api::DirGraph` | The in-memory graph. Owned by your binding's "graph handle". |
+| `DirGraph` / `KnowledgeGraph` | `kglite::api::*` | Core graph handle/storage wrapper spanning memory, mapped, and disk modes. |
+| `GraphRead` / `GraphWrite` | `kglite::api::*` | Storage-independent read/mutation traits; `GraphRead` is GAT-based and not object-safe. |
+| Storage/config types | `kglite::api::storage::*` | Mode selection, construction, and lifecycle configuration. |
 | `Value` | `kglite::api::Value` | Every value Cypher can return: scalars, `List`, `Map`, `Node`, `Relationship`, `Path`, …. |
 | `NodeValue` / `PathValue` / `RelValue` | `kglite::api::*` | Per-variant carriers; pattern-match into them without deriving accessors. |
-| `KgError` / `KgErrorCode` | `kglite::api::KgError`, `KgErrorCode` | Typed error enum (16 variants). Map to your binding's error idiom. File I/O: `FileNotFound` / `FileFormat` (corrupt/wrong-format `.kgl`) / `FileIo` (→ Python `FileError`/`FileFormatError`/`FileIoError`). |
+| `KgError` / `KgErrorCode` | `kglite::api::KgError`, `KgErrorCode` | Typed errors with 17 stable codes including cancellation. Map code/message/status through the binding. |
 | `Embedder` (trait) | `kglite::api::Embedder` | Pluggable text-embedding backend for `text_score()` Cypher. |
 | `FastEmbedAdapter` (feature `fastembed`) | `kglite::api::FastEmbedAdapter` | Rust-native ONNX embedder. |
 | `SourceLocation` / `SourceLookup` | `kglite::api::*` | Code-entity location lookup result types. |
@@ -91,15 +93,14 @@ the `session` module instead.
 
 ## Session (canonical query + transaction surface)
 
-The Phase E "single source of truth" — all bindings flow through
-here.
+The canonical query and transaction pipeline for Rust-side bindings.
 
 | Item | Path | Purpose |
 |---|---|---|
 | `Session` | `kglite::api::session::Session` | Shared graph state with commit-swap semantics. |
 | `Transaction` | `kglite::api::session::Transaction` | Snapshot/working CoW transaction state. |
 | `CommitOutcome` | `kglite::api::session::CommitOutcome` | `NoWritesNoOp` / `Committed{new_version}` / `ConflictDetected{current_version, base_version}`. |
-| `ExecuteOptions` | `kglite::api::session::ExecuteOptions` | Params + deadline + max_rows + lazy hint + embedder. |
+| `ExecuteOptions` | `kglite::api::session::ExecuteOptions` | Params, deadline, row/work budget, lazy hint, disabled passes, embedder, value codecs, cancellation, write scope, and provenance. |
 | `ExecuteOutcome` | `kglite::api::session::ExecuteOutcome` | `result: CypherResult` + `is_mutation: bool` + `output_format: OutputFormat`. |
 | `execute_read(&graph, query, &opts)` | `kglite::api::session::execute_read` | Run a read query. |
 | `execute_mut(&mut graph, query, &opts)` | `kglite::api::session::execute_mut` | Run a mutation. |
@@ -123,13 +124,14 @@ move freely between minor releases.
 
 | Change kind | Bumps |
 |---|---|
-| New item in `api::*` | Minor (`0.11.0` → `0.12.0`) |
-| Breaking change to an item already in `api::*` | Major (`0.x.y` → `1.0.0` once we hit 1.0; for now any 0.x bump may break, but we try to keep additions additive within a `0.x` line) |
-| Internal rearrangement (non-api items) | Patch (`0.11.0` → `0.11.1`) |
+| Additive item/options field in `api::*` | Patch or minor, with API baseline update |
+| Intentional breaking change before 1.0 | Minor plus changelog/migration guidance |
+| Internal rearrangement (non-api items) | Patch |
 
-The `.kgl` file format has its own version (`v3`, `v4`, …)
-tracked separately. Format bumps land with their decoder and
-require a graph rebuild from source.
+The `.kgl` format is versioned separately from the source API. The current
+writer emits RGF v5/Postcard; readers accept supported v4 files and explicitly
+reject v3 with a rebuild message. A format bump ships either read compatibility
+or a clear rebuild path.
 
 ## Where to find each item
 

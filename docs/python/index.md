@@ -30,6 +30,7 @@ If you're embedding the engine directly in a Rust binary, the
 
 guides/index
 guides/data-loading
+guides/inline-records
 guides/cypher
 guides/mcp-servers
 guides/mcp-skills
@@ -51,8 +52,8 @@ guides/recipes
 
 - **[Transactions](transactions.md)** — `begin()` / `commit()` /
   `rollback()`, snapshot isolation, OCC.
-- **[Error handling](error-handling.md)** — typed exception
-  hierarchy (`KgError` + 16 subclasses).
+- **[Error handling](error-handling.md)** — typed `KgError` exception
+  hierarchy and stable error codes.
 - **[Value projection](value-projection.md)** — NULL handling,
   CASE branches, optional property semantics.
 - **[Platform and artifact support](platform-support.md)** — runtime-tested,

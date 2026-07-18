@@ -347,8 +347,9 @@ class ResultView:
         Returned dict keys:
 
         - ``elapsed_ms`` (int): wall-clock query duration in milliseconds.
-        - ``timed_out`` (bool): ``True`` when the deadline fired (result
-          rows reflect the partial set before cancellation).
+        - ``timed_out`` (bool): ``False`` for returned results. A deadline
+          expiry raises :class:`CypherTimeoutError` instead of returning a
+          partial ``ResultView``.
         - ``timeout_ms`` (Optional[int]): the deadline that was in effect,
           or ``None`` when no deadline applied (memory graphs by default,
           or any call with ``timeout_ms=0``).
@@ -1019,8 +1020,9 @@ class KnowledgeGraph:
 
         Secondary labels are queryable via Cypher (``MATCH (n:Label)``)
         and surfaced by ``labels(n)``. The primary type (set via
-        ``add_nodes(node_type=...)``) is immutable — to retype a node,
-        use ``SET n.type = 'NewType'``.
+        ``add_nodes(node_type=...)``) is immutable. ``SET n.type`` writes an
+        ordinary property; changing the primary type requires recreating or
+        migrating the node.
 
         Args:
             node_type: Primary type of the nodes.
@@ -1046,8 +1048,8 @@ class KnowledgeGraph:
     ) -> dict[str, int]:
         """Remove a secondary label from a batch of nodes by id.
 
-        Errors if ``label`` is the primary type — use ``SET n.type``
-        to retype a node instead.
+        Errors if ``label`` is the primary type. Changing the primary type
+        requires recreating or migrating the node.
 
         Args:
             node_type: Primary type of the nodes.
@@ -3628,7 +3630,8 @@ class KnowledgeGraph:
                 Use to prevent OOM on dense graphs.
             connection_types: Only traverse edges of these types. Default all.
             via_types: Only traverse through nodes of these types. Default all.
-            timeout_ms: Abort after this many milliseconds, returning partial results.
+            timeout_ms: Stop searching after this many milliseconds; paths
+                found before the deadline are returned.
 
         Returns:
             List of path dicts, each with ``path``, ``connections``, ``length``.
@@ -3690,7 +3693,7 @@ class KnowledgeGraph:
             connection_types: Only traverse these relationship types (str or list).
             top_k: Return only the top *K* nodes.
             as_dict: Return ``{id: score}`` dict instead of list of dicts.
-            timeout_ms: Abort after this many milliseconds, returning partial results.
+            timeout_ms: Abort after this many milliseconds with an error.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
         Returns:
@@ -3719,7 +3722,7 @@ class KnowledgeGraph:
             connection_types: Only traverse these relationship types (str or list).
             top_k: Return only the top *K* nodes.
             as_dict: Return ``{id: score}`` dict instead of list of dicts.
-            timeout_ms: Abort after this many milliseconds, returning partial results.
+            timeout_ms: Abort after this many milliseconds with an error.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
         Returns:
@@ -3744,7 +3747,7 @@ class KnowledgeGraph:
             connection_types: Only count these relationship types (str or list).
             top_k: Return only the top *K* nodes.
             as_dict: Return ``{id: score}`` dict instead of list of dicts.
-            timeout_ms: Abort after this many milliseconds, returning partial results.
+            timeout_ms: Abort after this many milliseconds with an error.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
         Returns:
@@ -3772,7 +3775,7 @@ class KnowledgeGraph:
             connection_types: Filter to specific relationship types.
             top_k: Return only the top *K* nodes.
             as_dict: Return ``{id: score}`` dict instead of list of dicts.
-            timeout_ms: Abort after this many milliseconds, returning partial results.
+            timeout_ms: Abort after this many milliseconds with an error.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
         Returns:
@@ -3797,7 +3800,7 @@ class KnowledgeGraph:
             weight_property: Edge property to use as weight. Default all edges weight ``1.0``.
             resolution: Resolution parameter (higher = more communities). Default ``1.0``.
             connection_types: Only consider edges of these types. Default all edge types.
-            timeout_ms: Abort after this many milliseconds, returning partial results.
+            timeout_ms: Abort after this many milliseconds with an error.
 
         Returns:
             Dict with ``communities`` (dict of community_id to member list),
@@ -3816,7 +3819,7 @@ class KnowledgeGraph:
         Args:
             max_iterations: Maximum iterations. Default ``100``.
             connection_types: Only consider edges of these types. Default all edge types.
-            timeout_ms: Abort after this many milliseconds, returning partial results.
+            timeout_ms: Abort after this many milliseconds with an error.
 
         Returns:
             Dict with ``communities``, ``modularity``, and ``num_communities``.
@@ -4225,8 +4228,10 @@ class KnowledgeGraph:
         ``nodes_created``, ``relationships_created``, ``properties_set``,
         ``nodes_deleted``, ``relationships_deleted``, ``properties_removed``.
 
-        Each call is atomic: if any clause fails, the graph is unchanged.
-        Property and composite indexes are automatically maintained.
+        Direct mutation calls execute in place: if a later clause, timeout, or
+        row-budget check fails, earlier mutations may remain visible. Use
+        :meth:`KnowledgeGraph.session` or :meth:`KnowledgeGraph.begin` when
+        failure must roll back. Property and composite indexes are maintained.
 
         **FORMAT CSV**: Append ``FORMAT CSV`` to any query to get results as
         a CSV string instead of a ResultView. Good for large result transfers
@@ -4250,8 +4255,9 @@ class KnowledgeGraph:
                 query aborts promptly instead of waiting for the deadline.
             max_rows: Cap on intermediate rows and retained collection/work
                 growth across every execution path. Exceeding the cap raises
-                an error (never truncates) and rolls back a mutation statement.
-                Defaults to ``set_default_max_rows()``.
+                an error (never truncates). Direct mutation calls are in-place;
+                use Session/Transaction for rollback. Defaults to
+                ``set_default_max_rows()``.
             streaming: When ``True`` (default), the executor absorbs
                 compatible clause runs (currently
                 ``WITH/RETURN(group, agg) [ORDER BY ... LIMIT k]``) into
@@ -5260,19 +5266,19 @@ class KnowledgeGraph:
         ...
 
     def begin(self, timeout_ms: Optional[int] = None) -> Transaction:
-        """Begin a read-write transaction — returns a Transaction with a working copy.
+        """Begin a read-write transaction with a lazy copy-on-write snapshot.
 
-        Creates a snapshot (deep-clone) of the current graph state. All mutations
-        within the transaction are isolated until ``commit()`` is called. If rolled
-        back (or dropped without committing), no changes are applied.
+        ``begin()`` is O(1). The first mutation creates a backend-specific
+        working fork; all transaction mutations remain isolated until
+        ``commit()``. Rollback (or dropping without commit) discards the fork.
 
         Uses optimistic concurrency control: ``commit()`` will raise
-        ``RuntimeError`` if the graph was modified by another transaction since
-        ``begin()`` was called.
+        a typed ``KgError`` if the graph changed since ``begin()``.
 
         Args:
             timeout_ms: Optional transaction-level timeout in milliseconds.
-                If set, all operations after the deadline raise ``TimeoutError``.
+                If set, operations after the deadline raise
+                ``CypherTimeoutError``.
 
         Can be used as a context manager::
 
@@ -5361,8 +5367,8 @@ class Session:
         Mutations (``CREATE`` / ``SET`` / ``DELETE`` / ``REMOVE`` / ``MERGE``)
         take the Session's writer lock for the mutation, so
         concurrent ``execute()`` calls run one at a time and each sees the
-        prior writer's committed changes — no lost updates. The commit is an
-        Readers already holding snapshots keep seeing the pre-write graph. A
+        prior writer's committed changes — no lost updates. Readers already
+        holding snapshots keep seeing the pre-write graph. A
         new reader may briefly wait while a unique-owner write holds the core
         graph mutex.
 
@@ -5469,7 +5475,7 @@ class Transaction:
         - **Write isolation**: mutations modify only the working copy.
         - **Optimistic concurrency control**: ``commit()`` checks that the
           graph version hasn't changed since ``begin()``. If another transaction
-          committed in between, ``RuntimeError`` is raised.
+          committed in between, a typed ``KgError`` is raised.
         - **Commit**: replaces the original graph's data atomically.
 
     Read-only transactions (``begin_read()``):
@@ -5520,7 +5526,7 @@ class Transaction:
         After commit, the transaction cannot be used again.
 
         Raises:
-            RuntimeError: If the graph was modified since ``begin()`` (OCC conflict).
+            KgError: If the graph was modified since ``begin()`` (OCC conflict).
         """
         ...
 

@@ -10,9 +10,10 @@
 pip install kglite
 ```
 
-The default install is an 18 MB wheel that links zero network code and
-includes everything needed to ship the graph as an MCP server for Claude /
-Cursor / agents. (Parsing codebases into graphs now lives in the companion
+The default install has no required Python runtime dependencies and includes
+everything needed to ship the graph as an MCP server for Claude, Cursor, or
+other agents. The embedded graph engine requires no external database service.
+(Parsing codebases into graphs now lives in the companion
 [codingest](https://codingest.readthedocs.io) project; kglite loads and queries
 the `.kgl` it builds.)
 
@@ -70,7 +71,7 @@ graph.add_connections(
     target_id_field="tgt",
 )
 
-# Query — Cypher result is a ResultView (lazy; data stays in Rust).
+# Query — eligible ResultView projections stay lazy until accessed.
 result = graph.cypher("""
     MATCH (p:Person) WHERE p.age > 30
     RETURN p.name AS name, p.city AS city
@@ -132,9 +133,9 @@ file to Claude / Cursor / any MCP-capable agent in one command:
 kglite-mcp-server --graph my_graph.kgl
 ```
 
-Two tools out of the box (`graph_overview` for schema discovery,
-`cypher_query` for execution). Add a sibling `<basename>_mcp.yaml`
-file with `source_root: ./data` and you get **five** tools — three
+Three tools out of the box (`ping`, `graph_overview` for schema discovery,
+and `cypher_query` for execution). Add a sibling `<basename>_mcp.yaml`
+file with `source_root: ./data` and you get **six** tools — three
 sandboxed file-access tools (`read_source` / `grep` / `list_source`)
 register automatically. See {doc}`guides/mcp-servers`.
 

@@ -16,7 +16,11 @@ atomically renames it over the target, so a crash mid-save can't leave a torn
 `kglite.FileFormatError` on a corrupt file (see [Threading](#threading) and the
 {doc}`durable apps guide </python/guides/durable-apps>`).
 
-Save files (`.kgl`) use an explicitly versioned binary container. Current files use Postcard payloads; supported older bincode containers are selected only by their legacy format headers. For sharing across machines or long-term archival, prefer a portable format (GraphML, CSV).
+Save files (`.kgl`) use an explicitly versioned binary container. Current
+files use RGF v5, an explicit Postcard codec tag, and core-data version 3.
+Supported v4/bincode files are selected only by their header; v3 is refused
+with a rebuild instruction. A `.kgl` is the only complete KGLite backup because
+portable exports intentionally omit some engine-specific state.
 
 ### `open()` — load-or-create lifecycle
 
@@ -86,31 +90,34 @@ graph.export('my_graph.csv', format='csv')           # creates _nodes.csv + _edg
 graphml_string = graph.export_string(format='graphml')
 ```
 
-## Back up before upgrading (the format-stable escape hatch)
+## Back up before upgrading
 
 The `.kgl` file (and `to_bytes()`) is a **versioned binary cache**, not a
 forever-stable archive. KGLite occasionally hard-breaks the on-disk format
-across major versions (e.g. the v3→v4 `Value`-layout change), and a newer
+across pre-1.0 minor versions, and a newer
 binary will **refuse** an older file rather than silently misread it. If you
 still have the original source (CSV, DataFrame, dataset loader), you just
 rebuild. If you *don't*, you want a portable copy made **before** you upgrade.
 
-`export_csv()` + `from_blueprint()` are that copy — a schema-complete,
-format-stable round-trip (plain CSV + a `blueprint.json` manifest) that
-survives version changes, the way `sqlite3 .dump` does for SQLite:
+Keep the original source/build recipe whenever possible, and copy the `.kgl`
+before upgrading. For node/edge/property recovery, also make a portable CSV
+export explicitly from the complete graph rather than the current selection:
 
 ```python
 # Under the version that can still open the graph:
-graph.export_csv('backup/')            # nodes/*.csv + connections/*.csv + blueprint.json
+graph.export_csv('backup/', selection_only=False)
 
 # Later, on any version — rebuild the full graph from the portable copy:
 import kglite
 graph = kglite.from_blueprint('backup/blueprint.json')
 ```
 
-Treat `export_csv('backup/')` as the thing you run before a major-version
-upgrade. Unlike the lossy visualization exports above (GraphML/GEXF/D3), it
-preserves every node, edge, and property and reloads to an equivalent graph.
+CSV/blueprint preserves ordinary nodes, edges, and scalar properties, but it is
+**not a full-graph backup**: secondary labels, embeddings/vector indexes,
+timeseries stores, configured indexes/schema, and some structured value types
+are omitted or degraded. Recreate those from their source after import. If the
+current fluent selection is intentional, omit `selection_only=False` and treat
+the result as a subgraph export.
 
 ## NetworkX Interop
 
@@ -284,7 +291,7 @@ Indexes are maintained automatically by all mutation operations.
 
 1. **Batch operations** — add nodes/connections in batches, not individually
 2. **Specify columns** — only include columns you need to reduce memory
-3. **Filter by type first** — `select()` before `filter()` for narrower scans
+3. **Filter by type first** — `select()` before `where()` for narrower scans
 4. **Create indexes** — on frequently filtered equality conditions (~3x on 100k+ nodes)
 5. **Use lightweight methods** — `len()`, `indices()`, `node()` skip property materialization
 6. **Cypher LIMIT** — use `LIMIT` to avoid scanning entire result sets
@@ -379,7 +386,10 @@ if info['fragmentation_ratio'] > 0.3:
 
 - **One primary type per node.** Secondary labels (multi-label, 0.10.5+) are preserved; `labels(n)` returns a list, primary type first.
 - **`id` and `title` are canonical.** `add_nodes(unique_id_field='user_id')` stores the column as `id`. The original name works as an alias.
-- **Save files use a pinned binary format.** Compatible across OS/architecture within the same major version.
+- **Save files use a versioned binary format.** They are portable across
+  supported OS/architectures, but a pre-1.0 minor release may require rebuild.
 - **Indexes:** `create_index()` accelerates equality only. For range queries, use `create_range_index()`.
 - **Flat vs. grouped results.** After traversal with multiple parents, `titles()` and `collect()` return grouped dicts.
-- **No auto-persistence.** The graph lives in memory. `save()` is manual.
+- **Persistence is explicit unless lifecycle helpers are used.** `save()` is
+  manual on a plain graph; `open()` remembers a path and clean context-manager
+  exit saves, while `open(..., durable=True)` adds an in-memory WAL.

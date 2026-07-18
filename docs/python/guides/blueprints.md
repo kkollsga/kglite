@@ -76,7 +76,11 @@ Available types:
 | `"string"` | text | Default for text columns |
 | `"int"` | integer | Whole numbers |
 | `"float"` | float | Decimal numbers |
-| `"date"` | datetime | Expects epoch milliseconds in CSV; converts to datetime |
+| `"bool"` / `"boolean"` | boolean | Accepts true/false and common 1/0/yes/no forms |
+| `"date"` / `"datetime"` | date | Accepts `YYYY-MM-DD`, timestamp text, or epoch milliseconds; stores the date |
+| `"validFrom"` / `"validTo"` | date | Date column plus temporal-role metadata |
+| `"geometry"` | WKT string | Uses existing WKT or converts `_geometry` GeoJSON in Rust |
+| `"location.lat"` / `"location.lon"` | float | Coordinates; may receive GeoJSON centroids |
 
 Columns not listed in `properties` are still loaded — they just use auto-detection. You only need to specify types when auto-detection gets it wrong.
 
@@ -342,7 +346,9 @@ Use special property types to enable spatial indexing and queries.
 }
 ```
 
-For `"geometry"`, the CSV must have a `_geometry` column containing GeoJSON strings. The loader converts these to WKT format and computes centroid lat/lon automatically. Requires the `shapely` package (`pip install shapely`).
+If `_geometry` contains GeoJSON, the Rust loader converts it to WKT and can
+populate centroid latitude/longitude. Existing WKT passes through unchanged.
+Plain lat/lon needs no `_geometry`, and blueprint conversion needs no Shapely.
 
 After loading, use spatial queries like `distance()`, `near_point_m()`, and `contains()` — see the [Spatial guide](spatial.md) for details.
 
@@ -405,7 +411,13 @@ graph = kglite.from_blueprint("blueprint.json", save=False)
 
 ## How Loading Works
 
-`from_blueprint()` processes nodes in dependency order across five phases:
+`from_blueprint()` first applies the ordered top-level `compute` pipeline, then
+processes graph construction in dependency order. Compute operations are
+`derive` (row properties), `filter` (in-place or into a new type), `chain`
+(ordered group edges), `calendar` (Date hierarchy/linking), and `aggregate`
+(summary nodes/edges). Later operations can consume earlier outputs.
+
+Graph construction then has five steps:
 
 1. **Manual nodes** — types without `csv` (created from distinct FK values found across all CSVs)
 2. **Core nodes** — types with CSV files
@@ -540,12 +552,9 @@ Filters compare values exactly — `{"status": "Active"}` won't match `"active"`
 
 If your CSV has aggregate rows (e.g., `month=0` for annual totals), they are automatically dropped. Only rows with non-zero time components are loaded.
 
-### Geometry requires shapely
+### Geometry inputs
 
-If your blueprint uses `"geometry"`, `"location.lat"`, or `"location.lon"` types, install shapely:
-
-```bash
-pip install shapely
-```
-
-The CSV must have a `_geometry` column containing GeoJSON strings for geometry conversion.
+Blueprint GeoJSON → WKT/centroid conversion runs in Rust and needs no Shapely.
+Supply `_geometry` only for GeoJSON conversion; existing WKT and plain lat/lon
+columns are accepted directly. Shapely remains optional for Python-side
+geometry objects and GeoDataFrame helpers outside the blueprint loader.

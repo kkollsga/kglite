@@ -1,8 +1,8 @@
 # Examples: workspace mode (local + github-clone-tracker)
 
-`kglite-mcp-server --workspace <dir>` runs the server with a workspace
-backing it. Two flavours, picked by the manifest's `workspace.kind`
-field:
+`codingest-mcp --workspace <dir>` runs KGLite's graph-serving surface with
+codingest's code-graph builder injected. Two flavours are selected by the
+manifest's `workspace.kind` field:
 
 - **`workspace.kind: local`** — a fixed local source directory, watch
   mode for auto-rebuild on file changes, `set_root_dir(path)` to swap
@@ -23,7 +23,7 @@ Copy-pasteable starting points ship in the repo's `examples/`:
 - **Local code-review** → [`examples/local_code_review_mcp.yaml`](https://github.com/kkollsga/kglite/blob/main/examples/local_code_review_mcp.yaml)
 - **GitHub-clone tracker** → [`examples/open_source_workspace_mcp.yaml`](https://github.com/kkollsga/kglite/blob/main/examples/open_source_workspace_mcp.yaml)
 
-After copying one, run `kglite-mcp-server --selftest --mcp-config <your.yaml>`
+After copying one, run `codingest-mcp --selftest --mcp-config <your.yaml>`
 to confirm it stands up correctly (see the guide's
 [Verify your setup](../guides/mcp-servers.md#verify-your-setup)).
 
@@ -60,7 +60,6 @@ workspace:
 - read_code_source
 - ping
 - read_source / grep / list_source
-- repo_management              # local-mode also gets this for rebuild dispatch
 - set_root_dir                 # local-mode only
 - github_issues / github_api   # if GITHUB_TOKEN is in env
 ```
@@ -102,20 +101,6 @@ paths are under `workspace.root`:
 → "Error: path '/tmp' escapes the workspace root."                 ✓ (outside the sandbox)
 ```
 
-## `repo_management` in local mode
-
-In local-workspace mode `repo_management` does not accept a repo
-name (there's nothing to clone). It accepts:
-
-```text
-{"update": true}                        — re-fingerprint + rebuild
-{"update": true, "force_rebuild": true} — rebuild regardless of fingerprint
-```
-
-`force_rebuild: true` bypasses the SHA gating that's otherwise on
-top of the post-activate hook — useful after upgrading kglite
-itself or after a builder change.
-
 ## github_issues integration
 
 If the project under the active root has a `.git/config` with a
@@ -155,7 +140,7 @@ paste-ready manifest lives at
 ```bash
 mkdir /path/to/my-workspace/
 cp examples/open_source_workspace_mcp.yaml /path/to/my-workspace/workspace_mcp.yaml
-kglite-mcp-server --workspace /path/to/my-workspace/
+codingest-mcp --workspace /path/to/my-workspace/
 ```
 
 The filename inside the workspace dir MUST be `workspace_mcp.yaml` —
@@ -221,8 +206,8 @@ Key choices:
   `graph_overview()` output. Skipped for focused drill-downs
   (`graph_overview(types=...)` etc.) so it doesn't bloat every
   response. Good place for the "two-read-paths" mental model.
-- **`tools[].bundled:` overrides** (kglite 0.9.27 / mcp-methods
-  0.3.31+) — replace the agent-facing `description:` for specific
+- **`tools[].bundled:` overrides** — replace the agent-facing
+  `description:` for specific
   bundled tools. The example overrides four:
   - `repo_management` — its description carries the "FIRST STEP +
     five common invocations" guidance that used to live in the
@@ -239,15 +224,12 @@ Key choices:
     principle as the other three: per-tool guidance attached to
     the tool, not buried in a session-wide blob.
 
-  Override `description` works on any of the 12 bundled tools
-  (`cypher_query`, `graph_overview`, `ping`, `read_code_source`,
-  `save_graph`, `read_source`, `grep`, `list_source`,
-  `repo_management`, `set_root_dir`, `github_issues`,
-  `github_api`). Adding `hidden: true` drops a tool from
-  `tools/list` AND rejects calls — useful for narrowing the agent
-  surface when a bundled tool doesn't fit your deployment.
-  Unknown tool names fail at boot with the full valid catalogue
-  listed in the error message.
+  Override `description` works on any bundled tool in the catalogue reported
+  by the server. Adding `hidden: true` drops a tool from `tools/list` and
+  rejects calls — useful for narrowing the agent surface when a bundled tool
+  doesn't fit your deployment. Unknown tool names fail at boot with the full
+  valid catalogue listed in the error message. The catalogue is the authority;
+  it varies with server mode and optional integrations.
 
 ### What gets registered
 

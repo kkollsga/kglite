@@ -18,7 +18,7 @@ kglite-bolt-server --graph my-graph.kgl --bind 127.0.0.1 --port 7687
 Then point a Bolt v5 client at `bolt://localhost:7687` and run KGLite's
 documented Cypher dialect against the loaded `.kgl` graph.
 
-## Features (Phase F)
+## Features
 
 - **Bolt v5.x handshake + PackStream framing** (handshake versions
   5.0 / 5.1 / 5.2 / 5.3 / 5.4 advertised).
@@ -33,7 +33,7 @@ documented Cypher dialect against the loaded `.kgl` graph.
   `Neo.ClientError.Transaction.ConflictDetected`. Retry on the
   client side.
 - **Zero PyO3 in the binary** — no libpython link, no Python
-  runtime required. `cargo tree -p kglite-bolt-server | grep
+  runtime required. `cargo tree -p kglite-bolt-server | rg
   pyo3` returns empty.
 
 ## Transaction metadata (`write_scope` / `git_sha` / `modified_by`)

@@ -59,10 +59,10 @@ RUSTFLAGS="-Zsanitizer=thread" \
   -Zbuild-std --target aarch64-apple-darwin
 ```
 
-Result on the fixed code: **clean — no data races reported.** (First build is
-~3 min: it compiles std from source with instrumentation.) This is the intended
-CI nightly gate; it is not part of the default `make test` (needs nightly +
-build-std).
+The documented verification run on the fixed code reported no data races.
+ThreadSanitizer is a manual maintainer check, not a CI or default `make test`
+gate; it needs nightly plus `build-std`, and the first instrumented build is
+slow.
 
 ## `unsafe impl Send/Sync` audit
 

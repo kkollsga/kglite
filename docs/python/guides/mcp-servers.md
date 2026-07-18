@@ -75,6 +75,26 @@ Want semantic search (`text_score()` inside Cypher) or source-file
 access tools? Drop a manifest — see step 4 below or the
 [Customising with a manifest](#customising-with-a-manifest) section.
 
+### Agent graph workbench (opt-in writes)
+
+Servers are read-only by default. Add `--writable` when the agent must mutate
+or switch graphs:
+
+```bash
+# Open an existing graph with mutation + lifecycle tools.
+kglite-mcp-server --graph /data/work.kgl --writable
+
+# Create a missing graph explicitly in one of the three storage modes.
+kglite-mcp-server --graph /data/new.kgl --storage memory --writable
+# --storage mapped|disk may point at a directory-backed graph instead.
+```
+
+Writable mode registers mutation-capable `cypher_query` plus `load_graph`,
+`create_graph`, and `save_graph_as`; persistence to the active target is also
+available. `--storage` is a creation choice, not a silent conversion of an
+existing graph. Keep the default read-only mode for untrusted clients, and use
+`write_scope`/schema controls when writes should be type-scoped.
+
 ### 3. Register with Claude Desktop
 
 Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
@@ -133,7 +153,7 @@ line per capability:
 ```
 kglite-mcp-server --selftest  (mode: single-graph)
   ✓ server initializes: serverInfo.name = KGLite (single-graph)
-  ✓ graph tools registered: cypher_query + graph_overview present (8 tools total)
+  ✓ graph tools registered: cypher_query + graph_overview present
   – github tools: none registered (no GITHUB_TOKEN reachable, or disabled)
   ✓ graph hydrates: MATCH (n) RETURN count(n) → 1 row(s):
 Selftest PASSED — the server is configured correctly.
@@ -463,17 +483,19 @@ kglite-mcp-server --graph conference.kgl
 
 Tools registered (visible in any MCP-aware agent):
 
-- `graph_overview`, `cypher_query`, `save_graph`, `ping` — bundled
-- `read_code_source`, `explore` — bundled, code-graph-aware
-  (0.9.31+ / 0.9.34+ respectively)
+- `graph_overview`, `cypher_query`, `ping` — core graph tools
+- `read_code_source`, `explore` — code-graph-aware tools
 - `read_source`, `grep`, `list_source` — from `source_root`
 - `similar_sessions` — inline Cypher
 - `session_detail` — inline Cypher
 
-That's seven tools from ~35 lines of YAML, zero Python. For mapping the
-agent's input onto your stored types (Wikidata `'Q42'↔42`, enum codes, date
-formats), see {doc}`../examples/manifest_value_codecs`. For full Rust
-integration, see **Building a downstream binary** below.
+The exact list is mode-dependent. `save_graph` is registered only when the
+manifest opts in with `builtins.save_graph: true` or the server runs with
+`--writable`; write-enabled workbench mode also adds graph lifecycle tools.
+For mapping the agent's input onto your stored types (Wikidata
+`'Q42'↔42`, enum codes, date formats), see
+{doc}`../examples/manifest_value_codecs`. For full Rust integration, see
+**Building a downstream binary** below.
 
 ## Building a downstream binary
 
@@ -773,23 +795,14 @@ env) or activate the right env explicitly.
 The [tool gating matrix](#tool-gating) shows the conditions each
 tool needs to register. Most common cases:
 
-- `repo_management` / `set_root_dir` missing — you're not in
-  `--workspace` mode (or the manifest doesn't declare
-  `workspace.kind: local`).
+- `repo_management` missing — repository cloning is a `codingest-mcp`
+  workspace feature. `set_root_dir` requires `workspace.kind: local`.
 - `read_source` / `grep` / `list_source` missing — no source root
   is configured (no `source_root:` in the manifest, no `--source-root`
   CLI flag, and `--graph` parent auto-bind didn't fire).
 - `github_issues` / `github_api` missing — no `GITHUB_TOKEN` in env.
 - `save_graph` missing — you're not in `--graph` mode OR the
   manifest doesn't set `builtins.save_graph: true`.
-
-If you're also running the bare `mcp-server` CLI from
-[mcp-methods](https://mcp-methods.readthedocs.io) against the same
-YAML for comparison: expect a slightly different tool list there
-(notably `mcp-server` registers `repo_management` in bare mode
-while `kglite-mcp-server` gates it on `--workspace`). Tracked for
-framework alignment; only relevant if you compare the two binaries
-side-by-side.
 
 ### PyPI says "No matching distribution found" immediately after a release
 
@@ -853,7 +866,7 @@ will my agent see?"
 | `read_code_source` | always | Requires an active graph at call time (returns the no-graph message otherwise). |
 | `save_graph` | `--graph` mode AND `builtins.save_graph: true` | Other modes have no single graph to save back to. |
 | `read_source` / `grep` / `list_source` | a source root is configured (`--source-root`, `--graph` parent auto-bind, manifest `source_root:`, or active workspace repo) | All three register together; never registered independently. |
-| `repo_management` | `--workspace` mode OR `workspace.kind: local` in manifest | Local-mode rejects `name=` and `delete=true`; both are github-only. |
+| `repo_management` | `codingest-mcp --workspace` clone-tracker mode | Not registered in local-workspace mode; use `set_root_dir` there. |
 | `set_root_dir` | `workspace.kind: local` only | Sandboxed against the manifest-declared `workspace.root` for the lifetime of the server. |
 | `github_issues` / `github_api` | `GITHUB_TOKEN` (or `GH_TOKEN`) reachable at boot | Token loaded from process env, walk-up `.env`, or explicit `env_file:`. Tools are registered together; never one without the other. |
 | Manifest `tools[].cypher` entries | the manifest declares them AND the mode supports cypher (anything but `--source-root` and bare) | Tool names cannot collide with the built-ins above. |
@@ -1161,7 +1174,8 @@ same server, so it rarely matters).
 
 #### Watch mode rebuild costs
 
-`workspace.watch: true` + `--watch DIR` rebuilds the code graph (requires an injected builder — codingest-mcp)
+`workspace.watch: true` + `--watch DIR` rebuilds the code graph under
+`codingest-mcp`; the generic `kglite-mcp-server` intentionally has no builder
 on every debounced file change (500 ms default debounce). For source
 trees over 100k LoC this costs a few seconds per rebuild. The
 rebuild runs on a background thread; queries against the previous

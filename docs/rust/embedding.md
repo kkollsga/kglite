@@ -6,10 +6,9 @@ the Python wheel in their build. If you're a Python user
 (`pip install kglite`), you don't need to read this — `import
 kglite` already wraps everything for you.
 
-## The polars-style split
+## Crate split
 
-After Phase G (2026-05-24) kglite follows the same architectural
-pattern as polars / pydantic-core / many published pyo3 projects:
+KGLite keeps the pure-Rust engine separate from protocol and Python wrappers:
 
 | Crate | Purpose | Has PyO3? |
 |---|---|---|
@@ -18,10 +17,8 @@ pattern as polars / pydantic-core / many published pyo3 projects:
 | `kglite-bolt-server` (`crates/kglite-bolt-server/`) | Bolt v5.x protocol binary. Wraps the kglite engine directly. | No |
 | `kglite-mcp-server` (`crates/kglite-mcp-server/`) | MCP protocol binary. Depends on the pure-Rust `kglite` core directly — no pyo3 in the resulting binary. (Also bundled into the Python wheel, statically linked via the `kglite-py` crate, sharing the one engine.) | **No** |
 
-The end-state design that any future binding (Go via cgo,
-TypeScript via napi, JVM via JNI) follows: a sibling crate that
-depends on the `kglite` engine and adapts its API to the target
-language's idioms. No changes to the engine are required.
+Rust-side wrappers depend on the engine crate directly. Non-Rust bindings use
+the supported C ABI described later in this guide.
 
 ## Quick start
 
@@ -50,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let graph = load_file("graph.kgl")?;
 
     // Run a Cypher query through the canonical pipeline.
-    // Same path Python / Bolt / MCP all flow through (Phase E).
+    // Same path Python / Bolt / MCP all flow through.
     let params = HashMap::new();
     let opts = session::ExecuteOptions::eager(&params);
     let outcome = session::execute_read(
@@ -106,7 +103,7 @@ use kglite::api::Embedder;
   include scalars (`Int64`, `Float64`, `String`, `Bool`,
   `NaiveDate`), compound (`List`, `Map`), and graph-specific
   (`Node`, `Relationship`, `Path`).
-- **`KgError`** — typed error enum (16 variants) every engine
+- **`KgError`** — typed error enum every engine
   function can return. Map to your binding's error idiom at the
   boundary. File I/O surfaces as `FileError` (not found),
   `FileFormatError` (corrupt / wrong-format `.kgl` — what `load`
@@ -135,8 +132,7 @@ use kglite::api::session::{Session, Transaction, CommitOutcome};
 use kglite::api::session::{ExecuteOptions, execute_read, execute_mut};
 ```
 
-This is the "single source of truth" added in Phase E. All
-bindings flow through it. Cypher pipeline orchestration +
+This is the single source of truth all Rust-side bindings flow through. Cypher pipeline orchestration +
 snapshot/working CoW + OCC live here exactly once.
 
 - `execute_read(&dir, query, &opts)` — run a read query against
@@ -185,9 +181,9 @@ other:
   → Python loads via `kglite.load("graph.kgl")`
 - Future Go binding writes → TypeScript binding reads, etc.
 
-The format is versioned (`load_v3`, `load_v4`, …). Format bumps
-are coordinated with kglite's minor release cycle and tracked
-via `tests/test_phase4_parity.py::GOLDEN_V3_DIGEST` etc. (see
+The current writer emits RGF v5 with an explicit Postcard codec tag. The
+reader accepts v5/v4 and rejects v3 with a rebuild message. Format drift is
+tracked via `tests/test_phase4_parity.py::GOLDEN_V3_DIGEST` etc. (see
 CLAUDE.md → "Captured-constant refresh at release time").
 
 The format does NOT bundle binding-ergonomic state (Python's
@@ -196,30 +192,20 @@ those fresh on load.
 
 ## Wrapping the kglite engine in a new language
 
-The path for a new language binding (Go, TypeScript, JVM) is:
-
-1. **Create a new sibling crate** — `crates/kglite-go/`, or
-   wherever your binding's natural home is.
-2. **Depend on kglite** — `kglite = { path = "../kglite" }`
-   (enable the optional feature flags your binding needs).
-3. **Author your bridge** — cgo / napi / JNI handles that
-   marshal between your language's types and `kglite::api::*`.
-4. **Wrap the binding-ergonomic state** in your language's
-   idiomatic style. (For Go: a `Graph` struct holding `*C.DirGraph`
-   + a metrics/logger; for TS: a `Graph` class wrapping
-   `napi::Reference` + a Promise-returning API.)
-
-The hard part — the Cypher pipeline, the CoW transaction model,
-the OCC commit — is solved once, in `kglite::api::session`.
-Each binding only owns the marshalling layer.
+Rust-side wrappers call `kglite::api::*` directly. Non-Rust bindings (Go,
+JavaScript, JVM, .NET, Swift) use the supported `kglite-c` boundary rather than
+binding internal Rust structs. In both cases the engine owns the synchronous
+Cypher pipeline and graph semantics; the wrapper owns marshalling, runtime
+idioms, logging, error presentation, and teardown.
 
 ### Non-Rust bindings via the C ABI
 
 The `kglite-c` crate (`crates/kglite-c/`) is the canonical entry
 point for non-Rust language bindings — Go via cgo, JavaScript via
-napi, JVM via JNI, .NET via P/Invoke. It exposes
-`kglite::api::*` through 30 `extern "C"` functions plus a
-cbindgen-generated `kglite.h` header.
+napi, JVM via JNI, .NET via P/Invoke. It exposes the supported lifecycle,
+session, query, result, persistence, and embedder surface through a
+cbindgen-generated `kglite.h` header. The generated header, not a prose
+function count, is the signature authority.
 
 A minimal cgo binding looks like this:
 
@@ -262,21 +248,19 @@ development needed per binding.
 | Item | Stability |
 |---|---|
 | `kglite::api::*` | **Semver-stable** within a minor. Breaking changes are announced + version-bumped. |
-| `kglite::error::*` | Stable (KgError variants may grow but won't be removed without a major bump). |
+| `kglite::error::*` | Patch-stable within a 0.x minor; minor releases may make documented breaking changes. |
 | `kglite::graph::*` (raw module path) | **Internal**. Subject to reorganization. Always go through `api::*` re-exports. |
 | `kglite::datatypes::*` (raw module path) | Internal — use `api::{Value, NodeValue, PathValue, RelValue}`. |
-| Any `pub(crate)` item promoted to `pub` for visibility (Phase G.3a) | **Unstable** — these were opened up for the wrapper crate's needs. Subject to retraction once accessor methods are designed. |
+| Public items outside the curated `api::*` boundary | **Unstable** implementation detail; do not bind them. |
 
 If you depend on something outside `api::*`, you're on your own
 for minor-version compatibility.
 
 ## See also
 
-- `docs/rust/session.md` — full session/transaction
-  abstraction reference (Phase E).
+- `docs/rust/session.md` — full session/transaction abstraction reference.
 - `docs/python/transactions.md` — Python-API-flavored
   transaction guide.
 - `docs/operators/bolt-server.md` — Bolt server operator guide
   (an example of a sibling-crate binding).
 - `CYPHER.md` — Cypher language reference.
-- `docs/history/bolt-implementation.md` — Phase E + Phase G design docs.

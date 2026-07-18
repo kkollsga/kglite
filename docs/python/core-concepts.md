@@ -2,13 +2,20 @@
 
 ## Nodes, Relationships, and Selections
 
-**Nodes** have three built-in fields — `type` (label), `title` (display name), `id` (unique within type) — plus arbitrary properties. Each node has exactly one type.
+**Nodes** have three built-in fields — `type` (primary label), `title`
+(display name), and `id` (indexed logical identity) — plus arbitrary
+properties and optional secondary labels. Duplicate ids are possible; use
+`MERGE` or validate inputs when uniqueness matters.
 
 **Relationships** connect two nodes with a type (e.g., `:KNOWS`) and optional properties. The Cypher API calls them "relationships"; the fluent API calls them "connections" — same thing.
 
 **Selections** (fluent API) are lightweight views — a set of node indices that flow through chained operations like `select().where().traverse()`. They don't copy data.
 
-**Atomicity.** Each `cypher()` call is atomic — if any clause fails, the graph remains unchanged. For multi-statement atomicity, use `graph.begin()` transactions. Durability only via explicit `save()` (which is itself atomic + `fsync` — no torn file on a crash).
+**Atomicity.** Direct `graph.cypher()` mutations execute in place; if a later
+clause, timeout, or row-budget check fails, earlier work may remain visible.
+Use `graph.session().execute()` or `graph.begin()` when failure must roll back.
+`save()` publishes a snapshot atomically; `open(..., durable=True)` additionally
+provides an in-memory WAL and context-managed graphs can auto-save on close.
 
 **Single-owner.** A `KnowledgeGraph` is owned by one thread at a time: concurrent reads are fine, but a read overlapping a mutation on the same instance raises a clear `RuntimeError`. For multi-threaded use: give each worker its own `copy()`, share a read-only `graph.freeze()` snapshot for lock-free reads, or — when threads need shared reads **and** writes — `graph.session()` (lock-free reads + serialized composing writes). See {doc}`/concepts/concurrency`.
 
@@ -16,9 +23,13 @@
 
 KGLite stores nodes and relationships in a Rust graph structure ([petgraph](https://github.com/petgraph/petgraph)). Python only sees lightweight handles — data converts to Python objects on access, not on query.
 
-- **Cypher queries** parse, optimize, and execute entirely in Rust, then return a `ResultView` (lazy — rows convert to Python dicts only when accessed)
+- **Cypher queries** parse, optimize, and execute entirely in Rust, then return
+  a `ResultView`; eligible projections keep a lazy descriptor while ordinary
+  results are already materialized in Rust (Python values convert on access)
 - **Fluent API** chains build a *selection* (a set of node indices) — no data is copied until you call `collect()`, `to_df()`, etc.
-- **Persistence** is via `save()`/`load()` binary snapshots — there is no WAL or auto-save
+- **Persistence** uses `save()`/`load()` snapshots; `open(..., durable=True)`
+  enables a WAL for in-memory graphs and context-managed `open()` persists on
+  clean exit
 
 ## Storage Modes
 
@@ -69,13 +80,15 @@ All node-related methods use a consistent key order: **`type`, `title`, `id`**, 
 | Read (`MATCH...RETURN`) | `ResultView` — lazy container, rows converted on access |
 | Read with `to_df=True` | `pandas.DataFrame` |
 | Mutation (`CREATE`, `SET`, `DELETE`, `MERGE`) | `ResultView` with `.stats` dict |
-| `EXPLAIN` prefix | `str` (query plan, not executed) |
+| `EXPLAIN` prefix | `ResultView` containing the structured plan (not executed) |
 
 **Spatial return types:** `point()` values are returned as `{'latitude': float, 'longitude': float}` dicts.
 
 ### ResultView
 
-`ResultView` is a lazy result container returned by `cypher()`, centrality methods, `collect()`, and `sample()`. Data stays in Rust and is only converted to Python objects when you access it — making `cypher()` calls fast even for large result sets.
+`ResultView` is the Rust-backed result container returned by `cypher()`,
+centrality methods, `collect()`, and `sample()`. Python values are converted on
+access; eligible query projections may also defer row materialization.
 
 ```python
 result = graph.cypher("MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age")
