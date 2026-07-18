@@ -5,6 +5,21 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Atomic MCP domain graph context.** Embedded domain tools can use
+  `DomainGraphState::with_context` to borrow the active graph, persistence
+  target, and source root from one coherent activation snapshot.
+
+### Fixed
+
+- **MCP manifest bundled-tool overrides now apply to the completed router.**
+  `hidden: true` removes a tool from discovery and rejects direct calls even
+  when the route is registered by KGLite or a downstream extension; description
+  and rename overrides are validated and applied at the same late boot stage.
+
 ## [0.14.1] - 2026-07-18
 
 ### Added

@@ -494,14 +494,19 @@ fn main() -> anyhow::Result<()> {
         registry.register_typed_tool::<MyArgs, _>(
             "my_tool",
             "What the domain tool does.",
-            move |args| my_domain_logic(&graph, args),
+            move |args| graph.with_context(|context| {
+                my_domain_logic(context.graph(), context.root(), args)
+            }).unwrap_or_else(|| "no active graph".to_string()),
         )
     });
     run_with_extensions(std::env::args_os(), extensions)
 }
 ```
 
-The registry rejects names already owned by KGLite or manifest tools. It also
+The registry rejects names already owned by KGLite or manifest tools. Use
+`DomainGraphState::with_context` when the result needs both graph data and its
+identity: the borrowed graph, save target, and source root come from one
+active-slot snapshot. Keep that callback short and read-only. The registry also
 offers `register_route` for a custom rmcp `ToolRoute` while preserving the same
 collision check. See the compiling
 [`domain_tools.rs`](https://github.com/kkollsga/kglite/blob/main/crates/kglite-mcp-server/examples/domain_tools.rs)

@@ -80,6 +80,9 @@ bytes = "1"
 
 [dev-dependencies]
 tempfile = "3"
+# Exercise hidden-tool rejection through a real in-memory MCP handshake. The
+# production dependency enables only the server half; client code is test-only.
+rmcp = { version = "1.6", features = ["client"] }
 
 [features]
 # `fastembed` is an OPTIONAL feature, default OFF. Enabling it

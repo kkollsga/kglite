@@ -13,11 +13,18 @@ fn main() -> anyhow::Result<()> {
         registry.register_typed_tool::<SummaryArgs, _>(
             "collection_summary",
             "Summarise the active domain collection.",
-            move |args| match graph_state.schema() {
-                Some((nodes, edges)) if args.verbose => {
-                    format!("active collection: {nodes} nodes and {edges} edges")
+            move |args| match graph_state.with_context(|context| {
+                let schema = kglite::api::introspection::compute_schema(context.graph().dir());
+                let root = context.root().map_or_else(
+                    || "in-memory".to_string(),
+                    |path| path.display().to_string(),
+                );
+                (schema.node_count, schema.edge_count, root)
+            }) {
+                Some((nodes, edges, root)) if args.verbose => {
+                    format!("active collection at {root}: {nodes} nodes and {edges} edges")
                 }
-                Some((nodes, _)) => format!("active collection: {nodes} nodes"),
+                Some((nodes, _, root)) => format!("active collection at {root}: {nodes} nodes"),
                 None => "no active collection".to_string(),
             },
         )

@@ -675,6 +675,21 @@ impl GraphState {
         guard.as_ref().map(|active| f(&active.kg))
     }
 
+    /// Borrow the active graph and both path identities under one read lock.
+    pub(crate) fn with_kg_context<F, T>(&self, f: F) -> Option<T>
+    where
+        F: FnOnce(&KnowledgeGraph, Option<&Path>, Option<&Path>) -> T,
+    {
+        let guard = read_lock(&self.inner);
+        guard.as_ref().map(|active| {
+            f(
+                &active.kg,
+                active.source_path.as_deref(),
+                active.root.as_deref(),
+            )
+        })
+    }
+
     /// Exclusive (write-locked) access to the active graph, for the
     /// write-enabled `cypher_query` path. The `RwLock` write-lock
     /// serializes mutations and excludes concurrent readers for the

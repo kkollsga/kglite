@@ -29,14 +29,14 @@
 //! - `--source-root DIR` — generic file-tree mode (no graph).
 //! - bare — framework + manifest tools only.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use kglite::api::io::OpenDisposition;
 use mcp_methods::server::manifest::{
-    find_sibling_manifest, find_workspace_manifest, ManifestError,
+    find_sibling_manifest, find_workspace_manifest, ManifestError, ToolSpec,
 };
 use mcp_methods::server::{
     init_tracing, load_env_for_mode, maybe_watch, resolve_source_roots, serve_prompts, watch,
@@ -67,6 +67,36 @@ pub struct DomainGraphState {
     inner: GraphState,
 }
 
+/// One coherent, read-only view of the active graph and its path identity.
+///
+/// Values are valid only for the enclosing
+/// [`DomainGraphState::with_context`] callback. The graph, persistence target,
+/// and source root are borrowed under one active-slot read lock, so a
+/// concurrent activation cannot mix identity from one graph with another.
+#[derive(Clone, Copy)]
+pub struct DomainGraphContext<'a> {
+    graph: &'a kglite::api::KnowledgeGraph,
+    source_path: Option<&'a Path>,
+    root: Option<&'a Path>,
+}
+
+impl<'a> DomainGraphContext<'a> {
+    /// The active graph, borrowed read-only for the callback duration.
+    pub fn graph(&self) -> &'a kglite::api::KnowledgeGraph {
+        self.graph
+    }
+
+    /// Canonical persistence target used by `save_graph`, when one exists.
+    pub fn source_path(&self) -> Option<&'a Path> {
+        self.source_path
+    }
+
+    /// Canonical source identity: a source directory or loaded `.kgl` path.
+    pub fn root(&self) -> Option<&'a Path> {
+        self.root
+    }
+}
+
 impl DomainGraphState {
     /// Current `(node_count, edge_count)`, or `None` when no graph is active.
     pub fn schema(&self) -> Option<(u64, u64)> {
@@ -89,6 +119,24 @@ impl DomainGraphState {
         F: FnOnce(&kglite::api::KnowledgeGraph) -> T,
     {
         self.inner.with_kg(operation)
+    }
+
+    /// Borrow the active graph and its canonical path identity atomically.
+    ///
+    /// Keep the callback read-oriented and short: graph activation waits until
+    /// it returns. Use this instead of separate graph/path reads whenever a
+    /// domain result names the graph or source it inspected.
+    pub fn with_context<F, T>(&self, operation: F) -> Option<T>
+    where
+        F: FnOnce(DomainGraphContext<'_>) -> T,
+    {
+        self.inner.with_kg_context(|graph, source_path, root| {
+            operation(DomainGraphContext {
+                graph,
+                source_path,
+                root,
+            })
+        })
     }
 
     /// Run a parameterised read query against the active graph.
@@ -481,7 +529,84 @@ fn register_extension_tools(
         }
     }
     register_domain_tools(server, graph_state.clone(), domain_tools)
-        .context("downstream domain-tool registration failed")
+        .context("downstream domain-tool registration failed")?;
+    if let Some(manifest) = manifest {
+        apply_bundled_tool_overrides(server, manifest)
+            .context("manifest bundled-tool override failed")?;
+    }
+    Ok(())
+}
+
+/// Apply manifest overrides only after every route source has registered.
+///
+/// A bundled override may target a framework, KGLite, manifest, or downstream
+/// route, so applying it any earlier lets later registration silently undo a
+/// hidden flag or bypass rename/description validation.
+fn apply_bundled_tool_overrides(server: &mut McpServer, manifest: &Manifest) -> Result<()> {
+    let overrides: Vec<_> = manifest
+        .tools
+        .iter()
+        .filter_map(|tool| match tool {
+            ToolSpec::Bundled(override_) => Some(override_),
+            ToolSpec::Cypher(_) | ToolSpec::Python(_) => None,
+        })
+        .collect();
+    if overrides.is_empty() {
+        return Ok(());
+    }
+
+    let router = server.tool_router_mut();
+    for override_ in &overrides {
+        if !router.map.contains_key(override_.name.as_str()) {
+            anyhow::bail!(
+                "manifest bundled-tool override targets unknown route {:?}",
+                override_.name
+            );
+        }
+    }
+
+    let final_names = overrides
+        .iter()
+        .map(|override_| {
+            (
+                override_.name.as_str(),
+                override_.rename.as_deref().unwrap_or(&override_.name),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut owners = std::collections::HashMap::<&str, &str>::new();
+    for name in router.map.keys().map(|name| name.as_ref()) {
+        let final_name = final_names.get(name).copied().unwrap_or(name);
+        if let Some(existing) = owners.insert(final_name, name) {
+            anyhow::bail!(
+                "manifest bundled-tool rename {final_name:?} conflicts between routes {existing:?} and {name:?}"
+            );
+        }
+    }
+
+    let mut routes = Vec::with_capacity(overrides.len());
+    for override_ in overrides {
+        let was_disabled = router.is_disabled(&override_.name);
+        let route = router
+            .map
+            .remove(override_.name.as_str())
+            .expect("override targets validated above");
+        routes.push((override_, route, was_disabled));
+    }
+
+    for (override_, mut route, was_disabled) in routes {
+        let final_name = override_.rename.as_deref().unwrap_or(&override_.name);
+        route.attr.name = final_name.to_owned().into();
+        if let Some(description) = &override_.description {
+            route.attr.description = Some(description.clone().into());
+        }
+        router.add_route(route);
+        if override_.hidden || was_disabled {
+            router.disable_route(final_name.to_owned());
+        }
+    }
+
+    Ok(())
 }
 
 /// Fail fast on bad mode-specific path arguments before any expensive setup.
@@ -1634,5 +1759,120 @@ Use the registered domain tool.
 
         let prompts = server.prompt_router_mut().list_all();
         assert!(prompts.iter().any(|prompt| prompt.name == "domain_test"));
+    }
+
+    #[test]
+    fn graph_context_tracks_activation_as_one_coherent_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first_path = dir.path().join("first.kgl");
+        let second_path = dir.path().join("second.kgl");
+        let inner = GraphState::new(false);
+        inner
+            .create_in_mode(&first_path, StorageMode::Memory)
+            .expect("activate first graph");
+        let state = DomainGraphState {
+            inner: inner.clone(),
+        };
+
+        let first = state
+            .with_context(|context| {
+                (
+                    Arc::as_ptr(context.graph().dir()),
+                    context.source_path().map(Path::to_path_buf),
+                    context.root().map(Path::to_path_buf),
+                )
+            })
+            .expect("first context");
+        assert_eq!(first.1.as_deref(), Some(first_path.as_path()));
+        assert_eq!(first.2.as_deref(), Some(first_path.as_path()));
+
+        inner
+            .create_in_mode(&second_path, StorageMode::Memory)
+            .expect("activate second graph");
+        let second = state
+            .with_context(|context| {
+                (
+                    Arc::as_ptr(context.graph().dir()),
+                    context.source_path().map(Path::to_path_buf),
+                    context.root().map(Path::to_path_buf),
+                )
+            })
+            .expect("second context");
+        assert_ne!(first.0, second.0);
+        assert_eq!(second.1.as_deref(), Some(second_path.as_path()));
+        assert_eq!(second.2.as_deref(), Some(second_path.as_path()));
+    }
+}
+
+#[cfg(test)]
+mod bundled_override_tests {
+    use super::*;
+    use rmcp::model::CallToolRequestParams;
+
+    fn load_manifest(yaml: &str) -> (tempfile::TempDir, Manifest) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mcp.yaml");
+        std::fs::write(&path, yaml).expect("write manifest");
+        let manifest = mcp_methods::server::load_manifest(&path).expect("load manifest");
+        (dir, manifest)
+    }
+
+    #[tokio::test]
+    async fn hidden_route_is_unlisted_and_rejects_direct_calls() {
+        let (_dir, manifest) = load_manifest("tools:\n  - bundled: ping\n    hidden: true\n");
+        let mut server = McpServer::new(ServerOptions::default());
+
+        apply_bundled_tool_overrides(&mut server, &manifest).expect("apply override");
+
+        assert!(!server.tool_router_mut().has_route("ping"));
+        assert!(server.tool_router_mut().is_disabled("ping"));
+        let (server_transport, client_transport) = tokio::io::duplex(4096);
+        let server_handle = tokio::spawn(async move { server.serve(server_transport).await });
+        let client = ().serve(client_transport).await.expect("start MCP client");
+
+        let listed = client.peer().list_tools(None).await.expect("list tools");
+        assert!(listed.tools.iter().all(|tool| tool.name != "ping"));
+        let error = client
+            .call_tool(CallToolRequestParams::new("ping"))
+            .await
+            .expect_err("hidden route must reject direct calls");
+        assert!(error.to_string().contains("tool not found"));
+
+        client.cancel().await.expect("stop MCP client");
+        server_handle.abort();
+    }
+
+    #[test]
+    fn rename_and_description_replace_the_agent_facing_route() {
+        let (_dir, manifest) = load_manifest(
+            "tools:\n  - bundled: ping\n    rename: domain_ping\n    description: Domain health check.\n",
+        );
+        let mut server = McpServer::new(ServerOptions::default());
+
+        apply_bundled_tool_overrides(&mut server, &manifest).expect("apply override");
+
+        assert!(!server.tool_router_mut().has_route("ping"));
+        let renamed = server
+            .tool_router_mut()
+            .get("domain_ping")
+            .expect("renamed route");
+        assert_eq!(renamed.description.as_deref(), Some("Domain health check."));
+    }
+
+    #[test]
+    fn unknown_and_colliding_routes_fail_at_boot() {
+        let (_dir, unknown) =
+            load_manifest("tools:\n  - bundled: not_a_bundled_route\n    hidden: true\n");
+        let mut server = McpServer::new(ServerOptions::default());
+        let error = apply_bundled_tool_overrides(&mut server, &unknown)
+            .expect_err("unknown route must fail");
+        assert!(error.to_string().contains("unknown route"));
+
+        let (_dir, collision) =
+            load_manifest("tools:\n  - bundled: ping\n    rename: list_source\n");
+        let mut server = McpServer::new(ServerOptions::default());
+        let error = apply_bundled_tool_overrides(&mut server, &collision)
+            .expect_err("rename collision must fail");
+        assert!(error.to_string().contains("conflicts"));
     }
 }

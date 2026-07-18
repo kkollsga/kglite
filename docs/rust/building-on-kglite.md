@@ -46,7 +46,7 @@ stability posture; kglite's CI locks against accidental drift on all of them.
 | Seam | What it is | Stability |
 |---|---|---|
 | **Engine facade** — `kglite::api::*` | The curated Rust surface: `DirGraph`, `Value`, `session::*`, `io::{save_graph, load_file}`, error types, `code_entities`. | Exact-baseline-locked in CI (cargo-public-api, pinned nightly). Additive within a minor line; deliberate breaks ship on a MINOR bump with a migration guide. See the [API reference](api-reference.md). |
-| **MCP server library** — `kglite-mcp-server` | `run`, `run_with_embedder_factory`, `run_with_code_tree_hooks`, `run_with_extensions`, `CodeTreeHooks`, `ServerExtensions`, `DomainToolRegistry`, `DomainGraphState`. The seams a producer/domain MCP server builds on. | Public-API baseline + hook/registrar-semantics unit tests. Same MINOR-break posture as the engine facade. |
+| **MCP server library** — `kglite-mcp-server` | `run`, `run_with_embedder_factory`, `run_with_code_tree_hooks`, `run_with_extensions`, `CodeTreeHooks`, `ServerExtensions`, `DomainToolRegistry`, `DomainGraphState`, `DomainGraphContext`. The seams a producer/domain MCP server builds on. | Public-API baseline + hook/registrar-semantics unit tests. Same MINOR-break posture as the engine facade. |
 | **`.kgl` file format** | The persisted graph format that P1 handoff and all persistence use. | Versioned (`v3`, `v4`, …). Readers stay backward-compatible or refuse an old format with a clear rebuild message; a format bump lands with its decoder. |
 | **Python top-level** — `kglite.*` | `kglite.load`, `kglite.from_blueprint`, `kglite.from_records`, `KnowledgeGraph` methods. The P3 entry points and the P1 handoff target. | Contract-tested + stubtest against `kglite/__init__.pyi`. |
 | **C ABI** — `include/kglite.h` | The `extern "C"` surface for non-Rust bindings. | cbindgen header-drift check in CI; see the [C ABI guide](c-abi.md). |
@@ -196,7 +196,9 @@ fn main() -> anyhow::Result<()> {
         registry.register_typed_tool::<MyArgs, _>(
             "domain_action",
             "Run the producer's domain action.",
-            move |args| my_domain::run(&graph, args),
+            move |args| graph.with_context(|context| {
+                my_domain::run(context.graph(), context.root(), args)
+            }).unwrap_or_else(|| "no active graph".to_string()),
         )
     });
     run_with_extensions(std::env::args_os(), extensions)
@@ -205,10 +207,13 @@ fn main() -> anyhow::Result<()> {
 
 The callback runs after KGLite and manifest tools are registered but before
 skills are finalised, so `tool_registered:` predicates see domain tools. The
-registry rejects collisions with existing routes and exposes the live
-`GraphState`; downstreams own their methods, while KGLite retains generic
-graph/Cypher tool ownership. `ServerExtensions::with_code_tree_hooks` composes
-both extension kinds when a binary needs them together.
+registry rejects collisions with existing routes and exposes the live graph
+state. `with_context` borrows the graph, persistence target (`source_path`),
+and source identity (`root`) under one read lock, so activation cannot produce
+a graph/path mismatch. Keep its callback short and read-only. Downstreams own
+their methods, while KGLite retains generic graph/Cypher tool ownership.
+`ServerExtensions::with_code_tree_hooks` composes both extension kinds when a
+binary needs them together.
 
 ## Testing pattern
 
