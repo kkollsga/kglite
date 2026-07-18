@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Atomic MCP domain graph context.** Embedded domain tools can use
+  `DomainGraphState::with_context` to borrow the active graph, persistence
+  target, and source root from one coherent activation snapshot.
+
 ### Fixed
 
 - **MCP manifest bundled-tool overrides now apply to the completed router.**

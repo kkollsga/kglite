@@ -3,12 +3,21 @@ pub struct kglite_mcp_server::CodeTreeHooks
 pub kglite_mcp_server::CodeTreeHooks::build: alloc::boxed::Box<(dyn core::ops::function::Fn(&std::path::Path, bool) -> anyhow::Result<alloc::sync::Arc<kglite::graph::dir_graph::DirGraph>, alloc::string::String> + core::marker::Send + core::marker::Sync)>
 pub kglite_mcp_server::CodeTreeHooks::build_revs: alloc::boxed::Box<(dyn core::ops::function::Fn(&std::path::Path, &[alloc::string::String], bool) -> anyhow::Result<(alloc::sync::Arc<kglite::graph::dir_graph::DirGraph>, alloc::vec::Vec<alloc::string::String>), alloc::string::String> + core::marker::Send + core::marker::Sync)>
 pub kglite_mcp_server::CodeTreeHooks::is_code_file: alloc::boxed::Box<(dyn core::ops::function::Fn(&std::path::Path) -> bool + core::marker::Send + core::marker::Sync)>
+pub struct kglite_mcp_server::DomainGraphContext<'a>
+impl<'a> kglite_mcp_server::DomainGraphContext<'a>
+pub fn kglite_mcp_server::DomainGraphContext<'a>::graph(&self) -> &'a kglite::graph::handle::KnowledgeGraph
+pub fn kglite_mcp_server::DomainGraphContext<'a>::root(&self) -> core::option::Option<&'a std::path::Path>
+pub fn kglite_mcp_server::DomainGraphContext<'a>::source_path(&self) -> core::option::Option<&'a std::path::Path>
+impl<'a> core::clone::Clone for kglite_mcp_server::DomainGraphContext<'a>
+pub fn kglite_mcp_server::DomainGraphContext<'a>::clone(&self) -> kglite_mcp_server::DomainGraphContext<'a>
+impl<'a> core::marker::Copy for kglite_mcp_server::DomainGraphContext<'a>
 pub struct kglite_mcp_server::DomainGraphState
 impl kglite_mcp_server::DomainGraphState
 pub fn kglite_mcp_server::DomainGraphState::has_node_type(&self, node_type: &str) -> bool
 pub fn kglite_mcp_server::DomainGraphState::has_property(&self, node_type: &str, property: &str) -> bool
 pub fn kglite_mcp_server::DomainGraphState::run_cypher(&self, query: &str, params: &serde_json::map::Map<alloc::string::String, serde_json::value::Value>) -> alloc::string::String
 pub fn kglite_mcp_server::DomainGraphState::schema(&self) -> core::option::Option<(u64, u64)>
+pub fn kglite_mcp_server::DomainGraphState::with_context<F, T>(&self, operation: F) -> core::option::Option<T> where F: core::ops::function::FnOnce(kglite_mcp_server::DomainGraphContext<'_>) -> T
 pub fn kglite_mcp_server::DomainGraphState::with_graph<F, T>(&self, operation: F) -> core::option::Option<T> where F: core::ops::function::FnOnce(&kglite::graph::handle::KnowledgeGraph) -> T
 impl core::clone::Clone for kglite_mcp_server::DomainGraphState
 pub fn kglite_mcp_server::DomainGraphState::clone(&self) -> kglite_mcp_server::DomainGraphState

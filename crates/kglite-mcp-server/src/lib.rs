@@ -29,7 +29,7 @@
 //! - `--source-root DIR` — generic file-tree mode (no graph).
 //! - bare — framework + manifest tools only.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
@@ -67,6 +67,36 @@ pub struct DomainGraphState {
     inner: GraphState,
 }
 
+/// One coherent, read-only view of the active graph and its path identity.
+///
+/// Values are valid only for the enclosing
+/// [`DomainGraphState::with_context`] callback. The graph, persistence target,
+/// and source root are borrowed under one active-slot read lock, so a
+/// concurrent activation cannot mix identity from one graph with another.
+#[derive(Clone, Copy)]
+pub struct DomainGraphContext<'a> {
+    graph: &'a kglite::api::KnowledgeGraph,
+    source_path: Option<&'a Path>,
+    root: Option<&'a Path>,
+}
+
+impl<'a> DomainGraphContext<'a> {
+    /// The active graph, borrowed read-only for the callback duration.
+    pub fn graph(&self) -> &'a kglite::api::KnowledgeGraph {
+        self.graph
+    }
+
+    /// Canonical persistence target used by `save_graph`, when one exists.
+    pub fn source_path(&self) -> Option<&'a Path> {
+        self.source_path
+    }
+
+    /// Canonical source identity: a source directory or loaded `.kgl` path.
+    pub fn root(&self) -> Option<&'a Path> {
+        self.root
+    }
+}
+
 impl DomainGraphState {
     /// Current `(node_count, edge_count)`, or `None` when no graph is active.
     pub fn schema(&self) -> Option<(u64, u64)> {
@@ -89,6 +119,24 @@ impl DomainGraphState {
         F: FnOnce(&kglite::api::KnowledgeGraph) -> T,
     {
         self.inner.with_kg(operation)
+    }
+
+    /// Borrow the active graph and its canonical path identity atomically.
+    ///
+    /// Keep the callback read-oriented and short: graph activation waits until
+    /// it returns. Use this instead of separate graph/path reads whenever a
+    /// domain result names the graph or source it inspected.
+    pub fn with_context<F, T>(&self, operation: F) -> Option<T>
+    where
+        F: FnOnce(DomainGraphContext<'_>) -> T,
+    {
+        self.inner.with_kg_context(|graph, source_path, root| {
+            operation(DomainGraphContext {
+                graph,
+                source_path,
+                root,
+            })
+        })
     }
 
     /// Run a parameterised read query against the active graph.
@@ -1711,6 +1759,48 @@ Use the registered domain tool.
 
         let prompts = server.prompt_router_mut().list_all();
         assert!(prompts.iter().any(|prompt| prompt.name == "domain_test"));
+    }
+
+    #[test]
+    fn graph_context_tracks_activation_as_one_coherent_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first_path = dir.path().join("first.kgl");
+        let second_path = dir.path().join("second.kgl");
+        let inner = GraphState::new(false);
+        inner
+            .create_in_mode(&first_path, StorageMode::Memory)
+            .expect("activate first graph");
+        let state = DomainGraphState {
+            inner: inner.clone(),
+        };
+
+        let first = state
+            .with_context(|context| {
+                (
+                    Arc::as_ptr(context.graph().dir()),
+                    context.source_path().map(Path::to_path_buf),
+                    context.root().map(Path::to_path_buf),
+                )
+            })
+            .expect("first context");
+        assert_eq!(first.1.as_deref(), Some(first_path.as_path()));
+        assert_eq!(first.2.as_deref(), Some(first_path.as_path()));
+
+        inner
+            .create_in_mode(&second_path, StorageMode::Memory)
+            .expect("activate second graph");
+        let second = state
+            .with_context(|context| {
+                (
+                    Arc::as_ptr(context.graph().dir()),
+                    context.source_path().map(Path::to_path_buf),
+                    context.root().map(Path::to_path_buf),
+                )
+            })
+            .expect("second context");
+        assert_ne!(first.0, second.0);
+        assert_eq!(second.1.as_deref(), Some(second_path.as_path()));
+        assert_eq!(second.2.as_deref(), Some(second_path.as_path()));
     }
 }
 
