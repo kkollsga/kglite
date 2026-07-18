@@ -175,6 +175,79 @@ def test_add_edges_survive_save_reload(mode, tmp_path):
     assert post_count == 3, f"{mode}: edge count regressed after reload"
 
 
+def test_disk_second_save_refreshes_peer_count_histogram(tmp_path):
+    """A generation rewrite must index edges added after the first save.
+
+    The old caller predicted an incremental seal while ``save_to_dir`` saw a
+    generation stage and performed a rewrite. That disagreement skipped
+    overflow compaction, leaving the persisted peer-count histogram stale.
+    """
+    graph_path = str(tmp_path / "peer_counts")
+    graph = KnowledgeGraph(storage="disk", path=graph_path)
+    graph.add_nodes(
+        pd.DataFrame(
+            [
+                {"id": "a", "title": "A"},
+                {"id": "b", "title": "B"},
+            ]
+        ),
+        "Doc",
+        "id",
+        "title",
+    )
+    graph.add_connections(
+        pd.DataFrame([{"src": "a", "dst": "b"}]),
+        "LINKS",
+        "Doc",
+        "src",
+        "Doc",
+        "dst",
+    )
+    graph.save(graph_path)
+
+    graph.add_nodes(
+        pd.DataFrame([{"id": "c", "title": "C"}]),
+        "Doc",
+        "id",
+        "title",
+    )
+    graph.add_connections(
+        pd.DataFrame([{"src": "b", "dst": "c"}]),
+        "LINKS",
+        "Doc",
+        "src",
+        "Doc",
+        "dst",
+    )
+    graph.save(graph_path)
+    del graph
+
+    reloaded = kglite.load(graph_path)
+    direct = _rows(
+        reloaded.cypher(
+            "MATCH (:Doc)-[:LINKS]->(b:Doc) RETURN b.title AS title ORDER BY title",
+            timeout_ms=10_000,
+        )
+    )
+    grouped = _rows(
+        reloaded.cypher(
+            "MATCH (a:Doc)-[:LINKS]->(b:Doc) WITH b, count(a) AS n RETURN b.title AS title, n ORDER BY title",
+            timeout_ms=10_000,
+        )
+    )
+    counted = _rows(
+        reloaded.cypher(
+            "MATCH ()-[:LINKS]->(b:Doc) WITH b, count(*) AS n RETURN b.title AS title, n ORDER BY title",
+            timeout_ms=10_000,
+        )
+    )
+
+    assert direct == [{"title": "B"}, {"title": "C"}]
+    expected_counts = [{"title": "B", "n": 1}, {"title": "C", "n": 1}]
+    assert grouped == expected_counts
+    assert counted == expected_counts
+
+
 @pytest.mark.parametrize("mode", STORAGE_MODES)
 def test_detach_delete_count_survives_save_reload(mode, tmp_path):
     """DETACH DELETE → save → reload → surviving count and ids must

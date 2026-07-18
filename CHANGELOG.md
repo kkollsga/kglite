@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Nested map properties are preserved by columnar overflow storage and
   borrowed subgraph streaming instead of being written as `NULL` or omitted.
+- Disk generation saves rebuild peer-count histograms from newly added edges,
+  keeping grouped relationship counts complete after save and reload.
 
 ## [0.14.1] - 2026-07-18
 
