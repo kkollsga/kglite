@@ -79,7 +79,7 @@ maps to underscored prefixes:
 
 | Rust path | C prefix | Example |
 |---|---|---|
-| `kglite::api::load_file` | `kglite_load_file` | `kglite_load_file(*const c_char) → *mut KgliteGraph` |
+| `kglite::api::io::load_file` | `kglite_load_file` | `kglite_load_file(*const c_char) → *mut KgliteGraph` |
 | `kglite::api::session::execute_read` | `kglite_session_execute_read` | … |
 | `kglite::api::cypher::parse_cypher` | `kglite_cypher_parse` | … |
 | `kglite::api::KgErrorCode::neo4j_status_code` | `kglite_error_code_neo4j_status` | … |
@@ -120,7 +120,7 @@ pub extern "C" fn kglite_load_file(path: *const c_char) -> *mut KgliteGraph {
     let Ok(path_str) = unsafe { CStr::from_ptr(path) }.to_str() else {
         return std::ptr::null_mut();
     };
-    match kglite::api::load_file(path_str) {
+    match kglite::api::io::load_file(path_str) {
         Ok(arc) => Box::into_raw(Box::new(KgliteGraph { inner: arc })),
         Err(_) => std::ptr::null_mut(),
     }

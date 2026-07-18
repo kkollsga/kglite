@@ -457,7 +457,7 @@ fits their audience.
 ### 1. Read a `.kgl` file written by any other binding
 
 ```rust
-use kglite::api::load_file;
+use kglite::api::io::load_file;
 
 let graph = load_file("snapshot.kgl")?;  // → Arc<DirGraph>
 ```
@@ -506,7 +506,7 @@ to answer "what functions call X" queries about a codebase.
 ### 4. Load RDF / N-Triples
 
 ```rust
-use kglite::api::load_file; // plus the RDF/N-Triples loaders
+use kglite::api::io::load_file; // plus the RDF/N-Triples loaders
 ```
 
 The kept RDF loaders (`load_rdf` / `load_ntriples`) ingest Turtle /
@@ -682,7 +682,7 @@ by depending on `kglite`:
 | Snapshot/working CoW + OCC | `kglite::api::session` | ~1,500 |
 | Schema validation pipeline | `kglite::api::cypher::validate_schema` | ~800 |
 | Blueprint loader + builder | `kglite::api::blueprint` | ~5,000 |
-| `.kgl` format reader + writer (v3, v4) | `kglite::api::{load_file, save_graph}` | ~3,000 |
+| `.kgl` format reader + writer (v3, v4) | `kglite::api::io::{load_file, save_graph}` | ~3,000 |
 | Code-graph builder (tree-sitter) | the `codingest` crate | ~4,000 |
 | RDF / N-Triples loaders | `kglite::api` (`load_rdf`, `load_ntriples`) | — |
 | Embedder trait + FastEmbed adapter | `kglite::api::Embedder`, `FastEmbedAdapter` | ~600 |
@@ -707,7 +707,7 @@ OCC conflict detection, format portability — you inherit.
 A `.kgl` file written by your binding should load cleanly in any
 other binding. To stay portable:
 
-- **Use `kglite::api::save_graph`** (not your own format). It's
+- **Use `kglite::api::io::save_graph`** (not your own format). It's
   versioned, checksummed, and bumps along with the engine.
 - **Don't bundle binding-ergonomic state** in the graph itself.
   Selection caches, default timeouts, progress callbacks — these

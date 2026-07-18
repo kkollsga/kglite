@@ -32,13 +32,14 @@ Add `kglite` to your `Cargo.toml`:
 # Pre-crates.io-publish: path dependency from within the workspace.
 kglite = { path = "../kglite/crates/kglite" }
 # Post-publish: crates.io coordinate.
-# kglite = "0.11"
+# kglite = "0.14"
 ```
 
 Then load a `.kgl` file written by any kglite binding and query it:
 
 ```rust
-use kglite::api::{load_file, session, Value};
+use kglite::api::io::load_file;
+use kglite::api::{session, Value};
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -51,14 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Run a Cypher query through the canonical pipeline.
     // Same path Python / Bolt / MCP all flow through (Phase E).
     let params = HashMap::new();
-    let opts = session::ExecuteOptions {
-        params: &params,
-        deadline: None,
-        max_rows: None,
-        lazy_eligible: false,
-        disabled_passes: None,
-        embedder: None,
-    };
+    let opts = session::ExecuteOptions::eager(&params);
     let outcome = session::execute_read(
         &graph,
         "MATCH (n:Person) RETURN n.name LIMIT 10",
@@ -80,11 +74,10 @@ Verify the build has zero pyo3:
 cargo tree -p your-crate | grep pyo3   # → (empty)
 ```
 
-See `crates/kglite/examples/embedded_*.rs` for runnable
-end-to-end examples (`embedded_basic` reads a `.kgl`,
-`embedded_session` demonstrates OCC transactions,
-`embedded_blueprint` builds a graph from a Rust source tree
-via the codingest builder crate).
+See `crates/kglite/examples/embedded_*.rs` for the two runnable
+engine examples (`embedded_basic` reads a `.kgl` and
+`embedded_session` demonstrates OCC transactions). Source-tree
+construction lives in the separate `codingest` crate.
 
 ## The stable API surface
 
@@ -96,7 +89,7 @@ that may move between minor releases.
 ### Engine types
 
 ```rust
-use kglite::api::{DirGraph, Value, KgError, KgErrorCode};
+use kglite::api::{DirGraph, KnowledgeGraph, Value, KgError, KgErrorCode};
 use kglite::api::{NodeValue, PathValue, RelValue};
 use kglite::api::Embedder;
 ```
@@ -104,6 +97,11 @@ use kglite::api::Embedder;
 - **`DirGraph`** — the in-memory graph. Built from blueprint,
   loaded from a `.kgl`, or constructed via the codingest
   builder. Owned by your binding's "graph handle" type.
+- **`KnowledgeGraph`** — the thin pure-Rust handle around
+  `Arc<DirGraph>` plus an optional `Arc<dyn Embedder>`. Use it when
+  those two lifecycle values are all your Rust application needs;
+  bindings can still wrap `DirGraph` directly when they own richer
+  language-specific state.
 - **`Value`** — every value a Cypher query can return. Variants
   include scalars (`Int64`, `Float64`, `String`, `Bool`,
   `NaiveDate`), compound (`List`, `Map`), and graph-specific
@@ -162,27 +160,19 @@ longer part of the kglite core — they live in the separate
 kglite-datasets project, and the `sec` / `sodir` / `wikidata` Cargo
 features and `kglite::datasets::*` modules have been removed. kglite
 loads the graphs those loaders produce via the ordinary lifecycle
-API (`kglite::api::load_file`, etc.). To ingest RDF directly, use the
+API (`kglite::api::io::load_file`, etc.). To ingest RDF directly, use the
 kept RDF/N-Triples loaders instead.
 
-### `KnowledgeGraph` is NOT in the core
+### Thin Rust handle vs binding-specific handles
 
-The Python-facing `KnowledgeGraph` struct (with its `selection`,
-`reports`, `temporal_context`, `embedder`, etc. state) lives in
-the `kglite-py` wrapper crate because it's binding-ergonomic
-state — the kind of thing each binding wants to model in its own
-language's idioms. Embedders should:
-
-- Hold a `DirGraph` (or `Arc<DirGraph>` for cheap clones)
-  directly.
-- Hold an optional `Arc<dyn Embedder>` if they need text_score.
-- Bundle their own per-binding ergonomics (selection
-  history, default timeouts, format conversion).
-
-Your binding's "graph handle" type is a wrapper around these
-two values + whatever your language wants on top. The bolt-server
-crate is a working example — it wraps `Session` (which owns the
-`Arc<DirGraph>`) and adds Bolt protocol state.
+Core exports `kglite::api::KnowledgeGraph`, a deliberately small
+pure-Rust handle containing `Arc<DirGraph>` plus an optional
+`Arc<dyn Embedder>`. The Python wrapper has its own separate
+`KnowledgeGraph` PyClass with selection, reports, temporal context,
+and Python-facing ergonomics. A new binding should use the core handle
+only when that minimal shape fits; otherwise hold `DirGraph` and the
+embedder directly and add its own native state. The bolt server is a
+working example: it wraps `Session` and adds Bolt protocol state.
 
 ## The `.kgl` file format is portable
 
@@ -190,8 +180,8 @@ A `.kgl` written by any kglite binding loads cleanly in any
 other:
 
 - Python `kg.save("graph.kgl")` → Bolt server reads via
-  `kglite::api::load_file(path)`
-- Rust embedder `kglite::api::save_graph(&mut arc, path)`
+  `kglite::api::io::load_file(path)`
+- Rust embedder `kglite::api::io::save_graph(&mut arc, path)`
   → Python loads via `kglite.load("graph.kgl")`
 - Future Go binding writes → TypeScript binding reads, etc.
 

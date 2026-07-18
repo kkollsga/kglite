@@ -28,9 +28,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 1. Load the graph from disk ───────────────────────────────
     //
-    // `load_file` returns an `Arc<DirGraph>` — the engine type. No
-    // pyo3 wrapping (`KnowledgeGraph` is a pyo3 concern; it lives
-    // in the kglite-py wrapper crate, not here).
+    // `load_file` returns an `Arc<DirGraph>` — the engine type. The
+    // optional core `KnowledgeGraph` handle can wrap it with an embedder;
+    // the richer Python PyClass remains a separate wrapper type.
     let graph = load_file(&path)?;
     println!(
         "Loaded {}: {} bytes resident",

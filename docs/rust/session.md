@@ -114,14 +114,10 @@ Bolt-server passes `true`.
 ### `ExecuteOptions`
 
 ```rust
-let opts = ExecuteOptions {
-    params: &params,                    // borrowed &HashMap<String, Value>
-    deadline: Some(Instant::now() + Duration::from_secs(30)),
-    max_rows: Some(10_000),
-    lazy_eligible: false,                // true only if the binding has a lazy materializer (pyapi's ResultView does; bolt-server doesn't)
-    disabled_passes: None,               // or Some(set) for user-toggle
-    embedder: None,                      // Arc<dyn Embedder> required for text_score()
-};
+let mut opts = ExecuteOptions::eager(&params);
+opts.deadline = Some(Instant::now() + Duration::from_secs(30));
+opts.max_rows = Some(10_000);
+// Set opts.disabled_passes for user-toggle and opts.embedder for text_score().
 ```
 
 `lazy_eligible` matters: when `true`, the executor returns a

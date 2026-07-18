@@ -15,12 +15,13 @@ If you're using the Python wheel (`pip install kglite`), the
 # Cargo.toml
 [dependencies]
 # Path dep within this workspace; post-publish:
-#   kglite = "0.11"
+#   kglite = "0.14"
 kglite = { path = "../kglite/crates/kglite" }
 ```
 
 ```rust
-use kglite::api::{load_file, session, Value};
+use kglite::api::io::load_file;
+use kglite::api::{session, Value};
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,14 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let graph = load_file("graph.kgl")?;
 
     let params = HashMap::new();
-    let opts = session::ExecuteOptions {
-        params: &params,
-        deadline: None,
-        max_rows: None,
-        lazy_eligible: false,
-        disabled_passes: None,
-        embedder: None,
-    };
+    let opts = session::ExecuteOptions::eager(&params);
     let outcome = session::execute_read(
         &graph,
         "MATCH (n:Person) RETURN n.name LIMIT 10",
@@ -74,14 +68,7 @@ use std::sync::Arc;
 
 let session = Arc::new(Session::new(DirGraph::new()));
 let params: HashMap<String, kglite::api::Value> = HashMap::new();
-let opts = ExecuteOptions {
-    params: &params,
-    deadline: None,
-    max_rows: None,
-    lazy_eligible: false,
-    disabled_passes: None,
-    embedder: None,
-};
+let opts = ExecuteOptions::eager(&params);
 
 let mut tx = session.begin();
 kglite::api::session::execute_mut(
@@ -108,23 +95,20 @@ the session/transaction primitives.
 
 ## Examples
 
-Three runnable examples ship with the crate:
+Two runnable examples ship with the crate:
 
 ```bash
 cargo run -p kglite --example embedded_basic -- path/to/graph.kgl
 cargo run -p kglite --example embedded_session
-cargo run -p kglite --example embedded_blueprint
 ```
 
 - `embedded_basic.rs` — load a `.kgl`, run a Cypher query.
   Smallest possible embedder.
 - `embedded_session.rs` — two concurrent transactions; OCC catches
   the conflict.
-- `embedded_blueprint.rs` — parse the kglite source tree itself
-  via the codingest builder crate, then query the resulting
-  graph.
+Source-tree construction is provided by the separate `codingest` crate.
 
-All three are pyo3-free; `cargo tree -p kglite --example
+Both examples are pyo3-free; `cargo tree -p kglite --example
 embedded_basic | grep pyo3` returns empty.
 
 ## Where to go next

@@ -113,9 +113,35 @@ def test_installed_wheel_smoke_executes_console_script() -> None:
 def test_ci_compiles_packaged_optional_features_outside_workspace() -> None:
     ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     script = (REPO_ROOT / "scripts" / "check_packaged_features.sh").read_text(encoding="utf-8")
+    consumer = REPO_ROOT / "tests" / "fixtures" / "rust-embed-consumer"
     assert "bash scripts/check_packaged_features.sh" in ci
     assert "cargo package -p kglite" in script
     assert "--features parallel-bz2" in script
+    assert "tests/fixtures/rust-embed-consumer" in script
+    assert "cargo run" in script
+    assert "--locked" in script
+    assert (consumer / "Cargo.lock").is_file()
+    assert (consumer / "src" / "main.rs").is_file()
+
+
+def test_rust_embedding_docs_use_the_packaged_api_paths() -> None:
+    rust_docs = [
+        REPO_ROOT / "docs" / "rust" / name
+        for name in (
+            "api-reference.md",
+            "c-abi.md",
+            "embedding.md",
+            "implementing-a-binding.md",
+            "index.md",
+            "session.md",
+        )
+    ]
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in rust_docs)
+    assert "kglite::api::io::load_file" in combined
+    assert "kglite::api::io::save_graph" in combined
+    assert "kglite::api::load_file" not in combined
+    assert "kglite::api::save_graph" not in combined
+    assert "embedded_blueprint" not in combined
 
 
 def _write_fake_wheel(path: Path, *, include_extension: bool = True) -> None:

@@ -51,11 +51,11 @@ When the curated facade proves stable in the field, we cut 1.0 and the pre-1.0
 
 | Item | Path | Purpose |
 |---|---|---|
-| `load_file(path)` | `kglite::api::load_file` | Read a `.kgl` file (or disk dir) → `io::Result<Arc<DirGraph>>`. |
-| `load_kgl_bytes(&[u8])` | `kglite::api::load_kgl_bytes` | Load an in-memory graph from a `.kgl` byte buffer (counterpart of `write_kgl_to`). |
-| `save_graph(&mut arc, path)` | `kglite::api::save_graph` | Write an `Arc<DirGraph>` → `Result<(), String>`. |
-| `write_kgl` / `write_kgl_with(..., fsync)` | `kglite::api::write_kgl*` | Atomic (temp+rename) + durable (`fsync`) `.kgl` write. `write_kgl_with` toggles the flush. |
-| `write_kgl_to(&graph, &mut writer)` | `kglite::api::write_kgl_to` | Serialize the `.kgl` byte stream into any `Write` (backs `to_bytes`). |
+| `load_file(path)` | `kglite::api::io::load_file` | Read a `.kgl` file (or disk dir) → `io::Result<Arc<DirGraph>>`. |
+| `load_kgl_bytes(&[u8])` | `kglite::api::io::load_kgl_bytes` | Load an in-memory graph from a `.kgl` byte buffer (counterpart of `write_kgl_to`). |
+| `save_graph(&mut arc, path)` | `kglite::api::io::save_graph` | Write an `Arc<DirGraph>` → `Result<(), String>`. |
+| `write_kgl` / `write_kgl_with(..., fsync)` | `kglite::api::io::write_kgl*` | Atomic (temp+rename) + durable (`fsync`) `.kgl` write. `write_kgl_with` toggles the flush. |
+| `write_kgl_to(&graph, &mut writer)` | `kglite::api::io::write_kgl_to` | Serialize the `.kgl` byte stream into any `Write` (backs `to_bytes`). |
 
 `DirGraph::copy_embeddings_from(&src)` carries embedding stores across a rebuild
 by node id (the core behind the Python `copy_embeddings_from`). The other new

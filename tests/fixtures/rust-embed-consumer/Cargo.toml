@@ -1,0 +1,13 @@
+[package]
+name = "kglite-rust-embed-consumer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Keep this fixture independent from KGLite's workspace. The relative path is
+# preserved when check_packaged_features.sh copies the fixture beside the
+# extracted crates.io archive.
+[workspace]
+
+[dependencies]
+kglite = { path = "../../../crates/kglite" }
