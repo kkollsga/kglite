@@ -877,6 +877,7 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"add_connections(df, conn_type, source_type, source_id, target_type, target_id)\">Load edges from DataFrame.</method>\n");
     xml.push_str("    <method sig=\"extend(other, conflict_handling='update')\">Merge another in-memory KnowledgeGraph into this one in place (node identity (type,id); unions secondary labels; dedups edges on (type,src,tgt)). Returns a report dict.</method>\n");
     xml.push_str("    <method sig=\"kglite.from_blueprint(path, verbose=False)\">Build graph from JSON blueprint + CSVs.</method>\n");
+    xml.push_str("    <method sig=\"kglite.from_records(spec, on_missing_endpoint='vivify')\">Build graph from inline JSON records; endpoint policy: vivify, drop, or atomic error.</method>\n");
     xml.push_str("  </group>\n");
 
     // Export & persistence
@@ -1227,6 +1228,7 @@ pub(super) fn write_fluent_topic_loading(xml: &mut String) {
         "      <m sig=\"add_connections_bulk(specs)\">Bulk load multiple connection types.</m>\n",
     );
     xml.push_str("      <m sig=\"kglite.from_blueprint(path, verbose=False)\">Build graph from JSON blueprint + CSVs.</m>\n");
+    xml.push_str("      <m sig=\"kglite.from_records(spec, on_missing_endpoint='vivify')\">Build from inline JSON records. Missing endpoints: 'vivify'|'drop'|'error' (atomic).</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str(

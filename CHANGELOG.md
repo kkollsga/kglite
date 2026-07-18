@@ -5,6 +5,14 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Inline records:** `from_records(..., on_missing_endpoint=...)` can now
+  `"drop"` edges with absent endpoints or reject the complete build atomically
+  with `"error"`; the existing `"vivify"` behavior remains the default.
+
 ## [0.14.1] - 2026-07-18
 
 ### Added

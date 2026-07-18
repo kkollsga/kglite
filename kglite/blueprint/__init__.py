@@ -73,6 +73,7 @@ def from_records(
     lock_schema: bool = False,
     storage: str = "default",
     path: Optional[str] = None,
+    on_missing_endpoint: str = "vivify",
 ) -> KnowledgeGraph:
     """Build a KnowledgeGraph from an inline JSON records spec.
 
@@ -80,8 +81,8 @@ def from_records(
     CSV files on disk, the spec carries node and connection records inline.
     Agent-authored graphs are JSON-native, so this is the natural ingestion
     path for them. Column types are inferred from the record values, so a JSON
-    array becomes a native list property. Missing edge endpoints are
-    auto-vivified as provisional stub nodes (same as ``add_connections``).
+    array becomes a native list property. Missing edge endpoints can be
+    vivified as provisional stubs, dropped, or rejected atomically.
 
     Args:
         spec: The records spec, as a ``dict`` or a JSON string. Shape::
@@ -103,12 +104,16 @@ def from_records(
         lock_schema: If True, lock the schema after building.
         storage: ``"default"`` (in-memory), ``"mapped"``, or ``"disk"``.
         path: Directory for disk storage (only used with ``storage="disk"``).
+        on_missing_endpoint: ``"vivify"`` (default) creates provisional stub
+            nodes, ``"drop"`` omits affected edges, and ``"error"`` rejects
+            the complete build without publishing partial changes.
     """
     records_json = spec if isinstance(spec, str) else json.dumps(spec)
     graph = _from_records_rs(
         records_json,
         storage=storage if storage else "default",
         path=path,
+        on_missing_endpoint=on_missing_endpoint,
     )
     if save:
         out = Path(save)

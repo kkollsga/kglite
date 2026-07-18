@@ -93,7 +93,8 @@ g.cypher_query("MATCH (c:Company) RETURN c.name LIMIT 5")
 **Inline records** — `kglite.from_records(spec)` — carry nodes and connections
 inline as JSON instead of pointing at CSVs; column types are inferred and array
 values become native list properties. This is the no-CSV-on-disk / agent-authored
-path.
+path. Choose `on_missing_endpoint="vivify"` (the default), `"drop"`, or
+`"error"`; error mode is atomic and publishes no partial graph.
 
 **Imperative** — `KnowledgeGraph.add_nodes` / `add_connections` (and the `_bulk`
 variants) build a graph node-by-node from Python.

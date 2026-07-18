@@ -18,7 +18,8 @@
 //!     { "type": "KNOWS", "source_type": "Person", "source_id_field": "from",
 //!       "target_type": "Person", "target_id_field": "to",
 //!       "records": [ {"from": 1, "to": 2, "since": 2020} ] }
-//!   ]
+//!   ],
+//!   "on_missing_endpoint": "vivify"
 //! }
 //! ```
 //!
@@ -39,8 +40,18 @@ use serde_json::Value as Json;
 pub struct RecordsReport {
     pub nodes_added: usize,
     pub edges_added: usize,
+    /// Connection records omitted by `on_missing_endpoint: "drop"` because
+    /// at least one endpoint was null or absent from the graph.
+    pub edges_dropped_missing_endpoint: usize,
     pub node_types: Vec<String>,
     pub connection_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MissingEndpointPolicy {
+    Vivify,
+    Drop,
+    Error,
 }
 
 /// Build (or extend) `graph` from an inline JSON records spec. See the module
@@ -50,6 +61,25 @@ pub fn from_records(graph: &mut DirGraph, spec: &Json) -> Result<RecordsReport, 
         .as_object()
         .ok_or_else(|| "from_records: top-level JSON must be an object".to_string())?;
 
+    let endpoint_policy = parse_endpoint_policy(obj.get("on_missing_endpoint"))?;
+    if endpoint_policy == MissingEndpointPolicy::Error {
+        // `error` is an all-or-nothing ingestion mode. Build against a
+        // backend-aware transaction fork and publish it only after every node
+        // and connection spec has succeeded.
+        let mut working = graph.fork_transaction();
+        let report = load_records(&mut working, obj, endpoint_policy)?;
+        *graph = working;
+        return Ok(report);
+    }
+
+    load_records(graph, obj, endpoint_policy)
+}
+
+fn load_records(
+    graph: &mut DirGraph,
+    obj: &serde_json::Map<String, Json>,
+    endpoint_policy: MissingEndpointPolicy,
+) -> Result<RecordsReport, String> {
     let mut report = RecordsReport::default();
 
     // ── Nodes ────────────────────────────────────────────────────────────
@@ -68,7 +98,7 @@ pub fn from_records(graph: &mut DirGraph, spec: &Json) -> Result<RecordsReport, 
             .as_array()
             .ok_or_else(|| "from_records: 'connections' must be an array".to_string())?;
         for (i, conn_spec) in arr.iter().enumerate() {
-            load_connection_spec(graph, conn_spec, i, &mut report)?;
+            load_connection_spec(graph, conn_spec, i, endpoint_policy, &mut report)?;
         }
     }
 
@@ -116,6 +146,7 @@ fn load_connection_spec(
     graph: &mut DirGraph,
     spec: &Json,
     idx: usize,
+    endpoint_policy: MissingEndpointPolicy,
     report: &mut RecordsReport,
 ) -> Result<(), String> {
     let ctx = || format!("from_records: connections[{}]", idx);
@@ -134,26 +165,157 @@ fn load_connection_spec(
         records_to_columns_rows(records, &[&source_id_field, &target_id_field], &ctx)?;
     let df = DataFrame::from_cypher_rows(columns, rows).map_err(|e| format!("{}: {}", ctx(), e))?;
 
-    let rep = maintain::add_connections(
-        graph,
-        df,
-        connection_type.clone(),
-        source_type,
-        source_id_field,
-        target_type,
-        target_id_field,
-        None,
-        None,
-        None,
-    )
-    .map_err(|e| format!("{}: {}", ctx(), e))?;
-
-    report.edges_added += rep.connections_created;
+    match endpoint_policy {
+        MissingEndpointPolicy::Vivify => {
+            let rep = maintain::add_connections(
+                graph,
+                df,
+                connection_type.clone(),
+                source_type,
+                source_id_field,
+                target_type,
+                target_id_field,
+                None,
+                None,
+                None,
+            )
+            .map_err(|e| format!("{}: {}", ctx(), e))?;
+            report.edges_added += rep.connections_created;
+        }
+        MissingEndpointPolicy::Drop | MissingEndpointPolicy::Error => {
+            let edge_context = EdgeFrameContext {
+                connection_type: &connection_type,
+                source_type: &source_type,
+                source_id_field: &source_id_field,
+                target_type: &target_type,
+                target_id_field: &target_id_field,
+                connection_idx: idx,
+                endpoint_policy,
+            };
+            let edge_specs = edge_specs_from_frame(graph, &df, &edge_context)?;
+            let rep = maintain::add_edges_from_specs(graph, edge_specs)
+                .map_err(|e| format!("{}: {}", ctx(), e))?;
+            report.edges_added += rep.connections_created;
+            report.edges_dropped_missing_endpoint += rep.skipped_missing_endpoint;
+        }
+    }
     report.connection_types.push(connection_type);
     Ok(())
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
+
+fn parse_endpoint_policy(value: Option<&Json>) -> Result<MissingEndpointPolicy, String> {
+    match value {
+        None => Ok(MissingEndpointPolicy::Vivify),
+        Some(Json::String(s)) if s == "vivify" => Ok(MissingEndpointPolicy::Vivify),
+        Some(Json::String(s)) if s == "drop" => Ok(MissingEndpointPolicy::Drop),
+        Some(Json::String(s)) if s == "error" => Ok(MissingEndpointPolicy::Error),
+        Some(Json::String(s)) => Err(format!(
+            "from_records: unknown on_missing_endpoint mode '{s}'; expected 'vivify', 'drop', or 'error'"
+        )),
+        Some(_) => Err(
+            "from_records: 'on_missing_endpoint' must be 'vivify', 'drop', or 'error'"
+                .to_string(),
+        ),
+    }
+}
+
+struct EdgeFrameContext<'a> {
+    connection_type: &'a str,
+    source_type: &'a str,
+    source_id_field: &'a str,
+    target_type: &'a str,
+    target_id_field: &'a str,
+    connection_idx: usize,
+    endpoint_policy: MissingEndpointPolicy,
+}
+
+fn edge_specs_from_frame(
+    graph: &DirGraph,
+    frame: &DataFrame,
+    context: &EdgeFrameContext<'_>,
+) -> Result<Vec<maintain::EdgeSpec>, String> {
+    let property_columns: Vec<String> = frame
+        .get_column_names()
+        .into_iter()
+        .filter(|name| name != context.source_id_field && name != context.target_id_field)
+        .collect();
+    let mut specs = Vec::with_capacity(frame.row_count());
+
+    for row_idx in 0..frame.row_count() {
+        let source_id = frame
+            .get_value(row_idx, context.source_id_field)
+            .unwrap_or(Value::Null);
+        let target_id = frame
+            .get_value(row_idx, context.target_id_field)
+            .unwrap_or(Value::Null);
+
+        if context.endpoint_policy == MissingEndpointPolicy::Error {
+            validate_endpoint(
+                graph,
+                context.source_type,
+                context.source_id_field,
+                &source_id,
+                context.connection_idx,
+                row_idx,
+                "source",
+            )?;
+            validate_endpoint(
+                graph,
+                context.target_type,
+                context.target_id_field,
+                &target_id,
+                context.connection_idx,
+                row_idx,
+                "target",
+            )?;
+        }
+
+        let properties = property_columns
+            .iter()
+            .filter_map(|name| {
+                frame
+                    .get_value(row_idx, name)
+                    .filter(|value| !matches!(value, Value::Null))
+                    .map(|value| (name.clone(), value))
+            })
+            .collect();
+        specs.push(maintain::EdgeSpec {
+            source_type: context.source_type.to_string(),
+            source_id,
+            target_type: context.target_type.to_string(),
+            target_id,
+            edge_type: context.connection_type.to_string(),
+            properties,
+        });
+    }
+
+    Ok(specs)
+}
+
+fn validate_endpoint(
+    graph: &DirGraph,
+    node_type: &str,
+    id_field: &str,
+    id: &Value,
+    connection_idx: usize,
+    row_idx: usize,
+    endpoint_name: &str,
+) -> Result<(), String> {
+    let ctx = format!("from_records: connections[{connection_idx}].records[{row_idx}]");
+    if matches!(id, Value::Null) {
+        return Err(format!(
+            "{ctx}: {endpoint_name} endpoint id field '{id_field}' is null"
+        ));
+    }
+    if graph.lookup_by_id_readonly(node_type, id).is_none() {
+        return Err(format!(
+            "{ctx}: {endpoint_name} endpoint {node_type}({id}) does not exist"
+        ));
+    }
+    Ok(())
+}
 
 fn required_str(spec: &Json, key: &str, ctx: &impl Fn() -> String) -> Result<String, String> {
     spec.get(key)
@@ -229,3 +391,7 @@ fn json_to_value(j: &Json) -> Value {
         ),
     }
 }
+
+#[cfg(test)]
+#[path = "json_records_tests.rs"]
+mod tests;

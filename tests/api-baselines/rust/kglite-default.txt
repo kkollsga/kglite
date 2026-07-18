@@ -355,6 +355,7 @@ pub fn kglite::api::blueprint::NodeSpec::deserialize<__D>(__deserializer: __D) -
 pub struct kglite::api::blueprint::RecordsReport
 pub kglite::api::blueprint::RecordsReport::connection_types: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::blueprint::RecordsReport::edges_added: usize
+pub kglite::api::blueprint::RecordsReport::edges_dropped_missing_endpoint: usize
 pub kglite::api::blueprint::RecordsReport::node_types: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::blueprint::RecordsReport::nodes_added: usize
 impl core::clone::Clone for kglite::api::blueprint::RecordsReport

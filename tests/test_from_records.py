@@ -83,6 +83,53 @@ def test_endpoint_vivification():
     assert kg.cypher("MATCH ()-[r:REF]->() RETURN count(r) AS c").to_dicts() == [{"c": 2}]
 
 
+def _missing_endpoint_spec():
+    return {
+        "nodes": [{"type": "Doc", "id_field": "id", "records": [{"id": 1}, {"id": 2}]}],
+        "connections": [
+            {
+                "type": "REF",
+                "source_type": "Doc",
+                "source_id_field": "s",
+                "target_type": "Doc",
+                "target_id_field": "t",
+                "records": [
+                    {"s": 1, "t": 2, "weight": 3},
+                    {"s": 2, "t": 99, "weight": 4},
+                    {"s": None, "t": 1, "weight": 5},
+                ],
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize("storage", ["default", "mapped", "disk"])
+def test_endpoint_drop_policy_across_storage_modes(storage, tmp_path):
+    path = str(tmp_path / "graph") if storage == "disk" else None
+    kg = kglite.from_records(
+        _missing_endpoint_spec(),
+        storage=storage,
+        path=path,
+        on_missing_endpoint="drop",
+    )
+
+    assert kg.cypher("MATCH (n:Doc) RETURN count(n) AS c").to_dicts() == [{"c": 2}]
+    assert kg.cypher("MATCH ()-[r:REF]->() RETURN count(r) AS c").to_dicts() == [{"c": 1}]
+
+
+def test_endpoint_error_policy_is_deterministic():
+    with pytest.raises(
+        ValueError,
+        match=r"connections\[0\]\.records\[1\].*target endpoint Doc\(99\) does not exist",
+    ):
+        kglite.from_records(_missing_endpoint_spec(), on_missing_endpoint="error")
+
+
+def test_invalid_endpoint_policy_raises():
+    with pytest.raises(ValueError, match="unknown on_missing_endpoint mode"):
+        kglite.from_records(_spec(), on_missing_endpoint="guess")
+
+
 def test_malformed_json_raises():
     with pytest.raises(ValueError):
         kglite.from_records("{not valid json")
