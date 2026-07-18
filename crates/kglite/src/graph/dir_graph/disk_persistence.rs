@@ -1,6 +1,9 @@
 //! Disk-mode lifecycle and persistence orchestration.
 
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static DISK_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn write_compressed_disk_serde<T: serde::Serialize + ?Sized>(
     dir: &std::path::Path,
@@ -27,8 +30,9 @@ impl DirGraph {
         }
 
         // Create a temp directory for CSR files
+        let sequence = DISK_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let data_dir = std::env::temp_dir().join(format!(
-            "kglite_disk_{}_{:x}",
+            "kglite_disk_{}_{:x}_{sequence:x}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -184,18 +188,16 @@ impl DirGraph {
         // builds; done here as a one-shot so users only pay the cost at
         // save time, not per add_connections batch.
         //
-        // Gate: the phase-6 seal path in `save_to_dir` consumes
-        // `overflow_out` / `overflow_in` directly. Running `compact()`
-        // first moves those edges into the CSR (clearing overflow),
-        // which causes seal to write an empty segment and lose the
-        // new edges on reload. Only compact when we're taking the
-        // compact-rewrite path (no prior save, or no tail above the
-        // sealed watermark).
+        // The seal path consumes `overflow_out` / `overflow_in` directly,
+        // while a rewrite must compact first so every derived index is rebuilt
+        // from the complete CSR. Use the lower layer's target-aware decision:
+        // generation stages are distinct directories and always rewrite.
         if let GraphBackend::Disk(ref mut dg) = self.graph {
             dg.begin_persist();
-            let will_seal =
-                !dg.segment_manifest.is_empty() && dg.sealed_nodes_bound < dg.node_count() as u32;
-            if !will_seal && dg.has_overflow() {
+            let disposition = dg.save_disposition(dir);
+            if disposition == crate::graph::storage::disk::graph_persist::SaveDisposition::Rewrite
+                && dg.has_overflow()
+            {
                 dg.compact()
                     .map_err(|e| format!("disk compaction failed: {e}"))?;
             }

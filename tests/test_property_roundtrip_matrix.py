@@ -51,15 +51,10 @@ half of the contract):
 Notes on the two "known" bugs this suite was seeded from:
 
 1. *"Node ``Value::Map`` props saved as NULL to ``.kgl``"*
-   (`column_store.rs:1073`). This encoder (``serialize_overflow_value``) is
-   **not reached** by any Cypher-CREATE-then-save path in any storage mode
-   (memory / mapped / disk), nor by ``to_subgraph`` — those all preserve maps
-   (see ``test_map_survives_kgl_all_storage_modes``, a passing guard). The
-   overflow-bag encoder is exercised only by the columnar bulk builders
-   (RDF / n-triples / subgraph-streaming writer), so the bug is **latent**:
-   real in code, dormant for the common Python surface. If a future change
-   routes user maps through that encoder, the passing guard here becomes the
-   canary.
+   (`storage/overflow.rs`) is fixed: maps now have a versioned overflow tag
+   and the borrowed streaming path preserves them. The ordinary
+   Cypher-CREATE-then-save paths already preserved maps; the Rust unit suite
+   covers the formerly latent columnar and subgraph-streaming paths.
 2. *"`add_connections` drops list edge columns"* is fixed: default,
    whitelist, and exclusion semantics are covered below and through all
    storage modes.
@@ -339,10 +334,8 @@ def test_edge_value_survives_kgl(kind, tmp_path):
 
 # ── Cross-storage-mode parity for collections (list / map) ──────────────────
 # Locks in that native collections survive live reads AND .kgl save/reload on
-# every storage backend — including the mapped/disk columnar modes whose
-# overflow-bag encoder (column_store.rs:1073) drops maps in the bulk-build
-# path. These pass because the Cypher-write path keeps Values in the in-memory
-# overlay, not the overflow bag; if that ever changes, these fail first.
+# every storage backend, including the mapped/disk columnar modes. The Rust
+# storage suite separately covers maps routed through the overflow bag.
 _COLLECTION_KINDS = ["list_str", "list_int", "nested_list", "map", "dict_in_list", "list_in_dict"]
 
 
@@ -361,13 +354,10 @@ def test_collection_survives_storage_modes(kind, mode, tmp_path):
 
 
 def test_map_survives_kgl_all_storage_modes(tmp_path):
-    """Canary guard for the latent column_store.rs:1073 overflow-bag bug.
+    """Canary guard for map persistence across every public storage mode.
 
-    A node map survives ``.kgl`` save/reload on memory, mapped, AND disk. The
-    overflow-bag encoder that writes maps as NULL is only reached by the
-    columnar bulk builders (RDF / streaming), not this path. If a future change
-    routes Cypher-created maps through that encoder, this guard fails and points
-    at the regression.
+    The lower-level Rust suite also exercises the columnar overflow and
+    borrowed streaming encoders that are not directly reachable here.
     """
     for mode in ("memory", "mapped", "disk"):
         sub = tmp_path / mode

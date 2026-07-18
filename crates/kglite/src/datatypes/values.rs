@@ -194,6 +194,10 @@ pub enum BorrowedValue<'a> {
     /// it lets native list properties survive the streaming-disk save path
     /// (which otherwise can only carry scalars).
     List(&'a [Value]),
+    /// A borrowed map of owned values. Map cells use the same shape in
+    /// mixed columns and the overflow property bag, so borrowing the map
+    /// lets streaming-disk saves preserve them without cloning first.
+    Map(&'a BTreeMap<String, Value>),
 }
 
 impl<'a> BorrowedValue<'a> {
@@ -210,6 +214,7 @@ impl<'a> BorrowedValue<'a> {
             BorrowedValue::DateTime(d) => Value::DateTime(d),
             BorrowedValue::Timestamp(t) => Value::Timestamp(t),
             BorrowedValue::List(items) => Value::List(items.to_vec()),
+            BorrowedValue::Map(entries) => Value::Map(entries.clone()),
         }
     }
 }

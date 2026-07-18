@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hidden: true` removes a tool from discovery and rejects direct calls even
   when the route is registered by KGLite or a downstream extension; description
   and rename overrides are validated and applied at the same late boot stage.
+- Nested map properties are preserved by columnar overflow storage and
+  borrowed subgraph streaming instead of being written as `NULL` or omitted.
+- Disk generation saves rebuild peer-count histograms from newly added edges,
+  keeping grouped relationship counts complete after save and reload.
 
 ## [0.14.1] - 2026-07-18
 

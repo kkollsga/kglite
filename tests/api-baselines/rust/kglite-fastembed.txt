@@ -2649,6 +2649,7 @@ pub kglite::datatypes::values::BorrowedValue::DateTime(chrono::naive::date::Naiv
 pub kglite::datatypes::values::BorrowedValue::Float64(f64)
 pub kglite::datatypes::values::BorrowedValue::Int64(i64)
 pub kglite::datatypes::values::BorrowedValue::List(&'a [kglite::datatypes::values::Value])
+pub kglite::datatypes::values::BorrowedValue::Map(&'a alloc::collections::btree::map::BTreeMap<alloc::string::String, kglite::datatypes::values::Value>)
 pub kglite::datatypes::values::BorrowedValue::Null
 pub kglite::datatypes::values::BorrowedValue::String(&'a str)
 pub kglite::datatypes::values::BorrowedValue::Timestamp(chrono::naive::datetime::NaiveDateTime)

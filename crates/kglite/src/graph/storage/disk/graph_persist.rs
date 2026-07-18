@@ -93,6 +93,17 @@ const fn legacy_codec_tag() -> u8 {
 
 type OverflowEdges = (HashMap<u32, Vec<CsrEdge>>, HashMap<u32, Vec<CsrEdge>>);
 
+/// Persistence shape selected for a target directory.
+///
+/// Sealing mutates and structurally extends the graph's current root. A
+/// generation stage is a different, initially empty directory, so it must
+/// receive a complete compact snapshot instead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SaveDisposition {
+    Seal,
+    Rewrite,
+}
+
 fn load_overflow_edges(
     dir: &Path,
     codec: crate::serde_codec::CodecVersion,
@@ -448,6 +459,24 @@ impl DiskGraph {
         Ok(manifest)
     }
 
+    /// Decide whether `target_dir` can be extended with an incremental sealed
+    /// segment or needs a complete rewritten snapshot.
+    ///
+    /// A seal is valid only against the graph's selected data root: the
+    /// implementation reuses its existing segment files and updates their
+    /// metadata in place. Save-as targets and immutable generation stages are
+    /// distinct directories and therefore always require a rewrite.
+    pub(crate) fn save_disposition(&self, target_dir: &Path) -> SaveDisposition {
+        let have_prior_save = !self.segment_manifest.is_empty();
+        let current_root = self.data_dir.parent().unwrap_or(target_dir);
+        let have_unsealed_tail = self.sealed_nodes_bound < self.node_count as u32;
+        if have_prior_save && target_dir == current_root && have_unsealed_tail {
+            SaveDisposition::Seal
+        } else {
+            SaveDisposition::Rewrite
+        }
+    }
+
     /// Save disk graph state. For disk mode, binary arrays are already on disk
     /// via mmap — this only flushes metadata + any in-memory overflow/properties.
     ///
@@ -471,16 +500,9 @@ impl DiskGraph {
         self.clear_arenas();
         std::fs::create_dir_all(target_dir)?;
 
-        // Phase 6 + 7 auto-wire. `seal_to_new_segment` now handles
-        // both clean-tail (segment-local) and cross-segment
-        // (full-range) overflow — the `overflow_is_clean` gate from
-        // phase 6 is gone. Fall through to compact-and-rewrite when:
-        //   - no tail (nothing new to seal)
-        //   - target_dir differs from the graph's root (save-as)
-        //   - segment_manifest has never been persisted (initial save)
-        let have_prior_save = !self.segment_manifest.is_empty();
-        let same_dir = target_dir == self.data_dir.parent().unwrap_or(target_dir);
-        if have_prior_save && same_dir && self.sealed_nodes_bound < self.node_count as u32 {
+        // The orchestration layer uses this exact decision before calling us
+        // so overflow compaction and the eventual write shape cannot drift.
+        if self.save_disposition(target_dir) == SaveDisposition::Seal {
             let _seg_id = self.seal_to_new_segment(target_dir)?;
             return Ok(());
         }

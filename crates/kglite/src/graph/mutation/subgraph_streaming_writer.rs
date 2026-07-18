@@ -945,6 +945,7 @@ fn borrowed_kind(v: &BorrowedValue<'_>) -> &'static str {
         BorrowedValue::DateTime(_) => "DateTime",
         BorrowedValue::Timestamp(_) => "Timestamp",
         BorrowedValue::List(_) => "List",
+        BorrowedValue::Map(_) => "Map",
     }
 }
 
@@ -1144,5 +1145,61 @@ mod tests {
                 _ => assert_eq!(store.get(i as u32, key_p).unwrap(), v.clone()),
             }
         }
+    }
+
+    #[test]
+    fn borrowed_rows_preserve_map_columns_and_overflow_properties() {
+        let mut interner = StringInterner::new();
+        let schema = make_schema(&mut interner, &["payload"]);
+        let mut meta = HashMap::new();
+        meta.insert("payload".to_string(), "mixed".to_string());
+        let key_payload = interner.get_or_intern("payload");
+        let key_extra = interner.get_or_intern("extra");
+        let payload = std::collections::BTreeMap::from([
+            ("kind".into(), Value::String("mixed".into())),
+            ("values".into(), Value::List(vec![Value::Int64(1)])),
+        ]);
+        let extra = std::collections::BTreeMap::from([(
+            "nested".into(),
+            Value::Map(std::collections::BTreeMap::from([(
+                "ok".into(),
+                Value::Boolean(true),
+            )])),
+        )]);
+
+        let dir = TempDir::new().unwrap();
+        let mut writer = TypeWriter::new(
+            Arc::clone(&schema),
+            meta,
+            dir.path().to_path_buf(),
+            &interner,
+            "string",
+            "string",
+        )
+        .unwrap();
+        writer
+            .push_row_borrowed(
+                BorrowedValue::String("id"),
+                BorrowedValue::String("title"),
+                |visitor| {
+                    visitor.push_property(key_payload, BorrowedValue::Map(&payload))?;
+                    visitor.push_property(key_extra, BorrowedValue::Map(&extra))
+                },
+            )
+            .unwrap();
+
+        let store = writer.finalize(&interner).unwrap();
+        assert_eq!(store.get(0, key_payload), Some(Value::Map(payload.clone())));
+        assert_eq!(store.get(0, key_extra), Some(Value::Map(extra.clone())));
+
+        let mut seen = Vec::new();
+        store
+            .try_for_each_property_borrowed(0, |key, value| -> Result<(), ()> {
+                seen.push((key, value.to_value()));
+                Ok(())
+            })
+            .unwrap();
+        assert!(seen.contains(&(key_payload, Value::Map(payload))));
+        assert!(seen.contains(&(key_extra, Value::Map(extra))));
     }
 }

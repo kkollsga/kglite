@@ -31,6 +31,7 @@
 //! | 7   | Timestamp  | 8 bytes i64 LE (seconds since unix epoch)|
 //! | 8   | List (v1)  | u32 LE length + bincode(`Vec<Value>`)    |
 //! | 9   | List       | u32 LE length + Postcard(`Vec<Value>`)   |
+//! | 10  | Map        | u32 LE length + Postcard(`BTreeMap`)     |
 //!
 //! **Forward-compat rule:** any *future* tag MUST use a `u32 LE`
 //! length prefix + payload, so that older readers can skip an unknown
@@ -38,12 +39,10 @@
 //!
 //! ## Deliberately non-storable values
 //!
-//! `Map`, `Node`, `Relationship`, `Path` are query-result-time values
-//! and `Duration` / `NodeRef` are query-time-only; the encoder writes
-//! them as the Null tag (a *documented, known* limitation — the
-//! cross-mode canary tests in `test_property_roundtrip_matrix.py`
-//! lock in the observable behaviour). `Point` is encoded as its
-//! string form `"lat,lon"` (tag 6), matching the legacy writers.
+//! `Node`, `Relationship`, and `Path` are query-result-time values, while
+//! `Duration` and `NodeRef` are query-time-only; the encoder writes them as
+//! the Null tag. `Point` is encoded as its string form `"lat,lon"` (tag 6),
+//! matching the legacy writers.
 
 use crate::datatypes::values::{BorrowedValue, Value};
 use crate::graph::schema::InternedKey;
@@ -65,10 +64,11 @@ pub const TAG_TIMESTAMP: u8 = 7;
 /// Legacy bincode list payload. New writers use [`TAG_LIST_POSTCARD`].
 pub const TAG_LIST: u8 = 8;
 pub const TAG_LIST_POSTCARD: u8 = 9;
+pub const TAG_MAP_POSTCARD: u8 = 10;
 
 /// Highest tag this build knows how to *decode*. Tags above this are
 /// skipped via the length-prefix forward-compat rule (module docs).
-pub const MAX_KNOWN_TAG: u8 = TAG_LIST_POSTCARD;
+pub const MAX_KNOWN_TAG: u8 = TAG_MAP_POSTCARD;
 
 // ─── Encoders ────────────────────────────────────────────────────────────────
 
@@ -116,11 +116,10 @@ pub fn encode_value(buf: &mut Vec<u8>, key: InternedKey, value: &Value) {
         // properties, 0.11.x). New writes use the Postcard tag; tag 8
         // remains an explicit read-only bincode compatibility branch.
         Value::List(items) => encode_list(buf, items),
-        // Map / graph-entity variants are query-result-time values;
-        // they don't belong in the overflow property bag. Written as
-        // null (documented limitation — see module docs; canary
-        // coverage in test_property_roundtrip_matrix.py).
-        Value::Map(_) | Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
+        Value::Map(entries) => encode_map(buf, entries),
+        // Graph-entity variants are query-result-time values; they don't
+        // belong in the overflow property bag and are written as null.
+        Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
             buf.push(TAG_NULL);
         }
     }
@@ -162,6 +161,7 @@ pub fn encode_value_borrowed(buf: &mut Vec<u8>, key: InternedKey, value: &Borrow
         }
         BorrowedValue::String(s) => encode_str(buf, s),
         BorrowedValue::List(items) => encode_list(buf, items),
+        BorrowedValue::Map(entries) => encode_map(buf, entries),
     }
 }
 
@@ -187,6 +187,24 @@ fn encode_list(buf: &mut Vec<u8>, items: &[Value]) {
         // Serialisation should never fail for a Vec<Value>; if it
         // somehow does, fall back to null rather than corrupting the
         // blob.
+        Err(_) => buf.push(TAG_NULL),
+    }
+}
+
+#[inline]
+fn encode_map(buf: &mut Vec<u8>, entries: &std::collections::BTreeMap<String, Value>) {
+    match crate::serde_codec::encode_versioned(
+        crate::serde_codec::CURRENT_CODEC,
+        entries,
+        u32::MAX as u64,
+    ) {
+        Ok(bytes) => {
+            buf.push(TAG_MAP_POSTCARD);
+            buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&bytes);
+        }
+        // `Value` maps are serializable. Preserve the existing infallible
+        // overflow-writer contract if resource limits are ever exceeded.
         Err(_) => buf.push(TAG_NULL),
     }
 }
@@ -265,6 +283,19 @@ pub fn read_value(blob: &[u8], pos: &mut usize, type_tag: u8) -> Option<Value> {
                 crate::serde_codec::decode_exact_with(codec, bytes, bytes.len() as u64, limits)
                     .ok()?;
             Some(Value::List(items))
+        }
+        TAG_MAP_POSTCARD => {
+            let bytes = read_len_prefixed(blob, pos)?;
+            let limits = crate::serde_codec::DecodeLimits::new(u32::MAX as u64, bytes.len() as u64);
+            let entries: std::collections::BTreeMap<String, Value> =
+                crate::serde_codec::decode_exact_with(
+                    crate::serde_codec::CodecVersion::PostcardV1,
+                    bytes,
+                    bytes.len() as u64,
+                    limits,
+                )
+                .ok()?;
+            Some(Value::Map(entries))
         }
         _ => None,
     }
@@ -362,7 +393,7 @@ pub fn decode_blob(blob: &[u8]) -> Vec<(InternedKey, Value)> {
 /// Visit each entry of a row blob as a zero/low-copy
 /// [`BorrowedValue`]: strings borrow the blob bytes directly (after a
 /// UTF-8 *check* — corrupt bytes are decoded lossily, matching
-/// [`read_value`]), lists allocate a transient `Vec<Value>` that lives
+/// [`read_value`]), lists and maps allocate transient containers that live
 /// across the callback. Unknown tags are skipped via the
 /// forward-compat length prefix; a truncated tail ends the visit.
 ///
@@ -493,6 +524,26 @@ where
                     return Some(Err(e));
                 }
             }
+            TAG_MAP_POSTCARD => {
+                let Some(bytes) = read_len_prefixed(blob, pos) else {
+                    return Some(Ok(()));
+                };
+                let limits =
+                    crate::serde_codec::DecodeLimits::new(u32::MAX as u64, bytes.len() as u64);
+                let entries: std::collections::BTreeMap<String, Value> =
+                    match crate::serde_codec::decode_exact_with(
+                        crate::serde_codec::CodecVersion::PostcardV1,
+                        bytes,
+                        bytes.len() as u64,
+                        limits,
+                    ) {
+                        Ok(v) => v,
+                        Err(_) => return Some(Ok(())),
+                    };
+                if let Err(e) = f(key, BorrowedValue::Map(&entries)) {
+                    return Some(Err(e));
+                }
+            }
             _ => {
                 // Unknown (future) tag: length-prefixed by the
                 // forward-compat rule. Skip it, keep the rest of the
@@ -572,18 +623,28 @@ mod tests {
                 key(9),
                 Value::List(vec![Value::Int64(1), Value::String("x".into())]),
             ),
+            (
+                key(10),
+                Value::Map(std::collections::BTreeMap::from([
+                    ("count".into(), Value::Int64(2)),
+                    (
+                        "nested".into(),
+                        Value::List(vec![Value::Map(std::collections::BTreeMap::from([(
+                            "ok".into(),
+                            Value::Boolean(true),
+                        )]))]),
+                    ),
+                ])),
+            ),
         ];
         let blob = blob_of(&entries);
-        let list_tag_offset = blob.len()
-            - crate::serde_codec::encode_versioned(
-                crate::serde_codec::CURRENT_CODEC,
-                &vec![Value::Int64(1), Value::String("x".into())],
-                u32::MAX as u64,
-            )
-            .unwrap()
-            .len()
-            - 5;
-        assert_eq!(blob[list_tag_offset], TAG_LIST_POSTCARD);
+        let mut encoded_list = Vec::new();
+        encode_value(
+            &mut encoded_list,
+            key(9),
+            &Value::List(vec![Value::Int64(1), Value::String("x".into())]),
+        );
+        assert_eq!(encoded_list[8], TAG_LIST_POSTCARD);
         assert_eq!(decode_blob(&blob), entries);
         // Per-key scan agrees.
         for (k, v) in &entries {
@@ -647,6 +708,62 @@ mod tests {
         let mut borrowed = Vec::new();
         encode_value_borrowed(&mut borrowed, key(9), &BorrowedValue::Timestamp(ts));
         assert_eq!(owned, borrowed);
+    }
+
+    #[test]
+    fn borrowed_encoder_and_decoder_preserve_nested_map() {
+        let entries = std::collections::BTreeMap::from([
+            ("name".into(), Value::String("map".into())),
+            (
+                "items".into(),
+                Value::List(vec![Value::Map(std::collections::BTreeMap::from([(
+                    "answer".into(),
+                    Value::Int64(42),
+                )]))]),
+            ),
+        ]);
+        let expected = Value::Map(entries.clone());
+
+        let mut owned = Vec::new();
+        encode_value(&mut owned, key(9), &expected);
+        let mut borrowed = Vec::new();
+        encode_value_borrowed(&mut borrowed, key(9), &BorrowedValue::Map(&entries));
+
+        assert_eq!(owned, borrowed);
+        assert_eq!(owned[8], TAG_MAP_POSTCARD);
+        let payload_len = u32::from_le_bytes(owned[9..13].try_into().unwrap()) as usize;
+        assert_eq!(owned.len(), 13 + payload_len);
+
+        let blob = blob_of(&[(key(9), expected.clone())]);
+        assert_eq!(decode_blob(&blob), vec![(key(9), expected.clone())]);
+        let mut seen = Vec::new();
+        try_for_each_borrowed(&blob, |k, value| -> Result<(), ()> {
+            seen.push((k, value.to_value()));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen, vec![(key(9), expected)]);
+    }
+
+    #[test]
+    fn corrupt_map_payload_ends_scan_without_fabricating_a_value() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&2u16.to_le_bytes());
+        blob.extend_from_slice(&key(1).as_u64().to_le_bytes());
+        blob.push(TAG_MAP_POSTCARD);
+        blob.extend_from_slice(&1u32.to_le_bytes());
+        blob.push(0xff);
+        encode_value(&mut blob, key(2), &Value::String("not-reached".into()));
+
+        assert!(decode_blob(&blob).is_empty());
+        assert_eq!(scan_blob(&blob, key(1)), None);
+        let mut seen = Vec::new();
+        try_for_each_borrowed(&blob, |k, value| -> Result<(), ()> {
+            seen.push((k, value.to_value()));
+            Ok(())
+        })
+        .unwrap();
+        assert!(seen.is_empty());
     }
 
     /// One unknown (future, length-prefixed) tag must not drop the
@@ -719,12 +836,11 @@ mod tests {
     }
 
     #[test]
-    fn map_and_friends_encode_as_null_tag() {
-        // Documented limitation: Map / graph entities / Duration /
-        // NodeRef write the Null tag (do NOT try to make these
-        // storable here — see module docs).
+    fn transient_values_encode_as_null_tag() {
+        // Query-time values remain transient and therefore use the null
+        // tag in the overflow property bag.
         let mut buf = Vec::new();
-        encode_value(&mut buf, key(1), &Value::Map(Default::default()));
+        encode_value(&mut buf, key(1), &Value::NodeRef(7));
         assert_eq!(buf[8], TAG_NULL);
         assert_eq!(buf.len(), 9); // key + tag only, no payload
     }

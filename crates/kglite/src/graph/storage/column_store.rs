@@ -1098,10 +1098,9 @@ impl ColumnStore {
                 // Native list properties survive the streaming path by
                 // borrowing the slice; the overflow serializer encodes it.
                 Value::List(items) => crate::datatypes::values::BorrowedValue::List(items),
-                // Point / Map / graph-entity / Duration / NodeRef have no
-                // borrowed form; the overflow codec stores them as null
-                // anyway (documented limitation), so skipping here keeps
-                // the two paths behaviourally identical.
+                Value::Map(entries) => crate::datatypes::values::BorrowedValue::Map(entries),
+                // Point / graph-entity / Duration / NodeRef have no borrowed
+                // form; the overflow codec stores them as null anyway.
                 _ => continue,
             };
             f(*key, bv)?;
