@@ -763,6 +763,7 @@ def from_records(
     lock_schema: bool = False,
     storage: str = "default",
     path: Optional[str] = None,
+    on_missing_endpoint: str = "vivify",
 ) -> KnowledgeGraph:
     """Build a KnowledgeGraph from an inline JSON records spec.
 
@@ -771,8 +772,8 @@ def from_records(
     the natural ingestion path for agent-authored graphs. Column types are
     inferred from the record values, so a JSON array becomes a **native list
     property** (``'x' IN n.tags`` membership, ``UNWIND n.tags``). Missing edge
-    endpoints are auto-vivified as provisional stub nodes (same as
-    ``add_connections``).
+    endpoints can be vivified as provisional stubs, dropped, or rejected
+    atomically.
 
     Spec shape (``records`` are arrays of flat JSON objects)::
 
@@ -795,6 +796,9 @@ def from_records(
         lock_schema: If True, lock the schema after building.
         storage: ``"default"`` (in-memory), ``"mapped"``, or ``"disk"``.
         path: Directory for disk storage (only with ``storage="disk"``).
+        on_missing_endpoint: ``"vivify"`` (default) creates provisional stub
+            nodes, ``"drop"`` omits affected edges, and ``"error"`` rejects
+            the complete build without publishing partial changes.
 
     Returns:
         A new KnowledgeGraph populated from the records.
@@ -1093,6 +1097,8 @@ class KnowledgeGraph:
         nullable_int_downcast: bool = False,
         labels: Optional[list[str]] = None,
         managed_reload: bool = False,
+        git_sha: Optional[str] = None,
+        modified_by: Optional[str] = None,
     ) -> dict[str, Any]:
         """Add nodes from a DataFrame.
 
@@ -1173,6 +1179,8 @@ class KnowledgeGraph:
                 that also wear the ``Reviewer`` label, queryable via
                 ``MATCH (a:Reviewer)`` or ``MATCH (a:Agent:Reviewer)``.
                 For per-row labels, call :meth:`add_label` after.
+            git_sha: Commit SHA stamped on opted-in ``auto_timestamp`` types.
+            modified_by: Actor id stamped on opted-in ``auto_timestamp`` types.
 
         Returns:
             Operation report dict with keys ``nodes_created``,
@@ -1205,6 +1213,8 @@ class KnowledgeGraph:
         column_types: Optional[dict[str, str]] = None,
         query: Optional[str] = None,
         extra_properties: Optional[dict[str, Any]] = None,
+        git_sha: Optional[str] = None,
+        modified_by: Optional[str] = None,
     ) -> dict[str, Any]:
         """Add connections (edges) between existing nodes.
 
@@ -1260,6 +1270,10 @@ class KnowledgeGraph:
                 ``source_id_field`` and ``target_id_field``.
             extra_properties: Dict of static properties to add to every edge
                 created from the query results (query mode only).
+            git_sha: Commit SHA stamped when the edge type has
+                ``auto_timestamp=True``.
+            modified_by: Actor id stamped when the edge type has
+                ``auto_timestamp=True``.
 
         Returns:
             Operation report dict with ``connections_created``, ``connections_skipped``, etc.
@@ -1282,6 +1296,8 @@ class KnowledgeGraph:
         column_types: Optional[dict[str, str]] = None,
         query: Optional[str] = None,
         extra_properties: Optional[dict[str, Any]] = None,
+        git_sha: Optional[str] = None,
+        modified_by: Optional[str] = None,
     ) -> dict[str, Any]:
         """Replace a node's outgoing edges of a given type, then add new ones — an atomic edge upsert.
 
@@ -1322,6 +1338,10 @@ class KnowledgeGraph:
             column_types: Override column dtypes (data mode only).
             query: Cypher query string (alternative to ``data``). Must be read-only.
             extra_properties: Static properties stamped onto every edge (query mode only).
+            git_sha: Commit SHA stamped when the edge type has
+                ``auto_timestamp=True``.
+            modified_by: Actor id stamped when the edge type has
+                ``auto_timestamp=True``.
 
         Returns:
             Operation report dict with ``connections_created``, ``connections_skipped``, etc.
@@ -1405,33 +1425,54 @@ class KnowledgeGraph:
         """
         ...
 
-    def add_nodes_bulk(self, nodes: list[dict[str, Any]]) -> dict[str, int]:
+    def add_nodes_bulk(
+        self,
+        nodes: list[dict[str, Any]],
+        *,
+        git_sha: Optional[str] = None,
+        modified_by: Optional[str] = None,
+    ) -> dict[str, int]:
         """Add multiple node types at once.
 
         Each dict in *nodes* must contain ``node_type``, ``unique_id_field``,
         ``node_title_field``, and ``data`` (a DataFrame).
+        ``git_sha`` and ``modified_by`` apply to every opted-in node type.
 
         Returns:
             Mapping of ``node_type`` to count of nodes added.
         """
         ...
 
-    def add_connections_bulk(self, connections: list[dict[str, Any]]) -> dict[str, int]:
+    def add_connections_bulk(
+        self,
+        connections: list[dict[str, Any]],
+        *,
+        git_sha: Optional[str] = None,
+        modified_by: Optional[str] = None,
+    ) -> dict[str, int]:
         """Add multiple connection types at once.
 
         Each dict must contain ``source_type``, ``target_type``,
         ``connection_name``, and ``data`` (DataFrame with ``source_id``/``target_id`` columns).
+        ``git_sha`` and ``modified_by`` apply to every opted-in edge type.
 
         Returns:
             Mapping of ``connection_name`` to count of connections created.
         """
         ...
 
-    def add_connections_from_source(self, connections: list[dict[str, Any]]) -> dict[str, int]:
+    def add_connections_from_source(
+        self,
+        connections: list[dict[str, Any]],
+        *,
+        git_sha: Optional[str] = None,
+        modified_by: Optional[str] = None,
+    ) -> dict[str, int]:
         """Add connections, auto-filtering to types already loaded in the graph.
 
         Same spec format as :meth:`add_connections_bulk`, but silently skips
         connection specs whose source or target type is not in the graph.
+        ``git_sha`` and ``modified_by`` apply to every loaded opted-in edge type.
 
         Returns:
             Mapping of ``connection_name`` to count of connections created.
@@ -5307,11 +5348,15 @@ class Session:
         timeout_ms: int | None = None,
         max_rows: int | None = None,
         write_scope: list[str] | None = None,
+        git_sha: str | None = None,
+        modified_by: str | None = None,
     ) -> Any:
         """Run a Cypher write against the shared graph, serialized.
 
         ``write_scope`` (optional) restricts ``CREATE``/``SET`` to the given
         node-type whitelist — see :meth:`KnowledgeGraph.cypher`.
+        ``git_sha`` and ``modified_by`` are stamped on types that opt into
+        ``auto_timestamp`` provenance.
 
         Mutations (``CREATE`` / ``SET`` / ``DELETE`` / ``REMOVE`` / ``MERGE``)
         take the Session's writer lock for the mutation, so
@@ -5446,6 +5491,8 @@ class Transaction:
         timeout_ms: Optional[int] = None,
         max_rows: Optional[int] = None,
         write_scope: list[str] | None = None,
+        git_sha: Optional[str] = None,
+        modified_by: Optional[str] = None,
     ) -> ResultView | pd.DataFrame:
         """Execute a Cypher query within this transaction.
 
@@ -5458,6 +5505,8 @@ class Transaction:
             to_df: If True, return a pandas DataFrame.
             write_scope: Role-scoped write whitelist — see
                 :meth:`KnowledgeGraph.cypher`.
+            git_sha: Commit SHA stamped on opted-in types.
+            modified_by: Actor id stamped on opted-in types.
             timeout_ms: Per-query timeout in milliseconds (merged with transaction deadline).
             max_rows: Maximum intermediate rows or collection items. Exceeding
                 the cap raises an error and rolls back the statement.

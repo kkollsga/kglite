@@ -160,15 +160,23 @@ pub fn from_blueprint_rust(
 /// `from_blueprint_rust`. Returns the populated graph; the Python shim handles
 /// optional save / lock_schema. Exposed as `kglite.kglite.from_records_rust`.
 #[pyfunction]
-#[pyo3(signature = (records_json, *, storage=None, path=None))]
+#[pyo3(signature = (records_json, *, storage=None, path=None, on_missing_endpoint="vivify"))]
 pub fn from_records_rust(
     py: Python<'_>,
     records_json: String,
     storage: Option<&str>,
     path: Option<&str>,
+    on_missing_endpoint: &str,
 ) -> PyResult<KnowledgeGraph> {
-    let spec: serde_json::Value = serde_json::from_str(&records_json)
+    let mut spec: serde_json::Value = serde_json::from_str(&records_json)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid JSON: {}", e)))?;
+    let spec_obj = spec.as_object_mut().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("from_records: top-level JSON must be an object")
+    })?;
+    spec_obj.insert(
+        "on_missing_endpoint".to_string(),
+        serde_json::Value::String(on_missing_endpoint.to_string()),
+    );
 
     let kg = py
         .detach(|| -> Result<KnowledgeGraph, String> {

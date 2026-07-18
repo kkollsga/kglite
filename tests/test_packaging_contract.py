@@ -144,15 +144,40 @@ def test_rust_embedding_docs_use_the_packaged_api_paths() -> None:
     assert "embedded_blueprint" not in combined
 
 
-def _write_fake_wheel(path: Path, *, include_extension: bool = True) -> None:
+def _write_fake_wheel(
+    path: Path,
+    *,
+    distribution: str = "kglite",
+    include_extension: bool = True,
+    license_expression: str = "MIT",
+    license_bytes: bytes | None = None,
+) -> None:
+    dist_info = f"{distribution}-0.0.0.dist-info"
     with zipfile.ZipFile(path, "w") as wheel:
         wheel.writestr("kglite/cli.py", "")
         wheel.writestr("kglite/mcp_server.py", "")
         if include_extension:
             wheel.writestr("kglite/kglite.abi3.so", b"native")
         wheel.writestr(
-            "kglite-0.0.0.dist-info/entry_points.txt",
+            f"{dist_info}/entry_points.txt",
             "[console_scripts]\nkglite = kglite.cli:main\nkglite-mcp-server = kglite.mcp_server:main\n",
+        )
+        wheel.writestr(
+            f"{dist_info}/METADATA",
+            "\n".join(
+                [
+                    "Metadata-Version: 2.4",
+                    f"Name: {distribution}",
+                    "Version: 0.0.0",
+                    f"License-Expression: {license_expression}",
+                    "License-File: LICENSE",
+                    "",
+                ]
+            ),
+        )
+        wheel.writestr(
+            f"{dist_info}/licenses/LICENSE",
+            license_bytes if license_bytes is not None else (REPO_ROOT / "LICENSE").read_bytes(),
         )
 
 
@@ -181,3 +206,83 @@ def test_release_workflow_inventories_all_wheels_and_smokes_native_targets() -> 
     assert "matrix.target == 'x86_64-pc-windows-msvc'" in workflow
     assert "matrix.target == 'aarch64-apple-darwin'" in workflow
     assert "matrix.target == 'x86_64-unknown-linux-gnu'" in workflow
+
+
+def _run_license_checker(path: Path, *, expected_name: str = "kglite") -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            REPO_ROOT / "scripts" / "check_wheel_license.py",
+            "--expected-name",
+            expected_name,
+            path,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_wheel_license_checker_accepts_exact_metadata_and_bytes(tmp_path: Path) -> None:
+    wheel = tmp_path / "valid.whl"
+    _write_fake_wheel(wheel)
+
+    result = _run_license_checker(wheel)
+
+    assert result.returncode == 0
+    assert "MIT metadata+LICENSE=verified" in result.stdout
+
+
+def test_wheel_license_checker_rejects_wrong_distribution(tmp_path: Path) -> None:
+    wheel = tmp_path / "wrong-name.whl"
+    _write_fake_wheel(wheel, distribution="another-project")
+
+    result = _run_license_checker(wheel)
+
+    assert result.returncode == 1
+    assert "expected Name: kglite" in result.stderr
+
+
+def test_wheel_license_checker_rejects_wrong_expression(tmp_path: Path) -> None:
+    wheel = tmp_path / "wrong-expression.whl"
+    _write_fake_wheel(wheel, license_expression="Apache-2.0")
+
+    result = _run_license_checker(wheel)
+
+    assert result.returncode == 1
+    assert "expected License-Expression: MIT" in result.stderr
+
+
+def test_wheel_license_checker_rejects_changed_license(tmp_path: Path) -> None:
+    wheel = tmp_path / "changed-license.whl"
+    _write_fake_wheel(wheel, license_bytes=b"not the project license")
+
+    result = _run_license_checker(wheel)
+
+    assert result.returncode == 1
+    assert "embedded LICENSE differs" in result.stderr
+
+
+def test_wheel_license_checker_rejects_duplicate_metadata(tmp_path: Path) -> None:
+    wheel = tmp_path / "duplicate-metadata.whl"
+    _write_fake_wheel(wheel)
+    with zipfile.ZipFile(wheel, "a") as archive:
+        archive.writestr("duplicate-0.0.0.dist-info/METADATA", "Name: kglite\n")
+
+    result = _run_license_checker(wheel)
+
+    assert result.returncode == 1
+    assert "expected one .dist-info/METADATA, found 2" in result.stderr
+
+
+def test_wheel_license_gate_covers_every_published_wheel_family() -> None:
+    main_release = (WORKFLOWS / "build_wheels.yml").read_text(encoding="utf-8")
+    cli_release = (WORKFLOWS / "build_cli_wheels.yml").read_text(encoding="utf-8")
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    documentation = (REPO_ROOT / "docs" / "explanation" / "dependency-licenses.md").read_text(encoding="utf-8")
+
+    assert main_release.count('python scripts/check_wheel_artifact.py "wheels/*.whl"') == 3
+    assert cli_release.count("python scripts/check_wheel_license.py --expected-name kglite-cli") == 3
+    assert 'scripts/check_wheel_license.py --expected-name kglite "$RUNNER_TEMP/candidate-wheel/*.whl"' in ci
+    assert "wheel-only" in documentation
+    assert "does not build or validate source distributions or generate SBOMs" in " ".join(documentation.split())

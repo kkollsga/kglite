@@ -83,8 +83,8 @@
     {
       "path": "crates/kglite-py/src/graph/pyapi/kg_mutation.rs",
       "qualified_name": "crate::write_connections",
-      "lines": 250,
-      "branches": 24,
+      "lines": 230,
+      "branches": 18,
       "nesting": 4
     },
     {
@@ -545,8 +545,8 @@
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::add_nodes",
-      "lines": 287,
-      "branches": 40,
+      "lines": 281,
+      "branches": 39,
       "nesting": 4
     },
     {

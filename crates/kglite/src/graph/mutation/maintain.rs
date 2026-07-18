@@ -4,7 +4,9 @@ use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOper
 use crate::graph::mutation::batch::{
     BatchProcessor, ConflictHandling, ConnectionBatchProcessor, NodeAction,
 };
-use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, TypeSchema, PROVISIONAL_KEY};
+use crate::graph::schema::{
+    CurrentSelection, DirGraph, InternedKey, TypeSchema, PROVISIONAL_KEY, RESERVED_PROVENANCE_KEYS,
+};
 use crate::graph::storage::lookups::{CombinedTypeLookup, TypeLookup};
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::{EdgeIndex, NodeIndex};
@@ -54,7 +56,8 @@ pub fn add_nodes(
     node_title_field: Option<String>,
     conflict_handling: Option<String>,
 ) -> Result<NodeOperationReport, String> {
-    let mut interned_names = vec![node_type.as_str(), PROVISIONAL_KEY, "updated_at"];
+    let mut interned_names = vec![node_type.as_str(), PROVISIONAL_KEY];
+    interned_names.extend(RESERVED_PROVENANCE_KEYS.iter().copied());
     let column_names = df_data.get_column_names();
     interned_names.extend(column_names.iter().map(String::as_str));
     preflight_interner_names(graph, interned_names)?;
@@ -146,13 +149,18 @@ pub fn add_nodes(
         .iter()
         .map(|(col_name, _)| graph.interner.get_or_intern(col_name))
         .collect();
-    // Freshness provenance: opted-in types carry a reserved `updated_at` column
-    // (engine-managed metadata, stamped below). Register the key so the columnar
-    // store has a slot.
-    let stamps_updated_at = graph.auto_timestamp_for(&node_type);
-    if stamps_updated_at {
-        schema_keys.push(graph.interner.get_or_intern("updated_at"));
-    }
+    // Register every active reserved key so compact and columnar stores can
+    // persist the complete engine-owned provenance stamp.
+    let provenance_stamps: Vec<(InternedKey, Value)> = if graph.auto_timestamp_for(&node_type) {
+        graph
+            .provenance_props()
+            .into_iter()
+            .map(|(name, value)| (graph.interner.get_or_intern(name), value))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    schema_keys.extend(provenance_stamps.iter().map(|(key, _)| *key));
     let type_schema = Arc::new(TypeSchema::from_keys(schema_keys));
 
     // Store or extend the schema for this node type
@@ -175,17 +183,7 @@ pub fn add_nodes(
         .map(|(col_name, col_idx)| (graph.interner.get_or_intern(col_name), *col_idx))
         .collect();
     let property_count = property_columns.len();
-    // One clock read per `add_nodes` call for opted-in types; the same reserved
-    // `updated_at` value stamps every row (engine-owned — overwrites any
-    // user-supplied column of the same name in the row loop below).
-    let provenance_stamp: Option<(InternedKey, Value)> = if stamps_updated_at {
-        Some((
-            graph.interner.get_or_intern("updated_at"),
-            Value::Timestamp(chrono::Local::now().naive_local()),
-        ))
-    } else {
-        None
-    };
+    // One clock read per call; every row receives the same complete stamp.
     let mut batch = BatchProcessor::new(df_data.row_count());
     let mut skipped_count = 0;
     let mut skipped_null_id = 0;
@@ -242,11 +240,9 @@ pub fn add_nodes(
                 properties_interned.push((*interned_key, value));
             }
         }
-        // Stamp the reserved `updated_at` (engine owns the key — drop any
-        // user-supplied value of the same name, then push ours).
-        if let Some((k, ts)) = &provenance_stamp {
-            properties_interned.retain(|(ik, _)| ik != k);
-            properties_interned.push((*k, ts.clone()));
+        for (key, value) in &provenance_stamps {
+            properties_interned.retain(|(interned, _)| interned != key);
+            properties_interned.push((*key, value.clone()));
         }
 
         let action = match type_lookup.check_uid(&id) {
@@ -375,6 +371,20 @@ pub fn add_edges_from_specs(
     specs: Vec<EdgeSpec>,
 ) -> Result<EdgeSpecReport, String> {
     use std::collections::BTreeMap;
+    let mut interned_names = Vec::from(RESERVED_PROVENANCE_KEYS);
+    for spec in &specs {
+        interned_names.extend([
+            spec.source_type.as_str(),
+            spec.target_type.as_str(),
+            spec.edge_type.as_str(),
+        ]);
+        interned_names.extend(spec.properties.keys().map(String::as_str));
+    }
+    preflight_interner_names(graph, interned_names)?;
+    graph
+        .prepare_disk_mutation()
+        .map_err(|e| format!("disk mutation lease failed: {e}"))?;
+
     // Group by (source_type, target_type, edge_type) for deterministic,
     // one-lookup-one-batch-per-group processing.
     type EdgeRows = Vec<(Value, Value, HashMap<String, Value>)>;
@@ -458,8 +468,8 @@ pub fn add_connections(
         source_type.as_str(),
         target_type.as_str(),
         PROVISIONAL_KEY,
-        "updated_at",
     ];
+    interned_names.extend(RESERVED_PROVENANCE_KEYS.iter().copied());
     interned_names.extend(column_names.iter().map(String::as_str));
     preflight_interner_names(graph, interned_names)?;
     graph
@@ -925,8 +935,8 @@ pub fn replace_connections(
         source_type.as_str(),
         target_type.as_str(),
         PROVISIONAL_KEY,
-        "updated_at",
     ];
+    interned_names.extend(RESERVED_PROVENANCE_KEYS.iter().copied());
     interned_names.extend(column_names.iter().map(String::as_str));
     preflight_interner_names(graph, interned_names)?;
     graph
@@ -2073,6 +2083,10 @@ fn compute_aggregate(expr: &str, values: &[f64], count: usize) -> Value {
         Value::Null
     }
 }
+
+#[cfg(test)]
+#[path = "maintain_edge_spec_tests.rs"]
+mod edge_spec_tests;
 
 #[cfg(test)]
 mod id_index_tests {

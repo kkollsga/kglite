@@ -84,6 +84,8 @@ jobs:
         # manifest-path wants a Cargo.toml — so cd in instead.
         working-directory: crates/kglite-cli
         run: maturin build --release --target ${{ matrix.target }} --out wheels
+      - name: Verify wheel license metadata
+        run: python scripts/check_wheel_license.py --expected-name kglite-cli --license crates/kglite-cli/LICENSE "crates/kglite-cli/wheels/*.whl"
       - uses: actions/upload-artifact@v7
         with:
           name: cli-wheels-${{ matrix.os }}-${{ matrix.target }}
@@ -111,6 +113,8 @@ jobs:
           manylinux: ${{ matrix.manylinux }}
           working-directory: crates/kglite-cli
           args: --release --out wheels
+      - name: Verify wheel license metadata
+        run: python scripts/check_wheel_license.py --expected-name kglite-cli --license crates/kglite-cli/LICENSE "crates/kglite-cli/wheels/*.whl"
       - uses: actions/upload-artifact@v7
         with:
           name: cli-wheels-linux-${{ matrix.target }}
@@ -142,6 +146,8 @@ jobs:
           manylinux: ${{ matrix.manylinux }}
           working-directory: crates/kglite-cli
           args: --release --out wheels
+      - name: Verify wheel license metadata
+        run: python scripts/check_wheel_license.py --expected-name kglite-cli --license crates/kglite-cli/LICENSE "crates/kglite-cli/wheels/*.whl"
       - uses: actions/upload-artifact@v7
         with:
           name: cli-wheels-linux-${{ matrix.target }}

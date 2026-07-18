@@ -355,6 +355,7 @@ pub fn kglite::api::blueprint::NodeSpec::deserialize<__D>(__deserializer: __D) -
 pub struct kglite::api::blueprint::RecordsReport
 pub kglite::api::blueprint::RecordsReport::connection_types: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::blueprint::RecordsReport::edges_added: usize
+pub kglite::api::blueprint::RecordsReport::edges_dropped_missing_endpoint: usize
 pub kglite::api::blueprint::RecordsReport::node_types: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::blueprint::RecordsReport::nodes_added: usize
 impl core::clone::Clone for kglite::api::blueprint::RecordsReport
@@ -2078,6 +2079,7 @@ pub fn kglite::api::DirGraph::layer_for(&self, node_type: &str) -> core::option:
 pub fn kglite::api::DirGraph::primary_key_for(&self, node_type: &str) -> core::option::Option<&str>
 pub fn kglite::api::DirGraph::set_instructions(&mut self, text: &str, channel: core::option::Option<&str>)
 pub fn kglite::api::DirGraph::set_schema(&mut self, schema: kglite::api::SchemaDefinition)
+pub fn kglite::api::DirGraph::with_write_provenance<R>(&mut self, git_sha: core::option::Option<&str>, modified_by: core::option::Option<&str>, write: impl core::ops::function::FnOnce(&mut Self) -> R) -> R
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::compact_disk(&mut self) -> core::result::Result<usize, alloc::string::String>
 pub fn kglite::api::DirGraph::enable_disk_mode(&mut self) -> core::result::Result<(), alloc::string::String>

@@ -291,19 +291,19 @@
         },
         "add_connections": {
           "kind": "method",
-          "signature": "(self, /, data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None)"
+          "signature": "(self, /, data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None)"
         },
         "add_connections_bulk": {
           "kind": "method",
-          "signature": "(self, /, connections)"
+          "signature": "(self, /, connections, *, git_sha=None, modified_by=None)"
         },
         "add_connections_from_source": {
           "kind": "method",
-          "signature": "(self, /, connections)"
+          "signature": "(self, /, connections, *, git_sha=None, modified_by=None)"
         },
         "add_connections_internal": {
           "kind": "method",
-          "signature": "(self, /, connections, filter_to_loaded)"
+          "signature": "(self, /, connections, filter_to_loaded, git_sha, modified_by)"
         },
         "add_embeddings": {
           "kind": "method",
@@ -315,11 +315,11 @@
         },
         "add_nodes": {
           "kind": "method",
-          "signature": "(self, /, data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=False, labels=None, managed_reload=False)"
+          "signature": "(self, /, data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=False, labels=None, managed_reload=False, git_sha=None, modified_by=None)"
         },
         "add_nodes_bulk": {
           "kind": "method",
-          "signature": "(self, /, nodes)"
+          "signature": "(self, /, nodes, *, git_sha=None, modified_by=None)"
         },
         "add_properties": {
           "kind": "method",
@@ -783,7 +783,7 @@
         },
         "replace_connections": {
           "kind": "method",
-          "signature": "(self, /, data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None)"
+          "signature": "(self, /, data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None, git_sha=None, modified_by=None)"
         },
         "report_history": {
           "kind": "method",
@@ -1200,7 +1200,7 @@
         },
         "execute": {
           "kind": "method",
-          "signature": "(self, /, query, to_df=False, params=None, timeout_ms=None, max_rows=None, write_scope=None)"
+          "signature": "(self, /, query, to_df=False, params=None, timeout_ms=None, max_rows=None, write_scope=None, git_sha=None, modified_by=None)"
         },
         "node_count": {
           "kind": "method",
@@ -1274,7 +1274,7 @@
         },
         "cypher": {
           "kind": "method",
-          "signature": "(self, /, query, params=None, to_df=False, timeout_ms=None, max_rows=None, write_scope=None)"
+          "signature": "(self, /, query, params=None, to_df=False, timeout_ms=None, max_rows=None, write_scope=None, git_sha=None, modified_by=None)"
         },
         "is_read_only": {
           "kind": "attribute",
@@ -1323,7 +1323,7 @@
     },
     "from_records": {
       "kind": "function",
-      "signature": "(spec: 'Union[dict, str]', *, save: 'Optional[str]' = None, lock_schema: 'bool' = False, storage: 'str' = 'default', path: 'Optional[str]' = None) -> 'KnowledgeGraph'"
+      "signature": "(spec: 'Union[dict, str]', *, save: 'Optional[str]' = None, lock_schema: 'bool' = False, storage: 'str' = 'default', path: 'Optional[str]' = None, on_missing_endpoint: 'str' = 'vivify') -> 'KnowledgeGraph'"
     },
     "graphgen": {
       "kind": "function",

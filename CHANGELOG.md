@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Atomic MCP domain graph context.** Embedded domain tools can use
   `DomainGraphState::with_context` to borrow the active graph, persistence
   target, and source root from one coherent activation snapshot.
+- **Inline records:** `from_records(..., on_missing_endpoint=...)` can now
+  `"drop"` edges with absent endpoints or reject the complete build atomically
+  with `"error"`; the existing `"vivify"` behavior remains the default.
+- **Write provenance:** `git_sha` and `modified_by` now flow through sessions,
+  transactions, DataFrame node/edge writes, replacements, and connector bulk
+  helpers for schema types that opt into `auto_timestamp`.
+- **Release verification:** published main and standalone CLI wheels are now
+  checked for exact MIT metadata and an unmodified embedded LICENSE.
 
 ### Fixed
 
