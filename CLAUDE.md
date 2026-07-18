@@ -251,6 +251,17 @@ Three captured values drift across releases and need a version-paired refresh as
 
 The script requires a fresh release build (`maturin develop --release`) for steps 2 and 3.
 
+### PyPI project capacity
+
+PyPI's default project limit is 10.0 GB. The wheel release workflow sums the
+published file sizes from PyPI's project JSON API, reserves 250 MB for the next
+release, and blocks before builds when projected use reaches 80% of that limit.
+When it blocks, request a project-limit increase before publishing. Published
+files are never deleted automatically; any manual deletion requires a separate
+downstream-impact audit and explicit approval because it permanently breaks
+pinned installs. Update the configured limit only after PyPI confirms a new
+project-specific allowance.
+
 ### Multi-phase plans
 
 When a plan has Steps 1 / 2 / 3 / …:

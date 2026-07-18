@@ -4,6 +4,10 @@
 /.venv/
 /.venv*/
 /.claude/
+# Codex conventions and skills are workstation-local adapters. CLAUDE.md is
+# the tracked repository authority; do not auto-generate or stage these files.
+/.agents/
+/AGENTS.md
 /.pytest_cache/
 /data/
 # Local dev working folder — see dev-docs/README.md for the canonical layout.

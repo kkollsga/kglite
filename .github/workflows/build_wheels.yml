@@ -17,6 +17,13 @@ jobs:
       version: ${{ steps.check.outputs.version }}
     steps:
       - uses: actions/checkout@v7
+      - name: Check PyPI project storage budget
+        run: >-
+          python scripts/check_pypi_storage.py
+          --project kglite
+          --project-limit-bytes 10000000000
+          --action-threshold 0.80
+          --reserve-bytes 250000000
       - name: Check version against PyPI
         id: check
         run: |
