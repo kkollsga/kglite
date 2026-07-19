@@ -23,7 +23,7 @@ def test_python_coverage_scope_is_production_code_with_branches() -> None:
 def test_coverage_tool_versions_are_exactly_pinned() -> None:
     requirements = (ROOT / "requirements" / "coverage.txt").read_text().splitlines()
     pins = {line for line in requirements if line and not line.startswith("#")}
-    assert pins == {"coverage[toml]==7.10.7", "pytest-cov==7.1.0"}
+    assert pins == {"coverage[toml]==7.15.1", "pytest-cov==7.1.0"}
 
 
 def test_ci_uses_the_pinned_branch_coverage_contract() -> None:

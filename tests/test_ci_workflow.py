@@ -160,6 +160,10 @@ def test_every_ci_job_has_a_wall_clock_timeout() -> None:
 def test_scheduled_dependency_maintenance_is_report_first() -> None:
     dependabot = (REPO_ROOT / ".github" / "dependabot.yml").read_text()
     assert 'package-ecosystem: "cargo"' in dependabot
+    cargo_policy = dependabot.split('package-ecosystem: "cargo"', maxsplit=1)[1]
+    assert 'update-types: ["minor", "patch"]' in cargo_policy
+    assert 'dependency-name: "bincode"' in cargo_policy
+    assert 'update-types: ["major"' not in cargo_policy
 
     maintenance = _job_block("dependency-maintenance")
     assert "if: github.event_name == 'schedule'" in maintenance
