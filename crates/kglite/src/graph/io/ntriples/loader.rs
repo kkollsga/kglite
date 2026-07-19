@@ -2337,6 +2337,10 @@ mod tests {
 
         let mut graph = DirGraph::new();
         let error = load_error(&mut graph, temp.path());
-        assert!(error.contains("reader error"), "{error}");
+        assert!(
+            error.contains("reader error")
+                || (error.contains("Cannot open") && error.contains("invalid bzip2 format")),
+            "{error}"
+        );
     }
 }

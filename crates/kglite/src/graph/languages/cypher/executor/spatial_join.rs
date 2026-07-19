@@ -107,7 +107,7 @@ impl<'a> CypherExecutor<'a> {
 
             // R-tree bbox probe: only containers whose bbox contains this point.
             let env = AABB::from_point([lon, lat]);
-            for cand in tree.locate_in_envelope_intersecting(&env) {
+            for cand in tree.locate_in_envelope_intersecting(env) {
                 let pt = geo::Point::new(lon, lat);
                 if crate::graph::features::spatial::geometry_contains_point(&cand.geom, &pt) {
                     self.budget.reserve_rows(rows.len(), 1, "spatial join")?;

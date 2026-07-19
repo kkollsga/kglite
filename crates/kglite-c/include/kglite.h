@@ -27,7 +27,11 @@
  * that don't have a corresponding `KgErrorCode` because they
  * can't arise from inside the engine).
  */
-enum KgliteStatusCode {
+enum KgliteStatusCode
+#if __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // __STDC_VERSION__ >= 202311L
+ {
   KGLITE_STATUS_CODE_OK = 0,
   KGLITE_STATUS_CODE_CYPHER_SYNTAX = 1,
   KGLITE_STATUS_CODE_CYPHER_TIMEOUT = 2,
@@ -65,7 +69,11 @@ enum KgliteStatusCode {
    */
   KGLITE_STATUS_CODE_NULL_POINTER = 101,
 };
+#if __STDC_VERSION__ >= 202311L
+typedef enum KgliteStatusCode KgliteStatusCode;
+#else
 typedef uint32_t KgliteStatusCode;
+#endif // __STDC_VERSION__ >= 202311L
 
 /**
  * The ABI version that this build of `kglite-c` exposes. Derived at

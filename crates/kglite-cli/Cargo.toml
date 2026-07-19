@@ -24,7 +24,7 @@ kglite = { version = "0.14", path = "../kglite", default-features = false, featu
 
 # Line editor: prompt, history, Emacs/Vi keybindings, Ctrl-C/Ctrl-D handling.
 # The standard Rust REPL choice; not otherwise a workspace dep.
-rustyline = "14"
+rustyline = "18"
 
 # SIGINT → cancel the in-flight query (sets the flag execute_mut polls).
 # rustyline keeps the prompt in raw mode, so Ctrl-C only raises SIGINT while
