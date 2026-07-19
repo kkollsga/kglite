@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING (Rust): removed the unused `ProgressValue::F64` and `Str`
   variants and the duplicate `DirGraph::build_id_index_from_columns` alias.**
 
+### Fixed
+
+- **Persistence upgrade guidance now matches the Postcard-only reader.** The
+  README and ReadTheDocs migration paths cover `.kgl`, `.kgle`, disk graphs,
+  WAL/transient logs, and rebuildable caches through the 0.13.4 bridge, and
+  no longer promise that pre-0.14 bincode artifacts load directly.
+
 ## [0.14.2] - 2026-07-18
 
 ### Added

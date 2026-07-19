@@ -39,6 +39,10 @@ Choose the path that matches what you are doing:
 - **[MCP and agents](https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html)** · **[Rust](https://kglite.readthedocs.io/en/latest/rust/index.html)** · **[Operators](https://kglite.readthedocs.io/en/latest/operators/index.html)**
 - **[0.13 → 0.14 migration](https://kglite.readthedocs.io/en/latest/python/migrations/0.13-to-0.14.html)** · **[all documentation](https://kglite.readthedocs.io)**
 
+Upgrading from 0.13? Convert pre-0.14 `.kgl`, `.kgle`, disk, and WAL
+artifacts with kglite 0.13.4 before installing the current Postcard-only
+release; the migration guide above has the exact paths.
+
 For DataFrame loading, install the optional pandas integration with
 `pip install "kglite[pandas]"`; the complete walkthrough is in
 **[Quick Start](#quick-start)**.
@@ -75,7 +79,7 @@ released and versioned on its own cadence:
   bundled skill and CLI (`pip install sonagram`).
 
 **Upgrading from 0.13?** The code-graph builder and dataset loaders moved out
-of the wheel in 0.14 — see the
+of the wheel, and pre-0.14 bincode persistence needs a 0.13.4 conversion — see the
 [0.13 → 0.14 migration guide](https://kglite.readthedocs.io/en/latest/python/migrations/0.13-to-0.14.html).
 Pin back anytime with `pip install "kglite<0.14"`.
 
@@ -269,7 +273,7 @@ with typed graph-query and lifecycle tools. Code-graph construction, repository
 cloning, and code-watch workflows belong to **codingest-mcp**, which embeds the
 same KGLite graph-serving surface.
 
-### One command — any `.kgl` becomes an MCP server
+### One command — any current `.kgl` becomes an MCP server
 
 ```bash
 kglite-mcp-server --graph path/to/graph.kgl

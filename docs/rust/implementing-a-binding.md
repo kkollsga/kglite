@@ -90,10 +90,10 @@ invalid UTF-8/null pointers. Do not infer categories from message text.
 ## Storage and persistence
 
 Expose memory/mapped/disk choice without changing semantics. The current `.kgl`
-writer emits RGF v5 with an explicit Postcard codec; readers accept supported
-v4 files and reject v3 with a rebuild message. A binding must not serialize
-internal structs independently or promise compatibility broader than the core
-reader.
+writer and reader use RGF v5 with an explicit Postcard codec. RGF v4/bincode
+and older containers are rejected with migration/rebuild guidance. A binding
+must not serialize internal structs independently or promise compatibility
+broader than the core reader.
 
 For cross-package handoff, the declared consumer version floor must read the
 format written by the linked engine. Verify the exact artifact in a clean

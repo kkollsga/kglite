@@ -32,7 +32,7 @@ labels, cross-type predicates).
 | Python pymethods | `g.add_label(node_type, ids, label)` / `g.remove_label(...)` for direct batch ops |
 | `add_nodes` kwarg | `labels: list[str]` applies uniform secondary labels to every row in the batch |
 | `labels(n)` | Returns `[primary, ...secondaries]` in insertion order (was single-element list since 0.9.52) |
-| Save / load | RGF v5/Postcard carries a dedicated secondary-label section; supported v4 inputs load and round-trips preserve secondaries |
+| Save / load | RGF v5/Postcard carries a dedicated secondary-label section and round-trips preserve secondaries; pre-0.14 bincode containers require conversion with 0.13.4 |
 | Test surface | `tests/test_multi_label.py` covers CREATE, SET, REMOVE, MATCH AND-intersect, idempotence, primary-removal-error, save+load, the pymethods, and the `add_nodes(labels=...)` kwarg |
 
 ## Why a primary type

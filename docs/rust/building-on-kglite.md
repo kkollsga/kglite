@@ -47,7 +47,7 @@ stability posture; kglite's CI locks against accidental drift on all of them.
 |---|---|---|
 | **Engine facade** — `kglite::api::*` | The curated Rust surface: `DirGraph`, `Value`, `session::*`, `io::{save_graph, load_file}`, error types, `code_entities`. | Exact-baseline-locked in CI (cargo-public-api, pinned nightly). Additive within a minor line; deliberate breaks ship on a MINOR bump with a migration guide. See the [API reference](api-reference.md). |
 | **MCP server library** — `kglite-mcp-server` | `run`, `run_with_embedder_factory`, `run_with_code_tree_hooks`, `run_with_extensions`, `CodeTreeHooks`, `ServerExtensions`, `DomainToolRegistry`, `DomainGraphState`, `DomainGraphContext`. The seams a producer/domain MCP server builds on. | Public-API baseline + hook/registrar-semantics unit tests. Same MINOR-break posture as the engine facade. |
-| **`.kgl` file format** | The persisted graph format that handoff and all persistence use. | Current RGF v5/Postcard; v4 remains readable and v3 is refused with a clear rebuild message. |
+| **`.kgl` file format** | The persisted graph format that handoff and all persistence use. | Current RGF v5/Postcard only; v4/bincode and older containers are refused with a clear 0.13.4 conversion or rebuild message. |
 | **Python top-level** — `kglite.*` | `kglite.load`, `kglite.from_blueprint`, `kglite.from_records`, `KnowledgeGraph` methods. The P3 entry points and the P1 handoff target. | Contract-tested + stubtest against `kglite/__init__.pyi`. |
 | **C ABI** — `include/kglite.h` | The `extern "C"` surface for non-Rust bindings. | cbindgen header-drift check in CI; see the [C ABI guide](c-abi.md). |
 

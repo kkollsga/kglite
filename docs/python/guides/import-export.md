@@ -18,9 +18,12 @@ atomically renames it over the target, so a crash mid-save can't leave a torn
 
 Save files (`.kgl`) use an explicitly versioned binary container. Current
 files use RGF v5, an explicit Postcard codec tag, and core-data version 3.
-Supported v4/bincode files are selected only by their header; v3 is refused
-with a rebuild instruction. A `.kgl` is the only complete KGLite backup because
-portable exports intentionally omit some engine-specific state.
+Current readers accept RGF v5/Postcard. RGF v4/bincode and older containers
+are rejected with an explicit migration/rebuild instruction; use kglite 0.13.4
+as the conversion bridge described in the
+[0.13 → 0.14 migration guide](../migrations/0.13-to-0.14.md#convert-persisted-data-before-upgrading).
+A `.kgl` is the only complete KGLite backup because portable exports
+intentionally omit some engine-specific state.
 
 ### `open()` — load-or-create lifecycle
 

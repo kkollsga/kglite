@@ -155,11 +155,12 @@ zstd-compressed column sections by node type
 optional embeddings, timeseries, and secondary-label sections
 ```
 
-Container, codec, and core-data versions are separate. RGF v4 remains readable;
-RGF v3 is detected and refused with a rebuild message. Within v5,
-metadata additions use serde defaults where compatible, while incompatible
-embedded cache layouts are detected explicitly. Index definitions are stored
-so non-persistent index structures can be rebuilt on load.
+Container, codec, and core-data versions are separate. The current reader
+accepts RGF v5/Postcard only. RGF v4/bincode and older containers are detected
+and refused with a 0.13.4 conversion or rebuild message. Within v5, metadata
+additions use serde defaults where compatible, while incompatible embedded
+cache layouts are detected explicitly. Index definitions are stored so
+non-persistent index structures can be rebuilt on load.
 
 Disk mode uses a different lifecycle: writers build a staged generation,
 write completion metadata, rename it into `generations/`, then atomically

@@ -1643,9 +1643,9 @@ const EMBED_FORMAT_BREAK_MSG: &str =
 /// path; rebuild the graph from source. Message gives the operator
 /// enough breadcrumbs to know what changed and what to do.
 const V3_HARD_BREAK_MSG: &str = "kglite .kgl file format v3 is not supported by this binary. \
-     kglite 0.10+ uses v4 — the Value enum gained structured Node / \
-     Relationship / Path / List / Map variants, which changes the \
-     serialised property representation. Rebuild your graph from its \
+     It predates the current RGF v5/Postcard container; the Value enum gained \
+     structured Node / Relationship / Path / List / Map variants, which changes \
+     the serialised property representation. Rebuild your graph from its \
      original source (CSV, DataFrame, dataset loader) and save again, \
      or downgrade kglite to the 0.9.x line if you need to read this \
      file. If you no longer have the original source but can still run \

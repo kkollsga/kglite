@@ -129,9 +129,9 @@ move freely between minor releases.
 | Internal rearrangement (non-api items) | Patch |
 
 The `.kgl` format is versioned separately from the source API. The current
-writer emits RGF v5/Postcard; readers accept supported v4 files and explicitly
-reject v3 with a rebuild message. A format bump ships either read compatibility
-or a clear rebuild path.
+writer and reader use RGF v5/Postcard. RGF v4/bincode and older containers are
+rejected with a clear migration/rebuild path. Convert pre-0.14 artifacts with
+kglite 0.13.4 before handing them to a current binding.
 
 ## Where to find each item
 

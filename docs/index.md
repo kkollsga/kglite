@@ -27,6 +27,10 @@ engine. The `.kgl` file format is portable across all bindings.
 **[Reference](reference/index.md)** ·
 **[0.13 → 0.14 migration](python/migrations/0.13-to-0.14.md)**
 
+Upgrading from 0.13? Convert pre-0.14 `.kgl`, `.kgle`, disk, and WAL
+artifacts with kglite 0.13.4 before installing the current Postcard-only
+release; the migration guide above has the exact paths.
+
 ```{rubric} Cypher first
 ```
 
@@ -67,7 +71,8 @@ released and versioned on its own cadence:
   bundled skill and CLI (`pip install sonagram`).
 
 **Coming from 0.13?** The code-graph builder and dataset loaders moved out of
-the wheel in 0.14 — see the [0.13 → 0.14 migration guide](python/migrations/0.13-to-0.14.md).
+the wheel, and pre-0.14 bincode persistence needs a 0.13.4 conversion — see
+the [0.13 → 0.14 migration guide](python/migrations/0.13-to-0.14.md).
 Pin back anytime with `pip install "kglite<0.14"`.
 
 ```{rubric} Pick your track

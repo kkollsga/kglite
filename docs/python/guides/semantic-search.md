@@ -384,5 +384,6 @@ A `.kgle` carries each store's **provenance** — its `metric`, the embedder
 `model_id`, and per-node text hashes — so a rebuild-from-`.kgle` pipeline keeps
 it: after import, `embedding_info()` reports the model/metric, and
 `embed_texts(mode='changed')` re-embeds only genuinely-changed text instead of
-everything. (Older `.kgle` files written before this — format v1 — still import;
-they simply carry no provenance, so `mode='changed'` treats every node as new.)
+everything. Current releases import `.kgle` v3/Postcard only. Convert v1/v2
+files with kglite 0.13.4 by importing them into the matching graph and
+re-exporting them before upgrading.

@@ -182,9 +182,10 @@ other:
 - Future Go binding writes → TypeScript binding reads, etc.
 
 The current writer emits RGF v5 with an explicit Postcard codec tag. The
-reader accepts v5/v4 and rejects v3 with a rebuild message. Format drift is
-tracked via `tests/test_phase4_parity.py::GOLDEN_V3_DIGEST` etc. (see
-CLAUDE.md → "Captured-constant refresh at release time").
+reader accepts v5/Postcard and rejects v4/bincode and older containers with a
+migration/rebuild message. Format drift is tracked via
+`tests/test_phase4_parity.py::GOLDEN_V3_DIGEST` etc. (see CLAUDE.md →
+"Captured-constant refresh at release time").
 
 The format does NOT bundle binding-ergonomic state (Python's
 selection cache, default timeouts, etc.). Each binding sets

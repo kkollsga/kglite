@@ -62,8 +62,9 @@ The header exposes:
 - JSON result metadata/rows, memory statistics, and embedder binding.
 
 `.kgl` is the cross-binding handoff format. The current writer emits RGF
-v5/Postcard; supported v4 files remain readable and v3 is refused with a clear
-rebuild message.
+v5/Postcard and the current reader accepts that format. RGF v4/bincode and
+older containers are rejected with a clear migration/rebuild message; convert
+them with kglite 0.13.4 before crossing the C boundary.
 
 ## Sessions and transactions
 

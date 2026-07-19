@@ -9,7 +9,8 @@ the wheel as of 0.10.26 — no separate install). A standalone
 {doc}`guides/mcp-servers`.
 
 > **Coming from 0.13?** The code-graph builder and dataset loaders moved out of
-> the wheel in 0.14 — see the [0.13 → 0.14 migration guide](migrations/0.13-to-0.14.md).
+> the wheel, and pre-0.14 bincode persistence needs a 0.13.4 conversion — see
+> the [0.13 → 0.14 migration guide](migrations/0.13-to-0.14.md).
 > Pin back anytime with `pip install "kglite<0.14"`.
 
 If you're embedding the engine directly in a Rust binary, the
@@ -65,7 +66,8 @@ guides/recipes
   adopt KGLite from an existing Neo4j database / driver code.
 - **[0.13 → 0.14](migrations/0.13-to-0.14.md)** — the handover release:
   code-graph building moved to codingest, dataset loaders to
-  kglite-datasets. Escape hatches and per-surface migration table.
+  kglite-datasets, and persisted artifacts moved to Postcard-only formats.
+  Escape hatches and per-surface migration table.
 - **[MCP 0.6 → 0.9](migrations/mcp-0.6-to-0.9.md)** — older MCP
   server users.
 - **[MCP pre-0.9.20](migrations/mcp-pre-0.9.20.md)** — the

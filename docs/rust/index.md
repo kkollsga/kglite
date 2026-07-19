@@ -25,7 +25,7 @@ use kglite::api::{session, Value};
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load any .kgl file — same format that Python's
+    // Load any current .kgl file — same format that Python's
     // `kg.save("graph.kgl")` writes.
     let graph = load_file("graph.kgl")?;
 

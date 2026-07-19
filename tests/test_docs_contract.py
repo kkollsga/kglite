@@ -93,6 +93,8 @@ def test_readme_leads_with_install_query_and_reference_paths() -> None:
         "MCP and agents",
         "Operators",
         "all documentation",
+        "0.13.4",
+        "Postcard-only",
     ):
         assert required in onboarding
 
@@ -100,7 +102,16 @@ def test_readme_leads_with_install_query_and_reference_paths() -> None:
 def test_docs_home_leads_with_high_level_routes() -> None:
     index = (REPO_ROOT / "docs" / "index.md").read_text(encoding="utf-8")
     start = index.index("## Start here")
-    for required in ("Python", "Cypher", "MCP", "Rust", "Operators", "Reference"):
+    for required in (
+        "Python",
+        "Cypher",
+        "MCP",
+        "Rust",
+        "Operators",
+        "Reference",
+        "0.13.4",
+        "Postcard-only",
+    ):
         assert required in index[start : start + 2_500]
 
 
@@ -137,6 +148,22 @@ def test_retired_documentation_contracts_do_not_return() -> None:
         encoding="utf-8"
     )
     assert 'feature=\\"FOREACH\\"' not in topics
+
+
+def test_pre_014_persistence_is_never_documented_as_readable() -> None:
+    active = "\n".join(path.read_text(encoding="utf-8") for path in _active_markdown())
+    retired = (
+        "readers accept supported v4",
+        "supported v4 files remain readable",
+        "v4 remains readable",
+        "reader accepts v5/v4",
+        "supported v4 inputs load",
+        "supported v4 legacy decoder",
+        "format v1 — still import",
+        "every `.kgl` you saved keeps loading",
+        "`.kgl` files load across the boundary in both directions",
+    )
+    assert not [claim for claim in retired if claim in active]
 
 
 def test_documented_make_commands_are_real_targets() -> None:

@@ -32,7 +32,8 @@ Defined at `crates/kglite/src/datatypes/values.rs`. Sixteen variants today:
 | **`Map(BTreeMap<String, Value>)`** | string-keyed map (deterministic order) | MAP (sized) |
 
 Persistence uses the explicitly versioned RGF v5/Postcard container. The
-current reader accepts v5/v4 and rejects v3 with a clear rebuild error.
+current reader accepts v5/Postcard and rejects v4/bincode and older containers
+with a clear migration/rebuild error.
 
 ## `NodeRef` vs `Node` — transient vs materialised
 
@@ -164,8 +165,8 @@ variant position. The order in `crates/kglite/src/datatypes/values.rs` is
 intentionally stable for the first 9 variants (Null=0 .. Duration=8)
 so future enum changes append at the end (Timestamp is discriminant 15).
 The container and codec tags make compatibility explicit: the current reader
-selects v5/Postcard or the supported v4 legacy decoder by header and refuses v3
-rather than guessing.
+selects v5/Postcard by header and refuses v4/bincode or older containers rather
+than guessing. Kglite 0.13.4 is the conversion bridge for pre-0.14 artifacts.
 
 The `tests/test_phase4_parity.py::test_kgl_v3_golden_hash` byte-level
 tripwire fires on any drift in the saved layout; the

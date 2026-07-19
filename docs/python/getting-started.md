@@ -126,7 +126,7 @@ goes straight to the columnar store.
 
 ## Serve it to an AI agent
 
-The MCP server ships with the default install — expose any `.kgl`
+The MCP server ships with the default install — expose any current `.kgl`
 file to Claude / Cursor / any MCP-capable agent in one command:
 
 ```bash
