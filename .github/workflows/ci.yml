@@ -9,6 +9,13 @@ on:
     # Heavy race/stress verification stays off the per-PR critical path.
     - cron: '23 3 * * 1'
 
+# A rapid follow-up push to a PR branch supersedes the in-flight run — cancel
+# it instead of finishing ~20 jobs whose verdict nobody will read. Runs on
+# `main` (publish-triggering) and the weekly schedule are never cancelled.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 

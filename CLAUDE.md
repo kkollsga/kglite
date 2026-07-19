@@ -6,19 +6,42 @@
 source .venv/bin/activate && unset CONDA_PREFIX
 maturin develop --release    # release build; required for any perf measurement
 make test                    # Rust + Python tests (default markers — skips benchmark/parity/stress/model_download/binary_size/bolt/bolt_stress)
-make test-full               # test-rust + Python suite including the parity + bolt markers
-make lint                    # fmt + clippy + ruff format/check + mypy stubtest; run before pushing
+make gate                    # pre-push gate: lint + docs-facts drift + packaged-consumer contract + test-full
+make lint                    # lint subset only (api-chokepoint, clean-room, licenses, fmt, clippy, ruff, stubtest)
 ```
 
-`make lint` covers the local lint gate (api-chokepoint, clean-room +
-dependency-license checks, `cargo fmt --check`, clippy, ruff, stubtest).
-CI additionally gates things `make lint` doesn't run: the feature-profiled
-public-API diffs (`cargo public-api` using the pins and exact baselines in
-`tests/api-baselines/rust-api-profiles.json`),
-`kglite-c` clippy + tests with `--features sec,sodir,wikidata,rdf`, and the
-cbindgen header-drift check on `crates/kglite-c/include/kglite.h`. If you run
-pieces by hand, both `cargo fmt --check` and `ruff format --check` matter —
-CI gates on the `--check` variants separately from the auto-fix variants.
+**`make gate` is the universal pre-push gate — and the ceiling for routine
+local checking.** It runs exactly the local checks with a real record of
+catching CI failures before the push; ~5 min warm-cache, longer right after
+dependency changes. Do NOT routinely reproduce the rest of the CI matrix
+locally — CI runs ~20 jobs in parallel in ~13 min wall-clock, while the same
+checks serialize into hours on one machine. If you run pieces by hand, both
+`cargo fmt --check` and `ruff format --check` matter — CI gates on the
+`--check` variants separately from the auto-fix variants.
+
+**Surface-conditional extras — run only when the touched surface matches,
+never routinely:**
+
+- `crates/kglite-c/**` or the `kglite::api` / C ABI surface → kglite-c clippy +
+  tests (`--features rdf`, then default features) and the cbindgen header-drift
+  check (`cargo build -p kglite-c --features fastembed,rdf` then
+  `git diff crates/kglite-c/include/kglite.h`).
+- `docs/**`, top-level `*.md`, or `kglite/__init__.pyi` →
+  `sphinx-build -W --keep-going -b html docs <out>` with `docs/requirements.txt`.
+- A deliberate public Rust API change → `make refresh-api-baseline` and review
+  the delta. Otherwise skip: the 5-profile rustdoc pass costs ~25 min to
+  conclude "no change" (pins live in `tests/api-baselines/rust-api-profiles.json`).
+- Perf-sensitive paths (`core/pattern_matching/`, `cypher/executor/`, storage
+  hot paths) → `make bench-check` **on an otherwise-idle machine** — a capture
+  taken right after heavy builds reads +4–10% hot across the board.
+- Never run local `cargo package` verify sweeps across the workspace:
+  `scripts/check_packaged_features.sh` (inside `make gate`) already exercises
+  the packaged kglite crate as a real consumer, and CI + `cargo publish`
+  verify the rest.
+
+Sanitizers, Miri, Loom, free-threading, the 4-interpreter Python matrix,
+native-lifecycle OS matrix, and coverage are **CI-only by design** — never
+reproduce them locally.
 
 ## Architecture
 
@@ -92,14 +115,15 @@ The differential corpus is *the* mechanism preventing silent correctness regress
 Before any perf-related change:
 
 1. **Baseline first** — write/extend a benchmark covering touched code paths. Run it, record numbers.
-2. **Release mode only.** `maturin develop --release`. Never trust debug-build numbers; per-test variance is unbounded.
-3. **Trust `min` over `median`** for sub-millisecond benches. Median pulls upward with system load; min reflects best-case throughput.
-4. **Tighten the harness for noisy benches**:
+2. **Build only the changed working tree.** Use `maturin develop --release` when benchmarking the current codebase with local changes. Never trust debug-build numbers; per-test variance is unbounded.
+3. **Install released/reference versions with `uv`.** Do not source-build another revision just to establish an A/B baseline. Create an isolated venv and install its published wheel, e.g. `uv venv <venv> --python 3.12 && uv pip install --python <venv>/bin/python 'kglite==0.14.2'`. Run the probe outside the repository root so the local `kglite/` package cannot shadow the installed wheel.
+4. **Trust `min` over `median`** for sub-millisecond benches. Median pulls upward with system load; min reflects best-case throughput.
+5. **Tighten the harness for noisy benches**:
    - `--benchmark-min-rounds=100` (200 for sub-10-µs benches).
    - `--benchmark-warmup=on --benchmark-warmup-iterations=20`.
    - 30-second sleep between baseline and comparison runs (thermal settle).
    - Re-measure twice on the suspect commit. If runs disagree, you're seeing variance, not a regression.
-5. **In-memory is the gate.** Disk-mode benchmarks are nice-to-have but never at the cost of in-memory.
+6. **In-memory is the gate.** Disk-mode benchmarks are nice-to-have but never at the cost of in-memory.
 
 ## Key patterns
 
@@ -269,5 +293,16 @@ When a plan has Steps 1 / 2 / 3 / …:
 1. **One commit per phase.** Bisectability beats batched commits. Each phase's code + tests in its own `feat:` / `refactor:` / etc.
 2. **Each phase must be green before its commit** — `cargo build --lib`, `make lint`, and the relevant test suite all pass.
 3. **Keep going to the end.** Once a plan is approved, don't pause between phases. The only mid-plan stops are genuine blockers (failing test you can't fix, architectural surprise invalidating a later step).
-4. **End with a perf gate.** Before the final release commit, run new + existing benchmarks per the Performance protocol above. Record numbers in the release commit message or `[x.y.z]` CHANGELOG block. Fix regressions before the release commit, not in a follow-up.
-5. **Final commit is the version bump + CHANGELOG promotion.** No earlier phase touches `Cargo.toml`. User pushes once.
+4. **One branch per plan — phases are commits, never sub-branches.** A plan
+   gets exactly one feature branch and one draft PR; never spawn per-phase or
+   per-workstream branches to be merged back later (the 0.14.2 cycle left 8
+   stale branches this way). After the plan ships, the release flow deletes
+   the branch — local + remote.
+5. **Batch branch pushes.** Every push to the PR branch costs a full ~20-job
+   CI run (~2.5 runner-hours). Push at natural checkpoints — every 2–3 quick
+   phases, or before stepping away — not reflexively after each commit.
+   `ci.yml` cancels superseded in-flight PR runs, so a follow-up push is
+   cheap, but the habit should still be batching, with a final push covering
+   the completed plan.
+6. **End with a perf gate.** Before the final release commit, run new + existing benchmarks per the Performance protocol above. Record numbers in the release commit message or `[x.y.z]` CHANGELOG block. Fix regressions before the release commit, not in a follow-up.
+7. **Final commit is the version bump + CHANGELOG promotion.** No earlier phase touches `Cargo.toml`. User pushes once.

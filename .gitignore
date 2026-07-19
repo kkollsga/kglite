@@ -76,3 +76,5 @@ docs/autoapi/
 .DS_Store
 .bench-current.json
 .perf_audit_*.json
+# local cargo litter from running the fixture in-place; CI copies it to /tmp
+/tests/fixtures/rust-embed-consumer/target/
