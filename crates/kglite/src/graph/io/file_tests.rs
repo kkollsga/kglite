@@ -69,13 +69,8 @@ mod atomic_save_tests {
     }
 
     #[test]
-    fn pre_014_v4_fixtures_are_rejected_with_migration_guidance() {
-        let fixture =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/spatial_graph.kgl");
-        let legacy = std::fs::read(&fixture).unwrap();
-        assert_eq!(&legacy[..4], &V4_MAGIC);
-
-        let error = load_kgl_bytes(&legacy).err().unwrap();
+    fn pre_014_v4_header_is_rejected_with_migration_guidance() {
+        let error = load_kgl_bytes(&V4_MAGIC).err().unwrap();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("pre-0.14"));
         assert!(error.to_string().contains("0.13.4"));

@@ -1,14 +1,8 @@
 """The 0.14 persistence boundary rejects pre-Postcard portable artifacts."""
 
-from pathlib import Path
-
 import pytest
 
 import kglite
-
-FIXTURES = Path(__file__).parent / "fixtures"
-LEGACY_KGL = FIXTURES / "legacy_0_13_3.kgl"
-LEGACY_KGLE = FIXTURES / "legacy_0_13_3.kgle"
 
 
 def _matching_people() -> kglite.KnowledgeGraph:
@@ -21,17 +15,19 @@ def _matching_people() -> kglite.KnowledgeGraph:
     return graph
 
 
-def test_released_v4_graph_requires_a_pre_014_converter():
-    assert LEGACY_KGL.read_bytes()[:4] == b"RGF\x04"
+def test_v4_graph_header_requires_a_pre_014_converter(tmp_path):
+    legacy_kgl = tmp_path / "legacy.kgl"
+    legacy_kgl.write_bytes(b"RGF\x04")
     with pytest.raises(kglite.FileFormatError, match="pre-0.14.*0.13.4"):
-        kglite.load(str(LEGACY_KGL))
+        kglite.load(str(legacy_kgl))
 
 
-def test_released_kgle_v2_is_rejected_and_current_export_is_tagged_v3(tmp_path):
-    assert LEGACY_KGLE.read_bytes()[:8] == b"KGLE\x02\x00\x00\x00"
+def test_kgle_v2_header_is_rejected_and_current_export_is_tagged_v3(tmp_path):
+    legacy_kgle = tmp_path / "legacy.kgle"
+    legacy_kgle.write_bytes(b"KGLE\x02\x00\x00\x00")
     graph = _matching_people()
     with pytest.raises(OSError, match="pre-0.14.*0.13.4"):
-        graph.import_embeddings(str(LEGACY_KGLE))
+        graph.import_embeddings(str(legacy_kgle))
 
     graph.set_embeddings(
         "Person",
