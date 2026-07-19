@@ -32,7 +32,7 @@ path = "src/main.rs"
 # pure-Rust crate only (no pyo3 in tree, no libpython link).
 # 0.3.42 required: serve_prompts injects skill `description` (## When to
 # use) + honors `references_tools`, which the cross-tool skills below need.
-mcp-methods = { version = "0.3.50", default-features = false, features = ["server"] }
+mcp-methods = { version = "0.4", default-features = false, features = ["server"] }
 
 # kglite (pure-Rust core) — no pyo3 in the resulting binary, no
 # libpython link. The 0.10.1 lift moved KnowledgeGraph +
@@ -45,7 +45,7 @@ mcp-methods = { version = "0.3.50", default-features = false, features = ["serve
 kglite = { version = "0.14", path = "../kglite", default-features = false }
 
 # rmcp re-export for the dynamic tool registration path.
-rmcp = { version = "1.8", features = ["server", "macros", "transport-io", "schemars"] }
+rmcp = { version = "2.2", features = ["server", "macros", "transport-io", "schemars"] }
 
 # Async runtime + JSON
 # `net` is needed by csv_http's TcpListener — was previously pulled
@@ -82,7 +82,7 @@ bytes = "1"
 tempfile = "3"
 # Exercise hidden-tool rejection through a real in-memory MCP handshake. The
 # production dependency enables only the server half; client code is test-only.
-rmcp = { version = "1.8", features = ["client"] }
+rmcp = { version = "2.2", features = ["client"] }
 
 [features]
 # `fastembed` is an OPTIONAL feature, default OFF. Enabling it

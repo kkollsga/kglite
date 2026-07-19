@@ -420,7 +420,7 @@ jobs:
         run: |
           python -m venv .venv
           python -m venv "$RUNNER_TEMP/kglite-reference"
-          .venv/bin/python -m pip install maturin==1.13.3 -r requirements/benchmark.txt
+          .venv/bin/python -m pip install maturin==1.14.1 -r requirements/benchmark.txt
           "$RUNNER_TEMP/kglite-reference/bin/python" -m pip install -r requirements/benchmark.txt
           python -m pip download --only-binary=:all: --no-deps \
             "kglite==$REFERENCE_VERSION" --dest "$RUNNER_TEMP/reference-wheel"

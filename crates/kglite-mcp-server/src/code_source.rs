@@ -9,7 +9,7 @@
 //! the qualified-name flow as a kglite-side companion tool.
 //!
 //! Output is the same shape `read_source` produces (a single string body
-//! suitable for `Content::text`), so agents can mix-and-match the two
+//! suitable for `ContentBlock::text`), so agents can mix-and-match the two
 //! tools in `overview_prefix` instructions without UI surprises.
 
 use std::pin::Pin;
@@ -21,7 +21,7 @@ use mcp_methods::server::source::{read_source, ReadOpts, SourceRootsProvider};
 use mcp_methods::server::McpServer;
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::handler::server::tool::ToolCallContext;
-use rmcp::model::{CallToolResult, Content, Tool};
+use rmcp::model::{CallToolResult, ContentBlock, Tool};
 use rmcp::ErrorData as McpError;
 use serde_json::{json, Map, Value};
 
@@ -112,7 +112,7 @@ pub fn register(
             Box::pin(async move {
                 let args: Map<String, Value> = arguments.unwrap_or_default();
                 let body = run(&state, roots_provider.as_ref(), &args);
-                Ok(CallToolResult::success(vec![Content::text(body)]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(body)]))
             })
         },
     ));

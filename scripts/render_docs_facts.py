@@ -67,7 +67,7 @@ def _python_facts() -> tuple[str, dict[str, list[str]], list[str]]:
     optional = _section(text, "project.optional-dependencies")
     extras = {
         match.group(1): ast.literal_eval(match.group(2))
-        for match in re.finditer(r"(?m)^(\w+)\s*=\s*(\[[^\n]*\])", optional)
+        for match in re.finditer(r"(?m)^(\w+)\s*=\s*(\[[^\]]*\])", optional)
     }
     return requires_match.group(1), dict(sorted(extras.items())), classifiers
 

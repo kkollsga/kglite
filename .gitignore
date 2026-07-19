@@ -1,4 +1,7 @@
 # Skip specific directories
+# `make bundle-bin` copies the release kglite-mcp-server binary here for
+# dev-with-bin and the wheel-build workflow — build artifact, never committed.
+/kglite/_bin/
 /pytest/
 /venv/
 /.venv/

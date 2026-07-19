@@ -67,4 +67,4 @@ subtle = "2"
 # `Value::DateTime(NaiveDate)` arithmetic for the Bolt Date encoding
 # (days-since-Unix-epoch). Already transitive via kglite; pin to the
 # same version range so a workspace-level chrono bump touches us too.
-chrono = { version = "0.4.43", default-features = false }
+chrono = { version = "0.4.45", default-features = false }

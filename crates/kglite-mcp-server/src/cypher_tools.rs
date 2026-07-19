@@ -19,7 +19,7 @@ use anyhow::Result;
 use mcp_methods::server::{Manifest, McpServer, ToolSpec};
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::handler::server::tool::ToolCallContext;
-use rmcp::model::{CallToolResult, Content, Tool};
+use rmcp::model::{CallToolResult, ContentBlock, Tool};
 use rmcp::ErrorData as McpError;
 use serde_json::{Map, Value};
 
@@ -105,7 +105,7 @@ pub fn register_cypher_tools(
                         Ok(text) => text,
                         Err(e) => format!("cypher tool {name:?} error: {e}"),
                     };
-                    Ok(CallToolResult::success(vec![Content::text(body)]))
+                    Ok(CallToolResult::success(vec![ContentBlock::text(body)]))
                 })
             },
         ));

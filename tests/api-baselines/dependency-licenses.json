@@ -107,13 +107,13 @@
     ],
     [
       "rmcp",
-      "1.8.0",
+      "2.2.0",
       "Apache-2.0",
       "runtime MCP protocol implementation"
     ],
     [
       "rmcp-macros",
-      "1.8.0",
+      "2.2.0",
       "Apache-2.0",
       "MCP build-time proc macro"
     ],

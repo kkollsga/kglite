@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.4,<2.0"]
+requires = ["maturin>=1.14.1,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -46,15 +46,23 @@ dependencies = [
 dynamic = ["version"]
 
 [project.optional-dependencies]
-neo4j = ["neo4j>=5.0"]
+neo4j = ["neo4j>=6.2.0"]
 # DataFrame loading and conversion are optional so graph-only and MCP users
 # keep a zero-dependency base wheel. Install this extra for pandas workflows.
-pandas = ["pandas>=2.0"]
+pandas = [
+    "pandas>=3.0.3; python_version >= '3.11'",
+    "pandas>=2.3.3,<3; python_version < '3.11'",
+]
 # NetworkX interop: `KnowledgeGraph.to_networkx()` /
 # `kglite.from_networkx()`. Optional — networkx is never imported at
 # module load. `from_networkx` converts records through pandas, so the
 # integration extra installs both of its runtime dependencies.
-networkx = ["networkx>=3.0", "pandas>=2.0"]
+networkx = [
+    "networkx>=3.6.1; python_version >= '3.11'",
+    "networkx>=3.4.2,<3.5; python_version < '3.11'",
+    "pandas>=3.0.3; python_version >= '3.11'",
+    "pandas>=2.3.3,<3; python_version < '3.11'",
+]
 # No `embed` extra (removed in 0.10.28). Embedding is bring-your-own: the user
 # installs whatever embedding library they want and names it. For engine-level
 # semantic search, pass any duck-typed object to `g.set_embedder(...)` (see the

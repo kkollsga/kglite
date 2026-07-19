@@ -30,7 +30,10 @@ def _optional_dependency_blocks() -> dict[str, str]:
 
 
 def _requirement_names(block: str) -> set[str]:
-    return {match.group(1).lower().replace("_", "-") for match in re.finditer(r"[\"']([A-Za-z0-9_-]+)", block)}
+    # Each requirement is one double-quoted string; environment markers may
+    # contain single-quoted versions ("pandas>=3.0.3; python_version >= '3.11'"),
+    # so only the leading distribution name of each string counts.
+    return {match.group(1).lower().replace("_", "-") for match in re.finditer(r"\"([A-Za-z0-9_-]+)[^\"]*\"", block)}
 
 
 def test_networkx_extra_declares_every_runtime_dependency() -> None:
