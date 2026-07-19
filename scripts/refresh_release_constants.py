@@ -283,7 +283,7 @@ def refresh_api_baseline() -> tuple[bool, str]:
     paths = [REPO_ROOT / profile["baseline"] for profile in manifest["profiles"]]
     before = {path: path.read_text() if path.exists() else None for path in paths}
     proc = subprocess.run(
-        [sys.executable, "scripts/rust_api_profiles.py", "refresh"],
+        [sys.executable, "scripts/rust_api_profiles.py", "refresh", "--skip-if-unchanged"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,

@@ -80,13 +80,21 @@ def test_linux_perf_gate_uses_isolated_released_wheel_reference() -> None:
     assert "--only-binary=:all:" in perf
     assert "test_bench_core.py" in perf
     assert "sleep 30" in perf
-    assert ".bench-reference-0.13.2.json .bench-candidate.json" in perf
+    assert '.bench-reference-0.13.2.json "$1"' in perf
     assert "--require-exact-set" in perf
     assert "actions/upload-artifact@v7" in perf
     assert "include-hidden-files: true" in perf
     assert "scripts/benchmark_provenance.py" in perf
-    assert "tests/benchmarks/baselines/current.linux.json .bench-candidate.json" in perf
+    assert 'tests/benchmarks/baselines/current.linux.json "$1"' in perf
     assert perf.count("--require-exact-set") == 2
+    # Retry-once contract: a first-capture regression verdict triggers exactly
+    # one recapture; only a repeated failure is red, and both captures ship in
+    # the evidence artifact (which must survive a failed verdict).
+    assert "compare .bench-candidate.json" in perf
+    assert "compare .bench-candidate-retry.json" in perf
+    assert perf.count("--benchmark-json") >= 1
+    assert ".bench-candidate-retry.json" in perf
+    assert "if: always()" in perf
 
 
 def test_perf_regression_is_part_of_the_aggregate_gate() -> None:

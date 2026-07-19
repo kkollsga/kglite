@@ -29,8 +29,10 @@ never routinely:**
 - `docs/**`, top-level `*.md`, or `kglite/__init__.pyi` →
   `sphinx-build -W --keep-going -b html docs <out>` with `docs/requirements.txt`.
 - A deliberate public Rust API change → `make refresh-api-baseline` and review
-  the delta. Otherwise skip: the 5-profile rustdoc pass costs ~25 min to
-  conclude "no change" (pins live in `tests/api-baselines/rust-api-profiles.json`).
+  the delta. (The release-constants refresh auto-skips the ~25-min 5-profile
+  rustdoc pass when profiled sources/manifest/baselines are unchanged —
+  `--skip-if-unchanged` in `scripts/rust_api_profiles.py`; pins live in
+  `tests/api-baselines/rust-api-profiles.json`.)
 - Perf-sensitive paths (`core/pattern_matching/`, `cypher/executor/`, storage
   hot paths) → `make bench-check` **on an otherwise-idle machine** — a capture
   taken right after heavy builds reads +4–10% hot across the board.
@@ -124,6 +126,12 @@ Before any perf-related change:
    - 30-second sleep between baseline and comparison runs (thermal settle).
    - Re-measure twice on the suspect commit. If runs disagree, you're seeing variance, not a regression.
 6. **In-memory is the gate.** Disk-mode benchmarks are nice-to-have but never at the cost of in-memory.
+7. **Cumulative drift is gated too.** The per-release 20% gates recapture their
+   baseline every release, so slow drift (~10%/release) never trips them.
+   `make bench-anchor` compares the newest per-release baseline against the one
+   ~3 releases back at +30% — run at release time (wired into the release
+   skill). Per-release baseline files in `tests/benchmarks/baselines/` are the
+   longitudinal record; never delete them.
 
 ## Key patterns
 
@@ -274,6 +282,13 @@ Three captured values drift across releases and need a version-paired refresh as
 - `tests/benchmarks/baselines/<version>.json` and `current.json`. Captured by re-running the 11 tracked core benchmarks. The script is idempotent — if `<version>.json` already exists, recapture is skipped (delete the file to force a fresh capture; benchmark numbers are inherently noisy so we don't want to overwrite on every script run).
 
 The script requires a fresh release build (`maturin develop --release`) for steps 2 and 3.
+
+Two release-time companions (both wired into the release skill):
+`make bench-anchor` gates cumulative perf drift (newest baseline vs ~3
+releases back, +30%), and `make semver-check` reports mechanically-detected
+API changes vs the last published kglite to ground the bump-size decision
+(informational — this project deliberately ships documented breaking changes
+in patch bumps).
 
 ### PyPI project capacity
 

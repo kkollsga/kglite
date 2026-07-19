@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,9 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = ROOT / "tests" / "api-baselines" / "rust-api-profiles.json"
 VALID_CLASSIFICATIONS = {"profile-root", "public-api", "implementation-only"}
+# Refresh fast-path stamp. Lives under target/ (gitignored, wiped by
+# `cargo clean`) — losing it only costs one redundant full refresh.
+STAMP_PATH = ROOT / "target" / "rust-api-profiles.stamp"
 
 
 def load_manifest() -> dict[str, Any]:
@@ -129,6 +133,40 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         ):
             raise ValueError(f"companion {pkg}: invalid or duplicate baseline {baseline!r}")
         baselines.add(baseline)
+
+
+def compute_source_digest(manifest: dict[str, Any]) -> str:
+    """Digest everything that determines the captured API text: the manifest
+    (pins, profiles, classifications), each profiled package's `Cargo.toml` +
+    `src/**/*.rs`, and the current baseline files themselves (so a hand-edited
+    or deleted baseline can never be skipped over).
+
+    Deliberately excludes `Cargo.lock`: a dependency bump can in principle
+    rename an external type that appears in a signature, but that is rare and
+    the CI public-api job remains the authority — a wrong local skip surfaces
+    there as an exact-baseline diff.
+    """
+    digest = hashlib.sha256()
+    digest.update(MANIFEST_PATH.read_bytes())
+
+    packages = [manifest["package"]] + [c["package"] for c in manifest.get("companion_packages", [])]
+    for package in packages:
+        crate_dir = ROOT / "crates" / package
+        manifest_toml = crate_dir / "Cargo.toml"
+        if not manifest_toml.exists():
+            raise RuntimeError(f"cannot digest {package}: {manifest_toml} not found")
+        digest.update(manifest_toml.read_bytes())
+        for source in sorted((crate_dir / "src").rglob("*.rs")):
+            digest.update(str(source.relative_to(ROOT)).encode())
+            digest.update(source.read_bytes())
+
+    baselines = [p["baseline"] for p in manifest["profiles"]]
+    baselines += [c["baseline"] for c in manifest.get("companion_packages", [])]
+    for baseline in sorted(baselines):
+        path = ROOT / baseline
+        digest.update(baseline.encode())
+        digest.update(path.read_bytes() if path.exists() else b"<absent>")
+    return digest.hexdigest()
 
 
 def public_api_command(manifest: dict[str, Any], profile: dict[str, Any]) -> list[str]:
@@ -246,7 +284,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("validate", help="check manifest and Cargo feature coverage")
-    subparsers.add_parser("refresh", help="regenerate every committed profile baseline")
+    refresh_parser = subparsers.add_parser("refresh", help="regenerate every committed profile baseline")
+    refresh_parser.add_argument(
+        "--skip-if-unchanged",
+        action="store_true",
+        help="Skip the (expensive) rustdoc captures when profiled sources, manifest, "
+        "and baselines are byte-identical to the last successful refresh. "
+        "CI's exact-baseline check remains the authority.",
+    )
     subparsers.add_parser("check", help="compare every profile with its exact baseline")
     value_parser = subparsers.add_parser("value", help="print one top-level manifest value")
     value_parser.add_argument("key", choices=["nightly", "cargo_public_api_version"])
@@ -264,7 +309,16 @@ def main() -> int:
                 f"{len(manifest['feature_classifications'])} classified Cargo features"
             )
             return 0
-        return run_profiles(manifest, check=args.command == "check")
+        if args.command == "refresh" and args.skip_if_unchanged:
+            source_digest = compute_source_digest(manifest)
+            if STAMP_PATH.exists() and STAMP_PATH.read_text(encoding="utf-8").strip() == source_digest:
+                print("rust API baselines: sources/manifest/baselines unchanged since last refresh — skipped")
+                return 0
+        result = run_profiles(manifest, check=args.command == "check")
+        if args.command == "refresh" and result == 0:
+            STAMP_PATH.parent.mkdir(parents=True, exist_ok=True)
+            STAMP_PATH.write_text(compute_source_digest(manifest) + "\n", encoding="utf-8")
+        return result
     except (OSError, RuntimeError, subprocess.CalledProcessError, ValueError) as error:
         print(f"rust API profile error: {error}", file=sys.stderr)
         return 1

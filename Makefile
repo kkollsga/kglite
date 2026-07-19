@@ -80,6 +80,20 @@ bench-check:
 		&& python scripts/compare_bench.py $$BASELINE .bench-current.json \
 			--metric min --threshold 20 $$EXACT_SET
 
+## Cumulative perf-drift gate: newest per-release baseline vs the anchor
+## ~3 releases back at +30% (min). Catches slow drift the per-release 20%
+## gates structurally can't (the baseline ratchets forward every release).
+## Release-time companion to bench-check; runs in seconds (no benchmarks).
+bench-anchor:
+	$(ACTIVATE) && python scripts/check_perf_anchor.py
+
+## Rust semver report for the kglite crate vs the last published release.
+## INFORMATIONAL by convention: this project deliberately ships documented
+## breaking changes in patch bumps (0.x), so the release skill surfaces this
+## report in the bump-size decision instead of hard-gating on it.
+semver-check:
+	cargo semver-checks check-release -p kglite --baseline-version $$(curl -s -H "User-Agent: kglite-semver-check" https://crates.io/api/v1/crates/kglite | python3 -c "import json,sys; print(json.load(sys.stdin)['crate']['max_stable_version'])") || true
+
 ## Refresh the three captured constants that drift across releases:
 ## the .kgl golden digest, the binary-size baseline, and the perf
 ## baseline. Run as part of every release commit — see CLAUDE.md
