@@ -1,12 +1,12 @@
 """Phase 4 crunch-point parity tests — Serialization / IO.
 
-Guards the `.kgl` v3 on-disk format and the save/load paths against
+Guards the current portable `.kgl` format and the save/load paths against
 accidental drift during the Phase 4 migration (and any later phase
 that touches serialisation). Four risks covered:
 
-1. **Byte-level v3 format drift** — a refactor silently changes the
+1. **Byte-level portable-format drift** — a refactor silently changes the
    save byte layout. Old `.kgl` files stop loading, or the format
-   diverges without a version bump. ``test_kgl_v3_golden_hash`` pins a
+   diverges without a version bump. ``test_kgl_golden_hash`` pins a
    SHA-256 digest of a deterministic fixture's `.kgl` bytes so any byte
    change trips the test.
 
@@ -319,7 +319,7 @@ def _save_memory_fixture_to_bytes() -> bytes:
         return out.read_bytes()
 
 
-def test_kgl_v3_golden_hash():
+def test_kgl_golden_hash():
     """Byte-level current `.kgl` format tripwire.
 
     Any refactor that silently changes the save byte layout flips this

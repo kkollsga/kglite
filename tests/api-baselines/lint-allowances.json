@@ -141,10 +141,6 @@
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/vector.rs::fn:embed_texts:fn embed_texts( &mut self, py: Python<'_>, node_type: &str, text_column: &str, batch_size: Option<usize>, show_progress: Option<bool>, replace: Option<bool>, mode: Option<&str>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
-      "classification": "boundary"
-    },
-    {
       "identity": "crates/kglite-py/src/graph/pyapi/vector.rs::fn:search_text:fn search_text( &self, py: Python<'_>, text_column: &str, query: &str, top_k: Option<usize>, metric: Option<&str>, to_df: Option<bool>, returning: Option<Vec<String>>, exact: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
       "classification": "boundary"
     },
@@ -475,23 +471,11 @@
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/io/ntriples/mod.rs::fn:emit:fn emit(&self, event: ProgressEvent<'_>) -> Result<(), Cancelled>@occurrence:1::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/io/ntriples/mod.rs::fn:emit:fn emit(&self, event: ProgressEvent<'_>) -> Result<(), Cancelled>@occurrence:2::dead_code",
-      "classification": "dead-code"
-    },
-    {
       "identity": "crates/kglite/src/graph/io/unified_columns.rs::fn:write_unified_columns:pub fn write_unified_columns( dir: &Path, column_stores: &HashMap<String, Arc<ColumnStore>>, _interner: &StringInterner, ) -> io::Result<WriteResult>::dead_code",
       "classification": "dead-code"
     },
     {
       "identity": "crates/kglite/src/graph/languages/cypher/planner/schema_check.rs::fn:fmt:fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/mutation/subgraph_streaming.rs::fn:pass_a_scan:pub fn pass_a_scan(source: &DiskGraph, spec: &SubsetSpec) -> PassAResult::dead_code",
       "classification": "dead-code"
     },
     {

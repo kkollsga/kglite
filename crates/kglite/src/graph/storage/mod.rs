@@ -55,9 +55,8 @@ use std::time::Instant;
 /// `edge_weight`, `edge_indices`, `find_edge`, `edges_connecting`,
 /// `edge_weights`) onto the trait.
 ///
-/// Implemented today for [`crate::graph::schema::GraphBackend`];
-/// per-backend impls (`MemoryGraph`, `DiskGraph`) will land in Phase 5
-/// alongside the columnar cleanup that lets them diverge meaningfully.
+/// Implemented for [`crate::graph::schema::GraphBackend`] and directly for
+/// the mapped and disk backends where their storage-specific iterators matter.
 ///
 /// ### GATs and object-safety
 ///

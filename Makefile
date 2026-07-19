@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev dev-with-bin bundle-bin test test-full test-rust test-py bench bench-save bench-compare bench-check bench-check-v090 refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy lint lint-py source-quality rustsec-policy cov stubtest
+.PHONY: dev dev-with-bin bundle-bin test test-full test-rust test-py bench bench-save bench-compare bench-check refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy lint lint-py source-quality rustsec-policy cov stubtest
 
 ## Build and install the package into the local .venv
 dev:
@@ -61,11 +61,6 @@ bench-save:
 ## Compare current performance against saved baseline (release build).
 bench-compare:
 	$(ACTIVATE) && maturin develop --release --quiet && pytest tests/benchmarks/test_bench_core.py -m benchmark --benchmark-compare
-
-## Compare against the v0.9.0 baseline and fail on >5% mean regression (release build).
-## Run after each 0.9.0 gate-item lands to enforce the no-regression rule.
-bench-check-v090:
-	$(ACTIVATE) && maturin develop --release --quiet && pytest tests/benchmarks/test_bench_core.py -m benchmark --benchmark-compare=v0_9_0_baseline --benchmark-compare-fail=mean:5%
 
 ## Perf regression gate: compare the tracked core benchmarks against
 ## the current platform's baseline and fail on >20% regression on

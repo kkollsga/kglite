@@ -4899,12 +4899,12 @@ class KnowledgeGraph:
         A cheap, direct way to detect an embedder/model change without
         bookkeeping: compare it against your model's dimension before
         re-embedding. ``embed_texts`` / ``add_embeddings`` reject a dimension
-        mismatch (re-embed with ``replace=True`` to rebuild at a new dimension).
+        mismatch (re-embed with ``mode='all'`` to rebuild at a new dimension).
 
         Example::
 
             if g.embedding_dim("Article", "summary") not in (None, model.dimension):
-                g.embed_texts("Article", "summary", replace=True)  # model changed
+                g.embed_texts("Article", "summary", mode="all")  # model changed
         """
         ...
 
@@ -5120,7 +5120,6 @@ class KnowledgeGraph:
         text_column: str,
         batch_size: int = 256,
         show_progress: bool = True,
-        replace: bool = False,
         mode: str | None = None,
     ) -> dict[str, int]:
         """Embed a text column for all nodes of a given type.
@@ -5143,8 +5142,6 @@ class KnowledgeGraph:
             batch_size: Number of texts per ``model.embed()`` call (default 256).
             show_progress: Show a tqdm progress bar (default ``True``).
                 Silently falls back to no bar if ``tqdm`` is not installed.
-            replace: Legacy alias for ``mode``. ``True`` → ``mode='all'``,
-                ``False`` → ``mode='missing'``. Ignored when ``mode`` is given.
             mode: Which nodes to embed — ``'missing'`` (default): only nodes
                 without an embedding; ``'changed'``: nodes missing an embedding
                 *or* whose text changed since the last embed (via the stored

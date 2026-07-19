@@ -52,9 +52,8 @@ pub(crate) fn segment_subdir(id: u32) -> String {
 ///
 /// Used at load time to drive the CSR-load enumeration; at save time
 /// the next free id is `last().map(|(id, _)| id + 1).unwrap_or(0)`.
-/// PR1 phase 6 infrastructure — today every graph has exactly one
-/// segment directory (`seg_000`), so the returned Vec has length 1
-/// for non-legacy graphs. Phase 7+ will produce additional segments.
+/// Current graphs may contain multiple sealed `seg_NNN` generations; callers
+/// use this ordering to concatenate or compact them deterministically.
 pub(crate) fn enumerate_segment_dirs(root: &Path) -> Vec<(u32, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -258,7 +257,7 @@ pub struct DiskGraph {
     // patterns like `MATCH (n {label: 'X'})` where the agent doesn't
     // know the node type.
     pub(crate) global_indexes: GlobalIndexCache,
-    // ── Segment manifest (PR1 phases 2/5, single-segment view today).
+    // ── Segment manifest.
     //
     // Persisted at `seg_manifest.json` alongside the CSR files. Legacy
     // graphs that lack the file load as an empty manifest — the planner
@@ -267,8 +266,7 @@ pub struct DiskGraph {
     // whole graph; PR1 phase 5 populates `indexed_prop_ranges` for each
     // `PropertyIndex` discovered in the segment directory, using
     // `StringBloomPlaceholder` until the bloom-filter variant lands.
-    // Phase 6+ will split into multiple segments once multi-segment
-    // writes and reads are in place.
+    // Multi-segment writes and reads update this summary as generations seal.
     pub(crate) segment_manifest: super::segment_summary::SegmentManifest,
     // ── Sealed-nodes watermark (PR1 phase 8).
     //

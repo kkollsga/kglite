@@ -1867,7 +1867,7 @@ impl ColumnStore {
         Ok(())
     }
 
-    /// Load columns from a packed byte buffer (v3 format).
+    /// Load columns from the portable packed byte representation.
     ///
     /// If `temp_dir` is `Some`, writes column data to temp files and mmaps them
     /// (for larger-than-RAM support). If `None`, loads into heap.

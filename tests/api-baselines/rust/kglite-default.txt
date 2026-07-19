@@ -1058,7 +1058,7 @@ impl core::marker::StructuralPartialEq for kglite::api::io::OpenDisposition
 pub enum kglite::api::io::ProgressEvent<'a>
 pub kglite::api::io::ProgressEvent::Complete
 pub kglite::api::io::ProgressEvent::Complete::elapsed_s: f64
-pub kglite::api::io::ProgressEvent::Complete::fields: &'a [(&'a str, kglite::api::io::ProgressValue<'a>)]
+pub kglite::api::io::ProgressEvent::Complete::fields: &'a [(&'a str, kglite::api::io::ProgressValue)]
 pub kglite::api::io::ProgressEvent::Complete::phase: &'a str
 pub kglite::api::io::ProgressEvent::Start
 pub kglite::api::io::ProgressEvent::Start::label: &'a str
@@ -1067,11 +1067,9 @@ pub kglite::api::io::ProgressEvent::Start::total: core::option::Option<u64>
 pub kglite::api::io::ProgressEvent::Start::unit: &'a str
 pub kglite::api::io::ProgressEvent::Update
 pub kglite::api::io::ProgressEvent::Update::current: u64
-pub kglite::api::io::ProgressEvent::Update::fields: &'a [(&'a str, kglite::api::io::ProgressValue<'a>)]
+pub kglite::api::io::ProgressEvent::Update::fields: &'a [(&'a str, kglite::api::io::ProgressValue)]
 pub kglite::api::io::ProgressEvent::Update::phase: &'a str
-pub enum kglite::api::io::ProgressValue<'a>
-pub kglite::api::io::ProgressValue::F64(f64)
-pub kglite::api::io::ProgressValue::Str(&'a str)
+pub enum kglite::api::io::ProgressValue
 pub kglite::api::io::ProgressValue::U64(u64)
 pub struct kglite::api::io::Cancelled
 pub struct kglite::api::io::GraphFileIdentity
@@ -1987,7 +1985,6 @@ pub fn kglite::api::DirGraph::_get_connection_mut(&mut self, index: petgraph::gr
 pub fn kglite::api::DirGraph::add_node_label(&mut self, idx: petgraph::graph_impl::NodeIndex, label: kglite::api::InternedKey) -> bool
 pub fn kglite::api::DirGraph::build_connection_types_cache(&mut self)
 pub fn kglite::api::DirGraph::build_id_index(&mut self, node_type: &str)
-pub fn kglite::api::DirGraph::build_id_index_from_columns(&mut self, node_type: &str)
 pub fn kglite::api::DirGraph::bump_version(&mut self)
 pub fn kglite::api::DirGraph::check_auto_vacuum(&mut self) -> bool
 pub fn kglite::api::DirGraph::compact_properties(&mut self)

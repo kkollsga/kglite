@@ -391,7 +391,7 @@ graph.embed_texts('Article', 'summary', batch_size=256, show_progress=True)
 # mode='missing' (default): only nodes without an embedding yet.
 # mode='changed':            re-embed nodes whose text changed since last time
 #                            (a per-node content hash is stored to detect this).
-# mode='all' (= replace=True): re-embed every node, rebuilding the store.
+# mode='all':               re-embed every node, rebuilding the store.
 graph.embed_texts('Article', 'summary', mode='changed')
 
 # Inspect a store's provenance (dimension, count, model id, metric, #hashed):

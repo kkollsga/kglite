@@ -8,10 +8,10 @@
 //
 //   edge_prop_offsets.bin  MmapOrVec<u64>, (max_edge_idx + 1) entries.
 //                          offsets[i]..offsets[i+1] = byte range in heap
-//                          for edge i's bincode-serialized props blob.
+//                          for edge i's Postcard-serialized props blob.
 //                          offsets[i] == offsets[i+1] means "no props".
 //   edge_prop_heap.bin     MmapBytes, variable-length. Each populated
-//                          slot holds a bincode `Vec<(u64, Value)>` —
+//                          slot holds a Postcard `Vec<(u64, Value)>` —
 //                          raw InternedKey hashes, no interner needed
 //                          on the read path.
 //
@@ -25,11 +25,8 @@
 // page fault per file, which is unavoidable and still cheaper than
 // the current zstd-decode-whole-HashMap-at-load path.
 //
-// Legacy format=0 graphs stored `Vec<(InternedKey, Value)>` under the
-// `SerdeSerializeGuard` (InternedKey serialized as strings). The
-// `load_legacy` path still handles these for backward compat and
-// requires `&mut StringInterner` to re-register keys. Columnar formats
-// reads never touch the interner.
+// Pre-0.14 format 0/1 graphs are rejected before payload decoding.
+// Current columnar reads store raw hashes and never touch the interner.
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{InternedKey, StringInterner};
@@ -332,10 +329,8 @@ impl EdgePropertyStore {
     /// - `format_version` comes from `DiskGraphMeta.edge_properties_format`
     ///   (2 = Postcard columnar).
     /// - `meta` provides the file lengths needed to mmap the columnar files.
-    ///   Ignored when loading format=0.
-    /// - `interner` is mutated only on the legacy path (to register keys
-    ///   deserialized from the old string-keyed format). The columnar path
-    ///   stores raw u64 hashes and never touches the interner.
+    /// - `_interner` is retained by the storage boundary; current columnar
+    ///   payloads store raw u64 hashes and never touch it.
     pub fn load_from(
         dir: &Path,
         format_version: u8,

@@ -519,7 +519,7 @@
         },
         "embed_texts": {
           "kind": "method",
-          "signature": "(self, /, node_type, text_column, batch_size=256, show_progress=True, replace=False, mode=None)"
+          "signature": "(self, /, node_type, text_column, batch_size=256, show_progress=True, mode=None)"
         },
         "embedding": {
           "kind": "method",

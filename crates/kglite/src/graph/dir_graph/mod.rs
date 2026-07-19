@@ -504,14 +504,6 @@ impl DirGraph {
             .ensure(node_type, || self.compute_id_index(node_type));
     }
 
-    /// Build id_index for a type using column stores directly (no node materialization).
-    /// For DiskGraph, reads ids from mmap'd column stores via row_id from node_slots.
-    /// Much faster and uses no arena memory. `compute_id_index` already
-    /// prefers the column path for disk graphs, so this is a thin alias.
-    pub fn build_id_index_from_columns(&mut self, node_type: &str) {
-        self.build_id_index(node_type);
-    }
-
     /// Compute (without inserting) the `TypeIdIndex` for a node type by
     /// scanning the graph. The shared body behind `build_id_index` (the
     /// &mut, cache-on-build path) and the read-path lazy build in
@@ -2080,7 +2072,7 @@ impl DirGraph {
     }
 
     /// Convert all Columnar properties back to Compact.
-    /// Used before serialization to produce backward-compatible .kgl files.
+    /// Used when a caller needs a self-contained non-columnar graph.
     pub fn disable_columnar(&mut self) {
         let node_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
         for node_idx in node_indices {

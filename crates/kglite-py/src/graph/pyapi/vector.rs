@@ -1021,8 +1021,6 @@ impl KnowledgeGraph {
     ///     show_progress: Show a tqdm progress bar (default ``True``).
     ///         Requires ``tqdm`` to be installed; silently falls back to no
     ///         progress bar if it is not available.
-    ///     replace: Legacy alias for ``mode``. ``True`` → ``mode='all'``,
-    ///         ``False`` → ``mode='missing'``. Ignored if ``mode`` is given.
     ///     mode: Which nodes to embed —
     ///         ``'missing'`` (default): only nodes without an embedding yet;
     ///         ``'changed'``: nodes missing an embedding *or* whose text changed
@@ -1033,8 +1031,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     Dict with ``embedded``, ``skipped``, ``skipped_existing``,
     ///     ``reembedded_changed``, and ``dimension``.
-    #[pyo3(signature = (node_type, text_column, batch_size=256, show_progress=true, replace=false, mode=None))]
-    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (node_type, text_column, batch_size=256, show_progress=true, mode=None))]
     fn embed_texts(
         &mut self,
         py: Python<'_>,
@@ -1042,33 +1039,23 @@ impl KnowledgeGraph {
         text_column: &str,
         batch_size: Option<usize>,
         show_progress: Option<bool>,
-        replace: Option<bool>,
         mode: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let model = self.get_embedder_or_error()?;
         let embedding_property = format!("{}_emb", text_column);
         let batch_size = batch_size.unwrap_or(256);
-        // Resolve the embed mode. `mode` wins; else fall back to the legacy
-        // `replace` bool (True→all, False→missing).
-        let mode = match mode {
-            Some(m) => match m {
-                "missing" | "changed" | "all" => m.to_string(),
-                other => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "embed_texts(mode={other:?}): unknown mode. Use 'missing' (default), \
-                         'changed' (re-embed nodes whose text changed), or 'all'."
-                    )));
-                }
-            },
-            None => {
-                if replace.unwrap_or(false) {
-                    "all".to_string()
-                } else {
-                    "missing".to_string()
-                }
+        let mode = match mode.unwrap_or("missing") {
+            "missing" => "missing",
+            "changed" => "changed",
+            "all" => "all",
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "embed_texts(mode={other:?}): unknown mode. Use 'missing' (default), \
+                     'changed' (re-embed nodes whose text changed), or 'all'."
+                )));
             }
         };
-        let replace = mode == "all";
+        let rebuild_store = mode == "all";
 
         // Load model if it has a load() lifecycle method
         model
@@ -1084,24 +1071,24 @@ impl KnowledgeGraph {
         let mut reembedded_changed = 0usize;
 
         let emb_key = (node_type.to_string(), embedding_property.clone());
-        let existing_store = if replace {
+        let existing_store = if rebuild_store {
             None
         } else {
             self.inner.embeddings.get(&emb_key)
         };
 
-        // B4/B5 (operator 2026-06-17): an upsert (replace=False) into a store
+        // An incremental embed into a store
         // whose dimension differs from the current model's would silently mix
         // dimensions and corrupt similarity search. Reject it with a clear
-        // recipe instead. (replace=True is fine — it rebuilds a fresh store at
-        // the new dimension below, so a model swap is deterministic that way.)
+        // recipe instead. `mode='all'` rebuilds a fresh store at the new
+        // dimension below, so a model swap is deterministic that way.
         if let Some(s) = existing_store {
             if s.dimension != dimension {
                 model.unload();
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "embed_texts(): the model produces {dimension}-d vectors but the existing \
                      '{node_type}.{text_column}_emb' store is {}-d — embedding the rest would mix \
-                     dimensions and corrupt search. Re-embed the whole column with replace=True to \
+                     dimensions and corrupt search. Re-embed the whole column with mode='all' to \
                      rebuild at the new dimension, or remove_embeddings('{node_type}', '{text_column}') first.",
                     s.dimension
                 )));

@@ -90,8 +90,8 @@
     {
       "path": "crates/kglite-py/src/graph/pyapi/vector.rs",
       "qualified_name": "crate::KnowledgeGraph::embed_texts",
-      "lines": 227,
-      "branches": 44,
+      "lines": 217,
+      "branches": 43,
       "nesting": 6
     },
     {

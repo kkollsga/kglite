@@ -291,7 +291,7 @@ mod atomic_save_tests {
     }
 
     #[test]
-    fn legacy_index_readers_validate_exact_bounds_and_cardinality() {
+    fn retained_flat_csr_index_readers_validate_exact_bounds_and_cardinality() {
         let mut interner = crate::graph::storage::interner::StringInterner::new();
         let key = interner.get_or_intern("Person").as_u64();
 

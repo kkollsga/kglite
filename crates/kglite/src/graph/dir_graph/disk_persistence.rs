@@ -262,10 +262,9 @@ impl DirGraph {
         // graph root; no-op when the cache is empty.
         crate::graph::io::file::write_type_connectivity_bin(dir, self)?;
 
-        // The interner sidecar stores a codec-framed `Vec<String>` of
-        // originals. The hash is re-derived deterministically on load via
-        // `get_or_intern`; legacy unframed bincode and 0.8.12 JSON remain
-        // read-only compatibility paths.
+        // The framed interner sidecar stores `Vec<String>`; hashes are
+        // re-derived on load. Unframed binary data is rejected, while the
+        // older JSON representation remains a read-only data fallback.
         crate::graph::io::file::write_interner_bin(dir, self)?;
 
         // Save column stores (per type, sidecar format). Two modes:
@@ -397,8 +396,9 @@ impl DirGraph {
         // 0.8.13: type_indices uses a flat CSR binary keyed by interner
         // hashes. 0.8.28+: id_indices uses an mmap-resident raw `.bin`
         // layout — load reads via memory-mapped binary search, no eager
-        // HashMap rebuild. Backward-compat loaders fall through to the
-        // old bincode/zstd paths when the new file is absent.
+        // HashMap rebuild. The loader can still read the earlier flat-CSR
+        // sidecars when the mmap files are absent; pre-0.14 bincode caches
+        // are ignored and rebuilt.
         crate::graph::storage::disk::type_index::write_type_indices_bin(
             dir,
             &self.type_indices,

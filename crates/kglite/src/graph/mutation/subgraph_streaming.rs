@@ -1,13 +1,8 @@
 //! Disk-to-disk streaming subgraph filter.
 //!
-//! Phase 2 of `save_subset`: Pass A — sequential edge scan that builds a
-//! kept-nodes bitset. No output files yet; this is the spike validating
-//! the I/O shape on real Wikidata before output plumbing exists.
-//!
-//! Subsequent phases extend this module:
-//! - Phase 3: rank-1 over the bitset + per-type node materialization.
-//! - Phase 4: edge translation + property byte-range copy + CSR build.
-//! - Phase 5: sidecars + atomic finalize.
+//! The completed `save_subset` pipeline performs a sequential edge scan,
+//! rank-1 node-id translation, node materialization, edge/property copying,
+//! CSR construction, sidecar writes, and atomic publication.
 //!
 //! The streaming pipeline is gated to disk-backed sources. In-memory and
 //! mapped graphs route through the existing `to_subgraph().save()` path
@@ -26,9 +21,8 @@ use std::path::Path;
 #[derive(Clone, Debug, Default)]
 pub struct SubsetSpec {
     /// Restrict to edges of these types. `None` means all edge types.
-    /// In Phase 2 this is the only filter knob.
+    /// This is the streaming path's filter knob.
     pub edge_types: Option<Vec<InternedKey>>,
-    // Phase 3+ will add: seed_node_ids, seed_node_types, expand_hops.
 }
 
 /// Stats reported back from a Pass A scan. Used for sanity-checking on
@@ -42,8 +36,8 @@ pub struct ScanStats {
 }
 
 /// Compact bitset over node ids. `Vec<u64>` blocks; one bit per source
-/// node id. Phase 3 will extend this with rank-1 (popcount prefix array)
-/// for O(1) old→new id translation.
+/// node id. [`RankIndex`] adds a popcount prefix array for O(1)
+/// old→new id translation.
 #[derive(Clone, Debug)]
 pub struct Bitset {
     blocks: Vec<u64>,
@@ -85,7 +79,7 @@ impl Bitset {
         self.len
     }
 
-    /// Total set bits. Used to size the output graph in Phase 3+.
+    /// Total set bits. Used to size the output graph.
     pub fn count_ones(&self) -> u64 {
         self.blocks.iter().map(|b| b.count_ones() as u64).sum()
     }
@@ -118,12 +112,8 @@ impl Bitset {
 // matches the natural sequential walk of `node_slots.bin` in Pass B.
 
 /// O(1) translator from source node ids to dense destination ids. Built
-/// once after Pass A; consumed by node materialization (Phase 4) and
-/// edge translation (Phase 4). All RAM, zero disk reads.
-///
-/// `dead_code` is allowed at the impl level because Phase 3 ships the
-/// primitive in isolation — Phase 4 is the first consumer and lights up
-/// every method.
+/// once after Pass A; consumed by node materialization and edge translation.
+/// All RAM, zero disk reads.
 #[derive(Debug, Clone)]
 pub struct RankIndex {
     bitset: Bitset,
@@ -194,10 +184,7 @@ impl RankIndex {
 /// Result of [`pass_a_scan`].
 pub struct PassAResult {
     /// Source node ids that survive the filter. Endpoints of every kept
-    /// edge, plus any explicit seed nodes (Phase 3+). Phase 2 spike does
-    /// not surface the bitset to callers; Phase 3 consumes it to build
-    /// the rank-1 index.
-    #[allow(dead_code)]
+    /// edge. The writer consumes this bitset to build the rank-1 index.
     pub kept_nodes: Bitset,
     pub stats: ScanStats,
 }
@@ -213,9 +200,8 @@ pub struct PassAResult {
 /// edges (TOMBSTONE_EDGE marker in `source`) are skipped without
 /// touching property storage.
 ///
-/// Phase 4 will extend this loop to also write `kept_edges.tmp` +
-/// `edge_prop_offsets.bin` + `edge_prop_heap.bin` for the destination
-/// graph, all in lockstep with the same sequential scan.
+/// The file-producing variant below writes kept-edge records in the same
+/// sequential scan when the caller is building an output graph.
 pub fn pass_a_scan(source: &DiskGraph, spec: &SubsetSpec) -> PassAResult {
     let n_nodes = source.node_slot_len();
     let mut kept_nodes = Bitset::with_len(n_nodes);
@@ -460,15 +446,13 @@ pub fn save_subset(
         )
     })?;
 
-    // 3. Choose the right serializer based on graph size. The single-file
-    //    v3 format (`write_kgl`) bincode-serializes the whole
-    //    DirGraph in one go and trips bincode's size limit at scale —
-    //    Wikidata-class extracts (~17 M nodes / 35 M edges) hit it.
-    //    Above the threshold, convert to disk mode and write the
-    //    directory format which scales without per-blob limits. Reload
-    //    works for both: `kglite.load(path)` auto-detects file vs dir.
+    // 3. Choose the right serializer based on graph size. The portable v5
+    //    `.kgl` path (`write_kgl`) assembles one compressed in-memory payload;
+    //    Wikidata-class extracts (~17 M nodes / 35 M edges) need the bounded
+    //    disk-directory path instead. Reload works for both:
+    //    `kglite.load(path)` auto-detects file vs directory.
     //
-    //    Threshold picked empirically: the v3 single-file format is
+    //    Threshold picked empirically: the single-file format is
     //    comfortable below ~1 M nodes; everything above gets the
     //    directory treatment for safety.
     const SINGLE_FILE_NODE_THRESHOLD: u64 = 1_000_000;

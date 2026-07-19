@@ -303,7 +303,7 @@ fn finalize_disk_graph(
         let id_start = Instant::now();
         let type_names: Vec<String> = graph.type_indices.keys().map(|s| s.to_string()).collect();
         for type_name in &type_names {
-            graph.build_id_index_from_columns(type_name);
+            graph.build_id_index(type_name);
         }
         if build_debug() {
             eplog!(

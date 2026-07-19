@@ -32,13 +32,8 @@ parse_deps = false
 # Consumers building against a `libkglite_c` with feature X must
 # `#define KGLITE_FEATURE_X` before including `kglite.h`, or the
 # corresponding declarations are skipped. This keeps the header
-# linkable: a kglite-c built without `sodir` won't export
-# `kglite_datasets_sodir_fetch_all`, and the matching `#ifdef`
-# hides the declaration so callers can't accidentally reference
-# an undefined symbol.
-"feature = sodir" = "KGLITE_FEATURE_SODIR"
-"feature = sec" = "KGLITE_FEATURE_SEC"
-"feature = wikidata" = "KGLITE_FEATURE_WIKIDATA"
+# linkable: declarations for disabled features are hidden so callers
+# cannot accidentally reference an undefined symbol.
 "feature = fastembed" = "KGLITE_FEATURE_FASTEMBED"
 "feature = rdf" = "KGLITE_FEATURE_RDF"
 

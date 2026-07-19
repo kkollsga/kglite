@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   column, edge-property, and index payloads use Postcard only. Pre-0.14
   archival formats now fail with guidance to open and re-export them with
   KGLite 0.13.4; rebuildable pre-0.14 caches are skipped and regenerated.
+- **BREAKING: removed the `embed_texts(replace=...)` Python alias.** Use
+  `mode='all'` to rebuild every vector, or the default `mode='missing'` for an
+  incremental fill.
+- **BREAKING (Rust): removed the unused `ProgressValue::F64` and `Str`
+  variants and the duplicate `DirGraph::build_id_index_from_columns` alias.**
 
 ## [0.14.2] - 2026-07-18
 

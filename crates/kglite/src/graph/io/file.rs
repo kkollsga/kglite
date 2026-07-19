@@ -3,22 +3,20 @@
 // Versioned binary format for KnowledgeGraph persistence.
 //
 // File format v5 layout:
-//   [0..4]    Magic: b"RGF\x04" (Rusty Graph Format, version 4)
-//   [4..8]    core_data_version: u32 LE (tracks NodeData/EdgeData/Value changes)
-//   [8..12]   metadata_length: u32 LE
-//   [12..12+N]  JSON metadata (column schemas, section sizes, all config)
+//   [0..4]     Magic: b"RGF\x05" (Rusty Graph Format, version 5)
+//   [4]        Codec tag: 2 (Postcard v1)
+//   [5..9]     core_data_version: u32 LE
+//   [9..13]    metadata_length: u32 LE
+//   [13..13+N] JSON metadata (column schemas, section sizes, all config)
 //   [section]  topology.zst — graph structure WITHOUT node properties
 //   [section]  columns_<Type>.zst — one per node type, packed column data
 //   [section]  embeddings.zst (optional)
 //   [section]  timeseries.zst (optional)
+//   [section]  secondary_labels.zst (optional)
+//   [section]  vector_index.zst (optional, rebuildable)
 //
-// v4 vs v3: the Value enum gained five variants (Node, Relationship,
-// Path, List, Map). Variants 0..=8 (the v3 scalar set) preserve their
-// serde discriminants, so v3 files COULD be deserialised structurally
-// — but a v3 binary cannot read v4 files (unknown discriminants 9..=13),
-// and Phase A.1 makes the *hard break* user-decision: a v4 binary
-// refuses v3 files outright with a clear "rebuild your graph" message.
-// One file format, one set of in-flight Value semantics.
+// Pre-v5 magic values are retained only for explicit rejection and migration
+// guidance; their payloads are never decoded by the current reader.
 
 use crate::datatypes::values::Value;
 use crate::graph::features::timeseries::{NodeTimeseries, TimeseriesConfig};
@@ -72,7 +70,7 @@ const V5_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x05];
 /// structured variants (Node, Relationship, Path, List, Map).
 ///
 /// 0.10.29: bumped to 3 — `EmbeddingStore` gained `model_id` +
-/// `text_hashes` (positional bincode fields), so an embeddings section
+/// `text_hashes` (positional Serde fields), so an embeddings section
 /// written by core-version ≤ 2 can't be deserialized by this binary.
 /// Files *without* embeddings load unchanged; a ≤ 2 file *with*
 /// embeddings is rejected with a rebuild-and-re-embed message (see
@@ -85,23 +83,23 @@ const CURRENT_CORE_DATA_VERSION: u32 = 3;
 /// embeddings section can't be read by this binary.
 const EMBED_PROVENANCE_MIN_VERSION: u32 = 3;
 
-/// Column section metadata for v3 format.
+/// Column-section metadata shared by the current portable format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct V3ColumnSection {
+struct PortableColumnSection {
     type_name: String,
     compressed_size: u64,
     row_count: u32,
     columns: HashMap<String, String>, // prop_name → type_tag
 }
 
-/// Metadata serialized as JSON in v3 files. All fields use `#[serde(default)]`
-/// so that adding/removing fields never breaks existing files.
+/// Metadata serialized as JSON in portable files. Defaulted additions remain
+/// readable when older files omit them.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct FileMetadata {
     /// Core data version at save time — must match or be migratable.
     #[serde(default)]
     core_data_version: u32,
-    /// Library version string at save time (e.g. "0.6.5").
+    /// Library version string at save time (for example, "0.14.x").
     #[serde(default)]
     library_version: String,
     /// Optional schema definition.
@@ -154,16 +152,16 @@ pub(crate) struct FileMetadata {
     /// Timeseries data version: 1 = Vec<Vec<i64>> keys (legacy), 2 = NaiveDate keys.
     #[serde(default = "default_ts_data_version")]
     timeseries_data_version: u32,
-    /// v3: compressed size of topology section.
+    /// Compressed size of the topology section.
     #[serde(default)]
     topology_compressed_size: u64,
-    /// v3: column sections metadata (one per node type).
+    /// Column-section metadata (one per node type).
     #[serde(default)]
-    column_sections: Vec<V3ColumnSection>,
-    /// v3: compressed size of embedding section (0 if none).
+    column_sections: Vec<PortableColumnSection>,
+    /// Compressed size of the embedding section (0 if none).
     #[serde(default)]
     embeddings_compressed_size: u64,
-    /// v3: compressed size of timeseries section (0 if none).
+    /// Compressed size of the timeseries section (0 if none).
     #[serde(default)]
     timeseries_compressed_size: u64,
     /// 0.10.5: compressed size of secondary-label-index section (0 if
@@ -369,9 +367,9 @@ pub(crate) use metadata_sidecars::{
 const TYPE_INDICES_MAGIC: &[u8; 8] = b"KGLTIDX1";
 const TYPE_INDICES_VERSION: u32 = 1;
 
-/// Reader for `type_indices.bin.zst` in the new flat-CSR format.
+/// Reader for `type_indices.bin.zst` in the earlier flat-CSR format.
 /// Returns `Ok(None)` if the payload does not start with the
-/// `KGLTIDX1` magic (caller falls back to the legacy bincode path).
+/// `KGLTIDX1` magic so the caller can rebuild from node slots.
 pub(crate) fn read_type_indices_bin(
     payload: &[u8],
     interner: &crate::graph::storage::interner::StringInterner,
@@ -578,7 +576,7 @@ mod interner_file_tests {
     }
 }
 
-// ─── id_indices.bin.zst legacy reader ─────────────────────────────────────
+// ─── Retained flat-CSR id_indices.bin.zst reader ──────────────────────────
 //
 // Read-only fallback for graphs saved by 0.8.13–0.8.27. Fresh saves use
 // the mmap-resident `id_indices.bin` raw layout from
@@ -734,8 +732,8 @@ const TYPE_CONN_MAGIC: &[u8; 8] = b"KGLTCN1\0";
 const TYPE_CONN_VERSION: u32 = 1;
 
 // secondary_labels.bin.zst format. Persists DirGraph.secondary_label_index
-// for disk-backed graphs. Memory + mapped backends carry secondaries
-// inline on NodeData via bincode; disk's columnar layout has no
+// for disk-backed graphs. Memory + mapped backends carry secondaries inline
+// on NodeData in the portable payload; disk's columnar layout has no
 // per-row label slot, so we need this sidecar.
 //
 // Payload layout (zstd-compressed):
@@ -801,7 +799,7 @@ pub(crate) fn write_type_connectivity_bin(
 
 /// Reader for `type_connectivity.bin.zst`. Returns `Ok(None)` if the
 /// file is absent or has an unrecognised magic tag (caller falls back
-/// to the legacy JSON path).
+/// to the metadata JSON representation).
 pub(crate) fn read_type_connectivity_bin(
     dir: &std::path::Path,
     graph: &DirGraph,
@@ -1252,10 +1250,8 @@ pub fn write_kgl_with(graph: &DirGraph, path: &str, fsync: bool) -> io::Result<(
 /// and durably (temp + fsync + rename — see [`write_kgl_with`]). Heavy
 /// I/O, safe to run without the GIL.
 ///
-/// (Despite the long-standing `v3` names elsewhere, the bytes written are
-/// the v5 container — `V5_MAGIC` + an explicit Postcard codec tag +
-/// `CURRENT_CORE_DATA_VERSION`. This writer is named for the artifact to
-/// avoid another stale version label.)
+/// The bytes are the v5 container: `V5_MAGIC`, an explicit Postcard codec
+/// tag, and `CURRENT_CORE_DATA_VERSION`.
 ///
 /// The graph MUST have columnar storage enabled before calling this function.
 /// The caller (Python `save()`) handles auto-enable/disable.
@@ -1272,7 +1268,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
     validate_column_keys_registered(graph)?;
     let codec = serde_codec::CodecVersion::PostcardV1;
 
-    // 1. Serialize topology with properties stripped (v3: node props are in column sections)
+    // 1. Serialize topology with node properties stripped into column sections.
     let topology_raw = {
         let _strip = StripPropertiesGuard::new();
         let _guard = SerdeSerializeGuard::new(&graph.interner);
@@ -1289,7 +1285,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
     // that the Phase 4 golden-hash test relies on. Sorting here is free
     // (type_name count is small) and doesn't affect the format: each section
     // is self-describing and the decoder iterates column_sections_meta in order.
-    let mut column_sections_meta: Vec<V3ColumnSection> = Vec::new();
+    let mut column_sections_meta: Vec<PortableColumnSection> = Vec::new();
     let mut column_sections_data: Vec<Vec<u8>> = Vec::new();
 
     let mut column_stores_sorted: Vec<(&String, &Arc<ColumnStore>)> =
@@ -1309,7 +1305,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
             }
         }
 
-        column_sections_meta.push(V3ColumnSection {
+        column_sections_meta.push(PortableColumnSection {
             type_name: type_name.clone(),
             compressed_size: compressed.len() as u64,
             row_count: store.row_count(),
@@ -1436,8 +1432,8 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
 /// for parallelism with other Python threads — see `kg_core.rs::save`
 /// for the canonical split. Rust-only callers (no GIL) just call
 /// this directly.
-/// In-memory `.kgl` save: stamp metadata, consolidate to columnar (v3
-/// requires it), then write. `fsync = true` flushes the file + parent
+/// In-memory `.kgl` save: stamp metadata, consolidate to columnar, then
+/// write. `fsync = true` flushes the file + parent
 /// directory before returning so the bytes survive an OS/power crash;
 /// `fsync = false` keeps the atomic temp+rename (never a torn file) but
 /// skips the durability barrier for speed (the bench-only fast path). See
@@ -1708,8 +1704,8 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     log_stage("metadata_json", t);
 
     // Load interner. Current `interner.bin.zst` carries a codec frame and
-    // Postcard `Vec<String>`; the reader also accepts the unframed bincode
-    // generation and falls back to `interner.json` for 0.8.12-and-earlier.
+    // Postcard `Vec<String>`; unframed binary data is rejected. The older
+    // `interner.json` representation remains a read-only data fallback.
     let t = stage_timer();
     let loaded_from_bin = read_interner_bin(dir, &mut graph)?;
     if !loaded_from_bin && dir.join("interner.json").exists() {
@@ -1727,8 +1723,8 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     log_stage("interner_load", t);
 
     // Load DiskGraph — compressed files decompressed to temp dir, then mmap'd.
-    // Interner is passed mutably because legacy format=0 graphs store edge
-    // property keys as strings and need to register them on read.
+    // The disk storage loader owns the interner mutably while assembling all
+    // stores; current edge-property payloads contain resolved raw key hashes.
     let t = stage_timer();
     let (mut disk_graph, temp_dir) =
         crate::graph::storage::disk::graph::DiskGraph::load_from_dir(dir, &mut graph.interner)?;
@@ -1824,8 +1820,8 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     // Load column stores — prefer mmap-backed (columns.bin + columns_meta).
     // 0.8.12 phase-1: PR1 phase 4 moved these files to `seg_000/`. Check
     // both locations so post-phase-4 saves still take the fast mmap path
-    // — without this the load fell through to the legacy
-    // `columns/<type>/columns.zst` branch which returns an empty
+    // — without this the load fell through to the per-type
+    // `columns/<type>/columns.zst` branch, which returned an empty
     // `column_stores` map, breaking `MATCH (n:Type)` queries after a
     // disk-mode save + reload.
     let mmap_path = {
@@ -1904,7 +1900,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
         // check before overwriting out of caution.
         load_column_sidecars(dir, &mut graph)?;
     } else {
-        // Legacy path: load from columns/<type>/columns.zst files
+        // Per-type sidecar path: load columns/<type>/columns.zst files.
         load_column_sidecars(dir, &mut graph)?;
     }
     log_stage("column_stores_load", t);
@@ -1918,7 +1914,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     //   1. id_indices.bin   — 0.8.28+ raw mmap-resident layout (lazy reads,
     //      ~ms load even at Wikidata scale).
     //   2. id_indices.bin.zst with KGLIIDX1 magic — 0.8.13 flat-CSR format
-    //      (eager decompress + HashMap rebuild; legacy fallback).
+    //      (eager decompress + HashMap rebuild; retained data fallback).
     // Pre-0.14 bincode caches are ignored and rebuilt lazily.
     let t = stage_timer();
     if crate::graph::storage::GraphRead::is_disk(&graph.graph) {
@@ -2024,7 +2020,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
 
 /// Load `columns/<type>/columns.zst` sidecars into `graph.column_stores`.
 /// Skips entries whose type is already loaded (from `columns.bin`'s mmap
-/// fast path). Used by both the legacy flat layout and the additive
+/// fast path). Used by both the earlier per-type layout and the additive
 /// post-`columns.bin` path that covers types added post-build via
 /// `add_nodes`.
 fn load_column_sidecars(
@@ -2140,7 +2136,7 @@ fn load_v5(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
 }
 
 struct PortableSectionPlan {
-    columns: Vec<V3ColumnSection>,
+    columns: Vec<PortableColumnSection>,
     embeddings: u64,
     timeseries: u64,
     secondary_labels: u64,
@@ -2213,7 +2209,7 @@ fn load_portable_column_section(
     codec: serde_codec::CodecVersion,
     dir_graph: &mut DirGraph,
     sections: &mut SectionCursor<'_>,
-    section_meta: &V3ColumnSection,
+    section_meta: &PortableColumnSection,
     section_index: usize,
     temp_dir: &Path,
 ) -> io::Result<()> {
@@ -2292,7 +2288,7 @@ fn load_portable_columns(
     codec: serde_codec::CodecVersion,
     dir_graph: &mut DirGraph,
     sections: &mut SectionCursor<'_>,
-    columns: &[V3ColumnSection],
+    columns: &[PortableColumnSection],
 ) -> io::Result<()> {
     let temp_dir = portable_temp_dir();
     if let Ok(mut dirs) = dir_graph.temp_dirs.lock() {

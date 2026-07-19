@@ -126,12 +126,10 @@ fn fmt_with_commas(n: usize) -> String {
     out
 }
 
-fn set_fields(d: &Bound<'_, PyDict>, fields: &[(&str, ProgressValue<'_>)]) -> PyResult<()> {
+fn set_fields(d: &Bound<'_, PyDict>, fields: &[(&str, ProgressValue)]) -> PyResult<()> {
     for (k, v) in fields {
         match v {
             ProgressValue::U64(n) => d.set_item(*k, *n)?,
-            ProgressValue::F64(n) => d.set_item(*k, *n)?,
-            ProgressValue::Str(s) => d.set_item(*k, *s)?,
         }
     }
     Ok(())

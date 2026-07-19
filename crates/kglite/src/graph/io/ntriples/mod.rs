@@ -29,16 +29,10 @@ pub use column_builder::{ColMapEntry, ColumnTypeMeta, FixedColMeta, RegionMeta, 
 pub use loader::load_ntriples;
 
 /// Per-counter value carried by [`ProgressEvent`]. Pure Rust — the
-/// pyapi layer maps this into Python types when (and only when)
-/// adapting a Python callback into a [`ProgressSink`]. `F64` and
-/// `Str` are reserved for sub-step labels emitted from Phase 1b / 2 / 3
-/// once those phases get internal progress reporting.
-pub enum ProgressValue<'a> {
+/// pyapi layer maps this into Python types when adapting a Python callback
+/// into a [`ProgressSink`].
+pub enum ProgressValue {
     U64(u64),
-    #[allow(dead_code)] // Reserved for sub-step labels in Phase 1b/2/3.
-    F64(f64),
-    #[allow(dead_code)] // Reserved for sub-step labels in Phase 1b/2/3.
-    Str(&'a str),
 }
 
 /// Structured progress event emitted by `load_ntriples` at phase
@@ -54,12 +48,12 @@ pub enum ProgressEvent<'a> {
     Update {
         phase: &'a str,
         current: u64,
-        fields: &'a [(&'a str, ProgressValue<'a>)],
+        fields: &'a [(&'a str, ProgressValue)],
     },
     Complete {
         phase: &'a str,
         elapsed_s: f64,
-        fields: &'a [(&'a str, ProgressValue<'a>)],
+        fields: &'a [(&'a str, ProgressValue)],
     },
 }
 

@@ -779,7 +779,7 @@ class TestEmbedTexts:
         assert len(embs) == 4
 
     def test_embed_texts_replace(self):
-        """replace=True re-embeds everything."""
+        """mode='all' re-embeds everything."""
         graph = kglite.KnowledgeGraph()
         df = pd.DataFrame({"id": [1, 2], "title": ["A", "B"], "text": ["hello", "world"]})
         graph.add_nodes(df, "Item", "id", "title")
@@ -788,8 +788,8 @@ class TestEmbedTexts:
         r1 = graph.embed_texts("Item", "text", show_progress=False)
         assert r1["embedded"] == 2
 
-        # replace=True forces re-embed
-        r2 = graph.embed_texts("Item", "text", show_progress=False, replace=True)
+        # mode='all' forces re-embed
+        r2 = graph.embed_texts("Item", "text", show_progress=False, mode="all")
         assert r2["embedded"] == 2
         assert r2["skipped_existing"] == 0
 
@@ -997,7 +997,7 @@ class TestEmbedderLifecycle:
         graph.set_embedder(model)
 
         graph.embed_texts("Node", "text", show_progress=False)
-        graph.embed_texts("Node", "text", show_progress=False, replace=True)
+        graph.embed_texts("Node", "text", show_progress=False, mode="all")
 
         assert model.load_count == 2
         assert model.unload_count == 2

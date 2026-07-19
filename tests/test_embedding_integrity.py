@@ -4,7 +4,7 @@
   existing store (mixing dims silently corrupts similarity search).
 - `embedding_dim(node_type, text_column)` exposes the store's dimension so a
   model change is detectable without bookkeeping.
-- `embed_texts(replace=True)` is deterministic across a dimension change
+- `embed_texts(mode="all")` is deterministic across a dimension change
   (rebuilds a fresh store at the new dimension).
 """
 
@@ -53,7 +53,7 @@ def test_add_embeddings_rejects_dimension_mismatch() -> None:
 
 
 def test_embed_texts_upsert_rejects_dimension_change() -> None:
-    """embed_texts(replace=False) into a store of a different dimension must
+    """The default incremental embed into a store of a different dimension must
     error with a recipe, not silently mix dims."""
     g = _docs()
     g.set_embedder(_Stub(4))
@@ -61,14 +61,14 @@ def test_embed_texts_upsert_rejects_dimension_change() -> None:
     assert g.embedding_dim("Doc", "summary") == 4
 
     g.set_embedder(_Stub(8))  # model swap
-    with pytest.raises(ValueError, match="replace=True"):
+    with pytest.raises(ValueError, match="mode='all'"):
         g.embed_texts("Doc", "summary", show_progress=False)
     # The store is untouched by the rejected upsert.
     assert g.embedding_dim("Doc", "summary") == 4
 
 
-def test_embed_texts_replace_rebuilds_at_new_dimension() -> None:
-    """replace=True is deterministic across a dimension change — it rebuilds a
+def test_embed_texts_all_rebuilds_at_new_dimension() -> None:
+    """mode="all" is deterministic across a dimension change — it rebuilds a
     fresh store at the new model's dimension (B5)."""
     g = _docs()
     g.set_embedder(_Stub(4))
@@ -76,5 +76,5 @@ def test_embed_texts_replace_rebuilds_at_new_dimension() -> None:
     assert g.embedding_dim("Doc", "summary") == 4
 
     g.set_embedder(_Stub(8))
-    g.embed_texts("Doc", "summary", replace=True, show_progress=False)
+    g.embed_texts("Doc", "summary", mode="all", show_progress=False)
     assert g.embedding_dim("Doc", "summary") == 8

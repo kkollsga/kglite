@@ -54,7 +54,7 @@ results = graph.select("Article").search_text("summary", "machine learning", top
 **Key details:**
 
 - **Auto-naming:** text column `"summary"` → embedding store key `"summary_emb"` (auto-derived)
-- **Incremental, three modes:** `embed_texts(mode=…)` — `'missing'` (default) embeds only nodes without a vector; `'changed'` also re-embeds nodes whose **text changed** since the last pass (a per-node content hash is stored to detect this); `'all'` rebuilds the whole store. (The old `replace=True`/`False` booleans still work — `True` ≡ `mode='all'`, `False` ≡ `mode='missing'`.)
+- **Incremental, three modes:** `embed_texts(mode=…)` — `'missing'` (default) embeds only nodes without a vector; `'changed'` also re-embeds nodes whose **text changed** since the last pass (a per-node content hash is stored to detect this); `'all'` rebuilds the whole store.
 - **Progress bar:** shows a tqdm progress bar by default. Disable with `show_progress=False`.
 - **Load/unload lifecycle:** if the model has optional `load()` / `unload()` methods, they are called automatically before and after each embedding operation.
 - **Provenance:** if the embedder exposes a `model_id` / `model_name` attribute, it's stamped onto the store; `embedding_info()` surfaces it so a model swap is detectable. The model object itself is **not** saved with `save()` — call `set_embedder()` again after deserializing.

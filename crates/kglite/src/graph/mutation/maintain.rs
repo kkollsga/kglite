@@ -305,7 +305,7 @@ pub fn add_nodes(
     // after add_nodes, so every id-equality read scanned (issue #20: lookups
     // were O(node position), e.g. 26µs for a high-id node on 30k rows). The
     // build is O(nodes-of-type), matching the cost the load path already pays
-    // via build_id_index_from_columns.
+    // via build_id_index.
     graph.id_indices.remove(&node_type);
     graph.build_id_index(&node_type);
 
