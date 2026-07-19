@@ -19,10 +19,7 @@ UNSAFE_PATTERN = re.compile(r"unsafe\s*\{")
 DIRECT_CODEC_RULES = {
     "bincode": (
         re.compile(r"\bbincode\s*::|^\s*use\s+bincode\b", re.MULTILINE),
-        {
-            "crates/kglite/src/serde_codec/bincode_v1.rs",
-            "crates/kglite/src/bincode_wire_contract_tests.rs",
-        },
+        set(),
     ),
     "postcard": (
         re.compile(r"\bpostcard\s*::|^\s*use\s+postcard\b", re.MULTILINE),
@@ -30,7 +27,7 @@ DIRECT_CODEC_RULES = {
     ),
 }
 CODEC_MANIFEST_OWNERS = {
-    "bincode": {"crates/kglite/Cargo.toml"},
+    "bincode": set(),
     "postcard": {"crates/kglite/Cargo.toml"},
 }
 

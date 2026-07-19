@@ -209,9 +209,9 @@
     {
       "path": "crates/kglite/src/graph/io/file.rs",
       "qualified_name": "crate::load_disk_dir",
-      "lines": 377,
-      "branches": 70,
-      "nesting": 7
+      "lines": 363,
+      "branches": 66,
+      "nesting": 6
     },
     {
       "path": "crates/kglite/src/graph/io/ntriples/column_builder.rs",
@@ -587,7 +587,7 @@
     {
       "path": "crates/kglite/src/graph/storage/disk/graph_persist.rs",
       "qualified_name": "crate::DiskGraph::load_from_dir",
-      "lines": 273,
+      "lines": 271,
       "branches": 25,
       "nesting": 4
     },

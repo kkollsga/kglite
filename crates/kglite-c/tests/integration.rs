@@ -8,6 +8,9 @@
 //! pipeline so we catch ABI-boundary regressions (handle move
 //! semantics, ownership transfer, JSON shape, etc.).
 
+use kglite::api::io::save_graph;
+use kglite::api::session::{execute_mut, ExecuteOptions};
+use kglite::api::DirGraph;
 use kglite_c::{
     kglite_abi_version, kglite_blueprint_build, kglite_compute_schema_json,
     kglite_create_edges_batch, kglite_cypher_result_columns_json, kglite_cypher_result_free,
@@ -24,18 +27,32 @@ use kglite_c::{
     kglite_embedder_fastembed_new, kglite_embedder_free, kglite_session_set_embedder,
     KgliteEmbedder,
 };
+use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
-use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 
 fn fixture_path() -> CString {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let path = PathBuf::from(manifest_dir)
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("tests/fixtures/timeseries_graph.kgl");
-    CString::new(path.to_str().unwrap()).unwrap()
+    static FIXTURE: OnceLock<CString> = OnceLock::new();
+    FIXTURE
+        .get_or_init(|| {
+            let path = std::env::temp_dir().join(format!(
+                "kglite-c-current-format-fixture-{}.kgl",
+                std::process::id()
+            ));
+            let path_string = path.to_string_lossy().into_owned();
+            let mut graph = DirGraph::new();
+            let params = HashMap::new();
+            execute_mut(
+                &mut graph,
+                "CREATE (:Person {id: 1, title: 'Fixture'})",
+                &ExecuteOptions::eager(&params),
+            )
+            .unwrap();
+            let mut graph = Arc::new(graph);
+            save_graph(&mut graph, &path_string).unwrap();
+            CString::new(path_string).unwrap()
+        })
+        .clone()
 }
 
 #[test]

@@ -30,7 +30,6 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 //   [12..]   codec payload for Vec<(node_type, embedding_property, HnswIndex)>
 pub(super) const VECTOR_INDEX_MAGIC: &[u8; 8] = b"KGLVIDX1";
 const VECTOR_INDEX_FORMAT_VERSION: u32 = 2;
-pub(super) const VECTOR_INDEX_LEGACY_VERSION: u32 = 1;
 
 /// Encode every built HNSW index into a self-describing payload. Returns `None`
 /// when no store carries an index (the section is then omitted entirely).
@@ -61,11 +60,10 @@ pub(super) fn decode_vector_indexes(payload: &[u8], graph: &mut DirGraph) {
         return;
     }
     let ver = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
-    let codec = match ver {
-        VECTOR_INDEX_LEGACY_VERSION => serde_codec::CodecVersion::BincodeV1,
-        VECTOR_INDEX_FORMAT_VERSION => serde_codec::CodecVersion::PostcardV1,
-        _ => return, // newer/older index format — skip, the store rebuilds on demand
-    };
+    if ver != VECTOR_INDEX_FORMAT_VERSION {
+        return; // rebuildable cache: skip unknown and pre-0.14 versions
+    }
+    let codec = serde_codec::CodecVersion::PostcardV1;
     let entries: Vec<(String, String, HnswIndex)> =
         match codec_deser(codec, &payload[12..], (payload.len() - 12) as u64) {
             Ok(e) => e,
@@ -86,22 +84,8 @@ pub(super) fn decode_vector_indexes(payload: &[u8], graph: &mut DirGraph) {
 
 /// Magic bytes for the embedding export format.
 const KGLE_MAGIC: [u8; 4] = *b"KGLE";
-/// v3: retains the v2 payload shape but explicitly selects Postcard. v2
-/// (0.11.1) added store `metric` + `model_id` + per-node `text_hash`
-/// alongside each vector, so a rebuild-from-`.kgle` pipeline retains provenance
-/// and can use `embed_texts(mode='changed')`. v1 files (no provenance) still
-/// read — see the version branch in `import_embeddings_from_file`.
+/// v3 selects Postcard and includes store/vector provenance.
 const KGLE_VERSION: u32 = 3;
-
-/// v1 `.kgle` store shape (no provenance) — kept solely to deserialize files
-/// produced by kglite ≤ 0.11.0.
-#[derive(Deserialize)]
-struct ExportedEmbeddingStoreV1 {
-    node_type: String,
-    text_column: String,
-    dimension: usize,
-    entries: Vec<(Value, Vec<f32>)>,
-}
 
 /// A single embedding store serialized with node IDs (not internal indices).
 /// v2 adds provenance: the store `metric`/`model_id` and a per-entry text hash,
@@ -151,57 +135,29 @@ fn decode_embedding_file_payload(
     buf: &[u8],
     version: u32,
 ) -> io::Result<Vec<ExportedEmbeddingStore>> {
-    // Legacy bincode is positional, so the v1 shape (no provenance) must be
-    // read with its own struct and lifted to the current in-memory shape.
-    if version >= 3 {
-        if buf.len() < 9 {
-            return Err(io::Error::other(
-                "Embedding file v3 is truncated before its codec tag.",
-            ));
-        }
-        let codec = serde_codec::CodecVersion::from_tag(buf[8])
-            .map_err(|e| io::Error::other(format!("Invalid .kgle codec tag: {e}")))?;
-        if codec != serde_codec::CodecVersion::PostcardV1 {
-            return Err(io::Error::other(format!(
-                "Embedding file v3 selects codec {}, but v3 requires Postcard codec {}.",
-                codec.tag(),
-                serde_codec::CodecVersion::PostcardV1.tag()
-            )));
-        }
-        let decoder = GzDecoder::new(&buf[9..]);
-        let mut bounded = decoder.take(MAX_CODEC_BYTES.saturating_add(1));
-        let mut payload = Vec::new();
-        bounded.read_to_end(&mut payload)?;
-        if payload.len() as u64 > MAX_CODEC_BYTES {
-            return Err(io::Error::other(format!(
-                "Decompressed embedding payload exceeds the {MAX_CODEC_BYTES} byte limit"
-            )));
-        }
-        return codec_deser(codec, &payload, payload.capacity() as u64)
-            .map_err(|e| io::Error::other(format!("Failed to deserialize embedding data: {e}")));
+    if version < KGLE_VERSION {
+        return Err(super::pre_014_bincode_error(
+            format!(".kgle embedding file v{version}").as_str(),
+        ));
     }
-
-    if version >= 2 {
-        let gz = GzDecoder::new(&buf[8..]);
-        return serde_codec::legacy::decode_from_bounded(gz, MAX_CODEC_BYTES)
-            .map_err(|e| io::Error::other(format!("Failed to deserialize embedding data: {e}")));
+    if buf.len() < 9 {
+        return Err(io::Error::other(
+            "Embedding file v3 is truncated before its codec tag.",
+        ));
     }
-
-    let gz = GzDecoder::new(&buf[8..]);
-    let v1: Vec<ExportedEmbeddingStoreV1> =
-        serde_codec::legacy::decode_from_bounded(gz, MAX_CODEC_BYTES)
-            .map_err(|e| io::Error::other(format!("Failed to deserialize embedding data: {e}")))?;
-    Ok(v1
-        .into_iter()
-        .map(|s| ExportedEmbeddingStore {
-            node_type: s.node_type,
-            text_column: s.text_column,
-            dimension: s.dimension,
-            metric: None,
-            model_id: None,
-            entries: s.entries.into_iter().map(|(id, v)| (id, v, None)).collect(),
-        })
-        .collect())
+    let codec = serde_codec::CodecVersion::from_tag(buf[8])
+        .map_err(|e| io::Error::other(format!("Invalid .kgle codec tag: {e}")))?;
+    let decoder = GzDecoder::new(&buf[9..]);
+    let mut bounded = decoder.take(MAX_CODEC_BYTES.saturating_add(1));
+    let mut payload = Vec::new();
+    bounded.read_to_end(&mut payload)?;
+    if payload.len() as u64 > MAX_CODEC_BYTES {
+        return Err(io::Error::other(format!(
+            "Decompressed embedding payload exceeds the {MAX_CODEC_BYTES} byte limit"
+        )));
+    }
+    codec_deser(codec, &payload, payload.capacity() as u64)
+        .map_err(|e| io::Error::other(format!("Failed to deserialize embedding data: {e}")))
 }
 
 /// Export embeddings to a standalone .kgle file, keyed by node ID.
@@ -405,29 +361,32 @@ mod tests {
     }
 
     #[test]
-    fn legacy_v2_and_postcard_v3_embedding_payloads_decode_identically() {
+    fn pre_014_embedding_payload_is_rejected() {
         let stores = vec![fixture_store()];
-        let legacy_payload = serde_codec::legacy::encode(&stores).unwrap();
-        let legacy = embedding_file(2, None, &legacy_payload);
+        let old_payload = codec_ser(serde_codec::CodecVersion::PostcardV1, &stores).unwrap();
+        let old = embedding_file(2, None, &old_payload);
+        let error = decode_embedding_file_payload(&old, 2).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("pre-0.14"));
+    }
+
+    #[test]
+    fn postcard_v3_embedding_payload_decodes() {
+        let stores = vec![fixture_store()];
         let postcard_payload = codec_ser(serde_codec::CodecVersion::PostcardV1, &stores).unwrap();
         let current = embedding_file(
             3,
             Some(serde_codec::CodecVersion::PostcardV1.tag()),
             &postcard_payload,
         );
-
-        for decoded in [
-            decode_embedding_file_payload(&legacy, 2).unwrap(),
-            decode_embedding_file_payload(&current, 3).unwrap(),
-        ] {
-            assert_eq!(decoded.len(), 1);
-            assert_eq!(decoded[0].node_type, "Doc");
-            assert_eq!(decoded[0].text_column, "summary");
-            assert_eq!(decoded[0].dimension, 2);
-            assert_eq!(decoded[0].metric.as_deref(), Some("cosine"));
-            assert_eq!(decoded[0].model_id.as_deref(), Some("fixture"));
-            assert_eq!(decoded[0].entries[0].2, Some(99));
-        }
+        let decoded = decode_embedding_file_payload(&current, 3).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].node_type, "Doc");
+        assert_eq!(decoded[0].text_column, "summary");
+        assert_eq!(decoded[0].dimension, 2);
+        assert_eq!(decoded[0].metric.as_deref(), Some("cosine"));
+        assert_eq!(decoded[0].model_id.as_deref(), Some("fixture"));
+        assert_eq!(decoded[0].entries[0].2, Some(99));
     }
 
     #[test]

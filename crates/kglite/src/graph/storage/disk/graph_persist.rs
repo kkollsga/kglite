@@ -23,8 +23,8 @@ use super::segment_summary::SegmentManifest;
 #[derive(Serialize, Deserialize)]
 struct DiskGraphMeta {
     /// Codec for Serde-backed payloads owned by this disk snapshot.
-    /// Missing means the frozen bincode v1 format used before 0.13.4.
-    #[serde(default = "legacy_codec_tag")]
+    /// Missing means a retired pre-0.14 snapshot and is rejected on load.
+    #[serde(default)]
     serde_codec_version: u8,
     node_count: usize,
     node_slots_len: usize,
@@ -49,9 +49,7 @@ struct DiskGraphMeta {
     /// as `true` (conservative) via a custom default.
     #[serde(default = "default_has_tombstones")]
     has_tombstones: bool,
-    /// Edge property storage format. 0 = legacy bincode+zstd HashMap
-    /// (edge_properties.bin.zst). 1 = bincode columnar mmap base + overlay;
-    /// 2 = Postcard columnar mmap base + overlay.
+    /// Edge property storage format. 2 = Postcard columnar mmap base + overlay.
     /// (edge_prop_offsets.bin + edge_prop_heap.bin). Added in PR2 of
     /// the disk-graph-improvement-plan; defaults to 0 for backward
     /// compat with older .kgl directories.
@@ -87,8 +85,16 @@ fn default_has_tombstones() -> bool {
 
 const MAX_DISK_CODEC_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-const fn legacy_codec_tag() -> u8 {
-    crate::serde_codec::CodecVersion::BincodeV1.tag()
+fn validate_disk_format(meta: &DiskGraphMeta) -> std::io::Result<crate::serde_codec::CodecVersion> {
+    if meta.serde_codec_version != crate::serde_codec::CURRENT_CODEC.tag()
+        || meta.edge_properties_format < 2
+    {
+        return Err(crate::graph::io::file::pre_014_bincode_error(
+            "disk graph snapshot",
+        ));
+    }
+    crate::serde_codec::CodecVersion::from_tag(meta.serde_codec_version)
+        .map_err(std::io::Error::other)
 }
 
 type OverflowEdges = (HashMap<u32, Vec<CsrEdge>>, HashMap<u32, Vec<CsrEdge>>);
@@ -958,8 +964,7 @@ impl DiskGraph {
         let t = stage_timer();
         let meta_str = std::fs::read_to_string(dir.join("disk_graph_meta.json"))?;
         let meta: DiskGraphMeta = serde_json::from_str(&meta_str).map_err(std::io::Error::other)?;
-        let serde_codec = crate::serde_codec::CodecVersion::from_tag(meta.serde_codec_version)
-            .map_err(std::io::Error::other)?;
+        let serde_codec = validate_disk_format(&meta)?;
         log_stage("dg.meta_parse", t);
 
         // PR1 phase 4: CSR binaries live under seg_NNN/ when the graph
@@ -1123,8 +1128,7 @@ impl DiskGraph {
             peer_count_entries,
         } = segment_csr;
 
-        // Load edge properties — Postcard columnar (2), bincode columnar (1),
-        // or legacy combined bincode (0).
+        // Load Postcard columnar edge properties (format 2).
         // In the segmented layout the files live alongside the CSR.
         let t = stage_timer();
         let edge_properties = EdgePropertyStore::load_from(

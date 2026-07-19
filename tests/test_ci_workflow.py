@@ -162,7 +162,7 @@ def test_scheduled_dependency_maintenance_is_report_first() -> None:
     assert 'package-ecosystem: "cargo"' in dependabot
     cargo_policy = dependabot.split('package-ecosystem: "cargo"', maxsplit=1)[1]
     assert 'update-types: ["minor", "patch"]' in cargo_policy
-    assert 'dependency-name: "bincode"' in cargo_policy
+    assert "ignore:" not in cargo_policy
     assert 'update-types: ["major"' not in cargo_policy
 
     maintenance = _job_block("dependency-maintenance")

@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 
 const PROPERTY_LOG_MAGIC: [u8; 4] = *b"KPRL";
 const PROPERTY_LOG_FORMAT_VERSION: u8 = 2;
-const LEGACY_PROPERTY_LOG_FORMAT_VERSION: u8 = 1;
 const MAX_PROPERTY_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
 
 // ─── LogEntry ───────────────────────────────────────────────────────────────
@@ -138,8 +137,12 @@ impl PropertyLogReader {
             ));
         }
         let codec = match header[4] {
-            LEGACY_PROPERTY_LOG_FORMAT_VERSION => crate::serde_codec::CodecVersion::BincodeV1,
             PROPERTY_LOG_FORMAT_VERSION => crate::serde_codec::CodecVersion::PostcardV1,
+            1 => {
+                return Err(crate::graph::io::file::pre_014_bincode_error(
+                    "property-log format v1",
+                ));
+            }
             version => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -251,25 +254,19 @@ mod tests {
     }
 
     #[test]
-    fn header_selects_legacy_bincode_reader() {
+    fn pre_014_property_log_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy.log.zst");
         write_fixture(
             &path,
-            LEGACY_PROPERTY_LOG_FORMAT_VERSION,
-            crate::serde_codec::CodecVersion::BincodeV1,
+            1,
+            crate::serde_codec::CodecVersion::PostcardV1,
             false,
         );
 
-        let entry = PropertyLogReader::open(&path)
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap();
-        assert_eq!(entry.node_type, InternedKey::from_u64(42));
-        assert_eq!(entry.node_idx, NodeIndex::new(3));
-        assert_eq!(entry.id, Value::UniqueId(7));
-        assert_eq!(entry.properties[0].1, Value::List(vec![Value::Int64(1)]));
+        let error = PropertyLogReader::open(&path).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("pre-0.14"));
     }
 
     #[test]

@@ -389,33 +389,29 @@ fn test_column_store_new_mixed() {
 }
 
 #[test]
-fn packed_mixed_columns_read_both_codec_generations() {
+fn packed_mixed_columns_round_trip_with_current_codec() {
     let mut interner = StringInterner::new();
     let key = interner.get_or_intern("payload");
     let schema = Arc::new(TypeSchema::from_keys(vec![key]));
     let mut store = ColumnStore::new_mixed(schema.clone());
     store.push_row(&[(key, Value::String("legacy-or-current".into()))]);
 
-    for codec in [
-        crate::serde_codec::CodecVersion::BincodeV1,
-        crate::serde_codec::CodecVersion::PostcardV1,
-    ] {
-        let packed = store.write_packed_with_codec(&interner, codec).unwrap();
-        let loaded = ColumnStore::load_packed_with_codec(
-            schema.clone(),
-            &HashMap::new(),
-            &interner,
-            &packed,
-            1,
-            None,
-            codec,
-        )
-        .unwrap();
-        assert_eq!(
-            loaded.get(0, key),
-            Some(Value::String("legacy-or-current".into()))
-        );
-    }
+    let codec = crate::serde_codec::CURRENT_CODEC;
+    let packed = store.write_packed_with_codec(&interner, codec).unwrap();
+    let loaded = ColumnStore::load_packed_with_codec(
+        schema,
+        &HashMap::new(),
+        &interner,
+        &packed,
+        1,
+        None,
+        codec,
+    )
+    .unwrap();
+    assert_eq!(
+        loaded.get(0, key),
+        Some(Value::String("legacy-or-current".into()))
+    );
 }
 
 #[test]
@@ -462,7 +458,7 @@ fn test_column_store_materialize_roundtrip() {
 #[test]
 fn test_overflow_value_list_roundtrip() {
     // Native list properties must survive the overflow-bag wire format
-    // (tag 8 = u32 length prefix + bincode(Vec<Value>)). Before the
+    // (tag 9 = u32 length prefix + Postcard(Vec<Value>)). Before the
     // 0.11.x fix this serialized as null and the list was silently lost.
     let mut interner = StringInterner::new();
     let key = interner.get_or_intern("aliases");

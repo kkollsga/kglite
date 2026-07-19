@@ -313,11 +313,11 @@ class TestV3Format:
         finally:
             os.unlink(path)
 
-    def test_truncated_v3_file_error(self):
-        """A truncated v4 file should give a clear error."""
+    def test_truncated_current_file_error(self):
+        """A truncated v5 file should give a clear error."""
         with tempfile.NamedTemporaryFile(suffix=".kgl", delete=False) as f:
-            # Phase A.1 / C5 — bumped to v4 magic.
-            f.write(b"RGF\x04\x02\x00\x00\x00")  # magic + core_version, but no metadata_length
+            # v5 magic + Postcard tag + core version, but no metadata length.
+            f.write(b"RGF\x05\x02\x03\x00\x00\x00")
             path = f.name
         try:
             with pytest.raises(Exception, match="(?i)(truncated|incomplete|failed)"):
@@ -329,10 +329,10 @@ class TestV3Format:
         """A file with a future core_data_version should give a helpful upgrade message."""
         import struct
 
-        # Phase A.1 / C5 — v4 magic. Future core_data_version=99 still
-        # trips the in-loader "supports up to version N" error.
+        # v5 + Postcard. Future core_data_version=99 still trips the
+        # in-loader "supports up to version N" error.
         metadata = b"{}"
-        header = b"RGF\x04"
+        header = b"RGF\x05\x02"
         header += struct.pack("<I", 99)  # future core version
         header += struct.pack("<I", len(metadata))
 

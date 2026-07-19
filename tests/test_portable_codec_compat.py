@@ -1,6 +1,8 @@
-"""Compatibility fixtures captured with the published KGLite 0.13.3 wheel."""
+"""The 0.14 persistence boundary rejects pre-Postcard portable artifacts."""
 
 from pathlib import Path
+
+import pytest
 
 import kglite
 
@@ -19,33 +21,24 @@ def _matching_people() -> kglite.KnowledgeGraph:
     return graph
 
 
-def test_released_v4_graph_loads_with_embeddings_and_resaves_as_v5(tmp_path):
+def test_released_v4_graph_requires_a_pre_014_converter():
     assert LEGACY_KGL.read_bytes()[:4] == b"RGF\x04"
-    graph = kglite.load(str(LEGACY_KGL))
-
-    rows = graph.cypher("MATCH (n:Person) RETURN n.id, n.score ORDER BY n.id").to_list()
-    assert rows == [
-        {"n.id": "a", "n.score": 1},
-        {"n.id": "b", "n.score": 2},
-        {"n.id": "c", "n.score": 3},
-    ]
-    info = graph.embedding_info("Person", "title")
-    assert info["count"] == 3
-    assert info["dimension"] == 2
-    assert info["metric"] == "euclidean"
-
-    current = tmp_path / "current.kgl"
-    graph.save(str(current))
-    assert current.read_bytes()[:5] == b"RGF\x05\x02"
-    assert kglite.load(str(current)).embedding_info("Person", "title")["count"] == 3
+    with pytest.raises(kglite.FileFormatError, match="pre-0.14.*0.13.4"):
+        kglite.load(str(LEGACY_KGL))
 
 
-def test_released_kgle_v2_imports_and_current_export_is_tagged_v3(tmp_path):
+def test_released_kgle_v2_is_rejected_and_current_export_is_tagged_v3(tmp_path):
     assert LEGACY_KGLE.read_bytes()[:8] == b"KGLE\x02\x00\x00\x00"
     graph = _matching_people()
-    stats = graph.import_embeddings(str(LEGACY_KGLE))
-    assert stats == {"stores": 1, "imported": 3, "skipped": 0, "dropped_stores": 0}
-    assert graph.embedding_info("Person", "title")["metric"] == "euclidean"
+    with pytest.raises(OSError, match="pre-0.14.*0.13.4"):
+        graph.import_embeddings(str(LEGACY_KGLE))
+
+    graph.set_embeddings(
+        "Person",
+        "title",
+        {"a": [1.0, 0.0], "b": [0.0, 1.0], "c": [0.5, 0.5]},
+        metric="euclidean",
+    )
 
     current = tmp_path / "current.kgle"
     graph.export_embeddings(str(current))

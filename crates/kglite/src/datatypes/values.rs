@@ -1208,9 +1208,17 @@ mod tests {
         assert_eq!(format_value(&v), "\"2024-03-15T10:30:45\"");
 
         // serde round-trip (the .kgl path for Mixed columns).
-        let bytes = crate::serde_codec::legacy::encode(&v).unwrap();
+        let bytes =
+            crate::serde_codec::encode_versioned(crate::serde_codec::CURRENT_CODEC, &v, u64::MAX)
+                .unwrap();
         assert_eq!(
-            crate::serde_codec::legacy::decode::<Value>(&bytes).unwrap(),
+            crate::serde_codec::decode_exact_with::<Value>(
+                crate::serde_codec::CURRENT_CODEC,
+                &bytes,
+                bytes.len() as u64,
+                crate::serde_codec::DecodeLimits::new(u64::MAX, u64::MAX),
+            )
+            .unwrap(),
             v
         );
 

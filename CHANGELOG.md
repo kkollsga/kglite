@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING: all bincode persistence support and the bincode dependency have
+  been removed.** Current `.kgl`, `.kgle`, WAL, disk-snapshot, property-log,
+  column, edge-property, and index payloads use Postcard only. Pre-0.14
+  archival formats now fail with guidance to open and re-export them with
+  KGLite 0.13.4; rebuildable pre-0.14 caches are skipped and regenerated.
+
 ## [0.14.2] - 2026-07-18
 
 ### Added

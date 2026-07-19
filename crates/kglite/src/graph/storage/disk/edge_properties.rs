@@ -32,7 +32,7 @@
 // reads never touch the interner.
 
 use crate::datatypes::values::Value;
-use crate::graph::schema::{InternedKey, SerdeDeserializeGuard, StringInterner};
+use crate::graph::schema::{InternedKey, StringInterner};
 use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -45,8 +45,7 @@ use std::sync::Arc;
 pub const OFFSETS_FILE: &str = "edge_prop_offsets.bin";
 pub const HEAP_FILE: &str = "edge_prop_heap.bin";
 
-/// Legacy combined bincode+zstd blob emitted by format=0 graphs.
-/// Kept readable via `load_legacy` for backward compat.
+/// Retired pre-0.14 combined edge-property file, removed on current saves.
 pub const LEGACY_FILE: &str = "edge_properties.bin.zst";
 
 /// Lengths needed to mmap the columnar files at load time. Persisted
@@ -67,7 +66,7 @@ pub struct EdgePropertyStoreMeta {
 struct ColumnarBase {
     /// offsets[edge_idx]..offsets[edge_idx + 1] = byte range in heap.
     offsets: MmapOrVec<u64>,
-    /// Concatenated bincode blobs. Each populated slot is a
+    /// Concatenated Postcard blobs. Each populated slot is a
     /// `Vec<(u64, Value)>` — u64 is the raw `InternedKey` hash.
     heap: MmapBytes,
     codec: crate::serde_codec::CodecVersion,
@@ -152,9 +151,7 @@ impl EdgePropertyStore {
         Self::default()
     }
 
-    /// Construct from a pre-populated HashMap. Used when migrating a
-    /// legacy format=0 graph — the caller bincode-deserializes the old
-    /// blob and passes it here.
+    /// Construct from a pre-populated HashMap.
     pub fn from_overlay(map: HashMap<u32, Vec<(InternedKey, Value)>>) -> Self {
         Self {
             base: None,
@@ -333,8 +330,7 @@ impl EdgePropertyStore {
 
     /// Open the store from a directory.
     /// - `format_version` comes from `DiskGraphMeta.edge_properties_format`
-    ///   (0 = legacy combined bincode, 1 = bincode columnar,
-    ///   2 = Postcard columnar).
+    ///   (2 = Postcard columnar).
     /// - `meta` provides the file lengths needed to mmap the columnar files.
     ///   Ignored when loading format=0.
     /// - `interner` is mutated only on the legacy path (to register keys
@@ -344,10 +340,12 @@ impl EdgePropertyStore {
         dir: &Path,
         format_version: u8,
         meta: EdgePropertyStoreMeta,
-        interner: &mut StringInterner,
+        _interner: &mut StringInterner,
     ) -> io::Result<Self> {
-        if format_version == 0 || (meta.offsets_len == 0 && !dir.join(OFFSETS_FILE).exists()) {
-            return Self::load_legacy(dir, interner);
+        if format_version < 2 {
+            return Err(crate::graph::io::file::pre_014_bincode_error(
+                "edge-property store",
+            ));
         }
         let offsets_path = dir.join(OFFSETS_FILE);
         let heap_path = dir.join(HEAP_FILE);
@@ -367,7 +365,6 @@ impl EdgePropertyStore {
         let offsets = MmapOrVec::<u64>::load_mapped(&offsets_path, meta.offsets_len)?;
         let heap = MmapBytes::load_mapped(&heap_path, meta.heap_len)?;
         let codec = match format_version {
-            1 => crate::serde_codec::CodecVersion::BincodeV1,
             2 => crate::serde_codec::CodecVersion::PostcardV1,
             other => {
                 return Err(io::Error::new(
@@ -384,19 +381,6 @@ impl EdgePropertyStore {
             })),
             overlay: HashMap::new(),
         })
-    }
-
-    fn load_legacy(dir: &Path, interner: &mut StringInterner) -> io::Result<Self> {
-        let legacy = dir.join(LEGACY_FILE);
-        if !legacy.exists() {
-            return Ok(Self::new());
-        }
-        let compressed = std::fs::read(&legacy)?;
-        let bytes = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
-        let _guard = SerdeDeserializeGuard::new(interner);
-        let map: HashMap<u32, Vec<(InternedKey, Value)>> =
-            crate::serde_codec::legacy::decode(&bytes).map_err(io::Error::other)?;
-        Ok(Self::from_overlay(map))
     }
 
     /// Compute the on-disk metadata for this store — call after `save_to`
@@ -421,7 +405,7 @@ impl EdgePropertyStore {
 mod tests {
     use super::*;
     use crate::datatypes::values::Value;
-    use crate::graph::schema::{SerdeSerializeGuard, StringInterner};
+    use crate::graph::schema::StringInterner;
     use tempfile::TempDir;
 
     fn k(s: &str, interner: &mut StringInterner) -> InternedKey {
@@ -529,51 +513,36 @@ mod tests {
     }
 
     #[test]
-    fn legacy_load_reads_hashmap_blob() {
+    fn pre_014_combined_store_is_rejected() {
         let tmp = TempDir::new().unwrap();
         let mut interner = StringInterner::new();
-        let mut map: HashMap<u32, Vec<(InternedKey, Value)>> = HashMap::new();
-        map.insert(
-            2,
-            vec![(k("legacy", &mut interner), Value::String("old".into()))],
-        );
-
-        // Emit the legacy bincode+zstd blob manually, under the
-        // serialization guard so InternedKey serializes as a string.
-        {
-            let _g = SerdeSerializeGuard::new(&interner);
-            let raw = crate::serde_codec::legacy::encode(&map).unwrap();
-            let compressed = zstd::encode_all(raw.as_slice(), 3).unwrap();
-            std::fs::write(tmp.path().join(LEGACY_FILE), compressed).unwrap();
-        }
-
-        let loaded = EdgePropertyStore::load_from(
+        let error = EdgePropertyStore::load_from(
             tmp.path(),
             0,
             EdgePropertyStoreMeta::default(),
             &mut interner,
         )
-        .unwrap();
-        let got = loaded.get(2).expect("should load from legacy");
-        assert_eq!(got.as_ref().len(), 1);
-        assert_eq!(got.as_ref()[0].1, Value::String("old".into()));
+        .unwrap_err();
+        assert!(error.to_string().contains("pre-0.14"));
     }
 
     #[test]
-    fn legacy_columnar_slots_remain_readable_and_unknown_versions_fail() {
+    fn pre_014_columnar_and_unknown_versions_fail() {
         let tmp = TempDir::new().unwrap();
         let mut interner = StringInterner::new();
         let key = k("legacy-column", &mut interner);
         let raw = vec![(key.as_u64(), Value::Int64(17))];
-        let heap = crate::serde_codec::legacy::encode(&raw).unwrap();
+        let heap =
+            crate::serde_codec::encode_versioned(crate::serde_codec::CURRENT_CODEC, &raw, u64::MAX)
+                .unwrap();
         MmapOrVec::from_vec(vec![0u64, heap.len() as u64])
             .save_to_file(&tmp.path().join(OFFSETS_FILE))
             .unwrap();
         std::fs::write(tmp.path().join(HEAP_FILE), &heap).unwrap();
         let meta = EdgePropertyStore::meta_for(tmp.path());
 
-        let loaded = EdgePropertyStore::load_from(tmp.path(), 1, meta, &mut interner).unwrap();
-        assert_eq!(loaded.get(0).unwrap()[0].1, Value::Int64(17));
+        let error = EdgePropertyStore::load_from(tmp.path(), 1, meta, &mut interner).unwrap_err();
+        assert!(error.to_string().contains("pre-0.14"));
 
         let error = EdgePropertyStore::load_from(tmp.path(), 99, meta, &mut interner).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
@@ -606,7 +575,7 @@ mod tests {
         assert_eq!(meta.offsets_len, 0);
         assert_eq!(meta.heap_len, 0);
 
-        let reloaded = EdgePropertyStore::load_from(tmp.path(), 1, meta, &mut interner).unwrap();
+        let reloaded = EdgePropertyStore::load_from(tmp.path(), 2, meta, &mut interner).unwrap();
         assert!(reloaded.is_empty());
         // get() on any edge_idx returns None — matches the pre-phase-1
         // behavior where every edge had an empty slot.

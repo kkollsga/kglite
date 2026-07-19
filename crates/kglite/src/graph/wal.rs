@@ -32,8 +32,8 @@
 //! ## Crash safety of the format
 //!
 //! A frame is `[len: u32 LE][crc32: u32 LE][payload: codec(WalFrame)]`.
-//! The file header selects the codec for every frame: v1 used bincode and
-//! v2 uses Postcard. The codec is never inferred from payload bytes.
+//! The v2 file header selects Postcard for every frame. Older headers are
+//! rejected before any payload or torn-tail handling.
 //! A crash mid-append leaves a torn trailing frame; [`read_frames`] stops
 //! at the first short read or CRC mismatch and returns every frame up to
 //! it. A torn frame is therefore *discarded*, never half-applied — the
@@ -43,7 +43,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -58,7 +57,6 @@ pub const WAL_MAGIC: [u8; 4] = *b"KWAL";
 /// every checkpoint), not a long-term archival format like `.kgl`.
 pub const WAL_FORMAT_VERSION: u8 = 2;
 
-const LEGACY_WAL_FORMAT_VERSION: u8 = 1;
 const MAX_WAL_FRAME_BYTES: u64 = u32::MAX as u64;
 
 /// One logical, identity-keyed mutation. See the module docs for why
@@ -294,13 +292,15 @@ pub fn read_frames(mut r: impl Read, stream_len: u64) -> io::Result<Vec<WalFrame
 
 fn wal_codec(version: u8) -> io::Result<crate::serde_codec::CodecVersion> {
     match version {
-        LEGACY_WAL_FORMAT_VERSION => Ok(crate::serde_codec::CodecVersion::BincodeV1),
         WAL_FORMAT_VERSION => Ok(crate::serde_codec::CodecVersion::PostcardV1),
+        1 => Err(crate::graph::io::file::pre_014_bincode_error(
+            "WAL format v1",
+        )),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
                 "unsupported WAL format version {version} (this build reads \
-                 v{LEGACY_WAL_FORMAT_VERSION} and v{WAL_FORMAT_VERSION})"
+                 v{WAL_FORMAT_VERSION})"
             ),
         )),
     }
@@ -370,9 +370,8 @@ impl Wal {
     /// and the header `fsync` — so it is truncated and re-initialised in
     /// place. A *longer* file with a bad magic could be somebody's data:
     /// that errors loudly instead of destroying it. Supported v1 WALs are
-    /// atomically rewritten as v2 before append; unknown versions are rejected.
+    /// Pre-0.14 and unknown versions are rejected before append.
     pub fn open(path: PathBuf) -> io::Result<Self> {
-        migrate_legacy_wal(&path)?;
         let existed = path.exists();
         let mut file = OpenOptions::new()
             .create(true)
@@ -454,59 +453,6 @@ impl Wal {
     pub fn path(&self) -> &Path {
         &self.path
     }
-}
-
-/// Upgrade an intact legacy v1 WAL to v2 before it is opened for append.
-/// The replacement is written and synced separately, so a crash leaves either
-/// the old readable file or the complete new file, never a mixed-codec stream.
-fn migrate_legacy_wal(path: &Path) -> io::Result<()> {
-    let mut source = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    let len = source.metadata()?.len();
-    if len < (WAL_MAGIC.len() + 1) as u64 {
-        return Ok(()); // `open` repairs provably frameless torn headers.
-    }
-    let mut header = [0u8; 5];
-    source.read_exact(&mut header)?;
-    if header[..4] != WAL_MAGIC {
-        return Ok(()); // `open` applies its existing bad-magic policy.
-    }
-    let version = header[4];
-    if version != LEGACY_WAL_FORMAT_VERSION {
-        return Ok(());
-    }
-    drop(source); // Windows cannot replace a file while this handle is open.
-
-    let frames = read_frames(BufReader::new(File::open(path)?), len)?;
-    let mut temp_path = path.as_os_str().to_owned();
-    static MIGRATION_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nonce = MIGRATION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    temp_path.push(format!(".migrating.{}.{}", std::process::id(), nonce));
-    let temp_path = PathBuf::from(temp_path);
-    let result = (|| {
-        let mut temp = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&temp_path)?;
-        write_header(&mut temp)?;
-        for frame in &frames {
-            append_frame(&mut temp, frame)?;
-        }
-        temp.flush()?;
-        temp.sync_all()?;
-        drop(temp); // Close before replacement for Windows compatibility.
-        std::fs::rename(&temp_path, path)?;
-        sync_parent_dir(path);
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
-    }
-    result
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -673,10 +619,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_v1_frames_are_selected_by_header() {
-        let expected = vec![frame(1), frame(2)];
-        let bytes = write_wal_version(&expected, LEGACY_WAL_FORMAT_VERSION);
-        assert_eq!(read_frames_all(bytes).unwrap(), expected);
+    fn legacy_v1_is_rejected_before_frame_recovery() {
+        let bytes = b"KWAL\x01".to_vec();
+        let error = read_frames_all(bytes).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("pre-0.14"));
     }
 
     #[test]
@@ -722,27 +669,13 @@ mod tests {
     }
 
     #[test]
-    fn open_atomically_migrates_legacy_wal_before_append() {
+    fn open_rejects_legacy_wal_before_append() {
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("g.kgl-wal");
-        let expected = vec![frame(1), frame(2)];
-        std::fs::write(&p, write_wal_version(&expected, LEGACY_WAL_FORMAT_VERSION)).unwrap();
+        std::fs::write(&p, b"KWAL\x01").unwrap();
 
-        let mut wal = Wal::open(p.clone()).unwrap();
-        wal.append(&frame(3)).unwrap();
-        drop(wal);
-
-        assert_eq!(std::fs::read(&p).unwrap()[4], WAL_FORMAT_VERSION);
-        let frames = recover(&p).unwrap();
-        assert_eq!(
-            frames.iter().map(|frame| frame.lsn).collect::<Vec<_>>(),
-            [1, 2, 3]
-        );
-        assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .contains(".migrating.")));
+        let error = Wal::open(p).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

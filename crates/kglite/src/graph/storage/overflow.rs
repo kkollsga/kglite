@@ -29,7 +29,7 @@
 //! | 5   | DateTime   | 4 bytes i32 LE (days since unix epoch)   |
 //! | 6   | String     | u32 LE length + UTF-8 bytes              |
 //! | 7   | Timestamp  | 8 bytes i64 LE (seconds since unix epoch)|
-//! | 8   | List (v1)  | u32 LE length + bincode(`Vec<Value>`)    |
+//! | 8   | Reserved   | u32 LE length + retired pre-0.14 payload |
 //! | 9   | List       | u32 LE length + Postcard(`Vec<Value>`)   |
 //! | 10  | Map        | u32 LE length + Postcard(`BTreeMap`)     |
 //!
@@ -61,7 +61,8 @@ pub const TAG_BOOL: u8 = 4;
 pub const TAG_DATE: u8 = 5;
 pub const TAG_STRING: u8 = 6;
 pub const TAG_TIMESTAMP: u8 = 7;
-/// Legacy bincode list payload. New writers use [`TAG_LIST_POSTCARD`].
+/// Retired pre-0.14 list payload tag. Kept reserved so scanners can skip it
+/// without misaligning later properties; it is never decoded or written.
 pub const TAG_LIST: u8 = 8;
 pub const TAG_LIST_POSTCARD: u8 = 9;
 pub const TAG_MAP_POSTCARD: u8 = 10;
@@ -112,9 +113,8 @@ pub fn encode_value(buf: &mut Vec<u8>, key: InternedKey, value: &Value) {
         // NodeRef is transient; Duration is query-time-only (Cluster 2).
         // Both are written as null.
         Value::NodeRef(_) | Value::Duration { .. } => buf.push(TAG_NULL),
-        // Lists ARE real persistable property values (native list
-        // properties, 0.11.x). New writes use the Postcard tag; tag 8
-        // remains an explicit read-only bincode compatibility branch.
+        // Lists are persistable property values. Tag 8 is retired and
+        // current writes always use the Postcard tag.
         Value::List(items) => encode_list(buf, items),
         Value::Map(entries) => encode_map(buf, entries),
         // Graph-entity variants are query-result-time values; they don't
@@ -275,13 +275,16 @@ pub fn read_value(blob: &[u8], pos: &mut usize, type_tag: u8) -> Option<Value> {
             let epoch = UNIX_EPOCH_DATE.and_hms_opt(0, 0, 0)?;
             Some(Value::Timestamp(epoch + chrono::Duration::seconds(secs)))
         }
-        TAG_LIST | TAG_LIST_POSTCARD => {
+        TAG_LIST_POSTCARD => {
             let bytes = read_len_prefixed(blob, pos)?;
-            let codec = list_codec(type_tag)?;
             let limits = crate::serde_codec::DecodeLimits::new(u32::MAX as u64, bytes.len() as u64);
-            let items: Vec<Value> =
-                crate::serde_codec::decode_exact_with(codec, bytes, bytes.len() as u64, limits)
-                    .ok()?;
+            let items: Vec<Value> = crate::serde_codec::decode_exact_with(
+                crate::serde_codec::CodecVersion::PostcardV1,
+                bytes,
+                bytes.len() as u64,
+                limits,
+            )
+            .ok()?;
             Some(Value::List(items))
         }
         TAG_MAP_POSTCARD => {
@@ -297,15 +300,6 @@ pub fn read_value(blob: &[u8], pos: &mut usize, type_tag: u8) -> Option<Value> {
                 .ok()?;
             Some(Value::Map(entries))
         }
-        _ => None,
-    }
-}
-
-#[inline]
-fn list_codec(type_tag: u8) -> Option<crate::serde_codec::CodecVersion> {
-    match type_tag {
-        TAG_LIST => Some(crate::serde_codec::CodecVersion::BincodeV1),
-        TAG_LIST_POSTCARD => Some(crate::serde_codec::CodecVersion::PostcardV1),
         _ => None,
     }
 }
@@ -359,7 +353,7 @@ pub fn scan_blob(blob: &[u8], key: InternedKey) -> Option<Value> {
     let target = key.as_u64();
     let mut found = None;
     let _ = for_each_raw(blob, |entry_key, tag, blob, pos| {
-        if entry_key == target && tag <= MAX_KNOWN_TAG {
+        if entry_key == target && tag <= MAX_KNOWN_TAG && tag != TAG_LIST {
             found = read_value(blob, pos, tag);
             return Some(()); // stop scanning
         }
@@ -377,7 +371,7 @@ pub fn scan_blob(blob: &[u8], key: InternedKey) -> Option<Value> {
 pub fn decode_blob(blob: &[u8]) -> Vec<(InternedKey, Value)> {
     let mut result = Vec::new();
     let _ = for_each_raw(blob, |entry_key, tag, blob, pos| {
-        if tag <= MAX_KNOWN_TAG {
+        if tag <= MAX_KNOWN_TAG && tag != TAG_LIST {
             match read_value(blob, pos, tag) {
                 Some(val) => result.push((InternedKey::from_u64(entry_key), val)),
                 None => return Some(()), // truncated payload — stop
@@ -499,20 +493,17 @@ where
                     return Some(Err(e));
                 }
             }
-            TAG_LIST | TAG_LIST_POSTCARD => {
+            TAG_LIST_POSTCARD => {
                 let Some(bytes) = read_len_prefixed(blob, pos) else {
                     return Some(Ok(()));
                 };
                 // Lists can't borrow the blob — the codec must allocate —
                 // but the owned `Vec` lives across the synchronous
                 // `f()` call, so a borrowed slice into it is valid.
-                let Some(codec) = list_codec(tag) else {
-                    return Some(Ok(()));
-                };
                 let limits =
                     crate::serde_codec::DecodeLimits::new(u32::MAX as u64, bytes.len() as u64);
                 let items: Vec<Value> = match crate::serde_codec::decode_exact_with(
-                    codec,
+                    crate::serde_codec::CodecVersion::PostcardV1,
                     bytes,
                     bytes.len() as u64,
                     limits,
@@ -653,32 +644,26 @@ mod tests {
     }
 
     #[test]
-    fn legacy_bincode_list_tag_remains_readable() {
-        let expected = vec![Value::Int64(1), Value::String("legacy".into())];
-        let payload = crate::serde_codec::encode_versioned(
-            crate::serde_codec::CodecVersion::BincodeV1,
-            &expected,
-            u32::MAX as u64,
-        )
-        .unwrap();
+    fn retired_list_tag_is_skipped_without_losing_later_properties() {
+        let payload = [1u8, 2, 3];
         let mut blob = Vec::new();
-        blob.extend_from_slice(&1u16.to_le_bytes());
+        blob.extend_from_slice(&2u16.to_le_bytes());
         blob.extend_from_slice(&key(1).as_u64().to_le_bytes());
         blob.push(TAG_LIST);
         blob.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         blob.extend_from_slice(&payload);
+        encode_value(&mut blob, key(2), &Value::Int64(7));
 
-        assert_eq!(
-            scan_blob(&blob, key(1)),
-            Some(Value::List(expected.clone()))
-        );
+        assert_eq!(scan_blob(&blob, key(1)), None);
+        assert_eq!(scan_blob(&blob, key(2)), Some(Value::Int64(7)));
+        assert_eq!(decode_blob(&blob), vec![(key(2), Value::Int64(7))]);
         let mut seen = Vec::new();
         try_for_each_borrowed(&blob, |_, value| -> Result<(), ()> {
             seen.push(value.to_value());
             Ok(())
         })
         .unwrap();
-        assert_eq!(seen, vec![Value::List(expected)]);
+        assert_eq!(seen, vec![Value::Int64(7)]);
     }
 
     #[test]

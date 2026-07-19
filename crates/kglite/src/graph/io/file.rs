@@ -2,7 +2,7 @@
 //
 // Versioned binary format for KnowledgeGraph persistence.
 //
-// File format v4 layout (Phase A.1 / C5 of docs/history/bolt-implementation.md):
+// File format v5 layout:
 //   [0..4]    Magic: b"RGF\x04" (Rusty Graph Format, version 4)
 //   [4..8]    core_data_version: u32 LE (tracks NodeData/EdgeData/Value changes)
 //   [8..12]   metadata_length: u32 LE
@@ -30,7 +30,7 @@ use crate::graph::schema::{
 use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::{GraphRead, GraphWrite};
 // This module no longer constructs `KnowledgeGraph` directly.
-// `load_file` / `load_disk_dir` / `load_v4` return
+// `load_file` / `load_disk_dir` / `load_v5` return
 // `Arc<DirGraph>`; the binding callsites wrap that in their own
 // ergonomic type (pyapi → `KnowledgeGraph`, mcp-server → its
 // own `ActiveGraph`, future Go/TS → their binding's struct).
@@ -482,7 +482,7 @@ pub(crate) fn read_type_indices_bin(
 // ─── interner.bin.zst (0.8.13 fast-load) ─────────────────────────────────────
 //
 // Replaces `interner.json` (a `HashMap<String, String>` of
-// hash-to-original) with bincode-serialised `Vec<String>` of the
+// hash-to-original) with a compact `Vec<String>` sidecar of the
 // original strings, zstd-compressed. The hash is re-derived on load
 // by `interner.get_or_intern` — FNV of the string is deterministic.
 // Dropping the hash halves the on-disk size and eliminates JSON
@@ -524,7 +524,7 @@ mod interner_file_tests {
     fn malformed_interner_collision_is_invalid_data() {
         let dir = tempfile::tempdir().unwrap();
         let incoming = "persisted-name";
-        let bytes = serde_codec::legacy::encode(&vec![incoming.to_string()]).unwrap();
+        let bytes = encode_disk_serde(&vec![incoming.to_string()]).unwrap();
         let compressed = zstd::encode_all(bytes.as_slice(), 3).unwrap();
         std::fs::write(dir.path().join("interner.bin.zst"), compressed).unwrap();
 
@@ -542,7 +542,7 @@ mod interner_file_tests {
     }
 
     #[test]
-    fn disk_sidecar_frame_is_versioned_and_legacy_remains_readable() {
+    fn disk_sidecar_frame_is_versioned_and_unframed_payloads_are_rejected() {
         let values = vec!["alpha".to_string(), "beta".to_string()];
         let current = encode_disk_serde(&values).unwrap();
         assert_eq!(&current[..8], DISK_SERDE_MAGIC);
@@ -552,11 +552,13 @@ mod interner_file_tests {
             values
         );
 
-        let legacy = serde_codec::legacy::encode(&values).unwrap();
-        assert_eq!(
-            decode_disk_serde::<Vec<String>>(&legacy, legacy.capacity() as u64).unwrap(),
-            values
-        );
+        let unframed =
+            serde_codec::encode_versioned(serde_codec::CURRENT_CODEC, &values, MAX_CODEC_BYTES)
+                .unwrap();
+        let error =
+            decode_disk_serde::<Vec<String>>(&unframed, unframed.capacity() as u64).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("pre-0.14"));
     }
 
     #[test]
@@ -690,18 +692,10 @@ pub(crate) fn read_id_indices_bin(
                 let blob = payload
                     .get(cursor..blob_end)
                     .ok_or_else(|| invalid_data("id_indices General blob truncated"))?;
-                cursor = blob_end;
-                let inner: std::collections::HashMap<
-                    crate::datatypes::values::Value,
-                    petgraph::graph::NodeIndex,
-                > = serde_codec::legacy::decode_exact(blob, MAX_CODEC_BYTES)
-                    .map_err(|e| invalid_data(format!("invalid general id index: {e}")))?;
-                if inner.len() != num_entries {
-                    return Err(invalid_data("general id index cardinality mismatch"));
-                }
-                if out.insert(name, TypeIdIndex::General(inner)).is_some() {
-                    return Err(invalid_data("id index contains duplicate type names"));
-                }
+                let _ = (name, blob, num_entries);
+                // This pre-0.14 cache encoded general IDs with bincode. The
+                // caller treats `None` as a cache miss and rebuilds lazily.
+                return Ok(None);
             }
             other => {
                 return Err(io::Error::new(
@@ -1062,8 +1056,7 @@ fn zstd_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 /// Encode a Serde-backed disk sidecar with an explicit codec selector.
-/// Legacy sidecars lack this frame and remain readable through
-/// [`decode_disk_serde`].
+/// The explicit frame prevents payloads from being guessed by content.
 pub(crate) fn encode_disk_serde<T: Serialize + ?Sized>(value: &T) -> io::Result<Vec<u8>> {
     let payload = serde_codec::encode_versioned(serde_codec::CURRENT_CODEC, value, MAX_CODEC_BYTES)
         .map_err(io::Error::other)?;
@@ -1074,9 +1067,7 @@ pub(crate) fn encode_disk_serde<T: Serialize + ?Sized>(value: &T) -> io::Result<
     Ok(framed)
 }
 
-/// Decode a new explicitly framed disk sidecar or the frozen unframed
-/// bincode-v1 legacy representation. A recognised frame never falls back to
-/// another codec on error.
+/// Decode an explicitly framed Postcard disk sidecar.
 pub(crate) fn decode_disk_serde<'de, T: Deserialize<'de>>(
     bytes: &'de [u8],
     allocated_bytes: u64,
@@ -1094,7 +1085,7 @@ pub(crate) fn decode_disk_serde<'de, T: Deserialize<'de>>(
         )
         .map_err(io::Error::other);
     }
-    serde_codec::legacy::decode_bounded(bytes, MAX_CODEC_BYTES).map_err(io::Error::other)
+    Err(pre_014_bincode_error("unframed disk sidecar"))
 }
 
 /// Wrap a sidecar decode failure in an error that names the file and
@@ -1136,28 +1127,20 @@ fn codec_ser<T: Serialize>(codec: serde_codec::CodecVersion, val: &T) -> io::Res
     serde_codec::encode_versioned(codec, val, MAX_CODEC_BYTES).map_err(io::Error::other)
 }
 
-/// Deserialize one version-selected portable payload. The legacy reader keeps
-/// its historical trailing-byte policy; new Postcard formats are exact.
+/// Deserialize one version-selected portable payload exactly.
 fn codec_deser<'a, T: Deserialize<'a>>(
     codec: serde_codec::CodecVersion,
     buf: &'a [u8],
     allocated_bytes: u64,
 ) -> io::Result<T> {
-    let decoded = match codec {
-        serde_codec::CodecVersion::BincodeV1 => {
-            serde_codec::legacy::decode_bounded(buf, MAX_CODEC_BYTES)
-        }
-        serde_codec::CodecVersion::PostcardV1 => {
-            let envelope = serde_codec::PayloadEnvelope::from_tag(
-                codec.tag(),
-                buf,
-                allocated_bytes,
-                serde_codec::DecodeLimits::new(MAX_CODEC_BYTES, MAX_CODEC_BYTES),
-            )
-            .map_err(|e| invalid_data(format!("binary payload envelope is invalid: {e}")))?;
-            serde_codec::decode_versioned_exact(envelope)
-        }
-    };
+    let envelope = serde_codec::PayloadEnvelope::from_tag(
+        codec.tag(),
+        buf,
+        allocated_bytes,
+        serde_codec::DecodeLimits::new(MAX_CODEC_BYTES, MAX_CODEC_BYTES),
+    )
+    .map_err(|e| invalid_data(format!("binary payload envelope is invalid: {e}")))?;
+    let decoded = serde_codec::decode_versioned_exact(envelope);
     decoded.map_err(|e| invalid_data(format!("binary deserialization failed: {e}")))
 }
 
@@ -1504,6 +1487,14 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
+pub(crate) fn pre_014_bincode_error(artifact: &str) -> io::Error {
+    invalid_data(format!(
+        "Unsupported pre-0.14 bincode persistence: {artifact}. This build reads Postcard \
+         persistence only. Open the artifact with kglite 0.13.4 and re-save or re-export it, \
+         then retry; alternatively rebuild it from the original source."
+    ))
+}
+
 struct SectionCursor<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -1561,7 +1552,7 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
             return load_v5(&mmap);
         }
         if mmap[..4] == V4_MAGIC {
-            return load_v4(&mmap);
+            return Err(pre_014_bincode_error(".kgl container v4"));
         }
         if mmap[..4] == V3_MAGIC {
             return Err(io::Error::other(V3_HARD_BREAK_MSG));
@@ -1588,7 +1579,7 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
     if buf[..4] == V5_MAGIC {
         load_v5(&buf)
     } else if buf[..4] == V4_MAGIC {
-        load_v4(&buf)
+        Err(pre_014_bincode_error(".kgl container v4"))
     } else if buf[..4] == V3_MAGIC {
         Err(io::Error::other(V3_HARD_BREAK_MSG))
     } else if buf[..3] == V5_MAGIC[..3] && buf[3] > V5_MAGIC[3] {
@@ -1619,7 +1610,7 @@ pub fn load_kgl_bytes(data: &[u8]) -> io::Result<Arc<DirGraph>> {
     if data[..4] == V5_MAGIC {
         load_v5(data)
     } else if data[..4] == V4_MAGIC {
-        load_v4(data)
+        Err(pre_014_bincode_error(".kgl container v4"))
     } else if data[..4] == V3_MAGIC {
         Err(io::Error::other(V3_HARD_BREAK_MSG))
     } else if data[..3] == V5_MAGIC[..3] && data[3] > V5_MAGIC[3] {
@@ -1768,8 +1759,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     // Format priority:
     //   1. type_indices.bin   — 0.8.28+ raw mmap-resident layout (lazy reads).
     //   2. type_indices.bin.zst with KGLTIDX1 magic — 0.8.13 flat-CSR (eager).
-    //   3. type_indices.bin.zst as bincode HashMap — pre-0.8.13 (oldest).
-    //   4. node_slots scan fallback for graphs missing the file entirely.
+    //   3. node_slots scan fallback for graphs missing or pre-0.14 files.
     let t = stage_timer();
     if let GraphBackend::Disk(ref dg) = graph.graph {
         let mut loaded = false;
@@ -1785,17 +1775,9 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
             if ti_path.exists() {
                 if let Ok(compressed) = std::fs::read(&ti_path) {
                     if let Ok(bytes) = zstd_decompress(&compressed) {
-                        match read_type_indices_bin(&bytes, &graph.interner) {
-                            Ok(Some(indices)) => {
-                                graph.type_indices.replace_with(indices);
-                                loaded = true;
-                            }
-                            _ => {
-                                if let Ok(indices) = crate::serde_codec::legacy::decode(&bytes) {
-                                    graph.type_indices.replace_with(indices);
-                                    loaded = true;
-                                }
-                            }
+                        if let Ok(Some(indices)) = read_type_indices_bin(&bytes, &graph.interner) {
+                            graph.type_indices.replace_with(indices);
+                            loaded = true;
                         }
                     }
                 }
@@ -1937,7 +1919,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     //      ~ms load even at Wikidata scale).
     //   2. id_indices.bin.zst with KGLIIDX1 magic — 0.8.13 flat-CSR format
     //      (eager decompress + HashMap rebuild; legacy fallback).
-    //   3. id_indices.bin.zst as bincode HashMap — pre-0.8.13 (oldest).
+    // Pre-0.14 bincode caches are ignored and rebuilt lazily.
     let t = stage_timer();
     if crate::graph::storage::GraphRead::is_disk(&graph.graph) {
         if let Some(base) =
@@ -1949,13 +1931,8 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
             if id_indices_path.exists() {
                 if let Ok(compressed) = std::fs::read(&id_indices_path) {
                     if let Ok(bytes) = zstd_decompress(&compressed) {
-                        match read_id_indices_bin(&bytes, &graph.interner) {
-                            Ok(Some(indices)) => graph.id_indices.replace_with(indices),
-                            _ => {
-                                if let Ok(indices) = crate::serde_codec::legacy::decode(&bytes) {
-                                    graph.id_indices.replace_with(indices);
-                                }
-                            }
+                        if let Ok(Some(indices)) = read_id_indices_bin(&bytes, &graph.interner) {
+                            graph.id_indices.replace_with(indices);
                         }
                     }
                 }
@@ -2071,8 +2048,6 @@ fn load_column_sidecars(
         col_file: std::path::PathBuf,
         schema: Arc<crate::graph::schema::TypeSchema>,
         type_meta: std::collections::HashMap<String, String>,
-        // Pre-fetched fallback row-count for legacy (pre-0.8.12) sidecars.
-        legacy_row_count: u32,
     }
 
     let mut jobs: Vec<Job> = Vec::new();
@@ -2100,17 +2075,11 @@ fn load_column_sidecars(
             .get(&type_name)
             .cloned()
             .unwrap_or_default();
-        let legacy_row_count = graph
-            .type_indices
-            .get(&type_name)
-            .map(|v| v.len() as u32)
-            .unwrap_or(0);
         jobs.push(Job {
             type_name,
             col_file,
             schema,
             type_meta,
-            legacy_row_count,
         });
     }
 
@@ -2123,31 +2092,13 @@ fn load_column_sidecars(
                 let compressed = std::fs::read(&job.col_file)?;
                 let decoded = zstd_decompress(&compressed)?;
                 // Current format: `KGLCOLv2` + row_count + Postcard-backed
-                // mixed columns. `KGLCOLv1` and raw sidecars use bincode.
-                // Old format (pre-0.8.12): raw packed bytes. Dispatch via the
-                // magic tag. Old-format row_count is derived from
-                // `type_indices[type].len()` — wrong after DELETE tombstones
-                // (0.8.12 CHANGELOG F2), but best effort for legacy graphs.
-                let (packed_slice, row_count, codec): (&[u8], u32, serde_codec::CodecVersion) =
-                    if decoded.len() >= 12 && &decoded[..8] == b"KGLCOLv2" {
-                        (
-                            &decoded[12..],
-                            u32::from_le_bytes(decoded[8..12].try_into().unwrap()),
-                            serde_codec::CodecVersion::PostcardV1,
-                        )
-                    } else if decoded.len() >= 12 && &decoded[..8] == b"KGLCOLv1" {
-                        (
-                            &decoded[12..],
-                            u32::from_le_bytes(decoded[8..12].try_into().unwrap()),
-                            serde_codec::CodecVersion::BincodeV1,
-                        )
-                    } else {
-                        (
-                            decoded.as_slice(),
-                            job.legacy_row_count,
-                            serde_codec::CodecVersion::BincodeV1,
-                        )
-                    };
+                // mixed columns. Older sidecars require a pre-0.14 converter.
+                if decoded.len() < 12 || &decoded[..8] != b"KGLCOLv2" {
+                    return Err(pre_014_bincode_error("KGLCOLv1/raw column sidecar"));
+                }
+                let packed_slice = &decoded[12..];
+                let row_count = u32::from_le_bytes(decoded[8..12].try_into().unwrap());
+                let codec = serde_codec::CodecVersion::PostcardV1;
                 let store =
                     crate::graph::storage::column_store::ColumnStore::load_packed_with_codec(
                         job.schema,
@@ -2168,22 +2119,6 @@ fn load_column_sidecars(
         graph.column_stores.insert(type_name, Arc::new(store));
     }
     Ok(())
-}
-
-fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
-    if buf.len() < 12 {
-        return Err(invalid_data("v4 file is truncated — header incomplete"));
-    }
-    let core_version = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
-    let metadata_len = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]) as usize;
-    load_portable_columnar(
-        buf,
-        "v4",
-        serde_codec::CodecVersion::BincodeV1,
-        core_version,
-        metadata_len,
-        12,
-    )
 }
 
 fn load_v5(buf: &[u8]) -> io::Result<Arc<DirGraph>> {

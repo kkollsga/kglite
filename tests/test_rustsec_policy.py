@@ -74,4 +74,5 @@ def test_python_wrapper_does_not_redeclare_persisted_format_codec() -> None:
     wrapper_manifest = (ROOT / "crates" / "kglite-py" / "Cargo.toml").read_text()
     core_manifest = (ROOT / "crates" / "kglite" / "Cargo.toml").read_text()
     assert "\nbincode = " not in wrapper_manifest
-    assert '\nbincode = "1.3"' in core_manifest
+    assert "\nbincode = " not in core_manifest
+    assert '\npostcard = "' in core_manifest or "\npostcard = {" in core_manifest

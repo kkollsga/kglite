@@ -31,9 +31,6 @@ pub mod okf;
 pub mod param;
 pub(crate) mod serde_codec;
 
-#[cfg(test)]
-mod bincode_wire_contract_tests;
-
 /// Curated stable Rust API. Downstream consumers should depend on
 /// items here, not on the underlying module structure (which may
 /// move between minor releases).

@@ -1,27 +1,15 @@
 //! Crate-private binary Serde boundary.
 //!
 //! Persistence code depends on this module's policies and errors, never on a
-//! codec crate directly. `bincode_v1` is deliberately the only production
-//! module allowed to name bincode; once legacy readers expire, removing that
-//! adapter must be a small, auditable deletion.
-//!
-//! ## Future legacy-codec yank
-//!
-//! When support for pre-Postcard files is deliberately retired: remove
-//! `bincode_v1.rs`, the `bincode` Cargo dependency, `CodecVersion::BincodeV1`,
-//! and this module's `legacy` namespace; then replace each outer-format v1/v4
-//! branch with its existing unsupported-format/rebuild error. Never reinterpret
-//! legacy payload bytes as Postcard.
+//! codec crate directly. Postcard is the sole binary Serde codec accepted by
+//! current formats. Outer format readers reject pre-0.14 codec tags before
+//! invoking this boundary; legacy bytes are never reinterpreted as Postcard.
 
-mod bincode_v1;
 mod postcard_v1;
 
 use serde::de::Deserialize;
 use serde::Serialize;
-use std::collections::HashMap;
 use std::fmt;
-use std::hash::Hash;
-use std::io::Read;
 
 #[cfg(test)]
 mod tests;
@@ -49,15 +37,6 @@ pub(crate) enum CodecError {
         remaining: u64,
     },
     UnknownCodecVersion(u8),
-    TruncatedCollectionCount,
-    CollectionCountMismatch {
-        encoded: u64,
-        expected: u64,
-    },
-    CollectionPayloadTooSmall {
-        actual: u64,
-        minimum: u64,
-    },
 }
 
 impl fmt::Display for CodecError {
@@ -84,17 +63,6 @@ impl fmt::Display for CodecError {
             Self::UnknownCodecVersion(version) => {
                 write!(formatter, "unknown binary codec version {version}")
             }
-            Self::TruncatedCollectionCount => {
-                formatter.write_str("payload is truncated before its collection count")
-            }
-            Self::CollectionCountMismatch { encoded, expected } => write!(
-                formatter,
-                "encoded collection count {encoded} does not match expected count {expected}"
-            ),
-            Self::CollectionPayloadTooSmall { actual, minimum } => write!(
-                formatter,
-                "collection payload is {actual} bytes; minimum is {minimum}"
-            ),
         }
     }
 }
@@ -105,7 +73,6 @@ impl std::error::Error for CodecError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum CodecVersion {
-    BincodeV1 = 1,
     PostcardV1 = 2,
 }
 
@@ -118,7 +85,6 @@ impl CodecVersion {
 
     pub(crate) fn from_tag(tag: u8) -> Result<Self, CodecError> {
         match tag {
-            1 => Ok(Self::BincodeV1),
             2 => Ok(Self::PostcardV1),
             _ => Err(CodecError::UnknownCodecVersion(tag)),
         }
@@ -185,21 +151,15 @@ pub(crate) fn encode_versioned<T: Serialize + ?Sized>(
     value: &T,
     limit: u64,
 ) -> Result<Vec<u8>, CodecError> {
-    match codec {
-        CodecVersion::BincodeV1 => bincode_v1::encode_bounded(value, limit),
-        CodecVersion::PostcardV1 => postcard_v1::encode_bounded(value, limit),
-    }
+    let CodecVersion::PostcardV1 = codec;
+    postcard_v1::encode_bounded(value, limit)
 }
 
 pub(crate) fn decode_versioned_exact<'de, T: Deserialize<'de>>(
     envelope: PayloadEnvelope<'de>,
 ) -> Result<T, CodecError> {
-    match envelope.codec {
-        CodecVersion::BincodeV1 => {
-            bincode_v1::decode_exact(envelope.payload, envelope.payload.len() as u64)
-        }
-        CodecVersion::PostcardV1 => postcard_v1::decode_exact(envelope.payload),
-    }
+    let CodecVersion::PostcardV1 = envelope.codec;
+    postcard_v1::decode_exact(envelope.payload)
 }
 
 pub(crate) fn decode_exact_with<'de, T: Deserialize<'de>>(
@@ -210,59 +170,4 @@ pub(crate) fn decode_exact_with<'de, T: Deserialize<'de>>(
 ) -> Result<T, CodecError> {
     let envelope = PayloadEnvelope::from_tag(codec.tag(), bytes, allocated_bytes, limits)?;
     decode_versioned_exact(envelope)
-}
-
-/// Explicit compatibility namespace. New format branches use the active
-/// facade above; old on-disk versions must say `legacy` at the call site.
-pub(crate) mod legacy {
-    use super::*;
-
-    /// Test-only encoder for constructing frozen legacy fixtures.
-    #[cfg(test)]
-    pub(crate) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, CodecError> {
-        bincode_v1::encode(value)
-    }
-
-    pub(crate) fn decode<'de, T: Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, CodecError> {
-        bincode_v1::decode(bytes)
-    }
-
-    pub(crate) fn decode_bounded<'de, T: Deserialize<'de>>(
-        bytes: &'de [u8],
-        limit: u64,
-    ) -> Result<T, CodecError> {
-        bincode_v1::decode_bounded(bytes, limit)
-    }
-
-    pub(crate) fn decode_exact<'de, T: Deserialize<'de>>(
-        bytes: &'de [u8],
-        limit: u64,
-    ) -> Result<T, CodecError> {
-        let envelope = PayloadEnvelope::from_tag(
-            CodecVersion::BincodeV1.tag(),
-            bytes,
-            bytes.len() as u64,
-            DecodeLimits::new(limit, limit),
-        )?;
-        decode_versioned_exact(envelope)
-    }
-
-    pub(crate) fn decode_from_bounded<R: Read, T: serde::de::DeserializeOwned>(
-        reader: R,
-        limit: u64,
-    ) -> Result<T, CodecError> {
-        bincode_v1::decode_from_bounded(reader, limit)
-    }
-
-    pub(crate) fn decode_counted_map_exact<'de, K, V>(
-        bytes: &'de [u8],
-        expected_entries: u64,
-        limit: u64,
-    ) -> Result<HashMap<K, V>, CodecError>
-    where
-        K: Deserialize<'de> + Eq + Hash,
-        V: Deserialize<'de>,
-    {
-        bincode_v1::decode_counted_map_exact(bytes, expected_entries, limit)
-    }
 }

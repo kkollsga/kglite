@@ -69,23 +69,16 @@ mod atomic_save_tests {
     }
 
     #[test]
-    fn legacy_v4_fixtures_load_and_resave_as_v5() {
+    fn pre_014_v4_fixtures_are_rejected_with_migration_guidance() {
         let fixture =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/spatial_graph.kgl");
         let legacy = std::fs::read(&fixture).unwrap();
         assert_eq!(&legacy[..4], &V4_MAGIC);
 
-        let loaded = load_kgl_bytes(&legacy).unwrap();
-        let node_count = loaded.graph.node_count();
-        let edge_count = loaded.graph.edge_count();
-        assert!(node_count > 0);
-
-        let mut current = Vec::new();
-        write_kgl_to(&loaded, &mut current).unwrap();
-        assert_eq!(&current[..4], &V5_MAGIC);
-        let reloaded = load_kgl_bytes(&current).unwrap();
-        assert_eq!(reloaded.graph.node_count(), node_count);
-        assert_eq!(reloaded.graph.edge_count(), edge_count);
+        let error = load_kgl_bytes(&legacy).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("pre-0.14"));
+        assert!(error.to_string().contains("0.13.4"));
     }
 
     #[test]
@@ -160,30 +153,18 @@ mod atomic_save_tests {
     }
 
     #[test]
-    fn legacy_vector_index_v1_payload_still_attaches() {
-        let source = tiny_indexed_graph();
-        let entries: Vec<(&String, &String, &crate::graph::algorithms::hnsw::HnswIndex)> = source
-            .embeddings
-            .iter()
-            .filter_map(|((node_type, property), store)| {
-                store
-                    .index
-                    .as_ref()
-                    .map(|index| (node_type, property, index))
-            })
-            .collect();
-        let body = serde_codec::legacy::encode(&entries).unwrap();
+    fn pre_014_vector_index_v1_payload_is_skipped() {
         let mut payload = Vec::new();
         payload.extend_from_slice(vector_persistence::VECTOR_INDEX_MAGIC);
-        payload.extend_from_slice(&vector_persistence::VECTOR_INDEX_LEGACY_VERSION.to_le_bytes());
-        payload.extend_from_slice(&body);
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.extend_from_slice(&[1, 2, 3]);
 
         let mut destination = tiny_indexed_graph();
         for store in Arc::make_mut(&mut destination).embeddings.values_mut() {
             store.index = None;
         }
         decode_vector_indexes(&payload, Arc::make_mut(&mut destination));
-        assert!(destination
+        assert!(!destination
             .embeddings
             .get(&("Doc".to_string(), "vec_emb".to_string()))
             .unwrap()

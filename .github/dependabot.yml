@@ -30,8 +30,3 @@ updates:
         # Routine updates belong in one low-risk PR. Breaking migrations must
         # arrive separately so CI failures identify the dependency involved.
         update-types: ["minor", "patch"]
-    ignore:
-      # KGLite persistence is Postcard-only. crates.io's bincode 3.0.0 is an
-      # intentionally uncompilable sentinel, and no bincode release belongs
-      # in the dependency graph after the 0.14 format break.
-      - dependency-name: "bincode"
