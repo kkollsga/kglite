@@ -6,7 +6,7 @@ Regenerate with `python scripts/render_docs_facts.py`. CI checks this file for d
 
 ## Workspace
 
-- Shared package version: `0.14.2`
+- Shared package version: `0.14.3`
 - Workspace crates:
   - `kglite` — `crates/kglite/Cargo.toml`
   - `kglite-bolt-server` — `crates/kglite-bolt-server/Cargo.toml`
@@ -20,9 +20,9 @@ Regenerate with `python scripts/render_docs_facts.py`. CI checks this file for d
 - Declared Python floor: `>=3.10`
 - CI runtime matrix: `3.10`, `3.12`, `3.13`, `3.14`
 - Optional extras:
-  - `neo4j`: `neo4j>=5.0`
-  - `networkx`: `networkx>=3.0`, `pandas>=2.0`
-  - `pandas`: `pandas>=2.0`
+  - `neo4j`: `neo4j>=6.2.0`
+  - `networkx`: `networkx>=3.6.1; python_version >= '3.11'`, `networkx>=3.4.2,<3.5; python_version < '3.11'`, `pandas>=3.0.3; python_version >= '3.11'`, `pandas>=2.3.3,<3; python_version < '3.11'`
+  - `pandas`: `pandas>=3.0.3; python_version >= '3.11'`, `pandas>=2.3.3,<3; python_version < '3.11'`
 - Published classifiers:
   - `Development Status :: 4 - Beta`
   - `Intended Audience :: Developers`
@@ -59,8 +59,8 @@ Regenerate with `python scripts/render_docs_facts.py`. CI checks this file for d
 
 ## Current tracked benchmark capture
 
-- Captured: `2026-07-18T19:07:53.742502+00:00`
-- Source commit: `872ad735b137d368e9bbb0f27fdeeabba0d15907` (dirty: `true`)
+- Captured: `2026-07-19T18:27:29.467666+00:00`
+- Source commit: `3ae77bbbca1902368e7bbb6bc1f1d84a389a110d` (dirty: `true`)
 - Platform: `Darwin 25.3.0 arm64`
 - CPU: `Apple M4`
 - Python: `CPython 3.14.3`

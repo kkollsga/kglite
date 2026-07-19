@@ -129,7 +129,7 @@ def _parity_query(kg: KnowledgeGraph) -> list[tuple]:
 # Changing this digest without a format bump is a refactor bug — the
 # whole point of this test is to trip loudly when the `.kgl` byte layout
 # silently drifts.
-GOLDEN_V3_DIGEST = "7e12d085e80e4915a461e0dd983973df16df88f613e797589c8db117f5db5516"
+GOLDEN_V3_DIGEST = "b3fbaac7e1703d9fbe32651a982d6b26fa7ae2c5d4c24a02ff59bd31d14a2c45"
 
 # Phase A.1 / C5 cleared this set on the v3 → v4 format break. The
 # new v4 loader rejects v3 files (per the user-decided hard break
@@ -306,6 +306,8 @@ ACCEPTABLE_DIGESTS: frozenset[str] = frozenset(
         "0435ea877fbf386b27007035c3b7150fd8b35beb1defb815aad69b20f9afa1f1",
         # Demoted from GOLDEN_V3_DIGEST when 0.14.2 took over.
         "7dc5770f5cb93b82c30c91c47999a6e6c004b5d8d1e952930c4fa11ecc7e4f65",
+        # Demoted from GOLDEN_V3_DIGEST when 0.14.3 took over.
+        "7e12d085e80e4915a461e0dd983973df16df88f613e797589c8db117f5db5516",
     }
 )
 
@@ -351,7 +353,7 @@ def test_kgl_golden_hash():
 
 @pytest.mark.parity
 def test_kgl_v3_file_rejected_with_clear_error(tmp_path: Path):
-    """Phase A.1 / C5 — v3 `.kgl` files must error cleanly under the v4
+    """Phase A.1 / C5 — v3 `.kgl` files must error cleanly under the v5
     binary, with a message that names the format change and tells the
     user how to recover.
 
@@ -379,7 +381,7 @@ def test_kgl_v3_file_rejected_with_clear_error(tmp_path: Path):
 
     msg = str(exc_info.value)
     assert "v3" in msg, f"error message must name the v3 format: {msg!r}"
-    assert "v4" in msg or "0.10" in msg, f"error message must point at the v4 / 0.10 boundary: {msg!r}"
+    assert "v5" in msg or "Postcard" in msg, f"error message must point at the current v5/Postcard boundary: {msg!r}"
     assert "rebuild" in msg.lower() or "downgrade" in msg.lower(), (
         f"error message must tell the user how to recover: {msg!r}"
     )

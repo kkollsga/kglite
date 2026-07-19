@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-07-19
+
 ### Removed
 
 - **BREAKING: all bincode persistence support and the bincode dependency have
@@ -19,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incremental fill.
 - **BREAKING (Rust): removed the unused `ProgressValue::F64` and `Str`
   variants and the duplicate `DirGraph::build_id_index_from_columns` alias.**
+
+### Changed
+
+- Updated every declared Cargo and Python dependency to its latest usable
+  release. The MCP server now builds on `mcp-methods` 0.4 and `rmcp` 2.2.
 
 ### Fixed
 
