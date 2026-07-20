@@ -629,6 +629,27 @@ impl PartialEq for PropertyStorage {
     }
 }
 
+/// Serialize a `HashMap` with key-sorted entries. `.kgl` bytes are contractually
+/// reproducible (equivalent graphs → identical files; see the Phase 4 golden-hash
+/// test and the byte-determinism regression in `io/file_tests.rs`), but HashMap's
+/// per-process `RandomState` randomizes iteration order, so any map serialized
+/// raw breaks that. Wire-compatible in both directions: the payload is the same
+/// length-prefixed entry sequence, just ordered, and `HashMap` deserialization
+/// accepts any order.
+pub(crate) fn serialize_sorted_map<K, V, S>(
+    map: &HashMap<K, V>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    K: Ord + Serialize + std::hash::Hash + Eq,
+    V: Serialize,
+    S: Serializer,
+{
+    let mut entries: Vec<(&K, &V)> = map.iter().collect();
+    entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    serializer.collect_map(entries)
+}
+
 impl Serialize for PropertyStorage {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
@@ -1351,7 +1372,9 @@ pub struct EmbeddingStore {
     pub dimension: usize,
     /// Contiguous f32 buffer: embedding i occupies data[i*dimension..(i+1)*dimension]
     pub data: Vec<f32>,
-    /// Maps NodeIndex.index() -> slot position in the contiguous buffer
+    /// Maps NodeIndex.index() -> slot position in the contiguous buffer.
+    /// Key-sorted on write so equivalent stores serialize byte-identically.
+    #[serde(serialize_with = "serialize_sorted_map")]
     pub node_to_slot: HashMap<usize, usize>,
     /// Reverse map: slot -> NodeIndex.index(), needed for returning results
     pub slot_to_node: Vec<usize>,
@@ -1370,7 +1393,8 @@ pub struct EmbeddingStore {
     /// re-embed exactly the nodes whose text changed since the last pass,
     /// instead of every node or only the missing ones. Empty for stores built
     /// from raw vectors (no source text to hash).
-    #[serde(default)]
+    /// Key-sorted on write so equivalent stores serialize byte-identically.
+    #[serde(default, serialize_with = "serialize_sorted_map")]
     pub text_hashes: HashMap<usize, u64>,
     /// Cached L2 norm (‖v‖) per slot, parallel to `slot_to_node` — `norms[slot]`
     /// is the Euclidean norm of the vector at `data[slot*dimension..]`. A derived

@@ -36,6 +36,8 @@ pub struct NodeTimeseries {
     /// year → 2020-01-01, month → 2020-02-01, day → 2020-02-15.
     pub keys: Vec<NaiveDate>,
     /// Channel name → values array (must have same length as `keys`). NaN = missing.
+    /// Key-sorted on write so equivalent stores serialize byte-identically.
+    #[serde(serialize_with = "crate::graph::schema::serialize_sorted_map")]
     pub channels: HashMap<String, Vec<f64>>,
 }
 

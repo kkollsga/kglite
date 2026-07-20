@@ -410,19 +410,17 @@ impl DirGraph {
             &self.interner,
         )?;
 
-        // Save embeddings if any (matches write_kgl behavior for in-memory saves)
+        // Save embeddings if any (matches write_kgl behavior for in-memory saves).
+        // BTreeMap view for byte-determinism — same rationale as write_kgl.
         if !self.embeddings.is_empty() {
-            write_compressed_disk_serde(dir, "embeddings.bin.zst", &self.embeddings, "embeddings")?;
+            let ordered: std::collections::BTreeMap<_, _> = self.embeddings.iter().collect();
+            write_compressed_disk_serde(dir, "embeddings.bin.zst", &ordered, "embeddings")?;
         }
 
-        // Save timeseries_store if any
+        // Save timeseries_store if any (BTreeMap view for byte-determinism).
         if !self.timeseries_store.is_empty() {
-            write_compressed_disk_serde(
-                dir,
-                "timeseries.bin.zst",
-                &self.timeseries_store,
-                "timeseries",
-            )?;
+            let ordered: std::collections::BTreeMap<_, _> = self.timeseries_store.iter().collect();
+            write_compressed_disk_serde(dir, "timeseries.bin.zst", &ordered, "timeseries")?;
         }
 
         // Root metadata is the graph-level completion marker. Publish it only

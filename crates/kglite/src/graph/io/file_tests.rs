@@ -192,6 +192,83 @@ mod atomic_save_tests {
         assert!(!dst.embeddings[&("Doc".to_string(), "vec_emb".to_string())].has_index());
     }
 
+    /// Build an equivalent embedding+timeseries graph; `reverse` flips every
+    /// map-insertion order that must NOT affect the serialized bytes. Vector
+    /// insertion order is kept identical in both builds — slot layout is
+    /// legitimately order-dependent; the maps' internal ordering is not.
+    fn equivalent_embedding_graph(reverse: bool) -> Arc<DirGraph> {
+        use crate::graph::features::timeseries::NodeTimeseries;
+        use crate::graph::schema::EmbeddingStore;
+        use std::collections::HashMap;
+
+        let mut g = tiny_graph(40);
+        let dir = Arc::make_mut(&mut g);
+
+        let mut store_names = vec!["vec_emb", "alt_emb"];
+        if reverse {
+            store_names.reverse();
+        }
+        for name in store_names {
+            let mut store = EmbeddingStore::with_metric(4, "cosine");
+            for i in 0..40usize {
+                let v = [i as f32, (i % 3) as f32, 1.0, (i % 7) as f32];
+                store.set_embedding(i, &v);
+            }
+            let mut hash_order: Vec<usize> = (0..40).collect();
+            if reverse {
+                hash_order.reverse();
+            }
+            for i in hash_order {
+                store.text_hashes.insert(i, (i as u64).wrapping_mul(0x9e37));
+            }
+            dir.embeddings
+                .insert(("Doc".to_string(), name.to_string()), store);
+        }
+
+        let mut node_order: Vec<usize> = (0..8).collect();
+        if reverse {
+            node_order.reverse();
+        }
+        for n in node_order {
+            let mut channels = HashMap::new();
+            let mut channel_names = vec!["plays", "skips", "stars"];
+            if reverse {
+                channel_names.reverse();
+            }
+            for c in channel_names {
+                channels.insert(c.to_string(), vec![n as f64, 2.0]);
+            }
+            dir.timeseries_store.insert(
+                n,
+                NodeTimeseries {
+                    keys: vec![
+                        chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+                        chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
+                    ],
+                    channels,
+                },
+            );
+        }
+        g
+    }
+
+    #[test]
+    fn kgl_bytes_are_deterministic_across_equivalent_builds() {
+        // Regression for sonagram's byte-determinism report (2026-07-20):
+        // separately-constructed but equivalent graphs must produce identical
+        // `.kgl` bytes. Each HashMap instance carries its own RandomState, so
+        // even identical insertion orders iterate differently — serialization
+        // must canonicalize (sorted maps) rather than rely on iteration order.
+        let mut first = Vec::new();
+        write_kgl_to(&equivalent_embedding_graph(false), &mut first).unwrap();
+        let mut second = Vec::new();
+        write_kgl_to(&equivalent_embedding_graph(true), &mut second).unwrap();
+        assert_eq!(
+            first, second,
+            ".kgl bytes must not depend on HashMap insertion or iteration order"
+        );
+    }
+
     #[test]
     fn load_kgl_bytes_rejects_bad_magic() {
         let err = match load_kgl_bytes(b"NOPE and some trailing bytes that are long enough") {

@@ -1314,17 +1314,24 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
         column_sections_data.push(compressed);
     }
 
-    // 3. Compress embeddings if any
+    // 3. Compress embeddings if any.
+    //
+    // Serialize through a BTreeMap view: `graph.embeddings` is a HashMap whose
+    // per-process RandomState would otherwise randomize entry order — breaking
+    // the byte-reproducibility the column sections above already guarantee
+    // (same wire shape, HashMap deserializes it unchanged).
     let embedding_compressed = if !graph.embeddings.is_empty() {
-        let raw = codec_ser(codec, &graph.embeddings)?;
+        let ordered: std::collections::BTreeMap<_, _> = graph.embeddings.iter().collect();
+        let raw = codec_ser(codec, &ordered)?;
         Some(zstd_compress(&raw)?)
     } else {
         None
     };
 
-    // 4. Compress timeseries if any
+    // 4. Compress timeseries if any (BTreeMap view for the same reason).
     let timeseries_compressed = if !graph.timeseries_store.is_empty() {
-        let raw = codec_ser(codec, &graph.timeseries_store)?;
+        let ordered: std::collections::BTreeMap<_, _> = graph.timeseries_store.iter().collect();
+        let raw = codec_ser(codec, &ordered)?;
         Some(zstd_compress(&raw)?)
     } else {
         None

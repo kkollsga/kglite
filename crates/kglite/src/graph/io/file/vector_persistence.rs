@@ -172,7 +172,12 @@ pub fn export_embeddings_to_file(
     let mut exported_stores: Vec<ExportedEmbeddingStore> = Vec::new();
     let mut total_embeddings = 0usize;
 
-    for ((node_type, store_name), store) in &graph.embeddings {
+    // Iterate stores in key order: `graph.embeddings` is a HashMap, and an
+    // unsorted walk would randomize the exported store sequence per process,
+    // breaking `.kgle` byte-reproducibility for multi-store graphs.
+    let mut stores_sorted: Vec<_> = graph.embeddings.iter().collect();
+    stores_sorted.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    for ((node_type, store_name), store) in stores_sorted {
         let text_column = store_name
             .strip_suffix("_emb")
             .unwrap_or(store_name.as_str());

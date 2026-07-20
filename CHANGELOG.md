@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`.kgl`, `.kgle`, and disk-snapshot bytes are now deterministic across
+  equivalent graph builds.** Embedding stores (`node_to_slot`, `text_hashes`,
+  and the store container) and timeseries payloads (channel maps and the store
+  container) serialize with key-sorted entries, so rebuilding the same graph
+  in a new process produces byte-identical files. Wire-compatible in both
+  directions — no format bump, existing files load unchanged. (Reported by
+  sonagram's real-library byte-determinism gate.)
+
 ## [0.14.3] - 2026-07-19
 
 ### Removed
