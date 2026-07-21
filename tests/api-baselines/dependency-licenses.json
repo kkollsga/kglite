@@ -46,6 +46,12 @@
   ],
   "reviewed_packages": [
     [
+      "ar_archive_writer",
+      "0.5.2",
+      "Apache-2.0 WITH LLVM-exception",
+      "build-only archive writer used by psm (stacker's assembly shim)"
+    ],
+    [
       "approx",
       "0.5.1",
       "Apache-2.0",

@@ -180,6 +180,9 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         use kglite_core::api::GraphRead;
         let backend = &self.inner.graph;
+        // Direct GraphRead traversal — hold the disk arena guard while
+        // borrowed node weights live (arena protocol; no-op in memory/mapped).
+        let _arena_guard = self.inner.begin_read_pass();
 
         // Alias-aware lookup. Mirrors the matcher's cross-type fast
         // path so `g.search(...)` and `MATCH (n {title: ...})` resolve

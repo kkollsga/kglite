@@ -102,7 +102,7 @@ impl GraphBackend {
 
     /// Hold the disk materialization arenas for one read-query lifetime.
     /// Heap/mapped backends do not materialize through shared arenas.
-    pub(crate) fn begin_query(&self) -> Option<DiskQueryGuard<'_>> {
+    pub(crate) fn begin_query(&self) -> Option<DiskQueryGuard> {
         match self {
             GraphBackend::Disk(graph) => Some(graph.begin_query()),
             GraphBackend::Recording(graph) => graph.inner().begin_query(),

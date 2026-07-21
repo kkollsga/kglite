@@ -103,7 +103,7 @@ pub struct CypherExecutor<'a> {
     /// an active `DiskQueryGuard`. `None` on the memory/mapped backends
     /// (they don't materialize through shared arenas), so the in-memory
     /// hot path pays one enum match at construction.
-    _arena_guard: Option<crate::graph::storage::disk::graph::DiskQueryGuard<'a>>,
+    _arena_guard: Option<crate::graph::storage::disk::graph::DiskQueryGuard>,
 }
 
 impl<'a> CypherExecutor<'a> {

@@ -126,6 +126,9 @@ impl KnowledgeGraph {
         temporal: Option<bool>,
         include_secondary: bool,
     ) -> PyResult<Self> {
+        // Direct read path — hold the disk arena guard while borrowed
+        // node/edge weights live (no-op on memory/mapped backends).
+        let _arena_guard = self.inner.begin_read_pass();
         let mut new_kg = self.clone();
 
         // Record plan step: estimate based on the candidate set. When
@@ -403,6 +406,9 @@ impl KnowledgeGraph {
         date_from_field: Option<&str>,
         date_to_field: Option<&str>,
     ) -> PyResult<Self> {
+        // Direct read path — hold the disk arena guard while borrowed
+        // node/edge weights live (no-op on memory/mapped backends).
+        let _arena_guard = self.inner.begin_read_pass();
         // Auto-detect field names from temporal config if not provided
         let temporal_config = if date_from_field.is_none() || date_to_field.is_none() {
             self.infer_selection_node_type()
@@ -493,6 +499,9 @@ impl KnowledgeGraph {
         date_from_field: Option<&str>,
         date_to_field: Option<&str>,
     ) -> PyResult<Self> {
+        // Direct read path — hold the disk arena guard while borrowed
+        // node/edge weights live (no-op on memory/mapped backends).
+        let _arena_guard = self.inner.begin_read_pass();
         // Auto-detect field names from temporal config if not provided
         let temporal_config = if date_from_field.is_none() || date_to_field.is_none() {
             self.infer_selection_node_type()
@@ -753,6 +762,9 @@ impl KnowledgeGraph {
     /// Nodes of different types may have different properties — missing values become None.
     #[pyo3(signature = (*, include_type=true, include_id=true))]
     fn to_df(&self, py: Python<'_>, include_type: bool, include_id: bool) -> PyResult<Py<PyAny>> {
+        // Direct read path — hold the disk arena guard while borrowed
+        // node/edge weights live (no-op on memory/mapped backends).
+        let _arena_guard = self.inner.begin_read_pass();
         // Collect nodes from the current selection
         let mut nodes_data: Vec<(&str, &kglite_core::api::NodeData)> = Vec::new();
         for node_idx in self.cursor.selection.current_node_indices() {
@@ -856,6 +868,9 @@ impl KnowledgeGraph {
     /// The ``limit`` parameter caps the number of nodes shown (default 50).
     #[pyo3(signature = (limit=50))]
     fn to_str(&self, limit: usize) -> PyResult<String> {
+        // Direct read path — hold the disk arena guard while borrowed
+        // node/edge weights live (no-op on memory/mapped backends).
+        let _arena_guard = self.inner.begin_read_pass();
         use crate::datatypes::values::format_value;
 
         let node_indices: Vec<_> = self.cursor.selection.current_node_indices().collect();
@@ -930,6 +945,9 @@ impl KnowledgeGraph {
     /// ```
     #[pyo3(signature = (columns=None, limit=200))]
     fn show(&self, columns: Option<Vec<String>>, limit: usize) -> PyResult<String> {
+        // Direct read path — hold the disk arena guard while borrowed
+        // node/edge weights live (no-op on memory/mapped backends).
+        let _arena_guard = self.inner.begin_read_pass();
         use kglite_core::api::fluent::format_value_compact;
 
         let columns = columns.unwrap_or_else(|| vec!["id".to_string(), "title".to_string()]);
@@ -1113,6 +1131,9 @@ impl KnowledgeGraph {
     ///     # Returns: [1, 2, 3, 4, 5, ...]
     ///     ```
     fn ids(&self) -> PyResult<Py<PyAny>> {
+        // Direct read path — hold the disk arena guard while borrowed
+        // node/edge weights live (no-op on memory/mapped backends).
+        let _arena_guard = self.inner.begin_read_pass();
         Python::attach(|py| {
             let result = PyList::empty(py);
 
@@ -1144,6 +1165,9 @@ impl KnowledgeGraph {
     ///     ```
     #[pyo3(signature = (node_type, node_id))]
     fn node(&self, node_type: &str, node_id: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+        // Direct read path — hold the disk arena guard while borrowed
+        // node/edge weights live (no-op on memory/mapped backends).
+        let _arena_guard = self.inner.begin_read_pass();
         // Convert Python value to Rust Value
         let id_value = py_in::py_value_to_value(node_id)?;
 
@@ -1405,6 +1429,9 @@ impl KnowledgeGraph {
     ///     ```
     #[pyo3(signature = (file_path))]
     fn toc(&self, file_path: &str) -> PyResult<Py<PyAny>> {
+        // Direct read path — hold the disk arena guard while borrowed
+        // node/edge weights live (no-op on memory/mapped backends).
+        let _arena_guard = self.inner.begin_read_pass();
         let file_id = Value::String(file_path.to_string());
 
         // Find the File node by its id (path)

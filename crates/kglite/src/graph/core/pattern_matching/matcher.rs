@@ -169,7 +169,7 @@ pub struct PatternExecutor<'a> {
     /// guard-covered no matter which surface spawned it (Cypher executor,
     /// fluent API, MERGE matching). `None` on memory/mapped backends —
     /// one enum match at construction on the in-memory hot path.
-    _arena_guard: Option<crate::graph::storage::disk::graph::DiskQueryGuard<'a>>,
+    _arena_guard: Option<crate::graph::storage::disk::graph::DiskQueryGuard>,
 }
 
 /// Static empty params for constructors that don't take parameters.

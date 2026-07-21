@@ -103,6 +103,10 @@ fs2 = "0.4"
 sha2 = "0.11"
 memchr = "2"
 rustc-hash = "2"
+# On-demand stack growth for the recursive-descent Cypher parser: keeps
+# MAX_EXPRESSION_DEPTH-deep queries from overflowing default thread stacks
+# in debug builds, where frames are several times larger than release.
+stacker = "0.1"
 csv = "1.4"
 geojson = "1.0"
 indexmap = { version = "2", features = ["serde"] }

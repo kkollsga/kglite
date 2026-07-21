@@ -50,10 +50,20 @@ pub struct CypherParser {
 /// The recursive-descent expression parser, the planner's expression walkers,
 /// and the executor's `evaluate_expression` all recurse once per nesting
 /// level, so this budget bounds stack use across the whole pipeline (parse →
-/// plan → execute → drop). 512 levels is far beyond any legitimate query
-/// while keeping worst-case stack depth comfortably inside default thread
-/// stacks even in debug builds.
+/// plan → execute → drop). 512 levels is far beyond any legitimate query.
+/// Debug-profile frames are several times larger than release frames — deep
+/// nesting within this budget can exhaust a default thread stack before the
+/// guard fires — so [`CypherParser::descend`] also grows the stack on demand
+/// via `stacker`; the budget is the semantic contract, not the overflow
+/// protection.
 const MAX_EXPRESSION_DEPTH: usize = 512;
+
+/// Remaining-stack threshold below which [`CypherParser::descend`] allocates
+/// a fresh segment, and the size of that segment. The red zone must cover the
+/// deepest frame chain one nesting level can add across parse/plan/execute
+/// walkers (~10 frames in debug).
+const STACK_RED_ZONE: usize = 128 * 1024;
+const STACK_GROW_SIZE: usize = 4 * 1024 * 1024;
 
 impl CypherParser {
     /// Construct with the tokenizer's verbatim keyword-lexeme table —
@@ -94,7 +104,7 @@ impl CypherParser {
             ));
         }
         self.depth += 1;
-        let result = f(self);
+        let result = stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || f(self));
         self.depth -= 1;
         result
     }

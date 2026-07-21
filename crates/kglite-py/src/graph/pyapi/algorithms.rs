@@ -356,6 +356,9 @@ impl KnowledgeGraph {
         via_types: Option<Vec<String>>,
         timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
+        // Direct read path — hold the disk arena guard while borrowed
+        // node/edge weights live (no-op on memory/mapped backends).
+        let _arena_guard = self.inner.begin_read_pass();
         // Use O(1) direct lookup from id_indices (populated during add_nodes)
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = self
@@ -619,6 +622,9 @@ impl KnowledgeGraph {
         weak: Option<bool>,
         titles_only: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
+        // Direct read path — hold the disk arena guard while borrowed
+        // node/edge weights live (no-op on memory/mapped backends).
+        let _arena_guard = self.inner.begin_read_pass();
         let weak = weak.unwrap_or(true);
 
         let components = if weak {

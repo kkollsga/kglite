@@ -78,7 +78,7 @@ impl DiskGraph {
             node_count: 0,
             free_node_slots: Vec::new(),
             node_arena: std::sync::Mutex::new(Vec::with_capacity(256)),
-            active_queries: std::sync::Mutex::new(0),
+            active_queries: std::sync::Arc::new(std::sync::Mutex::new(0)),
             column_stores: HashMap::new(),
             out_offsets: MmapOrVec::mapped(&data_dir.join("out_offsets.bin"), 1025)?,
             out_edges: MmapOrVec::new(),
@@ -266,7 +266,7 @@ impl DiskGraph {
             node_count,
             free_node_slots: Vec::new(),
             node_arena: std::sync::Mutex::new(Vec::with_capacity(1024)),
-            active_queries: std::sync::Mutex::new(0),
+            active_queries: std::sync::Arc::new(std::sync::Mutex::new(0)),
             column_stores: HashMap::new(), // filled by caller via set_column_stores()
             out_offsets,
             out_edges,

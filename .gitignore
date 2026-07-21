@@ -34,7 +34,7 @@
 /benchmarks/competitive/graphsuite/__pycache__/
 
 # Ignore Rust build artifacts (keep wheels for distribution)
-/target/
+/target
 !/target/wheels/
 
 # Python bytecode

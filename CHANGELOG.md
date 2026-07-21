@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebuild results prepared for a superseded active-graph generation.
 - Made `.kgl` topology serialization deterministic for relationships with
   multiple properties, independent of their internal insertion order.
+- Deeply nested Cypher expressions (hundreds of levels, within the documented
+  512-level budget) no longer overflow the stack in debug builds: the parser
+  grows the stack on demand (via `stacker`), so the nesting budget — not the
+  thread stack — is the effective limit in every build profile.
+- Closed disk-mode arena-guard gaps outside the Cypher read executor: Cypher
+  mutations, bulk fluent mutations, graph algorithms, `search()`,
+  `to_networkx()`, and other direct read paths now hold the disk
+  materialization arena guard while borrowing node/edge weights (previously
+  only enforced by debug assertions that release builds skipped).
 
 ## [0.14.4] - 2026-07-20
 

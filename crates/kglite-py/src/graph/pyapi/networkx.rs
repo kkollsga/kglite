@@ -59,6 +59,10 @@ impl KnowledgeGraph {
 
         let graph = &self.inner;
         let interner = &graph.interner;
+        // Direct GraphRead traversal — hold the disk arena guard while
+        // borrowed node/edge weights live (arena protocol; no-op in
+        // memory/mapped).
+        let _arena_guard = graph.begin_read_pass();
 
         // Cache node-index -> Python id key once. Reused for every edge
         // endpoint so the conversion stays O(n + e), not O(n + e·k).

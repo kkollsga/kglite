@@ -90,6 +90,11 @@ pub(crate) fn execute_mutable_bounded(
     max_rows: Option<usize>,
 ) -> Result<CypherResult, String> {
     GraphRead::reset_arenas(&graph.graph);
+    // Mutation clauses read endpoints/properties through the same
+    // materializing accessors as queries (`get_node` → `node_weight`), so the
+    // whole mutation runs under an arena guard. The guard owns a counter
+    // handle rather than borrowing the graph, so it coexists with `&mut`.
+    let _arena_guard = graph.graph.begin_query();
 
     let budget = super::budget::ExecutionBudget::new(max_rows);
 

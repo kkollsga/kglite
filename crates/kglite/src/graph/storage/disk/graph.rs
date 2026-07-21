@@ -129,7 +129,7 @@ pub struct DiskGraph {
     /// materialization arenas. Arena reclamation is allowed only when this
     /// count is zero; otherwise references returned to another query may still
     /// be live. See [`DiskQueryGuard`].
-    pub(super) active_queries: std::sync::Mutex<usize>,
+    pub(super) active_queries: std::sync::Arc<std::sync::Mutex<usize>>,
 
     // ── Column stores for node properties (Arc refs, data mmap'd) ──
     pub(crate) column_stores:
@@ -337,17 +337,19 @@ unsafe impl Sync for DiskGraph {}
 
 /// Query-lifetime token for DiskGraph materialization arenas.
 ///
-/// The token is intentionally small and non-cloneable. Its borrow ties it to
-/// the graph snapshot used by the executor; dropping the last overlapping token
-/// makes the previous arena generation reclaimable by the next query.
-pub(crate) struct DiskQueryGuard<'a> {
-    graph: &'a DiskGraph,
+/// The token is intentionally small and non-cloneable. It owns a handle to
+/// the graph's active-query counter rather than borrowing the graph, so
+/// mutation paths (which hold `&mut DirGraph`) and direct readers outside the
+/// executor can hold one without freezing an immutable borrow. Dropping the
+/// last overlapping token makes the previous arena generation reclaimable by
+/// the next query.
+pub struct DiskQueryGuard {
+    active_queries: std::sync::Arc<std::sync::Mutex<usize>>,
 }
 
-impl Drop for DiskQueryGuard<'_> {
+impl Drop for DiskQueryGuard {
     fn drop(&mut self) {
         let mut active = self
-            .graph
             .active_queries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1527,7 +1529,7 @@ impl DiskGraph {
     /// The first query after an idle period reclaims values retained by the
     /// previous query generation. Overlapping and nested queries merely bump
     /// the active count, so neither can invalidate references held by another.
-    pub(crate) fn begin_query(&self) -> DiskQueryGuard<'_> {
+    pub(crate) fn begin_query(&self) -> DiskQueryGuard {
         let mut active = self
             .active_queries
             .lock()
@@ -1536,7 +1538,9 @@ impl DiskGraph {
             self.clear_read_arenas();
         }
         *active += 1;
-        DiskQueryGuard { graph: self }
+        DiskQueryGuard {
+            active_queries: std::sync::Arc::clone(&self.active_queries),
+        }
     }
 
     fn clear_read_arenas(&self) {
@@ -2158,7 +2162,7 @@ impl Clone for DiskGraph {
             node_count: self.node_count,
             free_node_slots: self.free_node_slots.clone(),
             node_arena: std::sync::Mutex::new(Vec::new()),
-            active_queries: std::sync::Mutex::new(0),
+            active_queries: std::sync::Arc::new(std::sync::Mutex::new(0)),
             column_stores: self.column_stores.clone(),
             out_offsets: snapshot("out offsets", &self.out_offsets),
             out_edges: snapshot("out edges", &self.out_edges),

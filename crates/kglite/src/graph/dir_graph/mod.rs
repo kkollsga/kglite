@@ -863,6 +863,17 @@ impl DirGraph {
         property
     }
 
+    /// Hold the disk materialization arenas for the lifetime of a direct
+    /// `GraphRead` traversal. `None` on memory/mapped backends (they don't
+    /// materialize through shared arenas). Every reader that borrows node or
+    /// edge weights outside the Cypher executor / pattern matcher — bindings
+    /// iterating the graph directly, index builders, exporters — must keep
+    /// the returned guard alive while those borrows live; see the arena
+    /// SAFETY protocol in `storage/disk/graph.rs`.
+    pub fn begin_read_pass(&self) -> Option<crate::graph::storage::disk::graph::DiskQueryGuard> {
+        self.graph.begin_query()
+    }
+
     pub fn get_node(&self, index: NodeIndex) -> Option<&NodeData> {
         self.graph.node_weight(index)
     }

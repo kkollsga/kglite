@@ -278,6 +278,10 @@ pub fn shortest_path(
     target: NodeIndex,
     options: &PathOptions,
 ) -> Option<PathResult> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     let PathOptions {
         connection_types,
         via_types,
@@ -316,6 +320,10 @@ pub fn all_shortest_paths(
     deadline: Interrupt,
     max_paths: usize,
 ) -> Vec<PathResult> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -341,6 +349,10 @@ pub fn all_shortest_paths_directed(
     deadline: Interrupt,
     max_paths: usize,
 ) -> Vec<PathResult> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -458,6 +470,10 @@ fn all_shortest_paths_impl(
 /// Only returns the hop count, avoiding parent tracking and path reconstruction.
 /// Uses level-by-level BFS to avoid per-node distance tracking.
 pub fn shortest_path_cost(graph: &DirGraph, source: NodeIndex, target: NodeIndex) -> Option<usize> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -511,6 +527,10 @@ pub fn shortest_path_cost_batch(
     graph: &DirGraph,
     pairs: &[(NodeIndex, NodeIndex)],
 ) -> Vec<Option<usize>> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -707,6 +727,10 @@ pub fn shortest_path_directed(
     target: NodeIndex,
     options: &PathOptions,
 ) -> Option<PathResult> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     let PathOptions {
         connection_types,
         via_types,
@@ -803,6 +827,10 @@ pub fn all_paths(
     target: NodeIndex,
     options: &AllPathsOptions,
 ) -> Vec<Vec<NodeIndex>> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     let AllPathsOptions {
         max_hops,
         max_results,
@@ -918,6 +946,10 @@ fn find_all_paths_recursive(
 /// Find all strongly connected components in the graph.
 /// Returns a vector of components, each component is a vector of node indices.
 pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -990,6 +1022,10 @@ pub fn weakly_connected_components(
     graph: &DirGraph,
     deadline: Interrupt,
 ) -> Result<Vec<Vec<NodeIndex>>, String> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -1019,6 +1055,10 @@ pub fn weakly_connected_components_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<Vec<Vec<NodeIndex>>, String> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -1215,6 +1255,10 @@ pub fn coreness_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<Vec<(NodeIndex, i64)>, String> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -1404,6 +1448,10 @@ pub fn ready_set_scoped(
     done: &HashSet<NodeIndex>,
     deadline: Interrupt,
 ) -> Result<Vec<(NodeIndex, i64)>, String> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -1448,6 +1496,10 @@ pub fn clustering_coefficient_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<Vec<(NodeIndex, f64)>, String> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -1501,6 +1553,10 @@ pub fn triangle_count_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<(u64, f64), String> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -1554,6 +1610,10 @@ pub fn eccentricity_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<Vec<(NodeIndex, i64)>, String> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -1610,6 +1670,10 @@ pub fn diameter_scoped(
     rel_types: Option<&[InternedKey]>,
     deadline: Interrupt,
 ) -> Result<i64, String> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -1641,6 +1705,10 @@ fn intersection_count_gt(a: &[u32], b: &[u32], gt: u32) -> u64 {
 
 /// Get node info for building Python-friendly path output
 pub fn get_node_info(graph: &DirGraph, node_idx: NodeIndex) -> Option<PathNodeInfo> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -1660,6 +1728,10 @@ pub fn get_node_info(graph: &DirGraph, node_idx: NodeIndex) -> Option<PathNodeIn
 
 /// Get information about what connection types link nodes in a path
 pub fn get_path_connections(graph: &DirGraph, path: &[NodeIndex]) -> Vec<Option<String>> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
@@ -1693,11 +1765,19 @@ pub fn get_path_connections(graph: &DirGraph, path: &[NodeIndex]) -> Vec<Option<
 
 /// Check if two nodes are connected (directly or indirectly)
 pub fn are_connected(graph: &DirGraph, source: NodeIndex, target: NodeIndex) -> bool {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     shortest_path(graph, source, target, &PathOptions::default()).is_some()
 }
 
 /// Calculate the degree (number of connections) for a node
 pub fn node_degree(graph: &DirGraph, node: NodeIndex) -> usize {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     let g = &graph.graph;
     g.edges(node).count()
         + g.neighbors_directed(node, petgraph::Direction::Incoming)
@@ -1746,6 +1826,10 @@ pub fn shortest_path_weighted(
     weight_property: &str,
     options: &PathOptions,
 ) -> Option<WeightedPathResult> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     let PathOptions {
         connection_types,
         via_types,
@@ -1873,6 +1957,10 @@ pub fn shortest_path_cost_weighted(
     weight_property: &str,
     options: &PathOptions,
 ) -> Option<f64> {
+    // Direct GraphRead traversal outside the executor: hold the disk arena
+    // guard while node/edge weights are borrowed (owned counter handle;
+    // no-op on memory/mapped backends). Results returned are owned.
+    let _arena_guard = graph.graph.begin_query();
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
