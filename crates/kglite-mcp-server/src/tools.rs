@@ -188,7 +188,7 @@ pub struct GraphState {
     /// `take()`s the slot and rebuilds. Pattern: do the actual work
     /// lazily, never on the watcher thread. N FS events between two
     /// tool calls → 1 rebuild (the slot just holds the latest target).
-    pending_rebuild: Arc<RwLock<Option<std::path::PathBuf>>>,
+    pending_rebuild: Arc<RwLock<Option<WorkspaceGraphTarget>>>,
     /// Outcome bookkeeping for the lazy rebuild: the last failure (kept
     /// until the next successful build and surfaced in tool output next
     /// to the built-at identity) plus a consecutive-failure counter
@@ -221,7 +221,17 @@ struct RebuildStatus {
     /// success.
     consecutive_failures: u32,
     /// The target whose rebuilds keep failing.
-    failed_target: Option<std::path::PathBuf>,
+    failed_target: Option<WorkspaceGraphTarget>,
+}
+
+/// Exact installed workspace product a watcher event observed. The generation
+/// prevents a slow rebuild prepared for an older activation from overwriting a
+/// newer graph, even when the root/revision labels later repeat.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkspaceGraphTarget {
+    root: std::path::PathBuf,
+    revisions: Option<Vec<String>>,
+    generation: u64,
 }
 
 struct ActiveGraph {
@@ -247,6 +257,8 @@ struct ActiveGraph {
     /// Wall-clock time this graph was built/loaded. Surfaced next to `root`
     /// so an agent can tell how fresh the active graph is.
     built_at: SystemTime,
+    /// Monotonic identity of this installed graph within the server process.
+    generation: u64,
 }
 
 /// Producer output prepared off the workspace activation lock. Publication is
@@ -283,6 +295,14 @@ fn humanize_age(t: SystemTime) -> String {
 }
 
 impl ActiveGraph {
+    fn workspace_target(&self) -> Option<WorkspaceGraphTarget> {
+        Some(WorkspaceGraphTarget {
+            root: self.root.clone()?,
+            revisions: self.revs.clone(),
+            generation: self.generation,
+        })
+    }
+
     /// `root="…" built_at="…" age="…"` attributes for the `<active_graph/>`
     /// header injected above the `graph_overview` schema. Omits `root` when
     /// no path is recorded.
@@ -423,13 +443,28 @@ impl GraphState {
         self.value_codecs.as_deref().map(|v| v.as_slice())
     }
 
-    /// Tag a directory as needing rebuild. Called from the watch
-    /// callback; non-blocking (a single lock-protected pointer write).
+    /// Tag the installed workspace graph as needing rebuild. Called from the
+    /// watch callback; non-blocking (two short lock-protected reads/writes).
+    /// Capturing the installed revision set and generation here prevents a
+    /// deferred rebuild from silently collapsing a multi-revision graph or
+    /// overwriting a newer activation.
     /// The actual rebuild happens lazily on the next tool call via
     /// [`ensure_workspace_graph_fresh`].
-    pub fn tag_workspace_graph_dirty(&self, target: std::path::PathBuf) {
-        tracing::debug!(target = %target.display(), "workspace graph tagged for rebuild");
+    pub fn tag_workspace_graph_dirty(&self) {
+        // Keep the active read lock through the pending write so a rebuild
+        // cannot publish between capturing this receipt and enqueueing it.
+        let active = read_lock(&self.inner);
+        let Some(target) = active.as_ref().and_then(ActiveGraph::workspace_target) else {
+            return;
+        };
+        tracing::debug!(
+            target = %target.root.display(),
+            revisions = ?target.revisions,
+            generation = target.generation,
+            "workspace graph tagged for rebuild"
+        );
         *write_lock(&self.pending_rebuild) = Some(target);
+        drop(active);
     }
 
     /// Rebuild the workspace graph if the watcher tagged it dirty since the
@@ -450,36 +485,42 @@ impl GraphState {
     pub fn ensure_workspace_graph_fresh(&self) {
         let target = write_lock(&self.pending_rebuild).take();
         let Some(target) = target else { return };
-        tracing::info!(target = %target.display(), "rebuilding workspace graph (lazy, FS changed)");
-        match self.build_workspace_graph(&target, None) {
-            Ok(()) => {
-                *write_lock(&self.rebuild_status) = RebuildStatus::default();
+        tracing::info!(
+            target = %target.root.display(),
+            revisions = ?target.revisions,
+            generation = target.generation,
+            "rebuilding workspace graph (lazy, FS changed)"
+        );
+        match self.prepare_workspace_graph(&target.root, target.revisions.as_deref()) {
+            Ok(prepared) => {
+                if self.commit_workspace_rebuild(prepared, &target) {
+                    *write_lock(&self.rebuild_status) = RebuildStatus::default();
+                } else {
+                    tracing::debug!(
+                        target = %target.root.display(),
+                        generation = target.generation,
+                        "discarding workspace rebuild prepared for a superseded graph"
+                    );
+                }
             }
             Err(e) => {
-                tracing::warn!(error = %e, "lazy workspace graph rebuild failed");
-                let failures = {
-                    let mut status = write_lock(&self.rebuild_status);
-                    if status.failed_target.as_deref() == Some(target.as_path()) {
-                        status.consecutive_failures += 1;
-                    } else {
-                        status.consecutive_failures = 1;
-                        status.failed_target = Some(target.clone());
-                    }
-                    status.last_error = Some(e.to_string());
-                    status.failed_at = Some(SystemTime::now());
-                    status.consecutive_failures
+                let Some(failures) = self.record_current_rebuild_failure(&target, &e) else {
+                    tracing::debug!(
+                        target = %target.root.display(),
+                        generation = target.generation,
+                        "discarding workspace rebuild failure for a superseded graph"
+                    );
+                    return;
                 };
+                tracing::warn!(error = %e, "lazy workspace graph rebuild failed");
                 if failures < MAX_CONSECUTIVE_REBUILD_FAILURES {
                     // Restore the marker so the next tool call retries —
                     // without clobbering a newer target the watcher may
                     // have tagged while this build was running.
-                    let mut slot = write_lock(&self.pending_rebuild);
-                    if slot.is_none() {
-                        *slot = Some(target);
-                    }
+                    self.restore_current_rebuild_target(target);
                 } else {
                     tracing::warn!(
-                        target = %target.display(),
+                        target = %target.root.display(),
                         failures,
                         "workspace graph rebuild keeps failing — serving the stale \
                          graph; retrying only on the next FS event"
@@ -495,18 +536,26 @@ impl GraphState {
     /// appears, so an agent knows the graph it queries is staler than
     /// the filesystem.
     pub fn rebuild_error_note(&self) -> Option<String> {
+        let active = read_lock(&self.inner);
+        let active_target = active.as_ref().and_then(ActiveGraph::workspace_target)?;
         let status = read_lock(&self.rebuild_status);
+        if status.failed_target.as_ref() != Some(&active_target) {
+            return None;
+        }
         let err = status.last_error.as_ref()?;
         let age = status
             .failed_at
             .map(humanize_age)
             .unwrap_or_else(|| "?".to_string());
-        Some(format!(
+        let note = format!(
             "WARNING: workspace graph rebuild failed {age} ago ({} consecutive \
              failure(s)) — the active graph is STALE relative to the \
              filesystem. Error: {err}",
             status.consecutive_failures
-        ))
+        );
+        drop(status);
+        drop(active);
+        Some(note)
     }
 
     /// Append the rebuild-failure warning (if any) to a tool response.
@@ -557,6 +606,9 @@ impl GraphState {
         if reuse_existing {
             writer_lease = guard.as_mut().and_then(|active| active.writer_lease.take());
         }
+        let generation = guard
+            .as_ref()
+            .map_or(1, |active| active.generation.saturating_add(1));
         *guard = Some(ActiveGraph {
             kg,
             source_path: Some(path.to_path_buf()),
@@ -564,6 +616,7 @@ impl GraphState {
             root: Some(path.to_path_buf()),
             revs: None,
             built_at: SystemTime::now(),
+            generation,
         });
         Ok(opened.disposition)
     }
@@ -629,6 +682,7 @@ impl GraphState {
             root: Some(root.to_path_buf()),
             revs: revisions,
             built_at: SystemTime::now(),
+            generation: 0,
         };
         let summary = activation_summary_for_active(&active);
         Ok(PreparedWorkspaceGraph { active, summary })
@@ -639,10 +693,100 @@ impl GraphState {
     /// mcp-methods' generation commit boundary.
     pub(crate) fn commit_workspace_graph(
         &self,
-        prepared: PreparedWorkspaceGraph,
+        mut prepared: PreparedWorkspaceGraph,
     ) -> Option<String> {
-        *write_lock(&self.inner) = Some(prepared.active);
+        let mut slot = write_lock(&self.inner);
+        prepared.active.generation = slot
+            .as_ref()
+            .map_or(1, |active| active.generation.saturating_add(1));
+        *slot = Some(prepared.active);
         prepared.summary
+    }
+
+    /// Publish a lazy rebuild only if the exact graph observed by the watcher
+    /// is still installed. A watcher event that arrived during the rebuild is
+    /// retargeted to the newly installed generation so it still gets one
+    /// follow-up rebuild instead of being mistaken for stale work.
+    fn commit_workspace_rebuild(
+        &self,
+        mut prepared: PreparedWorkspaceGraph,
+        expected: &WorkspaceGraphTarget,
+    ) -> bool {
+        let mut active_slot = write_lock(&self.inner);
+        if active_slot
+            .as_ref()
+            .and_then(ActiveGraph::workspace_target)
+            .as_ref()
+            != Some(expected)
+        {
+            return false;
+        }
+        prepared.active.generation = expected.generation.saturating_add(1);
+        let installed_target = prepared
+            .active
+            .workspace_target()
+            .expect("workspace rebuild always has a root");
+        *active_slot = Some(prepared.active);
+
+        let mut pending = write_lock(&self.pending_rebuild);
+        if pending.as_ref() == Some(expected) {
+            *pending = Some(installed_target);
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn active_workspace_target(&self) -> Option<WorkspaceGraphTarget> {
+        read_lock(&self.inner)
+            .as_ref()
+            .and_then(ActiveGraph::workspace_target)
+    }
+
+    /// Record a rebuild failure only while its source graph remains current.
+    /// Holding the active-graph read lock through the status write closes the
+    /// activation race between the identity check and failure publication.
+    fn record_current_rebuild_failure(
+        &self,
+        target: &WorkspaceGraphTarget,
+        error: &anyhow::Error,
+    ) -> Option<u32> {
+        let active = read_lock(&self.inner);
+        if active
+            .as_ref()
+            .and_then(ActiveGraph::workspace_target)
+            .as_ref()
+            != Some(target)
+        {
+            return None;
+        }
+        let mut status = write_lock(&self.rebuild_status);
+        if status.failed_target.as_ref() == Some(target) {
+            status.consecutive_failures += 1;
+        } else {
+            status.consecutive_failures = 1;
+            status.failed_target = Some(target.clone());
+        }
+        status.last_error = Some(error.to_string());
+        status.failed_at = Some(SystemTime::now());
+        Some(status.consecutive_failures)
+    }
+
+    /// Restore a failed target only if it remains installed and no newer
+    /// watcher event has already occupied the pending slot.
+    fn restore_current_rebuild_target(&self, target: WorkspaceGraphTarget) {
+        let active = read_lock(&self.inner);
+        if active
+            .as_ref()
+            .and_then(ActiveGraph::workspace_target)
+            .as_ref()
+            != Some(&target)
+        {
+            return;
+        }
+        let mut pending = write_lock(&self.pending_rebuild);
+        if pending.is_none() {
+            *pending = Some(target);
+        }
     }
 
     /// Build and publish outside activation transactions (boot and lazy-watch
@@ -1660,6 +1804,7 @@ mod tests {
             root: None,
             revs: None,
             built_at: SystemTime::now(),
+            generation: 0,
         }
     }
 
@@ -1792,16 +1937,23 @@ mod tests {
     fn failed_rebuild_restores_marker_then_backs_off_after_cap() {
         let state = GraphState::new(Some(WorkspaceGraphMode::LocalWorkspace))
             .with_workspace_graph(Some(test_hooks()));
-        let bad = std::path::PathBuf::from("/nonexistent/kglite-mcp-rebuild-test");
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let root = workspace.path().to_path_buf();
+        std::fs::write(root.join("m.py"), "def stale():\n    return 1\n").unwrap();
+        state
+            .build_workspace_graph(&root, None)
+            .expect("install the graph that later becomes stale");
+        let target = state.active_workspace_target().expect("workspace target");
+        std::fs::remove_dir_all(&root).expect("make the current target fail rebuilding");
 
         // A failed rebuild must restore the dirty marker (so the next tool
         // call retries) and record the error — up to the hot-fail cap.
-        state.tag_workspace_graph_dirty(bad.clone());
+        state.tag_workspace_graph_dirty();
         for failure in 1..MAX_CONSECUTIVE_REBUILD_FAILURES {
             state.ensure_workspace_graph_fresh();
             assert_eq!(
                 read_lock(&state.pending_rebuild).as_ref(),
-                Some(&bad),
+                Some(&target),
                 "failure {failure} must restore the marker for a retry"
             );
             let note = state.rebuild_error_note().expect("error recorded");
@@ -1826,23 +1978,102 @@ mod tests {
 
         // A fresh FS event re-tags → exactly one more retry; still failing,
         // so the marker again stays cleared.
-        state.tag_workspace_graph_dirty(bad.clone());
+        state.tag_workspace_graph_dirty();
         state.ensure_workspace_graph_fresh();
         assert!(read_lock(&state.pending_rebuild).is_none());
         assert!(state.rebuild_error_note().is_some());
 
         // A successful rebuild clears the error and resets the counter.
-        let good = std::env::temp_dir().join(format!("kgl_rebuild_ok_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&good);
-        std::fs::write(good.join("m.py"), "def ok():\n    return 1\n").unwrap();
-        state.tag_workspace_graph_dirty(good.clone());
+        std::fs::create_dir_all(&root).expect("restore workspace directory");
+        std::fs::write(root.join("m.py"), "def ok():\n    return 1\n").unwrap();
+        state.tag_workspace_graph_dirty();
         state.ensure_workspace_graph_fresh();
         assert!(
             state.rebuild_error_note().is_none(),
             "successful rebuild must clear the recorded failure"
         );
         assert!(read_lock(&state.pending_rebuild).is_none());
-        let _ = std::fs::remove_dir_all(&good);
+    }
+
+    #[test]
+    fn workspace_rebuild_preserves_multi_revision_target() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        std::fs::write(
+            workspace.path().join("m.py"),
+            "def changed():\n    return 1\n",
+        )
+        .unwrap();
+        let state = GraphState::new(Some(WorkspaceGraphMode::Workspace))
+            .with_workspace_graph(Some(test_hooks()));
+        let revisions = vec!["base".to_string(), "head".to_string()];
+        state
+            .build_workspace_graph(workspace.path(), Some(&revisions))
+            .expect("initial revision-set build");
+
+        state.tag_workspace_graph_dirty();
+        state.ensure_workspace_graph_fresh();
+
+        assert_eq!(state.active_workspace_revisions(), Some(revisions));
+        assert!(read_lock(&state.pending_rebuild).is_none());
+    }
+
+    #[test]
+    fn workspace_rebuild_cannot_overwrite_newer_activation() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Barrier,
+        };
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let rebuild_started = Arc::new(Barrier::new(2));
+        let release_rebuild = Arc::new(Barrier::new(2));
+        let hooks = Arc::new(WorkspaceGraphHooks {
+            build: Box::new({
+                let calls = calls.clone();
+                let rebuild_started = rebuild_started.clone();
+                let release_rebuild = release_rebuild.clone();
+                move |request| {
+                    let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    if call == 2 {
+                        rebuild_started.wait();
+                        release_rebuild.wait();
+                    }
+                    let graph = new_dir_graph_in_mode(StorageMode::Memory, None)
+                        .map(Arc::new)
+                        .map_err(|e| e.to_string())?;
+                    Ok(match request.revisions() {
+                        Some(revisions) => {
+                            WorkspaceGraphResult::with_revisions(graph, revisions.to_vec())
+                        }
+                        None => WorkspaceGraphResult::new(graph),
+                    })
+                }
+            }),
+            is_relevant: Box::new(|_| true),
+        });
+        let state = GraphState::new(Some(WorkspaceGraphMode::LocalWorkspace))
+            .with_workspace_graph(Some(hooks));
+        let root_a = Path::new("/workspace/a");
+        let root_b = Path::new("/workspace/b");
+        state
+            .build_workspace_graph(root_a, None)
+            .expect("install initial graph");
+        state.tag_workspace_graph_dirty();
+
+        let rebuilding = state.clone();
+        let rebuild_thread = std::thread::spawn(move || rebuilding.ensure_workspace_graph_fresh());
+        rebuild_started.wait();
+
+        let newer = state
+            .prepare_workspace_graph(root_b, None)
+            .expect("prepare newer activation");
+        state.commit_workspace_graph(newer);
+        release_rebuild.wait();
+        rebuild_thread.join().expect("rebuild thread");
+
+        assert_eq!(state.active_workspace_root().as_deref(), Some(root_b));
+        assert!(read_lock(&state.pending_rebuild).is_none());
+        assert!(state.rebuild_error_note().is_none());
     }
 
     #[test]

@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Made concurrent MCP workspace activations request-coherent: graph preparation
   now publishes only while its activation generation is current, and watcher
   identity comes from the graph committed by that same transaction.
+- Preserved revision-set scope across lazy MCP workspace rebuilds and discarded
+  rebuild results prepared for a superseded active-graph generation.
 - Made `.kgl` topology serialization deterministic for relationships with
   multiple properties, independent of their internal insertion order.
 

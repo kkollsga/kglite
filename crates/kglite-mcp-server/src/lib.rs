@@ -930,7 +930,6 @@ fn apply_discovery_steer(mode: &Mode, mut options: ServerOptions) -> ServerOptio
 fn spawn_mode_watcher(mode: &Mode, graph_state: &GraphState) -> Result<Option<watch::WatchHandle>> {
     match mode {
         Mode::Watch { dir } => {
-            let canon = dir.canonicalize()?;
             let gs = graph_state.clone();
             let cb: watch::ChangeHandler = Arc::new(move |paths| {
                 // Skip when no changed path is relevant to the producer; build
@@ -942,7 +941,7 @@ fn spawn_mode_watcher(mode: &Mode, graph_state: &GraphState) -> Result<Option<wa
                 // Tag for rebuild — the actual work happens on the
                 // next MCP tool call via ensure_workspace_graph_fresh.
                 // Cheap: no rebuild on the watcher thread, ms-scale.
-                gs.tag_workspace_graph_dirty(canon.clone());
+                gs.tag_workspace_graph_dirty();
             });
             maybe_watch(Some(dir), Some(cb))
         }
@@ -977,7 +976,7 @@ fn spawn_mode_watcher(mode: &Mode, graph_state: &GraphState) -> Result<Option<wa
                 }
                 // Tag for rebuild; the actual rebuild fires on the
                 // next MCP tool call (ensure_workspace_graph_fresh).
-                gs.tag_workspace_graph_dirty(active.clone());
+                gs.tag_workspace_graph_dirty();
             });
             maybe_watch(Some(root), Some(cb))
         }
