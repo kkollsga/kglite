@@ -71,6 +71,12 @@ jobs:
         # shrink from its frozen baseline (docs/history/roadmap-2026H1.md).
         run: ./scripts/check_api_chokepoint.sh
 
+      - name: Check Cypher clean-room contract
+        run: python scripts/check_cypher_clean_room.py
+
+      - name: Check dependency license policy
+        run: python scripts/check_dependency_licenses.py
+
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 

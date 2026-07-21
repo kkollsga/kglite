@@ -5,9 +5,9 @@
 ```bash
 uv venv .venv                # one-time environment creation
 uv run --no-sync maturin develop  # fast dev install when Python tests need current Rust code
-make test                    # Rust + Python tests (default markers — skips benchmark/parity/stress/model_download/binary_size/bolt/bolt_stress)
-make gate                    # pre-push gate: lint + docs-facts drift + packaged-consumer contract + test-full
-make lint                    # lint subset only (api-chokepoint, clean-room, licenses, fmt, clippy, ruff, stubtest)
+make gate                    # fast format/static + docs-facts checkpoint
+make lint                    # fast format/static lint (no build, metadata walk, or imports)
+make test-mcp                # package-scoped tests; also test-core / test-cli
 ```
 
 **The repo `.venv` is owned by `uv`.** For direct Python or maturin commands,
@@ -23,9 +23,9 @@ themselves.
 `maturin` recompiles a different `python-extension` feature/crate-type variant.
 Do not use that pair as a generic gate. Select one path:
 
-- Rust engine → `cargo build -p kglite --lib` plus targeted Rust tests.
-- MCP server → `cargo build -p kglite-mcp-server --lib` plus its tests.
-- CLI → `cargo build -p kglite-cli` plus its tests.
+- Rust engine → `make test-core` or a narrower `cargo test -p kglite <filter>`.
+- MCP server → `make test-mcp` or a narrower package test filter.
+- CLI → `make test-cli` plus only matching interface tests.
 - Python wrapper/core test that does not exercise bundled commands → run
   `uv run --no-sync maturin develop --no-default-features --features
   abi3,python-extension` directly; do not pre-build the workspace.
@@ -40,14 +40,19 @@ the first build of a plan and keep them for the whole plan. Verify the real
 cache location with `sccache --show-stats`; never switch target/profile paths
 mid-plan merely because a build is slow.
 
+`make test`, `make test-full`, and bare workspace `cargo test` are broad
+diagnostics, not routine local gates. Run them only to investigate a failure
+that crosses package boundaries; otherwise let GitHub CI parallelize them.
+
 **Local correctness testing stays in the default/debug profile.** Never run
 `maturin develop --release`, `cargo test --release`, or another release-profile
 build merely to run tests. Use `uv run --no-sync maturin develop` (or `make
 dev`) only when Python tests need a fresh native extension; Rust-only changes
-should start with targeted `cargo test`/`cargo build --lib`. The completed PR's
-full GitHub CI must be green before a release starts. Release mode is reserved
-for actual performance measurement and the single release-artifact/constants
-refresh described below—not as an extra correctness gate.
+should use a targeted `cargo test`, or package-scoped `cargo check` when no
+behavioral test applies. The completed PR's full GitHub CI must be green before
+a release starts. Release mode is reserved for actual performance measurement
+and the single release-artifact/constants refresh described below—not as an
+extra correctness gate.
 
 **Every performance check uses release mode.** Benchmarks, regression checks,
 and any timing or size measurement are invalid in the default/debug profile;
@@ -55,22 +60,28 @@ use the release-building `make bench*` target or an explicit `uv run --no-sync
 maturin develop --release` first. Never report or compare debug-profile perf
 numbers.
 
-**`make gate` is the universal pre-push gate — and the ceiling for routine
-local checking.** It runs exactly the local checks with a real record of
-catching CI failures before the push; ~5 min warm-cache, longer right after
-dependency changes. Do NOT routinely reproduce the rest of the CI matrix
-locally — CI runs ~20 jobs in parallel in ~13 min wall-clock, while the same
-checks serialize into hours on one machine. If you run pieces by hand, both
-`cargo fmt --check` and `ruff format --check` matter — CI gates on the
-`--check` variants separately from the auto-fix variants.
+**Local validation is a fast relevance filter, not serialized CI.** Run `make
+gate` plus the smallest test command that exercises the changed behavior (for
+example `make test-mcp` or a single `cargo test -p … <filter>`). Do not run
+workspace-wide policy audits, clippy, `test-full`, stubtest,
+packaged-consumer verification, or a fresh native extension unless the touched
+surface specifically requires it. GitHub CI is the authoritative full matrix
+and must be green before release. `make lint-policy` is only for changes to
+policy scripts/baselines, dependencies, or Cypher clean-room sources;
+`make lint-full` is only an explicit CI-equivalent diagnostic. Neither is a
+phase or pre-push requirement. Both `cargo fmt --check` and `ruff format
+--check` remain in the fast gate.
 
 **Abort accidental slow paths early.** A targeted local check that starts
 resolving/syncing the project or compiling unrelated feature trees is the wrong
 command, not useful extra coverage. After roughly three minutes without new
-output, inspect the exact process and CPU once. If no compiler/linker is active,
-or an unexpected `uv` editable/PEP 517 build is running, terminate only those
-exact processes and reassess. Do not enter an unbounded poll/restart loop or
-switch profiles repeatedly; both throw away build-cache progress.
+output, inspect the exact process, CPU, and output-artifact timestamp once. A
+compiler process that merely exists but remains asleep at 0% CPU with no
+artifact progress is not useful activity: allow at most one additional
+60-second window, then terminate only that exact process tree and reassess.
+Stop immediately for an unexpected `uv` editable/PEP 517 build or unrelated
+feature tree. Do not enter an unbounded poll/restart loop or switch profiles
+repeatedly; both throw away build-cache progress.
 
 **Surface-conditional extras — run only when the touched surface matches,
 never routinely:**
@@ -81,17 +92,17 @@ never routinely:**
   `git diff crates/kglite-c/include/kglite.h`).
 - `docs/**`, top-level `*.md`, or `kglite/__init__.pyi` →
   `sphinx-build -W --keep-going -b html docs <out>` with `docs/requirements.txt`.
-- A deliberate public Rust API change → `make refresh-api-baseline` and review
-  the delta. (The release-constants refresh auto-skips the ~25-min 5-profile
-  rustdoc pass when profiled sources/manifest/baselines are unchanged —
-  `--skip-if-unchanged` in `scripts/rust_api_profiles.py`; pins live in
-  `tests/api-baselines/rust-api-profiles.json`.)
+- A deliberate public Rust API change → refresh only the affected API profile
+  when possible and review the delta; let CI verify the complete profile set.
+  The full `make refresh-api-baseline` five-profile rustdoc pass is a
+  release-time/explicit maintenance operation, not a routine phase gate. Pins
+  live in `tests/api-baselines/rust-api-profiles.json`.
 - Perf-sensitive paths (`core/pattern_matching/`, `cypher/executor/`, storage
   hot paths) → `make bench-check` **on an otherwise-idle machine** — a capture
   taken right after heavy builds reads +4–10% hot across the board.
-- Never run local `cargo package` verify sweeps across the workspace:
-  `scripts/check_packaged_features.sh` (inside `make gate`) already exercises
-  the packaged kglite crate as a real consumer, and CI + `cargo publish`
+- Run `scripts/check_packaged_features.sh` locally only after changing package
+  metadata, feature wiring, or the packaged-consumer fixture. Never run local
+  `cargo package` verify sweeps across the workspace; CI + `cargo publish`
   verify the rest.
 
 Sanitizers, Miri, Loom, free-threading, the 4-interpreter Python matrix,
@@ -362,7 +373,7 @@ project-specific allowance.
 When a plan has Steps 1 / 2 / 3 / …:
 
 1. **One commit per phase.** Bisectability beats batched commits. Each phase's code + tests in its own `feat:` / `refactor:` / etc.
-2. **Each phase must be green before its commit** — the smallest package-specific build above, `make lint`, and the relevant test suite all pass. Never use workspace-root `cargo build --lib` as the generic phase build.
+2. **Each phase must be green before its commit** — `make gate` and the smallest relevant package/test filter pass. A targeted test already compiles its target, so do not add a redundant build or workspace-wide clippy run. Never use workspace-root `cargo build --lib` as the generic phase build.
 3. **Keep going to the end.** Once a plan is approved, don't pause between phases. The only mid-plan stops are genuine blockers (failing test you can't fix, architectural surprise invalidating a later step).
 4. **One branch per plan — phases are commits, never sub-branches.** A plan
    gets exactly one feature branch and one draft PR; never spawn per-phase or

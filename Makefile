@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev dev-with-bin bundle-bin test test-full test-rust test-py bench bench-save bench-compare bench-check refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy gate lint lint-py source-quality rustsec-policy cov stubtest
+.PHONY: dev dev-with-bin bundle-bin test test-full test-rust test-core test-mcp test-cli test-py bench bench-save bench-compare bench-check refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy gate lint lint-policy lint-full lint-py source-quality rustsec-policy cov stubtest
 
 ## Build and install the package into the local .venv
 dev:
@@ -32,6 +32,16 @@ test: test-rust test-py
 ## Run Rust unit tests only
 test-rust:
 	$(ACTIVATE) && cargo test
+
+## Fast package-scoped Rust suites for normal local development.
+test-core:
+	cargo test -p kglite --lib
+
+test-mcp:
+	cargo test -p kglite-mcp-server
+
+test-cli:
+	cargo test -p kglite-cli
 
 ## Run Python tests only (excludes benchmarks)
 test-py:
@@ -164,24 +174,26 @@ check-api-chokepoint:
 check-lint-allowances:
 	python scripts/check_lint_allowances.py
 
-## Universal pre-push gate — exactly the local checks with a real record of
-## catching CI failures before the push: the lint script gates, generated-docs
-## drift, the packaged-consumer contract (runs in TWO CI jobs; a stale fixture
-## lockfile or packaging break fails both), and the full Rust+Python suite.
-## Surface-conditional extras (kglite-c/header drift, sphinx -W, api-baseline
-## refresh, bench-check) run only when their surface changed — see CLAUDE.md
-## "Build & test". Everything else is CI-only by design.
+## Fast local checkpoint. Pair this with the smallest package/test filter
+## covering the change. Policy audits, workspace clippy, stubtest, packaged-
+## consumer verification, and the broad test matrix run in CI.
 gate: lint check-docs-facts
-	bash scripts/check_packaged_features.sh
-	$(MAKE) test-full
 
-## Run all lint checks (Rust + Python + stubs)
-lint: check-api-chokepoint check-lint-allowances source-quality rustsec-policy
+## Fast formatting/static lint. Intentionally performs no Rust compilation,
+## metadata walk, or runtime import.
+lint: check-api-chokepoint
+	cargo fmt -- --check
+	$(ACTIVATE) && ruff format --check . && ruff check .
+
+## Slower repository-wide policy audits. CI runs these; invoke locally only
+## when changing their rules, baselines, dependency policy, or Cypher sources.
+lint-policy: check-lint-allowances source-quality rustsec-policy
 	$(ACTIVATE) && python scripts/check_cypher_clean_room.py
 	$(ACTIVATE) && python scripts/check_dependency_licenses.py
-	cargo fmt -- --check
+
+## Explicit CI-equivalent lint sweep. Not part of routine local development.
+lint-full: gate lint-policy
 	cargo clippy --all-targets -- -D warnings
-	$(ACTIVATE) && ruff format --check . && ruff check .
 	$(ACTIVATE) && python -m mypy.stubtest kglite --ignore-missing-stub --ignore-unused-allowlist --mypy-config-file mypy_stubtest.ini --allowlist stubtest_allowlist.txt
 
 ## Run tests with coverage report

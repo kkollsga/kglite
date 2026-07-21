@@ -47,8 +47,9 @@ construction/persistence work required by a new backend.
   suites relevant to the mode.
 - Small in-memory benchmarks before changing shared planner/executor paths;
   in-memory remains the performance gate.
-- `cargo build --lib`, `make lint`, `make test-full`, and the CI-only C-ABI/API
-  profile checks described in `AGENTS.md`.
+- `make gate`, targeted `kglite` tests, and the matching storage parity suites.
+  GitHub CI owns workspace clippy, the broad test matrix, and C-ABI/API profile
+  checks described in `AGENTS.md`.
 
 Start at `storage/mod.rs`, `storage/backend.rs`, and the closest existing
 backend. Do not copy internal implementation details across modes when a trait
