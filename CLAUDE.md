@@ -3,12 +3,57 @@
 ## Build & test
 
 ```bash
-source .venv/bin/activate && unset CONDA_PREFIX
-maturin develop --release    # release build; required for any perf measurement
+uv venv .venv                # one-time environment creation
+uv run --no-sync maturin develop  # fast dev install when Python tests need current Rust code
 make test                    # Rust + Python tests (default markers — skips benchmark/parity/stress/model_download/binary_size/bolt/bolt_stress)
 make gate                    # pre-push gate: lint + docs-facts drift + packaged-consumer contract + test-full
 make lint                    # lint subset only (api-chokepoint, clean-room, licenses, fmt, clippy, ruff, stubtest)
 ```
+
+**The repo `.venv` is owned by `uv`.** For direct Python or maturin commands,
+use `uv run --no-sync …`; do not activate the environment manually and do not
+use bare `uv run`, which may sync dependencies and rebuild the editable project
+before running the requested command. This repository does not track `uv.lock`:
+provision with `uv venv` and install dependencies explicitly with `uv pip
+install --python .venv/bin/python …`. Make targets already select `.venv`
+themselves.
+
+**Build the smallest touched surface.** This is a virtual workspace, so bare
+`cargo build --lib` builds every library member—including `kglite-py`—and then
+`maturin` recompiles a different `python-extension` feature/crate-type variant.
+Do not use that pair as a generic gate. Select one path:
+
+- Rust engine → `cargo build -p kglite --lib` plus targeted Rust tests.
+- MCP server → `cargo build -p kglite-mcp-server --lib` plus its tests.
+- CLI → `cargo build -p kglite-cli` plus its tests.
+- Python wrapper/core test that does not exercise bundled commands → run
+  `uv run --no-sync maturin develop --no-default-features --features
+  abi3,python-extension` directly; do not pre-build the workspace.
+- MCP/CLI bridge or final packaged-contract gate → run the full default debug
+  extension once with `uv run --no-sync maturin develop` (or `make dev`).
+
+The default extension intentionally links the engine, CLI, and MCP server; its
+MCP feature adds roughly 100 resolved packages. Do not pay that cost for a
+Rust-only or narrow Python check. If the checkout is on an external volume,
+choose stable internal-disk `CARGO_TARGET_DIR` and `SCCACHE_DIR` paths before
+the first build of a plan and keep them for the whole plan. Verify the real
+cache location with `sccache --show-stats`; never switch target/profile paths
+mid-plan merely because a build is slow.
+
+**Local correctness testing stays in the default/debug profile.** Never run
+`maturin develop --release`, `cargo test --release`, or another release-profile
+build merely to run tests. Use `uv run --no-sync maturin develop` (or `make
+dev`) only when Python tests need a fresh native extension; Rust-only changes
+should start with targeted `cargo test`/`cargo build --lib`. The completed PR's
+full GitHub CI must be green before a release starts. Release mode is reserved
+for actual performance measurement and the single release-artifact/constants
+refresh described below—not as an extra correctness gate.
+
+**Every performance check uses release mode.** Benchmarks, regression checks,
+and any timing or size measurement are invalid in the default/debug profile;
+use the release-building `make bench*` target or an explicit `uv run --no-sync
+maturin develop --release` first. Never report or compare debug-profile perf
+numbers.
 
 **`make gate` is the universal pre-push gate — and the ceiling for routine
 local checking.** It runs exactly the local checks with a real record of
@@ -18,6 +63,14 @@ locally — CI runs ~20 jobs in parallel in ~13 min wall-clock, while the same
 checks serialize into hours on one machine. If you run pieces by hand, both
 `cargo fmt --check` and `ruff format --check` matter — CI gates on the
 `--check` variants separately from the auto-fix variants.
+
+**Abort accidental slow paths early.** A targeted local check that starts
+resolving/syncing the project or compiling unrelated feature trees is the wrong
+command, not useful extra coverage. After roughly three minutes without new
+output, inspect the exact process and CPU once. If no compiler/linker is active,
+or an unexpected `uv` editable/PEP 517 build is running, terminate only those
+exact processes and reassess. Do not enter an unbounded poll/restart loop or
+switch profiles repeatedly; both throw away build-cache progress.
 
 **Surface-conditional extras — run only when the touched surface matches,
 never routinely:**
@@ -117,7 +170,7 @@ The differential corpus is *the* mechanism preventing silent correctness regress
 Before any perf-related change:
 
 1. **Baseline first** — write/extend a benchmark covering touched code paths. Run it, record numbers.
-2. **Build only the changed working tree.** Use `maturin develop --release` when benchmarking the current codebase with local changes. Never trust debug-build numbers; per-test variance is unbounded.
+2. **Build only the changed working tree, always in release mode.** Every benchmark and performance gate must use a release-built candidate (`uv run --no-sync maturin develop --release`, or the release-building `make bench*` target). Debug-profile performance results are invalid and must be discarded. This is a perf-only exception to the default-profile correctness-testing rule above.
 3. **Install released/reference versions with `uv`.** Do not source-build another revision just to establish an A/B baseline. Create an isolated venv and install its published wheel, e.g. `uv venv <venv> --python 3.12 && uv pip install --python <venv>/bin/python 'kglite==0.14.2'`. Run the probe outside the repository root so the local `kglite/` package cannot shadow the installed wheel.
 4. **Trust `min` over `median`** for sub-millisecond benches. Median pulls upward with system load; min reflects best-case throughput.
 5. **Tighten the harness for noisy benches**:
@@ -281,7 +334,10 @@ Three captured values drift across releases and need a version-paired refresh as
 - `tests/test_phase5_parity.py::test_binary_size_regression` baseline. Update the docstring's "what grew" note with each bump — the script adds a `TODO: describe what grew since the prior baseline` line for the maintainer to fill in.
 - `tests/benchmarks/baselines/<version>.json` and `current.json`. Captured by re-running the 11 tracked core benchmarks. The script is idempotent — if `<version>.json` already exists, recapture is skipped (delete the file to force a fresh capture; benchmark numbers are inherently noisy so we don't want to overwrite on every script run).
 
-The script requires a fresh release build (`maturin develop --release`) for steps 2 and 3.
+The script requires one fresh release artifact (`uv run --no-sync maturin
+develop --release`) for steps 2 and 3. Build it once, after the completed PR's
+full CI is green; it is release-data generation, not a reason to rerun tests in
+release mode.
 
 Two release-time companions (both wired into the release skill):
 `make bench-anchor` gates cumulative perf drift (newest baseline vs ~3
@@ -306,7 +362,7 @@ project-specific allowance.
 When a plan has Steps 1 / 2 / 3 / …:
 
 1. **One commit per phase.** Bisectability beats batched commits. Each phase's code + tests in its own `feat:` / `refactor:` / etc.
-2. **Each phase must be green before its commit** — `cargo build --lib`, `make lint`, and the relevant test suite all pass.
+2. **Each phase must be green before its commit** — the smallest package-specific build above, `make lint`, and the relevant test suite all pass. Never use workspace-root `cargo build --lib` as the generic phase build.
 3. **Keep going to the end.** Once a plan is approved, don't pause between phases. The only mid-plan stops are genuine blockers (failing test you can't fix, architectural surprise invalidating a later step).
 4. **One branch per plan — phases are commits, never sub-branches.** A plan
    gets exactly one feature branch and one draft PR; never spawn per-phase or
