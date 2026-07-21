@@ -219,3 +219,20 @@ stubtest:
 ## Remove build artifacts
 clean:
 	cargo clean
+
+## Size-gated cargo clean. Cargo never garbage-collects target/: incremental
+## session dirs and feature-variant artifacts accumulate without bound (a
+## 2026-07 audit found 503 GB / 1.27M files, making an incremental
+## `maturin develop` take 8 minutes). Run at release time (wired into the
+## release skill); no-ops while target/ stays under the threshold. With
+## sccache configured, the post-clean rebuild is cheap.
+PRUNE_TARGET_GB := 40
+prune-target:
+	@dir=$$(readlink target 2>/dev/null || echo target); \
+	size_gb=$$(du -sg "$$dir" 2>/dev/null | cut -f1); \
+	if [ "$${size_gb:-0}" -ge $(PRUNE_TARGET_GB) ]; then \
+		echo "target/ is $${size_gb} GB (>= $(PRUNE_TARGET_GB) GB) — running cargo clean"; \
+		cargo clean; \
+	else \
+		echo "target/ is $${size_gb:-0} GB — under the $(PRUNE_TARGET_GB) GB prune threshold"; \
+	fi

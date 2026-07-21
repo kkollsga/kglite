@@ -34,11 +34,20 @@ Do not use that pair as a generic gate. Select one path:
 
 The default extension intentionally links the engine, CLI, and MCP server; its
 MCP feature adds roughly 100 resolved packages. Do not pay that cost for a
-Rust-only or narrow Python check. If the checkout is on an external volume,
-choose stable internal-disk `CARGO_TARGET_DIR` and `SCCACHE_DIR` paths before
-the first build of a plan and keep them for the whole plan. Verify the real
-cache location with `sccache --show-stats`; never switch target/profile paths
-mid-plan merely because a build is slow.
+Rust-only or narrow Python check. Build caches live on the internal disk by
+standing setup (2026-07): `target` is a **symlink** to
+`/Users/Shared/cargo-targets/KGLite` (repo-relative `target/...` paths keep
+working), and `SCCACHE_DIR=/Users/Shared/sccache` is pinned in
+`~/.cargo/config.toml [env]` because `$HOME` sits on the external USB volume.
+Do not override `CARGO_TARGET_DIR`/`SCCACHE_DIR` per-plan or switch
+target/profile paths mid-plan merely because a build is slow; if the symlink
+is missing (fresh clone), recreate it before the first build. Cargo never
+garbage-collects the target dir — `make prune-target` (size-gated
+`cargo clean`, wired into the release skill) keeps it bounded. macOS
+Gatekeeper adds a ~30 s first-run assessment to every freshly linked local
+binary unless the invoking terminal is in Privacy & Security → Developer
+Tools; a warm `cargo test` that stalls at ~0 % CPU on first execution is that
+assessment, not a hung test.
 
 `make test`, `make test-full`, and bare workspace `cargo test` are broad
 diagnostics, not routine local gates. Run them only to investigate a failure
