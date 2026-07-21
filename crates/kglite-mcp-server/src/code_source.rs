@@ -132,7 +132,7 @@ fn run(
 
     // Lazy rebuild: if the watcher tagged the graph dirty since the
     // last call, rebuild now before resolving the qualified name.
-    state.ensure_code_tree_fresh();
+    state.ensure_workspace_graph_fresh();
 
     let lookup = match state.source_lookup(qname, node_type) {
         Ok(loc) => loc,

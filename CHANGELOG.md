@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced the code-tree-specific MCP embedding hooks with a generic
+  `WorkspaceGraphHooks` lifecycle. One request/result path now covers ordinary
+  and revision-set builds, while downstream producers own file relevance and
+  ingestion policy through `ServerExtensions::with_workspace_graph`.
+
 ### Fixed
 
 - Made `.kgl` topology serialization deterministic for relationships with

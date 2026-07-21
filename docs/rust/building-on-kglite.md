@@ -46,7 +46,7 @@ stability posture; kglite's CI locks against accidental drift on all of them.
 | Seam | What it is | Stability |
 |---|---|---|
 | **Engine facade** — `kglite::api::*` | The curated Rust surface: `DirGraph`, `Value`, `session::*`, `io::{save_graph, load_file}`, error types, `code_entities`. | Exact-baseline-locked in CI (cargo-public-api, pinned nightly). Additive within a minor line; deliberate breaks ship on a MINOR bump with a migration guide. See the [API reference](api-reference.md). |
-| **MCP server library** — `kglite-mcp-server` | `run`, `run_with_embedder_factory`, `run_with_code_tree_hooks`, `run_with_extensions`, `CodeTreeHooks`, `ServerExtensions`, `DomainToolRegistry`, `DomainGraphState`, `DomainGraphContext`. The seams a producer/domain MCP server builds on. | Public-API baseline + hook/registrar-semantics unit tests. Same MINOR-break posture as the engine facade. |
+| **MCP server library** — `kglite-mcp-server` | `run`, `run_with_embedder_factory`, `run_with_extensions`, `WorkspaceGraphHooks`, `WorkspaceGraphRequest`, `WorkspaceGraphResult`, `WorkspaceGraphRelevance`, `ServerExtensions`, `DomainToolRegistry`, `DomainGraphState`, `DomainGraphContext`. The seams a producer/domain MCP server builds on. | Public-API baseline + hook/registrar-semantics unit tests. Same MINOR-break posture as the engine facade. |
 | **`.kgl` file format** | The persisted graph format that handoff and all persistence use. | Current RGF v5/Postcard only; v4/bincode and older containers are refused with a clear 0.13.4 conversion or rebuild message. |
 | **Python top-level** — `kglite.*` | `kglite.load`, `kglite.from_blueprint`, `kglite.from_records`, `KnowledgeGraph` methods. The P3 entry points and the P1 handoff target. | Contract-tested + stubtest against `kglite/__init__.pyi`. |
 | **C ABI** — `include/kglite.h` | The `extern "C"` surface for non-Rust bindings. | cbindgen header-drift check in CI; see the [C ABI guide](c-abi.md). |
@@ -150,30 +150,44 @@ surface.
 
 ## MCP recipe
 
-A producer that wants an MCP server wraps
-`kglite_mcp_server::run_with_code_tree_hooks`. The seam is *code-tree-named* but
-*generically shaped* — a triple of hooks:
+A producer that wants an MCP server composes `ServerExtensions` with a generic
+workspace-graph lifecycle:
 
-- **build**: `path → graph` (single build),
-- **build_revs**: `path → graph` over multiple git revisions (the hook owns rev
-  canonicalization), and
-- **is_code_file**: the watch predicate — is a change to this path
-  build-relevant?
+- **build** receives one request shape for ordinary and revision-set builds;
+- **result** returns the graph and canonical revision labels it represents; and
+- **is_relevant** owns the producer's complete watch policy. KGLite does not
+  assume file languages or documentation ingestion.
 
 ```rust
-use kglite_mcp_server::CodeTreeHooks;
+use kglite_mcp_server::{
+    run_with_extensions, ServerExtensions, WorkspaceGraphHooks,
+    WorkspaceGraphMode, WorkspaceGraphResult,
+};
 
 fn main() -> anyhow::Result<()> {
-    let hooks = CodeTreeHooks {
-        build: Box::new(|dir, include_docs| my_builder::build(dir, include_docs)),
-        build_revs: Box::new(|dir, revs, include_docs| {
-            let revs = my_builder::dedup_revs(revs);
-            let graph = my_builder::build_revs(dir, &revs, include_docs)?;
-            Ok((graph, revs))
+    let hooks = WorkspaceGraphHooks {
+        build: Box::new(|request| {
+            let include_docs = request.mode() == WorkspaceGraphMode::Workspace;
+            match request.revisions() {
+                None => my_builder::build(request.root(), include_docs)
+                    .map(WorkspaceGraphResult::new),
+                Some(requested) => {
+                    let revisions = my_builder::dedup_revs(requested);
+                    let graph = my_builder::build_revs(
+                        request.root(), &revisions, include_docs,
+                    )?;
+                    Ok(WorkspaceGraphResult::with_revisions(graph, revisions))
+                }
+            }
         }),
-        is_code_file: Box::new(|p| my_builder::language_for_path(p).is_some()),
+        is_relevant: Box::new(|change| {
+            my_builder::language_for_path(change.path()).is_some()
+                || (change.mode() == WorkspaceGraphMode::Workspace
+                    && change.path().extension().is_some_and(|ext| ext == "md"))
+        }),
     };
-    kglite_mcp_server::run_with_code_tree_hooks(std::env::args_os(), Some(hooks))
+    let extensions = ServerExtensions::new().with_workspace_graph(hooks);
+    run_with_extensions(std::env::args_os(), extensions)
 }
 ```
 
@@ -213,7 +227,7 @@ state. `with_context` borrows the graph, persistence target (`source_path`),
 and source identity (`root`) under one read lock, so activation cannot produce
 a graph/path mismatch. Keep its callback short and read-only. Downstreams own
 their methods, while KGLite retains generic graph/Cypher tool ownership.
-`ServerExtensions::with_code_tree_hooks` composes both extension kinds when a
+`ServerExtensions::with_workspace_graph` composes both extension kinds when a
 binary needs them together.
 
 ## Testing pattern

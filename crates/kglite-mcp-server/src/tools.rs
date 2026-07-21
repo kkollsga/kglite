@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 const NO_GRAPH: &str =
     "No active graph. Pass --graph X.kgl, or activate one via repo_management('org/repo').";
 
-/// Hot-fail guard for the lazy code-tree rebuild: after this many
-/// consecutive failures for the same target, [`GraphState::ensure_code_tree_fresh`]
+/// Hot-fail guard for the lazy workspace-graph rebuild: after this many
+/// consecutive failures for the same target, [`GraphState::ensure_workspace_graph_fresh`]
 /// stops restoring the dirty marker (no more per-tool-call retries) and
 /// keeps serving the stale graph — with the failure surfaced in tool
 /// output — until a new FS event re-tags the target.
@@ -52,47 +52,130 @@ pub(crate) fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     lock.write().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Refusal message for code-graph build requests when no builder is
-/// injected. The in-tree builder moved to the standalone codingest
-/// project; this server still serves every graph-read tool on any graph.
-const NO_BUILDER_MSG: &str = "code-graph building is not available in this binary: as of kglite \
-0.14 the builder lives in the codingest project.\n\
-  fix:      install codingest-mcp (`cargo install codingest-mcp`, or the prebuilt binaries at \
-https://github.com/kkollsga/codingest/releases) and swap the `command` in your MCP config from \
-`kglite-mcp-server` to `codingest-mcp` — it embeds this server, accepts the SAME flags and \
-manifest, and injects its builder. Nothing else in your config changes.\n\
-  rollback: keep running the old kglite-mcp-server binary (or `pip install \"kglite<0.14\"` for \
-the wheel-bundled one).\n\
-  reading .kgl graphs (--graph) needs no builder and keeps working here.\n\
-  migration guide: https://kglite.readthedocs.io/en/latest/python/migrations/0.13-to-0.14.html";
+/// Refusal surfaced when a workspace mode has no graph producer configured.
+const NO_BUILDER_MSG: &str = "workspace-graph building is not configured in this binary. \
+Embed kglite-mcp-server and inject WorkspaceGraphHooks through \
+ServerExtensions::with_workspace_graph. For source-code graphs, use codingest-mcp. \
+Reading existing .kgl graphs with --graph remains available.";
 
-/// Single-tree build closure: `(dir, include_docs) -> graph`.
-pub type CodeTreeBuildFn =
-    dyn Fn(&Path, bool) -> Result<Arc<kglite::api::DirGraph>, String> + Send + Sync;
+/// Server mode that requested a workspace graph.
+///
+/// Producers own all domain policy derived from this value, including which
+/// files to ingest. KGLite does not assume source languages or documentation
+/// behavior.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum WorkspaceGraphMode {
+    /// Clone-backed `--workspace` mode.
+    Workspace,
+    /// Manifest-declared local workspace activated through `set_root_dir`.
+    LocalWorkspace,
+    /// Fixed-directory `--watch` mode.
+    Watch,
+}
 
-/// Multi-rev build closure: `(dir, revs, include_docs) -> (graph, canonical_revs)`.
-pub type CodeTreeBuildRevsFn = dyn Fn(&Path, &[String], bool) -> Result<(Arc<kglite::api::DirGraph>, Vec<String>), String>
-    + Send
-    + Sync;
+/// One producer request for a workspace graph.
+pub struct WorkspaceGraphRequest {
+    root: std::path::PathBuf,
+    revisions: Option<Vec<String>>,
+    mode: WorkspaceGraphMode,
+}
 
-/// Injection seam for the code-tree build path — the builder analogue of
-/// the Python-embedder factory in `run_with_embedder_factory`. An external
-/// builder (e.g. the standalone codingest workspace) passes closures via
-/// [`crate::run_with_code_tree_hooks`]; `None` keeps the in-tree
-/// `kglite::api::code_tree` builder. The closures must be `Send + Sync`:
-/// they're called from tool handlers on the tokio runtime.
-pub struct CodeTreeHooks {
-    /// Build a single-tree code graph for a directory.
-    pub build: Box<CodeTreeBuildFn>,
-    /// Build a multi-rev graph. Returns the graph **and the canonical
-    /// (deduped) rev labels**: the labels are recorded on the active slot
-    /// and surfaced in the activation banner, so the hook owns rev
-    /// canonicalization — the server must not assume an in-tree
-    /// `dedup_revs` exists.
-    pub build_revs: Box<CodeTreeBuildRevsFn>,
-    /// Watch predicate: does a change to this path affect the code graph?
-    /// (The docs-pass `.md` extension check stays server-side.)
-    pub is_code_file: Box<dyn Fn(&Path) -> bool + Send + Sync>,
+impl WorkspaceGraphRequest {
+    pub(crate) fn new(
+        root: std::path::PathBuf,
+        revisions: Option<Vec<String>>,
+        mode: WorkspaceGraphMode,
+    ) -> Self {
+        Self {
+            root,
+            revisions,
+            mode,
+        }
+    }
+
+    /// Canonical source root to build.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Resolved revisions requested by activation, oldest to newest.
+    /// `None` means the producer should build its ordinary working-tree view.
+    pub fn revisions(&self) -> Option<&[String]> {
+        self.revisions.as_deref()
+    }
+
+    /// Workspace mode that originated the request.
+    pub fn mode(&self) -> WorkspaceGraphMode {
+        self.mode
+    }
+}
+
+/// Completed graph plus the canonical revision labels represented by it.
+pub struct WorkspaceGraphResult {
+    graph: Arc<kglite::api::DirGraph>,
+    revisions: Option<Vec<String>>,
+}
+
+impl WorkspaceGraphResult {
+    /// Return a normal working-tree graph.
+    pub fn new(graph: Arc<kglite::api::DirGraph>) -> Self {
+        Self {
+            graph,
+            revisions: None,
+        }
+    }
+
+    /// Return a graph spanning canonicalized revision labels.
+    pub fn with_revisions(graph: Arc<kglite::api::DirGraph>, revisions: Vec<String>) -> Self {
+        Self {
+            graph,
+            revisions: Some(revisions),
+        }
+    }
+
+    fn into_parts(self) -> (Arc<kglite::api::DirGraph>, Option<Vec<String>>) {
+        (self.graph, self.revisions)
+    }
+}
+
+/// Borrowed watch-change context passed to the producer's relevance policy.
+pub struct WorkspaceGraphRelevance<'a> {
+    path: &'a Path,
+    mode: WorkspaceGraphMode,
+}
+
+impl<'a> WorkspaceGraphRelevance<'a> {
+    pub(crate) fn new(path: &'a Path, mode: WorkspaceGraphMode) -> Self {
+        Self { path, mode }
+    }
+
+    /// Changed path reported by the watcher.
+    pub fn path(&self) -> &'a Path {
+        self.path
+    }
+
+    /// Workspace mode whose active graph would be rebuilt.
+    pub fn mode(&self) -> WorkspaceGraphMode {
+        self.mode
+    }
+}
+
+/// Unified plain/revision-set workspace graph build closure.
+pub type WorkspaceGraphBuildFn =
+    dyn Fn(WorkspaceGraphRequest) -> Result<WorkspaceGraphResult, String> + Send + Sync;
+
+/// Producer-owned watch relevance policy.
+pub type WorkspaceGraphRelevanceFn =
+    dyn for<'a> Fn(WorkspaceGraphRelevance<'a>) -> bool + Send + Sync;
+
+/// Generic workspace-graph lifecycle extension for embedding binaries.
+pub struct WorkspaceGraphHooks {
+    /// Build the graph requested by KGLite. The producer owns revision
+    /// canonicalization and all domain-specific ingestion policy.
+    pub build: Box<WorkspaceGraphBuildFn>,
+    /// Return whether a changed path can affect the active graph.
+    pub is_relevant: Box<WorkspaceGraphRelevanceFn>,
 }
 
 /// Shared active-graph state. Cloning is cheap (Arc).
@@ -101,7 +184,7 @@ pub struct GraphState {
     inner: Arc<RwLock<Option<ActiveGraph>>>,
     /// Deferred-rebuild slot. The watcher tags the active root here
     /// (cheap, microseconds — sets the slot, drops the lock); each
-    /// MCP tool entry calls [`ensure_code_tree_fresh`] which atomically
+    /// MCP tool entry calls [`ensure_workspace_graph_fresh`] which atomically
     /// `take()`s the slot and rebuilds. Pattern: do the actual work
     /// lazily, never on the watcher thread. N FS events between two
     /// tool calls → 1 rebuild (the slot just holds the latest target).
@@ -112,25 +195,21 @@ pub struct GraphState {
     /// implementing the [`MAX_CONSECUTIVE_REBUILD_FAILURES`] hot-fail
     /// guard.
     rebuild_status: Arc<RwLock<RebuildStatus>>,
-    /// Whether `build_code_tree` also ingests the repo's markdown as
-    /// `:Doc` nodes (and links them to code via `MENTIONS`/`DOCUMENTS`).
-    /// On for the github-workspace (open-source) mode; off for local /
-    /// file modes. Set once at startup; carried by every clone so the
-    /// lazy watch-rebuild uses the same setting.
-    include_docs: bool,
+    /// Workspace mode used to build request/relevance context. `None` for
+    /// graph/source-root/bare modes that never ask a producer to build.
+    workspace_mode: Option<WorkspaceGraphMode>,
     /// Manifest-declared value codecs (`extensions.value_codecs`). Server-
     /// config, set once at boot via [`with_value_codecs`] and carried by every
     /// clone; passed to `ExecuteOptions::value_codecs` on each `cypher_query` /
     /// `tools[].cypher` run so the engine decodes query-side literals and
     /// encodes result columns (`'Q42'` ↔ `42`) — safely, after parsing.
     value_codecs: Option<Arc<Vec<ValueCodec>>>,
-    /// External code-tree builder ([`CodeTreeHooks`]); `None` = in-tree
-    /// builder. Set once at boot via [`with_code_tree_hooks`], carried by
-    /// every clone so the lazy watch-rebuild uses the same builder.
-    code_tree_hooks: Option<Arc<CodeTreeHooks>>,
+    /// External workspace-graph lifecycle extension. Set once at boot and
+    /// carried by every clone so lazy watch rebuilds use the same producer.
+    workspace_graph_hooks: Option<Arc<WorkspaceGraphHooks>>,
 }
 
-/// Bookkeeping for lazy code-tree rebuild failures. Reset to default on
+/// Bookkeeping for lazy workspace-graph rebuild failures. Reset to default on
 /// the next successful build.
 #[derive(Default)]
 struct RebuildStatus {
@@ -159,7 +238,7 @@ struct ActiveGraph {
     /// path.
     root: Option<std::path::PathBuf>,
     /// The resolved git revisions this graph spans, when it was built as a
-    /// multi-rev code graph (`build_code_tree_revs`) — oldest → newest, HEAD
+    /// revision-set graph — oldest → newest, HEAD
     /// last. `None` for a plain single-rev / loaded graph. Surfaced in the
     /// `<active_graph …>` header (`revs="…"`) and the activation summary so an
     /// agent knows unscoped queries span all these revs (the over-count trap)
@@ -233,11 +312,10 @@ impl ActiveGraph {
 }
 
 impl GraphState {
-    /// `include_docs`: build with the markdown docs pass (github-workspace
-    /// mode on, local/file modes off).
-    pub fn new(include_docs: bool) -> Self {
+    /// Create state for an optional workspace-graph-producing mode.
+    pub fn new(workspace_mode: Option<WorkspaceGraphMode>) -> Self {
         Self {
-            include_docs,
+            workspace_mode,
             ..Self::default()
         }
     }
@@ -249,10 +327,10 @@ impl GraphState {
         self
     }
 
-    /// Attach an external code-tree builder ([`CodeTreeHooks`]). Builder
-    /// form, set once at boot like [`Self::with_value_codecs`].
-    pub fn with_code_tree_hooks(mut self, hooks: Option<Arc<CodeTreeHooks>>) -> Self {
-        self.code_tree_hooks = hooks;
+    /// Attach an external workspace-graph producer. Builder form, set once at
+    /// boot like [`Self::with_value_codecs`].
+    pub fn with_workspace_graph(mut self, hooks: Option<Arc<WorkspaceGraphHooks>>) -> Self {
+        self.workspace_graph_hooks = hooks;
         self
     }
 
@@ -260,26 +338,16 @@ impl GraphState {
     /// this: without a builder, "no graph after activate" is a permanent
     /// configuration state (surfaced via the activation summary), not a
     /// build failure worth erroring the activation for.
-    pub fn has_code_tree_hooks(&self) -> bool {
-        self.code_tree_hooks.is_some()
+    pub fn has_workspace_graph_builder(&self) -> bool {
+        self.workspace_graph_hooks.is_some()
     }
 
-    /// Whether a changed path should tag a code-tree rebuild: any file the
-    /// active builder handles, plus `.md` files when the docs pass is
-    /// enabled (so editing a README re-links it to the code).
+    /// Whether the configured producer considers a changed path relevant.
     pub fn is_graph_relevant(&self, p: &Path) -> bool {
-        // No builder hooks → no rebuild is possible, so no change is
-        // graph-relevant. (The in-tree builder moved to codingest; this
-        // server builds code graphs only when an embedding binary injects
-        // CodeTreeHooks.)
-        let Some(hooks) = &self.code_tree_hooks else {
+        let (Some(hooks), Some(mode)) = (&self.workspace_graph_hooks, self.workspace_mode) else {
             return false;
         };
-        (hooks.is_code_file)(p)
-            || (self.include_docs
-                && p.extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|e| e.eq_ignore_ascii_case("md")))
+        (hooks.is_relevant)(WorkspaceGraphRelevance::new(p, mode))
     }
 
     /// The configured value codecs as a slice for `ExecuteOptions::value_codecs`
@@ -291,13 +359,13 @@ impl GraphState {
     /// Tag a directory as needing rebuild. Called from the watch
     /// callback; non-blocking (a single lock-protected pointer write).
     /// The actual rebuild happens lazily on the next tool call via
-    /// [`ensure_code_tree_fresh`].
-    pub fn tag_code_tree_dirty(&self, target: std::path::PathBuf) {
-        tracing::debug!(target = %target.display(), "code_tree tagged for rebuild");
+    /// [`ensure_workspace_graph_fresh`].
+    pub fn tag_workspace_graph_dirty(&self, target: std::path::PathBuf) {
+        tracing::debug!(target = %target.display(), "workspace graph tagged for rebuild");
         *write_lock(&self.pending_rebuild) = Some(target);
     }
 
-    /// Rebuild the code-tree if the watcher tagged it dirty since the
+    /// Rebuild the workspace graph if the watcher tagged it dirty since the
     /// last call. Called by each MCP tool entry that reads the graph
     /// (cypher_query / graph_overview / save_graph / read_code_source
     /// / explore). No-op when nothing's pending.
@@ -312,16 +380,16 @@ impl GraphState {
     /// same target the marker is NOT restored — the stale graph keeps
     /// being served (error still surfaced) and the next retry happens
     /// only when a fresh FS event re-tags the target.
-    pub fn ensure_code_tree_fresh(&self) {
+    pub fn ensure_workspace_graph_fresh(&self) {
         let target = write_lock(&self.pending_rebuild).take();
         let Some(target) = target else { return };
-        tracing::info!(target = %target.display(), "rebuilding code_tree (lazy, FS changed)");
-        match self.build_code_tree(&target) {
+        tracing::info!(target = %target.display(), "rebuilding workspace graph (lazy, FS changed)");
+        match self.build_workspace_graph(&target, None) {
             Ok(()) => {
                 *write_lock(&self.rebuild_status) = RebuildStatus::default();
             }
             Err(e) => {
-                tracing::warn!(error = %e, "lazy code_tree rebuild failed");
+                tracing::warn!(error = %e, "lazy workspace graph rebuild failed");
                 let failures = {
                     let mut status = write_lock(&self.rebuild_status);
                     if status.failed_target.as_deref() == Some(target.as_path()) {
@@ -346,7 +414,7 @@ impl GraphState {
                     tracing::warn!(
                         target = %target.display(),
                         failures,
-                        "code_tree rebuild keeps failing — serving the stale \
+                        "workspace graph rebuild keeps failing — serving the stale \
                          graph; retrying only on the next FS event"
                     );
                 }
@@ -367,7 +435,7 @@ impl GraphState {
             .map(humanize_age)
             .unwrap_or_else(|| "?".to_string());
         Some(format!(
-            "WARNING: code-tree rebuild failed {age} ago ({} consecutive \
+            "WARNING: workspace graph rebuild failed {age} ago ({} consecutive \
              failure(s)) — the active graph is STALE relative to the \
              filesystem. Error: {err}",
             status.consecutive_failures
@@ -465,53 +533,29 @@ impl GraphState {
         ))
     }
 
-    pub fn build_code_tree(&self, dir: &Path) -> Result<()> {
-        let Some(hooks) = &self.code_tree_hooks else {
+    /// Ask the configured producer for a workspace graph and atomically swap
+    /// the completed result into the active slot.
+    pub fn build_workspace_graph(&self, root: &Path, revisions: Option<&[String]>) -> Result<()> {
+        let Some(hooks) = &self.workspace_graph_hooks else {
             anyhow::bail!(NO_BUILDER_MSG);
         };
-        // include_docs is mode-dependent (github-workspace on, local off).
-        let dir_arc = (hooks.build)(dir, self.include_docs)
-            .map_err(|e| anyhow::anyhow!("code-tree build hook failed: {}", e))?;
-        let kg = KnowledgeGraph::from_arc(dir_arc);
-        *write_lock(&self.inner) = Some(ActiveGraph {
-            kg,
-            source_path: None,
-            writer_lease: None,
-            root: Some(dir.to_path_buf()),
-            revs: None,
-            built_at: SystemTime::now(),
-        });
-        Ok(())
-    }
-
-    /// Build a **multi-rev** code-tree graph spanning `revs` (resolved git
-    /// revspecs, oldest → newest with HEAD last — as delivered by the
-    /// mcp-methods revs-aware activation hook) and swap it into the active
-    /// slot. The rev counterpart of [`Self::build_code_tree`]: routes through
-    /// the shared core merge (`kglite::api::code_tree::build_code_tree_revs`,
-    /// B.2b), which folds one node per entity across revs and stamps native
-    /// list props (`revs` / `rev_fp` on nodes, `revs` on edges) plus the
-    /// rev-scoping provenance instructions that `describe()` / `graph_overview`
-    /// render. Records `root` + the resolved `revs` + `built_at` on the active
-    /// slot so the identity surfaces (`<active_graph …>` header, activation
-    /// summary) name the loaded rev-set.
-    pub fn build_code_tree_revs(&self, dir: &Path, revs: &[String]) -> Result<()> {
-        let Some(hooks) = &self.code_tree_hooks else {
-            anyhow::bail!(NO_BUILDER_MSG);
+        let Some(mode) = self.workspace_mode else {
+            anyhow::bail!("workspace-graph build requested outside a workspace/watch mode");
         };
-        // The recorded `active.revs` — which feeds the header + activation
-        // banner — must match the canonical label set the builder folds into
-        // the graph, so the hook owns rev dedup and returns the canonical
-        // list alongside the graph.
-        let (dir_arc, revs) = (hooks.build_revs)(dir, revs, self.include_docs)
-            .map_err(|e| anyhow::anyhow!("code-tree revs build hook failed: {}", e))?;
-        let kg = KnowledgeGraph::from_arc(dir_arc);
+        let request = WorkspaceGraphRequest::new(
+            root.to_path_buf(),
+            revisions.map(|revs| revs.to_vec()),
+            mode,
+        );
+        let result = (hooks.build)(request)
+            .map_err(|e| anyhow::anyhow!("workspace-graph build hook failed: {e}"))?;
+        let (graph, revisions) = result.into_parts();
         *write_lock(&self.inner) = Some(ActiveGraph {
-            kg,
+            kg: KnowledgeGraph::from_arc(graph),
             source_path: None,
             writer_lease: None,
-            root: Some(dir.to_path_buf()),
-            revs: Some(revs),
+            root: Some(root.to_path_buf()),
+            revs: revisions,
             built_at: SystemTime::now(),
         });
         Ok(())
@@ -549,11 +593,11 @@ impl GraphState {
     pub fn activation_summary(&self) -> Option<String> {
         let guard = read_lock(&self.inner);
         let Some(active) = guard.as_ref() else {
-            // Activation ran but no graph landed. Without builder hooks
+            // Activation ran but no graph landed. Without a producer
             // that's expected, not silent: the framework swallows the
             // post-activate hook's error, so this summary is the only
             // channel that reaches the activation message.
-            if self.code_tree_hooks.is_none() {
+            if self.workspace_graph_hooks.is_none() {
                 return Some(NO_BUILDER_MSG.to_string());
             }
             return None;
@@ -598,7 +642,7 @@ impl GraphState {
         // nothing over-counts and there is no delta to diff, so it reads plainly.
         // A multi-rev graph names the loaded revs and teaches the scoping idiom
         // (unscoped queries span ALL revs) + `CALL rev_diff` for deltas. Mirrors
-        // the provenance instructions `build_code_tree_revs` stamps into describe().
+        // provenance instructions stamped into the producer's graph description.
         if let Some(revs) = active.revs.as_ref().filter(|r| !r.is_empty()) {
             if revs.len() == 1 {
                 msg.push_str(&format!(
@@ -1125,7 +1169,7 @@ pub fn register(
     if writable {
         server.register_typed_tool::<CypherArgs, _>("cypher_query", cypher_desc, move |args| {
             let csv = csv.clone();
-            s.ensure_code_tree_fresh();
+            s.ensure_workspace_graph_fresh();
             let codecs = s.value_codecs();
             let scope = args.write_scope.clone();
             let git_sha = args.git_sha.clone();
@@ -1149,7 +1193,7 @@ pub fn register(
     } else {
         server.register_typed_tool::<ReadCypherArgs, _>("cypher_query", cypher_desc, move |args| {
             let csv = csv.clone();
-            s.ensure_code_tree_fresh();
+            s.ensure_workspace_graph_fresh();
             let codecs = s.value_codecs();
             let body = s.with_active(|g| run_cypher_tool(g, &args.query, codecs, csv.as_deref()));
             s.with_rebuild_warning(body)
@@ -1175,7 +1219,7 @@ pub fn register(
                     wipe_temp_dir(dir);
                 }
             }
-            s.ensure_code_tree_fresh();
+            s.ensure_workspace_graph_fresh();
             let body = s.with_active(|g| run_overview(g, &args));
             s.with_rebuild_warning(body)
         },
@@ -1186,7 +1230,7 @@ pub fn register(
             "save_graph",
             "Persist the active graph to its source .kgl file (single-graph mode only).",
             move |_| {
-                s.ensure_code_tree_fresh();
+                s.ensure_workspace_graph_fresh();
                 // Mutable access: the save must go through the active
                 // graph's own Arc so `prepare_save`'s `Arc::make_mut` sees
                 // refcount 1 (no whole-graph deep copy per save).
@@ -1237,7 +1281,7 @@ pub fn register(
             "Save the active graph to an explicit path and rebind the save target there. \
              Write-enabled servers only.",
             move |args| {
-                s.ensure_code_tree_fresh();
+                s.ensure_workspace_graph_fresh();
                 match s.save_as(Path::new(&args.path)) {
                     Ok(msg) => msg,
                     Err(e) => e,
@@ -1474,25 +1518,27 @@ mod tests {
     use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
 
     #[test]
-    fn code_tree_hooks_replace_builder_and_watch_predicate() {
+    fn workspace_graph_hooks_unify_builds_and_own_relevance() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let build_calls = Arc::new(AtomicUsize::new(0));
         let calls = build_calls.clone();
-        let hooks = CodeTreeHooks {
-            build: Box::new(move |_dir, _docs| {
+        let hooks = WorkspaceGraphHooks {
+            build: Box::new(move |request| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 new_dir_graph_in_mode(StorageMode::Memory, None)
                     .map(Arc::new)
+                    .map(|graph| match request.revisions() {
+                        Some(revisions) => {
+                            WorkspaceGraphResult::with_revisions(graph, revisions.to_vec())
+                        }
+                        None => WorkspaceGraphResult::new(graph),
+                    })
                     .map_err(|e| e.to_string())
             }),
-            build_revs: Box::new(|_dir, revs, _docs| {
-                new_dir_graph_in_mode(StorageMode::Memory, None)
-                    .map(|g| (Arc::new(g), revs.to_vec()))
-                    .map_err(|e| e.to_string())
-            }),
-            is_code_file: Box::new(|p| p.extension().is_some_and(|e| e == "zig")),
+            is_relevant: Box::new(|change| change.path().extension().is_some_and(|e| e == "zig")),
         };
-        let gs = GraphState::new(false).with_code_tree_hooks(Some(Arc::new(hooks)));
+        let gs = GraphState::new(Some(WorkspaceGraphMode::LocalWorkspace))
+            .with_workspace_graph(Some(Arc::new(hooks)));
 
         // Watch predicate comes from the hook, not language_for_path
         // (in-tree has no zig parser; hook says only zig is code).
@@ -1500,17 +1546,17 @@ mod tests {
         assert!(!gs.is_graph_relevant(Path::new("a.rs")));
 
         // build goes through the hook and swaps in the returned graph.
-        gs.build_code_tree(Path::new("/nonexistent-is-fine-for-hook"))
+        gs.build_workspace_graph(Path::new("/nonexistent-is-fine-for-hook"), None)
             .expect("hook build");
         assert_eq!(build_calls.load(Ordering::SeqCst), 1);
         assert!(gs.schema().is_some(), "hook-built graph became active");
 
         // revs path records the hook's canonical rev list.
-        gs.build_code_tree_revs(
+        gs.build_workspace_graph(
             Path::new("/nonexistent-is-fine-for-hook"),
-            &["a".into(), "b".into()],
+            Some(&["a".into(), "b".into()]),
         )
-        .expect("hook build_revs");
+        .expect("revision-set hook build");
     }
 
     #[test]
@@ -1518,21 +1564,23 @@ mod tests {
         // The in-tree builder is gone: a hook-less state can't rebuild, so
         // no path is graph-relevant and build requests refuse with a
         // pointer at codingest.
-        let gs = GraphState::new(true);
+        let gs = GraphState::new(Some(WorkspaceGraphMode::Workspace));
         assert!(!gs.is_graph_relevant(Path::new("a.rs")));
         assert!(!gs.is_graph_relevant(Path::new("README.md")));
         let err = gs
-            .build_code_tree(Path::new("/tmp"))
+            .build_workspace_graph(Path::new("/tmp"), None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("codingest"), "refusal names codingest: {err}");
         let err = gs
-            .build_code_tree_revs(Path::new("/tmp"), &["r1".into()])
+            .build_workspace_graph(Path::new("/tmp"), Some(&["r1".into()]))
             .unwrap_err()
             .to_string();
         assert!(err.contains("codingest"), "refusal names codingest: {err}");
-        // With hooks + docs pass on, .md is graph-relevant again.
-        let gs_docs = GraphState::new(true).with_code_tree_hooks(Some(test_hooks()));
+        // The producer, not KGLite, chooses that markdown is relevant in
+        // clone-backed workspace mode.
+        let gs_docs = GraphState::new(Some(WorkspaceGraphMode::Workspace))
+            .with_workspace_graph(Some(test_hooks()));
         assert!(gs_docs.is_graph_relevant(Path::new("README.md")));
     }
 
@@ -1552,8 +1600,8 @@ mod tests {
     /// tests exercise GraphState's machinery (activation summaries, rev
     /// recording, rebuild backoff) against a minimal hand-built
     /// code-schema graph. Fails on a missing dir like a real builder;
-    /// `build_revs` dedups labels and stamps a `revs` list prop.
-    fn test_hooks() -> Arc<CodeTreeHooks> {
+    /// The unified build closure dedups labels and stamps a `revs` list prop.
+    fn test_hooks() -> Arc<WorkspaceGraphHooks> {
         fn mini_graph(revs: Option<&[String]>) -> Result<Arc<kglite::api::DirGraph>, String> {
             let mut dir =
                 new_dir_graph_in_mode(StorageMode::Memory, None).map_err(|e| e.to_string())?;
@@ -1581,26 +1629,34 @@ mod tests {
             }
             Ok(Arc::new(dir))
         }
-        Arc::new(CodeTreeHooks {
-            build: Box::new(|dir, _docs| {
-                if !dir.is_dir() {
-                    return Err(format!("no such directory: {}", dir.display()));
+        Arc::new(WorkspaceGraphHooks {
+            build: Box::new(|request| {
+                if !request.root().is_dir() {
+                    return Err(format!("no such directory: {}", request.root().display()));
                 }
-                mini_graph(None)
-            }),
-            build_revs: Box::new(|dir, revs, _docs| {
-                if !dir.is_dir() {
-                    return Err(format!("no such directory: {}", dir.display()));
-                }
-                let mut canon: Vec<String> = Vec::new();
-                for r in revs {
-                    if !canon.contains(r) {
-                        canon.push(r.clone());
+                let Some(revisions) = request.revisions() else {
+                    return mini_graph(None).map(WorkspaceGraphResult::new);
+                };
+                let mut canonical = Vec::new();
+                for revision in revisions {
+                    if !canonical.contains(revision) {
+                        canonical.push(revision.clone());
                     }
                 }
-                mini_graph(Some(&canon)).map(|g| (g, canon))
+                mini_graph(Some(&canonical))
+                    .map(|graph| WorkspaceGraphResult::with_revisions(graph, canonical))
             }),
-            is_code_file: Box::new(|p| p.extension().is_some_and(|e| e == "py" || e == "rs")),
+            is_relevant: Box::new(|change| {
+                change
+                    .path()
+                    .extension()
+                    .is_some_and(|e| e == "py" || e == "rs")
+                    || (change.mode() == WorkspaceGraphMode::Workspace
+                        && change
+                            .path()
+                            .extension()
+                            .is_some_and(|e| e.eq_ignore_ascii_case("md")))
+            }),
         })
     }
 
@@ -1646,7 +1702,7 @@ mod tests {
             "kglite-mcp-saveas-noclone-{}.kgl",
             std::process::id()
         ));
-        let state = GraphState::new(false);
+        let state = GraphState::new(None);
         *write_lock(&state.inner) = Some(active);
         let msg = state.save_as(&path2).expect("save_as succeeds");
         assert!(msg.starts_with("Saved"), "{msg}");
@@ -1667,14 +1723,15 @@ mod tests {
 
     #[test]
     fn failed_rebuild_restores_marker_then_backs_off_after_cap() {
-        let state = GraphState::new(false).with_code_tree_hooks(Some(test_hooks()));
+        let state = GraphState::new(Some(WorkspaceGraphMode::LocalWorkspace))
+            .with_workspace_graph(Some(test_hooks()));
         let bad = std::path::PathBuf::from("/nonexistent/kglite-mcp-rebuild-test");
 
         // A failed rebuild must restore the dirty marker (so the next tool
         // call retries) and record the error — up to the hot-fail cap.
-        state.tag_code_tree_dirty(bad.clone());
+        state.tag_workspace_graph_dirty(bad.clone());
         for failure in 1..MAX_CONSECUTIVE_REBUILD_FAILURES {
-            state.ensure_code_tree_fresh();
+            state.ensure_workspace_graph_fresh();
             assert_eq!(
                 read_lock(&state.pending_rebuild).as_ref(),
                 Some(&bad),
@@ -1686,7 +1743,7 @@ mod tests {
 
         // Failure #cap: stop retrying (marker not restored) — the stale
         // graph keeps being served with the error surfaced.
-        state.ensure_code_tree_fresh();
+        state.ensure_workspace_graph_fresh();
         assert!(
             read_lock(&state.pending_rebuild).is_none(),
             "after {MAX_CONSECUTIVE_REBUILD_FAILURES} consecutive failures \
@@ -1698,12 +1755,12 @@ mod tests {
             "note reports the failure count: {note}"
         );
         // With no marker, further tool calls are no-ops (no retry storm).
-        state.ensure_code_tree_fresh();
+        state.ensure_workspace_graph_fresh();
 
         // A fresh FS event re-tags → exactly one more retry; still failing,
         // so the marker again stays cleared.
-        state.tag_code_tree_dirty(bad.clone());
-        state.ensure_code_tree_fresh();
+        state.tag_workspace_graph_dirty(bad.clone());
+        state.ensure_workspace_graph_fresh();
         assert!(read_lock(&state.pending_rebuild).is_none());
         assert!(state.rebuild_error_note().is_some());
 
@@ -1711,8 +1768,8 @@ mod tests {
         let good = std::env::temp_dir().join(format!("kgl_rebuild_ok_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&good);
         std::fs::write(good.join("m.py"), "def ok():\n    return 1\n").unwrap();
-        state.tag_code_tree_dirty(good.clone());
-        state.ensure_code_tree_fresh();
+        state.tag_workspace_graph_dirty(good.clone());
+        state.ensure_workspace_graph_fresh();
         assert!(
             state.rebuild_error_note().is_none(),
             "successful rebuild must clear the recorded failure"
@@ -1723,7 +1780,8 @@ mod tests {
 
     #[test]
     fn activation_summary_reports_node_types_or_none() {
-        let gs = GraphState::new(false).with_code_tree_hooks(Some(test_hooks()));
+        let gs = GraphState::new(Some(WorkspaceGraphMode::LocalWorkspace))
+            .with_workspace_graph(Some(test_hooks()));
         assert!(
             gs.activation_summary().is_none(),
             "no active graph → terse activation (no mini-map)"
@@ -1735,7 +1793,8 @@ mod tests {
             "def hub():\n    return leaf()\n\ndef leaf():\n    return 1\n\nclass Bar:\n    pass\n",
         )
         .unwrap();
-        gs.build_code_tree(&dir).expect("build code tree");
+        gs.build_workspace_graph(&dir, None)
+            .expect("build workspace graph");
         let summary = gs
             .activation_summary()
             .expect("summary present once a graph is active");
@@ -1752,13 +1811,14 @@ mod tests {
     }
 
     #[test]
-    fn build_code_tree_revs_swaps_slot_and_records_revs() {
+    fn revision_build_swaps_slot_and_records_revisions() {
         let dir = std::env::temp_dir().join(format!("kgl_slot_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let (s1, s2) = ("r1".to_string(), "r2".to_string());
-        let gs = GraphState::new(false).with_code_tree_hooks(Some(test_hooks()));
+        let gs = GraphState::new(Some(WorkspaceGraphMode::LocalWorkspace))
+            .with_workspace_graph(Some(test_hooks()));
         let revs = vec![s1.clone(), s2.clone()];
-        gs.build_code_tree_revs(&dir, &revs)
+        gs.build_workspace_graph(&dir, Some(&revs))
             .expect("multi-rev build");
         // The slot is active with nodes.
         let (nodes, _edges) = gs.schema().expect("schema after multi-rev build");
@@ -1785,8 +1845,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kgl_actsumrev_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let (s1, s2) = ("r1".to_string(), "r2".to_string());
-        let gs = GraphState::new(false).with_code_tree_hooks(Some(test_hooks()));
-        gs.build_code_tree_revs(&dir, &[s1.clone(), s2.clone()])
+        let gs = GraphState::new(Some(WorkspaceGraphMode::LocalWorkspace))
+            .with_workspace_graph(Some(test_hooks()));
+        gs.build_workspace_graph(&dir, Some(&[s1.clone(), s2.clone()]))
             .expect("multi-rev build");
         let summary = gs.activation_summary().expect("summary present");
         // Still carries the base mini-map + discovery hatch.
@@ -1818,11 +1879,13 @@ mod tests {
     fn single_rev_build_carries_no_revs_attr_or_steer() {
         // The plain build path leaves `revs = None`, so neither the header attr
         // nor the multi-rev steer appears (no regression for single-rev graphs).
-        let gs = GraphState::new(false).with_code_tree_hooks(Some(test_hooks()));
+        let gs = GraphState::new(Some(WorkspaceGraphMode::LocalWorkspace))
+            .with_workspace_graph(Some(test_hooks()));
         let dir = std::env::temp_dir().join(format!("kgl_single_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("m.py"), "def foo():\n    return 1\n").unwrap();
-        gs.build_code_tree(&dir).expect("single-rev build");
+        gs.build_workspace_graph(&dir, None)
+            .expect("single-rev build");
         let attrs = gs.with_active(|a| a.identity_attrs());
         assert!(
             !attrs.contains("revs="),
@@ -1862,9 +1925,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kgl_singlerev_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let s2 = "r2".to_string();
-        let gs = GraphState::new(false).with_code_tree_hooks(Some(test_hooks()));
+        let gs = GraphState::new(Some(WorkspaceGraphMode::LocalWorkspace))
+            .with_workspace_graph(Some(test_hooks()));
         // Duplicate labels for one commit → deduped to a single rev (defect B).
-        gs.build_code_tree_revs(&dir, &[s2.clone(), s2.clone()])
+        gs.build_workspace_graph(&dir, Some(&[s2.clone(), s2.clone()]))
             .expect("single-rev-via-revs build");
         // Header carries the rev once, not "s2,s2".
         let attrs = gs.with_active(|a| a.identity_attrs());

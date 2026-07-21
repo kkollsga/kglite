@@ -118,7 +118,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
 
     # Companion crates: full default-feature public-API snapshots of sibling
     # workspace crates whose *library* surface downstream repos build against
-    # (e.g. kglite-mcp-server's CodeTreeHooks seam, consumed by codingest-mcp).
+    # (e.g. kglite-mcp-server's WorkspaceGraphHooks seam, consumed by codingest-mcp).
     # Exempt from the feature-classification machinery — one baseline each.
     for companion in manifest.get("companion_packages", []):
         pkg = companion.get("package")

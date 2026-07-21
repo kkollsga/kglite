@@ -21,9 +21,9 @@
 //!
 //! Modes:
 //! - `--graph X.kgl` — load a pre-built graph file at boot.
-//! - `--workspace DIR` — multi-repo source workspace. Code-graph construction
-//!   requires injected [`CodeTreeHooks`] (for example from `codingest-mcp`).
-//! - `--watch DIR` — file-watcher mode. With injected builder hooks, changes
+//! - `--workspace DIR` — multi-repo source workspace. Graph construction
+//!   requires injected [`WorkspaceGraphHooks`] (for example from `codingest-mcp`).
+//! - `--watch DIR` — file-watcher mode. With an injected producer, changes
 //!   rebuild and atomically swap the active graph.
 //! - `--source-root DIR` — generic file-tree mode (no graph).
 //! - bare — framework + manifest tools only.
@@ -52,8 +52,11 @@ mod explore;
 mod selftest;
 mod tools;
 mod value_codecs;
-pub use crate::tools::CodeTreeHooks;
 use crate::tools::GraphState;
+pub use crate::tools::{
+    WorkspaceGraphBuildFn, WorkspaceGraphHooks, WorkspaceGraphMode, WorkspaceGraphRelevance,
+    WorkspaceGraphRelevanceFn, WorkspaceGraphRequest, WorkspaceGraphResult,
+};
 use kglite::api::storage::StorageMode;
 
 /// Read-oriented handle to the graph slot shared by KGLite's MCP tools.
@@ -219,7 +222,7 @@ pub type DomainToolRegistrar =
 /// Optional boot-time extension points for binaries embedding this server.
 #[derive(Default)]
 pub struct ServerExtensions {
-    code_tree_hooks: Option<CodeTreeHooks>,
+    workspace_graph: Option<WorkspaceGraphHooks>,
     domain_tools: Option<Box<DomainToolRegistrar>>,
 }
 
@@ -228,9 +231,9 @@ impl ServerExtensions {
         Self::default()
     }
 
-    /// Inject an external code-tree builder for workspace build/watch paths.
-    pub fn with_code_tree_hooks(mut self, hooks: CodeTreeHooks) -> Self {
-        self.code_tree_hooks = Some(hooks);
+    /// Inject an external producer for workspace build/watch paths.
+    pub fn with_workspace_graph(mut self, hooks: WorkspaceGraphHooks) -> Self {
+        self.workspace_graph = Some(hooks);
         self
     }
 
@@ -269,11 +272,11 @@ struct Cli {
     #[arg(long = "source-root", conflicts_with_all = ["graph", "workspace", "watch"])]
     source_root: Option<PathBuf>,
 
-    /// Workspace mode: clone GitHub repos and build code-tree graphs.
+    /// Workspace mode: clone GitHub repos and build workspace graphs.
     #[arg(long, conflicts_with_all = ["graph", "source_root", "watch"])]
     workspace: Option<PathBuf>,
 
-    /// Watch mode: rebuild the code-tree graph on file changes.
+    /// Watch mode: rebuild the workspace graph on file changes.
     #[arg(long, conflicts_with_all = ["graph", "source_root", "workspace"])]
     watch: Option<PathBuf>,
 
@@ -299,7 +302,7 @@ struct Cli {
     /// is a wide sandbox that agents narrow with `set_root_dir` and is never
     /// built as a unit, so `--selftest` does registration-only checks by
     /// default; pass a small representative subdir here to also verify a real
-    /// code_tree build + `cypher_query` hydration.
+    /// workspace-graph build + `cypher_query` hydration.
     #[arg(long = "selftest-path")]
     selftest_path: Option<PathBuf>,
 
@@ -358,6 +361,15 @@ fn fallback_name(mode: &Mode) -> &'static str {
         Mode::LocalWorkspace { .. } => "KGLite (local-workspace)",
         Mode::Watch { .. } => "KGLite (watch)",
         Mode::Bare => "KGLite",
+    }
+}
+
+fn workspace_graph_mode(mode: &Mode) -> Option<WorkspaceGraphMode> {
+    match mode {
+        Mode::Workspace { .. } => Some(WorkspaceGraphMode::Workspace),
+        Mode::LocalWorkspace { .. } => Some(WorkspaceGraphMode::LocalWorkspace),
+        Mode::Watch { .. } => Some(WorkspaceGraphMode::Watch),
+        _ => None,
     }
 }
 
@@ -436,26 +448,6 @@ where
     T: Into<std::ffi::OsString> + Clone,
 {
     run_with_options(args, factory, ServerExtensions::default())
-}
-
-/// Like [`run`], but with an external code-tree builder ([`CodeTreeHooks`]).
-/// An outer binary embedding this server as a library (e.g. codingest-mcp)
-/// passes closures for the build / multi-rev-build / watch-predicate paths;
-/// every other tool is builder-agnostic and unaffected. `None` keeps the
-/// in-tree `kglite::api::code_tree` builder — [`run`] passes `None`.
-pub fn run_with_code_tree_hooks<I, T>(args: I, hooks: Option<CodeTreeHooks>) -> Result<()>
-where
-    I: IntoIterator<Item = T>,
-    T: Into<std::ffi::OsString> + Clone,
-{
-    run_with_options(
-        args,
-        None,
-        ServerExtensions {
-            code_tree_hooks: hooks,
-            domain_tools: None,
-        },
-    )
 }
 
 /// Run the server with downstream boot-time extension points.
@@ -730,8 +722,8 @@ fn graph_result_footer(
     }
 }
 
-/// Github-workspace wiring: clone-and-track activation builds the code
-/// graph through the injected builder ([`CodeTreeHooks`]); without one,
+/// Github-workspace wiring: clone-and-track activation builds the workspace
+/// graph through the injected producer ([`WorkspaceGraphHooks`]); without one,
 /// activation still binds source tools and the activation summary carries
 /// the builder-unavailable note.
 fn github_workspace(
@@ -741,23 +733,21 @@ fn github_workspace(
 ) -> Result<workspace::Workspace> {
     let gs = graph_state.clone();
     let hook: workspace::PostActivateHook = Arc::new(move |path, name| {
-        tracing::info!(repo = name, "code_tree::build on activate");
-        if !gs.has_code_tree_hooks() {
-            tracing::warn!("no code-tree builder injected; source tools only");
+        tracing::info!(repo = name, "workspace graph build on activate");
+        if !gs.has_workspace_graph_builder() {
+            tracing::warn!("no workspace-graph producer injected; source tools only");
             return Ok(());
         }
-        gs.build_code_tree(path)
+        gs.build_workspace_graph(path, None)
     });
     // Revs-aware hook (mcp-methods 0.3.49 `with_post_activate_revs`):
     // fired instead of the plain hook when `repo_management(revs=…)` is
     // called, with the resolved revspecs (oldest→newest, HEAD last).
-    // Builds ONE multi-rev graph via `build_code_tree_revs` (B.2b). The
-    // plain hook above stays the HEAD-only default; only a `revs`
-    // request reaches this path.
+    // The plain and revision-set paths share one producer request shape.
     let gs_revs = graph_state.clone();
     let revs_hook: PostActivateRevsHook = Arc::new(move |path, name, revs| {
-        tracing::info!(repo = name, revs = ?revs, "code_tree::build_revs on activate");
-        gs_revs.build_code_tree_revs(path, revs)
+        tracing::info!(repo = name, revs = ?revs, "workspace graph revision build on activate");
+        gs_revs.build_workspace_graph(path, Some(revs))
     });
     // Opening steer: append the graph mini-map to the activation
     // message. The post-activate hook above builds the graph first, so
@@ -810,23 +800,26 @@ fn local_workspace(
         // Poison-recovering lock policy (see tools::read_lock) — a
         // panicked holder must not silently stop root updates.
         *tools::write_lock(&active_root_for_hook) = Some(path.to_path_buf());
-        tracing::info!(repo = name, "code_tree::build on local-workspace activate");
+        tracing::info!(
+            repo = name,
+            "workspace graph build on local-workspace activate"
+        );
         // No injected builder: activation still succeeds (source
         // tools bind) and the activation summary carries the
         // builder-unavailable note — erroring here would make the
         // framework skip that summary.
-        if !gs.has_code_tree_hooks() {
-            tracing::warn!("no code-tree builder injected; source tools only");
+        if !gs.has_workspace_graph_builder() {
+            tracing::warn!("no workspace-graph producer injected; source tools only");
             return Ok(());
         }
         // Surface a build failure instead of leaving the tools to
         // report a bare "No active graph" (operator ask, 2026-06-23).
-        if let Err(e) = gs.build_code_tree(path) {
+        if let Err(e) = gs.build_workspace_graph(path, None) {
             tracing::error!(
                 repo = name,
                 root = %path.display(),
                 error = %e,
-                "local-workspace code_tree build failed"
+                "local-workspace graph build failed"
             );
             return Err(e);
         }
@@ -835,8 +828,8 @@ fn local_workspace(
     // Revs-aware hook (mcp-methods 0.3.49): fired instead of the plain
     // hook when `set_root_dir(revs=…)` is called, with the resolved
     // revspecs (oldest→newest, HEAD last). Builds ONE multi-rev graph
-    // via `build_code_tree_revs` (B.2b) and updates the shared active
-    // root the same way the plain hook does, so the watch callback can
+    // through the same request shape and updates the shared active root the
+    // same way the plain hook does, so the watch callback can
     // still scope its rebuilds. The plain hook stays the single-rev
     // default; only a `revs` request reaches this path.
     let gs_revs = graph_state.clone();
@@ -846,14 +839,14 @@ fn local_workspace(
         tracing::info!(
             repo = name,
             revs = ?revs,
-            "code_tree::build_revs on local-workspace activate"
+            "workspace graph revision build on local-workspace activate"
         );
-        if let Err(e) = gs_revs.build_code_tree_revs(path, revs) {
+        if let Err(e) = gs_revs.build_workspace_graph(path, Some(revs)) {
             tracing::error!(
                 repo = name,
                 root = %path.display(),
                 error = %e,
-                "local-workspace multi-rev code_tree build failed"
+                "local-workspace multi-revision graph build failed"
             );
             return Err(e);
         }
@@ -937,8 +930,8 @@ fn bind_mode(
             options = options.with_static_source_roots(vec![canon.to_string_lossy().into_owned()]);
             if matches!(mode, Mode::Watch { .. }) {
                 graph_state
-                    .build_code_tree(&canon)
-                    .context("initial code_tree build failed")?;
+                    .build_workspace_graph(&canon, None)
+                    .context("initial workspace graph build failed")?;
             }
         }
         Mode::Workspace { dir } => {
@@ -1014,18 +1007,16 @@ fn spawn_mode_watcher(
             let canon = dir.canonicalize()?;
             let gs = graph_state.clone();
             let cb: watch::ChangeHandler = Arc::new(move |paths| {
-                // Skip when no changed path is a file code_tree parses
-                // — a `cargo build` / `npm install` storm of `.rlib` /
-                // `node_modules/` events would otherwise needlessly
-                // tag a rebuild. Cheap predicate (just an ext lookup).
+                // Skip when no changed path is relevant to the producer; build
+                // and install storms would otherwise needlessly tag a rebuild.
                 let any_code = paths.iter().any(|p| gs.is_graph_relevant(p));
                 if !any_code {
                     return;
                 }
                 // Tag for rebuild — the actual work happens on the
-                // next MCP tool call via ensure_code_tree_fresh.
+                // next MCP tool call via ensure_workspace_graph_fresh.
                 // Cheap: no rebuild on the watcher thread, ms-scale.
-                gs.tag_code_tree_dirty(canon.clone());
+                gs.tag_workspace_graph_dirty(canon.clone());
             });
             maybe_watch(Some(dir), Some(cb))
         }
@@ -1052,10 +1043,9 @@ fn spawn_mode_watcher(
                     return;
                 };
                 // Two-stage filter: (1) inside the active root,
-                // (2) is a code file `code_tree` would parse. The
-                // second filter skips `cargo build` /
-                // `node_modules/` storms that otherwise tag a
-                // rebuild for changes the parser doesn't see.
+                // (2) is relevant according to the injected producer. The
+                // second filter skips build/install storms the producer does
+                // not ingest.
                 let any_under_active_and_code = paths
                     .iter()
                     .any(|p| p.starts_with(&active) && gs.is_graph_relevant(p));
@@ -1063,8 +1053,8 @@ fn spawn_mode_watcher(
                     return;
                 }
                 // Tag for rebuild; the actual rebuild fires on the
-                // next MCP tool call (ensure_code_tree_fresh).
-                gs.tag_code_tree_dirty(active.clone());
+                // next MCP tool call (ensure_workspace_graph_fresh).
+                gs.tag_workspace_graph_dirty(active.clone());
             });
             maybe_watch(Some(root), Some(cb))
         }
@@ -1078,7 +1068,7 @@ async fn run_async(
     extensions: ServerExtensions,
 ) -> Result<()> {
     let ServerExtensions {
-        code_tree_hooks,
+        workspace_graph,
         domain_tools,
     } = extensions;
     init_tracing();
@@ -1110,11 +1100,6 @@ async fn run_async(
     // guidance by default, without every deployment copy-pasting it.
     let options = apply_discovery_steer(&mode, options);
 
-    // The github-workspace (open-source) mode ingests each cloned repo's
-    // markdown as `:Doc` nodes and links them to code (MENTIONS/DOCUMENTS) —
-    // a repo's prose is part of its intelligence. Local / file / graph modes
-    // keep the lean code-only graph.
-    let include_docs = matches!(mode, Mode::Workspace { .. });
     // extensions.value_codecs: build the manifest-declared, position-scoped
     // literal codecs (prefix / map / regex). Passed to the engine via
     // ExecuteOptions per query — decode on the way in, encode on the way out.
@@ -1129,9 +1114,9 @@ async fn run_async(
     } else {
         Some(Arc::new(value_codecs))
     };
-    let graph_state = GraphState::new(include_docs)
+    let graph_state = GraphState::new(workspace_graph_mode(&mode))
         .with_value_codecs(value_codecs)
-        .with_code_tree_hooks(code_tree_hooks.map(Arc::new));
+        .with_workspace_graph(workspace_graph.map(Arc::new));
 
     // Shared "active root" slot for local-workspace mode. Populated
     // by the post-activate hook on each `set_root_dir`; read by the
@@ -1694,7 +1679,7 @@ mod domain_tool_tests {
         });
         let mut server = McpServer::new(ServerOptions::default());
 
-        register_domain_tools(&mut server, GraphState::new(false), extensions.domain_tools)
+        register_domain_tools(&mut server, GraphState::new(None), extensions.domain_tools)
             .expect("register downstream tool");
 
         assert!(called.load(Ordering::SeqCst));
@@ -1713,7 +1698,7 @@ mod domain_tool_tests {
         let mut server = McpServer::new(ServerOptions::default());
 
         let error =
-            register_domain_tools(&mut server, GraphState::new(false), extensions.domain_tools)
+            register_domain_tools(&mut server, GraphState::new(None), extensions.domain_tools)
                 .expect_err("duplicate route must fail");
 
         assert!(error.to_string().contains("conflicts"));
@@ -1741,7 +1726,7 @@ Use the registered domain tool.
             )
         });
         let mut server = McpServer::new(ServerOptions::default());
-        register_domain_tools(&mut server, GraphState::new(false), extensions.domain_tools)
+        register_domain_tools(&mut server, GraphState::new(None), extensions.domain_tools)
             .expect("register downstream tool");
         let skills_source = SkillsSource::Sources(vec![SkillSource::Bundled]);
         let skills = SkillRegistry::new()
@@ -1765,7 +1750,7 @@ Use the registered domain tool.
         let dir = tempfile::tempdir().expect("tempdir");
         let first_path = dir.path().join("first.kgl");
         let second_path = dir.path().join("second.kgl");
-        let inner = GraphState::new(false);
+        let inner = GraphState::new(None);
         inner
             .create_in_mode(&first_path, StorageMode::Memory)
             .expect("activate first graph");

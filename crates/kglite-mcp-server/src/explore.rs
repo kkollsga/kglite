@@ -133,7 +133,7 @@ fn run(
 
     // Lazy rebuild: if the watcher tagged the graph dirty since the
     // last call, rebuild now before exploring.
-    state.ensure_code_tree_fresh();
+    state.ensure_workspace_graph_fresh();
 
     state
         .with_kg(|kg| {
