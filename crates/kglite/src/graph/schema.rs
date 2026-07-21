@@ -34,7 +34,7 @@ pub fn is_reserved_provenance_key(key: &str) -> bool {
 }
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// Reserved property name marking an auto-vivified stub node — one
@@ -1941,8 +1941,10 @@ impl Serialize for EdgeData {
         use serde::ser::SerializeStruct;
         let mut s = serializer.serialize_struct("EdgeData", 2)?;
         s.serialize_field("connection_type", &self.connection_type)?;
-        // Rebuild HashMap for serialization (backward-compatible wire format)
-        let props_map: HashMap<&InternedKey, &Value> =
+        // Serde maps have the same backward-compatible wire shape regardless
+        // of their Rust container. Sort by the persisted InternedKey value so
+        // equivalent property vectors always produce identical `.kgl` bytes.
+        let props_map: BTreeMap<&InternedKey, &Value> =
             self.properties.iter().map(|(k, v)| (k, v)).collect();
         s.serialize_field("properties", &props_map)?;
         s.end()

@@ -7,7 +7,8 @@ mod atomic_save_tests {
     use super::*;
     use crate::datatypes::{DataFrame, Value};
     use crate::graph::dir_graph::DirGraph;
-    use crate::graph::storage::GraphRead;
+    use crate::graph::storage::{GraphRead, GraphWrite};
+    use petgraph::graph::NodeIndex;
 
     /// Build a tiny columnar in-memory graph ready for `write_kgl*`.
     fn tiny_graph(n: i64) -> Arc<DirGraph> {
@@ -249,6 +250,29 @@ mod atomic_save_tests {
                 },
             );
         }
+
+        // Force the internal Vec<(InternedKey, Value)> into opposite orders.
+        // This bypasses HashMap construction so the regression specifically
+        // covers EdgeData's map-shaped topology serialization.
+        let connection_type = dir.interner.get_or_intern("RELATES_TO");
+        let mut edge_properties = vec![
+            (
+                dir.interner.get_or_intern("confidence"),
+                Value::Float64(0.75),
+            ),
+            (
+                dir.interner.get_or_intern("source"),
+                Value::String("fixture".to_string()),
+            ),
+        ];
+        if reverse {
+            edge_properties.reverse();
+        }
+        dir.graph.add_edge(
+            NodeIndex::new(0),
+            NodeIndex::new(1),
+            crate::graph::schema::EdgeData::new_interned(connection_type, edge_properties),
+        );
         g
     }
 
@@ -266,6 +290,14 @@ mod atomic_save_tests {
         assert_eq!(
             first, second,
             ".kgl bytes must not depend on HashMap insertion or iteration order"
+        );
+
+        let loaded = load_kgl_bytes(&first).unwrap();
+        let edge = loaded.graph.edge_weights().next().unwrap();
+        assert_eq!(edge.get_property("confidence"), Some(&Value::Float64(0.75)));
+        assert_eq!(
+            edge.get_property("source"),
+            Some(&Value::String("fixture".to_string()))
         );
     }
 

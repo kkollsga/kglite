@@ -41,7 +41,7 @@ impl std::error::Error for InternerCollision {}
 /// Lookups via `get_property(key)` compute the hash inline — no interner needed.
 /// Only methods that output string keys (e.g. `property_iter`) require the interner.
 #[repr(transparent)]
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Default, Copy, Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub struct InternedKey(u64);
 
 impl InternedKey {
