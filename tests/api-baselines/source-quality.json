@@ -48,7 +48,7 @@
     {
       "path": "crates/kglite-mcp-server/src/lib.rs",
       "qualified_name": "crate::run_async",
-      "lines": 306,
+      "lines": 291,
       "branches": 31,
       "nesting": 3
     },

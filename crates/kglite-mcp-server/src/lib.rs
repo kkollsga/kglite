@@ -29,7 +29,7 @@
 //! - bare — framework + manifest tools only.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -39,8 +39,9 @@ use mcp_methods::server::manifest::{
 };
 use mcp_methods::server::{
     init_tracing, load_env_for_mode, maybe_watch, resolve_source_roots, serve_prompts, watch,
-    workspace, BundledSkill, Manifest, McpServer, PostActivateRevsHook, PredicateClause, ResultCtx,
-    ServerOptions, SkillPredicateEvaluator, SkillRegistry, WorkspaceKind,
+    workspace, ActivationBuild, ActivationRequest, ActivationTransactionHook, BundledSkill,
+    Manifest, McpServer, PredicateClause, PreparedActivation, ResultCtx, ServerOptions,
+    SkillPredicateEvaluator, SkillRegistry, WorkspaceKind,
 };
 use rmcp::transport::stdio;
 use rmcp::ServiceExt;
@@ -722,6 +723,44 @@ fn graph_result_footer(
     }
 }
 
+/// Request-scoped prepare/commit adapter shared by clone-backed and local
+/// workspaces. Expensive producer work runs before publication; mcp-methods
+/// invokes the returned commit closure only while this request is current.
+fn workspace_activation_transaction(graph_state: &GraphState) -> ActivationTransactionHook {
+    let state = graph_state.clone();
+    Arc::new(move |request: &ActivationRequest| {
+        tracing::info!(
+            activation_id = %request.id(),
+            root = %request.path().display(),
+            build = ?request.build(),
+            "preparing workspace graph activation"
+        );
+        if matches!(request.build(), ActivationBuild::Reuse) {
+            let summary = state
+                .reusable_activation_summary(request.path())
+                .or_else(|| state.no_builder_summary());
+            return Ok(PreparedActivation::summary(summary));
+        }
+        if !state.has_workspace_graph_builder() {
+            tracing::warn!(
+                activation_id = %request.id(),
+                "no workspace-graph producer injected; source tools only"
+            );
+            return Ok(PreparedActivation::summary(state.no_builder_summary()));
+        }
+        let revisions = match request.build() {
+            ActivationBuild::Revisions(revisions) => Some(revisions.as_slice()),
+            ActivationBuild::Plain => None,
+            ActivationBuild::Reuse => unreachable!("reuse returned above"),
+        };
+        let prepared = state.prepare_workspace_graph(request.path(), revisions)?;
+        let commit_state = state.clone();
+        Ok(PreparedActivation::new(move || {
+            Ok(commit_state.commit_workspace_graph(prepared))
+        }))
+    })
+}
+
 /// Github-workspace wiring: clone-and-track activation builds the workspace
 /// graph through the injected producer ([`WorkspaceGraphHooks`]); without one,
 /// activation still binds source tools and the activation summary carries
@@ -731,50 +770,16 @@ fn github_workspace(
     stale_after_days: u32,
     graph_state: &GraphState,
 ) -> Result<workspace::Workspace> {
-    let gs = graph_state.clone();
-    let hook: workspace::PostActivateHook = Arc::new(move |path, name| {
-        tracing::info!(repo = name, "workspace graph build on activate");
-        if !gs.has_workspace_graph_builder() {
-            tracing::warn!("no workspace-graph producer injected; source tools only");
-            return Ok(());
-        }
-        gs.build_workspace_graph(path, None)
-    });
-    // Revs-aware hook (mcp-methods 0.3.49 `with_post_activate_revs`):
-    // fired instead of the plain hook when `repo_management(revs=…)` is
-    // called, with the resolved revspecs (oldest→newest, HEAD last).
-    // The plain and revision-set paths share one producer request shape.
-    let gs_revs = graph_state.clone();
-    let revs_hook: PostActivateRevsHook = Arc::new(move |path, name, revs| {
-        tracing::info!(repo = name, revs = ?revs, "workspace graph revision build on activate");
-        gs_revs.build_workspace_graph(path, Some(revs))
-    });
-    // Opening steer: append the graph mini-map to the activation
-    // message. The post-activate hook above builds the graph first, so
-    // counts are live when this runs. Chained before the workspace is
-    // cloned into `options` (framework caveat). Correctness of the
-    // single active-graph slot across A→B→A repo swaps is owned by
-    // mcp-methods ≥0.3.47 (its skip gate tracks the currently-active
-    // built root, so a re-bind of a different root always rebuilds).
-    let gs_sum = graph_state.clone();
-    let summary: workspace::ActivationSummaryHook =
-        Arc::new(move |_path, _name| gs_sum.activation_summary());
-    Ok(
-        workspace::Workspace::open(canon, stale_after_days, Some(hook))
-            .context("workspace init failed")?
-            .with_post_activate_revs(revs_hook)
-            .with_activation_summary(summary),
-    )
+    Ok(workspace::Workspace::open(canon, stale_after_days, None)
+        .context("workspace init failed")?
+        .with_activation_transaction(workspace_activation_transaction(graph_state)))
 }
 
 /// Local-workspace wiring (`set_root_dir` root swaps).
 ///
-/// mcp-methods `Workspace::open_local(root, hook)` STORES the post-activate
-/// hook but does NOT fire it at open — verified against mcp-methods 0.3.42
-/// `src/server/workspace.rs`: `open_local` (`:145`) just stores
-/// `post_activate`; the hook fires only inside `activate()` (`:491-492`),
-/// which `set_root_dir` calls on every swap. So every fire reaching these
-/// closures is a real user activate — build the code graph on each.
+/// `Workspace::open_local` stores the activation transaction but does not fire
+/// it at boot. Each `set_root_dir` prepares a graph off-lock; mcp-methods 0.4.1
+/// commits it only if that request remains the latest activation intent.
 ///
 /// History (do not re-add): an older mcp-methods contract fired the hook
 /// synchronously inside `open` with the wide `workspace.root` (~360k
@@ -785,86 +790,12 @@ fn github_workspace(
 /// was instead swallowing the user's FIRST `set_root_dir` — leaving the
 /// graph permanently unbuilt in local mode ("No active graph" on every
 /// graph tool). Operator inbox 2026-06-23 (+ original 2026-06-06 repro).
-/// Deferral removed; building eagerly is safe because mcp-methods no
-/// longer fires at boot.
-fn local_workspace(
-    root: PathBuf,
-    graph_state: &GraphState,
-    local_active_root: &Arc<RwLock<Option<PathBuf>>>,
-) -> Result<workspace::Workspace> {
-    // Active root is captured in a shared RwLock so the watch callback
-    // (spawn_mode_watcher) can scope its rebuilds.
-    let gs = graph_state.clone();
-    let active_root_for_hook = local_active_root.clone();
-    let hook: workspace::PostActivateHook = Arc::new(move |path, name| {
-        // Poison-recovering lock policy (see tools::read_lock) — a
-        // panicked holder must not silently stop root updates.
-        *tools::write_lock(&active_root_for_hook) = Some(path.to_path_buf());
-        tracing::info!(
-            repo = name,
-            "workspace graph build on local-workspace activate"
-        );
-        // No injected builder: activation still succeeds (source
-        // tools bind) and the activation summary carries the
-        // builder-unavailable note — erroring here would make the
-        // framework skip that summary.
-        if !gs.has_workspace_graph_builder() {
-            tracing::warn!("no workspace-graph producer injected; source tools only");
-            return Ok(());
-        }
-        // Surface a build failure instead of leaving the tools to
-        // report a bare "No active graph" (operator ask, 2026-06-23).
-        if let Err(e) = gs.build_workspace_graph(path, None) {
-            tracing::error!(
-                repo = name,
-                root = %path.display(),
-                error = %e,
-                "local-workspace graph build failed"
-            );
-            return Err(e);
-        }
-        Ok(())
-    });
-    // Revs-aware hook (mcp-methods 0.3.49): fired instead of the plain
-    // hook when `set_root_dir(revs=…)` is called, with the resolved
-    // revspecs (oldest→newest, HEAD last). Builds ONE multi-rev graph
-    // through the same request shape and updates the shared active root the
-    // same way the plain hook does, so the watch callback can
-    // still scope its rebuilds. The plain hook stays the single-rev
-    // default; only a `revs` request reaches this path.
-    let gs_revs = graph_state.clone();
-    let active_root_for_revs_hook = local_active_root.clone();
-    let revs_hook: PostActivateRevsHook = Arc::new(move |path, name, revs| {
-        *tools::write_lock(&active_root_for_revs_hook) = Some(path.to_path_buf());
-        tracing::info!(
-            repo = name,
-            revs = ?revs,
-            "workspace graph revision build on local-workspace activate"
-        );
-        if let Err(e) = gs_revs.build_workspace_graph(path, Some(revs)) {
-            tracing::error!(
-                repo = name,
-                root = %path.display(),
-                error = %e,
-                "local-workspace multi-revision graph build failed"
-            );
-            return Err(e);
-        }
-        Ok(())
-    });
-    // Opening steer: mini-map on the activation message (see
-    // github_workspace). Correctness of the single active-graph slot
-    // across A→B→A `set_root_dir` swaps is owned by mcp-methods ≥0.3.47:
-    // its skip gate tracks the currently-active built root (not every
-    // root ever hydrated), so re-binding a different root always
-    // re-fires the build hook, and a same-root re-bind still cheap-skips.
-    let gs_sum = graph_state.clone();
-    let summary: workspace::ActivationSummaryHook =
-        Arc::new(move |_path, _name| gs_sum.activation_summary());
-    Ok(workspace::Workspace::open_local(root, Some(hook))
+/// Deferral removed; preparation is safe because mcp-methods no longer fires
+/// any activation callback at boot.
+fn local_workspace(root: PathBuf, graph_state: &GraphState) -> Result<workspace::Workspace> {
+    Ok(workspace::Workspace::open_local(root, None)
         .context("local-workspace init failed")?
-        .with_post_activate_revs(revs_hook)
-        .with_activation_summary(summary))
+        .with_activation_transaction(workspace_activation_transaction(graph_state)))
 }
 
 /// Apply mode-specific bindings — source roots, workspace handle, initial
@@ -874,7 +805,6 @@ fn bind_mode(
     cli: &Cli,
     manifest: Option<&Manifest>,
     graph_state: &GraphState,
-    local_active_root: &Arc<RwLock<Option<PathBuf>>>,
     mut options: ServerOptions,
 ) -> Result<ServerOptions> {
     match mode {
@@ -940,7 +870,7 @@ fn bind_mode(
             options = options.with_workspace(ws);
         }
         Mode::LocalWorkspace { root, .. } => {
-            let ws = local_workspace(root.clone(), graph_state, local_active_root)?;
+            let ws = local_workspace(root.clone(), graph_state)?;
             options = options.with_workspace(ws);
         }
         Mode::Bare => {
@@ -997,11 +927,7 @@ fn apply_discovery_steer(mode: &Mode, mut options: ServerOptions) -> ServerOptio
 /// explicit `--watch DIR` and `manifest.workspace.kind: local` with
 /// `watch: true` wire the same change-handler shape. Returns the watch
 /// handle the caller must keep alive for the server's lifetime.
-fn spawn_mode_watcher(
-    mode: &Mode,
-    graph_state: &GraphState,
-    local_active_root: &Arc<RwLock<Option<PathBuf>>>,
-) -> Result<Option<watch::WatchHandle>> {
+fn spawn_mode_watcher(mode: &Mode, graph_state: &GraphState) -> Result<Option<watch::WatchHandle>> {
     match mode {
         Mode::Watch { dir } => {
             let canon = dir.canonicalize()?;
@@ -1030,14 +956,11 @@ fn spawn_mode_watcher(
             // `workspace.root` and rebuilt the entire wide tree on
             // every event (build storm on any `cargo build` /
             // editor save anywhere in the sandbox). Fix: read the
-            // shared `local_active_root` (populated by the
-            // post-activate hook above on each `set_root_dir`),
-            // skip when nothing changed under the active root,
-            // rebuild against the active root only.
+            // committed graph identity, skip when nothing changed under the
+            // active root, and rebuild against that root only.
             let gs = graph_state.clone();
-            let active_root_for_watch = local_active_root.clone();
             let cb: watch::ChangeHandler = Arc::new(move |paths| {
-                let active = tools::read_lock(&active_root_for_watch).clone();
+                let active = gs.active_workspace_root();
                 let Some(active) = active else {
                     // No `set_root_dir` yet; nothing to rebuild.
                     return;
@@ -1118,25 +1041,10 @@ async fn run_async(
         .with_value_codecs(value_codecs)
         .with_workspace_graph(workspace_graph.map(Arc::new));
 
-    // Shared "active root" slot for local-workspace mode. Populated
-    // by the post-activate hook on each `set_root_dir`; read by the
-    // watch callback to scope rebuilds. Stays `None` until the first
-    // `set_root_dir` (the boot-time activate is intentionally
-    // deferred — see `Mode::LocalWorkspace` arm below for why).
-    // Other modes never write to it.
-    let local_active_root: Arc<RwLock<Option<PathBuf>>> = Arc::new(RwLock::new(None));
-
     // Mode-specific bindings: source roots, workspace handle, initial graph
     // build. Extracted to `bind_mode` so this boot fn reads as a sequence of
     // named phases.
-    let options = bind_mode(
-        &mode,
-        &cli,
-        manifest.as_ref(),
-        &graph_state,
-        &local_active_root,
-        options,
-    )?;
+    let options = bind_mode(&mode, &cli, manifest.as_ref(), &graph_state, options)?;
 
     // Runtime graph-over-grep steering (mcp-methods 0.3.46 result-postprocess
     // hook): append a one-line footer to a builtin tool result at the moment of
@@ -1282,7 +1190,7 @@ async fn run_async(
         domain_tools,
     )?;
 
-    let _watch_handle = spawn_mode_watcher(&mode, &graph_state, &local_active_root)?;
+    let _watch_handle = spawn_mode_watcher(&mode, &graph_state)?;
 
     // 0.9.31: SkillRegistry wiring. Bundled methodology for kglite's
     // four custom tools (cypher_query / graph_overview / save_graph /
@@ -1520,6 +1428,200 @@ fn print_boot_summary(
         parts.push(format!("graph: {nodes} nodes, {edges} edges"));
     }
     eprintln!("kglite-mcp-server: {}", parts.join("; "));
+}
+
+#[cfg(test)]
+mod activation_transaction_tests {
+    use super::*;
+    use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
+    use mcp_methods::server::RevsRequest;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
+
+    fn graph_result(request: WorkspaceGraphRequest) -> Result<WorkspaceGraphResult, String> {
+        let mut graph = new_dir_graph_in_mode(StorageMode::Memory, None)?;
+        let params = std::collections::HashMap::new();
+        let options = kglite::api::session::ExecuteOptions::eager(&params);
+        kglite::api::session::execute_mut(&mut graph, "CREATE (:File {id:'fixture.rs'})", &options)
+            .map_err(|error| error.to_string())?;
+        let graph = Arc::new(graph);
+        Ok(match request.revisions() {
+            Some(revisions) => WorkspaceGraphResult::with_revisions(graph, revisions.to_vec()),
+            None => WorkspaceGraphResult::new(graph),
+        })
+    }
+
+    fn local_state(hooks: WorkspaceGraphHooks) -> GraphState {
+        GraphState::new(Some(WorkspaceGraphMode::LocalWorkspace))
+            .with_workspace_graph(Some(Arc::new(hooks)))
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[test]
+    fn newer_root_commits_while_older_preparation_is_discarded() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let slow_root = temp.path().join("slow");
+        let fast_root = temp.path().join("fast");
+        std::fs::create_dir_all(&slow_root).expect("slow root");
+        std::fs::create_dir_all(&fast_root).expect("fast root");
+        let slow_root = slow_root.canonicalize().expect("canonical slow");
+        let fast_root = fast_root.canonicalize().expect("canonical fast");
+        let slow_entered = Arc::new(Barrier::new(2));
+        let release_slow = Arc::new(Barrier::new(2));
+        let hooks = WorkspaceGraphHooks {
+            build: Box::new({
+                let slow_root = slow_root.clone();
+                let slow_entered = slow_entered.clone();
+                let release_slow = release_slow.clone();
+                move |request| {
+                    if request.root() == slow_root {
+                        slow_entered.wait();
+                        release_slow.wait();
+                    }
+                    graph_result(request)
+                }
+            }),
+            is_relevant: Box::new(|_| true),
+        };
+        let state = local_state(hooks);
+        let workspace = local_workspace(temp.path().to_path_buf(), &state).expect("workspace");
+
+        let slow_workspace = workspace.clone();
+        let slow_for_thread = slow_root.clone();
+        let slow = std::thread::spawn(move || slow_workspace.set_root_dir(&slow_for_thread, None));
+        slow_entered.wait();
+        let fast_output = workspace.set_root_dir(&fast_root, None);
+        release_slow.wait();
+        let slow_output = slow.join().expect("slow activation");
+
+        assert!(fast_output.contains(&fast_root.display().to_string()));
+        assert!(fast_output.contains("Graph ready: 1 nodes"));
+        assert!(slow_output.contains("superseded by request 2"));
+        assert_eq!(state.active_workspace_root(), Some(fast_root));
+    }
+
+    #[test]
+    fn same_root_revision_activation_supersedes_plain_preparation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        run_git(&repo, &["init", "-q"]);
+        run_git(&repo, &["config", "user.email", "test@example.com"]);
+        run_git(&repo, &["config", "user.name", "KGLite Test"]);
+        std::fs::write(repo.join("fixture.rs"), "fn fixture() {}\n").expect("fixture");
+        run_git(&repo, &["add", "fixture.rs"]);
+        run_git(&repo, &["commit", "-q", "-m", "fixture"]);
+        let repo = repo.canonicalize().expect("canonical repo");
+        let plain_entered = Arc::new(Barrier::new(2));
+        let release_plain = Arc::new(Barrier::new(2));
+        let hooks = WorkspaceGraphHooks {
+            build: Box::new({
+                let plain_entered = plain_entered.clone();
+                let release_plain = release_plain.clone();
+                move |request| {
+                    if request.revisions().is_none() {
+                        plain_entered.wait();
+                        release_plain.wait();
+                    }
+                    graph_result(request)
+                }
+            }),
+            is_relevant: Box::new(|_| true),
+        };
+        let state = local_state(hooks);
+        let workspace = local_workspace(repo.clone(), &state).expect("workspace");
+
+        let plain_workspace = workspace.clone();
+        let plain_root = repo.clone();
+        let plain = std::thread::spawn(move || plain_workspace.set_root_dir(&plain_root, None));
+        plain_entered.wait();
+        let revisions = RevsRequest::List(vec!["HEAD".to_string()]);
+        let revision_output = workspace.set_root_dir(&repo, Some(&revisions));
+        release_plain.wait();
+        let plain_output = plain.join().expect("plain activation");
+
+        assert!(revision_output.contains("revs: HEAD"));
+        assert!(revision_output.contains("revision 'HEAD'"));
+        assert!(plain_output.contains("superseded by request 2"));
+        assert_eq!(state.active_workspace_root(), Some(repo));
+        assert_eq!(
+            state.active_workspace_revisions(),
+            Some(vec!["HEAD".into()])
+        );
+    }
+
+    #[test]
+    fn failed_current_preparation_preserves_committed_graph() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let good_root = temp.path().join("good");
+        let broken_root = temp.path().join("broken");
+        std::fs::create_dir_all(&good_root).expect("good root");
+        std::fs::create_dir_all(&broken_root).expect("broken root");
+        let good_root = good_root.canonicalize().expect("canonical good");
+        let broken_root = broken_root.canonicalize().expect("canonical broken");
+        let hooks = WorkspaceGraphHooks {
+            build: Box::new({
+                let broken_root = broken_root.clone();
+                move |request| {
+                    if request.root() == broken_root {
+                        return Err("builder rejected broken root".to_string());
+                    }
+                    graph_result(request)
+                }
+            }),
+            is_relevant: Box::new(|_| true),
+        };
+        let state = local_state(hooks);
+        let workspace = local_workspace(temp.path().to_path_buf(), &state).expect("workspace");
+
+        let good_output = workspace.set_root_dir(&good_root, None);
+        let broken_output = workspace.set_root_dir(&broken_root, None);
+
+        assert!(good_output.contains("Graph ready: 1 nodes"));
+        assert!(broken_output.contains("failed during preparation"));
+        assert!(broken_output.contains("builder rejected broken root"));
+        assert_eq!(state.active_workspace_root(), Some(good_root));
+    }
+
+    #[test]
+    fn same_plain_target_reuses_the_committed_graph_and_summary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(&root).expect("root");
+        let root = root.canonicalize().expect("canonical root");
+        let builds = Arc::new(AtomicUsize::new(0));
+        let hooks = WorkspaceGraphHooks {
+            build: Box::new({
+                let builds = builds.clone();
+                move |request| {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    graph_result(request)
+                }
+            }),
+            is_relevant: Box::new(|_| true),
+        };
+        let state = local_state(hooks);
+        let workspace = local_workspace(root.clone(), &state).expect("workspace");
+
+        let first = workspace.set_root_dir(&root, None);
+        let reused = workspace.set_root_dir(&root, None);
+
+        assert!(first.contains("Graph ready: 1 nodes"));
+        assert!(reused.contains("build skipped"));
+        assert!(reused.contains("Graph ready: 1 nodes"));
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert_eq!(state.active_workspace_root(), Some(root));
+    }
 }
 
 #[cfg(test)]

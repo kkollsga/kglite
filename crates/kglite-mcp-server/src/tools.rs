@@ -249,6 +249,14 @@ struct ActiveGraph {
     built_at: SystemTime,
 }
 
+/// Producer output prepared off the workspace activation lock. Publication is
+/// deliberately separate so mcp-methods can discard a superseded request
+/// without this graph ever becoming visible.
+pub(crate) struct PreparedWorkspaceGraph {
+    active: ActiveGraph,
+    summary: Option<String>,
+}
+
 /// Format a `SystemTime` as a second-precision UTC ISO-8601 timestamp.
 fn iso8601(t: SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(t)
@@ -309,6 +317,65 @@ impl ActiveGraph {
             humanize_age(self.built_at)
         )
     }
+}
+
+fn activation_summary_for_active(active: &ActiveGraph) -> Option<String> {
+    let overview = compute_schema(active.kg.dir());
+    if overview.node_count == 0 {
+        return None;
+    }
+    let mut types: Vec<(&str, usize)> = overview
+        .node_types
+        .iter()
+        .map(|(name, detail)| (name.as_str(), detail.count))
+        .collect();
+    types.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let top: Vec<String> = types
+        .iter()
+        .take(4)
+        .map(|(name, count)| format!("{count} {name}"))
+        .collect();
+    let root_note = match &active.root {
+        Some(root) => format!(
+            " · root {} · built {} ago.",
+            root.display(),
+            humanize_age(active.built_at)
+        ),
+        None => format!(" · built {} ago.", humanize_age(active.built_at)),
+    };
+    let mut message = format!(
+        "Graph ready: {} nodes ({}) · {} edges.{root_note} Start with graph_overview() \
+         → cypher_query for structure (definitions, callers, types, counts, \
+         paths); use grep for literal text only. If graph_overview/cypher_query aren't \
+         in your loaded tools, search your tool registry for 'cypher' or 'graph_overview' \
+         and load them before falling back to grep — they are always registered.",
+        overview.node_count,
+        top.join(", "),
+        overview.edge_count,
+    );
+    if let Some(revisions) = active
+        .revs
+        .as_ref()
+        .filter(|revisions| !revisions.is_empty())
+    {
+        if revisions.len() == 1 {
+            message.push_str(&format!(
+                " Code graph at revision '{}' (a committed snapshot, not the working tree).",
+                revisions[0],
+            ));
+        } else {
+            let newest = revisions.last().map(String::as_str).unwrap_or("");
+            message.push_str(&format!(
+                " Multi-rev graph spanning {} revisions: {}. UNSCOPED queries span ALL revs \
+                 (they over-count) — scope with `WHERE '<rev>' IN n.revs` (head only: `WHERE \
+                 '{newest}' IN n.revs`); for deltas use `CALL rev_diff({{from: '<rev>', \
+                 to: '<rev>'}})`.",
+                revisions.len(),
+                revisions.join(", "),
+            ));
+        }
+    }
+    Some(message)
 }
 
 impl GraphState {
@@ -533,9 +600,14 @@ impl GraphState {
         ))
     }
 
-    /// Ask the configured producer for a workspace graph and atomically swap
-    /// the completed result into the active slot.
-    pub fn build_workspace_graph(&self, root: &Path, revisions: Option<&[String]>) -> Result<()> {
+    /// Ask the configured producer for a workspace graph without publishing
+    /// it. Expensive parsing and summary generation happen here, outside the
+    /// mcp-methods activation commit lock.
+    pub(crate) fn prepare_workspace_graph(
+        &self,
+        root: &Path,
+        revisions: Option<&[String]>,
+    ) -> Result<PreparedWorkspaceGraph> {
         let Some(hooks) = &self.workspace_graph_hooks else {
             anyhow::bail!(NO_BUILDER_MSG);
         };
@@ -550,15 +622,50 @@ impl GraphState {
         let result = (hooks.build)(request)
             .map_err(|e| anyhow::anyhow!("workspace-graph build hook failed: {e}"))?;
         let (graph, revisions) = result.into_parts();
-        *write_lock(&self.inner) = Some(ActiveGraph {
+        let active = ActiveGraph {
             kg: KnowledgeGraph::from_arc(graph),
             source_path: None,
             writer_lease: None,
             root: Some(root.to_path_buf()),
             revs: revisions,
             built_at: SystemTime::now(),
-        });
+        };
+        let summary = activation_summary_for_active(&active);
+        Ok(PreparedWorkspaceGraph { active, summary })
+    }
+
+    /// Publish one already-prepared graph and return the summary computed from
+    /// that exact artifact. Keep this to a single slot swap: it may run inside
+    /// mcp-methods' generation commit boundary.
+    pub(crate) fn commit_workspace_graph(
+        &self,
+        prepared: PreparedWorkspaceGraph,
+    ) -> Option<String> {
+        *write_lock(&self.inner) = Some(prepared.active);
+        prepared.summary
+    }
+
+    /// Build and publish outside activation transactions (boot and lazy-watch
+    /// paths). Activation uses the prepare/commit pair directly.
+    pub fn build_workspace_graph(&self, root: &Path, revisions: Option<&[String]>) -> Result<()> {
+        let prepared = self.prepare_workspace_graph(root, revisions)?;
+        self.commit_workspace_graph(prepared);
         Ok(())
+    }
+
+    /// Root of the exact workspace graph currently installed. Watchers use
+    /// this committed identity instead of a separately-published root slot.
+    pub(crate) fn active_workspace_root(&self) -> Option<std::path::PathBuf> {
+        read_lock(&self.inner)
+            .as_ref()
+            .and_then(|active| active.root.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_workspace_revisions(&self) -> Option<Vec<String>> {
+        read_lock(&self.inner)
+            .as_ref()
+            .and_then(|active| active.revs.clone())
     }
 
     pub fn bind_embedder(&self, embedder: Arc<dyn Embedder>) -> Result<()> {
@@ -590,6 +697,7 @@ impl GraphState {
     /// (petekSuite report, 2026-07-08). The `instructions`-block `DISCOVERY_STEER`
     /// says the same thing, but a tool-call *result* is read more reliably than
     /// the handshake `instructions`. `None` when no graph is active.
+    #[cfg(test)]
     pub fn activation_summary(&self) -> Option<String> {
         let guard = read_lock(&self.inner);
         let Some(active) = guard.as_ref() else {
@@ -602,66 +710,25 @@ impl GraphState {
             }
             return None;
         };
-        let overview = compute_schema(active.kg.dir());
-        if overview.node_count == 0 {
+        activation_summary_for_active(active)
+    }
+
+    /// Snapshot the summary only when the installed graph is the exact plain
+    /// target mcp-methods asked to reuse. A stale framework identity must not
+    /// describe an unrelated graph that another lifecycle route installed.
+    pub(crate) fn reusable_activation_summary(&self, root: &Path) -> Option<String> {
+        let guard = read_lock(&self.inner);
+        let active = guard.as_ref()?;
+        if active.root.as_deref() != Some(root) || active.revs.is_some() {
             return None;
         }
-        let mut types: Vec<(&str, usize)> = overview
-            .node_types
-            .iter()
-            .map(|(name, o)| (name.as_str(), o.count))
-            .collect();
-        types.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-        let top: Vec<String> = types
-            .iter()
-            .take(4)
-            .map(|(n, c)| format!("{c} {n}"))
-            .collect();
-        // Identity note so the activation message itself names the root now
-        // live (the message an agent trusts right after a swap) — makes a
-        // stale-slot mismatch visible without a follow-up graph_overview.
-        let root_note = match &active.root {
-            Some(r) => format!(
-                " · root {} · built {} ago.",
-                r.display(),
-                humanize_age(active.built_at)
-            ),
-            None => format!(" · built {} ago.", humanize_age(active.built_at)),
-        };
-        let mut msg = format!(
-            "Graph ready: {} nodes ({}) · {} edges.{root_note} Start with graph_overview() \
-             \u{2192} cypher_query for structure (definitions, callers, types, counts, \
-             paths); use grep for literal text only. If graph_overview/cypher_query aren't \
-             in your loaded tools, search your tool registry for 'cypher' or 'graph_overview' \
-             and load them before falling back to grep — they are always registered.",
-            overview.node_count,
-            top.join(", "),
-            overview.edge_count,
-        );
-        // Rev steer. A single-rev graph is just a point-in-time snapshot —
-        // nothing over-counts and there is no delta to diff, so it reads plainly.
-        // A multi-rev graph names the loaded revs and teaches the scoping idiom
-        // (unscoped queries span ALL revs) + `CALL rev_diff` for deltas. Mirrors
-        // provenance instructions stamped into the producer's graph description.
-        if let Some(revs) = active.revs.as_ref().filter(|r| !r.is_empty()) {
-            if revs.len() == 1 {
-                msg.push_str(&format!(
-                    " Code graph at revision '{}' (a committed snapshot, not the working tree).",
-                    revs[0],
-                ));
-            } else {
-                let newest = revs.last().map(String::as_str).unwrap_or("");
-                msg.push_str(&format!(
-                    " Multi-rev graph spanning {} revisions: {}. UNSCOPED queries span ALL revs \
-                     (they over-count) — scope with `WHERE '<rev>' IN n.revs` (head only: `WHERE \
-                     '{newest}' IN n.revs`); for deltas use `CALL rev_diff({{from: '<rev>', \
-                     to: '<rev>'}})`.",
-                    revs.len(),
-                    revs.join(", "),
-                ));
-            }
-        }
-        Some(msg)
+        activation_summary_for_active(active)
+    }
+
+    pub(crate) fn no_builder_summary(&self) -> Option<String> {
+        self.workspace_graph_hooks
+            .is_none()
+            .then(|| NO_BUILDER_MSG.to_string())
     }
 
     /// Whether the active graph has at least one node of the named
