@@ -226,6 +226,19 @@ clean:
 ## `maturin develop` take 8 minutes). Run at release time (wired into the
 ## release skill); no-ops while target/ stays under the threshold. With
 ## sccache configured, the post-clean rebuild is cheap.
+## Dev-environment cleanliness sweep: the size-gated target prune plus
+## removal of regenerable local artifacts that otherwise accumulate without
+## any bound or owner (bench captures, sphinx output, tool caches, stale
+## ABI-variant extensions, .DS_Store litter). Everything removed here is
+## re-creatable by the tool that made it. `.hypothesis/` is deliberately
+## KEPT — it is the found-counterexample regression corpus, not a cache.
+## Wired into the release skill; safe to run any time.
+prune-dev: prune-target
+	rm -f .bench-current.json
+	rm -rf docs/_build .mypy_cache .ruff_cache .pytest_cache .uv-cache
+	find kglite -maxdepth 1 -name "kglite.*.so" ! -name "kglite.abi3.so" -delete
+	find . \( -path ./target -o -path ./.venv \) -prune -o -name ".DS_Store" -type f -print0 | xargs -0 rm -f
+
 PRUNE_TARGET_GB := 40
 prune-target:
 	@dir=$$(readlink target 2>/dev/null || echo target); \

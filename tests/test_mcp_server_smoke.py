@@ -31,14 +31,14 @@ import pytest
 
 import kglite
 
-BINARY = Path(__file__).resolve().parent.parent / "target" / "release" / "kglite-mcp-server"
+# Newest built profile (release or debug); skip with the rebuild command when
+# nothing fresh is built. See tests/conftest.py::workspace_binary.
+from tests.conftest import binary_skip_reason, workspace_binary
 
+BINARY = workspace_binary("kglite-mcp-server")
+_SKIP_REASON = binary_skip_reason("kglite-mcp-server", BINARY, "cargo build -p kglite-mcp-server --release")
 
-pytestmark = pytest.mark.skipif(
-    not BINARY.exists(),
-    reason=f"kglite-mcp-server binary not built (missing at {BINARY}). "
-    f"Build with `cargo build -p kglite-mcp-server --release`.",
-)
+pytestmark = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 
 
 def _discover_github_token() -> Optional[str]:

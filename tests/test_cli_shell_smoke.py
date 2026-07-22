@@ -10,23 +10,20 @@ The release binary lands at target/release/kglite.
 
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
 
 import pytest
 
-# Prefer the release binary (what CI/users ship); fall back to debug so a local
-# `cargo build -p kglite-cli` is enough to exercise these.
-_ROOT = Path(__file__).resolve().parent.parent
-_RELEASE = _ROOT / "target" / "release" / "kglite"
-_DEBUG = _ROOT / "target" / "debug" / "kglite"
-BINARY = _RELEASE if _RELEASE.exists() else _DEBUG
+# Resolve the newest built profile (release or debug) so a local
+# `cargo build -p kglite-cli` is enough to exercise these, and a stale
+# release binary never shadows a fresh debug build. Skips (with the rebuild
+# command) when nothing fresh is built; CI always builds fresh.
+from tests.conftest import binary_skip_reason, workspace_binary
 
-pytestmark = pytest.mark.skipif(
-    not BINARY.exists(),
-    reason=f"kglite shell binary not built (looked at {_RELEASE} and {_DEBUG}). "
-    "Build with: cargo build --release -p kglite-cli",
-)
+BINARY = workspace_binary("kglite")
+SKIP_REASON = binary_skip_reason("kglite shell binary", BINARY, "cargo build -p kglite-cli")
+
+pytestmark = pytest.mark.skipif(SKIP_REASON is not None, reason=SKIP_REASON or "")
 
 
 def _run(script: str) -> str:

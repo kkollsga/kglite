@@ -11,6 +11,65 @@ import pytest
 from kglite import KnowledgeGraph
 
 # ---------------------------------------------------------------------------
+# Workspace-binary resolution (shared by the CLI / MCP / bolt binary-backed
+# suites)
+# ---------------------------------------------------------------------------
+#
+# Binary-backed suites run whatever bytes sit in target/, so two local-only
+# failure classes exist that CI (which always builds fresh) never sees:
+#
+# - a stale release binary shadowing a freshly built debug one — resolve the
+#   NEWEST built profile, not release-first;
+# - a binary predating the current workspace version bump — it reports the
+#   previous version and fails contract tests with pure noise. Skip with the
+#   rebuild command instead.
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_WORKSPACE_MANIFEST = _REPO_ROOT / "Cargo.toml"
+
+# Markers whose tests legitimately run long (30GB mapped graphs, multi-GB
+# model downloads, sustained load). Everything else falls under the 120 s
+# per-test hang ceiling set in pyproject.toml [tool.pytest.ini_options].
+_TIMEOUT_EXEMPT_MARKERS = ("benchmark", "stress", "model_download", "bolt_stress")
+
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        if any(item.get_closest_marker(marker) for marker in _TIMEOUT_EXEMPT_MARKERS):
+            item.add_marker(pytest.mark.timeout(0))
+
+
+def workspace_binary(name: str) -> Path:
+    """Newest built variant of workspace binary `name` across release/debug.
+
+    Falls back to the (non-existent) release path when neither profile has
+    been built, so callers can keep using `.exists()` and print a canonical
+    location in skip messages.
+    """
+    release = _REPO_ROOT / "target" / "release" / name
+    debug = _REPO_ROOT / "target" / "debug" / name
+    candidates = [path for path in (release, debug) if path.exists()]
+    if not candidates:
+        return release
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def binary_skip_reason(name: str, binary: Path, build_hint: str) -> str | None:
+    """Skip reason for a binary-backed suite, or None when it should run.
+
+    Staleness is classified by mtime against the root Cargo.toml: every
+    version bump (and every checkout touching it) moves that mtime, so an
+    older binary cannot be trusted to reflect the current workspace. CI is
+    unaffected — it builds immediately before testing.
+    """
+    if not binary.exists():
+        return f"{name} not built (expected at {binary}). Build with: {build_hint}"
+    if binary.stat().st_mtime < _WORKSPACE_MANIFEST.stat().st_mtime:
+        return f"{name} at {binary} predates the workspace manifest (stale build) — rebuild with: {build_hint}"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Bolt-server fixtures (shared across tests/test_bolt_server_*.py)
 # ---------------------------------------------------------------------------
 #
@@ -25,7 +84,12 @@ from kglite import KnowledgeGraph
 # build-bolt-server` (or `cargo build -p kglite-bolt-server --release`)
 # is the standard way to materialize it.
 
-_BOLT_BINARY = Path(__file__).resolve().parent.parent / "target" / "release" / "kglite-bolt-server"
+_BOLT_BINARY = workspace_binary("kglite-bolt-server")
+_BOLT_SKIP_REASON = binary_skip_reason(
+    "kglite-bolt-server",
+    _BOLT_BINARY,
+    "cargo build -p kglite-bolt-server --release",
+)
 
 
 def _find_free_port() -> int:
@@ -112,7 +176,7 @@ def _teardown_bolt_server(proc) -> None:
 
 
 def _bolt_binary_available() -> bool:
-    return _BOLT_BINARY.exists()
+    return _BOLT_SKIP_REASON is None
 
 
 @pytest.fixture
@@ -131,7 +195,7 @@ def bolt_server(tmp_path):
     Skips the test if the binary isn't built.
     """
     if not _bolt_binary_available():
-        pytest.skip(f"kglite-bolt-server binary not built (expected at {_BOLT_BINARY})")
+        pytest.skip(_BOLT_SKIP_REASON)
     fixture_path = tmp_path / "fixture.kgl"
     _build_bolt_fixture_graph(fixture_path)
     proc, url = _spawn_bolt_server(fixture_path, readonly=False)
@@ -143,7 +207,7 @@ def bolt_server(tmp_path):
 def bolt_server_readonly(tmp_path):
     """Spawn `kglite-bolt-server --readonly` on its own ephemeral port."""
     if not _bolt_binary_available():
-        pytest.skip(f"kglite-bolt-server binary not built (expected at {_BOLT_BINARY})")
+        pytest.skip(_BOLT_SKIP_REASON)
     fixture_path = tmp_path / "fixture_ro.kgl"
     _build_bolt_fixture_graph(fixture_path)
     proc, url = _spawn_bolt_server(fixture_path, readonly=True)

@@ -35,7 +35,7 @@ def test_coverage_tool_versions_are_exactly_pinned() -> None:
 
 
 def test_ci_uses_the_pinned_branch_coverage_contract() -> None:
-    assert "pip install maturin pytest pandas hypothesis -r requirements/coverage.txt" in CI_TEXT
+    assert "pip install maturin pytest pytest-timeout pandas hypothesis -r requirements/coverage.txt" in CI_TEXT
     assert (
         "pytest tests/ -v --tb=short --cov=kglite --cov-branch "
         "--cov-config=pyproject.toml --cov-report=xml:coverage.xml"

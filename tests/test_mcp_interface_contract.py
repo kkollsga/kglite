@@ -7,12 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_mcp_server_smoke import BINARY, _build_fixture_graph, _spawn
+from tests.test_mcp_server_smoke import _SKIP_REASON, _build_fixture_graph, _spawn
 
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "tests" / "api-baselines" / "mcp-tools.json"
 
-pytestmark = pytest.mark.skipif(not BINARY.exists(), reason="release kglite-mcp-server binary not built")
+pytestmark = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 
 
 def _tool_contract(client) -> list[dict]:

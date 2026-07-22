@@ -145,6 +145,12 @@ markers = [
     "bolt_stress: Bolt-protocol concurrency/stress tests (slow; multi-session under load). Opt-in via '-m bolt_stress'; excluded from default suite to keep iteration fast.",
 ]
 addopts = "-m 'not benchmark and not parity and not stress and not model_download and not binary_size and not bolt and not bolt_stress'"
+# Hang detection, not a performance budget: the default suite's slowest test
+# runs ~2 s, so a test that hits 120 s is stuck (deadlock, unresponsive
+# subprocess, runaway query) and must FAIL loudly instead of stalling the
+# developer. Opt-in heavy suites (benchmark/stress/model_download/bolt_stress)
+# are exempted via pytest_collection_modifyitems in tests/conftest.py.
+timeout = 120
 
 [tool.mypy]
 ignore_missing_imports = true

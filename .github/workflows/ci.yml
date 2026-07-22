@@ -268,7 +268,7 @@ jobs:
           workspaces: ". -> target"
 
       - name: Install dependencies
-        run: pip install maturin pytest pandas hypothesis -r requirements/coverage.txt
+        run: pip install maturin pytest pytest-timeout pandas hypothesis -r requirements/coverage.txt
 
       - name: Install pyarrow for the coexistence canary (newest-python leg only)
         # Only the newest-python leg installs pyarrow, so tests/test_pyarrow_coexistence.py
@@ -392,7 +392,7 @@ jobs:
         # `ModuleNotFoundError: No module named 'kglite.kglite'`.
         run: |
           python -m venv .ftvenv
-          ./.ftvenv/bin/pip install -q maturin pytest pandas
+          ./.ftvenv/bin/pip install -q maturin pytest pytest-timeout pandas
           VIRTUAL_ENV="$PWD/.ftvenv" ./.ftvenv/bin/maturin develop --release \
             --no-default-features --features python-extension,mcp-server
 
@@ -599,7 +599,7 @@ jobs:
         run: |
           python -m venv .venv
           echo "$PWD/.venv/bin" >> $GITHUB_PATH
-          .venv/bin/pip install maturin pytest pandas
+          .venv/bin/pip install maturin pytest pytest-timeout pandas
           .venv/bin/maturin develop --release
       - name: Run bounded memory/mapped/disk parity matrix
         run: |
@@ -629,7 +629,7 @@ jobs:
         run: |
           python -m venv .venv
           echo "$PWD/.venv/bin" >> $GITHUB_PATH
-          .venv/bin/pip install maturin pytest pandas
+          .venv/bin/pip install maturin pytest pytest-timeout pandas
           .venv/bin/maturin develop --release
       - name: Run bounded disk ownership and arena regressions
         run: |
@@ -762,7 +762,7 @@ jobs:
       - name: Build release extension and Bolt server
         run: |
           python -m venv .venv
-          .venv/bin/pip install maturin pytest pandas neo4j
+          .venv/bin/pip install maturin pytest pytest-timeout pandas neo4j
           .venv/bin/maturin develop --release
           cargo build --release -p kglite-bolt-server
       - name: Run bounded Session stress

@@ -8,7 +8,7 @@ import subprocess
 
 import pytest
 
-from tests.test_cli_shell_smoke import BINARY
+from tests.test_cli_shell_smoke import BINARY, SKIP_REASON
 
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "tests" / "api-baselines" / "cli-interface.json"
@@ -25,7 +25,7 @@ COMMANDS = {
     "skill-uninstall": ("skill", "uninstall"),
 }
 
-pytestmark = pytest.mark.skipif(not BINARY.exists(), reason="kglite CLI binary not built")
+pytestmark = pytest.mark.skipif(SKIP_REASON is not None, reason=SKIP_REASON or "")
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:

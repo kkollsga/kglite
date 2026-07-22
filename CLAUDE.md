@@ -53,6 +53,39 @@ assessment, not a hung test.
 diagnostics, not routine local gates. Run them only to investigate a failure
 that crosses package boundaries; otherwise let GitHub CI parallelize them.
 
+**Testing discipline (locked 2026-07-22).**
+
+- **The installed extension must be a debug build during correctness work.** A
+  release-built `kglite.abi3.so` silently disables the debug-only assertions
+  (parser stack-depth behavior, the disk arena-guard protocol) that are the
+  suite's real detectors — the 2026-07-21 audit found latent bugs those
+  assertions catch immediately. After any release-profile build (benchmarks,
+  release constants), rebuild debug (`uv run --no-sync maturin develop`)
+  before the next test run.
+- **Binary-backed suites resolve binaries through
+  `tests/conftest.py::workspace_binary`** — newest of release/debug, and a
+  skip-with-rebuild-command when the binary predates the root `Cargo.toml`.
+  Never hard-code a profile path in a test; a stale release binary shadowing
+  fresh code produces contract failures that reveal nothing.
+- **Every Python test carries a 120 s hang ceiling** (`pytest-timeout`,
+  configured in `pyproject.toml`; opt-in heavy markers are exempted in
+  `tests/conftest.py::pytest_collection_modifyitems`). A test that hits the
+  ceiling is a FAILED test — fix the hang; never raise the default, never
+  wait out a stuck run. The default suite's slowest test is ~2 s, so the
+  ceiling is pure hang detection.
+
+**Dev-environment cleanliness — every file accumulation needs a gate.** Any
+path the tooling writes outside git must have a bound and an owner: `target/`
+→ `make prune-target` (40 GB size gate); regenerable artifacts and tool caches
+(`.bench-current.json`, `docs/_build`, `.mypy_cache`, `.ruff_cache`,
+`.pytest_cache`, `.uv-cache`, stale ABI-variant extensions, `.DS_Store`) →
+`make prune-dev` (wired into the release skill); sccache → its 30 GiB config
+cap; `dev-docs/` and `inbox/` → their skills. Never add a new file-writing
+step (bench capture, fixture dump, scratch graph) without pointing it at the
+session scratchpad / `tmp_path`, or adding it to `prune-dev` in the same
+change. `.hypothesis/` is deliberately exempt — it is the found-counterexample
+regression corpus, not a cache.
+
 **Local correctness testing stays in the default/debug profile.** Never run
 `maturin develop --release`, `cargo test --release`, or another release-profile
 build merely to run tests. Use `uv run --no-sync maturin develop` (or `make
