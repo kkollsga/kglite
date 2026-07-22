@@ -36,13 +36,15 @@ def project_literal(path: Path, key: str) -> str | None:
 
 def main() -> int:
     policy = json.loads(POLICY.read_text())
-    metadata = json.loads(
-        subprocess.check_output(
-            ["cargo", "metadata", "--format-version", "1", "--locked", "--all-features", "--offline"],
-            cwd=ROOT,
-            text=True,
-        )
-    )
+    # Prefer offline resolution (fast, deterministic), but fall back to a
+    # networked call: after a Cargo.lock change the CI cargo cache misses and
+    # offline metadata fails to resolve even long-standing packages.
+    base_cmd = ["cargo", "metadata", "--format-version", "1", "--locked", "--all-features"]
+    try:
+        raw = subprocess.check_output([*base_cmd, "--offline"], cwd=ROOT, text=True)
+    except subprocess.CalledProcessError:
+        raw = subprocess.check_output(base_cmd, cwd=ROOT, text=True)
+    metadata = json.loads(raw)
     allowed = set(policy["allowed_expressions"])
     review_required = set(policy["review_required_expressions"])
     reviewed = {(name, version, license) for name, version, license, _scope in policy["reviewed_packages"]}

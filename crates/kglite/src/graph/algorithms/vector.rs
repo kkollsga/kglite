@@ -113,10 +113,7 @@ pub fn vector_search(
     query_vector: &[f32],
     options: &VectorSearchOptions,
 ) -> Result<Vec<VectorSearchResult>, String> {
-    // Direct GraphRead traversal outside the executor: hold the disk arena
-    // guard while node/edge weights are borrowed (owned counter handle;
-    // no-op on memory/mapped backends). Results returned are owned.
-    let _arena_guard = graph.graph.begin_query();
+    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let VectorSearchOptions {
         top_k,
         metric,

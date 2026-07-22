@@ -167,9 +167,7 @@ impl ResultView {
         results: Vec<CentralityResult>,
         top_k: Option<usize>,
     ) -> Self {
-        // Direct read path — hold the disk arena guard while borrowed
-        // node/edge weights live (no-op on memory/mapped backends).
-        let _arena_guard = graph.begin_read_pass();
+        let _arena_guard = graph.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let limit = top_k.unwrap_or(results.len());
         let columns = vec!["type".into(), "title".into(), "id".into(), "score".into()];
 
@@ -223,9 +221,7 @@ impl ResultView {
         graph: &DirGraph,
         node_indices: &[petgraph::graph::NodeIndex],
     ) -> Self {
-        // Direct read path — hold the disk arena guard while borrowed
-        // node/edge weights live (no-op on memory/mapped backends).
-        let _arena_guard = graph.begin_read_pass();
+        let _arena_guard = graph.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let nodes_vec: Vec<&NodeData> = node_indices
             .iter()
             .filter_map(|&idx| graph.get_node(idx))

@@ -90,21 +90,21 @@
     {
       "path": "crates/kglite-py/src/graph/pyapi/vector.rs",
       "qualified_name": "crate::KnowledgeGraph::embed_texts",
-      "lines": 217,
+      "lines": 218,
       "branches": 43,
       "nesting": 6
     },
     {
       "path": "crates/kglite/src/graph/algorithms/centrality.rs",
       "qualified_name": "crate::betweenness_centrality",
-      "lines": 289,
+      "lines": 290,
       "branches": 26,
       "nesting": 6
     },
     {
       "path": "crates/kglite/src/graph/algorithms/centrality.rs",
       "qualified_name": "crate::closeness_centrality",
-      "lines": 260,
+      "lines": 261,
       "branches": 20,
       "nesting": 5
     },
@@ -418,6 +418,13 @@
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
+      "qualified_name": "crate::execute_mutable_bounded",
+      "lines": 204,
+      "branches": 30,
+      "nesting": 3
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
       "qualified_name": "crate::execute_set",
       "lines": 551,
       "branches": 79,
@@ -538,14 +545,14 @@
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::add_connections",
-      "lines": 304,
+      "lines": 305,
       "branches": 41,
       "nesting": 3
     },
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::add_nodes",
-      "lines": 281,
+      "lines": 282,
       "branches": 39,
       "nesting": 4
     },
@@ -559,7 +566,7 @@
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::create_connections",
-      "lines": 267,
+      "lines": 268,
       "branches": 47,
       "nesting": 10
     },

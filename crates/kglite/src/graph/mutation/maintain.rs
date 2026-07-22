@@ -56,10 +56,7 @@ pub fn add_nodes(
     node_title_field: Option<String>,
     conflict_handling: Option<String>,
 ) -> Result<NodeOperationReport, String> {
-    // Mutation paths read endpoints/properties through the same materializing
-    // accessors as queries; hold the disk arena guard for the whole operation
-    // (owned counter handle, coexists with `&mut`; no-op on memory/mapped).
-    let _arena_guard = graph.graph.begin_query();
+    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let mut interned_names = vec![node_type.as_str(), PROVISIONAL_KEY];
     interned_names.extend(RESERVED_PROVENANCE_KEYS.iter().copied());
     let column_names = df_data.get_column_names();
@@ -374,10 +371,7 @@ pub fn add_edges_from_specs(
     graph: &mut DirGraph,
     specs: Vec<EdgeSpec>,
 ) -> Result<EdgeSpecReport, String> {
-    // Mutation paths read endpoints/properties through the same materializing
-    // accessors as queries; hold the disk arena guard for the whole operation
-    // (owned counter handle, coexists with `&mut`; no-op on memory/mapped).
-    let _arena_guard = graph.graph.begin_query();
+    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     use std::collections::BTreeMap;
     let mut interned_names = Vec::from(RESERVED_PROVENANCE_KEYS);
     for spec in &specs {
@@ -470,10 +464,7 @@ pub fn add_connections(
     target_title_field: Option<String>,
     conflict_handling: Option<String>,
 ) -> Result<ConnectionOperationReport, String> {
-    // Mutation paths read endpoints/properties through the same materializing
-    // accessors as queries; hold the disk arena guard for the whole operation
-    // (owned counter handle, coexists with `&mut`; no-op on memory/mapped).
-    let _arena_guard = graph.graph.begin_query();
+    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let column_names = df_data.get_column_names();
     let mut interned_names = vec![
         connection_type.as_str(),
@@ -941,10 +932,7 @@ pub fn replace_connections(
     target_title_field: Option<String>,
     conflict_handling: Option<String>,
 ) -> Result<ConnectionOperationReport, String> {
-    // Mutation paths read endpoints/properties through the same materializing
-    // accessors as queries; hold the disk arena guard for the whole operation
-    // (owned counter handle, coexists with `&mut`; no-op on memory/mapped).
-    let _arena_guard = graph.graph.begin_query();
+    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let column_names = df_data.get_column_names();
     let mut interned_names = vec![
         connection_type.as_str(),
@@ -1040,10 +1028,7 @@ pub fn replace_connections(
 /// an edge but never promoted by a real node row — along with all its
 /// incident edges. Returns `(nodes_purged, edges_removed)`.
 pub fn purge_provisional_nodes(graph: &mut DirGraph) -> (usize, usize) {
-    // Mutation paths read endpoints/properties through the same materializing
-    // accessors as queries; hold the disk arena guard for the whole operation
-    // (owned counter handle, coexists with `&mut`; no-op on memory/mapped).
-    let _arena_guard = graph.graph.begin_query();
+    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let provisional_key = graph.interner.get_or_intern(PROVISIONAL_KEY);
     let mut to_delete: HashSet<NodeIndex> = HashSet::new();
     for node_idx in graph.graph.node_indices() {
@@ -1122,10 +1107,7 @@ pub fn create_connections(
     source_type_filter: Option<String>,                    // override source level by node type
     target_type_filter: Option<String>,                    // override target level by node type
 ) -> Result<ConnectionOperationReport, String> {
-    // Mutation paths read endpoints/properties through the same materializing
-    // accessors as queries; hold the disk arena guard for the whole operation
-    // (owned counter handle, coexists with `&mut`; no-op on memory/mapped).
-    let _arena_guard = graph.graph.begin_query();
+    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     graph
         .prepare_disk_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
@@ -1390,10 +1372,7 @@ pub fn update_node_properties(
     nodes: &[(Option<NodeIndex>, Value)],
     property: &str,
 ) -> Result<NodeOperationReport, String> {
-    // Mutation paths read endpoints/properties through the same materializing
-    // accessors as queries; hold the disk arena guard for the whole operation
-    // (owned counter handle, coexists with `&mut`; no-op on memory/mapped).
-    let _arena_guard = graph.graph.begin_query();
+    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     if nodes.is_empty() {
         return Err("No nodes to update".to_string());
     }
@@ -1562,10 +1541,7 @@ pub fn add_properties(
     selection: &CurrentSelection,
     property_spec: HashMap<String, PropertySpec>,
 ) -> Result<AddPropertiesReport, String> {
-    // Mutation paths read endpoints/properties through the same materializing
-    // accessors as queries; hold the disk arena guard for the whole operation
-    // (owned counter handle, coexists with `&mut`; no-op on memory/mapped).
-    let _arena_guard = graph.graph.begin_query();
+    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     graph
         .prepare_disk_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;

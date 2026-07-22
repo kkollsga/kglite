@@ -41,9 +41,7 @@ impl KnowledgeGraph {
         embeddings: &Bound<'_, PyDict>,
         metric: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        // Direct read path — hold the disk arena guard while borrowed
-        // node/edge weights live (no-op on memory/mapped backends).
-        let _arena_guard = self.inner.begin_read_pass();
+        let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let g = get_graph_mut(&mut self.inner);
         let embedding_property = format!("{}_emb", text_column);
 
@@ -298,9 +296,7 @@ impl KnowledgeGraph {
         returning: Option<Vec<String>>,
         exact: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
-        // Direct read path — hold the disk arena guard while borrowed
-        // node/edge weights live (no-op on memory/mapped backends).
-        let _arena_guard = self.inner.begin_read_pass();
+        let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let top_k = top_k.unwrap_or(10);
         let exact = exact.unwrap_or(false);
         let embedding_property = format!("{}_emb", text_column);
@@ -566,9 +562,7 @@ impl KnowledgeGraph {
         py: Python<'_>,
         node_type: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        // Direct read path — hold the disk arena guard while borrowed
-        // node/edge weights live (no-op on memory/mapped backends).
-        let _arena_guard = self.inner.begin_read_pass();
+        let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         use crate::datatypes::values::Value;
         use std::collections::HashSet;
 
@@ -879,9 +873,7 @@ impl KnowledgeGraph {
         node_type_or_text_column: &str,
         text_column: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        // Direct read path — hold the disk arena guard while borrowed
-        // node/edge weights live (no-op on memory/mapped backends).
-        let _arena_guard = self.inner.begin_read_pass();
+        let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let result = PyDict::new(py);
 
         // Two-arg form: embeddings(node_type, text_column)
@@ -1053,9 +1045,7 @@ impl KnowledgeGraph {
         show_progress: Option<bool>,
         mode: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        // Direct read path — hold the disk arena guard while borrowed
-        // node/edge weights live (no-op on memory/mapped backends).
-        let _arena_guard = self.inner.begin_read_pass();
+        let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let model = self.get_embedder_or_error()?;
         let embedding_property = format!("{}_emb", text_column);
         let batch_size = batch_size.unwrap_or(256);

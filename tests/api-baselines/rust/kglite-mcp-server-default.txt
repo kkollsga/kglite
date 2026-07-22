@@ -1,4 +1,17 @@
 pub mod kglite_mcp_server
+#[non_exhaustive] pub enum kglite_mcp_server::WorkspaceGraphMode
+pub kglite_mcp_server::WorkspaceGraphMode::LocalWorkspace
+pub kglite_mcp_server::WorkspaceGraphMode::Watch
+pub kglite_mcp_server::WorkspaceGraphMode::Workspace
+impl core::clone::Clone for kglite_mcp_server::WorkspaceGraphMode
+pub fn kglite_mcp_server::WorkspaceGraphMode::clone(&self) -> kglite_mcp_server::WorkspaceGraphMode
+impl core::cmp::Eq for kglite_mcp_server::WorkspaceGraphMode
+impl core::cmp::PartialEq for kglite_mcp_server::WorkspaceGraphMode
+pub fn kglite_mcp_server::WorkspaceGraphMode::eq(&self, other: &kglite_mcp_server::WorkspaceGraphMode) -> bool
+impl core::fmt::Debug for kglite_mcp_server::WorkspaceGraphMode
+pub fn kglite_mcp_server::WorkspaceGraphMode::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite_mcp_server::WorkspaceGraphMode
+impl core::marker::StructuralPartialEq for kglite_mcp_server::WorkspaceGraphMode
 pub struct kglite_mcp_server::DomainGraphContext<'a>
 impl<'a> kglite_mcp_server::DomainGraphContext<'a>
 pub fn kglite_mcp_server::DomainGraphContext<'a>::graph(&self) -> &'a kglite::graph::handle::KnowledgeGraph
@@ -30,21 +43,8 @@ pub fn kglite_mcp_server::ServerExtensions::with_workspace_graph(self, hooks: kg
 impl core::default::Default for kglite_mcp_server::ServerExtensions
 pub fn kglite_mcp_server::ServerExtensions::default() -> kglite_mcp_server::ServerExtensions
 pub struct kglite_mcp_server::WorkspaceGraphHooks
-pub kglite_mcp_server::WorkspaceGraphHooks::build: alloc::boxed::Box<(dyn core::ops::function::Fn(kglite_mcp_server::WorkspaceGraphRequest) -> anyhow::Result<kglite_mcp_server::WorkspaceGraphResult, alloc::string::String> + core::marker::Send + core::marker::Sync)>
-pub kglite_mcp_server::WorkspaceGraphHooks::is_relevant: alloc::boxed::Box<(dyn for<'a> core::ops::function::Fn(kglite_mcp_server::WorkspaceGraphRelevance<'a>) -> bool + core::marker::Send + core::marker::Sync)>
-#[non_exhaustive] pub enum kglite_mcp_server::WorkspaceGraphMode
-pub kglite_mcp_server::WorkspaceGraphMode::LocalWorkspace
-pub kglite_mcp_server::WorkspaceGraphMode::Watch
-pub kglite_mcp_server::WorkspaceGraphMode::Workspace
-impl core::clone::Clone for kglite_mcp_server::WorkspaceGraphMode
-pub fn kglite_mcp_server::WorkspaceGraphMode::clone(&self) -> kglite_mcp_server::WorkspaceGraphMode
-impl core::cmp::Eq for kglite_mcp_server::WorkspaceGraphMode
-impl core::cmp::PartialEq for kglite_mcp_server::WorkspaceGraphMode
-pub fn kglite_mcp_server::WorkspaceGraphMode::eq(&self, other: &kglite_mcp_server::WorkspaceGraphMode) -> bool
-impl core::fmt::Debug for kglite_mcp_server::WorkspaceGraphMode
-pub fn kglite_mcp_server::WorkspaceGraphMode::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for kglite_mcp_server::WorkspaceGraphMode
-impl core::marker::StructuralPartialEq for kglite_mcp_server::WorkspaceGraphMode
+pub kglite_mcp_server::WorkspaceGraphHooks::build: alloc::boxed::Box<kglite_mcp_server::WorkspaceGraphBuildFn>
+pub kglite_mcp_server::WorkspaceGraphHooks::is_relevant: alloc::boxed::Box<kglite_mcp_server::WorkspaceGraphRelevanceFn>
 pub struct kglite_mcp_server::WorkspaceGraphRelevance<'a>
 impl<'a> kglite_mcp_server::WorkspaceGraphRelevance<'a>
 pub fn kglite_mcp_server::WorkspaceGraphRelevance<'a>::mode(&self) -> kglite_mcp_server::WorkspaceGraphMode

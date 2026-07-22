@@ -114,9 +114,7 @@ impl KnowledgeGraph {
         channel_name: String,
         values: Vec<f64>,
     ) -> PyResult<()> {
-        // Direct read path — hold the disk arena guard while borrowed
-        // node/edge weights live (no-op on memory/mapped backends).
-        let _arena_guard = self.inner.begin_read_pass();
+        let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
         let graph = get_graph_mut(&mut self.inner);
         let id_val = py_in::py_value_to_value(node_id)?;
         let node_idx = find_node_by_id(graph, &id_val)?;

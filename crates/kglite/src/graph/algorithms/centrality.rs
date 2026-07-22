@@ -215,10 +215,7 @@ pub fn betweenness_centrality(
     graph: &DirGraph,
     options: &CentralityOptions,
 ) -> Result<Vec<CentralityResult>, String> {
-    // Direct GraphRead traversal outside the executor: hold the disk arena
-    // guard while node/edge weights are borrowed (owned counter handle;
-    // no-op on memory/mapped backends). Results returned are owned.
-    let _arena_guard = graph.graph.begin_query();
+    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let CentralityOptions {
         normalized,
         sample_size,
@@ -521,10 +518,7 @@ pub fn pagerank(
     graph: &DirGraph,
     options: &PagerankOptions,
 ) -> Result<Vec<CentralityResult>, String> {
-    // Direct GraphRead traversal outside the executor: hold the disk arena
-    // guard while node/edge weights are borrowed (owned counter handle;
-    // no-op on memory/mapped backends). Results returned are owned.
-    let _arena_guard = graph.graph.begin_query();
+    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let PagerankOptions {
         damping_factor,
         max_iterations,
@@ -694,10 +688,7 @@ pub fn degree_centrality(
     graph: &DirGraph,
     options: &DegreeCentralityOptions,
 ) -> Result<Vec<CentralityResult>, String> {
-    // Direct GraphRead traversal outside the executor: hold the disk arena
-    // guard while node/edge weights are borrowed (owned counter handle;
-    // no-op on memory/mapped backends). Results returned are owned.
-    let _arena_guard = graph.graph.begin_query();
+    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let DegreeCentralityOptions {
         normalized,
         connection_types,
@@ -784,10 +775,7 @@ pub fn closeness_centrality(
     graph: &DirGraph,
     options: &CentralityOptions,
 ) -> Result<Vec<CentralityResult>, String> {
-    // Direct GraphRead traversal outside the executor: hold the disk arena
-    // guard while node/edge weights are borrowed (owned counter handle;
-    // no-op on memory/mapped backends). Results returned are owned.
-    let _arena_guard = graph.graph.begin_query();
+    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let CentralityOptions {
         normalized,
         sample_size,

@@ -1983,6 +1983,7 @@ impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::_get_connection(&self, index: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::graph::schema::EdgeData>
 pub fn kglite::api::DirGraph::_get_connection_mut(&mut self, index: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&mut kglite::graph::schema::EdgeData>
 pub fn kglite::api::DirGraph::add_node_label(&mut self, idx: petgraph::graph_impl::NodeIndex, label: kglite::api::InternedKey) -> bool
+pub fn kglite::api::DirGraph::begin_read_pass(&self) -> core::option::Option<kglite::api::DiskQueryGuard>
 pub fn kglite::api::DirGraph::build_connection_types_cache(&mut self)
 pub fn kglite::api::DirGraph::build_id_index(&mut self, node_type: &str)
 pub fn kglite::api::DirGraph::bump_version(&mut self)
@@ -2090,6 +2091,9 @@ impl serde_core::ser::Serialize for kglite::api::DirGraph
 pub fn kglite::api::DirGraph::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::DirGraph
 pub fn kglite::api::DirGraph::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub struct kglite::api::DiskQueryGuard
+impl core::ops::drop::Drop for kglite::api::DiskQueryGuard
+pub fn kglite::api::DiskQueryGuard::drop(&mut self)
 pub struct kglite::api::ExploreOptions
 pub kglite::api::ExploreOptions::include_source: bool
 pub kglite::api::ExploreOptions::max_depth: usize
@@ -2141,8 +2145,12 @@ pub fn kglite::api::InternedKey::from_u64(v: u64) -> Self
 impl core::clone::Clone for kglite::api::InternedKey
 pub fn kglite::api::InternedKey::clone(&self) -> kglite::api::InternedKey
 impl core::cmp::Eq for kglite::api::InternedKey
+impl core::cmp::Ord for kglite::api::InternedKey
+pub fn kglite::api::InternedKey::cmp(&self, other: &kglite::api::InternedKey) -> core::cmp::Ordering
 impl core::cmp::PartialEq for kglite::api::InternedKey
 pub fn kglite::api::InternedKey::eq(&self, other: &kglite::api::InternedKey) -> bool
+impl core::cmp::PartialOrd for kglite::api::InternedKey
+pub fn kglite::api::InternedKey::partial_cmp(&self, other: &kglite::api::InternedKey) -> core::option::Option<core::cmp::Ordering>
 impl core::default::Default for kglite::api::InternedKey
 pub fn kglite::api::InternedKey::default() -> kglite::api::InternedKey
 impl core::fmt::Debug for kglite::api::InternedKey

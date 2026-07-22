@@ -750,10 +750,7 @@ pub fn louvain_communities(
     graph: &DirGraph,
     options: &CommunityOptions,
 ) -> Result<CommunityResult, String> {
-    // Direct GraphRead traversal outside the executor: hold the disk arena
-    // guard while node/edge weights are borrowed (owned counter handle;
-    // no-op on memory/mapped backends). Results returned are owned.
-    let _arena_guard = graph.graph.begin_query();
+    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let CommunityOptions {
         weight_property,
         resolution,
@@ -948,10 +945,7 @@ pub fn leiden_communities(
     graph: &DirGraph,
     options: &CommunityOptions,
 ) -> Result<CommunityResult, String> {
-    // Direct GraphRead traversal outside the executor: hold the disk arena
-    // guard while node/edge weights are borrowed (owned counter handle;
-    // no-op on memory/mapped backends). Results returned are owned.
-    let _arena_guard = graph.graph.begin_query();
+    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let CommunityOptions {
         weight_property,
         resolution,
@@ -1003,10 +997,7 @@ pub fn label_propagation(
     graph: &DirGraph,
     options: &LabelPropagationOptions,
 ) -> Result<CommunityResult, String> {
-    // Direct GraphRead traversal outside the executor: hold the disk arena
-    // guard while node/edge weights are borrowed (owned counter handle;
-    // no-op on memory/mapped backends). Results returned are owned.
-    let _arena_guard = graph.graph.begin_query();
+    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     let LabelPropagationOptions {
         max_iterations,
         connection_types,

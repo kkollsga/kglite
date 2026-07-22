@@ -1342,10 +1342,8 @@ impl KnowledgeGraph {
         keep_selection: Option<bool>,
         group_by: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        // Direct read path — hold the disk arena guard while borrowed
-        // node/edge weights live (no-op on memory/mapped backends).
-        let _arena_guard = self.inner.begin_read_pass();
-        // group_by property: count nodes grouped by a property value
+        let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
+                                                         // group_by property: count nodes grouped by a property value
         if let Some(property) = group_by {
             let nodes = kglite_core::api::fluent::collect_selected_nodes(
                 &self.cursor.selection,
