@@ -334,6 +334,21 @@ def main() -> int:
     changed, msg = refresh_api_baseline()
     print(f"   {'CHANGED' if changed else 'no-op '}: {msg}\n")
 
+    # 5. packaged-consumer fixture lockfile. The fixture consumes kglite by
+    # version under --locked, so every workspace version bump (and any new
+    # dependency) must re-resolve its lock or the packaged-feature CI jobs
+    # fail on main (bit 0.14.4 and 0.14.5).
+    print("5. packaged-consumer fixture lockfile")
+    before = (REPO_ROOT / "tests/fixtures/rust-embed-consumer/Cargo.lock").read_bytes()
+    subprocess.run(
+        ["cargo", "update", "--manifest-path", "tests/fixtures/rust-embed-consumer/Cargo.toml", "-p", "kglite"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+    )
+    after = (REPO_ROOT / "tests/fixtures/rust-embed-consumer/Cargo.lock").read_bytes()
+    print(f"   {'CHANGED' if before != after else 'no-op '}: tests/fixtures/rust-embed-consumer/Cargo.lock\n")
+
     # Pretty diff summary.
     diff = subprocess.run(
         [
