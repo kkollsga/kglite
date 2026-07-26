@@ -731,12 +731,6 @@ impl Wal {
         self.file.sync_data()
     }
 
-    /// How this WAL makes each frame durable.
-    #[inline]
-    pub fn sync_mode(&self) -> SyncMode {
-        self.sync
-    }
-
     /// Reset to an empty WAL (header only), `fsync`ing the truncation.
     /// Called after a checkpoint (a full `.kgl` save) has folded every
     /// frame into the snapshot, so the log can start fresh.
@@ -1320,7 +1314,6 @@ mod tests {
         let p = dir.path().join("g.kgl-wal");
         {
             let mut wal = Wal::open(p.clone(), SyncMode::PageCache).unwrap();
-            assert_eq!(wal.sync_mode(), SyncMode::PageCache);
             wal.append(&frame(1)).unwrap();
             wal.append(&frame(2)).unwrap();
         }

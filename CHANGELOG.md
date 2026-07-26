@@ -417,6 +417,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking (Rust API): `kglite::api::durable::Wal::open` takes a second
+  argument**, `sync: SyncMode`, naming how each appended frame is made durable.
+  Any Rust embedder calling it directly must pass a mode; Python callers are
+  unaffected. Kept as a break rather than adding a second constructor
+  alongside an unchanged `open`, for two reasons: a compat wrapper for a
+  replaced function is exactly the dual old-vs-new API path this project does
+  not carry, and an `open` that kept its old signature would have to *default*
+  the sync mode — silently choosing a durability guarantee on the caller's
+  behalf, at the one boundary where a silent default costs data. Naming the
+  mode is the point. `DurabilityLevel::sync_mode()` maps a level to one.
+
 - **A WAL frame is written with a single `write` call** instead of three (one
   each for the length prefix, the CRC, and the payload). Besides removing two
   syscalls from the per-commit path, this closes the window in which a
