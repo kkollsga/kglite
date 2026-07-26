@@ -75,13 +75,6 @@
       "nesting": 4
     },
     {
-      "path": "crates/kglite-py/src/graph/pyapi/kg_core.rs",
-      "qualified_name": "crate::KnowledgeGraph::define_schema",
-      "lines": 163,
-      "branches": 56,
-      "nesting": 6
-    },
-    {
       "path": "crates/kglite-py/src/graph/pyapi/kg_mutation.rs",
       "qualified_name": "crate::write_connections",
       "lines": 230,
@@ -418,6 +411,13 @@
       "nesting": 4
     },
     {
+      "path": "crates/kglite-py/src/graph/pyapi/kg_core.rs",
+      "qualified_name": "crate::KnowledgeGraph::define_schema",
+      "lines": 163,
+      "branches": 56,
+      "nesting": 6
+    },
+    {
       "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
       "qualified_name": "crate::execute_mutable_bounded",
       "lines": 211,
@@ -553,12 +553,12 @@
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::add_nodes",
-      "lines": 282,
-      "branches": 39,
+      "lines": 275,
+      "branches": 32,
       "nesting": 4
     },
     {
-      "path": "crates/kglite/src/graph/mutation/maintain.rs",
+      "path": "crates/kglite/src/graph/mutation/add_properties.rs",
       "qualified_name": "crate::add_properties_aggregate",
       "lines": 187,
       "branches": 39,
