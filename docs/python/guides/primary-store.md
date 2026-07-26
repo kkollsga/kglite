@@ -166,10 +166,27 @@ cost in more detail.
 
 ## What KGLite does not do
 
-**One process writes.** There is no shared live multi-process transaction
-handle and no replication protocol. Disk mode publishes immutable generations
-behind a cross-process writer lease, which stops two processes from publishing
-at once — that is stable-reader/single-writer publication, not concurrent
+**One process writes — and this is now enforced, not just documented.**
+`kglite.open(path)` takes an exclusive cross-process writer lease for as long
+as the graph can write back to `path`, so a second process opening the same
+path fails immediately with the holder's pid rather than quietly overwriting
+its work at `save()`:
+
+```
+KgError: app.kgl is open for writing by pid 4711 (since 2026-07-26T09:15:03+02:00)
+```
+
+Readers are unaffected: `load()` and `open_session()` take no lease, so any
+number of processes can read a graph while one writes. The lease is an OS-owned
+lock, so a writer killed with `SIGKILL` releases it immediately — the leftover
+`<path>.lock` (the lock, always empty) and `<path>.lock-owner` (the pid and
+acquisition time, used to name a holder) are records, not the lock itself, and
+deleting them achieves nothing. `open(..., lock=False)` opts out for callers
+that coordinate writers some other way.
+
+There is still no shared live multi-process transaction handle and no
+replication protocol. Disk mode publishes immutable generations behind the same
+kind of lease — that is stable-reader/single-writer publication, not concurrent
 multi-process write access. When several processes need to read and write one
 graph, the answer is to run `kglite-bolt-server` and let that one process own
 the graph while clients connect over the Bolt protocol. The official Python,

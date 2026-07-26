@@ -15,6 +15,7 @@ def test_open_creates_then_loads(tmp_path):
     g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
     g.save()  # bare save uses the remembered path
     assert (tmp_path / "app.kgl").exists()
+    del g  # release the writer lease before reopening the same path
 
     g2 = kglite.open(p)  # exists -> load
     names = [r["n"] for r in g2.cypher("MATCH (p:Person) RETURN p.name AS n")]
@@ -26,10 +27,13 @@ def test_bare_save_round_trips(tmp_path):
     g = kglite.open(p)
     g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
     g.save()
+    del g  # each open() owns the path until released
     g = kglite.open(p)
     g.cypher("CREATE (:Person {id: 2, name: 'Bob'})")
     g.save()
-    assert kglite.open(p).cypher("MATCH (p) RETURN count(*) AS c").scalar() == 2
+    # Read-back uses load(): it takes no writer lease, so it works whether or
+    # not `g` is still holding one.
+    assert kglite.load(p).cypher("MATCH (p) RETURN count(*) AS c").scalar() == 2
 
 
 def test_save_as_updates_remembered_path(tmp_path):

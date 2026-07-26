@@ -146,8 +146,12 @@ def test_disk_copy_and_loaded_source_mutate_in_either_order(tmp_path, copy_first
     assert _count(copied) == 3
     source.save()
     copied.save(str(copy_path))
-    assert kglite.open(str(source_path)).cypher("MATCH (:Person {id: 20}) RETURN count(*) AS c").to_list() == [{"c": 0}]
-    assert kglite.open(str(copy_path)).cypher("MATCH (:Person {id: 10}) RETURN count(*) AS c").to_list() == [{"c": 0}]
+    # Read-back verification uses load(), not open(): `source` is still alive
+    # and still owns the write lease for source_path, and re-opening a path
+    # for writing merely to inspect it is what the single-writer guard exists
+    # to catch.
+    assert kglite.load(str(source_path)).cypher("MATCH (:Person {id: 20}) RETURN count(*) AS c").to_list() == [{"c": 0}]
+    assert kglite.load(str(copy_path)).cypher("MATCH (:Person {id: 10}) RETURN count(*) AS c").to_list() == [{"c": 0}]
 
 
 # ── Clone / derived views: preserve identity fields ──────────────────────────

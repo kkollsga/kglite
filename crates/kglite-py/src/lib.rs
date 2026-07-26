@@ -284,15 +284,62 @@ fn from_bytes(py: Python<'_>, data: &[u8]) -> PyResult<KnowledgeGraph> {
 ///   keeps no log, which is measurably faster for write-heavy bulk loading (no
 ///   `fsync` per commit) and is the right choice when the graph is rebuildable
 ///   from source data.
+///
+/// `lock` (default `true`) takes the cross-process single-writer lease for the
+/// life of the returned graph. It is on by default because the alternative is
+/// silent data loss, not an error: two processes that open one path both build
+/// a complete snapshot and the last `save()` wins. `false` opts out for callers
+/// who coordinate writers themselves. Readers never take the lease — that is
+/// what `load` / `open_session` are for.
 #[pyfunction]
-#[pyo3(signature = (path, *, storage=None, durable=None))]
+#[pyo3(signature = (path, *, storage=None, durable=None, lock=true))]
 fn open(
     py: Python<'_>,
     path: String,
     storage: Option<&str>,
     durable: Option<bool>,
+    lock: bool,
 ) -> PyResult<KnowledgeGraph> {
     use kglite_core::api::GraphRead;
+
+    // Take write ownership *before* reading a byte. The window that loses a
+    // writer's work is open-to-save, not save itself: two processes that both
+    // load, both mutate, and both save produce two full snapshots, and the
+    // second one published wins outright. Locking at save time would be too
+    // late to notice.
+    //
+    // Fail-fast (`Duration::ZERO`) rather than waiting: `open()` is called on
+    // request paths and in worker startup, where a blocked-for-30s open is a
+    // worse failure than a clear error. A caller that genuinely wants to queue
+    // can retry around the error.
+    let writer_lease = if lock {
+        Some(
+            py.detach(|| {
+                kglite_core::api::io::GraphWriterLease::acquire(
+                    std::path::Path::new(&path),
+                    std::time::Duration::ZERO,
+                )
+            })
+            .map_err(|e| {
+                // The engine's message is binding-neutral by design, so the
+                // Python-specific way out is appended here rather than baked
+                // into core. Most callers who hit this wanted to *read* a
+                // graph someone else is writing, and naming the call that
+                // does that turns a refusal into an answer.
+                crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "{e} To read this graph while another process writes it, use \
+                         kglite.load(path) or kglite.open_session(path), which take no \
+                         lease. Pass kglite.open(..., lock=False) only if you are \
+                         coordinating writers yourself.",
+                    ),
+                )))
+            })?,
+        )
+    } else {
+        None
+    };
 
     let mut kg = if std::path::Path::new(&path).exists() {
         py.detach(|| load_file(&path))
@@ -302,6 +349,7 @@ fn open(
         KnowledgeGraph::construct(storage, Some(&path))?
     };
     kg.lifecycle.source_path = Some(std::path::PathBuf::from(&path));
+    kg.lifecycle.writer_lease = writer_lease;
     // Resolved after the graph exists, because the mode of an *existing* path
     // comes from the file, not from the `storage` argument.
     let wanted = durable.unwrap_or(!kg.inner.graph.is_disk());

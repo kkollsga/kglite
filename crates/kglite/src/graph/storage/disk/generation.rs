@@ -174,6 +174,13 @@ impl GraphDirectoryLock {
                 ),
             )
         })?;
+        // Written for a human reading the file directly, and deliberately
+        // never read back by this codebase. It cannot be: `fs2` locks via
+        // `LockFileEx` on Windows, whose locks are mandatory, so any other
+        // handle reading these bytes gets ERROR_LOCK_VIOLATION (33) rather
+        // than the pid. Code that needs to *name* a lock holder must publish
+        // the record to an unlocked sibling instead — see `GraphWriterLease`
+        // in `graph/io/open.rs`, which had exactly this bug.
         file.set_len(0)?;
         writeln!(file, "pid={}", std::process::id())?;
         file.sync_all()?;

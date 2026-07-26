@@ -220,15 +220,27 @@ pub(crate) struct GraphLifecycle {
     /// handle isn't shareable). When `Some`, the backend is wrapped in
     /// `GraphBackend::Recording` so mutations are captured for the WAL.
     pub(crate) durable: Option<DurableState>,
+    /// Cross-process single-writer guard for `source_path`, held for as long
+    /// as this graph can still write back to it. `Some` only on a graph from
+    /// `kglite.open(path)` (the write-back entry point); `None` for
+    /// `kglite.load(path)` and every clone/derived view, so readers never
+    /// contend. Like `durable`, it owns an OS `File` handle and therefore
+    /// cannot be shared.
+    ///
+    /// Released by `close()` / `__exit__` after the final save, and by `Drop`
+    /// otherwise — including on a crash, where the OS drops the underlying
+    /// file lock for us.
+    pub(crate) writer_lease: Option<kglite_core::api::io::GraphWriterLease>,
 }
 
 impl GraphLifecycle {
-    /// A detached lifecycle: no save target, not durable. Used by in-memory
-    /// constructors, `copy()`, and every derived view.
+    /// A detached lifecycle: no save target, not durable, holding no writer
+    /// lease. Used by in-memory constructors, `copy()`, and every derived view.
     pub(crate) fn detached() -> Self {
         GraphLifecycle {
             source_path: None,
             durable: None,
+            writer_lease: None,
         }
     }
 }
@@ -427,10 +439,13 @@ impl Clone for KnowledgeGraph {
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
             // A true Clone preserves the save identity (source_path) but never
-            // the durable session (the WAL File handle isn't shareable).
+            // the durable session (the WAL File handle isn't shareable) nor the
+            // writer lease — write ownership stays with the graph that opened
+            // the path, so a clone can never release it early on drop.
             lifecycle: GraphLifecycle {
                 source_path: self.lifecycle.source_path.clone(),
                 durable: None,
+                writer_lease: None,
             },
         }
     }

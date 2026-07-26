@@ -1,7 +1,7 @@
 //! Shared graph open-or-create lifecycle used by server-style bindings.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, Read};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -28,8 +28,29 @@ pub struct OpenGraphResult {
     pub identity: GraphFileIdentity,
 }
 
-/// Cross-process writer ownership for a graph path. The sibling lock file is
-/// persistent; OS advisory-lock teardown, not PID-file deletion, owns liveness.
+/// Cross-process writer ownership for a graph path. Both sidecars are
+/// persistent; OS lock teardown, not PID-file deletion, owns liveness.
+///
+/// Ownership is split across two files on purpose:
+///
+/// - `<path>.lock` is the lock token, and holds **no** data. It is what
+///   [`fs2`] locks, and it is deliberately still this exact path so that a
+///   binary from before the split still excludes, and is excluded by, this one.
+/// - `<path>.lock-owner` carries the human-readable `pid` / `since` record
+///   used to name the holder in an error message.
+///
+/// The record cannot live inside the lock file. `fs2` locks via `flock` on
+/// Unix, which is *advisory* — a contender can still read the bytes — but via
+/// `LockFileEx` on Windows, whose locks are **mandatory** over the whole range
+/// (`fs2` passes `(0, !0, !0)`). There, an exclusive lock makes the file
+/// unreadable to every other handle, including other handles in the holder's
+/// own process, and a contender's read fails with `ERROR_LOCK_VIOLATION` (33)
+/// rather than returning bytes. Keeping the record in an unlocked sibling is
+/// what lets the holder be *named* on every platform instead of degrading to
+/// an anonymous "another process" exactly where that matters most.
+///
+/// The same mandatory-lock mechanism is documented at the disk backend's
+/// `snapshot_files` helper, which skips `.kglite.lock` for this reason.
 pub struct GraphWriterLease {
     file: File,
 }
@@ -39,7 +60,7 @@ impl GraphWriterLease {
         let path = writer_lease_path(graph_path);
         let started = Instant::now();
         loop {
-            let mut file = OpenOptions::new()
+            let file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
@@ -47,20 +68,14 @@ impl GraphWriterLease {
                 .open(&path)?;
             match file.try_lock_exclusive() {
                 Ok(()) => {
-                    file.set_len(0)?;
-                    file.rewind()?;
-                    writeln!(file, "pid={}", std::process::id())?;
-                    file.sync_data()?;
+                    publish_owner_record(&writer_owner_path(graph_path));
                     return Ok(Self { file });
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Err(error) if is_lock_contended(&error) => {
                     if started.elapsed() >= timeout {
                         return Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
-                            format!(
-                                "timed out waiting for writer lease {}; another writer is active",
-                                path.display()
-                            ),
+                            contended_message(graph_path, &path),
                         ));
                     }
                     std::thread::sleep(Duration::from_millis(50));
@@ -84,6 +99,144 @@ fn writer_lease_path(graph_path: &Path) -> std::path::PathBuf {
     let mut lock = graph_path.as_os_str().to_os_string();
     lock.push(".lock");
     lock.into()
+}
+
+/// Whether a failed `try_lock_*` means "someone else holds it" rather than a
+/// genuine I/O failure.
+///
+/// Deliberately **not** an `ErrorKind` comparison. `fs2` surfaces the
+/// platform's native lock errno — `EWOULDBLOCK` (35) on Unix,
+/// `ERROR_LOCK_VIOLATION` (33) on Windows — and only the Unix one maps to
+/// [`io::ErrorKind::WouldBlock`]; the Windows one is uncategorised. A `kind()`
+/// check therefore recognises contention on Unix and silently misses it on
+/// Windows, where two things then go wrong at once: the raw platform error
+/// escapes instead of a message naming the holder, *and* the retry loop below
+/// never runs, so a caller's timeout (the CLI and MCP server both pass 30s)
+/// returns instantly instead of waiting.
+///
+/// [`fs2::lock_contended_error`] exists precisely so callers can compare
+/// portably. The `WouldBlock` arm is kept as a belt-and-braces fallback for an
+/// error that carries the kind but no raw errno.
+fn is_lock_contended(error: &io::Error) -> bool {
+    error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+        || error.kind() == io::ErrorKind::WouldBlock
+}
+
+/// Sibling of the lock file holding the holder's identity. Never locked, so it
+/// stays readable on Windows — see [`GraphWriterLease`].
+fn writer_owner_path(graph_path: &Path) -> std::path::PathBuf {
+    let mut owner = graph_path.as_os_str().to_os_string();
+    owner.push(".lock-owner");
+    owner.into()
+}
+
+/// Record who now holds the lease, for the benefit of whoever is refused next.
+///
+/// Truncate-then-write, so a contender reading mid-update sees either nothing
+/// (reported as "another process", and retried) or the complete new record —
+/// never the *previous*, now-released holder's pid, which would send someone
+/// chasing a process that has already exited.
+///
+/// Deliberately infallible: this is naming, not locking. The caller has
+/// already won the lock at this point, and failing an acquisition because a
+/// cosmetic sidecar could not be written would trade a working guard for a
+/// better error message. A failure here costs only the pid in a message that
+/// someone else may never see.
+fn publish_owner_record(owner_path: &Path) {
+    let record = format!(
+        "pid={}\nsince={}\n",
+        std::process::id(),
+        chrono::Local::now().to_rfc3339()
+    );
+    let _ = std::fs::write(owner_path, record);
+}
+
+/// Ownership details published to `<path>.lock-owner`, read back only on the
+/// contention path. The bytes are *documentation*: liveness is established by
+/// the failed lock acquisition that precedes every read, so a record left
+/// behind by a crashed process is never mistaken for a live holder — nothing
+/// reads it unless someone currently holds the lock.
+#[derive(Debug, Default)]
+struct LeaseHolder {
+    pid: Option<u32>,
+    since: Option<String>,
+}
+
+impl LeaseHolder {
+    /// Best-effort parse. Every failure mode — unreadable file, truncated
+    /// mid-write by the holder, an older release's `pid`-only format —
+    /// degrades to a less specific description rather than masking the real
+    /// "another writer is active" error with a parse error.
+    ///
+    /// Retries briefly while the record is absent, because the holder takes
+    /// the lock *before* it publishes its identity: two processes racing at
+    /// startup (the exact case this guard exists for) otherwise reliably read
+    /// the empty window and report an unnamed "another process". The cost is
+    /// paid only on the error path, where a correct message beats promptness.
+    fn read(owner_path: &Path) -> Self {
+        const ATTEMPTS: u32 = 10;
+        for attempt in 0..ATTEMPTS {
+            let holder = Self::read_once(owner_path);
+            if holder.pid.is_some() {
+                return holder;
+            }
+            if attempt + 1 < ATTEMPTS {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        Self::default()
+    }
+
+    fn read_once(owner_path: &Path) -> Self {
+        let Ok(text) = std::fs::read_to_string(owner_path) else {
+            return Self::default();
+        };
+        let mut holder = Self::default();
+        for line in text.lines() {
+            match line.split_once('=') {
+                Some(("pid", value)) => holder.pid = value.trim().parse().ok(),
+                Some(("since", value)) => holder.since = Some(value.trim().to_string()),
+                _ => {}
+            }
+        }
+        holder
+    }
+
+    fn describe(&self) -> String {
+        // A self-pid hit is not a deployment problem, it is an un-closed
+        // handle in the caller's own code, and saying "another process" for
+        // your own pid sends people hunting a process that does not exist.
+        if self.pid == Some(std::process::id()) {
+            return format!(
+                "this same process (pid {}), which has not closed an earlier open() of it",
+                std::process::id()
+            );
+        }
+        match (self.pid, self.since.as_deref()) {
+            (Some(pid), Some(since)) => format!("pid {pid} (since {since})"),
+            (Some(pid), None) => format!("pid {pid}"),
+            _ => "another process".to_string(),
+        }
+    }
+}
+
+/// The message a blocked writer sees. Names the holding process, because
+/// "another writer is active" leaves an operator with nothing to act on.
+///
+/// The closing sentence is deliberate support-burden prevention: the lock
+/// file is persistent and survives a `SIGKILL`, so the natural reflex on
+/// seeing one is to delete it. Deleting it does not release the lock (the OS
+/// already did that when the holder died) and only removes the record of who
+/// holds it, so the message says so before the reflex fires.
+fn contended_message(graph_path: &Path, lock_path: &Path) -> String {
+    format!(
+        "{} is open for writing by {}; only one process may write a graph at a time. \
+         The lock is released automatically when that process exits, even on a crash — \
+         deleting {} does not release it.",
+        graph_path.display(),
+        LeaseHolder::read(&writer_owner_path(graph_path)).describe(),
+        lock_path.display()
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -351,6 +504,180 @@ mod tests {
         let _lease = GraphWriterLease::acquire(&path, Duration::ZERO).unwrap();
         let opened = open_or_create_graph(&path, Some(StorageMode::Memory)).unwrap();
         assert_eq!(opened.disposition, OpenDisposition::Opened);
+    }
+
+    /// Deliberately **not** gated to Unix. Naming the holder is the feature,
+    /// and a `cfg`-gated test would let it silently degrade to "another
+    /// process" on Windows — the platform where a multi-process deployment
+    /// tripping this is arguably most likely — while CI stayed green.
+    #[test]
+    fn contended_message_names_the_holding_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("named.kgl");
+        let _lease = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
+        let error = GraphWriterLease::acquire(&graph, Duration::ZERO)
+            .err()
+            .expect("second acquire must be refused");
+        // Carry the raw platform error into the failure text. A refusal that
+        // still reads as the OS's own lock error means the contention check
+        // did not classify it, and naming the errno makes that diagnosable
+        // from a CI log alone instead of needing a local repro.
+        let diagnosis = format!(
+            "got {error:?} (raw OS error {:?}, kind {:?}). A raw platform lock \
+             error here means `is_lock_contended` failed to classify it — the \
+             errno differs per platform (EWOULDBLOCK on Unix, \
+             ERROR_LOCK_VIOLATION on Windows), so an `ErrorKind` comparison \
+             recognises only Unix.",
+            error.raw_os_error(),
+            error.kind()
+        );
+        let message = error.to_string();
+        // Same-process contention is reported as such rather than as a
+        // phantom "other process" carrying the caller's own pid.
+        assert!(
+            message.contains(&format!("pid {}", std::process::id())),
+            "the refusal must name the holding process; {diagnosis}"
+        );
+        assert!(message.contains("named.kgl"), "{diagnosis}");
+        assert!(message.contains("does not release it"), "{diagnosis}");
+    }
+
+    /// Pins the portable classification directly, so a regression is a one-line
+    /// failure rather than a confusing raw-errno leak somewhere downstream.
+    /// Un-gated on purpose: the whole point is that it must hold on the
+    /// platform whose errno is *not* the one `ErrorKind` understands.
+    #[test]
+    fn contention_is_classified_from_the_platform_lock_error() {
+        assert!(
+            is_lock_contended(&fs2::lock_contended_error()),
+            "the error fs2 returns for a contended lock must be recognised as \
+             contention on every platform"
+        );
+        assert!(is_lock_contended(&io::Error::from(
+            io::ErrorKind::WouldBlock
+        )));
+        // A real failure must still propagate rather than be retried as if
+        // someone else merely held the lock.
+        assert!(!is_lock_contended(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+    }
+
+    /// The misclassification also disabled waiting: an unrecognised error
+    /// returned immediately instead of entering the retry loop, so the CLI's
+    /// and MCP server's 30s lease timeouts silently became zero. Asserting the
+    /// call actually blocks catches that independently of the message.
+    #[test]
+    fn a_contended_acquire_waits_for_its_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("waiting.kgl");
+        let _lease = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
+
+        let started = Instant::now();
+        let error = GraphWriterLease::acquire(&graph, Duration::from_millis(300))
+            .err()
+            .expect("a held lease must still be refused after the timeout");
+        assert!(
+            started.elapsed() >= Duration::from_millis(250),
+            "acquire returned after {:?}, so it never waited — contention was \
+             not recognised and the retry loop was skipped ({error})",
+            started.elapsed()
+        );
+    }
+
+    /// The property whose platform split broke this: the owner record must be
+    /// readable *by someone other than the holder, while the lock is held*.
+    ///
+    /// It is asserted as a distinct test, with the raw OS error in the failure
+    /// message, because the two candidate causes look identical from the
+    /// outside. A record kept inside the locked file returns bytes on Unix
+    /// (`flock` is advisory) and fails with `ERROR_LOCK_VIOLATION` (33) on
+    /// Windows (`LockFileEx` is mandatory) — so this test distinguishes "the
+    /// read failed" from "the record was empty" instead of leaving the next
+    /// person to infer it from a `None`.
+    #[test]
+    fn owner_record_stays_readable_while_the_lease_is_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("readable.kgl");
+        let _lease = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
+
+        let owner = writer_owner_path(&graph);
+        let text = std::fs::read_to_string(&owner).unwrap_or_else(|error| {
+            panic!(
+                "the owner record must stay readable while the lease is held, but \
+                 reading {} failed: {error} (raw OS error {:?}). A mandatory-lock \
+                 platform reports ERROR_LOCK_VIOLATION (33) here the moment the \
+                 record is moved back inside the locked file.",
+                owner.display(),
+                error.raw_os_error()
+            )
+        });
+        assert!(
+            text.contains(&format!("pid={}", std::process::id())),
+            "{text}"
+        );
+
+        // And the lock token itself carries no data, so nothing can come to
+        // depend on reading it — which is the trap that caused this.
+        let lock = writer_lease_path(&graph);
+        assert_eq!(
+            std::fs::metadata(&lock).unwrap().len(),
+            0,
+            "the lock file must stay empty; its contents are unreadable to \
+             contenders on mandatory-lock platforms"
+        );
+    }
+
+    /// Also un-gated: the timestamp is half of what makes the message
+    /// actionable (a live writer versus one forgotten since Tuesday), so it
+    /// has to survive on every platform the guard ships to.
+    #[test]
+    fn lease_record_carries_pid_and_acquisition_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("record.kgl");
+        let _lease = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
+        let holder = LeaseHolder::read(&writer_owner_path(&graph));
+        assert_eq!(holder.pid, Some(std::process::id()));
+        assert!(holder.since.is_some(), "acquisition time must be recorded");
+    }
+
+    /// A second holder must overwrite the first's record rather than leave a
+    /// dead pid to be reported as live. The record is only ever read after a
+    /// failed acquisition, so it must describe whoever holds the lock *now*.
+    #[test]
+    fn owner_record_is_replaced_by_each_new_holder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("succession.kgl");
+        let owner = writer_owner_path(&graph);
+
+        std::fs::write(&owner, b"pid=999999\nsince=long-ago\n").unwrap();
+        let _lease = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
+
+        let holder = LeaseHolder::read(&owner);
+        assert_eq!(
+            holder.pid,
+            Some(std::process::id()),
+            "a stale predecessor's pid must not survive a fresh acquisition"
+        );
+        assert_ne!(holder.since.as_deref(), Some("long-ago"));
+    }
+
+    #[test]
+    fn holder_description_degrades_without_a_readable_record() {
+        // Two cases must degrade to a usable message rather than a parse
+        // failure: no record at all — a holder that has locked but not yet
+        // published, or a holder running a build from before the record moved
+        // out of the lock file — and a record carrying only `pid=`.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("absent.lock");
+        assert_eq!(
+            LeaseHolder::read_once(&missing).describe(),
+            "another process"
+        );
+
+        let legacy = tmp.path().join("legacy.lock");
+        std::fs::write(&legacy, b"pid=999999\n").unwrap();
+        assert_eq!(LeaseHolder::read_once(&legacy).describe(), "pid 999999");
     }
 
     #[test]

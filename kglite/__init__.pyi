@@ -650,7 +650,13 @@ def graphgen(
     """
     ...
 
-def open(path: str, *, storage: str | None = None, durable: bool | None = None) -> KnowledgeGraph:
+def open(
+    path: str,
+    *,
+    storage: str | None = None,
+    durable: bool | None = None,
+    lock: bool = True,
+) -> KnowledgeGraph:
     """Open a graph at ``path`` — load it if it exists, create a fresh one if
     it doesn't (load-or-create). The embedded-database lifecycle entry point.
 
@@ -685,9 +691,45 @@ def open(path: str, *, storage: str | None = None, durable: bool | None = None) 
               rather than quietly returning a graph without the crash safety
               you asked for.
             - ``False`` — opt out. See the performance note below.
+        lock: Single-writer guard — **on by default**. Opening takes an
+            exclusive advisory lock on a ``<path>.lock`` sidecar and holds it
+            until ``close()`` / ``with``-block exit, so a second process that
+            opens the same path raises instead of silently overwriting your
+            work (see the note below). Pass ``False`` only when something else
+            already guarantees a single writer — an external supervisor, or a
+            process you have confined to reads. ``lock=False`` opts out of
+            *taking* the lease, not out of the consequences of ignoring one.
 
     Returns:
         A KnowledgeGraph bound to ``path``.
+
+    Raises:
+        KgError: If another process already holds the write lease for
+            ``path``. The message names the holding pid and when it acquired,
+            e.g. ``app.kgl is open for writing by pid 4711 (since ...)``.
+
+    Note:
+        **One process writes at a time.** ``save()`` republishes the whole
+        graph, so two processes that open the same path independently both
+        build a complete snapshot and the last one to save wins — silently
+        discarding everything the other did. That is the single most likely
+        accident when deploying an embedded database: a ``gunicorn`` worker
+        pool, a cron job overlapping a request, or a stale process left
+        running. The lease turns it into an error at ``open()`` rather than
+        data loss at ``save()``.
+
+        **Readers are never blocked.** :func:`load` and :func:`open_session`
+        take no lease, so any number of processes can read a graph while one
+        writes; they observe the last published snapshot. Only :func:`open` —
+        the write-back entry point — claims ownership.
+
+        **A crash releases the lease.** The lock belongs to the operating
+        system, not to the sidecar file, so a writer killed with ``SIGKILL``
+        (or lost to a power cut) frees it immediately. Two small sidecars are
+        left behind and are harmless: ``<path>.lock`` (the lock itself, always
+        empty) and ``<path>.lock-owner`` (the pid/timestamp used to name a
+        holder in the error above). Deleting either does *not* release a live
+        lock, and does nothing useful for a dead one.
 
     Note:
         **What durability costs.** Crash safety is bought with one ``fsync``
