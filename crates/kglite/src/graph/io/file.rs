@@ -118,7 +118,13 @@ pub(crate) struct FileMetadata {
     /// Declared UNIQUE constraints to reinstall after load. Additive — a file
     /// written before constraints existed deserializes to an empty list, i.e.
     /// no constraints, which is exactly its original behaviour.
-    #[serde(default)]
+    ///
+    /// Skipped when empty so a graph that declares no constraint writes
+    /// byte-identical output to one produced before the field existed. Without
+    /// that, the field emits `"unique_constraint_keys":[]` into *every* `.kgl`
+    /// and gratuitously shifts the format for the overwhelming majority of
+    /// graphs, which carry no constraints at all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     unique_constraint_keys: Vec<UniqueConstraintKey>,
     /// Node type metadata: node_type → { property_name → type_string }
     #[serde(default)]

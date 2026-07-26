@@ -297,3 +297,56 @@ mod bulk_index_freshness_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod constraint_snapshot_tests {
+    use super::*;
+
+    /// `populate_index_keys` snapshots the declared UNIQUE constraints out of a
+    /// `HashMap`, whose iteration order is reseeded per process. Left unsorted,
+    /// two saves of the same graph produce different bytes — and because the
+    /// order only varies *between* processes, no single-process test catches it.
+    /// Asserting the snapshot is sorted pins the invariant directly.
+    #[test]
+    fn populate_index_keys_snapshots_unique_constraints_sorted() {
+        let mut graph = DirGraph::new();
+        // Declared out of order, and across two node types, so an unsorted
+        // snapshot has plenty of room to disagree with a sorted one.
+        for (node_type, properties) in [
+            ("Person", vec!["email"]),
+            ("Order", vec!["ref"]),
+            ("Person", vec!["city", "street"]),
+            ("Person", vec!["ssn"]),
+            ("Order", vec!["customer", "seq"]),
+        ] {
+            graph
+                .create_unique_constraint(node_type, &properties)
+                .expect("empty graph cannot violate a constraint");
+        }
+
+        graph.populate_index_keys();
+
+        // Spelled out rather than compared against `sorted(snapshot)`: a
+        // self-referential assertion can pass by luck when the HashMap happens
+        // to hand back an already-ordered set.
+        let expected: Vec<(String, Vec<String>)> = [
+            ("Order", vec!["customer", "seq"]),
+            ("Order", vec!["ref"]),
+            ("Person", vec!["city", "street"]),
+            ("Person", vec!["email"]),
+            ("Person", vec!["ssn"]),
+        ]
+        .into_iter()
+        .map(|(t, props)| {
+            (
+                t.to_string(),
+                props.into_iter().map(str::to_string).collect(),
+            )
+        })
+        .collect();
+        assert_eq!(
+            graph.unique_constraint_keys, expected,
+            "unique_constraint_keys must be persisted in a deterministic order"
+        );
+    }
+}

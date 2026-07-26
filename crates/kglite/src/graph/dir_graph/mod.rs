@@ -925,7 +925,17 @@ impl DirGraph {
         // Declared UNIQUE constraints persist the same way. `unique_indices`
         // keys *are* the declaration list, so snapshotting them keeps the two
         // from drifting when a constraint is dropped.
-        self.unique_constraint_keys = self.unique_indices.keys().cloned().collect();
+        //
+        // Sorted, unlike the index-key lists above: `unique_indices` is a
+        // `HashMap`, so its iteration order is reseeded per process and two
+        // saves of the same graph would otherwise disagree byte for byte. The
+        // order carries no meaning — `rebuild_unique_indices_from_keys` reads
+        // the list as a set — so imposing one costs nothing and makes a saved
+        // graph reproducible.
+        let mut unique_keys: Vec<UniqueConstraintKey> =
+            self.unique_indices.keys().cloned().collect();
+        unique_keys.sort_unstable();
+        self.unique_constraint_keys = unique_keys;
     }
 
     /// Rebuild property and composite indexes from the persisted key lists.
