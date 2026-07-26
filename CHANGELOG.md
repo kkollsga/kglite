@@ -502,6 +502,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   save aborted with "Access is denied" before the atomic rename it was
   protecting. Staged files are now fsynced through a writable handle.
 
+  Saving also left the writer's arrays mapping its scratch workspace instead of
+  the generation just published. Windows will not delete a directory that still
+  holds a mapped file, so those scratch directories accumulated inside the
+  graph directory; the writer now re-maps onto the published snapshot, which
+  also means it observes exactly what a fresh reader would on every platform.
+- **Repairing a torn write-ahead log header now works on Windows.** A `.kgl-wal`
+  left truncated by a crash is repaired on open, but the repair truncated and
+  rewrote the file through the log's append handle. An append handle is not a
+  general-purpose write handle — on Windows it is opened without the access
+  right that truncation requires — so recovering from a torn header failed
+  there. Header creation, repair, and version upgrade now happen on an ordinary
+  handle before the append handle is opened.
+
   This was never caught because no CI job ran the engine's test suite on
   Windows, even though Windows wheels are published. The native-lifecycle job
   now runs it.

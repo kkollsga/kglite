@@ -21,6 +21,40 @@ impl DiskGraph {
         Ok(())
     }
 
+    /// Paths of every memory-mapped array this graph currently holds.
+    ///
+    /// Exists so the "a published graph maps only its own generation"
+    /// invariant is checkable on every platform. POSIX keeps a mapping valid
+    /// after its file is unlinked, so a mapping left pointing into a
+    /// just-deleted scratch directory is invisible there; Windows refuses to
+    /// delete such a directory at all. Asserting on paths catches the
+    /// regression everywhere rather than only on the platform that complains.
+    ///
+    /// Does not cover the edge-property store, which owns its own handles.
+    #[cfg(test)]
+    pub(crate) fn mapped_file_paths(&mut self) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        let mut push = |path: Option<&Path>| {
+            if let Some(path) = path {
+                paths.push(path.to_path_buf());
+            }
+        };
+        push(self.node_slots.file_path());
+        push(self.out_offsets.file_path());
+        push(self.out_edges.file_path());
+        push(self.in_offsets.file_path());
+        push(self.in_edges.file_path());
+        push(self.edge_endpoints.file_path());
+        push(self.conn_type_index_types.file_path());
+        push(self.conn_type_index_offsets.file_path());
+        push(self.conn_type_index_sources.file_path());
+        push(self.peer_count_types.file_path());
+        push(self.peer_count_offsets.file_path());
+        push(self.peer_count_entries.file_path());
+        push(self.pending_edges.get_mut().file_path());
+        paths
+    }
+
     pub(crate) fn active_write_dir(&self) -> &Path {
         self.mutation_workspace
             .as_ref()
@@ -36,6 +70,48 @@ impl DiskGraph {
     ) -> std::io::Result<()> {
         self.logical_root = logical_root;
         self.data_dir = snapshot_dir.join(segment_subdir(0));
+
+        // Re-map the CSR arrays onto the generation just published.
+        //
+        // Until this point they map files under the mutation workspace — and,
+        // for a detached copy, under its private root — which are exactly the
+        // directories cleared at the end of this function. POSIX tolerated the
+        // mismatch: removal unlinks files whose mappings stay valid, so the
+        // live writer went on reading a directory that no longer existed.
+        // Windows refuses to remove a directory that still contains mapped
+        // files, so the scratch roots survived and accumulated inside the
+        // user's graph directory.
+        //
+        // Re-mapping onto the published snapshot is what both platforms
+        // actually want, and it is the same end state a fresh reader reaches.
+        // A generation stage is always a distinct directory, so `save_to_dir`
+        // took the rewrite path and seg_000 holds the complete graph — see
+        // `save_disposition`, which documents that stages never seal.
+        let published = super::graph_persist::SegmentCsr::load_from(&self.data_dir, &self.data_dir)?;
+        self.node_slots = published.node_slots;
+        self.out_offsets = published.out_offsets;
+        self.out_edges = published.out_edges;
+        self.in_offsets = published.in_offsets;
+        self.in_edges = published.in_edges;
+        self.edge_endpoints = published.edge_endpoints;
+        self.conn_type_index_types = published.conn_type_index_types;
+        self.conn_type_index_offsets = published.conn_type_index_offsets;
+        self.conn_type_index_sources = published.conn_type_index_sources;
+        self.peer_count_types = published.peer_count_types;
+        self.peer_count_offsets = published.peer_count_offsets;
+        self.peer_count_entries = published.peer_count_entries;
+        // The published arrays are fully materialised — `save_logical_*` folded
+        // every overlay into them — so the overlays must be dropped or their
+        // entries would be counted twice. Same discipline as `flush_node_slots`
+        // and the post-`swap_csr_files` reset in `build_csr_partitioned`.
+        self.node_slot_updates.clear();
+        self.appended_node_slots.clear();
+        self.appended_edge_endpoints.clear();
+        self.removed_edges.clear();
+        // Pending edges were folded into the CSR by the save; whatever handle
+        // is left points into the workspace we are about to remove.
+        *self.pending_edges.get_mut() = MmapOrVec::new();
+
         // `save_to` absorbs the edge-property overlay into the published
         // files. Re-open that base before clearing the workspace so the
         // live writer observes the same state as a freshly loaded reader.
