@@ -13,6 +13,13 @@ Two child-death models, both real:
   on signal 9, which is what makes it a crash test rather than a shutdown
   test.
 
+A parent that seeds a checkpoint must ``del`` its handle before spawning the
+child. ``kglite.open`` holds a cross-process single-writer lease for the life
+of the graph, so a parent still holding one would block the child outright —
+and a parent that kept writing alongside the child would be the very
+lost-update bug the lease exists to prevent (see ``test_single_writer.py``).
+The ``del`` is the handover, not a formality.
+
 Every crash test runs for each storage mode that supports durability
 (:data:`DURABLE_STORAGE_MODES`). ``storage="disk"`` is deliberately excluded
 and its refusal is asserted in ``test_durable_rejects_disk_mode``.
@@ -196,6 +203,7 @@ def test_set_and_delete_survive_crash(tmp_path, storage):
     g.cypher("CREATE (:Person {id: 1, name: 'Alice', age: 30})")
     g.cypher("CREATE (:Person {id: 2, name: 'Bob'})")
     g.save()  # checkpoint
+    del g  # hand the write lease to the child; see the note at the top
 
     _crash_child(
         tmp_path,
@@ -219,6 +227,7 @@ def test_checkpoint_truncates_wal_then_recovers_post_checkpoint(tmp_path, storag
     g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
     g.save()  # checkpoint: .kgl written, WAL truncated
     assert (tmp_path / "app.kgl").exists()
+    del g  # hand the write lease to the child; see the note at the top
 
     # Post-checkpoint mutation in a child that crashes.
     _crash_child(
@@ -299,6 +308,7 @@ def test_labels_survive_checkpoint_then_crash(tmp_path, storage):
     g = _open(tmp_path / "app.kgl", storage)
     g.cypher("CREATE (:Person:Employee {id: 1, name: 'Alice'})")
     g.save()  # labels go into the .kgl secondary_labels section; WAL truncated
+    del g  # hand the write lease to the child; see the note at the top
 
     _crash_child(
         tmp_path,
@@ -497,6 +507,7 @@ def test_durability_survives_an_auto_vacuum(tmp_path, storage):
         g.cypher(f"CREATE (:Doomed {{id: {i}}})")
     g.save()  # checkpoint, so recovery depends only on the WAL below
     g.set_auto_vacuum(0.3)
+    del g  # hand the write lease to the child; see the note at the top
 
     _crash_child(
         tmp_path,

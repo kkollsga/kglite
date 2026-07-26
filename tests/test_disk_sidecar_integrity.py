@@ -169,7 +169,10 @@ def test_durable_save_forces_fsync_with_warning(tmp_path):
     # The save is a real checkpoint: .kgl written, WAL truncated to header.
     assert os.path.exists(p)
     assert os.path.getsize(p + "-wal") == 5  # magic + version, no frames
-    # Data survives a reopen from the checkpoint alone.
+    # Data survives a reopen from the checkpoint alone. Release the first
+    # handle's writer lease first — reopening a path for writing while still
+    # holding it is refused by the single-writer guard.
+    del g
     g2 = kglite.open(p, durable=True)
     assert g2.cypher("MATCH (p:Person) RETURN count(*) AS c").scalar() == 1
 

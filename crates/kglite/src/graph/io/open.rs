@@ -47,9 +47,19 @@ impl GraphWriterLease {
                 .open(&path)?;
             match file.try_lock_exclusive() {
                 Ok(()) => {
+                    // Truncate first, then publish in a single write. A
+                    // contender that reads mid-update must see either nothing
+                    // (reported as "another process") or the complete new
+                    // record — never the *previous*, now-dead holder's pid,
+                    // which would send someone chasing a process that exited.
+                    let record = format!(
+                        "pid={}\nsince={}\n",
+                        std::process::id(),
+                        chrono::Local::now().to_rfc3339()
+                    );
                     file.set_len(0)?;
                     file.rewind()?;
-                    writeln!(file, "pid={}", std::process::id())?;
+                    file.write_all(record.as_bytes())?;
                     file.sync_data()?;
                     return Ok(Self { file });
                 }
@@ -57,10 +67,7 @@ impl GraphWriterLease {
                     if started.elapsed() >= timeout {
                         return Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
-                            format!(
-                                "timed out waiting for writer lease {}; another writer is active",
-                                path.display()
-                            ),
+                            contended_message(graph_path, &path),
                         ));
                     }
                     std::thread::sleep(Duration::from_millis(50));
@@ -84,6 +91,93 @@ fn writer_lease_path(graph_path: &Path) -> std::path::PathBuf {
     let mut lock = graph_path.as_os_str().to_os_string();
     lock.push(".lock");
     lock.into()
+}
+
+/// Ownership details the holder records in the sidecar lock file, read back
+/// only on the contention path. The bytes are advisory *documentation*: the
+/// lock itself is the OS file-descriptor lock, so a stale file with a dead
+/// pid in it locks nothing.
+#[derive(Debug, Default)]
+struct LeaseHolder {
+    pid: Option<u32>,
+    since: Option<String>,
+}
+
+impl LeaseHolder {
+    /// Best-effort parse. Every failure mode — unreadable file, truncated
+    /// mid-write by the holder, an older release's `pid`-only format —
+    /// degrades to a less specific description rather than masking the real
+    /// "another writer is active" error with a parse error.
+    ///
+    /// Retries briefly while the record is absent, because the holder takes
+    /// the lock *before* it publishes its identity: two processes racing at
+    /// startup (the exact case this guard exists for) otherwise reliably read
+    /// the empty window and report an unnamed "another process". The cost is
+    /// paid only on the error path, where a correct message beats promptness.
+    fn read(lock_path: &Path) -> Self {
+        const ATTEMPTS: u32 = 10;
+        for attempt in 0..ATTEMPTS {
+            let holder = Self::read_once(lock_path);
+            if holder.pid.is_some() {
+                return holder;
+            }
+            if attempt + 1 < ATTEMPTS {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        Self::default()
+    }
+
+    fn read_once(lock_path: &Path) -> Self {
+        let Ok(text) = std::fs::read_to_string(lock_path) else {
+            return Self::default();
+        };
+        let mut holder = Self::default();
+        for line in text.lines() {
+            match line.split_once('=') {
+                Some(("pid", value)) => holder.pid = value.trim().parse().ok(),
+                Some(("since", value)) => holder.since = Some(value.trim().to_string()),
+                _ => {}
+            }
+        }
+        holder
+    }
+
+    fn describe(&self) -> String {
+        // A self-pid hit is not a deployment problem, it is an un-closed
+        // handle in the caller's own code, and saying "another process" for
+        // your own pid sends people hunting a process that does not exist.
+        if self.pid == Some(std::process::id()) {
+            return format!(
+                "this same process (pid {}), which has not closed an earlier open() of it",
+                std::process::id()
+            );
+        }
+        match (self.pid, self.since.as_deref()) {
+            (Some(pid), Some(since)) => format!("pid {pid} (since {since})"),
+            (Some(pid), None) => format!("pid {pid}"),
+            _ => "another process".to_string(),
+        }
+    }
+}
+
+/// The message a blocked writer sees. Names the holding process, because
+/// "another writer is active" leaves an operator with nothing to act on.
+///
+/// The closing sentence is deliberate support-burden prevention: the lock
+/// file is persistent and survives a `SIGKILL`, so the natural reflex on
+/// seeing one is to delete it. Deleting it does not release the lock (the OS
+/// already did that when the holder died) and only removes the record of who
+/// holds it, so the message says so before the reflex fires.
+fn contended_message(graph_path: &Path, lock_path: &Path) -> String {
+    format!(
+        "{} is open for writing by {}; only one process may write a graph at a time. \
+         The lock is released automatically when that process exits, even on a crash — \
+         deleting {} does not release it.",
+        graph_path.display(),
+        LeaseHolder::read(lock_path).describe(),
+        lock_path.display()
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -351,6 +445,52 @@ mod tests {
         let _lease = GraphWriterLease::acquire(&path, Duration::ZERO).unwrap();
         let opened = open_or_create_graph(&path, Some(StorageMode::Memory)).unwrap();
         assert_eq!(opened.disposition, OpenDisposition::Opened);
+    }
+
+    #[test]
+    fn contended_message_names_the_holding_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("named.kgl");
+        let _lease = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
+        let message = GraphWriterLease::acquire(&graph, Duration::ZERO)
+            .err()
+            .expect("second acquire must be refused")
+            .to_string();
+        // Same-process contention is reported as such rather than as a
+        // phantom "other process" carrying the caller's own pid.
+        assert!(
+            message.contains(&format!("pid {}", std::process::id())),
+            "{message}"
+        );
+        assert!(message.contains("named.kgl"), "{message}");
+        assert!(message.contains("does not release it"), "{message}");
+    }
+
+    #[test]
+    fn lease_record_carries_pid_and_acquisition_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("record.kgl");
+        let _lease = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
+        let holder = LeaseHolder::read(&writer_lease_path(&graph));
+        assert_eq!(holder.pid, Some(std::process::id()));
+        assert!(holder.since.is_some(), "acquisition time must be recorded");
+    }
+
+    #[test]
+    fn holder_description_degrades_without_a_readable_record() {
+        // A holder that has locked but not yet published its identity, and a
+        // lock file from a release that only wrote `pid=`, must both produce
+        // a usable message rather than a parse failure.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("absent.lock");
+        assert_eq!(
+            LeaseHolder::read_once(&missing).describe(),
+            "another process"
+        );
+
+        let legacy = tmp.path().join("legacy.lock");
+        std::fs::write(&legacy, b"pid=999999\n").unwrap();
+        assert_eq!(LeaseHolder::read_once(&legacy).describe(), "pid 999999");
     }
 
     #[test]

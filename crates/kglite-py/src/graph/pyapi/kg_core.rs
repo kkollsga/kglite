@@ -730,10 +730,16 @@ impl KnowledgeGraph {
     /// nowhere to write, and silently doing nothing is friendlier than
     /// raising on a best-effort cleanup call. Pair with `save(path)` if you
     /// need an explicit target.
+    /// Also releases the cross-process writer lease taken by
+    /// [`kglite.open`], after the final checkpoint is on disk — so the next
+    /// writer never observes a half-saved graph. A failed save keeps the
+    /// lease, because the graph still holds unsaved work destined for that
+    /// path and the caller may retry.
     fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         if self.lifecycle.source_path.is_some() {
             self.save(py, None, true)?;
         }
+        self.lifecycle.writer_lease = None;
         Ok(())
     }
 
@@ -752,6 +758,12 @@ impl KnowledgeGraph {
     /// This is a *clean-exit* checkpoint, not crash safety: a hard crash
     /// (`kill -9`, power loss) mid-block writes nothing. Durable-on-commit is
     /// a separate capability.
+    ///
+    /// Exiting the block also ends the graph's write ownership: the
+    /// cross-process writer lease taken by [`kglite.open`] is released here,
+    /// which is what makes two sequential `with kglite.open(path)` blocks in
+    /// one process work. On the exception path the lease is released too —
+    /// the save was skipped, so nothing further will be written.
     #[pyo3(signature = (exc_type, _exc_value, _traceback))]
     fn __exit__(
         &mut self,
@@ -763,6 +775,7 @@ impl KnowledgeGraph {
         if exc_type.is_none() && self.lifecycle.source_path.is_some() {
             self.save(py, None, true)?;
         }
+        self.lifecycle.writer_lease = None;
         Ok(false)
     }
 

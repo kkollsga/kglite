@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`kglite.open()` now enforces one writer per graph, instead of silently
+  losing one.** Two processes that opened the same path both built a complete
+  snapshot in memory and both wrote it at `save()`, so whichever saved last
+  won and everything the other had done disappeared — with both processes
+  exiting 0, nothing logged, and nothing in the file to show it had happened.
+  That is the likeliest accident when deploying an embedded database: a
+  multi-worker `gunicorn` pool, a cron job overlapping a request, or a stale
+  process nobody noticed.
+
+  `open()` now takes an exclusive cross-process writer lease on a
+  `<path>.lock` sidecar and holds it until `close()` / `with`-block exit. A
+  second writer fails immediately, naming the process that has it:
+
+  ```
+  KgError: app.kgl is open for writing by pid 4711 (since 2026-07-26T09:15:03+02:00)
+  ```
+
+  The lease mechanism itself is not new — the CLI and the MCP server have held
+  it since disk generations shipped, and `open_or_create_graph` documents it as
+  a caller's responsibility. The Python binding was the caller that never
+  opted in, which left the most-used surface unguarded.
+
+  Three deliberate boundaries:
+
+  - **Readers are never blocked.** `load()` and `open_session()` take no
+    lease. `save()` republishes the whole graph, so a reader sees the last
+    consistent snapshot; making reads exclusive would break read-replica and
+    analytics deployments to fix a problem only writers have.
+  - **A crash releases it.** The lock is owned by the OS, not by the sidecar
+    file's existence, so a writer lost to `SIGKILL` or a power cut frees it
+    at once. The leftover `.lock` file is a record of the holder, not the
+    lock — deleting it releases nothing, and the error message says so, since
+    deleting lock files by reflex is how this class of guard gets defeated.
+  - **`open(..., lock=False)` opts out**, explicitly and never by default, for
+    deployments that coordinate writers externally.
+
+  Disk-mode graphs were already protected by their own generation lock, but
+  only failed at the *first mutation* with a bare
+  `Resource temporarily unavailable (os error 35)`; they now fail at `open()`
+  with the same named message as every other storage mode.
+
+  **Possible impact:** a deployment that genuinely opened one graph from two
+  processes was already losing writes, and now gets an error instead. Two
+  overlapping `kglite.open()` calls on one path *within* a single process are
+  refused for the same reason (the error says so explicitly); sequential
+  `with kglite.open(path)` blocks are unaffected, because the lease is
+  released on block exit.
+
 ### Added
 
 - `kglite-bolt-server --neo4j-compat` (or `KGLITE_BOLT_NEO4J_COMPAT=1`) makes the
