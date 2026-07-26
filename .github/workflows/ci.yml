@@ -226,7 +226,11 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install ruff
-        run: pip install ruff
+        # Pinned deliberately: `pip install ruff` floats to the newest release,
+        # so a formatter change in an unrelated ruff release turns every open
+        # branch red with no source change behind it. Bump this in a dedicated
+        # commit that also reformats and updates local environments.
+        run: pip install ruff==0.16.0
 
       - name: Check formatting
         run: ruff format --check .
