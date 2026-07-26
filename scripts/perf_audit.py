@@ -296,10 +296,10 @@ def main() -> None:
         if not before_path.exists() or not after_path.exists():
             print("Missing .perf_audit_before.json or .perf_audit_after.json", file=sys.stderr)
             sys.exit(1)
-        diff(json.loads(before_path.read_text()), json.loads(after_path.read_text()))
+        diff(json.loads(before_path.read_text(encoding="utf-8")), json.loads(after_path.read_text(encoding="utf-8")))
     else:
         data = collect()
-        Path(f".perf_audit_{args.mode}.json").write_text(json.dumps(data, indent=2))
+        Path(f".perf_audit_{args.mode}.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
         print(f"Captured {args.mode} → .perf_audit_{args.mode}.json")
 
 

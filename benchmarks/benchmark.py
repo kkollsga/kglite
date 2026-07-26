@@ -81,7 +81,7 @@ def main() -> int:
 
     md = render()
     out = pathlib.Path(args.out)
-    out.write_text(md)
+    out.write_text(md, encoding="utf-8")
     print(f"\nwrote {out.relative_to(ROOT) if out.is_relative_to(ROOT) else out}")
     return 0
 

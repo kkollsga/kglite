@@ -50,9 +50,9 @@ def project(tmp_path):
     directory = tmp_path / "migrations"
     directory.mkdir()
     for name, body in MIGRATIONS.items():
-        (directory / name).write_text(body)
+        (directory / name).write_text(body, encoding="utf-8")
     # A non-migration file alongside the scripts must be ignored, not rejected.
-    (directory / "README.md").write_text("how these work\n")
+    (directory / "README.md").write_text("how these work\n", encoding="utf-8")
     return path, directory
 
 
@@ -117,7 +117,7 @@ def test_only_newly_added_migrations_are_applied(project):
     path, directory = project
     run("migrate", str(path), str(directory))
 
-    (directory / "004_extra.cypher").write_text("MATCH (p:Person) SET p.extra = 1;\n")
+    (directory / "004_extra.cypher").write_text("MATCH (p:Person) SET p.extra = 1;\n", encoding="utf-8")
     result = run("migrate", str(path), str(directory))
     assert result.returncode == 0, result.stderr
 
@@ -143,7 +143,7 @@ def test_a_stamp_the_migration_set_cannot_explain_is_refused(project):
 
 def test_duplicate_versions_are_refused(project):
     path, directory = project
-    (directory / "1_clash.cypher").write_text("MATCH (n) RETURN n;\n")
+    (directory / "1_clash.cypher").write_text("MATCH (n) RETURN n;\n", encoding="utf-8")
 
     result = run("migrate", str(path), str(directory))
     assert result.returncode != 0
@@ -153,7 +153,7 @@ def test_duplicate_versions_are_refused(project):
 
 def test_a_migration_without_a_version_prefix_is_refused_not_skipped(project):
     path, directory = project
-    (directory / "add_more.cypher").write_text("MATCH (n) RETURN n;\n")
+    (directory / "add_more.cypher").write_text("MATCH (n) RETURN n;\n", encoding="utf-8")
 
     result = run("migrate", str(path), str(directory))
     assert result.returncode != 0
@@ -164,7 +164,7 @@ def test_a_migration_without_a_version_prefix_is_refused_not_skipped(project):
 def test_a_failing_migration_leaves_the_graph_untouched(project):
     """All-or-nothing at the file level: no partial stamp, no partial write."""
     path, directory = project
-    (directory / "004_broken.cypher").write_text("THIS IS NOT CYPHER;\n")
+    (directory / "004_broken.cypher").write_text("THIS IS NOT CYPHER;\n", encoding="utf-8")
     before = path.read_bytes()
 
     result = run("migrate", str(path), str(directory))

@@ -174,7 +174,7 @@ class LocalNeo4jServer:
                 "",
             ]
         )
-        with open(os.path.join(conf_dir, "neo4j.conf"), "w") as fh:
+        with open(os.path.join(conf_dir, "neo4j.conf"), "w", encoding="utf-8") as fh:
             fh.write(conf)
 
         child_env = dict(os.environ, NEO4J_CONF=conf_dir)

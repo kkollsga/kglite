@@ -179,7 +179,7 @@ def _strip_test_items(source: str) -> str:
 
 
 def _load_baseline(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("schema_version") != 1:
         raise ValueError(f"{path}: unsupported source-quality schema")
     return data
@@ -192,7 +192,7 @@ def _file_size_violations(root: Path, baseline: dict[str, Any]) -> list[str]:
     seen_exceptions: set[str] = set()
     for path in _production_rs_files(root):
         relative = path.relative_to(root).as_posix()
-        lines = len(path.read_text().splitlines())
+        lines = len(path.read_text(encoding="utf-8").splitlines())
         exception = exceptions.get(relative)
         ceiling = exception["max_lines"] if exception else limit
         if exception:
@@ -214,7 +214,7 @@ def _enum_match_violations(root: Path, baseline: dict[str, Any]) -> list[str]:
         if path.name.endswith("_tests.rs"):
             continue
         relative = path.relative_to(graph_root).as_posix()
-        count = len(ENUM_PATTERN.findall(_strip_test_items(path.read_text())))
+        count = len(ENUM_PATTERN.findall(_strip_test_items(path.read_text(encoding="utf-8"))))
         if count:
             hits[relative] = count
     violations = [
@@ -231,7 +231,7 @@ def _unsafe_violations(root: Path, baseline: dict[str, Any]) -> list[str]:
     violations: list[str] = []
     for relative_root in baseline["safety_roots"]:
         for path in sorted((root / relative_root).rglob("*.rs")):
-            lines = path.read_text().splitlines()
+            lines = path.read_text(encoding="utf-8").splitlines()
             for index, line in enumerate(lines):
                 if line.lstrip().startswith("//") or not UNSAFE_PATTERN.search(line):
                     continue
@@ -248,14 +248,14 @@ def _module_violations(root: Path, baseline: dict[str, Any]) -> list[str]:
         if not path.is_file():
             violations.append(f"stale mod.rs cap {relative}: file is missing")
             continue
-        lines = len(path.read_text().splitlines())
+        lines = len(path.read_text(encoding="utf-8").splitlines())
         if lines > cap:
             violations.append(f"{relative}: {lines} lines exceeds module cap {cap}")
     return violations
 
 
 def _symbol_violations(root: Path) -> list[str]:
-    storage_mod = (root / "crates" / "kglite" / "src" / "graph" / "storage" / "mod.rs").read_text()
+    storage_mod = (root / "crates" / "kglite" / "src" / "graph" / "storage" / "mod.rs").read_text(encoding="utf-8")
     required = ["pub mod recording;", "pub use recording::RecordingGraph;"]
     return [f"storage/mod.rs lost required symbol: {symbol}" for symbol in required if symbol not in storage_mod]
 
@@ -265,13 +265,13 @@ def _codec_boundary_violations(root: Path) -> list[str]:
     violations: list[str] = []
     for path in _production_rs_files(root):
         relative = path.relative_to(root).as_posix()
-        production = _strip_test_items(path.read_text())
+        production = _strip_test_items(path.read_text(encoding="utf-8"))
         for codec, (pattern, allowlist) in DIRECT_CODEC_RULES.items():
             if relative not in allowlist and pattern.search(production):
                 violations.append(f"{relative}: direct {codec} use bypasses serde_codec")
     for manifest in sorted(root.rglob("Cargo.toml")):
         relative = manifest.relative_to(root).as_posix()
-        lines = manifest.read_text().splitlines()
+        lines = manifest.read_text(encoding="utf-8").splitlines()
         for codec, owners in CODEC_MANIFEST_OWNERS.items():
             declaration = re.compile(rf"^\s*{re.escape(codec)}\s*=")
             if relative not in owners and any(
@@ -379,7 +379,7 @@ def _refresh_functions(path: Path, root: Path, baseline: dict[str, Any]) -> None
     exceptions = [metric for metric in metrics if _is_exception(metric, baseline["limits"])]
     exceptions.sort(key=lambda item: (item["path"], item["qualified_name"]))
     baseline["function_exceptions"] = exceptions
-    path.write_text(json.dumps(baseline, indent=2, sort_keys=False) + "\n")
+    path.write_text(json.dumps(baseline, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
     print(f"refreshed {len(exceptions)} function ceilings in {path.relative_to(root)}")
 
 
@@ -417,20 +417,20 @@ def _self_test() -> None:
         graph = root / "crates" / "kglite" / "src" / "graph"
         graph.mkdir(parents=True)
         source = graph / "sample.rs"
-        source.write_text("one\ntwo\nthree\nfour\n")
+        source.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
         assert _file_size_violations(root, baseline)
-        source.write_text("fn f() { GraphBackend::Memory(x); }\n")
+        source.write_text("fn f() { GraphBackend::Memory(x); }\n", encoding="utf-8")
         assert _enum_match_violations(root, baseline)
-        source.write_text("fn f() { unsafe { call(); } }\n")
+        source.write_text("fn f() { unsafe { call(); } }\n", encoding="utf-8")
         assert _unsafe_violations(root, baseline)
-        source.write_text("fn f() { bincode::serialize(&1).unwrap(); }\n")
+        source.write_text("fn f() { bincode::serialize(&1).unwrap(); }\n", encoding="utf-8")
         assert _codec_boundary_violations(root)
-        source.write_text("fn f() { postcard::to_stdvec(&1).unwrap(); }\n")
+        source.write_text("fn f() { postcard::to_stdvec(&1).unwrap(); }\n", encoding="utf-8")
         assert _codec_boundary_violations(root)
-        source.write_text("fn f() {}\n")
+        source.write_text("fn f() {}\n", encoding="utf-8")
         wrapper = root / "crates" / "wrapper"
         wrapper.mkdir()
-        (wrapper / "Cargo.toml").write_text('[dependencies]\nbincode = "1"\n')
+        (wrapper / "Cargo.toml").write_text('[dependencies]\nbincode = "1"\n', encoding="utf-8")
         assert any("dependency declared outside" in item for item in _codec_boundary_violations(root))
 
     mixed_source = """\

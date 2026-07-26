@@ -10,7 +10,7 @@ import pytest
 import kglite
 
 ROOT = Path(__file__).resolve().parent.parent
-MANIFEST = json.loads((ROOT / "tests" / "cypher_contract" / "cases.json").read_text())
+MANIFEST = json.loads((ROOT / "tests" / "cypher_contract" / "cases.json").read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("case", MANIFEST["cases"], ids=lambda case: case["id"])

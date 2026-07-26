@@ -15,7 +15,8 @@ def _write_result(path: Path, names: list[str]) -> None:
     path.write_text(
         json.dumps(
             {"benchmarks": [{"name": name, "stats": {"min": 1.0, "mean": 1.0, "median": 1.0}} for name in names]}
-        )
+        ),
+        encoding="utf-8",
     )
 
 

@@ -126,7 +126,7 @@ def _build_columns_bin_graph(tmp_path) -> str:
             f"<http://www.wikidata.org/prop/direct/P31> "
             f"<http://www.wikidata.org/entity/Q5> ."
         )
-    nt_path.write_text("\n".join(lines) + "\n")
+    nt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     path = str(tmp_path / "dg_nt")
     g = kglite.KnowledgeGraph(storage="disk", path=path)
     g.load_ntriples(str(nt_path), languages=["en"], verbose=False)
@@ -159,7 +159,7 @@ def test_invalid_utf8_in_columns_bin_fails_load(tmp_path):
 
 def test_durable_save_forces_fsync_with_warning(tmp_path):
     p = str(tmp_path / "app.kgl")
-    g = kglite.open(p, durable=True)
+    g = kglite.open(p, durable=True, encoding="utf-8")
     g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -170,13 +170,13 @@ def test_durable_save_forces_fsync_with_warning(tmp_path):
     assert os.path.exists(p)
     assert os.path.getsize(p + "-wal") == 5  # magic + version, no frames
     # Data survives a reopen from the checkpoint alone.
-    g2 = kglite.open(p, durable=True)
+    g2 = kglite.open(p, durable=True, encoding="utf-8")
     assert g2.cypher("MATCH (p:Person) RETURN count(*) AS c").scalar() == 1
 
 
 def test_durable_save_default_fsync_no_warning(tmp_path):
     p = str(tmp_path / "app.kgl")
-    g = kglite.open(p, durable=True)
+    g = kglite.open(p, durable=True, encoding="utf-8")
     g.cypher("CREATE (:Person {id: 1})")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")

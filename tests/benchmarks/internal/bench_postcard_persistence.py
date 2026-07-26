@@ -160,7 +160,7 @@ def _wal(root: Path, mutations: int, rounds: int) -> dict:
     sizes = []
     for index in range(rounds):
         path = root / f"wal-{index}.kgl"
-        graph = kglite.open(str(path), durable=True)
+        graph = kglite.open(str(path), durable=True, encoding="utf-8")
         start = time.perf_counter()
         for item in range(mutations):
             graph.cypher(
@@ -174,7 +174,7 @@ def _wal(root: Path, mutations: int, rounds: int) -> dict:
         gc.collect()
 
         start = time.perf_counter()
-        recovered = kglite.open(str(path), durable=True)
+        recovered = kglite.open(str(path), durable=True, encoding="utf-8")
         count = recovered.cypher("MATCH (n:Event) RETURN count(n) AS n").scalar()
         recover_samples.append(time.perf_counter() - start)
         assert count == mutations
@@ -253,7 +253,7 @@ def main() -> None:
             "property_log": _property_log(work_root, args.ntriples_entities, args.rounds),
             "peak_rss_bytes": _peak_rss_bytes(),
         }
-        args.output.write_text(json.dumps(result, indent=2) + "\n")
+        args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(result, indent=2))
     finally:
         shutil.rmtree(work_root, ignore_errors=True)

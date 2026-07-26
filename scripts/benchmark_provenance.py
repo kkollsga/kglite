@@ -14,7 +14,7 @@ from typing import Any
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    with path.open("rb", encoding="utf-8") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -102,9 +102,9 @@ def main() -> int:
     parser.add_argument("--candidate-version", required=True)
     args = parser.parse_args()
 
-    reference = json.loads(args.reference_json.read_text())
-    candidate = json.loads(args.candidate_json.read_text())
-    expected = json.loads(args.expected_names.read_text())
+    reference = json.loads(args.reference_json.read_text(encoding="utf-8"))
+    candidate = json.loads(args.candidate_json.read_text(encoding="utf-8"))
+    expected = json.loads(args.expected_names.read_text(encoding="utf-8"))
     names = validate_benchmark_results(reference, candidate, expected)
 
     reference_env = probe_environment(absolute_executable(args.reference_python), args.harness.parent)
@@ -134,7 +134,7 @@ def main() -> int:
             "result_sha256": sha256(args.candidate_json),
         },
     }
-    args.output.write_text(json.dumps(provenance, indent=2) + "\n")
+    args.output.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8", newline="\n")
     print(f"benchmark provenance: OK ({len(names)} workloads)")
     return 0
 

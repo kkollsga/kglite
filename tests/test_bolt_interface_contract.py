@@ -81,6 +81,6 @@ def capture_bolt_contract(path: Path) -> dict:
 
 
 def test_bolt_interface_matches_reviewed_baseline(tmp_path):
-    expected = json.loads(BASELINE.read_text())
+    expected = json.loads(BASELINE.read_text(encoding="utf-8"))
     actual = capture_bolt_contract(tmp_path / "bolt-interface.kgl")
     assert actual == expected, "Bolt columns or typed Node/Relationship/Path shapes drifted"

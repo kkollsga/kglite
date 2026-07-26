@@ -27,7 +27,7 @@ EXPECTED = {
 
 
 def test_hardening_release_minima_have_provenance_and_live_workloads() -> None:
-    baseline = json.loads(BASELINE.read_text())
+    baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
     assert baseline["schema_version"] == 1
     assert baseline["source_distribution"] == "kglite==0.13.2 (PyPI wheel)"
     assert baseline["metric"] == "min"
@@ -44,6 +44,6 @@ def test_hardening_release_minima_have_provenance_and_live_workloads() -> None:
 
     defined = set()
     for source in BENCHMARK_SOURCES:
-        tree = ast.parse(source.read_text())
+        tree = ast.parse(source.read_text(encoding="utf-8"))
         defined.update(node.name for node in tree.body if isinstance(node, ast.FunctionDef))
     assert EXPECTED <= defined

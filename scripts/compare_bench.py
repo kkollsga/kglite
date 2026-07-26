@@ -40,7 +40,7 @@ def _load(path: Path) -> dict[str, float]:
     """Load a pytest-benchmark JSON and return `{name: stats}` per the
     `--metric` chosen later. We return the full stats dict for each
     benchmark so the caller picks the metric without re-reading."""
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     return {b["name"]: b["stats"] for b in data["benchmarks"]}
 
 

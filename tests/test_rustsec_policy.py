@@ -71,8 +71,8 @@ def test_incomplete_rustsec_exception_is_rejected(tmp_path: Path) -> None:
 
 
 def test_python_wrapper_does_not_redeclare_persisted_format_codec() -> None:
-    wrapper_manifest = (ROOT / "crates" / "kglite-py" / "Cargo.toml").read_text()
-    core_manifest = (ROOT / "crates" / "kglite" / "Cargo.toml").read_text()
+    wrapper_manifest = (ROOT / "crates" / "kglite-py" / "Cargo.toml").read_text(encoding="utf-8")
+    core_manifest = (ROOT / "crates" / "kglite" / "Cargo.toml").read_text(encoding="utf-8")
     assert "\nbincode = " not in wrapper_manifest
     assert "\nbincode = " not in core_manifest
     assert '\npostcard = "' in core_manifest or "\npostcard = {" in core_manifest

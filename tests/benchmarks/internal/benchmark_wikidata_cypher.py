@@ -137,7 +137,7 @@ def main():
     # Open CSV at start and flush per row so partial runs (SIGKILL, OOM, Ctrl-C)
     # still leave a populated CSV behind. The previous end-of-main writerows path
     # lost everything on crash.
-    csv_file = open(CSV_OUT, "w", newline="")
+    csv_file = open(CSV_OUT, "w", newline="", encoding="utf-8")
     writer = csv.DictWriter(csv_file, fieldnames=["name", "category", "status", "rows", "time_ms"])
     writer.writeheader()
     csv_file.flush()

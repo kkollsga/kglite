@@ -40,12 +40,12 @@ def upsert_timeseries(path: Path, rows: list[dict], fields: list[str]) -> dict[s
     """Merge `rows` (keyed by 'date') into the CSV — upsert by date, new wins."""
     existing: dict[str, dict] = {}
     if path.exists():
-        with path.open(newline="") as f:
+        with path.open(newline="", encoding="utf-8") as f:
             for r in csv.DictReader(f):
                 existing[r["date"]] = r
     for r in rows:
         existing[r["date"]] = {k: str(r[k]) for k in fields}
-    with path.open("w", newline="") as f:
+    with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         for key in sorted(existing):
@@ -59,9 +59,9 @@ def append_snapshot(path: Path, rows: list[dict], fields: list[str]) -> None:
     today = rows[0]["captured"] if rows else None
     kept: list[dict] = []
     if path.exists():
-        with path.open(newline="") as f:
+        with path.open(newline="", encoding="utf-8") as f:
             kept = [r for r in csv.DictReader(f) if r.get("captured") != today]
-    with path.open("w", newline="") as f:
+    with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         for r in kept:
@@ -73,7 +73,7 @@ def append_snapshot(path: Path, rows: list[dict], fields: list[str]) -> None:
 def read_csv(path: Path) -> list[dict]:
     if not path.exists():
         return []
-    with path.open(newline="") as f:
+    with path.open(newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 

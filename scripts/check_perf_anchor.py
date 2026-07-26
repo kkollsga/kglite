@@ -52,7 +52,7 @@ def release_baselines() -> list[tuple[tuple[int, int, int], Path]]:
 
 
 def load_metric(path: Path, metric: str) -> dict[str, float]:
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     return {b["name"]: b["stats"][metric] for b in data["benchmarks"]}
 
 

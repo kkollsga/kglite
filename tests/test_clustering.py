@@ -636,7 +636,7 @@ class TestBugReport:
         assert "saved" in msg.lower()
         import pathlib
 
-        content = pathlib.Path(tmp_report_path).read_text()
+        content = pathlib.Path(tmp_report_path).read_text(encoding="utf-8")
         assert "# KGLite Bug Reports" in content
         assert "### Bug Report" in content
         assert "MATCH (n) RETURN n" in content
@@ -646,7 +646,7 @@ class TestBugReport:
         graph.bug_report("q", "r", "e", "d", path=tmp_report_path)
         import pathlib
 
-        content = pathlib.Path(tmp_report_path).read_text()
+        content = pathlib.Path(tmp_report_path).read_text(encoding="utf-8")
         assert "UTC" in content
         assert "KGLite v" in content
 
@@ -655,7 +655,7 @@ class TestBugReport:
         graph.bug_report("q2", "r2", "e2", "second report", path=tmp_report_path)
         import pathlib
 
-        content = pathlib.Path(tmp_report_path).read_text()
+        content = pathlib.Path(tmp_report_path).read_text(encoding="utf-8")
         pos_second = content.index("second report")
         pos_first = content.index("first report")
         assert pos_second < pos_first, "new report should appear before old"
@@ -664,7 +664,7 @@ class TestBugReport:
         graph.bug_report("my query", "my result", "my expected", "my desc", path=tmp_report_path)
         import pathlib
 
-        content = pathlib.Path(tmp_report_path).read_text()
+        content = pathlib.Path(tmp_report_path).read_text(encoding="utf-8")
         assert "**Query:**" in content
         assert "**Result:**" in content
         assert "**Expected:**" in content
@@ -675,7 +675,7 @@ class TestBugReport:
         graph.bug_report("q2", "r2", "e2", "d2", path=tmp_report_path)
         import pathlib
 
-        content = pathlib.Path(tmp_report_path).read_text()
+        content = pathlib.Path(tmp_report_path).read_text(encoding="utf-8")
         assert content.count("---") >= 2, "each report should have a separator"
 
     def test_sanitizes_html(self, graph, tmp_report_path):
@@ -688,7 +688,7 @@ class TestBugReport:
         )
         import pathlib
 
-        content = pathlib.Path(tmp_report_path).read_text()
+        content = pathlib.Path(tmp_report_path).read_text(encoding="utf-8")
         assert "<script>" not in content
 
     def test_sanitizes_triple_backticks(self, graph, tmp_report_path):
@@ -701,7 +701,7 @@ class TestBugReport:
         )
         import pathlib
 
-        content = pathlib.Path(tmp_report_path).read_text()
+        content = pathlib.Path(tmp_report_path).read_text(encoding="utf-8")
         # Triple backticks in user input should be escaped
         assert "\\`\\`\\`" in content
 
@@ -715,7 +715,7 @@ class TestBugReport:
         )
         import pathlib
 
-        content = pathlib.Path(tmp_report_path).read_text()
+        content = pathlib.Path(tmp_report_path).read_text(encoding="utf-8")
         assert "javascript:" not in content
 
     def test_default_path(self, graph, monkeypatch, tmp_path):

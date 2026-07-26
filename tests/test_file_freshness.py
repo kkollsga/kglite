@@ -16,8 +16,8 @@ import kglite
 def _graph(tmp_path):
     a = tmp_path / "a.txt"
     b = tmp_path / "b.txt"
-    a.write_text("hello")
-    b.write_text("world")
+    a.write_text("hello", encoding="utf-8")
+    b.write_text("world", encoding="utf-8")
     g = kglite.KnowledgeGraph()
     g.cypher(
         "CREATE (:Artifact {id: 'x', file_path: $a}), (:Artifact {id: 'y', file_path: $b})",
@@ -35,7 +35,7 @@ def test_stamp_then_no_drift(tmp_path):
 def test_detects_changed_and_missing(tmp_path):
     g, a, b = _graph(tmp_path)
     kglite.stamp_file_freshness(g, node_type="Artifact")
-    a.write_text("CHANGED")  # content differs
+    a.write_text("CHANGED", encoding="utf-8")  # content differs
     b.unlink()  # gone
     drift = {d["id"]: d["status"] for d in kglite.check_file_freshness(g, node_type="Artifact")}
     assert drift == {"x": "changed", "y": "missing"}
@@ -61,7 +61,7 @@ def test_check_is_read_only(tmp_path):
 
 def test_custom_keyword_property_names_are_escaped(tmp_path):
     artifact = tmp_path / "keyword.txt"
-    artifact.write_text("content")
+    artifact.write_text("content", encoding="utf-8")
     g = kglite.KnowledgeGraph()
     g.cypher(
         "CREATE (:Artifact {id: 'x', `order`: $path})",
@@ -84,7 +84,7 @@ def test_custom_keyword_property_names_are_escaped(tmp_path):
 
 def test_custom_label_and_property_names_with_spaces(tmp_path):
     artifact = tmp_path / "spaced.txt"
-    artifact.write_text("content")
+    artifact.write_text("content", encoding="utf-8")
     g = kglite.KnowledgeGraph()
     g.cypher(
         "CREATE (:`Build Artifact` {id: 'x', `file path`: $path})",
@@ -169,7 +169,7 @@ def test_stamp_uses_one_batched_mutation_query(tmp_path):
 
 def test_same_id_across_types_updates_only_the_matching_type(tmp_path):
     artifact = tmp_path / "shared.txt"
-    artifact.write_text("content")
+    artifact.write_text("content", encoding="utf-8")
     g = kglite.KnowledgeGraph()
     g.cypher(
         "CREATE (:Artifact {id: 'same', file_path: $path}), (:Other {id: 'same', file_path: $path})",
@@ -187,7 +187,7 @@ def test_same_id_across_types_updates_only_the_matching_type(tmp_path):
 
 def test_duplicate_resolved_paths_are_snapshotted_once(tmp_path, monkeypatch):
     artifact = tmp_path / "shared.txt"
-    artifact.write_text("content")
+    artifact.write_text("content", encoding="utf-8")
     g = kglite.KnowledgeGraph()
     g.cypher(
         "CREATE (:Artifact {id: 1, file_path: $a}), (:Artifact {id: 2, file_path: $b})",
@@ -221,8 +221,8 @@ def test_snapshot_cache_has_a_fixed_entry_bound(tmp_path, monkeypatch):
 def test_descriptor_snapshot_retries_path_replacement(tmp_path, monkeypatch):
     target = tmp_path / "target.txt"
     replacement = tmp_path / "replacement.txt"
-    target.write_text("old")
-    replacement.write_text("new")
+    target.write_text("old", encoding="utf-8")
+    replacement.write_text("new", encoding="utf-8")
     real_stat = os.stat
     replaced = False
 
@@ -275,7 +275,7 @@ def test_descriptor_snapshot_retries_concurrent_in_place_mutation(tmp_path, monk
 
     def mutate():
         assert first_read.wait(timeout=5)
-        with target.open("r+b") as stream:
+        with target.open("r+b", encoding="utf-8") as stream:
             stream.write(b"b")
             stream.flush()
             os.fsync(stream.fileno())
@@ -292,7 +292,7 @@ def test_descriptor_snapshot_retries_concurrent_in_place_mutation(tmp_path, monk
 
 def test_descriptor_snapshot_reports_persistently_unstable_file(tmp_path, monkeypatch):
     target = tmp_path / "unstable.txt"
-    target.write_text("content")
+    target.write_text("content", encoding="utf-8")
     real_stat = os.stat
 
     class ChangedIdentity:
@@ -312,7 +312,7 @@ def test_descriptor_snapshot_reports_persistently_unstable_file(tmp_path, monkey
 
 def test_hash_none_detects_nanosecond_mtime_change(tmp_path):
     target = tmp_path / "precise.txt"
-    target.write_text("unchanged")
+    target.write_text("unchanged", encoding="utf-8")
     initial_ns = 1_800_000_000_123_456_100
     os.utime(target, ns=(initial_ns, initial_ns))
     g = kglite.KnowledgeGraph()

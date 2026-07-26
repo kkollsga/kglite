@@ -37,7 +37,6 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import kglite  # noqa: E402
-
 from tests.conftest import rss_mb  # noqa: E402
 
 

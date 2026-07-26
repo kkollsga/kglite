@@ -174,5 +174,5 @@ except Exception as e:  # noqa: BLE001
     record("M1_disk", -1.0, f"disk mode skipped: {e}")
 
 sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
-OUT.write_text(json.dumps({"sha": sha, "results": results}, indent=2))
+OUT.write_text(json.dumps({"sha": sha, "results": results}, indent=2), encoding="utf-8")
 print(f"\nBaseline written to {OUT}  (HEAD {sha})")

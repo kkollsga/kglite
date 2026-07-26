@@ -24,9 +24,9 @@ def promote(
     *,
     reference_version: str = "0.13.2",
 ) -> None:
-    reference: dict[str, Any] = json.loads(reference_path.read_text())
-    provenance: dict[str, Any] = json.loads(provenance_path.read_text())
-    expected: dict[str, Any] = json.loads(expected_path.read_text())
+    reference: dict[str, Any] = json.loads(reference_path.read_text(encoding="utf-8"))
+    provenance: dict[str, Any] = json.loads(provenance_path.read_text(encoding="utf-8"))
+    expected: dict[str, Any] = json.loads(expected_path.read_text(encoding="utf-8"))
 
     if provenance.get("schema_version") != 1:
         raise ValueError("unsupported benchmark provenance schema")
@@ -59,8 +59,8 @@ def promote(
         "github": provenance["github"],
     }
     rendered = json.dumps(promoted, indent=2) + "\n"
-    versioned_output.write_text(rendered)
-    current_output.write_text(rendered)
+    versioned_output.write_text(rendered, encoding="utf-8", newline="\n")
+    current_output.write_text(rendered, encoding="utf-8", newline="\n")
 
 
 def main() -> int:

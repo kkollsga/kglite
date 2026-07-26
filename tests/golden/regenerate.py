@@ -130,13 +130,13 @@ def main() -> int:
     drift: list[pathlib.Path] = []
 
     for path, content in outputs.items():
-        existing = path.read_text() if path.exists() else None
+        existing = path.read_text(encoding="utf-8") if path.exists() else None
         if existing == content:
             continue
         if args.check:
             drift.append(path)
         else:
-            path.write_text(content)
+            path.write_text(content, encoding="utf-8")
             print(f"wrote {path.relative_to(_TESTS_DIR.parent)}")
 
     if args.check and drift:

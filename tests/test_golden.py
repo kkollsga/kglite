@@ -46,7 +46,7 @@ def _memory_golden():
 
 
 def _load_snapshot(name: str) -> str:
-    return (SNAPSHOTS_DIR / name).read_text()
+    return (SNAPSHOTS_DIR / name).read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("mode", STORAGE_MODES)

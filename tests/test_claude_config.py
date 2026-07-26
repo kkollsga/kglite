@@ -31,11 +31,11 @@ def shutil_which_required(binary: str) -> str:
 
 def _write(p: Path, data: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data))
+    p.write_text(json.dumps(data), encoding="utf-8")
 
 
 def _read(p: Path) -> dict:
-    return json.loads(p.read_text())
+    return json.loads(p.read_text(encoding="utf-8"))
 
 
 # ── default_path ──────────────────────────────────────────────────────
@@ -73,7 +73,7 @@ def test_list_mcps_missing_file(tmp_path):
 
 def test_list_mcps_empty_file(tmp_path):
     p = tmp_path / "cfg.json"
-    p.write_text("")
+    p.write_text("", encoding="utf-8")
     assert claude_config.list_mcps(path=p) == {}
 
 

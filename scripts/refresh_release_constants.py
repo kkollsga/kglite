@@ -66,7 +66,7 @@ def read_version() -> str:
     the single source of truth the captured constants (.kgl header, binary
     size, benchmark baselines) all describe.
     """
-    text = (REPO_ROOT / "Cargo.toml").read_text()
+    text = (REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8")
     # Scope the search to the [workspace.package] table so we don't pick up an
     # unrelated `version = ` from another top-level table.
     m = re.search(
@@ -113,7 +113,7 @@ def compute_kgl_digest() -> str:
 def refresh_kgl_golden(version: str, new_digest: str) -> tuple[bool, str]:
     """Update GOLDEN_V3_DIGEST + demote prior value into ACCEPTABLE_DIGESTS.
     Returns (changed, message)."""
-    text = PHASE4_TEST.read_text()
+    text = PHASE4_TEST.read_text(encoding="utf-8")
 
     cur_match = re.search(r'^(GOLDEN_V3_DIGEST = )"([0-9a-f]{64})"', text, re.MULTILINE)
     if cur_match is None:
@@ -150,7 +150,7 @@ def refresh_kgl_golden(version: str, new_digest: str) -> tuple[bool, str]:
         flags=re.MULTILINE,
     )
 
-    PHASE4_TEST.write_text(text)
+    PHASE4_TEST.write_text(text, encoding="utf-8", newline="\n")
     return True, f"GOLDEN_V3_DIGEST → {new_digest[:12]}… (prior {cur_digest[:12]}… demoted to ACCEPTABLE_DIGESTS)"
 
 
@@ -159,7 +159,7 @@ def refresh_kgl_golden(version: str, new_digest: str) -> tuple[bool, str]:
 
 def refresh_binary_size(version: str, current_size: int) -> tuple[bool, str]:
     """Update the current platform's size baseline + history note."""
-    text = PHASE5_TEST.read_text()
+    text = PHASE5_TEST.read_text(encoding="utf-8")
 
     platform_key = sys.platform if sys.platform in {"darwin", "linux"} else "linux"
     bl_match = re.search(
@@ -205,7 +205,7 @@ def refresh_binary_size(version: str, current_size: int) -> tuple[bool, str]:
         text,
     )
 
-    PHASE5_TEST.write_text(text)
+    PHASE5_TEST.write_text(text, encoding="utf-8", newline="\n")
     return True, f"binary-size baseline {cur_baseline:,} → {current_size:,} bytes"
 
 
@@ -257,14 +257,14 @@ def refresh_perf_baseline(version: str) -> tuple[bool, str]:
         proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
         if proc.returncode != 0:
             return False, f"benchmark run failed:\n{proc.stdout}\n{proc.stderr}"
-        data = json.loads(tmp_json.read_text())
+        data = json.loads(tmp_json.read_text(encoding="utf-8"))
 
     # Strip per-iteration `data` — gates need aggregates only; carrying
     # the full series bloats commits to ~30 MB per release.
     for b in data["benchmarks"]:
         b["stats"].pop("data", None)
 
-    target.write_text(json.dumps(data, indent=2))
+    target.write_text(json.dumps(data, indent=2), encoding="utf-8", newline="\n")
     shutil.copyfile(target, current)
     return True, f"perf baseline written to {target.relative_to(REPO_ROOT)} (also copied to current.json)"
 
@@ -279,9 +279,9 @@ def refresh_api_baseline() -> tuple[bool, str]:
     """Regenerate every manifest-declared cargo-public-api baseline."""
     if shutil.which("cargo-public-api") is None:
         return False, "cargo-public-api not installed — see rust-api-profiles.json for the pinned version (skipped)"
-    manifest = json.loads(API_PROFILE_MANIFEST.read_text())
+    manifest = json.loads(API_PROFILE_MANIFEST.read_text(encoding="utf-8"))
     paths = [REPO_ROOT / profile["baseline"] for profile in manifest["profiles"]]
-    before = {path: path.read_text() if path.exists() else None for path in paths}
+    before = {path: path.read_text(encoding="utf-8") if path.exists() else None for path in paths}
     proc = subprocess.run(
         [sys.executable, "scripts/rust_api_profiles.py", "refresh", "--skip-if-unchanged"],
         cwd=REPO_ROOT,
@@ -291,7 +291,7 @@ def refresh_api_baseline() -> tuple[bool, str]:
     if proc.returncode != 0:
         last = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "unknown error"
         return False, f"cargo public-api profile refresh failed: {last}"
-    after = {path: path.read_text() if path.exists() else None for path in paths}
+    after = {path: path.read_text(encoding="utf-8") if path.exists() else None for path in paths}
     if before == after:
         return False, f"all {len(paths)} Rust API profile baselines already current"
     return True, f"refreshed {len(paths)} Rust API profile baselines"

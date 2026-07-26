@@ -212,7 +212,7 @@ def main() -> int:
         return 0
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(expected, encoding="utf-8")
+    args.output.write_text(expected, encoding="utf-8", newline="\n")
     return 0
 
 

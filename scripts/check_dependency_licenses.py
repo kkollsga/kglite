@@ -18,7 +18,7 @@ def project_literal(path: Path, key: str) -> str | None:
     """Read one simple literal from [project], rejecting ambiguous TOML."""
     in_project = False
     found: str | None = None
-    for raw_line in path.read_text().splitlines():
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if line.startswith("["):
             in_project = line == "[project]"
@@ -35,7 +35,7 @@ def project_literal(path: Path, key: str) -> str | None:
 
 
 def main() -> int:
-    policy = json.loads(POLICY.read_text())
+    policy = json.loads(POLICY.read_text(encoding="utf-8"))
     # Prefer offline resolution (fast, deterministic), but fall back to a
     # networked call: after a Cargo.lock change the CI cargo cache misses and
     # offline metadata fails to resolve even long-standing packages.

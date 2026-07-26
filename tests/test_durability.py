@@ -43,8 +43,7 @@ DURABLE_STORAGE_MODES = ("memory", "mapped")
 #: into a graceful-shutdown test is worse than one that does not run.
 requires_sigkill = pytest.mark.skipif(
     not hasattr(signal, "SIGKILL"),
-    reason="SIGKILL is POSIX-only; this is a crash test and must not degrade "
-    "into a graceful-shutdown test on Windows",
+    reason="SIGKILL is POSIX-only; this is a crash test and must not degrade into a graceful-shutdown test on Windows",
 )
 
 
@@ -60,7 +59,7 @@ def _open(path, storage: str = "memory"):
     kwargs = {"durable": True}
     if storage != "memory":
         kwargs["storage"] = storage
-    return kglite.open(str(path), **kwargs)
+    return kglite.open(str(path), **kwargs, encoding="utf-8")
 
 
 def _child_script(tmp_path, body: str, storage: str, ending: str) -> str:
@@ -468,7 +467,8 @@ def test_load_ntriples_does_not_panic_on_a_durable_graph(tmp_path):
         "<http://www.wikidata.org/prop/direct/P31> "
         "<http://www.wikidata.org/entity/Q5> .\n"
         "<http://www.wikidata.org/entity/Q5> "
-        '<http://www.w3.org/2000/01/rdf-schema#label> "human" .\n'
+        '<http://www.w3.org/2000/01/rdf-schema#label> "human" .\n',
+        encoding="utf-8",
     )
     g = _open(tmp_path / "app.kgl")
     stats = g.load_ntriples(str(nt))
@@ -532,7 +532,7 @@ def test_durable_rejects_disk_mode(tmp_path):
     and point at what to do instead — silently accepting the flag would promise
     crash safety the mode does not provide."""
     with pytest.raises(ValueError) as excinfo:
-        kglite.open(str(tmp_path / "g"), storage="disk", durable=True)
+        kglite.open(str(tmp_path / "g"), storage="disk", durable=True, encoding="utf-8")
     message = str(excinfo.value)
     assert "storage='disk'" in message
     assert "save()" in message, "must name the supported alternative"
@@ -540,7 +540,7 @@ def test_durable_rejects_disk_mode(tmp_path):
 
 
 def test_non_durable_open_writes_no_wal(tmp_path):
-    g = kglite.open(str(tmp_path / "app.kgl"), durable=False)
+    g = kglite.open(str(tmp_path / "app.kgl"), durable=False, encoding="utf-8")
     g.cypher("CREATE (:Person {id: 1})")
     g.save()
     # Non-durable mode never creates a WAL sidecar.

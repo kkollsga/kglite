@@ -20,7 +20,7 @@ NONCONSTRUCTIBLE = {"FrozenGraph", "ResultIter", "ResultView", "Session", "Trans
 
 
 def test_runtime_python_api_matches_reviewed_baseline():
-    expected = json.loads(BASELINE.read_text())
+    expected = json.loads(BASELINE.read_text(encoding="utf-8"))
     actual = capture_python_api()
     assert actual == expected, (
         "Python public API drifted. Review additions/signature/default/error-hierarchy changes, "
@@ -29,7 +29,7 @@ def test_runtime_python_api_matches_reviewed_baseline():
 
 
 def _stub_declarations():
-    tree = ast.parse((ROOT / "kglite" / "__init__.pyi").read_text())
+    tree = ast.parse((ROOT / "kglite" / "__init__.pyi").read_text(encoding="utf-8"))
     declarations = {
         node.name: node for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
     }

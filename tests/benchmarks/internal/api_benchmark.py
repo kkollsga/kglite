@@ -667,7 +667,7 @@ def _git_sha() -> str:
 def _append_baseline_row(row: dict) -> None:
     """Stream one result row to benchmarks/ingest_baseline.csv. Creates header if new."""
     new_file = not BASELINE_CSV.exists()
-    with BASELINE_CSV.open("a", newline="") as f:
+    with BASELINE_CSV.open("a", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=BASELINE_COLUMNS)
         if new_file:
             w.writeheader()
