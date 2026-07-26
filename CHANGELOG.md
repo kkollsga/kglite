@@ -352,11 +352,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   followed by a write with `rows` still in scope. That query is common, but the
   `WHERE`-spelled equivalent of it never had the problem.
 
-  Results up to a few thousand rows are now converted up front and hold no graph
-  reference, so that shape costs nothing extra. Genuinely large results still
-  defer, and `ResultView`'s documentation now explains when that matters and how
-  to avoid it. Behaviour is unchanged: a held result has always shown the data as
-  of query time, and still does.
+  Very small results — a budget of `rows × columns`, so a single-entity lookup
+  or a handful of rows — are now converted up front and hold no graph
+  reference, so that shape costs nothing extra. The budget is deliberately
+  small: every deferred-eligible query pays the conversion, while only a result
+  held across a write benefits, so the cost to readers has to stay inside noise
+  before the saving counts. Larger results still defer and still hold the graph;
+  `ResultView`'s documentation explains when that matters and how to avoid it.
+  Behaviour is unchanged: a held result has always shown the data as of query
+  time, and still does.
+
+  Consumers gain a little either way — materialising a result in one batched
+  pass is 12–15% faster than resolving it row by row, at every size measured.
 
 - `KnowledgeGraph.begin()` documented that embeddings are excluded from the
   transaction snapshot's copy. They are not — embeddings, indexes and timeseries

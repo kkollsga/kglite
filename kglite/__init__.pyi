@@ -318,21 +318,28 @@ class ResultView:
     ``cypher()`` calls fast even for large result sets — the cost is deferred
     to when you consume the data.
 
-    **Large deferred results hold the graph open.** To serve rows later, a
-    deferred view keeps a reference to the graph it was queried from. Writing
-    to that graph while such a view is still alive copies the whole graph
-    (every node, edge, index and embedding) so the view keeps seeing the data
-    it was built from. Results up to a few thousand rows are converted up
-    front and never do this, so ordinary read-then-write code is unaffected::
+    **Deferred results hold the graph open.** To serve rows later, a deferred
+    view keeps a reference to the graph it was queried from. Writing to that
+    graph while such a view is still alive copies the whole graph (every node,
+    edge, index and embedding) so the view keeps seeing the data it was built
+    from. On a large graph that copy costs tens of milliseconds and it repeats
+    every time the pattern recurs.
 
-        rows = graph.cypher("MATCH (u:User) RETURN u.name")  # small: eager
-        graph.cypher("MATCH (u:User) SET u.seen = true")     # no copy
+    Very small results — roughly a couple of dozen values, so a single-entity
+    lookup or a handful of rows — are converted up front and hold no graph
+    reference, which covers the usual read-modify-write handler::
 
-    For a genuinely large result, finish with it before writing — consume it
-    (``to_df()``, ``to_list()``) or let it go out of scope::
+        row = graph.cypher("MATCH (u:User {id: 1}) RETURN u.name, u.balance")
+        graph.cypher("MATCH (u:User {id: 1}) SET u.balance = 0")  # no copy
+
+    Anything larger stays deferred, so finish with it before writing — consume
+    it (``to_df()``, ``to_list()``) or let it go out of scope::
 
         big = graph.cypher("MATCH (n:Event) RETURN n.ts").to_df()  # no view kept
         graph.cypher("MATCH (n:Event) SET n.archived = true")      # no copy
+
+    The cutoff is kept deliberately small because every deferred-eligible query
+    pays it, while only a result held across a write benefits.
 
     Supports:
       - ``len(result)`` — row count (O(1), no conversion)

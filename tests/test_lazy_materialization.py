@@ -58,15 +58,17 @@ def test_lazy_resultview_access_forms(graph):
     assert "Alice" in repr(lazy(graph))
 
 
-@pytest.fixture(params=(64, 8192), ids=("under-eager-threshold", "over-eager-threshold"))
+@pytest.fixture(params=(8, 8192), ids=("under-eager-threshold", "over-eager-threshold"))
 def sized_graph(request):
-    """A memory graph whose Person count straddles EAGER_MATERIALISE_MAX_ROWS.
+    """A memory graph straddling EAGER_MATERIALISE_MAX_CELLS.
 
-    Small lazy-eligible results are materialised at construction and drop the
-    graph reference; large ones stay deferred. The two paths must be
-    indistinguishable through the public API — this fixture is what makes the
-    boundary testable from Python at all, since the difference is otherwise
-    only observable as a whole-graph copy.
+    The budget is rows x columns, and the query below returns two columns, so
+    8 rows (16 cells) is under and 8192 rows is far over. Small lazy-eligible
+    results are materialised at construction and drop the graph reference;
+    large ones stay deferred. The two paths must be indistinguishable through
+    the public API — this fixture is what makes the boundary testable from
+    Python at all, since the difference is otherwise only observable as a
+    whole-graph copy.
     """
     count = request.param
     graph = kglite.KnowledgeGraph()

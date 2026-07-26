@@ -72,19 +72,44 @@ use std::sync::{Arc, Mutex};
 /// on demand. The graph `Arc` keeps the storage alive for the lifetime of
 /// the view; the `Mutex<Vec<...>>` caches materialised rows so repeat
 /// access doesn't re-read from disk.
-/// Row count at or below which a lazy-eligible result is materialised up front
-/// instead of holding the graph open — see
+/// Cell budget (`rows × columns`) at or below which a lazy-eligible result is
+/// materialised up front instead of holding the graph open — see
 /// [`ResultView::from_cypher_result_with_graph`].
 ///
-/// The two costs being traded are not symmetric. Materialising `n` rows of a
-/// lazy-eligible RETURN is `O(n × columns)` bounded property reads. Keeping the
-/// `Arc<DirGraph>` alive risks an `O(V+E)` fork of the graph *and* every index,
-/// interner and embedding store the next write touches. So the threshold does
-/// not need to find a break-even point — it only needs to be high enough to
-/// cover the result sizes an application actually holds in a variable while
-/// writing (lookups, pages, small aggregates) and low enough that the wasted
-/// work is negligible when the rows go unread.
-const EAGER_MATERIALISE_MAX_ROWS: usize = 4096;
+/// **This is paid by every eligible read, so it is sized to disappear into
+/// noise, not to maximise coverage.** Materialising is a win when the caller
+/// consumes the rows (one batched pass beats per-row resolution by 12–15%
+/// across every size measured) and dead loss when it does not — a query whose
+/// rows are never read, or read only via `len()`, now does work it previously
+/// skipped. Since a read is far more common than a read held across a write,
+/// the tax on the former has to be invisible before the saving on the latter
+/// counts for anything.
+///
+/// Measured on a 100k-node graph, `MATCH (n:Item) RETURN n.title, n.value
+/// LIMIT k`, release build, never consumed — the shape the tracked
+/// `test_bench_cypher_match` / `test_bench_columnar_cypher_match` benchmarks
+/// run, and the shape that caught an earlier 4096-row version of this constant
+/// as a 2× regression:
+///
+/// | cells | cost |
+/// |---|---|
+/// | 32 (k=16)  | +1.6% |
+/// | 64 (k=32)  | +8.0% |
+/// | 128 (k=64) | +18.6% |
+/// | 200 (k=100)| +28.5% |
+///
+/// 32 is the last point that stays inside run-to-run noise. Budgeting in
+/// *cells* rather than rows keeps that guarantee when a RETURN is wide: cost
+/// tracks property reads, so 16 rows × 2 columns and 1 row × 32 columns are
+/// the same work and neither should be treated as cheaper than the other.
+///
+/// The coverage this buys is small in rows and precisely the shape that
+/// matters: a read-modify-write handler reads one entity, or a handful, and
+/// holds it across the write. For that case the saving is the entire fork —
+/// tens of milliseconds on a large graph against well under a microsecond of
+/// eager work. Bigger results stay deferred and keep the pin; that residual is
+/// documented on `ResultView` rather than paid for by every reader.
+const EAGER_MATERIALISE_MAX_CELLS: usize = 32;
 
 struct LazyRows {
     descriptor: LazyResultDescriptor,
@@ -165,7 +190,7 @@ impl ResultView {
     /// still in scope) into a whole-graph copy *per request*.
     ///
     /// Deferral only earns that risk when most rows are never consumed, which
-    /// needs a large result to matter. Below the threshold the projection is
+    /// needs a large result to matter. Within the cell budget the projection is
     /// bounded and cheap, and paying it up front is strictly better than
     /// risking an O(V+E) fork — so the view drops the `Arc` and becomes eager.
     /// Materialisation failures fall through to the lazy path deliberately, so
@@ -173,7 +198,10 @@ impl ResultView {
     pub fn from_cypher_result_with_graph(result: CypherResult, graph: Arc<DirGraph>) -> Self {
         if let Some(lazy_desc) = result.lazy {
             let n = lazy_desc.len();
-            if n <= EAGER_MATERIALISE_MAX_ROWS {
+            // Saturating: a pathological column count must fall through to the
+            // deferred path, never wrap into a small product and look cheap.
+            let cells = n.saturating_mul(result.columns.len());
+            if cells <= EAGER_MATERIALISE_MAX_CELLS {
                 if let Ok(rows) =
                     kglite_core::api::cypher::materialise_lazy_range(&lazy_desc, &graph, 0..n)
                 {
