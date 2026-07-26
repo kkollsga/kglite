@@ -126,6 +126,33 @@ graph.cypher("MATCH (n:Person) WHERE n.name =~ '(?i)^ali.*' RETURN n.name")
 graph.cypher("MATCH (n:Person) WHERE n.email =~ '.*@example\\.com$' RETURN n.name")
 ```
 
+### Generated filters: prefer `IN [...]` over long `OR` chains
+
+Expression nesting is capped at **512 levels**, and every `OR` term adds one
+level — so a filter builder that emits one term per selected value
+(`n.sku = 'a' OR n.sku = 'b' OR ...`) stops parsing at ~512 selections:
+
+```
+Expression nesting exceeds 512 levels; simplify the query. ...
+```
+
+A list membership test is one level no matter how long the list is, so the
+same filter expressed with `IN` has no practical ceiling — and it is faster,
+because it can be pushed into the MATCH and use an index:
+
+```python
+# Fragile above ~512 values, and slower below it
+graph.cypher("MATCH (n:Product) WHERE " + " OR ".join(f"n.sku = '{s}'" for s in skus) + " RETURN n")
+
+# Prefer this — one AST level for any number of values, and parameterised
+graph.cypher("MATCH (n:Product) WHERE n.sku IN $skus RETURN n", params={"skus": skus})
+```
+
+The planner already rewrites `OR` chains of equalities on a *single* property
+into `IN` for you, but only after the query parses — so it cannot rescue a
+chain that is already too long, and it does not fire for chains spanning
+different properties. Generating `IN` directly is the robust habit.
+
 ## Relationship Properties
 
 Relationships can have properties. Access them with `r.property` syntax:

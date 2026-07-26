@@ -8,16 +8,7 @@ use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::PatternElement;
 use crate::graph::languages::cypher::ast::*;
 
-/// Push simple equality predicates from WHERE into MATCH pattern properties.
-/// This enables the pattern executor to filter during matching rather than after.
-///
-/// Fold OR chains of equalities on the same variable.property into IN predicates.
-///
-/// Example: `WHERE n.name = 'A' OR n.name = 'B' OR n.name = 'C'`
-/// Becomes: `WHERE n.name IN ['A', 'B', 'C']`
-///
-/// This enables predicate pushdown into MATCH patterns and index acceleration.
-/// Must run BEFORE `push_where_into_match`.
+/// Fuse `OPTIONAL MATCH` followed by an aggregate into a single pass.
 pub(crate) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
     let mut i = 0;
     while i + 1 < query.clauses.len() {

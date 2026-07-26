@@ -664,11 +664,16 @@ jobs:
       - name: Test core lease-protected publication
         run: cargo test -p kglite --lib graph::io::open::tests::writer_lease_serializes_open_create_and_publish -- --exact
       # The two filters above already compile the whole engine test binary, so
-      # running it costs little beyond the test time — and it is the only job
-      # that exercises the storage backends on Windows, where mmap and file
-      # lifetimes differ from POSIX (a file with an open mapped view cannot be
-      # resized, replaced, or deleted). Published Windows wheels ship this
-      # engine, so the suite needs to run somewhere on the platform.
+      # running the rest of it is close to free — and this is the only job that
+      # exercises the engine on Windows at all (no Windows job runs pytest, yet
+      # Windows wheels ship). It covers two things nothing else does:
+      #   * storage-backend file lifetimes, where Windows differs from POSIX —
+      #     a file with an open mapped view cannot be resized, replaced or
+      #     deleted, which this job is what first caught;
+      #   * the stack-depth bound against non-Linux frame sizes, via
+      #     stack_probe::budget_ceiling_query_fits_the_query_thread_stack,
+      #     which walks the deepest AST the parser accepts, so a platform with
+      #     much larger frames overflows here instead of in a user's process.
       - name: Test core engine unit suite
         run: cargo test -p kglite --lib
       - name: Test CLI lifecycle unit suite
