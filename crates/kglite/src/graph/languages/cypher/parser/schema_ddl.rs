@@ -198,7 +198,7 @@ impl CypherParser {
             let properties = self.parse_ddl_on_properties(&target)?;
             DropIndexSelector::Descriptor { target, properties }
         } else {
-            DropIndexSelector::Name(self.expect_name("index name after DROP INDEX")?)
+            DropIndexSelector::Name(self.take_drop_index_name()?)
         };
         let if_exists = self.parse_if_exists();
         self.expect_statement_end("DROP INDEX")?;
@@ -207,6 +207,42 @@ impl CypherParser {
             selector,
             if_exists,
         })))
+    }
+
+    /// The name in `DROP INDEX <name>`.
+    ///
+    /// KGLite's canonical index names contain a dot (`Person.age`,
+    /// `Person.(city,age)`), which Cypher would otherwise require backticks to
+    /// write. Reassembling the dotted form here means `SHOW INDEXES` output can
+    /// be pasted straight into `DROP INDEX` — backticked names still work, since
+    /// the tokenizer hands those over as one identifier.
+    fn take_drop_index_name(&mut self) -> Result<String, String> {
+        let mut name = self.expect_name("index name after DROP INDEX")?;
+        if !self.check(&CypherToken::Dot) {
+            return Ok(name);
+        }
+        self.advance();
+        name.push('.');
+
+        // `Label.(a,b)` — the composite spelling.
+        if self.check(&CypherToken::LParen) {
+            self.advance();
+            name.push('(');
+            loop {
+                name.push_str(&self.expect_name("property name in a composite index name")?);
+                if self.check(&CypherToken::Comma) {
+                    self.advance();
+                    name.push(',');
+                } else {
+                    break;
+                }
+            }
+            self.expect(&CypherToken::RParen)?;
+            name.push(')');
+        } else {
+            name.push_str(&self.expect_name("property name in an index name")?);
+        }
+        Ok(name)
     }
 
     /// Parse `SHOW INDEXES` / `SHOW CONSTRAINTS` (and the `ALL` and singular

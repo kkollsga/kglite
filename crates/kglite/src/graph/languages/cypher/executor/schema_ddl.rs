@@ -301,10 +301,13 @@ fn drop_missing_index(
     if if_exists {
         return Ok(MutationStats::default());
     }
-    let installed = collect_indexes_structured(graph)
+    // Deduplicated: a property carrying both a hash and a B-tree index yields
+    // two rows under one canonical name, and listing it twice reads as a bug.
+    let mut installed: Vec<String> = collect_indexes_structured(graph)
         .iter()
         .map(|info| info.name.clone())
-        .collect::<Vec<_>>();
+        .collect();
+    installed.dedup();
     let available = if installed.is_empty() {
         "no indexes are installed".to_string()
     } else {
