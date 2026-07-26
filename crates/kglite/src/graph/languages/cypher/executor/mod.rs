@@ -95,6 +95,11 @@ pub struct CypherExecutor<'a> {
     /// into the streaming pipeline ([`stream::pipeline::try_run_streaming`]).
     /// Default `true`; disabled per-query via `kg.cypher(streaming=False)`.
     streaming: bool,
+    /// Whether this execution may read local files through `LOAD CSV`, and
+    /// from where. Default [`load_csv::CsvImportPolicy::Denied`] — a caller
+    /// grants filesystem access explicitly, so a remote Bolt client never
+    /// inherits one by omission. See `executor/load_csv.rs`.
+    pub(super) csv_import: load_csv::CsvImportPolicy,
     /// Holds the disk materialization arenas alive for this executor's
     /// lifetime (arena protocol in `storage/disk/graph.rs`, enforced by a
     /// debug assert). Acquired in the constructor so EVERY read this
@@ -122,8 +127,17 @@ impl<'a> CypherExecutor<'a> {
             spatial_node_cache: RwLock::new(HashMap::new()),
             alias_name_hashes: OnceLock::new(),
             streaming: true,
+            csv_import: load_csv::CsvImportPolicy::Denied,
             _arena_guard: graph.graph.begin_query(),
         }
+    }
+
+    /// Grant this execution `LOAD CSV` filesystem access. In-process bindings
+    /// pass [`load_csv::CsvImportPolicy::LocalFilesystem`]; servers pass a
+    /// [`load_csv::CsvImportPolicy::Directory`] or nothing at all.
+    pub fn with_csv_import(mut self, policy: load_csv::CsvImportPolicy) -> Self {
+        self.csv_import = policy;
+        self
     }
 
     /// Whether `property` could possibly be a registered id-/title-field
@@ -278,6 +292,68 @@ impl<'a> CypherExecutor<'a> {
         Ok(result)
     }
 
+    /// Drive a read-only `LOAD CSV` pipeline: strip the leading clause, then
+    /// run the remaining clauses once per bounded batch of CSV rows and
+    /// concatenate the outputs.
+    ///
+    /// Only reached for read-only queries — `LOAD CSV … CREATE/MERGE/SET`
+    /// routes to the mutable engine, which has its own batch driver over the
+    /// same [`load_csv::drive`] helper.
+    fn execute_load_csv_pipeline(
+        &self,
+        query: &CypherQuery,
+        load: &LoadCsvClause,
+        profile: Option<&mut Vec<ClauseStats>>,
+    ) -> Result<ResultSet, String> {
+        let source = self.evaluate_expression(&load.source, &ResultRow::new())?;
+        let barrier = load_csv::batching_barrier(&query.clauses[1..]);
+
+        // The suffix is executed as its own query so the driver loop reuses
+        // the ordinary clause dispatch, fusion, and streaming machinery
+        // untouched. Cloning the clause list costs one allocation per
+        // `LOAD CSV` query — never per batch, never on any other path.
+        let suffix = CypherQuery {
+            clauses: query.clauses[1..].to_vec(),
+            explain: false,
+            profile: query.profile,
+            output_format: query.output_format,
+            optimizer_tags: Vec::new(),
+        };
+
+        let mut merged_profile: Vec<ClauseStats> = Vec::new();
+        let result = load_csv::drive(
+            load,
+            &source,
+            &self.csv_import,
+            barrier.as_deref(),
+            |seed| {
+                let mut batch_profile = Vec::new();
+                let out = self.execute_clauses_profiled(
+                    &suffix,
+                    seed,
+                    if query.profile {
+                        Some(&mut batch_profile)
+                    } else {
+                        None
+                    },
+                )?;
+                write::merge_profile(&mut merged_profile, batch_profile);
+                Ok(out)
+            },
+        )?;
+
+        if let Some(stats) = profile {
+            stats.push(ClauseStats {
+                clause_name: clause_display_name(&query.clauses[0]),
+                rows_in: 0,
+                rows_out: merged_profile.first().map_or(0, |first| first.rows_in),
+                elapsed_us: 0,
+            });
+            stats.extend(merged_profile);
+        }
+        Ok(result)
+    }
+
     /// Run a query's clause pipeline from a seed result set, without
     /// PROFILE accounting. Thin wrapper for the subquery body path.
     pub(super) fn execute_clauses(
@@ -304,6 +380,13 @@ impl<'a> CypherExecutor<'a> {
         initial: ResultSet,
         mut profile: Option<&mut Vec<ClauseStats>>,
     ) -> Result<ResultSet, String> {
+        // `LOAD CSV` drives the clauses that follow it over bounded row
+        // batches instead of running as a clause, so peak memory never scales
+        // with file size. See `executor/load_csv.rs`.
+        if let Some(Clause::LoadCsv(load)) = query.clauses.first() {
+            return self.execute_load_csv_pipeline(query, load, profile);
+        }
+
         let mut result_set = initial;
         let profiling = query.profile;
 
@@ -470,6 +553,16 @@ impl<'a> CypherExecutor<'a> {
             Clause::Limit(l) => self.execute_limit(l, result_set),
             Clause::Skip(s) => self.execute_skip(s, result_set),
             Clause::Unwind(u) => self.execute_unwind(u, result_set),
+            // `LOAD CSV` is a driver, not a clause — both engines strip it
+            // before entering their clause loop (see
+            // `execute_load_csv_pipeline` and `execute_mutable_with_csv`), and
+            // the parser refuses it in any non-leading position. Reaching
+            // here means one of those guarantees broke.
+            Clause::LoadCsv(_) => Err(
+                "internal error: LOAD CSV reached the clause dispatcher instead of its batch \
+                 driver. Please report this query."
+                    .to_string(),
+            ),
             Clause::Union(u) => self.execute_union(u, result_set),
             Clause::FusedOptionalMatchAggregate {
                 match_clause,
@@ -796,6 +889,7 @@ pub mod dead_code;
 mod execution_support;
 pub mod expression;
 pub mod helpers;
+pub mod load_csv;
 pub mod match_clause;
 pub mod match_execution;
 pub mod refresh_stats;
@@ -817,7 +911,11 @@ pub mod write;
 
 pub use execution_support::clause_display_name;
 pub use helpers::return_item_column_name;
-pub use write::{execute_mutable, is_mutation_query};
+// `execute_mutable` is re-exported by `api::cypher` directly from
+// `write`; nothing inside the engine calls it any more — the session layer
+// uses `write::execute_mutable_with_csv`, which carries the LOAD CSV
+// filesystem capability.
+pub use write::is_mutation_query;
 
 /// Best-effort declared-variable set derived from the bindings present on
 /// a result set's rows. Used only by the index-less `execute_single_clause`

@@ -22,6 +22,7 @@ use boltr::server::{
 };
 use boltr::types::{BoltDict, BoltValue};
 
+use kglite::api::session::CsvImportPolicy;
 use kglite::api::{cypher, DirGraph, Value};
 
 use crate::error_map::kg_to_bolt;
@@ -85,6 +86,14 @@ pub struct KgliteBackend {
     /// but can differ when running behind a reverse proxy
     /// (`--advertise-addr` flag on `main.rs`).
     advertised_addr: String,
+    /// LOAD CSV filesystem capability for every query on this server.
+    ///
+    /// Server-wide rather than per-session because a Bolt client's identity
+    /// carries no filesystem authority here: `--auth basic` is a single shared
+    /// credential, not a user directory, so there is nothing to scope an import
+    /// grant to beyond "this server allows imports from this directory".
+    /// Default `Denied` — see the `--allow-csv-import` flag.
+    csv_import: CsvImportPolicy,
 }
 
 /// Per-Bolt-transaction state. Wraps the canonical
@@ -187,7 +196,12 @@ impl KgliteBackend {
     /// so it must be reachable from the client's network. Usually
     /// this matches the bind address but should differ when bound
     /// to `0.0.0.0` behind a hostname or reverse proxy.
-    pub fn new(graph: DirGraph, readonly: bool, advertised_addr: String) -> Self {
+    pub fn new(
+        graph: DirGraph,
+        readonly: bool,
+        advertised_addr: String,
+        csv_import: CsvImportPolicy,
+    ) -> Self {
         Self {
             session: Arc::new(kglite::api::session::Session::new(graph)),
             readonly,
@@ -195,6 +209,7 @@ impl KgliteBackend {
             session_counter: AtomicU64::new(0),
             tx_counter: AtomicU64::new(0),
             advertised_addr,
+            csv_import,
         }
     }
 }
@@ -750,6 +765,10 @@ impl KgliteBackend {
         opts.write_scope = meta.write_scope.as_ref();
         opts.git_sha = meta.git_sha.as_deref();
         opts.modified_by = meta.modified_by.as_deref();
+        // Every query reaching this backend came in over the wire, so the
+        // remote-caller policy applies unconditionally. `execute_opts` is the
+        // single chokepoint for both the auto-commit and in-transaction paths.
+        opts.csv_import = self.csv_import.clone();
         opts
     }
 

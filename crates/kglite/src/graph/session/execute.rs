@@ -27,6 +27,7 @@ use crate::graph::languages::cypher;
 use crate::graph::languages::cypher::ast::{
     Clause, CreateElement, CreatePattern, CypherQuery, OutputFormat, RemoveItem, SetItem,
 };
+use crate::graph::languages::cypher::executor::load_csv::CsvImportPolicy;
 use crate::graph::languages::cypher::result::CypherResult;
 use crate::graph::languages::cypher::value_codec::ValueCodec;
 
@@ -100,6 +101,18 @@ pub struct ExecuteOptions<'a> {
     /// against and an actor id. `None` = not supplied. Mutation path only.
     pub git_sha: Option<&'a str>,
     pub modified_by: Option<&'a str>,
+    /// Whether this execution may read local files through `LOAD CSV`, and
+    /// from where.
+    ///
+    /// Defaults to [`CsvImportPolicy::Denied`], and deliberately so: `file://`
+    /// means the server's filesystem, so a binding that never considered
+    /// `LOAD CSV` must not hand its callers a file-read primitive by omission.
+    /// In-process bindings (the Python wheel, the CLI) grant
+    /// [`CsvImportPolicy::LocalFilesystem`] because their caller already has
+    /// the host process's access; the Bolt server grants a
+    /// [`CsvImportPolicy::Directory`] only when started with
+    /// `--allow-csv-import <DIR>`; the MCP server grants nothing.
+    pub csv_import: CsvImportPolicy,
 }
 
 impl<'a> ExecuteOptions<'a> {
@@ -141,7 +154,17 @@ impl<'a> ExecuteOptions<'a> {
             write_scope: None,
             git_sha: None,
             modified_by: None,
+            csv_import: CsvImportPolicy::Denied,
         }
+    }
+
+    /// Grant `LOAD CSV` filesystem access for this execution.
+    ///
+    /// Builder form so a call-site reads as an explicit grant rather than a
+    /// field assignment buried among defaults.
+    pub fn with_csv_import(mut self, policy: CsvImportPolicy) -> Self {
+        self.csv_import = policy;
+        self
     }
 }
 
@@ -228,6 +251,7 @@ pub fn execute_read(
         .with_max_rows(opts.max_rows)
         .with_streaming(opts.lazy_eligible)
         .with_cancel(opts.cancel)
+        .with_csv_import(opts.csv_import.clone())
         .execute(&parsed)
         .map_err(|message| exec_err(opts, message))?;
     // value_codecs: encode codec'd-property result columns back to the typed
@@ -355,17 +379,14 @@ pub fn execute_mut(
         // leaks into a later execution on the same working copy.
         graph.active_write_scope = opts.write_scope.cloned();
         let r = graph.with_write_provenance(opts.git_sha, opts.modified_by, |graph| {
-            if opts.max_rows.is_some() {
-                cypher::executor::write::execute_mutable_bounded(
-                    graph,
-                    &parsed,
-                    params,
-                    interrupt,
-                    opts.max_rows,
-                )
-            } else {
-                cypher::execute_mutable(graph, &parsed, params, interrupt)
-            }
+            cypher::executor::write::execute_mutable_with_csv(
+                graph,
+                &parsed,
+                params,
+                interrupt,
+                opts.max_rows,
+                &opts.csv_import,
+            )
         });
         graph.active_write_scope = None;
         let r = match r {

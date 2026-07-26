@@ -26,7 +26,7 @@
 
 use super::super::ast::*;
 use super::super::tokenizer::CypherToken;
-use super::CypherParser;
+use super::{soft_word_eq, CypherParser};
 
 /// Index-type words that may precede `INDEX` in `CREATE <TYPE> INDEX`.
 const INDEX_TYPE_WORDS: &[(&str, DdlIndexType)] = &[
@@ -56,11 +56,13 @@ impl CypherParser {
     /// `(` or `<` (a pattern), never by a bare identifier, so this cannot
     /// steal a write.
     pub(super) fn create_opens_schema_ddl(&self) -> bool {
-        match self.ddl_word_at(1) {
-            Some(word) if is_ddl_word(word, "INDEX") || is_ddl_word(word, "CONSTRAINT") => true,
+        match self.soft_word_at(1) {
+            Some(word) if soft_word_eq(word, "INDEX") || soft_word_eq(word, "CONSTRAINT") => true,
             Some(word) => {
                 index_type_for_word(word).is_some()
-                    && self.ddl_word_at(2).is_some_and(|w| is_ddl_word(w, "INDEX"))
+                    && self
+                        .soft_word_at(2)
+                        .is_some_and(|w| soft_word_eq(w, "INDEX"))
             }
             None => false,
         }
@@ -71,10 +73,10 @@ impl CypherParser {
     /// position, so recognising them here only converts a "unexpected token"
     /// error into a real statement.
     pub(super) fn identifier_opens_schema_ddl(&self) -> bool {
-        let Some(word) = self.ddl_word_at(0) else {
+        let Some(word) = self.soft_word_at(0) else {
             return false;
         };
-        if !is_ddl_word(word, "DROP") && !is_ddl_word(word, "SHOW") {
+        if !soft_word_eq(word, "DROP") && !soft_word_eq(word, "SHOW") {
             return false;
         }
         // `SHOW ALL INDEXES` puts the `All` keyword token between the two, so
@@ -84,7 +86,7 @@ impl CypherParser {
         } else {
             1
         };
-        self.ddl_word_at(noun_offset)
+        self.soft_word_at(noun_offset)
             .is_some_and(is_index_or_constraint_noun)
     }
 
@@ -102,7 +104,7 @@ impl CypherParser {
         if !self.identifier_opens_schema_ddl() {
             return Ok(None);
         }
-        if self.peek_ddl_word("DROP") {
+        if self.peek_soft_word("DROP") {
             self.parse_drop_schema_ddl().map(Some)
         } else {
             self.parse_show_schema_ddl().map(Some)
@@ -131,7 +133,7 @@ impl CypherParser {
     pub(super) fn parse_create_schema_ddl(&mut self) -> Result<Clause, String> {
         self.expect(&CypherToken::Create)?;
 
-        if self.eat_ddl_word("CONSTRAINT") {
+        if self.eat_soft_word("CONSTRAINT") {
             let command = self.parse_create_constraint_body()?;
             return Ok(Clause::Schema(SchemaCommand::Constraint(
                 ConstraintCommand::Create(command),
@@ -139,7 +141,7 @@ impl CypherParser {
         }
 
         let index_type = self.take_index_type_word();
-        self.expect_ddl_word("INDEX", "CREATE ... INDEX")?;
+        self.expect_soft_word("INDEX", "CREATE ... INDEX")?;
 
         let name = self.take_optional_ddl_name()?;
         let if_not_exists = self.parse_if_not_exists()?;
@@ -171,9 +173,9 @@ impl CypherParser {
     /// Parse `DROP INDEX …` / `DROP CONSTRAINT …`. Precondition:
     /// [`Self::identifier_opens_schema_ddl`] returned true with `DROP`.
     pub(super) fn parse_drop_schema_ddl(&mut self) -> Result<Clause, String> {
-        self.expect_ddl_word("DROP", "DROP statement")?;
+        self.expect_soft_word("DROP", "DROP statement")?;
 
-        if self.eat_ddl_word("CONSTRAINT") {
+        if self.eat_soft_word("CONSTRAINT") {
             let name = self.expect_name("constraint name after DROP CONSTRAINT")?;
             let if_exists = self.parse_if_exists();
             self.expect_statement_end("DROP CONSTRAINT")?;
@@ -182,7 +184,7 @@ impl CypherParser {
             )));
         }
 
-        self.expect_ddl_word("INDEX", "DROP INDEX")?;
+        self.expect_soft_word("INDEX", "DROP INDEX")?;
 
         // Neo4j 3.x descriptor syntax (`DROP INDEX ON :Label(prop)`) was
         // removed in Neo4j 4.0. Recognise it explicitly: a bare "expected
@@ -196,7 +198,7 @@ impl CypherParser {
             );
         }
 
-        let selector = if self.peek_ddl_word("FOR") {
+        let selector = if self.peek_soft_word("FOR") {
             let target = self.parse_ddl_for_target()?;
             let properties = self.parse_ddl_on_properties(&target)?;
             DropIndexSelector::Descriptor { target, properties }
@@ -252,7 +254,7 @@ impl CypherParser {
     /// spellings). Precondition: [`Self::identifier_opens_schema_ddl`] returned
     /// true with `SHOW`.
     pub(super) fn parse_show_schema_ddl(&mut self) -> Result<Clause, String> {
-        self.expect_ddl_word("SHOW", "SHOW statement")?;
+        self.expect_soft_word("SHOW", "SHOW statement")?;
         // `SHOW ALL INDEXES` — `ALL` is a real keyword token, not an
         // identifier, and means the same as the bare form.
         if self.check(&CypherToken::All) {
@@ -286,7 +288,7 @@ impl CypherParser {
 
     /// `FOR (n:Label)` or `FOR ()-[r:TYPE]-()`, consuming the `FOR`.
     fn parse_ddl_for_target(&mut self) -> Result<DdlTarget, String> {
-        self.expect_ddl_word("FOR", "index or constraint pattern")?;
+        self.expect_soft_word("FOR", "index or constraint pattern")?;
         self.expect(&CypherToken::LParen)?;
 
         // `()-[r:T]-()` — an empty leading node marks the relationship form.
@@ -366,7 +368,7 @@ impl CypherParser {
 
         // Neo4j 5 spells this REQUIRE; Neo4j 4 spelled it ASSERT. Accept both
         // so a 4.x-era schema script reaches the executor's feature message.
-        if !self.eat_ddl_word("REQUIRE") && !self.eat_ddl_word("ASSERT") {
+        if !self.eat_soft_word("REQUIRE") && !self.eat_soft_word("ASSERT") {
             return Err(format!(
                 "expected REQUIRE (Neo4j 5) or ASSERT (Neo4j 4) in CREATE CONSTRAINT, found {:?}",
                 self.peek()
@@ -438,17 +440,17 @@ impl CypherParser {
                 self.take_constraint_type_words()?,
             ));
         }
-        if self.eat_ddl_word("TYPED") {
+        if self.eat_soft_word("TYPED") {
             return Ok(ConstraintRequirement::PropertyType(
                 self.take_constraint_type_words()?,
             ));
         }
         // The optional `NODE` / `RELATIONSHIP` scope word before UNIQUE / KEY.
-        let _ = self.eat_ddl_word("NODE") || self.eat_ddl_word("RELATIONSHIP");
-        if self.eat_ddl_word("UNIQUE") {
+        let _ = self.eat_soft_word("NODE") || self.eat_soft_word("RELATIONSHIP");
+        if self.eat_soft_word("UNIQUE") {
             return Ok(ConstraintRequirement::Unique);
         }
-        if self.eat_ddl_word("KEY") {
+        if self.eat_soft_word("KEY") {
             return Ok(ConstraintRequirement::Key);
         }
         Err(format!(
@@ -483,51 +485,26 @@ impl CypherParser {
     // ========================================================================
     // Token-level helpers
     // ========================================================================
-
-    /// The identifier lexeme `offset` tokens ahead, if that token is one.
-    fn ddl_word_at(&self, offset: usize) -> Option<&str> {
-        match self.peek_at(offset) {
-            Some(CypherToken::Identifier(word)) => Some(word.as_str()),
-            _ => None,
-        }
-    }
-
-    fn peek_ddl_word(&self, word: &str) -> bool {
-        self.ddl_word_at(0).is_some_and(|w| is_ddl_word(w, word))
-    }
-
-    /// Consume the identifier `word` if it is next; report whether it was.
-    fn eat_ddl_word(&mut self, word: &str) -> bool {
-        if self.peek_ddl_word(word) {
-            self.advance();
-            true
-        } else {
-            false
-        }
-    }
-
-    fn expect_ddl_word(&mut self, word: &str, context: &str) -> Result<(), String> {
-        if self.eat_ddl_word(word) {
-            Ok(())
-        } else {
-            Err(format!(
-                "Expected {word} in {context}, got {:?}",
-                self.peek()
-            ))
-        }
-    }
+    //
+    // The soft-keyword primitives (`soft_word_at`, `peek_soft_word`,
+    // `eat_soft_word`, `expect_soft_word`, `soft_word_eq`) live in
+    // `super` — `LOAD CSV` parses the same way (non-reserved words arriving
+    // as `Identifier`), so they are shared rather than duplicated.
 
     /// Consume an index-type word when it is immediately followed by `INDEX`.
     /// Without the lookahead, `CREATE INDEX range FOR …` (an index *named*
     /// `range`) would lose its name.
     fn take_index_type_word(&mut self) -> DdlIndexType {
-        let Some(word) = self.ddl_word_at(0) else {
+        let Some(word) = self.soft_word_at(0) else {
             return DdlIndexType::Unspecified;
         };
         let Some(index_type) = index_type_for_word(word) else {
             return DdlIndexType::Unspecified;
         };
-        if self.ddl_word_at(1).is_some_and(|w| is_ddl_word(w, "INDEX")) {
+        if self
+            .soft_word_at(1)
+            .is_some_and(|w| soft_word_eq(w, "INDEX"))
+        {
             self.advance();
             index_type
         } else {
@@ -538,8 +515,8 @@ impl CypherParser {
     /// The optional `<name>` slot of a `CREATE INDEX` / `CREATE CONSTRAINT`.
     /// Absent when the next token opens the rest of the statement.
     fn take_optional_ddl_name(&mut self) -> Result<Option<String>, String> {
-        match self.ddl_word_at(0) {
-            Some(word) if NAME_SLOT_TERMINATORS.iter().any(|t| is_ddl_word(word, t)) => Ok(None),
+        match self.soft_word_at(0) {
+            Some(word) if NAME_SLOT_TERMINATORS.iter().any(|t| soft_word_eq(word, t)) => Ok(None),
             Some(_) => Ok(Some(self.expect_name("index or constraint name")?)),
             None => Ok(None),
         }
@@ -548,7 +525,7 @@ impl CypherParser {
     /// `IF NOT EXISTS`. `NOT` and `EXISTS` are real keyword tokens; only `IF`
     /// is an identifier.
     fn parse_if_not_exists(&mut self) -> Result<bool, String> {
-        if !self.eat_ddl_word("IF") {
+        if !self.eat_soft_word("IF") {
             return Ok(false);
         }
         self.expect(&CypherToken::Not)?;
@@ -559,7 +536,7 @@ impl CypherParser {
     /// `IF EXISTS`. Only reached where `IF NOT EXISTS` is not legal, so no
     /// `NOT` disambiguation is needed.
     fn parse_if_exists(&mut self) -> bool {
-        if self.peek_ddl_word("IF") && self.peek_at(1) == Some(&CypherToken::Exists) {
+        if self.peek_soft_word("IF") && self.peek_at(1) == Some(&CypherToken::Exists) {
             self.advance();
             self.advance();
             true
@@ -572,7 +549,7 @@ impl CypherParser {
     /// whether one was present; the executor rejects it, because KGLite has no
     /// index providers or per-index configuration to apply.
     fn take_ddl_options(&mut self) -> Result<bool, String> {
-        if !self.eat_ddl_word("OPTIONS") {
+        if !self.eat_soft_word("OPTIONS") {
             return Ok(false);
         }
         self.expect(&CypherToken::LBrace)?;
@@ -591,7 +568,7 @@ impl CypherParser {
     /// The `INDEX`/`INDEXES`/`CONSTRAINT`/`CONSTRAINTS` noun of a `SHOW`
     /// statement, normalised to upper case.
     fn expect_ddl_noun(&mut self) -> Result<String, String> {
-        match self.ddl_word_at(0) {
+        match self.soft_word_at(0) {
             Some(word) if is_index_or_constraint_noun(word) => {
                 let upper = word.to_uppercase();
                 self.advance();
@@ -651,15 +628,10 @@ impl DdlIndexType {
     }
 }
 
-/// Case-insensitive comparison against a canonical DDL word.
-fn is_ddl_word(candidate: &str, canonical: &str) -> bool {
-    candidate.eq_ignore_ascii_case(canonical)
-}
-
 fn index_type_for_word(word: &str) -> Option<DdlIndexType> {
     INDEX_TYPE_WORDS
         .iter()
-        .find(|(candidate, _)| is_ddl_word(word, candidate))
+        .find(|(candidate, _)| soft_word_eq(word, candidate))
         .map(|(_, index_type)| *index_type)
 }
 
@@ -667,7 +639,7 @@ fn index_type_for_word(word: &str) -> Option<DdlIndexType> {
 fn is_index_or_constraint_noun(word: &str) -> bool {
     ["INDEX", "INDEXES", "CONSTRAINT", "CONSTRAINTS"]
         .iter()
-        .any(|noun| is_ddl_word(word, noun))
+        .any(|noun| soft_word_eq(word, noun))
 }
 
 // ============================================================================

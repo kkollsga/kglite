@@ -1277,6 +1277,9 @@ pub(crate) fn collect_introduced_variables(clause: &Clause, out: &mut HashSet<St
         Clause::Unwind(u) => {
             out.insert(u.alias.clone());
         }
+        Clause::LoadCsv(l) => {
+            out.insert(l.variable.clone());
+        }
         Clause::CallSubquery { body, .. } => {
             // A nested CALL { } introduces its body's terminal RETURN
             // columns into the outer scope (§1.2 rule 3). Those names are
@@ -1378,6 +1381,13 @@ fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String>) {
         Clause::Skip(s) => collect_expression_refs(&s.count, out),
         Clause::Limit(l) => collect_expression_refs(&l.count, out),
         Clause::Unwind(u) => collect_expression_refs(&u.expression, out),
+        // The source expression may reference a parameter (`FROM $path`);
+        // the bound row variable is recorded for the same
+        // barrier-correctness reason as FOREACH's loop variable below.
+        Clause::LoadCsv(l) => {
+            collect_expression_refs(&l.source, out);
+            out.insert(l.variable.clone());
+        }
         Clause::Union(u) => {
             for c in &u.query.clauses {
                 collect_clause_variables(c, out);

@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `LOAD CSV [WITH HEADERS] FROM <source> AS row [FIELDTERMINATOR <sep>]`, in
+  the Neo4j grammar, so a ported import script runs unedited. `WITH HEADERS`
+  binds each record as a map keyed by the header row; without it, records bind
+  as zero-indexed lists. Fields stay strings — CSV carries no types, and
+  inferring them would corrupt leading-zero identifiers — so conversion is
+  explicit (`toInteger(row.id)`); an empty field is `null`, and a short row
+  nulls its missing columns instead of failing the load. `FROM $path` works.
+  The clause must lead the query; anywhere else it is rejected with the
+  positional rule rather than a confusing pattern error. `CYPHER.md` documents
+  the full mapping under "LOAD CSV".
+- `LOAD CSV` **streams**: the executor reads 1000 rows at a time and runs the
+  following clauses once per batch, so peak memory does not scale with file
+  size — a 5 MB and a 109 MB input both cost about 20 MB resident on a
+  row-local pipeline. Batching applies to the clauses it is equivalent for
+  (`MATCH`, `WHERE`, `UNWIND`, `CREATE`, `MERGE`, `SET`, `DELETE`, `REMOVE`,
+  `FOREACH`, non-aggregating `WITH`/`RETURN`) — the ingest shape, which streams
+  at any file size. A downstream clause that reasons over the whole result
+  (aggregate, `ORDER BY`, `SKIP`/`LIMIT`, `DISTINCT`, `UNION`, `CALL`) cannot be
+  batched without changing the answer, so those queries take a single capped
+  pass and fail at 1,000,000 rows naming the clause that forced it, rather than
+  exhausting memory.
+- `LOAD CSV FROM 'http://…'` is rejected with a message naming the
+  network-free design and the local-file route, never a parse error: the engine
+  ships no HTTP client (network dependencies were removed in 0.14.x), so there
+  is nothing to fetch a URL with. Other URL schemes name the supported set.
+  Neo4j's `CALL { ... } IN TRANSACTIONS` batching modifier remains unsupported —
+  batching here is automatic, so there is no commit interval to declare.
+- `--allow-csv-import <DIR>` on `kglite-bolt-server`, and a `csv_import` field
+  on `kglite::api::session::ExecuteOptions`. Reading local files through
+  `LOAD CSV` is a capability the caller is granted, defaulting to **denied**:
+  in-process callers (the Python API, the Rust library, the CLI) are allowed
+  because they already have the host process's filesystem access, while a Bolt
+  client is remote and gets nothing unless an operator names an import
+  directory. Imports are then confined to that directory after symlink
+  resolution, so `..` segments and symlinks cannot escape it. Without the gate,
+  anyone able to open a Bolt connection could run
+  `LOAD CSV FROM 'file:///etc/passwd'`.
 - Cypher index DDL, in the Neo4j 5 grammar, so a schema-setup script ports
   unedited: `CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:Label) ON
   (n.prop, ...)`, `DROP INDEX <name> [IF EXISTS]`, and `SHOW [ALL] INDEX[ES]`.

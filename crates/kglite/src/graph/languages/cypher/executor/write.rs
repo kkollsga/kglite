@@ -78,6 +78,33 @@ pub fn execute_mutable(
     execute_mutable_bounded(graph, query, params, interrupt, None)
 }
 
+/// Invariant context for one mutation run — everything the clause loop reads
+/// but never changes. Bundled so [`run_clause_pipeline`] can be called once
+/// per `LOAD CSV` batch without a ten-argument signature.
+pub(super) struct MutationCtx<'a> {
+    pub params: &'a HashMap<String, Value>,
+    pub interrupt: &'a Interrupt,
+    pub budget: &'a super::budget::ExecutionBudget,
+    pub profiling: bool,
+    /// Whether `LOAD CSV` may read local files in this execution.
+    pub csv_import: &'a super::load_csv::CsvImportPolicy,
+    /// Clauses that precede the pipeline being run — non-empty only for the
+    /// `LOAD CSV` suffix, where the stripped `LOAD CSV … AS row` still
+    /// declares `row` for correlated-subquery import validation.
+    pub leading: &'a [Clause],
+}
+
+impl MutationCtx<'_> {
+    /// Variables declared by everything before `clauses[i]`, including the
+    /// stripped leading clauses.
+    fn declared_before(&self, clauses: &[Clause], i: usize) -> std::collections::HashSet<String> {
+        use crate::graph::languages::cypher::planner::simplification::declared_variables;
+        let mut declared = declared_variables(self.leading);
+        declared.extend(declared_variables(&clauses[..i]));
+        declared
+    }
+}
+
 #[inline]
 fn check_interrupt_periodic(interrupt: &Interrupt, iteration: usize) -> Result<(), String> {
     if iteration & (super::INTERRUPT_POLL_INTERVAL - 1) == 0 && interrupt.exceeded() {
@@ -96,6 +123,28 @@ pub(crate) fn execute_mutable_bounded(
     interrupt: Interrupt,
     max_rows: Option<usize>,
 ) -> Result<CypherResult, String> {
+    execute_mutable_with_csv(
+        graph,
+        query,
+        params,
+        interrupt,
+        max_rows,
+        &super::load_csv::CsvImportPolicy::Denied,
+    )
+}
+
+/// Mutable execution with an explicit `LOAD CSV` filesystem capability.
+///
+/// The capability defaults to denied in every other entry point, so granting
+/// it is always visible at the call site.
+pub(crate) fn execute_mutable_with_csv(
+    graph: &mut DirGraph,
+    query: &CypherQuery,
+    params: HashMap<String, Value>,
+    interrupt: Interrupt,
+    max_rows: Option<usize>,
+    csv_import: &super::load_csv::CsvImportPolicy,
+) -> Result<CypherResult, String> {
     // Arena guard for the whole mutation: begin_query performs the same
     // idle-arena reclamation reset_arenas did, then holds the count so every
     // materializing read (`get_node` → `node_weight`) inside mutation clauses
@@ -104,12 +153,106 @@ pub(crate) fn execute_mutable_bounded(
 
     let budget = super::budget::ExecutionBudget::new(max_rows);
 
-    let mut result_set = ResultSet::new();
     let mut stats = MutationStats::default();
     let profiling = query.profile;
     let mut profile_stats: Vec<ClauseStats> = Vec::new();
 
-    for (i, clause) in query.clauses.iter().enumerate() {
+    // `LOAD CSV` drives the rest of the pipeline over bounded row batches
+    // instead of being executed as a clause — the whole point is that peak
+    // memory must not scale with file size. See `executor/load_csv.rs`.
+    let result_set = if let Some(Clause::LoadCsv(load)) = query.clauses.first() {
+        let suffix = &query.clauses[1..];
+        let ctx = MutationCtx {
+            params: &params,
+            interrupt: &interrupt,
+            budget: &budget,
+            profiling,
+            csv_import,
+            leading: &query.clauses[..1],
+        };
+        let source = {
+            let executor = CypherExecutor::with_params(graph, &params, interrupt.deadline)
+                .with_cancel(interrupt.cancel)
+                .with_budget(budget.clone());
+            executor.evaluate_expression(&load.source, &ResultRow::new())?
+        };
+        let barrier = super::load_csv::batching_barrier(suffix);
+        super::load_csv::drive(load, &source, csv_import, barrier.as_deref(), |seed| {
+            let mut batch_profile = Vec::new();
+            let out =
+                run_clause_pipeline(graph, suffix, seed, &ctx, &mut stats, &mut batch_profile)?;
+            merge_profile(&mut profile_stats, batch_profile);
+            Ok(out)
+        })?
+    } else {
+        let ctx = MutationCtx {
+            params: &params,
+            interrupt: &interrupt,
+            budget: &budget,
+            profiling,
+            csv_import,
+            leading: &[],
+        };
+        run_clause_pipeline(
+            graph,
+            &query.clauses,
+            ResultSet::new(),
+            &ctx,
+            &mut stats,
+            &mut profile_stats,
+        )?
+    };
+
+    finalize_mutation(
+        graph,
+        query,
+        params,
+        interrupt,
+        budget,
+        result_set,
+        stats,
+        profiling,
+        profile_stats,
+    )
+}
+
+/// Sum one batch's PROFILE rows into the accumulator.
+///
+/// Every batch runs the identical clause list, so entries align by index and
+/// the merged row reads as the clause's total across the whole file.
+pub(super) fn merge_profile(acc: &mut Vec<ClauseStats>, batch: Vec<ClauseStats>) {
+    for (index, entry) in batch.into_iter().enumerate() {
+        match acc.get_mut(index) {
+            Some(existing) => {
+                existing.rows_in += entry.rows_in;
+                existing.rows_out += entry.rows_out;
+                existing.elapsed_us += entry.elapsed_us;
+            }
+            None => acc.push(entry),
+        }
+    }
+}
+
+/// Run `clauses` against `graph`, starting from `seed`.
+///
+/// Extracted from `execute_mutable_with_csv` so the `LOAD CSV` driver can call
+/// it once per row batch. `seed` is empty for an ordinary query and holds one
+/// batch of CSV rows otherwise.
+fn run_clause_pipeline(
+    graph: &mut DirGraph,
+    clauses: &[Clause],
+    seed: ResultSet,
+    ctx: &MutationCtx<'_>,
+    stats: &mut MutationStats,
+    profile_stats: &mut Vec<ClauseStats>,
+) -> Result<ResultSet, String> {
+    let params = ctx.params;
+    let interrupt = ctx.interrupt;
+    let budget = ctx.budget;
+    let profiling = ctx.profiling;
+    let mut result_set = seed;
+
+    for (i, clause) in clauses.iter().enumerate() {
         if interrupt.exceeded() {
             // Deadline passed or the caller flipped the cancel flag (Ctrl-C).
             // The mutation is atomic: aborting here discards the in-flight
@@ -151,11 +294,10 @@ pub(crate) fn execute_mutable_bounded(
         match clause {
             // Write clauses: mutate graph directly
             Clause::Create(create) => {
-                result_set =
-                    execute_create(graph, create, result_set, &params, &mut stats, &interrupt)?;
+                result_set = execute_create(graph, create, result_set, params, stats, interrupt)?;
             }
             Clause::Set(set) => {
-                execute_set(graph, set, &result_set, &params, &mut stats, &interrupt)?;
+                execute_set(graph, set, &result_set, params, stats, interrupt)?;
                 // Flush staged writes so any subsequent clause's reads
                 // (including a trailing RETURN's property projection)
                 // observe the SET. SET routes through node_weight_mut →
@@ -173,18 +315,17 @@ pub(crate) fn execute_mutable_bounded(
                 graph.sync_column_stores_from_disk();
             }
             Clause::Delete(del) => {
-                execute_delete(graph, del, &result_set, &mut stats, &interrupt)?;
+                execute_delete(graph, del, &result_set, stats, interrupt)?;
             }
             Clause::Remove(rem) => {
-                execute_remove(graph, rem, &result_set, &mut stats, &interrupt)?;
+                execute_remove(graph, rem, &result_set, stats, interrupt)?;
                 // Same rationale as SET — REMOVE goes through
                 // node_weight_mut on disk.
                 GraphWrite::flush_pending_writes(&mut graph.graph);
                 graph.sync_column_stores_from_disk();
             }
             Clause::Merge(merge) => {
-                result_set =
-                    execute_merge(graph, merge, result_set, &params, &mut stats, &interrupt)?;
+                result_set = execute_merge(graph, merge, result_set, params, stats, interrupt)?;
                 // MERGE may invoke ON MATCH SET / ON CREATE SET via
                 // `execute_set`; flush so any following clause sees the
                 // mutations.
@@ -205,10 +346,10 @@ pub(crate) fn execute_mutable_bounded(
                     list,
                     body,
                     &result_set,
-                    &params,
-                    &mut stats,
-                    &interrupt,
-                    &budget,
+                    params,
+                    stats,
+                    interrupt,
+                    budget,
                 )?;
                 GraphWrite::flush_pending_writes(&mut graph.graph);
                 graph.sync_column_stores_from_disk();
@@ -217,13 +358,11 @@ pub(crate) fn execute_mutable_bounded(
             // scope (variables bound by clauses 0..i), distinct from the
             // bindings present in any single row.
             Clause::CallSubquery { import, body } => {
-                let executor = CypherExecutor::with_params(graph, &params, interrupt.deadline)
+                let executor = CypherExecutor::with_params(graph, params, interrupt.deadline)
                     .with_cancel(interrupt.cancel)
-                    .with_budget(budget.clone());
-                let declared =
-                    crate::graph::languages::cypher::planner::simplification::declared_variables(
-                        &query.clauses[..i],
-                    );
+                    .with_budget(budget.clone())
+                    .with_csv_import(ctx.csv_import.clone());
+                let declared = ctx.declared_before(clauses, i);
                 result_set = executor.execute_call_subquery(import, body, result_set, &declared)?;
             }
             // Schema DDL. Runs here — not on the read engine — because schema
@@ -231,13 +370,14 @@ pub(crate) fn execute_mutable_bounded(
             // rollback guards as a data mutation. `SHOW INDEXES` classifies as
             // a read and never reaches this arm.
             Clause::Schema(command) => {
-                schema_ddl::execute_schema_mutation(graph, command, &mut stats)?;
+                schema_ddl::execute_schema_mutation(graph, command, stats)?;
             }
             // Read clauses: create temporary immutable executor
             _ => {
-                let executor = CypherExecutor::with_params(graph, &params, interrupt.deadline)
+                let executor = CypherExecutor::with_params(graph, params, interrupt.deadline)
                     .with_cancel(interrupt.cancel)
-                    .with_budget(budget.clone());
+                    .with_budget(budget.clone())
+                    .with_csv_import(ctx.csv_import.clone());
                 result_set = executor.execute_single_clause(clause, result_set)?;
             }
         }
@@ -263,6 +403,26 @@ pub(crate) fn execute_mutable_bounded(
         }
     }
 
+    Ok(result_set)
+}
+
+/// Flush staged writes and project the pipeline's rows into a `CypherResult`.
+///
+/// Split out of `execute_mutable_with_csv` alongside [`run_clause_pipeline`]:
+/// the flush and the projection happen exactly once per query, even when the
+/// `LOAD CSV` driver ran the pipeline many times.
+#[allow(clippy::too_many_arguments)]
+fn finalize_mutation(
+    graph: &mut DirGraph,
+    query: &CypherQuery,
+    params: HashMap<String, Value>,
+    interrupt: Interrupt,
+    budget: super::budget::ExecutionBudget,
+    result_set: ResultSet,
+    stats: MutationStats,
+    profiling: bool,
+    profile_stats: Vec<ClauseStats>,
+) -> Result<CypherResult, String> {
     // Flush any pending mutation state into the steady-state stores so
     // (a) the trailing RETURN's reads observe the writes from this same
     // query, and (b) any subsequent read-only query started by the user

@@ -197,6 +197,14 @@ fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), 
                 validate_expression_scope(&unwind.expression, &scope)?;
                 scope.insert(unwind.alias.clone());
             }
+            // `LOAD CSV … AS row` declares `row` for everything downstream.
+            // The source expression is validated against the *incoming* scope
+            // (empty, since LOAD CSV is leading-position only), which is what
+            // lets `FROM $path` through and rejects `FROM n.path`.
+            Clause::LoadCsv(load) => {
+                validate_expression_scope(&load.source, &scope)?;
+                scope.insert(load.variable.clone());
+            }
             Clause::Union(union) => validate_scope(&union.query, initial)?,
             Clause::Create(create) => {
                 for pattern in &create.patterns {
@@ -863,7 +871,9 @@ fn validate_clause(
             }
             validate_query(body, graph, &mut inner_vars)?;
         }
-        Clause::Return(_) | Clause::OrderBy(_) | Clause::Unwind(_) => {}
+        // LOAD CSV binds an untyped map/list, so there is no node type to
+        // validate properties against — same as UNWIND.
+        Clause::Return(_) | Clause::OrderBy(_) | Clause::Unwind(_) | Clause::LoadCsv(_) => {}
         Clause::Create(c) => {
             for pattern in &c.patterns {
                 validate_create_pattern(pattern, graph, var_types)?;

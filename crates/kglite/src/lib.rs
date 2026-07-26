@@ -438,6 +438,9 @@ pub mod api {
     /// truth for the Cypher pipeline + snapshot/working CoW
     /// transaction model. See `docs/rust/session.md`.
     pub mod session {
+        /// `LOAD CSV` filesystem capability. Every binding decides what its
+        /// callers get; see `ExecuteOptions::csv_import`.
+        pub use crate::graph::languages::cypher::executor::load_csv::CsvImportPolicy;
         pub use crate::graph::session::{
             execute_mut, execute_read, resolve_noderefs, CommitOutcome, ExecuteOptions,
             ExecuteOutcome, Session, Transaction,

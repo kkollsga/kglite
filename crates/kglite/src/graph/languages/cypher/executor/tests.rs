@@ -1,6 +1,7 @@
 //! Executor unit tests.
 #![allow(clippy::approx_constant)]
 use super::helpers::*;
+use super::write::execute_mutable;
 use super::*;
 use crate::datatypes::values::Value;
 use crate::graph::schema::{EdgeData, NodeData};

@@ -458,7 +458,10 @@ class TestDescribeCypherTiers:
         g = KnowledgeGraph()
         desc = g.describe(cypher=True)
         assert "<limitations>" in desc
-        assert "LOAD CSV" in desc
+        # LOAD CSV itself is supported since the Neo4j on-ramp work; what is
+        # still limited is the http(s):// source, so the limitation entry
+        # names the source rather than the clause.
+        assert 'feature="LOAD CSV http(s):// source"' in desc
         assert "CREATE INDEX" in desc
         assert 'feature="FOREACH"' not in desc
         assert 'name="CALL { }"' in desc

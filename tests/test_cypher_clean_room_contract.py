@@ -14,12 +14,22 @@ MANIFEST = json.loads((ROOT / "tests" / "cypher_contract" / "cases.json").read_t
 
 
 @pytest.mark.parametrize("case", MANIFEST["cases"], ids=lambda case: case["id"])
-def test_independent_cypher_behavior(case):
+def test_independent_cypher_behavior(case, tmp_path):
     graph = kglite.KnowledgeGraph()
     for setup_query in case.get("setup", []):
         graph.cypher(setup_query).to_list()
 
-    actual = graph.cypher(case["query"], params=case.get("params")).to_list()
+    # `LOAD CSV` cases declare their input inline as `files: {name: content}`.
+    # Each file is written under `tmp_path` (never into the repo) and the query
+    # refers to it as `{csv_dir}/<name>`, substituted here — the only way a
+    # declarative case can name a real path.
+    query = case["query"]
+    for name, content in case.get("files", {}).items():
+        (tmp_path / name).write_text(content, encoding="utf-8")
+    if "files" in case:
+        query = query.replace("{csv_dir}", str(tmp_path))
+
+    actual = graph.cypher(query, params=case.get("params")).to_list()
     assert actual == case["expected"], case["requirement"]
 
 
