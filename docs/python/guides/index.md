@@ -40,7 +40,8 @@ Domain-specific surfaces — pull them in when your data has the shape:
 |---|---|
 | {doc}`querying` | The fluent-API alternative to Cypher (`select` / `where` / `traverse` / `collect`). Useful for programmatic graph construction. |
 | {doc}`blueprints` | Declarative graph schemas — nodes/edges defined once in a CSV-driven config. Best for repeated builds of the same shape. |
-| {doc}`import-export` | Round-trip with Neo4j, JSON, N-Triples; CSV bulk export. |
+| {doc}`import-export` | Round-trip with Neo4j, JSON, N-Triples; CSV bulk export; SQLite export as the no-lock-in exit. |
+| {doc}`schema-migrations` | Your graph is long-lived state whose shape changes over time. The user-schema version stamp, ordered Cypher migration scripts + `kglite migrate`, and the recreate-the-node pattern for type changes. |
 | {doc}`ai-agents` | `describe()` XML schema for system prompts. Read this if you're building agent stacks beyond MCP. |
 | {doc}`recipes` | Short snippets for "how do I do X" patterns that span multiple guides. |
 

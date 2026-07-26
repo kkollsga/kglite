@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Export a graph to SQLite as a dependency-free exit path. `graph.export(
+  'dump.sql')` / `export_string('sqlite')` and `kglite export-sqlite <graph>
+  [output]` emit a deterministic SQLite-dialect SQL script — node types become
+  tables, connection types become link tables — which `sqlite3 out.db <
+  dump.sql` turns into a real relational database. No SQLite library is linked
+  into KGLite; emitting a script rather than a `.db` file adds **zero
+  dependencies**. Parquet is deliberately out of scope: it would mean taking on
+  the `arrow`/`parquet` tree, and `to_df().to_parquet(...)` already covers it
+  with the dependency in your environment rather than ours.
+- A **user-schema version** stamp persisted with the graph — your own
+  data-model revision, distinct from the engine-owned `.kgl` format version and
+  never interpreted by the engine. Read/write it via `graph.schema_version` /
+  `set_schema_version(n)`, `graph_info()['user_schema_version']`, or
+  `kglite schema-version <graph> [--set N]`. Additive: `.kgl` files written
+  before this field existed load at the unversioned baseline, and a graph that
+  never sets one saves byte-for-byte as before. `describe()` reports it once
+  set, so an agent opening a graph cold sees which schema generation it holds.
+- `kglite migrate <graph> <dir>` applies ordered `<version>_<name>.cypher`
+  migrations and advances that stamp. Re-running is a no-op; statements run
+  against an in-memory copy so a failure part-way leaves the `.kgl`
+  byte-identical; and a stamp the migration set cannot explain, a duplicate
+  version, or an unversioned filename are all refused rather than guessed at.
+  New guide: *Schema Migrations*, which documents the recreate-the-node pattern
+  for type changes — including that `SET n:NewType` adds a secondary label and
+  does **not** change a node's primary type.
+
+### Fixed
+
+- `graph.export(...)` no longer writes an empty file when the current selection
+  exists but matched nothing. It decided whether to use the selection from
+  "does a selection level exist" rather than "does the selection hold nodes",
+  so a fluent call that matched nothing made `export('out.graphml')` silently
+  emit an empty graph while `export_string('graphml')` was correct. All three
+  export entry points now share one selection-resolution helper.
+- The Cypher script splitter behind the REPL's `.read` (and now `migrate`) is
+  quote-aware: a `;` inside a string literal is data, so
+  `CREATE (:Note {body: 'a;b'})` is no longer torn into two invalid fragments.
+
 ## [0.14.5] - 2026-07-22
 
 ### Changed

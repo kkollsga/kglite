@@ -2165,7 +2165,7 @@ class KnowledgeGraph:
         Distinct from ``graph_info()['format_version']``, which is the ``.kgl``
         on-disk layout version and belongs to the engine.
 
-        See the :doc:`migrations guide <python/guides/migrations>`.
+        See the :doc:`migrations guide </python/guides/schema-migrations>`.
         """
         ...
 
@@ -3938,7 +3938,7 @@ class KnowledgeGraph:
 
         A script rather than a ``.db`` file keeps kglite dependency-free while
         still handing you a real, queryable database. See the
-        :doc:`migrations guide <python/guides/migrations>`.
+        :doc:`migrations guide </python/guides/schema-migrations>`.
 
         Args:
             path: Output file path.

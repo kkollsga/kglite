@@ -210,3 +210,64 @@ def test_the_stamp_appears_in_describe_only_once_set(tmp_path):
 
     graph.set_schema_version(4)
     assert "<user-schema-version>4</user-schema-version>" in graph.describe()
+
+
+# ── the documented type-change pattern ──────────────────────────────────────
+#
+# Primary-type immutability makes "recreate the node" the documented pattern for
+# a type change (docs/python/guides/migrations.md). These tests pin both halves:
+# what the engine actually refuses, and that the recipe the guide prints works
+# verbatim — including the trap where `SET n:NewType` looks like it worked.
+
+
+def test_primary_type_cannot_be_changed_in_place(tmp_path):
+    graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE (:Contractor {id: 1, title: 'Ada'})")
+
+    # Property assignment is refused outright.
+    with pytest.raises(Exception, match="Cannot SET node type"):
+        graph.cypher("MATCH (n:Contractor) SET n.type = 'Person'")
+
+    # Label assignment *succeeds* but adds a secondary label — the primary type
+    # is untouched, even though `MATCH (n:Person)` now matches. This is the trap
+    # the guide warns about, so it is pinned rather than left to be rediscovered.
+    graph.cypher("MATCH (n:Contractor) SET n:Person")
+    assert graph.cypher("MATCH (n) RETURN n.type AS t").to_dicts() == [{"t": "Contractor"}]
+    assert graph.cypher("MATCH (n) RETURN labels(n) AS l").to_dicts() == [{"l": ["Contractor", "Person"]}]
+    assert graph.cypher("MATCH (n:Person) RETURN count(n) AS c").to_dicts() == [{"c": 1}]
+
+
+def test_the_documented_recreate_the_node_recipe_works(tmp_path):
+    """The guide's four-step type change, run verbatim."""
+    graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE (:Contractor {id: 1, title: 'Ada', email: 'a@x.com'})")
+    graph.cypher("CREATE (:Company {id: 10, title: 'Acme'})")
+    graph.cypher("CREATE (:Manager {id: 20, title: 'Bob'})")
+    graph.cypher("MATCH (c:Contractor), (k:Company) CREATE (c)-[:WORKS_AT {since: 2019}]->(k)")
+    graph.cypher("MATCH (m:Manager), (c:Contractor) CREATE (m)-[:MANAGES]->(c)")
+
+    for statement in [
+        # 1. Replacement node, properties carried across.
+        "MATCH (c:Contractor) CREATE (:Person {id: c.id, title: c.title, email: c.email})",
+        # 2. Outgoing edges, with their properties.
+        "MATCH (c:Contractor)-[w:WORKS_AT]->(k), (p:Person {id: c.id}) CREATE (p)-[:WORKS_AT {since: w.since}]->(k)",
+        # 3. Incoming edges — the step that is silent when forgotten.
+        "MATCH (m)-[:MANAGES]->(c:Contractor), (p:Person {id: c.id}) CREATE (m)-[:MANAGES]->(p)",
+        # 4. Drop the originals, taking their edges with them.
+        "MATCH (c:Contractor) DETACH DELETE c",
+    ]:
+        graph.cypher(statement)
+
+    # The node now genuinely has the new primary type, with its properties.
+    assert graph.cypher("MATCH (p:Person) RETURN p.type AS type, p.title AS title, p.email AS email").to_dicts() == [
+        {"type": "Person", "title": "Ada", "email": "a@x.com"}
+    ]
+
+    # Both edge directions survived, and the edge property came with them.
+    assert graph.cypher(
+        "MATCH (p:Person)-[w:WORKS_AT]->(k) RETURN k.title AS company, w.since AS since"
+    ).to_dicts() == [{"company": "Acme", "since": 2019}]
+    assert graph.cypher("MATCH (m)-[:MANAGES]->(p:Person) RETURN m.title AS manager").to_dicts() == [{"manager": "Bob"}]
+
+    # And nothing of the old type is left behind.
+    assert graph.cypher("MATCH (c:Contractor) RETURN count(c) AS c").to_dicts() == [{"c": 0}]

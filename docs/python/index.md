@@ -44,6 +44,7 @@ guides/spatial
 guides/timeseries
 guides/graph-algorithms
 guides/import-export
+guides/schema-migrations
 guides/ai-agents
 guides/okf
 guides/recipes

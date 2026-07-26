@@ -133,7 +133,7 @@ pub struct DirGraph {
     /// (`save_metadata.format_version`, the `.kgl` magic), which the engine owns
     /// and this never touches. `0` = unversioned, which is also what a `.kgl`
     /// written before this field existed loads as (additive, absent in old
-    /// files). Docs: `docs/python/guides/migrations.md`.
+    /// files). Docs: `docs/python/guides/schema-migrations.md`.
     #[serde(default)]
     pub user_schema_version: u32,
     /// Auto-vacuum threshold: if Some(t), vacuum() is triggered automatically after
