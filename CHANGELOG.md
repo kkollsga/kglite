@@ -334,6 +334,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `claude_config` now reads and writes Claude MCP config files as UTF-8. On a
+  non-UTF-8 Windows codepage the read mis-decoded the file and the atomic write
+  committed the damage over every unrelated MCP server entry; non-ASCII text in
+  other entries is now preserved byte-for-byte.
+- `print()` of a Cypher result no longer raises `UnicodeEncodeError` when stdout
+  cannot encode box-drawing characters (redirected output, CI logs, captured
+  subprocesses). Such output falls back to an ASCII table; set
+  `KGLITE_ASCII_TABLE=1`/`0` to force either style.
+- `repr()` of a result containing a string longer than 30 characters no longer
+  panics when the truncation point falls inside a multi-byte character, and
+  non-ASCII cells no longer skew column alignment.
+- `LOAD CSV FROM 'file:///C:/data.csv'` now resolves on Windows instead of
+  producing the unreachable `/C:/data.csv`.
 - Declaring a UNIQUE or NODE KEY constraint no longer reintroduces a
   graph-sized copy on every mutating statement. The unique-occupancy map holds
   one entry per node of the constrained type, and it was being deep-cloned into
