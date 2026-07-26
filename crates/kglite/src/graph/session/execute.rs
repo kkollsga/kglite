@@ -21,6 +21,7 @@ use std::time::Instant;
 
 use crate::datatypes::Value;
 use crate::error::KgError;
+use crate::graph::dir_graph::rollback::StatementCheckpoint;
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::embedder::Embedder;
 use crate::graph::languages::cypher;
@@ -329,18 +330,25 @@ pub fn execute_mut(
     }
 
     // A statement is atomic even when the caller supplied an already-
-    // materialized transaction working copy. Keep a checkpoint whenever the
+    // materialized transaction working copy. Open a checkpoint whenever the
     // executor can still fail after its first write. A deliberately narrow
     // in-memory fast path covers two shapes whose executors finish all
     // fallible work before mutating; see `can_skip_rollback_checkpoint`.
-    let rollback_checkpoint = (is_mutation && !can_skip_rollback_checkpoint(graph, &parsed, opts))
-        .then(|| graph.fork_transaction());
+    //
+    // The checkpoint is an undo journal (O(changes)) wherever the journal can
+    // reverse everything the statement may touch, and a whole-graph clone
+    // (O(V+E)) otherwise; `dir_graph::rollback` owns that decision and
+    // documents it. Either way it MUST be closed on every exit path —
+    // `commit` is what uninstalls the capture journal.
+    let checkpoint = if is_mutation && !can_skip_rollback_checkpoint(graph, &parsed, opts) {
+        StatementCheckpoint::open(graph)
+    } else {
+        StatementCheckpoint::None
+    };
 
     if is_mutation {
         if let Err(error) = graph.prepare_disk_mutation() {
-            if let Some(checkpoint) = rollback_checkpoint {
-                *graph = checkpoint;
-            }
+            checkpoint.rollback(graph);
             return Err(KgError::FileIo(error));
         }
     }
@@ -371,12 +379,11 @@ pub fn execute_mut(
         let r = match r {
             Ok(result) => result,
             Err(message) => {
-                if let Some(checkpoint) = rollback_checkpoint {
-                    *graph = checkpoint;
-                }
+                checkpoint.rollback(graph);
                 return Err(exec_err(opts, message));
             }
         };
+        checkpoint.commit(graph);
         // A Cypher write occurred — advance the graph version so any
         // version-keyed caches (the plan cache) and OCC see the change.
         // Bumps the working copy directly so a read-after-write *within* the

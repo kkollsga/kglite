@@ -29,10 +29,12 @@ pub mod mode;
 pub mod overflow;
 mod packed_codec;
 pub mod type_build_meta;
+pub mod undo;
 
 use crate::datatypes::Value;
 use crate::graph::core::iterators::GraphEdgeRef;
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
+use crate::graph::storage::undo::UndoJournal;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
 use petgraph::Direction;
@@ -503,6 +505,11 @@ pub struct MemoryGraph {
     /// aggregations. Derived state: empty on clone/load and invalidated by
     /// every edge mutation.
     pub(crate) peer_counts: RwLock<HashMap<u64, Arc<MemoryPeerCounts>>>,
+    /// Statement-scoped inverse-op buffer. `Some` only while a mutating
+    /// Cypher statement holds a rollback checkpoint; `None` is the steady
+    /// state, so reads pay nothing and writes pay one discriminant check.
+    /// See [`crate::graph::storage::undo`].
+    pub(crate) undo: Option<Box<UndoJournal>>,
 }
 
 #[derive(Debug, Default)]
@@ -643,6 +650,9 @@ impl Clone for MemoryGraph {
         Self {
             inner: self.inner.clone(),
             peer_counts: RwLock::new(HashMap::new()),
+            // A journal belongs to the statement that opened it, never to a
+            // copy of the graph it was recorded against.
+            undo: None,
         }
     }
 }
@@ -658,7 +668,28 @@ impl MemoryGraph {
         Self {
             inner,
             peer_counts: RwLock::new(HashMap::new()),
+            undo: None,
         }
+    }
+
+    /// Install a fresh statement-scoped undo journal, discarding any stale
+    /// one (defensive: a journal must never outlive its statement).
+    #[inline]
+    pub(crate) fn begin_undo(&mut self) {
+        self.undo = Some(Box::new(UndoJournal::new()));
+    }
+
+    /// Uninstall and return the journal, ending capture.
+    #[inline]
+    pub(crate) fn take_undo(&mut self) -> Option<Box<UndoJournal>> {
+        self.undo.take()
+    }
+
+    /// Mutable access to the active journal, for the `DirGraph`-level capture
+    /// seam (inverted-index and timeseries edits the backend cannot see).
+    #[inline]
+    pub(crate) fn undo_journal_mut(&mut self) -> Option<&mut UndoJournal> {
+        self.undo.as_deref_mut()
     }
 
     /// Borrow the inner `StableDiGraph`. Shared with [`MappedGraph`]

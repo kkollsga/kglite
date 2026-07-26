@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Mutating Cypher statements no longer deep-copy the graph to stay atomic. A
+  statement-scoped undo journal records the inverse of each write, so the cost
+  of a write now scales with the number of changes instead of with the size of
+  the graph — a single `SET` takes the same time on a thousand-node graph as on
+  a million-node one. Rollback fidelity is unchanged: a failed statement
+  restores node and relationship identity, properties, labels, index ordering,
+  schema metadata, and the version counter exactly.
+
+  Graphs in columnar mode, graphs with user-created property/range/composite
+  indexes, and the `mapped`/`disk` backends keep the previous whole-graph
+  checkpoint, so their write cost is unchanged.
+
 ## [0.14.5] - 2026-07-22
 
 ### Changed

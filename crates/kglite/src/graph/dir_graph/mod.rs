@@ -45,6 +45,7 @@ mod caches;
 mod disk_persistence;
 mod independent_copy;
 mod node_write;
+pub(crate) mod rollback;
 mod schema_ops;
 
 /// Version-keyed cache of per-`(type, property)` distinct-value counts (NDV)
@@ -1541,6 +1542,14 @@ impl DirGraph {
         }
         bucket.push(idx);
         self.has_secondary_labels = true;
+        // Statement-rollback capture: the label index lives above storage, so
+        // the backend's `GraphWrite` seam cannot see this edit.
+        if let Some(journal) = self.graph.undo_journal_mut() {
+            journal.note_bucket_appended(
+                crate::graph::storage::undo::BucketId::SecondaryLabel(label),
+                idx,
+            );
+        }
         true
     }
 
@@ -1569,16 +1578,29 @@ impl DirGraph {
         let Some(bucket) = self.secondary_label_index.get_mut(&label) else {
             return Ok(false);
         };
-        let before = bucket.len();
-        bucket.retain(|&i| i != idx);
-        let removed = bucket.len() < before;
-        if removed && bucket.is_empty() {
+        // Positional removal rather than `retain`: `add_node_label` rejects
+        // duplicates, so there is at most one match, and the position is what
+        // statement rollback needs to restore the bucket's original order.
+        let position = bucket.iter().position(|&i| i == idx);
+        if let Some(pos) = position {
+            bucket.remove(pos);
+        }
+        if position.is_some() && bucket.is_empty() {
             self.secondary_label_index.remove(&label);
         }
         if self.secondary_label_index.is_empty() {
             self.has_secondary_labels = false;
         }
-        Ok(removed)
+        if let Some(pos) = position {
+            if let Some(journal) = self.graph.undo_journal_mut() {
+                journal.note_bucket_removed(
+                    crate::graph::storage::undo::BucketId::SecondaryLabel(label),
+                    idx,
+                    pos,
+                );
+            }
+        }
+        Ok(position.is_some())
     }
 
     /// Return a node's labels as `[primary, ...extras]`. Returns an
@@ -2488,3 +2510,6 @@ pub struct GraphInfo {
 #[cfg(test)]
 #[path = "dir_graph_tests.rs"]
 mod dir_graph_tests;
+
+#[cfg(test)]
+mod rollback_tests;
