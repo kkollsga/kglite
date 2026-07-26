@@ -76,9 +76,8 @@ struct Cli {
     /// an unrestricted `LOAD CSV` would let anyone who can connect read any
     /// file this process can — `LOAD CSV FROM 'file:///etc/passwd'`. When set,
     /// imports are confined to DIR after symlink resolution, so `..` segments
-    /// and symlinks cannot escape it. Neo4j gates the same capability with
-    /// `server.directories.import` plus
-    /// `dbms.security.allow_csv_import_from_file_urls`.
+    /// and symlinks cannot escape it. Server-mode graph databases generally
+    /// gate CSV import the same way: an allowed directory, off by default.
     #[arg(long, value_name = "DIR")]
     allow_csv_import: Option<PathBuf>,
 

@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `LOAD CSV [WITH HEADERS] FROM <source> AS row [FIELDTERMINATOR <sep>]`, in
-  the Neo4j grammar, so a ported import script runs unedited. `WITH HEADERS`
+  the spelling other Cypher databases use, so a ported import script runs
+  unedited. `WITH HEADERS`
   binds each record as a map keyed by the header row; without it, records bind
   as zero-indexed lists. Fields stay strings — CSV carries no types, and
   inferring them would corrupt leading-zero identifiers — so conversion is
@@ -34,8 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   network-free design and the local-file route, never a parse error: the engine
   ships no HTTP client (network dependencies were removed in 0.14.x), so there
   is nothing to fetch a URL with. Other URL schemes name the supported set.
-  Neo4j's `CALL { ... } IN TRANSACTIONS` batching modifier remains unsupported —
-  batching here is automatic, so there is no commit interval to declare.
+  The `CALL { ... } IN TRANSACTIONS` batching modifier (and the older
+  `USING PERIODIC COMMIT` spelling) remains unsupported — batching here is
+  automatic, so there is no commit interval to declare.
 - `--allow-csv-import <DIR>` on `kglite-bolt-server`, and a `csv_import` field
   on `kglite::api::session::ExecuteOptions`. Reading local files through
   `LOAD CSV` is a capability the caller is granted, defaulting to **denied**:
@@ -50,17 +52,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chains like `$cfg.a.b`. The bracket form (`$row['name']`) and the
   via-variable form (`WITH $row AS r RETURN r.name`) already worked, so the
   dotted form raising a syntax error was an inconsistency rather than a
-  decision; Neo4j accepts it, and a ported query passing a map parameter hits
-  it immediately. Absent keys yield `null`, as elsewhere.
-- Conformance suites for the official **JavaScript** and **Java** Neo4j
-  drivers (`tests/conformance/js`, `tests/conformance/java`), run in CI by the
-  new `bolt-driver-conformance` job. Each covers the same 22 checks — session
+  decision; other Cypher implementations accept it, and a ported query passing
+  a map parameter hits it immediately. Absent keys yield `null`, as elsewhere.
+- Conformance suites for the official **JavaScript** and **Java** Bolt drivers
+  (`neo4j-driver`, `neo4j-java-driver`) under `tests/conformance/`, run in CI by
+  the new `bolt-driver-conformance` job. Each covers the same 22 checks — session
   and explicit-transaction lifecycle, managed `executeWrite`, PackStream type
   round-trips, Node/Relationship/Path values, `Neo.*` error codes, OCC conflict
   detection, and the `LOAD CSV` capability refusal — and a source-level parity
   test fails if the two drift apart. Previously only the official Python driver
   was regression-tested; the other drivers "may connect", which nobody had
   checked.
+
+- The migration guide (`docs/python/migrations/neo4j-to-kglite.md`) now
+  documents three data-transfer routes rather than one — driver+pandas,
+  export-to-CSV plus `LOAD CSV` (the route for consumers with no pandas), and
+  pandas-in-between — with the four `LOAD CSV` behaviour differences a ported
+  import script will meet spelled out.
 
 - Cypher index DDL, in the Neo4j 5 grammar, so a schema-setup script ports
   unedited: `CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:Label) ON
@@ -96,8 +104,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - OCC commit conflicts over Bolt now report
-  `Neo.ClientError.Transaction.ConflictDetected`, the code this crate's README
-  and the Neo4j migration guide have always documented. They previously
+  `Neo.ClientError.Transaction.ConflictDetected`, the code the Bolt server's
+  README and the migration guide have always documented. They previously
   reported `Neo.ClientError.Transaction.TransactionStartFailed` — wrong twice
   over, since the transaction started fine — so a ported client branching on
   the status code (the normal way to write a retry loop) was misled. Writing

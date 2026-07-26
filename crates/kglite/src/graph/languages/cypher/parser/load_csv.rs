@@ -1,4 +1,4 @@
-//! Cypher parser: `LOAD CSV`, in the Neo4j grammar.
+//! Cypher parser: `LOAD CSV`, in the spelling other Cypher databases use.
 //!
 //! ```text
 //! LOAD CSV [WITH HEADERS] FROM <expression> AS <variable>
@@ -25,8 +25,8 @@
 //! mis-executed.
 //!
 //! **Syntax error vs unsupported feature.** Same rule as schema DDL: a ported
-//! Neo4j script must never see a syntax error for something KGLite read but
-//! cannot serve. `http://` and `https://` sources parse cleanly here and are
+//! script must never see a syntax error for something KGLite read but cannot
+//! serve. `http://` and `https://` sources parse cleanly here and are
 //! rejected at execute time with the network-free-design explanation — see
 //! `executor/load_csv.rs`.
 

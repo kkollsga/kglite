@@ -951,8 +951,8 @@ graph.cypher("UNWIND [1, 2, 3] AS x RETURN x, x * 2 AS doubled")
 
 ## LOAD CSV
 
-Read a delimited file and pipe its rows through the rest of the query — the
-Neo4j import idiom, so a ported load script runs unedited.
+Read a delimited file and pipe its rows through the rest of the query, in the
+spelling other Cypher databases use, so a ported load script runs unedited.
 
 ```
 LOAD CSV [WITH HEADERS] FROM <source> AS <variable> [FIELDTERMINATOR <sep>]
@@ -991,9 +991,8 @@ download and parse it in your own code and pass the rows in as a parameter.
 | `kglite-mcp-server` | **Denied** | none |
 
 Without this gate, any client that could open a Bolt connection could run
-`LOAD CSV FROM 'file:///etc/passwd'`. Neo4j gates the same capability with
-`server.directories.import` and
-`dbms.security.allow_csv_import_from_file_urls`.
+`LOAD CSV FROM 'file:///etc/passwd'`. Server-mode graph databases generally
+gate CSV import the same way — an allowed import directory, off by default.
 
 ### Memory: what streams and what does not
 
@@ -2213,4 +2212,4 @@ compatible subset.
 | Indexing | Three separate structures — hash equality, composite, B-tree range — plus automatic type indexes and vector indexes | One general `RANGE` index serving equality, range, and ordering | An equality index cannot serve a range predicate, so KGLite exposes the distinction that Neo4j collapses. `CREATE INDEX` / `DROP INDEX` / `SHOW INDEXES` are supported — see [Cypher index DDL](#cypher-index-ddl) for exactly what each statement builds |
 | Index names | Canonical and derived: `Label.property`, `Label.(a,b)` | User-assigned, unique | A name in `CREATE INDEX <name> …` is accepted for script portability but not stored; the persisted `.kgl` index state is a list of `(label, property)` keys |
 | Constraint DDL | Not supported — rejected with the enforcement route that applies | `CREATE CONSTRAINT … IS UNIQUE / IS NOT NULL` | Uniqueness is a load-time concern (primary keys, `MERGE`); presence and types are enforced by `lock_schema()` |
-| `LOAD CSV` source | Local files only — `file://` URLs and filesystem paths, gated by a per-caller capability | `file://` plus `http(s)://`, gated by `server.directories.import` | The engine ships no HTTP client (network dependencies were removed in 0.14.x), so there is nothing to fetch a URL with. Filesystem access is granted per caller: on for in-process use, off for Bolt clients unless the server was started with `--allow-csv-import <DIR>` |
+| `LOAD CSV` source | Local files only — `file://` URLs and filesystem paths, gated by a per-caller capability | `file://` plus `http(s)://`, gated by an import-directory setting | The engine ships no HTTP client (network dependencies were removed in 0.14.x), so there is nothing to fetch a URL with. Filesystem access is granted per caller: on for in-process use, off for Bolt clients unless the server was started with `--allow-csv-import <DIR>` |

@@ -79,10 +79,13 @@ with driver.session() as session:
 
 The query path is the *same* Cypher engine the Python API uses;
 differential tests confirm row-for-row equivalence
-(`tests/test_bolt_server_differential.py`). The Python driver is the
-only client with automated regression coverage — other drivers use
-the same Bolt v5 protocol and should work, but exercise them manually
-first.
+(`tests/test_bolt_server_differential.py`). The official **Python,
+JavaScript, and Java** drivers all have automated regression coverage in
+CI — session and explicit-transaction lifecycle, managed `executeWrite`
+retry, PackStream type round-trips, `Node`/`Relationship`/`Path` values,
+`Neo.*` error codes, and OCC conflict detection
+(`tests/conformance/`). Go and .NET use the same Bolt v5 protocol and
+should work, but are untested — exercise them yourself first.
 
 #### What carries over, and what does not
 
@@ -136,7 +139,11 @@ Note the parameter syntax difference: the driver takes `**kwargs`
 
 ## Getting data out of Neo4j into KGLite
 
-The practical recipe: query Neo4j with the driver, pull rows into a
+There are three routes; pick by what you already have.
+
+### Route 1 — query the source database directly, bulk-load via pandas
+
+Query the source database with the `neo4j` driver, pull rows into a
 pandas DataFrame, and bulk-load with `add_nodes` / `add_connections`.
 
 ```python
@@ -174,11 +181,70 @@ and supports a `column_types=` override for spatial/temporal columns;
 `add_connections` can take a Cypher `query=` instead of a DataFrame.
 See the [data-loading guide](../guides/data-loading.md).
 
-**Alternate route — APOC CSV export.** For large graphs, export from
-Neo4j with `apoc.export.csv.all('graph.csv', {})` (or per-label
-queries), then `pd.read_csv` → `add_nodes` / `add_connections`. KGLite
-has no `LOAD CSV` — by design, pandas/`csv` give you better control
-over typing and cleanup.
+### Route 2 — dump to CSV, then `LOAD CSV` (no pandas needed)
+
+KGLite runs `LOAD CSV`, so the standard export/import pair ports
+unedited. Export with APOC (`apoc.export.csv.all('graph.csv', {})`, or
+per-label queries for a clean node/edge split), then load with the same
+Cypher you already have:
+
+```python
+import kglite
+
+graph = kglite.KnowledgeGraph()
+
+# Nodes. Fields arrive as strings — CSV carries no types — so convert
+# explicitly, as the source script already does.
+graph.cypher(
+    "LOAD CSV WITH HEADERS FROM 'file:///export/people.csv' AS row "
+    "CREATE (:Person {id: toInteger(row.id), name: row.name})"
+)
+
+# Relationships, by endpoint id. Pattern properties take variables
+# rather than function calls, so convert in a WITH first.
+graph.cypher(
+    "LOAD CSV WITH HEADERS FROM 'file:///export/knows.csv' AS row "
+    "WITH toInteger(row.src) AS src, toInteger(row.dst) AS dst "
+    "MATCH (a:Person {id: src}), (b:Person {id: dst}) "
+    "CREATE (a)-[:KNOWS]->(b)"
+)
+
+graph.save("my-graph.kgl")
+```
+
+Prefer this route if you have no pandas (a Bolt client, a Rust or JVM
+consumer) or if you already have import scripts you would rather not
+rewrite. Four differences are worth knowing before you run it:
+
+| | KGLite | Neo4j |
+|---|---|---|
+| Sources | `file://` URLs and plain local paths | `file://` plus `http(s)://` |
+| Batching | Automatic — 1000 rows at a time for row-local pipelines, so file size does not drive memory | `CALL { … } IN TRANSACTIONS` (formerly `USING PERIODIC COMMIT`), which you declare |
+| Whole-result clauses | An aggregate, `ORDER BY`, `SKIP`/`LIMIT`, `DISTINCT`, `UNION`, or `CALL` after `LOAD CSV` cannot be batched, so the file is read in one capped pass and fails past 1,000,000 rows naming the clause responsible | Same memory characteristic, no explicit ceiling |
+| Position | Must be the first clause | Anywhere in the pipeline |
+
+`http(s)://` is rejected with a message rather than a syntax error: the
+engine carries no HTTP client at all (network dependencies were removed
+in 0.14.x), so there is nothing to fetch a URL with. Download the file
+first, or fetch it in your own code and pass the rows in as a
+parameter.
+
+**Over Bolt, `LOAD CSV` is off by default.** `file://` means the
+*server's* filesystem, and a Bolt client is a remote caller, so serving
+it ungated would publish an arbitrary-file-read primitive. In-process
+callers (this Python API, the Rust library, the CLI) are allowed because
+they already have the host process's filesystem access; a Bolt client
+gets nothing unless the server was started with `--allow-csv-import
+<DIR>`, which confines imports to `DIR` after symlink resolution — the
+same shape as the import-directory setting you will have configured on
+the server side already. See
+[CYPHER.md → LOAD CSV](https://github.com/kkollsga/kglite/blob/main/CYPHER.md#load-csv).
+
+### Route 3 — pandas between export and load
+
+Still the best fit when you want typing control, column renaming, or
+cleanup in between: `pd.read_csv` → `add_nodes` / `add_connections`,
+using the same calls as Route 1.
 
 ## Cypher dialect divergence
 
@@ -232,7 +298,7 @@ Verified absent against 0.10.14:
 | Pattern comprehensions `[(n)-->(m) \| m]` | Not supported | `MATCH`/`OPTIONAL MATCH` + `collect()` |
 | Quantified path patterns `((a)-->(b))+` | Not supported | Variable-length paths `-[:R*1..3]->` (supported) |
 | `allShortestPaths(...)` | Not supported | `shortestPath(...)` (supported) returns one path |
-| `LOAD CSV` | Not supported (by design) | pandas / `csv` → `add_nodes` |
+| `LOAD CSV` | Supported — `file://` and local paths, leading position only | `http(s)://` needs a prior download; off by default for Bolt clients (see above) |
 | `exists(n.prop)` (property existence) | Not supported | `WHERE n.prop IS NOT NULL` / `IS NULL` |
 | `exists((pattern))` in `RETURN` | Not supported as a `RETURN` expression | `EXISTS { pattern }` / inline pattern predicate in `WHERE` |
 | `CREATE TEXT / FULLTEXT / POINT / VECTOR / LOOKUP INDEX` | Not supported — rejected with the route that applies | `CONTAINS`/`STARTS WITH` need no text index; `create_vector_index(...)` for ranked retrieval; label lookup is automatic |
