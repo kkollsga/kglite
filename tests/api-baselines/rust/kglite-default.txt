@@ -2057,6 +2057,7 @@ pub fn kglite::api::DirGraph::copy_embeddings_from(&mut self, src: &kglite::api:
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::create_composite_index(&mut self, node_type: &str, properties: &[&str]) -> usize
 pub fn kglite::api::DirGraph::create_index(&mut self, node_type: &str, property: &str) -> usize
+pub fn kglite::api::DirGraph::create_property_index_routed(&mut self, node_type: &str, property: &str) -> core::result::Result<(usize, bool), alloc::string::String>
 pub fn kglite::api::DirGraph::create_range_index(&mut self, node_type: &str, property: &str) -> usize
 pub fn kglite::api::DirGraph::drop_composite_index(&mut self, node_type: &str, properties: &[alloc::string::String]) -> bool
 pub fn kglite::api::DirGraph::drop_index(&mut self, node_type: &str, property: &str) -> core::result::Result<bool, alloc::string::String>

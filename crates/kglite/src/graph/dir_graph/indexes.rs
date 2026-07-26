@@ -104,12 +104,11 @@ impl DirGraph {
     /// the OOM this method exists to avoid. The counterpart
     /// [`Self::drop_index`] already routes internally.
     ///
-    /// Crate-internal: the routing decision is an implementation detail of how
-    /// KGLite stores an index, not a contract a binding should have to know
-    /// about. External callers reach index creation through `CREATE INDEX`,
-    /// which routes here — so every binding gets the disk-safe path for free
-    /// and none can pick the wrong primitive.
-    pub(crate) fn create_property_index_routed(
+    /// Public deliberately, and it is the boundary principle that puts it here:
+    /// `kglite-py`'s `create_index` and the Cypher `CREATE INDEX` executor need
+    /// the identical backend decision, so it is exactly the shape that belongs
+    /// in `kglite::api` rather than being written twice per binding.
+    pub fn create_property_index_routed(
         &mut self,
         node_type: &str,
         property: &str,
