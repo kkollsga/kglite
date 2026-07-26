@@ -1536,6 +1536,7 @@ impl DirGraph {
         if primary == label {
             return false;
         }
+        let bucket_was_new = !self.secondary_label_index.contains_key(&label);
         let bucket = self.secondary_label_index.entry(label).or_default();
         if bucket.contains(&idx) {
             return false;
@@ -1548,6 +1549,7 @@ impl DirGraph {
             journal.note_bucket_appended(
                 crate::graph::storage::undo::BucketId::SecondaryLabel(label),
                 idx,
+                bucket_was_new,
             );
         }
         true

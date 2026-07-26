@@ -229,11 +229,9 @@ fn replay(graph: &mut DirGraph, journal: UndoJournal) {
 fn apply(graph: &mut DirGraph, entry: UndoEntry, stale_id_indices: &mut HashSet<String>) {
     match entry {
         UndoEntry::NodeAdded { idx, node_type } => {
-            let type_name = graph.interner.resolve(node_type).to_string();
-            graph
-                .type_indices
-                .retain_in_type(&type_name, |member| *member != idx);
-            stale_id_indices.insert(type_name);
+            // `type_indices` is reversed by the `BucketAppended` entry the
+            // create path recorded; only the id index needs invalidating here.
+            stale_id_indices.insert(graph.interner.resolve(node_type).to_string());
             // A node created by this statement can only carry edges this
             // statement created, and those replayed first (they were captured
             // later), so it is isolated by now.
@@ -280,14 +278,27 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, stale_id_indices: &mut HashSet<
             let restored = GraphWrite::add_edge(&mut graph.graph, src, tgt, prior);
             debug_assert_slot_reused(restored.index(), idx.index(), "edge");
         }
-        UndoEntry::BucketAppended { bucket, idx } => match bucket {
-            BucketId::NodeType(name) => graph
-                .type_indices
-                .retain_in_type(&name, |member| *member != idx),
+        UndoEntry::BucketAppended {
+            bucket,
+            idx,
+            bucket_was_new,
+        } => match bucket {
+            BucketId::NodeType(name) => {
+                graph
+                    .type_indices
+                    .retain_in_type(&name, |member| *member != idx);
+                // Only drop the bucket if this statement introduced it: an
+                // empty bucket can legitimately pre-exist (a type whose nodes
+                // were all deleted earlier), and dropping that would be its
+                // own kind of drift.
+                if bucket_was_new {
+                    graph.type_indices.remove(&name);
+                }
+            }
             BucketId::SecondaryLabel(label) => {
                 if let Some(members) = graph.secondary_label_index.get_mut(&label) {
                     members.retain(|member| *member != idx);
-                    if members.is_empty() {
+                    if bucket_was_new || members.is_empty() {
                         graph.secondary_label_index.remove(&label);
                     }
                 }

@@ -101,8 +101,15 @@ pub enum UndoEntry {
         tgt: NodeIndex,
         prior: EdgeData,
     },
-    /// `idx` was appended to an inverted-index bucket. Undo removes it.
-    BucketAppended { bucket: BucketId, idx: NodeIndex },
+    /// `idx` was appended to an inverted-index bucket. Undo removes it — and
+    /// removes the bucket itself when `bucket_was_new`, because an
+    /// emptied-but-present bucket is still observable (a zero-count type in
+    /// `describe()`).
+    BucketAppended {
+        bucket: BucketId,
+        idx: NodeIndex,
+        bucket_was_new: bool,
+    },
     /// `idx` was removed from position `pos` of a bucket. Undo re-inserts it
     /// there.
     BucketRemoved {
@@ -213,10 +220,15 @@ impl UndoJournal {
 
     // ── DirGraph-seam capture ───────────────────────────────────────────
 
-    /// `idx` was appended to `bucket`.
+    /// `idx` was appended to `bucket`. `bucket_was_new` records whether the
+    /// bucket itself came into existence with this append.
     #[inline]
-    pub fn note_bucket_appended(&mut self, bucket: BucketId, idx: NodeIndex) {
-        self.entries.push(UndoEntry::BucketAppended { bucket, idx });
+    pub fn note_bucket_appended(&mut self, bucket: BucketId, idx: NodeIndex, bucket_was_new: bool) {
+        self.entries.push(UndoEntry::BucketAppended {
+            bucket,
+            idx,
+            bucket_was_new,
+        });
     }
 
     /// `idx` was removed from position `pos` of `bucket`.

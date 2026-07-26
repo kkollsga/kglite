@@ -724,11 +724,22 @@ fn create_node(
     // per-clause disk read-side sync happens once in execute_create, not here.
     let node_idx = graph.insert_node_routed(id, title, &label, properties);
 
-    // Update type_indices
+    // Update type_indices. `bucket_was_new` feeds statement rollback: undoing
+    // the append is not enough if this CREATE also *introduced* the type —
+    // an emptied-but-present bucket still shows up in `describe()` as a
+    // zero-count type.
+    let bucket_was_new = !graph.type_indices.contains_key(&label);
     graph
         .type_indices
         .entry_or_default(label.clone())
         .push(node_idx);
+    if let Some(journal) = graph.graph.undo_journal_mut() {
+        journal.note_bucket_appended(
+            crate::graph::storage::undo::BucketId::NodeType(label.clone()),
+            node_idx,
+            bucket_was_new,
+        );
+    }
 
     // Keep the id-index consistent. A declared-PK type maintains it
     // incrementally — the readonly probe above already built it, so a
