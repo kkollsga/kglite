@@ -142,7 +142,7 @@ def run_benchmarks():
     print("Spatial Cypher Performance Benchmarks")
     print("=" * 80)
 
-    # ── Small graph: 50 areas × 100 cities ─────────────────────────────
+    # -- Small graph: 50 areas × 100 cities -----------------------------
     g_small = build_graph(50, 100)
     print("\n--- Small graph: 50 areas, 100 cities ---")
     print("    (cross products: contains 5K, intersects 2.5K, distance 10K)")
@@ -218,7 +218,7 @@ def run_benchmarks():
           """).to_list(),
     )
 
-    # ── Medium graph: 200 areas × 500 cities ──────────────────────────
+    # -- Medium graph: 200 areas × 500 cities --------------------------
     g_med = build_graph(200, 500)
     print("\n--- Medium graph: 200 areas, 500 cities ---")
     print("    (cross products: contains 100K, intersects 40K, distance 250K)")
@@ -268,7 +268,7 @@ def run_benchmarks():
           """).to_list(),
     )
 
-    # ── Large graph: 500 areas × 1000 cities ──────────────────────────
+    # -- Large graph: 500 areas × 1000 cities --------------------------
     g_large = build_graph(500, 1000)
     print("\n--- Large graph: 500 areas, 1000 cities ---")
     print("    (cross products: contains 500K, intersects 250K, distance 1M)")
@@ -301,10 +301,10 @@ def run_benchmarks():
           """).to_list(),
     )
 
-    # ── Prospect workload shape: 263 polygons × 10K points, complex geom ─
+    # -- Prospect workload shape: 263 polygons × 10K points, complex geom -
     # Mirrors Sodir petroleum build: StructuralElement × Wellbore containment.
     g_prospect = build_graph(263, 10_000, complex_geom=True)
-    print("\n--- Prospect shape: 263 complex areas × 10K cities (≈2.6M pairs) ---")
+    print("\n--- Prospect shape: 263 complex areas × 10K cities (~2.6M pairs) ---")
 
     bench(
         "contains prospect_shape — 2.6M pairs",
@@ -315,7 +315,7 @@ def run_benchmarks():
           """).to_list(),
     )
 
-    # ── Geometry complexity scaling ───────────────────────────────────
+    # -- Geometry complexity scaling -----------------------------------
     print("\n--- Geometry complexity: simple (5 vertices) vs complex (50 vertices) ---")
     g_simple = build_graph(200, 500, complex_geom=False)
     g_complex = build_graph(200, 500, complex_geom=True)
@@ -352,7 +352,7 @@ def run_benchmarks():
           """).to_list(),
     )
 
-    # ── WKT cache effectiveness ───────────────────────────────────────
+    # -- WKT cache effectiveness ---------------------------------------
     print("\n--- WKT cache effectiveness ---")
     g_fresh = build_graph(500, 0)
 
@@ -374,7 +374,7 @@ def run_benchmarks():
           """).to_list(),
     )
 
-    # ── Centroid fallback path (geometry-only, no location config) ────
+    # -- Centroid fallback path (geometry-only, no location config) ----
     print("\n--- Centroid fallback path (geometry-only config) ---")
     g_geom = build_geom_only_graph(200)
     # Warm the WKT cache

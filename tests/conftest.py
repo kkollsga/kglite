@@ -62,6 +62,15 @@ def workspace_binary(name: str) -> Path:
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
+#: For tests that specifically need *peak* RSS. `resource.getrusage` is the
+#: only source of it, and there is no `resource` module on Windows. Prefer
+#: `rss_mb()` (portable, current RSS) unless the peak is the point.
+requires_getrusage = pytest.mark.skipif(
+    importlib.util.find_spec("resource") is None,
+    reason="peak-RSS measurement needs resource.getrusage, which is POSIX-only",
+)
+
+
 def rss_mb() -> float:
     """Current resident set size of this process, in MB.
 

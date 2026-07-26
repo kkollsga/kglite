@@ -55,7 +55,7 @@ def fmt_mb(mb):
 
 
 def section(title):
-    print(f"\n{'─' * 68}\n  {title}\n{'─' * 68}")
+    print(f"\n{'-' * 68}\n  {title}\n{'-' * 68}")
 
 
 def dir_size_mb(path):
@@ -69,13 +69,13 @@ def dir_size_mb(path):
     return total / (1024 * 1024)
 
 
-# ── Synthetic graph parameters ───────────────────────────────────────────────
+# -- Synthetic graph parameters -----------------------------------------------
 
 # Per-node budget in memory mode (measured empirically on a similar shape):
 #   id(u64) + title(~40 char) + 3×int64 + category(~20 char) + description(~400 char)
-#   plus HashMap overhead ≈ ~700 B / node
-# Plus ~3 edges/node × ~100 B ≈ 300 B
-# ⇒ ~1 KB per node → 1M nodes ≈ 1 GB memory-equivalent.
+#   plus HashMap overhead ~ ~700 B / node
+# Plus ~3 edges/node × ~100 B ~ 300 B
+# ⇒ ~1 KB per node -> 1M nodes ~ 1 GB memory-equivalent.
 BYTES_PER_NODE_MEMORY_EST = 1024
 EDGES_PER_NODE = 3
 BATCH_SIZE = 50_000
@@ -151,7 +151,7 @@ def _make_edges(src_range, tgt_range, count, prop_offset=0):
     )
 
 
-# ── Build ────────────────────────────────────────────────────────────────────
+# -- Build --------------------------------------------------------------------
 
 
 def _resolve_scale(target_gb):
@@ -253,7 +253,7 @@ def build_graph(target_gb, mode, path=None):
         elapsed = time.perf_counter() - t0
         total_edges += n_edges
         print(
-            f"  {etype:10s}: {n_edges:>10,} {src_type}→{tgt_type} in {fmt_time(elapsed):>10s}  RSS={fmt_mb(rss_mb())}"
+            f"  {etype:10s}: {n_edges:>10,} {src_type}->{tgt_type} in {fmt_time(elapsed):>10s}  RSS={fmt_mb(rss_mb())}"
         )
 
     total_time = time.perf_counter() - t_start
@@ -274,7 +274,7 @@ def build_graph(target_gb, mode, path=None):
     return kg, stats
 
 
-# ── Queries ──────────────────────────────────────────────────────────────────
+# -- Queries ------------------------------------------------------------------
 
 
 def run_queries(kg, label, total_nodes):
@@ -328,7 +328,7 @@ def run_queries(kg, label, total_nodes):
     return timings
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# -- Main ---------------------------------------------------------------------
 
 
 def main():

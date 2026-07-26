@@ -54,7 +54,7 @@ def main() -> int:
         try:
             stats = kglite.graphgen(args.scale, seed=1234, out=staged)
             print(
-                f"[dataset] kglite.graphgen({args.scale!r}) → {stats['nodes']:,} nodes / {stats['edges']:,} edges\n",
+                f"[dataset] kglite.graphgen({args.scale!r}) -> {stats['nodes']:,} nodes / {stats['edges']:,} edges\n",
                 flush=True,
             )
             cmd = [

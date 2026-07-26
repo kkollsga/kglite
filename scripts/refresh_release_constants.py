@@ -151,7 +151,7 @@ def refresh_kgl_golden(version: str, new_digest: str) -> tuple[bool, str]:
     )
 
     PHASE4_TEST.write_text(text, encoding="utf-8", newline="\n")
-    return True, f"GOLDEN_V3_DIGEST → {new_digest[:12]}… (prior {cur_digest[:12]}… demoted to ACCEPTABLE_DIGESTS)"
+    return True, f"GOLDEN_V3_DIGEST -> {new_digest[:12]}… (prior {cur_digest[:12]}… demoted to ACCEPTABLE_DIGESTS)"
 
 
 # ── 2. Binary-size baseline ────────────────────────────────────────────
@@ -206,7 +206,7 @@ def refresh_binary_size(version: str, current_size: int) -> tuple[bool, str]:
     )
 
     PHASE5_TEST.write_text(text, encoding="utf-8", newline="\n")
-    return True, f"binary-size baseline {cur_baseline:,} → {current_size:,} bytes"
+    return True, f"binary-size baseline {cur_baseline:,} -> {current_size:,} bytes"
 
 
 # ── 3. Perf baseline ───────────────────────────────────────────────────

@@ -32,7 +32,6 @@ Run: pytest -m parity tests/test_phase4_parity.py
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 from pathlib import Path
 import random
 import sys
@@ -43,6 +42,7 @@ import pytest
 
 import kglite
 from kglite import KnowledgeGraph
+from tests.conftest import requires_getrusage
 
 pytestmark = pytest.mark.parity
 
@@ -488,14 +488,8 @@ def test_save_incremental_v0_7_6(tmp_path: Path):
 # This ceiling needs *peak* RSS, which only `getrusage` reports, so it cannot
 # use the portable psutil helper in conftest (that one reports current RSS and
 # would miss a spike that is freed before the measurement). `resource` does not
-# exist on Windows; gate the one test rather than the whole module, so the
-# digest and round-trip parity checks still collect there.
-requires_getrusage = pytest.mark.skipif(
-    importlib.util.find_spec("resource") is None,
-    reason="peak-RSS measurement needs resource.getrusage, which is POSIX-only",
-)
-
-
+# exist on Windows; `requires_getrusage` gates the one test rather than the
+# whole module, so the digest and round-trip parity checks still collect there.
 def _rss_mb() -> float:
     # ru_maxrss is bytes on macOS (darwin), KB on Linux. The previous
     # threshold-based detection returned 1000× too-large readings for

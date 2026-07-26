@@ -54,13 +54,19 @@ pub struct CypherParser {
 /// Maximum expression/predicate AST nesting depth accepted by the parser.
 ///
 /// The recursive-descent expression parser, the planner's expression walkers,
-/// and the executor's `evaluate_expression` all recurse once per nesting
-/// level, so this budget bounds stack use across the whole pipeline (parse →
-/// plan → execute → drop). 512 levels is far beyond any legitimate query.
-/// Debug-profile frames are several times larger than release frames — deep
-/// nesting within this budget can exhaust a default thread stack before the
-/// guard fires — so [`CypherParser::descend`] also grows the stack on demand
-/// via `stacker`.
+/// the executor's `evaluate_expression` and the AST's `Drop` all recurse once
+/// per nesting level, so this budget bounds the *depth* every one of them
+/// walks. 512 levels is far beyond any legitimate query.
+///
+/// It does not, however, bound their *stack use* equally. Only
+/// [`CypherParser::descend`] grows the stack on demand (via `stacker`); the
+/// planner, executor and `Drop` walkers recurse on whatever stack their
+/// thread already has. Debug-profile frames are several times larger than
+/// release frames, so the guarantee those stages actually carry is "at most
+/// 512 levels", not "cannot overflow" — a thread with a small stack (Windows
+/// defaults to 1 MB) has not been measured against a 512-level AST. Extending
+/// the `stacker` guard past the parser is deliberately deferred until that
+/// measurement exists.
 ///
 /// The budget bounds **AST depth, not parser call depth**, and those differ:
 /// the left-associative operator chains (`OR`/`XOR`/`AND`, `+`/`-`/`||`,
@@ -70,14 +76,16 @@ pub struct CypherParser {
 /// inside a [`CypherParser::chain`] scope; recursive nesting is charged by
 /// [`CypherParser::descend`]. Charging both is what makes the budget an
 /// actual bound on what the downstream walkers recurse through — the
-/// walkers themselves have no guard, and they run on server worker threads
-/// whose stacks are far smaller than the main thread's.
+/// walkers themselves have neither a depth guard nor stack growth, and they
+/// run on server worker threads whose stacks are far smaller than the main
+/// thread's.
 const MAX_EXPRESSION_DEPTH: usize = 512;
 
 /// Remaining-stack threshold below which [`CypherParser::descend`] allocates
 /// a fresh segment, and the size of that segment. The red zone must cover the
-/// deepest frame chain one nesting level can add across parse/plan/execute
-/// walkers (~10 frames in debug).
+/// deepest frame chain one nesting level can add *while parsing* (~10 frames
+/// in debug); the plan/execute/drop walkers are not covered, since
+/// `maybe_grow` is only called from the parser.
 const STACK_RED_ZONE: usize = 128 * 1024;
 const STACK_GROW_SIZE: usize = 4 * 1024 * 1024;
 

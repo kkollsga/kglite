@@ -77,7 +77,7 @@ def read_csv(path: Path) -> list[dict]:
         return list(csv.DictReader(f))
 
 
-# ── PDF rendering (dark mode) ────────────────────────────────────────────────
+# -- PDF rendering (dark mode) ------------------------------------------------
 
 
 def _set_split_ylim(ax_primary, ax_secondary, primary_vals, secondary_vals) -> None:
@@ -109,7 +109,7 @@ def _plot_timeseries(ax, data: dict, total_key: str, label: str) -> None:
     ax2.tick_params(axis="y", labelcolor="#FFB74D")
     _set_split_ylim(ax, ax2, uniq, total)
     ax.set_title(
-        f"{label}: {sum(total)} total / {sum(uniq)} unique  ({xs[0]:%Y-%m-%d} → {xs[-1]:%Y-%m-%d})",
+        f"{label}: {sum(total)} total / {sum(uniq)} unique  ({xs[0]:%Y-%m-%d} -> {xs[-1]:%Y-%m-%d})",
         fontsize=10,
     )
     ax.legend(handles=[l_uniq, l_total], fontsize=8, loc="upper left")
@@ -261,7 +261,7 @@ def main() -> None:
         append_snapshot(out / "paths.csv", path_rows, ["captured", "path", "title", "count", "unique"])
 
     render_pdf(out, args.repo, views, clones)
-    print(f"OK: views={len(views)}d clones={len(clones)}d referrers={len(ref_rows)} paths={len(path_rows)} → {out}/")
+    print(f"OK: views={len(views)}d clones={len(clones)}d referrers={len(ref_rows)} paths={len(path_rows)} -> {out}/")
 
 
 if __name__ == "__main__":

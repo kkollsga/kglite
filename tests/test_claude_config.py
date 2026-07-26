@@ -20,6 +20,10 @@ from kglite import claude_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+#: A bare interpreter name that `shutil.which` can resolve here.
+#: Windows ships `python.exe` and has no `python3`.
+_PYTHON = "python" if sys.platform == "win32" else "python3"
+
 
 def shutil_which_required(binary: str) -> str:
     """Like ``shutil.which`` but skip the test if the binary is unavailable."""
@@ -45,7 +49,10 @@ def test_default_path_macos(monkeypatch):
     monkeypatch.setattr("sys.platform", "darwin")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path("/home/u")))
     p = claude_config.default_path("claude_desktop")
-    assert str(p) == "/home/u/Library/Application Support/Claude/claude_desktop_config.json"
+    # as_posix(), not str(): on Windows the same Path stringifies with
+    # backslashes, so a literal POSIX comparison fails on the platform whose
+    # branch this test exists to pin down.
+    assert p.as_posix() == "/home/u/Library/Application Support/Claude/claude_desktop_config.json"
 
 
 def test_default_path_claude_code():
@@ -181,17 +188,17 @@ def test_add_mcp_resolves_bare_command_to_absolute_path(tmp_path):
     """A bare binary name gets stored as its absolute path so Claude Desktop's
     minimal-PATH subprocess env can find it."""
     p = tmp_path / "cfg.json"
-    claude_config.add_mcp("srv", "python3", path=p)
+    claude_config.add_mcp("srv", _PYTHON, path=p)
     cmd = _read(p)["mcpServers"]["srv"]["command"]
     assert Path(cmd).is_absolute(), f"expected absolute path, got {cmd!r}"
-    assert Path(cmd).name in {"python3", "python3.exe"}
+    assert Path(cmd).name in {_PYTHON, _PYTHON + ".exe"}
 
 
 def test_add_mcp_resolve_command_false_preserves_literal(tmp_path):
     """Opt-out for Docker shims, wrapper scripts, or commands with embedded args."""
     p = tmp_path / "cfg.json"
-    claude_config.add_mcp("srv", "python3", resolve_command=False, path=p)
-    assert _read(p)["mcpServers"]["srv"]["command"] == "python3"
+    claude_config.add_mcp("srv", _PYTHON, resolve_command=False, path=p)
+    assert _read(p)["mcpServers"]["srv"]["command"] == _PYTHON
 
 
 def test_add_mcp_unresolvable_command_passes_through(tmp_path):
@@ -204,7 +211,7 @@ def test_add_mcp_unresolvable_command_passes_through(tmp_path):
 def test_add_mcp_absolute_path_preserved(tmp_path):
     """An already-absolute path that exists should round-trip unchanged."""
     p = tmp_path / "cfg.json"
-    abs_python = shutil_which_required("python3")
+    abs_python = shutil_which_required(_PYTHON)
     claude_config.add_mcp("srv", abs_python, path=p)
     assert _read(p)["mcpServers"]["srv"]["command"] == abs_python
 
@@ -212,15 +219,15 @@ def test_add_mcp_absolute_path_preserved(tmp_path):
 def test_edit_mcp_resolves_command_too(tmp_path):
     p = tmp_path / "cfg.json"
     claude_config.add_mcp("srv", "/literal/path", resolve_command=False, path=p)
-    claude_config.edit_mcp("srv", command="python3", path=p)
+    claude_config.edit_mcp("srv", command=_PYTHON, path=p)
     cmd = _read(p)["mcpServers"]["srv"]["command"]
     assert Path(cmd).is_absolute()
-    assert Path(cmd).name in {"python3", "python3.exe"}
+    assert Path(cmd).name in {_PYTHON, _PYTHON + ".exe"}
 
 
 def test_edit_mcp_resolve_command_false(tmp_path):
     p = tmp_path / "cfg.json"
-    claude_config.add_mcp("srv", "python3", path=p)
+    claude_config.add_mcp("srv", _PYTHON, path=p)
     claude_config.edit_mcp("srv", command="my-shim", resolve_command=False, path=p)
     assert _read(p)["mcpServers"]["srv"]["command"] == "my-shim"
 
