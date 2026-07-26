@@ -31,8 +31,6 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::sync::Arc;
-
 use pyo3::prelude::*;
 mod datatypes;
 mod error_py;
@@ -429,7 +427,7 @@ fn _run_mcp_server(
     // boot, if the manifest declares a Python embedder library. The argument is
     // the `extensions.embedder` config as JSON, so Python owns library choice.
     let factory: Option<kglite_mcp_server::PyEmbedderFactory> = embedder_factory.map(|f| {
-        Box::new(move |config_json: &str| -> Result<Arc<dyn kglite_core::api::Embedder>, String> {
+        Box::new(move |config_json: &str| -> Result<std::sync::Arc<dyn kglite_core::api::Embedder>, String> {
             Python::attach(|py| {
                 let instance = f
                     .call1(py, (config_json,))
@@ -438,7 +436,7 @@ fn _run_mcp_server(
                     .map_err(|e| {
                         format!("embedder factory returned an object missing the EmbeddingModel protocol (need `dimension` + `embed`): {e}")
                     })?;
-                Ok(Arc::new(adapter) as Arc<dyn kglite_core::api::Embedder>)
+                Ok(std::sync::Arc::new(adapter) as std::sync::Arc<dyn kglite_core::api::Embedder>)
             })
         }) as kglite_mcp_server::PyEmbedderFactory
     });

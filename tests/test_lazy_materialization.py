@@ -56,3 +56,61 @@ def test_lazy_resultview_access_forms(graph):
         {"name": "Bob", "age": 25},
     ]
     assert "Alice" in repr(lazy(graph))
+
+
+@pytest.fixture(params=(8, 8192), ids=("under-eager-threshold", "over-eager-threshold"))
+def sized_graph(request):
+    """A memory graph straddling EAGER_MATERIALISE_MAX_CELLS.
+
+    The budget is rows x columns, and the query below returns two columns, so
+    8 rows (16 cells) is under and 8192 rows is far over. Small lazy-eligible
+    results are materialised at construction and drop the graph reference;
+    large ones stay deferred. The two paths must be indistinguishable through
+    the public API — this fixture is what makes the boundary testable from
+    Python at all, since the difference is otherwise only observable as a
+    whole-graph copy.
+    """
+    count = request.param
+    graph = kglite.KnowledgeGraph()
+    graph.add_nodes(
+        pd.DataFrame(
+            {
+                "id": list(range(count)),
+                "title": [f"P{i}" for i in range(count)],
+                "age": [i % 90 for i in range(count)],
+            }
+        ),
+        "Person",
+        "id",
+        "title",
+        columns=["age"],
+    )
+    return graph, count
+
+
+def test_streaming_matches_eager_across_the_threshold(sized_graph):
+    """Deferred and up-front materialisation agree on both sides of the cutoff."""
+    graph, count = sized_graph
+    query = "MATCH (n:Person) RETURN n.title AS name, n.age AS age"
+    streamed = graph.cypher(query, streaming=True)
+    eager = graph.cypher(query, streaming=False)
+    assert len(streamed) == count
+    assert streamed.to_dicts() == eager.to_dicts()
+
+
+def test_streaming_result_survives_an_intervening_write(sized_graph):
+    """A held result keeps its pre-write rows whether or not it was deferred.
+
+    Below the threshold the rows are already materialised; above it the view
+    still holds the graph it was built from and the write copies-on-write.
+    Either way the caller sees the data as of query time — the guarantee that
+    lets the eager path drop the graph reference without changing semantics.
+    """
+    graph, count = sized_graph
+    query = "MATCH (n:Person) RETURN n.title AS name, n.age AS age"
+    held = graph.cypher(query, streaming=True)
+    graph.cypher("MATCH (n:Person) SET n.age = 999")
+    rows = held.to_dicts()
+    assert len(rows) == count
+    assert all(row["age"] != 999 for row in rows)
+    assert graph.cypher("MATCH (n:Person) RETURN DISTINCT n.age AS age").to_dicts() == [{"age": 999}]

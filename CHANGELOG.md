@@ -518,6 +518,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   This was never caught because no CI job ran the engine's test suite on
   Windows, even though Windows wheels are published. The native-lifecycle job
   now runs it.
+- Holding a deferred query result in a variable no longer makes the next write
+  copy the whole graph. A deferred (`streaming`) result keeps a reference to the
+  graph so it can serve rows later, and that reference made the next write
+  through the same `KnowledgeGraph` deep-clone every node, edge, index and
+  embedding — a cost that grows with graph size rather than with the work done,
+  so it is invisible on a small test fixture and severe on a large one.
+
+  The reach is narrower than it first looks, and worth stating precisely: only
+  results that are *deferred* hold the graph, and deferral requires a query of
+  just `MATCH`/`OPTIONAL MATCH`/`RETURN`/`SKIP`/`LIMIT` returning bare property
+  accesses. Anything with `WHERE`, `ORDER BY`, `DISTINCT`, `WITH`, `UNWIND`, an
+  aggregate, a whole-node `RETURN n`, or a computed value was already eager and
+  never pinned anything. So the shape that paid was a read-modify-write handler
+  whose read is an inline-filtered point lookup or unfiltered projection —
+  `rows = graph.cypher("MATCH (u:User {id: 1}) RETURN u.name, u.balance")`
+  followed by a write with `rows` still in scope. That query is common, but the
+  `WHERE`-spelled equivalent of it never had the problem.
+
+  Very small results — a budget of `rows × columns`, so a single-entity lookup
+  or a handful of rows — are now converted up front and hold no graph
+  reference, so that shape costs nothing extra. The budget is deliberately
+  small: every deferred-eligible query pays the conversion, while only a result
+  held across a write benefits, so the cost to readers has to stay inside noise
+  before the saving counts. Larger results still defer and still hold the graph;
+  `ResultView`'s documentation explains when that matters and how to avoid it.
+  Behaviour is unchanged: a held result has always shown the data as of query
+  time, and still does.
+
+  Consumers gain a little either way — materialising a result in one batched
+  pass is 12–15% faster than resolving it row by row, at every size measured.
+
+- `KnowledgeGraph.begin()` documented that embeddings are excluded from the
+  transaction snapshot's copy. They are not — embeddings, indexes and timeseries
+  are part of the graph and are copied with it, so the note understated the cost
+  of opening a transaction on an embedding-heavy graph. Corrected.
+
 - `claude_config` now reads and writes Claude MCP config files as UTF-8. On a
   non-UTF-8 Windows codepage the read mis-decoded the file and the atomic write
   committed the damage over every unrelated MCP server entry; non-ASCII text in
