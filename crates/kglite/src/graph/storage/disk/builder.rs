@@ -429,9 +429,11 @@ impl DiskGraph {
                     }
                 }
 
-                // Cleanup sort chunks
+                // Cleanup sort chunks. Dropping the mappings first is load
+                // bearing on Windows, which will not delete a mapped file;
+                // the removal is checked so a regression is loud.
                 drop(chunk_mmaps);
-                let _ = std::fs::remove_dir_all(&sort_dir);
+                super::remove_scratch_dir(&sort_dir)?;
 
                 if verbose {
                     eprintln!("      in merge: {:.1}s", substep.elapsed().as_secs_f64());
@@ -611,6 +613,16 @@ impl DiskGraph {
         node_bound: usize,
         verbose: bool,
     ) -> io::Result<()> {
+        // `write_conn_type_index` re-creates `conn_type_index_*.bin` in place,
+        // and these three fields still map exactly those paths from the
+        // previous build. Windows refuses to truncate or re-create a file that
+        // has a live mapped view (`ERROR_USER_MAPPED_FILE`); POSIX allows it,
+        // which is why this ordering bug stayed invisible. Release the
+        // mappings first and re-adopt the writer's below — the same discipline
+        // `swap_csr_files` and `save_logical_node_slots` already follow.
+        self.conn_type_index_types = MmapOrVec::new();
+        self.conn_type_index_offsets = MmapOrVec::new();
+        self.conn_type_index_sources = MmapOrVec::new();
         let (types, offsets, sources) = write_conn_type_index(
             &self.out_offsets,
             &self.out_edges,
@@ -647,6 +659,15 @@ impl DiskGraph {
         if total == 0 {
             return Ok(());
         }
+        // Same in-place-rewrite hazard as `build_conn_type_index`:
+        // `write_peer_count_histogram` re-creates `peer_count_*.bin` via
+        // `fs::write`, and these fields still map those paths. Drop the
+        // mappings before the writer runs — Windows cannot re-create a
+        // mapped file — and re-adopt the fresh ones below. This must happen
+        // before `endpoints` borrows `self`.
+        self.peer_count_types = MmapOrVec::new();
+        self.peer_count_offsets = MmapOrVec::new();
+        self.peer_count_entries = MmapOrVec::new();
         let logical_endpoints;
         let endpoints = if self.appended_edge_endpoints.is_empty() && self.removed_edges.is_empty()
         {
