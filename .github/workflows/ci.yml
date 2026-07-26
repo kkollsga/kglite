@@ -663,6 +663,16 @@ jobs:
         run: cargo test -p kglite --lib graph::io::open::tests::crashed_process_releases_writer_lease -- --exact --nocapture
       - name: Test core lease-protected publication
         run: cargo test -p kglite --lib graph::io::open::tests::writer_lease_serializes_open_create_and_publish -- --exact
+      # The two steps above already compile the whole kglite lib test binary,
+      # so running the rest of it is close to free — and these are the only
+      # runners where the engine is exercised on Windows at all (no Windows
+      # job runs pytest, yet Windows wheels ship). It is also the only place
+      # the stack-depth bound gets checked against non-Linux frame sizes:
+      # stack_probe::budget_ceiling_query_fits_the_query_thread_stack walks
+      # the deepest AST the parser accepts, and a platform whose frames are
+      # much larger would overflow here instead of in a user's process.
+      - name: Test core lib suite
+        run: cargo test -p kglite --lib
       - name: Test CLI lifecycle unit suite
         run: cargo test -p kglite-cli
 
