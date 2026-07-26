@@ -938,6 +938,16 @@ fn write_type_detail(
                     };
                     attrs.push_str(&format!(" indexed=\"{}\"", kind));
                 }
+                // Declared constraints, so an agent knows a write will be
+                // rejected *before* attempting it. `SHOW CONSTRAINTS` gives the
+                // full picture including composite tuples; this annotation
+                // covers the single-property case, which is where a write is
+                // most often planned.
+                if let Some(constraint) =
+                    describe_property_constraint(graph, node_type, &prop.property_name)
+                {
+                    attrs.push_str(&format!(" constraint=\"{constraint}\""));
+                }
                 if let Some(ref vals) = prop.values {
                     if !vals.is_empty() {
                         let val_strs: Vec<String> = vals
@@ -2041,5 +2051,27 @@ mod mcp_quickstart_tests {
                 "retired contract returned: {retired:?}"
             );
         }
+    }
+}
+
+/// The declared constraint on a single property, for the `describe()` annotation:
+/// `node_key` when it is both unique and required, else `unique` or `not_null`,
+/// and `None` when the property is unconstrained.
+///
+/// Single-property only. A composite tuple constrains the *combination*, so
+/// tagging its members individually would overstate what is enforced — `SHOW
+/// CONSTRAINTS` reports those in full.
+fn describe_property_constraint(
+    graph: &DirGraph,
+    node_type: &str,
+    property: &str,
+) -> Option<&'static str> {
+    let unique = graph.has_unique_constraint(node_type, &[property.to_string()]);
+    let required = graph.has_not_null_constraint(node_type, property);
+    match (unique, required) {
+        (true, true) => Some("node_key"),
+        (true, false) => Some("unique"),
+        (false, true) => Some("not_null"),
+        (false, false) => None,
     }
 }

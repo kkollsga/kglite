@@ -236,7 +236,8 @@ Verified absent against 0.10.14:
 | `exists(n.prop)` (property existence) | Not supported | `WHERE n.prop IS NOT NULL` / `IS NULL` |
 | `exists((pattern))` in `RETURN` | Not supported as a `RETURN` expression | `EXISTS { pattern }` / inline pattern predicate in `WHERE` |
 | `CREATE TEXT / FULLTEXT / POINT / VECTOR / LOOKUP INDEX` | Not supported — rejected with the route that applies | `CONTAINS`/`STARTS WITH` need no text index; `create_vector_index(...)` for ranked retrieval; label lookup is automatic |
-| `CREATE CONSTRAINT ... IS UNIQUE / IS NOT NULL` | Parses, then rejected with the enforcement route | Node-type primary keys + `MERGE` for uniqueness; `lock_schema()` for presence and types |
+| `CREATE CONSTRAINT ... IS :: TYPE` / `IS TYPED TYPE` | Parses, then rejected — there is no write-time property-type constraint, so accepting it would report success while enforcing nothing | `lock_schema()` rejects writes disagreeing with the recorded property type; `validate_schema()` audits existing data. (`IS UNIQUE` / `IS NOT NULL` / `IS NODE KEY` **are** supported — see below) |
+| `CREATE CONSTRAINT ... FOR ()-[r:T]-() ...` | Not supported | KGLite constrains node properties only |
 
 ### Constructs that DO work (worth confirming)
 
@@ -329,7 +330,8 @@ Every `cypher()` call also attaches lightweight `result.diagnostics`
 | Backup | `neo4j-admin dump` / online backup | Copy the `.kgl` file (or `save_subset(path)` for a slice) |
 | Concurrency | Server-managed sessions, ACID | Reads parallelize (GIL released via `py.detach()`); mutations serialize via copy-on-write; OCC on transactions |
 | Cross-process access | Native (server) | Embedded — use the Bolt server as the coordination point for multi-process |
-| Schema DDL | `CREATE INDEX` / `CREATE CONSTRAINT` Cypher | Index DDL is supported — `CREATE [RANGE] INDEX`, `DROP INDEX`, `SHOW INDEXES`. What each statement builds differs from Neo4j (KGLite has separate equality, composite, and range structures) and index names are canonical, not user-assigned: see [CYPHER.md → Cypher index DDL](https://github.com/kkollsga/kglite/blob/main/CYPHER.md#cypher-index-ddl). The equivalent APIs remain — `create_index(type, prop)`, `create_range_index(...)`, `list_indexes()`, `drop_index(...)`. Type indices are automatic. Constraint DDL is not supported. |
+| Schema DDL | `CREATE INDEX` / `CREATE CONSTRAINT` Cypher | Index DDL is supported — `CREATE [RANGE] INDEX`, `DROP INDEX`, `SHOW INDEXES`. What each statement builds differs from Neo4j (KGLite has separate equality, composite, and range structures) and index names are canonical, not user-assigned: see [CYPHER.md → Cypher index DDL](https://github.com/kkollsga/kglite/blob/main/CYPHER.md#cypher-index-ddl). The equivalent APIs remain — `create_index(type, prop)`, `create_range_index(...)`, `list_indexes()`, `drop_index(...)`. Type indices are automatic. |
+| Constraint DDL | `CREATE CONSTRAINT ... IS UNIQUE / IS NOT NULL / IS NODE KEY` | Supported and enforced on every write path, including the bulk loader. Composite tuples (`REQUIRE (n.a, n.b) IS UNIQUE`) work; `IS NODE KEY` is uniqueness plus presence, installed atomically. Unlike index names, **constraint names are stored**, so `DROP CONSTRAINT <name>` works as written in a Neo4j script; unnamed constraints are addressable by their canonical descriptor. Declaring a constraint the existing data already violates is rejected and changes nothing. `IS :: TYPE` is refused (see above). See [CYPHER.md → Cypher constraint DDL](https://github.com/kkollsga/kglite/blob/main/CYPHER.md#cypher-constraint-ddl). `define_schema({"nodes": {...}})` declares the same constraints from Python. |
 | Migrations | Versioned migration tools | None — you own schema evolution in Python load code |
 
 Indexes are maintained automatically across Cypher mutations
