@@ -728,6 +728,48 @@ mod tests {
         );
     }
 
+    /// Replay must work on a `mapped` graph, not only the heap default.
+    /// Asserted here rather than from Python because the storage mode is not
+    /// observable through the Python surface — a silent downgrade to memory
+    /// would make an end-to-end mapped test pass vacuously.
+    ///
+    /// It works for a structural reason worth pinning: `MappedGraph` mutates
+    /// the same petgraph `StableDiGraph` as `MemoryGraph` and differs only in
+    /// its derived mmap-backed indexes, so `apply_frames`' `maintain::*` calls
+    /// reach it unchanged.
+    #[test]
+    fn replays_onto_a_mapped_graph() {
+        use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+        let mut g = new_dir_graph_in_mode(StorageMode::Mapped, None).unwrap();
+        assert!(g.graph.is_mapped(), "fixture must really be mapped");
+
+        let frames = vec![
+            frame(
+                1,
+                vec![
+                    upsert_node(1, "Alice", vec![("age", Value::Int64(30))]),
+                    upsert_node(2, "Bob", vec![]),
+                    knows(1, 2),
+                    set_labels(1, &["Employee"]),
+                ],
+            ),
+            frame(
+                2,
+                vec![MutationOp::RemoveNode {
+                    node_type: "Person".into(),
+                    id: Value::Int64(2),
+                }],
+            ),
+        ];
+        apply_frames(&mut g, &frames, 0).unwrap();
+
+        assert!(g.graph.is_mapped(), "replay must not switch the backend");
+        assert_eq!(g.graph.node_count(), 1);
+        assert_eq!(g.graph.edge_count(), 0, "edge went with the removed node");
+        assert_eq!(labels_of(&mut g, 1), vec!["Person", "Employee"]);
+        assert_eq!(prop(&mut g, 1, "age"), Some(Value::Int64(30)));
+    }
+
     #[test]
     fn replaying_twice_is_idempotent() {
         let frames = vec![frame(

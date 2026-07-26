@@ -102,9 +102,10 @@ impl GraphBackend {
     /// Only the heap backend can. `Mapped` maintains lazy mmap-columnar
     /// indexes and `Disk` mutates through generation overlays whose inverse is
     /// not expressible as a petgraph edit, so both keep the clone checkpoint
-    /// (see `dir_graph/rollback.rs`). `Recording` forwards: a durable graph is
-    /// `Recording(Memory)` and every write still lands on the heap backend
-    /// underneath, so it participates.
+    /// (see `dir_graph/rollback.rs`). `Recording` forwards to whatever it
+    /// wraps, so a durable graph participates exactly when its underlying
+    /// backend would: `Recording(Memory)` journals, `Recording(Mapped)` keeps
+    /// the clone. Durability and rollback strategy are independent concerns.
     #[inline]
     pub(crate) fn supports_undo_journal(&self) -> bool {
         match self {

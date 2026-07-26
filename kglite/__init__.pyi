@@ -628,8 +628,11 @@ def open(path: str, *, storage: str | None = None, durable: bool = False) -> Kno
             ``fsync``'d before the call returns, and on open any WAL frames are
             replayed onto the loaded checkpoint to recover work committed since
             the last ``save()``. ``save()`` writes a full checkpoint and
-            truncates the WAL. In-memory graphs only in this release
-            (``storage="mapped"/"disk"`` raise ``ValueError``).
+            truncates the WAL. Supported for the in-memory default and
+            ``storage="mapped"``. ``storage="disk"`` raises ``ValueError``: a
+            disk graph commits by publishing an immutable generation, so its
+            durability boundary is that publish rather than a logical log —
+            use ``save()`` checkpoints there.
 
     Returns:
         A KnowledgeGraph bound to ``path``.

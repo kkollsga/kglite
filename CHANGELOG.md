@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `kglite.open(path, storage="mapped", durable=True)` now works — write-ahead
+  logging is no longer restricted to in-memory graphs. A mapped graph mutates
+  the same in-memory structure as the default backend and differs only in its
+  file-backed property columns, so it gets the same per-commit crash safety
+  with no change to the log format.
+
+  `storage="disk"` still raises `ValueError`, now explaining why and what to
+  use instead: a disk graph commits by publishing an immutable generation, so
+  a logical write-ahead log is not its durability boundary. Use `save()`
+  checkpoints for disk graphs.
+
 ### Changed
 
 - Mutating Cypher statements no longer deep-copy the graph to stay atomic. A
