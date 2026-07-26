@@ -2092,6 +2092,70 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
         "many_labels_one_node",
         "MATCH (p:Person {person_id: 2}) SET p:A SET p:B SET p:C WITH p REMOVE p:B RETURN labels(p) AS ls",
     ),
+    # ── Write clauses fed an empty binding stream ────────────────────────
+    #
+    # A clause that produced zero rows must leave every downstream write with
+    # nothing to do. What these pin for the optimizer specifically: no pass may
+    # drop, hoist, or fuse a write clause out from behind the emptying clause,
+    # because doing so would restore the write to a *leading* position — where
+    # Cypher's implicit start row legitimately applies and one node really is
+    # created. Optimized and naive therefore have to agree on post-state node
+    # and edge counts, which is what the harness compares.
+    #
+    # `person_id: 999` and the `Ghost` label are chosen to match nothing in the
+    # fixture; `Ghost` also makes the pattern's node type unknown, the shape the
+    # planner emits an "unknown node label … returns no rows" warning for.
+    (
+        "create_after_empty_inline_map_match",
+        "MATCH (p:Person {person_id: 999}) CREATE (t:Task {person_id: 900}) RETURN t.person_id AS pid",
+    ),
+    (
+        "create_after_empty_where_match",
+        "MATCH (p:Person) WHERE p.person_id = 999 CREATE (t:Task {person_id: 901}) RETURN t.person_id AS pid",
+    ),
+    (
+        "create_after_empty_match_with",
+        "MATCH (p:Person {person_id: 999}) WITH p CREATE (t:Task {person_id: 902}) RETURN t.person_id AS pid",
+    ),
+    (
+        "create_after_empty_relationship_match",
+        "MATCH (p:Person)-[:NO_SUCH_EDGE]->(q:Person) CREATE (t:Task {person_id: 903}) RETURN t.person_id AS pid",
+    ),
+    (
+        # The phantom-endpoint shape: `g` binds nothing, so creating the edge
+        # would have to invent its target node. Post-state edge count is the
+        # assertion that bites.
+        "create_edge_after_partially_unmatched_multi_pattern",
+        "MATCH (p:Person {person_id: 1}), (g:Ghost {person_id: 999}) "
+        "CREATE (p)-[:ASSIGNED_TO]->(g) RETURN count(*) AS n",
+    ),
+    (
+        "merge_after_empty_match",
+        "MATCH (p:Person {person_id: 999}) MERGE (t:Task {person_id: 904}) RETURN t.person_id AS pid",
+    ),
+    (
+        "foreach_after_empty_match",
+        "MATCH (p:Person {person_id: 999}) FOREACH (i IN [910, 911] | CREATE (:Task {person_id: i})) "
+        "WITH 1 AS done MATCH (n) RETURN count(n) AS n",
+    ),
+    (
+        "create_after_unwind_empty_list",
+        "UNWIND [] AS x CREATE (t:Task {person_id: 905}) RETURN t.person_id AS pid",
+    ),
+    (
+        # The control living in the corpus: a *leading* CREATE still gets
+        # Cypher's implicit start row. Pins that the empty-stream rule was not
+        # over-applied to writes that open a query.
+        "leading_create_still_runs_once",
+        "CREATE (t:Task {person_id: 906}) WITH 1 AS done MATCH (n) RETURN count(n) AS n",
+    ),
+    (
+        # OPTIONAL MATCH is the deliberate opposite: it null-pads rather than
+        # emptying, so the CREATE downstream of it must still run.
+        "create_after_optional_match_miss",
+        "MATCH (p:Person {person_id: 1}) OPTIONAL MATCH (g:Ghost) "
+        "CREATE (t:Task {person_id: 907}) RETURN t.person_id AS pid, g AS g",
+    ),
 ]
 
 
