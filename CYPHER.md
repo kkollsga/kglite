@@ -27,6 +27,7 @@ surface at a glance — most of what you'd reach for is here, in-process:
 | **Reading** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY` / `SKIP` / `LIMIT`, `UNWIND`, `UNION` |
 | **Writing** | `CREATE`, `MERGE` (+ `ON CREATE` / `ON MATCH SET`), `SET`, `DELETE` / `DETACH DELETE`, `REMOVE`, `FOREACH (x IN list \| …)` |
 | **Subqueries** | `CALL { … }` (correlated + uncorrelated), `EXISTS { … }`, `COUNT { … }` |
+| **Schema DDL** | `CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:L) ON (n.p, …)`, `DROP INDEX … [IF EXISTS]`, `SHOW INDEXES` — see [Cypher index DDL](#cypher-index-ddl) for the taxonomy mapping |
 | **Path finding** | variable-length `-[*1..n]->`, `shortestPath(…)`, `allShortestPaths(…)`, weighted shortest path (`CALL`) |
 | **Predicates** | `=, <>, <, >, <=, >=`, `AND` / `OR` / `NOT`, `IS [NOT] NULL`, `IN`, `CONTAINS` / `STARTS WITH` / `ENDS WITH`, regex `=~` |
 | **Expressions** | list comprehension `[x IN xs WHERE … \| …]`, `reduce(…)`, `CASE`, list/map literals, parameters `$p` |
@@ -1213,7 +1214,7 @@ autocomplete, and surface index advisors.
 |-----------|---------------|---------|
 | `CALL db.labels()` | `label` | One row per node-type ("label") in the graph, sorted alphabetically |
 | `CALL db.relationshipTypes()` | `relationshipType` | One row per connection-type ("relationship type") in the graph, sorted alphabetically |
-| `CALL db.indexes()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties`, `state` | One row per index installed on the graph, sorted by `name` |
+| `CALL db.indexes()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties`, `state` | One row per index installed on the graph, sorted by `name`. `SHOW INDEXES` returns the same rows — see [Cypher index DDL](#cypher-index-ddl) |
 | `CALL db.propertyKeys()` | `propertyKey` | One row per declared property name (node + relationship), sorted alphabetically |
 | `CALL db.schema()` | `nodeType`, `properties` | One row per node-type with its sorted list of property names — the in-language counterpart of Python `describe()` |
 
@@ -1672,6 +1673,122 @@ graph.cypher("MATCH (n:Country) WHERE n.label STARTS WITH 'O' RETURN n.nid")
 # O(log N + k) where k is the number of matches
 ```
 
+### Cypher index DDL
+
+Neo4j 5 index DDL runs against KGLite, so a schema-setup script ports
+unedited. What it *builds* is not the same thing, because the two engines have
+different indexes — read this table before assuming a statement did what it
+does in Neo4j.
+
+```cypher
+CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:Label) ON (n.prop [, n.prop2 ...])
+DROP INDEX <name> [IF EXISTS]
+DROP INDEX FOR (n:Label) ON (n.prop [, ...])        -- KGLite extension
+SHOW [ALL] INDEX[ES]
+```
+
+#### What each statement builds
+
+KGLite has three index structures, each serving a different predicate shape.
+Neo4j has one `RANGE` index that serves all of them.
+
+| KGLite structure | Serves | Equivalent API call |
+|---|---|---|
+| hash equality (`property_indices`) | `=`, `IN` | `create_index(label, prop)` |
+| composite hash (`composite_indices`) | conjunctive `=` on all its properties | `create_composite_index(label, [p1, p2])` |
+| B-tree range (`range_indices`) | `<`, `<=`, `>`, `>=`, ordering | `create_range_index(label, prop)` |
+
+| Statement | Builds | `indexes_added` |
+|---|---|---|
+| `CREATE INDEX FOR (n:L) ON (n.p)` | one hash equality index | 1 |
+| `CREATE INDEX FOR (n:L) ON (n.a, n.b)` | one composite index | 1 |
+| `CREATE RANGE INDEX FOR (n:L) ON (n.p)` | a hash equality index **and** a B-tree range index | 2 |
+
+The `RANGE` form builds two structures because that is what Neo4j's single
+`RANGE` index serves. The bare form deliberately builds only the equality
+index, which is where Neo4j 5 (for which bare and `RANGE` are identical) and
+KGLite part ways: doing both for every `CREATE INDEX` in a ported script would
+silently double index memory, and in-memory footprint is this engine's
+product. The divergence costs performance, never correctness — if you need
+range acceleration, write `CREATE RANGE INDEX`.
+
+#### Index names are canonical, not yours
+
+KGLite derives index names from what they index — `Label.property`, or
+`Label.(a,b)` for a composite. A name in `CREATE INDEX <name> FOR …` is
+**accepted but not stored**: the persisted `.kgl` index state is a list of
+`(label, property)` key tuples, so there is nowhere to keep it.
+
+```cypher
+CREATE INDEX person_email FOR (p:Person) ON (p.email);   -- index is created
+SHOW INDEXES;                                            -- name is 'Person.email'
+DROP INDEX person_email;                                 -- error, explains this
+DROP INDEX Person.email;                                 -- works
+DROP INDEX FOR (p:Person) ON (p.email);                   -- also works
+```
+
+`DROP INDEX` accepts the dotted canonical name unquoted, so `SHOW INDEXES`
+output pastes straight in. `DROP INDEX <unknown name> IF EXISTS` is a no-op —
+truthfully, since no index carries that name — while the bare form errors and
+spells the naming rule out, because "person_email doesn't exist" is baffling to
+someone who just created it under that name. The descriptor form
+(`DROP INDEX FOR …`) is a KGLite extension that sidesteps naming entirely.
+
+One canonical name can cover two structures: a property carrying both a hash
+and a B-tree index shows two `SHOW INDEXES` rows sharing a `name`,
+distinguished by `type` (`PROPERTY` vs `RANGE`). `DROP INDEX <name>` removes
+every structure under that name.
+
+#### `SHOW INDEXES`
+
+A read, so it works on a read-only graph. Returns the same rows and columns as
+`CALL db.indexes()`:
+
+| Column | Value |
+|---|---|
+| `name` | canonical name — `Label.property` or `Label.(a,b)` |
+| `type` | `PROPERTY` (hash equality or composite) or `RANGE` (B-tree) |
+| `entityType` | always `NODE` |
+| `labelsOrTypes` | single-element list holding the node type |
+| `properties` | indexed property names in declaration order |
+| `state` | always `ONLINE` — KGLite builds indexes atomically |
+
+Neo4j 5 also returns `id`, `populationPercent`, `indexProvider`,
+`owningConstraint`, `lastRead`, and `readCount`. KGLite has no equivalent
+state for any of them, so they are **omitted** rather than filled with invented
+values. For filtering and projection use `CALL db.indexes() YIELD …` — `SHOW
+INDEXES` rejects `YIELD` / `WHERE` / `BRIEF` / `VERBOSE` rather than accepting
+a filter it would ignore.
+
+#### Forms that are rejected
+
+Each fails with a `CypherExecutionError` naming the construct and the route
+that works — never a syntax error, and never a no-op that reports success.
+
+| Statement | Why, and what to use |
+|---|---|
+| `CREATE TEXT INDEX` | No text index. `CONTAINS` / `STARTS WITH` / `ENDS WITH` work unindexed (a string index already gives prefix pushdown — see above) |
+| `CREATE FULLTEXT INDEX` | No full-text index. Use `create_vector_index` + `vector_score()` for ranked text retrieval |
+| `CREATE POINT INDEX` | No point index. Spatial predicates and the spatial-join optimiser work on geometry properties without one |
+| `CREATE VECTOR INDEX` | Vector indexes exist, but need an embedder and HNSW build parameters, so they are created through `create_vector_index(...)` |
+| `CREATE LOOKUP INDEX` | Label and relationship-type lookup is always indexed automatically (`type_indices`) |
+| `CREATE INDEX FOR ()-[r:T]-() ON (r.p)` | KGLite indexes node properties only. Relationship properties are queryable, just scanned |
+| `... OPTIONS { ... }` | No index providers or per-index configuration to apply |
+| `CREATE RANGE INDEX ... ON (n.a, n.b)` | The B-tree is single-property. Use a composite equality index, or one `CREATE RANGE INDEX` per property |
+| `CREATE/DROP/SHOW CONSTRAINT` | No Cypher-managed constraints. Uniqueness comes from node-type primary keys and `MERGE`; presence and types from `lock_schema()` |
+
+#### Guards
+
+Schema is graph state, so index DDL is a **mutation**: it is blocked on a
+read-only graph (`read_only(True)`), blocked in a read-only transaction, and
+rolled back with the rest of a failed statement. On a schema-locked graph,
+indexing an undeclared property is rejected — the same typo-guard writes get.
+A schema command is a standalone statement: it cannot follow another clause or
+appear inside a `CALL { }` body.
+
+`indexes_added` and `indexes_removed` join `graph.last_mutation_stats`,
+mirroring Neo4j's `indexesAdded` / `indexesRemoved` summary counters.
+
 ## Timeseries Functions
 
 Query time-indexed numeric data attached to nodes. All date arguments are strings (`'2020'`, `'2020-2'`, `'2020-2-15'`), and precision is validated against the data's resolution.
@@ -1870,6 +1987,7 @@ below; do not infer absence from this shorter list.
 | Category | Supported |
 |----------|-----------|
 | **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CALL { ... }` (read subqueries — uncorrelated + correlated), `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN`, `PROFILE` |
+| **Schema DDL** | `CREATE INDEX`, `CREATE RANGE INDEX`, `DROP INDEX`, `SHOW INDEXES` — standalone statements; `CREATE CONSTRAINT` / `DROP CONSTRAINT` / `SHOW CONSTRAINTS` parse and are rejected with the enforcement route that applies |
 | **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, abbreviated `-->` / `--` / `<--`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val, key: $param, key: var}`, `p = shortestPath(...)` |
 | **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern WHERE ... }`, `EXISTS(( pattern ))`, inline pattern predicates, `any/all/none/single(x IN list WHERE ...)` |
 | **RETURN** | `n.prop`, `r.prop`, `AS` aliases, `DISTINCT`, arithmetic `+`/`-`/`*`/`/`, string concat `\|\|`, map projections `n {.prop}`, map literals `{k: expr}`, list slicing `[i..j]` |
@@ -2000,5 +2118,7 @@ compatible subset.
 | `SET n:Label` | Supported (adds a secondary label) | Supported | Primary type is immutable; changing it requires node migration/recreation |
 | Storage | In-memory, mmap-backed, or disk CSR | Disk-based | One Cypher engine spans all three embedded storage modes |
 | Transactions | Snapshot isolation + OCC through `Session` / `Transaction` | Full ACID | Native session coordination is binding-independent; direct graph writes are in-place |
-| Indexing | Type, equality, range, composite, and vector indexes through APIs | Schema indexes | Cypher `CREATE INDEX` syntax is unsupported; use Python/Rust APIs |
+| Indexing | Three separate structures — hash equality, composite, B-tree range — plus automatic type indexes and vector indexes | One general `RANGE` index serving equality, range, and ordering | An equality index cannot serve a range predicate, so KGLite exposes the distinction that Neo4j collapses. `CREATE INDEX` / `DROP INDEX` / `SHOW INDEXES` are supported — see [Cypher index DDL](#cypher-index-ddl) for exactly what each statement builds |
+| Index names | Canonical and derived: `Label.property`, `Label.(a,b)` | User-assigned, unique | A name in `CREATE INDEX <name> …` is accepted for script portability but not stored; the persisted `.kgl` index state is a list of `(label, property)` keys |
+| Constraint DDL | Not supported — rejected with the enforcement route that applies | `CREATE CONSTRAINT … IS UNIQUE / IS NOT NULL` | Uniqueness is a load-time concern (primary keys, `MERGE`); presence and types are enforced by `lock_schema()` |
 | `LOAD CSV` | Not supported | Supported | Python ecosystem (pandas) preferred for data loading |

@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Cypher index DDL, in the Neo4j 5 grammar, so a schema-setup script ports
+  unedited: `CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:Label) ON
+  (n.prop, ...)`, `DROP INDEX <name> [IF EXISTS]`, and `SHOW [ALL] INDEX[ES]`.
+  Statements are standalone and route to the existing index machinery — one
+  property builds a hash equality index, two or more build a composite index,
+  and the `RANGE` keyword additionally builds the B-tree range index, so the
+  pair covers what Neo4j's single `RANGE` index serves. The bare form stays
+  equality-only on purpose (building both for every ported statement would
+  double index memory); `CYPHER.md` documents the full mapping under "Cypher
+  index DDL".
+- `DROP INDEX FOR (n:Label) ON (n.prop)` — a KGLite descriptor form, since
+  index names here are canonical and derived (`Label.property`,
+  `Label.(a,b)`) rather than user-assigned. A name supplied to `CREATE INDEX`
+  is accepted for portability but not persisted, and `DROP INDEX` accepts the
+  dotted canonical name without backticks so `SHOW INDEXES` output pastes
+  straight in.
+- `SHOW INDEXES` returns the same rows and columns as `CALL db.indexes()`
+  (`name`, `type`, `entityType`, `labelsOrTypes`, `properties`, `state`).
+  Neo4j's `id`, `populationPercent`, `indexProvider`, `owningConstraint`,
+  `lastRead`, and `readCount` are omitted — KGLite holds no equivalent state —
+  and `YIELD` / `WHERE` modifiers are rejected in favour of `CALL db.indexes()`
+  rather than silently ignored.
+- `indexes_added` and `indexes_removed` in `graph.last_mutation_stats`,
+  mirroring Neo4j's `indexesAdded` / `indexesRemoved` summary counters.
+- Index and constraint DDL that KGLite cannot serve — `TEXT`, `POINT`,
+  `FULLTEXT`, `VECTOR`, `LOOKUP`, relationship indexes, `OPTIONS { ... }`, and
+  every `CREATE`/`DROP`/`SHOW CONSTRAINT` form (including the Neo4j 4 `ASSERT`
+  spelling) — now parses and fails with a specific unsupported-feature error
+  naming the construct and the route that works today, instead of a syntax
+  error or a silent no-op.
+
+### Changed
+
+- Index DDL is classified as a mutation, since schema is graph state: it is
+  blocked on a read-only graph and in a read-only transaction, rolls back with
+  a failed statement, and is rejected on a schema-locked graph when the
+  property is undeclared. `SHOW INDEXES` is a read and works on a read-only
+  graph.
+
 ## [0.14.5] - 2026-07-22
 
 ### Changed

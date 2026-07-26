@@ -1386,6 +1386,9 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
     );
     xml.push_str("    <clause name=\"CALL { }\">Read subquery — runs a nested MATCH/WITH/RETURN per outer row. Uncorrelated CALL { MATCH ... RETURN ... } runs once (cartesian-combined); correlated CALL { WITH p MATCH (p)-->... RETURN count(...) AS c } runs per outer row. Importing WITH lists bare variables only. Example: MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]-&gt;(f) RETURN count(f) AS c } RETURN p.name, c</clause>\n");
     xml.push_str("    <clause name=\"HAVING\">Post-aggregation filter on RETURN/WITH. Example: RETURN n.type, count(*) AS cnt HAVING cnt > 5</clause>\n");
+    xml.push_str("    <clause name=\"CREATE INDEX\">Schema DDL, a standalone statement. CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:Label) ON (n.prop[, n.prop2]) — one property builds a hash equality index (serves = and IN), two or more build a composite index, and the RANGE keyword additionally builds a B-tree range index (serves &lt; &lt;= &gt; &gt;=). Index names are canonical (Label.prop, Label.(a,b)); a name given here is accepted but not stored. Counters land in last_mutation_stats.indexes_added.</clause>\n");
+    xml.push_str("    <clause name=\"DROP INDEX\">DROP INDEX &lt;canonical-name&gt; [IF EXISTS], e.g. DROP INDEX Person.email — or the descriptor form DROP INDEX FOR (n:Label) ON (n.prop). Removes every structure registered under that name.</clause>\n");
+    xml.push_str("    <clause name=\"SHOW INDEXES\">List installed indexes as a read: columns name, type (PROPERTY|RANGE), entityType, labelsOrTypes, properties, state. Same rows as CALL db.indexes(); use that form when you need YIELD or WHERE.</clause>\n");
     xml.push_str("    <clause name=\"EXPLAIN\">Prefix to show query plan as ResultView [step, operation, estimated_rows] without executing.</clause>\n");
     xml.push_str("    <clause name=\"PROFILE\">Prefix to execute and collect per-clause stats. Result has .profile with [clause, rows_in, rows_out, elapsed_us].</clause>\n");
     xml.push_str("  </clauses>\n");
@@ -1436,7 +1439,8 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
 
     xml.push_str("  <limitations>\n");
     xml.push_str("    <item feature=\"LOAD CSV\" workaround=\"Use Python pandas/csv, then CREATE nodes from dicts\"/>\n");
-    xml.push_str("    <item feature=\"CREATE INDEX\" note=\"Type indices are automatic; no manual index management needed\"/>\n");
+    xml.push_str("    <item feature=\"CREATE CONSTRAINT\" note=\"Constraint DDL parses but is rejected: there are no Cypher-managed constraints. Uniqueness comes from a node type primary key plus MERGE; property presence and types from lock_schema(). CREATE INDEX / DROP INDEX / SHOW INDEXES ARE supported.\"/>\n");
+    xml.push_str("    <item feature=\"TEXT / FULLTEXT / POINT / VECTOR / LOOKUP INDEX\" note=\"Only equality, composite, and RANGE index DDL is served. CONTAINS/STARTS WITH need no text index; use create_vector_index() for vector search; label lookup is always indexed.\"/>\n");
     xml.push_str("    <item feature=\"Primary-type mutation\" note=\"Each node has an immutable primary type plus optional secondary labels via SET n:Label / CREATE (n:A:B) / g.add_label(...). MATCH (n:A:B) AND-intersects. SET n.type writes a property; recreate or migrate the node to change its primary type.\"/>\n");
     xml.push_str("    <item feature=\"Variable-length weighted paths\" note=\"Unweighted variable-length paths (*1..3) are supported\"/>\n");
     xml.push_str("  </limitations>\n");
