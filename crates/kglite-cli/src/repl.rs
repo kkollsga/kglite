@@ -447,25 +447,68 @@ fn infer_value(cell: &str) -> Value {
     }
 }
 
-/// Split a `.read` file into individual Cypher statements. Statements are
-/// `;`-terminated when any `;` is present (the common `.cypher` convention);
-/// otherwise each non-blank, non-`//`-comment line is one statement.
-fn split_statements(contents: &str) -> Vec<String> {
-    if contents.contains(';') {
-        contents
-            .split(';')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect()
-    } else {
-        contents
+/// Split a Cypher script into individual statements. Statements are
+/// `;`-terminated when any *separator* `;` is present (the common `.cypher`
+/// convention); otherwise each non-blank, non-`//`-comment line is one
+/// statement.
+///
+/// The scan is quote-aware: a `;` inside a `'…'` or `"…"` literal is data, not
+/// a separator, so `CREATE (:Note {body: 'a;b'})` stays one statement. A naive
+/// `split(';')` tears it into two invalid fragments. Cypher escapes quotes with
+/// a backslash, so an escaped quote does not end the literal.
+///
+/// Shared by the REPL's `.read` and by `kglite migrate`, where a mis-split
+/// would be considerably more costly than in interactive use.
+pub(crate) fn split_statements(contents: &str) -> Vec<String> {
+    let separators = statement_separator_positions(contents);
+    if separators.is_empty() {
+        return contents
             .lines()
             .map(str::trim)
             .filter(|s| !s.is_empty() && !s.starts_with("//"))
             .map(str::to_string)
-            .collect()
+            .collect();
     }
+    let mut statements = Vec::new();
+    let mut start = 0;
+    for &end in separators.iter().chain(std::iter::once(&contents.len())) {
+        if start > contents.len() {
+            break;
+        }
+        let fragment = contents[start..end.min(contents.len())].trim();
+        if !fragment.is_empty() {
+            statements.push(fragment.to_string());
+        }
+        start = end + 1;
+    }
+    statements
+}
+
+/// Byte offsets of the `;` characters that actually separate statements —
+/// i.e. those outside any string literal.
+fn statement_separator_positions(contents: &str) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (offset, ch) in contents.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some(open) => match ch {
+                '\\' => escaped = true,
+                c if c == open => quote = None,
+                _ => {}
+            },
+            None => match ch {
+                '\'' | '"' => quote = Some(ch),
+                ';' => positions.push(offset),
+                _ => {}
+            },
+        }
+    }
+    positions
 }
 
 #[cfg(test)]
@@ -506,5 +549,32 @@ mod tests {
     fn split_on_lines_when_no_semicolons() {
         let got = split_statements("MATCH (a) RETURN a\n// a comment\n\nMATCH (b) RETURN b\n");
         assert_eq!(got, vec!["MATCH (a) RETURN a", "MATCH (b) RETURN b"]);
+    }
+
+    #[test]
+    fn semicolon_inside_a_string_literal_is_not_a_separator() {
+        // A naive split(';') tears this into two invalid fragments.
+        let got = split_statements("CREATE (:Note {body: 'a;b'});\nMATCH (n) RETURN n;");
+        assert_eq!(
+            got,
+            vec!["CREATE (:Note {body: 'a;b'})", "MATCH (n) RETURN n"]
+        );
+
+        // Double quotes behave the same, and an escaped quote does not end the
+        // literal — so the `;` after it is still data.
+        let got = split_statements("CREATE (:N {t: \"x\\\";y\"})");
+        assert_eq!(got, vec!["CREATE (:N {t: \"x\\\";y\"})"]);
+    }
+
+    #[test]
+    fn a_script_whose_only_semicolons_are_quoted_falls_back_to_line_mode() {
+        // No separator semicolons at all, so each line is a statement — the
+        // quoted `;` must not push the script into semicolon mode and produce
+        // one giant fragment.
+        let got = split_statements("MATCH (a) WHERE a.t = 'x;y' RETURN a\nMATCH (b) RETURN b");
+        assert_eq!(
+            got,
+            vec!["MATCH (a) WHERE a.t = 'x;y' RETURN a", "MATCH (b) RETURN b"]
+        );
     }
 }
