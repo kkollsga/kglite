@@ -66,6 +66,11 @@ pub enum RawOp {
         tgt_type: InternedKey,
         tgt_id: Value,
     },
+    /// A node's secondary-label set changed. Like the upserts this carries
+    /// only the index and is resolved against final state, so several
+    /// `SET n:A SET n:B` in one batch collapse to one op holding both.
+    /// Dropped at resolve time if the node was later removed.
+    SetNodeLabels(NodeIndex),
 }
 
 /// Wrapper that captures write invocations on `G` as [`RawOp`]s while
@@ -107,6 +112,15 @@ impl<G: GraphRead> RecordingGraph<G> {
     #[inline]
     pub fn note_node_upsert(&mut self, idx: NodeIndex) {
         self.ops.push(RawOp::UpsertNode(idx));
+    }
+
+    /// Record that node `idx`'s secondary labels changed. Labels live in
+    /// `DirGraph::secondary_label_index`, above this backend, so no
+    /// `GraphWrite` call carries them — the label choke points call this
+    /// instead. Resolved at flush like any other index-keyed op.
+    #[inline]
+    pub fn note_node_labels(&mut self, idx: NodeIndex) {
+        self.ops.push(RawOp::SetNodeLabels(idx));
     }
 
     /// Drain the buffered raw ops, leaving the buffer empty. Called at
@@ -155,10 +169,17 @@ impl<G: GraphRead + Clone> Clone for RecordingGraph<G> {
 /// resolving interned keys through `interner`. Upserts whose node/edge
 /// no longer exists (removed later in the same batch) are dropped — the
 /// corresponding remove op already captures the final state.
+///
+/// `secondary_labels` yields a node's current secondary labels by name,
+/// ordered as `DirGraph::node_labels` orders them. It is a callback rather
+/// than a field read because labels are not backend state at all: they live
+/// in `DirGraph::secondary_label_index`, one layer above the `graph` this
+/// function is given. Callers pass `DirGraph::secondary_label_names`.
 pub fn resolve_ops(
     raw: &[RawOp],
     graph: &impl GraphRead,
     interner: &StringInterner,
+    secondary_labels: impl Fn(NodeIndex) -> Vec<String>,
 ) -> Vec<MutationOp> {
     let mut out = Vec::with_capacity(raw.len());
     for op in raw {
@@ -212,6 +233,19 @@ pub fn resolve_ops(
                     tgt_type: interner.resolve(*tgt_type).to_string(),
                     tgt_id: tgt_id.clone(),
                 });
+            }
+            RawOp::SetNodeLabels(idx) => {
+                // Resolved against final state, so repeated `SET n:A`/`SET
+                // n:B` in one batch collapse into a single whole-set op. A
+                // node removed later in the batch yields `None` and is
+                // dropped — its `RemoveNode` already carries the outcome.
+                if let Some((node_type, id)) = logical_node(graph, *idx, interner) {
+                    out.push(MutationOp::SetNodeLabels {
+                        node_type,
+                        id,
+                        labels: secondary_labels(*idx),
+                    });
+                }
             }
         }
     }
@@ -711,6 +745,19 @@ mod tests {
         (nc, ec, nb)
     }
 
+    /// `resolve_ops` for the majority of tests, which drive a bare
+    /// `RecordingGraph` with no `DirGraph` above it and therefore no label
+    /// index. Named rather than inlined so "this graph has no secondary
+    /// labels" is an assertion about the fixture, not an anonymous
+    /// `|_| vec![]`.
+    fn resolve_unlabelled(
+        raw: &[RawOp],
+        graph: &impl GraphRead,
+        interner: &StringInterner,
+    ) -> Vec<MutationOp> {
+        resolve_ops(raw, graph, interner, |_| Vec::new())
+    }
+
     // ── write capture + resolution ───────────────────────────────────
 
     #[test]
@@ -753,7 +800,7 @@ mod tests {
 
         let raw = rg.take_ops();
         assert_eq!(rg.ops_len(), 0, "take_ops empties the buffer");
-        let ops = resolve_ops(&raw, &rg, &interner);
+        let ops = resolve_unlabelled(&raw, &rg, &interner);
         assert_eq!(
             ops,
             vec![
@@ -798,7 +845,7 @@ mod tests {
             nd.set_property("age", Value::Int64(41), &mut interner);
         }
         let raw = rg.take_ops();
-        let ops = resolve_ops(&raw, &rg, &interner);
+        let ops = resolve_unlabelled(&raw, &rg, &interner);
         // Resolves to the node's FINAL state (age = 41), not a delta.
         assert_eq!(
             ops,
@@ -819,7 +866,7 @@ mod tests {
         let removed = rg.remove_node(NodeIndex::new(0));
         assert!(removed.is_some());
         let raw = rg.take_ops();
-        let ops = resolve_ops(&raw, &rg, &interner);
+        let ops = resolve_unlabelled(&raw, &rg, &interner);
         assert_eq!(
             ops,
             vec![MutationOp::RemoveNode {
@@ -837,7 +884,7 @@ mod tests {
         let removed = rg.remove_edge(EdgeIndex::new(0));
         assert!(removed.is_some());
         let raw = rg.take_ops();
-        let ops = resolve_ops(&raw, &rg, &interner);
+        let ops = resolve_unlabelled(&raw, &rg, &interner);
         assert_eq!(
             ops,
             vec![MutationOp::RemoveEdge {
@@ -863,7 +910,7 @@ mod tests {
         ));
         rg.remove_node(a);
         let raw = rg.take_ops();
-        let ops = resolve_ops(&raw, &rg, &interner);
+        let ops = resolve_unlabelled(&raw, &rg, &interner);
         // The UpsertNode placeholder resolves to None (node gone); only
         // the RemoveNode survives — replay reaches the right final state.
         assert_eq!(
@@ -872,6 +919,63 @@ mod tests {
                 node_type: "Person".into(),
                 id: Value::Int64(7),
             }]
+        );
+    }
+
+    /// A label change produces one whole-set op resolved against final
+    /// state, so repeated notes for the same node collapse instead of
+    /// logging an add-per-label.
+    #[test]
+    fn captures_label_changes_as_one_whole_set_op() {
+        let mut interner = StringInterner::new();
+        let backend = make_memory_backend(&mut interner);
+        let mut rg: RecordingGraph<GraphBackend> = RecordingGraph::new(backend);
+        let node = NodeIndex::new(0);
+        rg.note_node_labels(node);
+        rg.note_node_labels(node);
+        let raw = rg.take_ops();
+        assert_eq!(raw.len(), 2, "each choke-point call buffers a raw op");
+
+        let ops = resolve_ops(&raw, &rg, &interner, |idx| {
+            assert_eq!(idx, node);
+            vec!["Employee".to_string(), "Manager".to_string()]
+        });
+        let expected = MutationOp::SetNodeLabels {
+            node_type: "Person".into(),
+            id: Value::UniqueId(1),
+            labels: vec!["Employee".to_string(), "Manager".to_string()],
+        };
+        assert_eq!(
+            ops,
+            vec![expected.clone(), expected],
+            "both resolve to the same final set — replay is idempotent"
+        );
+    }
+
+    /// A node labelled and then removed in one batch must not log a label
+    /// op naming a node that no longer exists.
+    #[test]
+    fn label_op_for_a_removed_node_is_dropped() {
+        let mut interner = StringInterner::new();
+        let mut rg: RecordingGraph<GraphBackend> = RecordingGraph::new(GraphBackend::new());
+        let a = rg.add_node(NodeData::new(
+            Value::Int64(7),
+            Value::String("Ghost".into()),
+            "Person".into(),
+            HashMap::new(),
+            &mut interner,
+        ));
+        rg.note_node_labels(a);
+        rg.remove_node(a);
+        let raw = rg.take_ops();
+        let ops = resolve_ops(&raw, &rg, &interner, |_| vec!["Employee".to_string()]);
+        assert_eq!(
+            ops,
+            vec![MutationOp::RemoveNode {
+                node_type: "Person".into(),
+                id: Value::Int64(7),
+            }],
+            "no SetNodeLabels for a node the batch deleted"
         );
     }
 

@@ -253,11 +253,22 @@ pub struct DirGraph {
     /// `#[serde(skip)]` — rebuilt by `rebuild_type_indices`.
     #[serde(skip)]
     pub has_secondary_labels: bool,
-    /// O(1) secondary-label index: label_key → [NodeIndex].
-    /// Populated by the choke-point label mutation API
-    /// (`DirGraph::add_node_label` / `remove_node_label`) and on load by
-    /// `rebuild_type_indices`. `#[serde(skip)]` — rebuilt from
-    /// `NodeData.extra_labels` on load.
+    /// O(1) secondary-label index: label_key → [NodeIndex]. **The
+    /// canonical store** — `NodeData` carries no labels of its own, so this
+    /// map is the only record that a node has any secondary label.
+    ///
+    /// Written exclusively by the choke-point label mutation API
+    /// (`DirGraph::add_node_label` / `remove_node_label`), which is also
+    /// where rollback and WAL capture hook in for the same reason: the map
+    /// sits above the storage backend, so no `GraphWrite` call can carry a
+    /// label change.
+    ///
+    /// `#[serde(skip)]` — it cannot be derived from node payloads, so it is
+    /// persisted out-of-band and restored by the load path: the `.kgl`
+    /// `secondary_labels` section for in-memory graphs, the
+    /// `secondary_labels.bin.zst` sidecar for disk ones, and
+    /// `MutationOp::SetNodeLabels` frames for post-checkpoint WAL replay.
+    /// `rebuild_type_indices` deliberately leaves it alone.
     #[serde(skip)]
     pub secondary_label_index: HashMap<InternedKey, Vec<NodeIndex>>,
 }
@@ -1552,6 +1563,9 @@ impl DirGraph {
                 bucket_was_new,
             );
         }
+        // WAL capture, for the same reason: no `GraphWrite` call describes a
+        // label change, so a durable graph would otherwise lose it on replay.
+        self.graph.note_recorded_node_labels(idx);
         true
     }
 
@@ -1601,6 +1615,9 @@ impl DirGraph {
                     pos,
                 );
             }
+            // WAL capture — see `add_node_label`. The op carries the whole
+            // remaining set, so a removal replays as correctly as an add.
+            self.graph.note_recorded_node_labels(idx);
         }
         Ok(position.is_some())
     }
@@ -1630,8 +1647,20 @@ impl DirGraph {
         let Some(primary) = GraphRead::node_type_of(&self.graph, idx) else {
             return Vec::new();
         };
+        let extras = self.secondary_labels(idx);
+        let mut labels = Vec::with_capacity(extras.len() + 1);
+        labels.push(primary);
+        labels.extend(extras);
+        labels
+    }
+
+    /// A node's **secondary** labels alone, sorted by label name — the
+    /// ordering half of [`node_labels`](Self::node_labels), factored out so
+    /// the primary-first-then-name-sorted guarantee has exactly one
+    /// implementation. Empty when the node has none (or does not exist).
+    pub fn secondary_labels(&self, idx: NodeIndex) -> Vec<InternedKey> {
         if !self.has_secondary_labels {
-            return vec![primary];
+            return Vec::new();
         }
         let mut extras: Vec<InternedKey> = self
             .secondary_label_index
@@ -1640,10 +1669,18 @@ impl DirGraph {
             .map(|(&key, _)| key)
             .collect();
         extras.sort_unstable_by(|a, b| self.interner.resolve(*a).cmp(self.interner.resolve(*b)));
-        let mut labels = Vec::with_capacity(extras.len() + 1);
-        labels.push(primary);
-        labels.extend(extras);
-        labels
+        extras
+    }
+
+    /// [`secondary_labels`](Self::secondary_labels) resolved to owned
+    /// names. This is what the WAL persists — a log outlives the interner
+    /// that produced its keys, so labels cross the durability boundary as
+    /// strings, in the same order the live graph reports them.
+    pub fn secondary_label_names(&self, idx: NodeIndex) -> Vec<String> {
+        self.secondary_labels(idx)
+            .into_iter()
+            .map(|key| self.interner.resolve(key).to_string())
+            .collect()
     }
 
     /// All nodes carrying `label` as EITHER their primary type or a

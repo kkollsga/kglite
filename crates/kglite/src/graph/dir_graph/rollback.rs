@@ -351,7 +351,6 @@ fn debug_assert_slot_reused(restored: usize, expected: usize, kind: &str) {
 mod tests {
     use super::*;
     use crate::datatypes::Value;
-    use crate::graph::schema::NodeData;
     use petgraph::graph::NodeIndex;
     use petgraph::stable_graph::StableDiGraph;
     use std::collections::HashMap;

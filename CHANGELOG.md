@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Secondary labels are no longer lost on crash recovery in `durable=True`
+  mode.** A node's `:Label`s live in an index above the storage layer, so the
+  write-ahead log never captured them: after a crash, a recovered node kept
+  every property but came back with only its primary label, and
+  `MATCH (n:Label)` no longer found it. Labels are now logged as their own
+  entry and restored in `labels(n)` order, including removals
+  (`REMOVE n:Label`). Data written by an earlier version replays unchanged —
+  the log's older format is read exactly, not rejected. A log written by *this*
+  version is refused by older builds with a clear message instead of being
+  silently truncated.
+
 - `labels(n)` now returns a node's secondary labels in a stable order (sorted
   by name, primary label first). They were previously returned in hash-map
   iteration order, so two graphs holding identical data could report a node's

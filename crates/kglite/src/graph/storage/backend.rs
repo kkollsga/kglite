@@ -67,14 +67,14 @@ pub enum GraphBackend {
     Memory(MemoryGraph),
     Mapped(MappedGraph),
     Disk(Box<DiskGraph>),
-    // Phase 6 validation wrapper. Constructed only from Rust
-    // `#[cfg(test)]` modules in `storage/recording.rs`; no Python
-    // constructor reaches this arm. The variant exists so the enum
-    // dispatcher exercises a 4th backend through the same match arms
-    // as the production three, proving open/closed at the trait
-    // surface. `dead_code` in release builds sees no constructor,
-    // hence the allow.
-    #[allow(dead_code)]
+    // Write-capture wrapper for the WAL. Introduced as a Phase 6
+    // test-only validation wrapper, now the production backend of every
+    // graph opened with `durable=True`: the binding wraps the loaded
+    // backend via `wrap_backend_for_durability`, so each mutation that
+    // passes the `GraphWrite` seam is buffered as a `RawOp` and flushed
+    // to the log. Because it wraps the enum itself, it is
+    // storage-agnostic — the capture layer is identical for a memory,
+    // mapped, or disk graph underneath.
     Recording(Box<RecordingGraph<GraphBackend>>),
 }
 
@@ -209,6 +209,23 @@ impl GraphBackend {
     pub fn note_recorded_node_upsert(&mut self, idx: NodeIndex) {
         if let GraphBackend::Recording(rg) = self {
             rg.note_node_upsert(idx);
+        }
+    }
+
+    /// Record that node `idx`'s secondary labels changed, for the WAL
+    /// capture wrapper. No-op unless this is the
+    /// [`GraphBackend::Recording`] backend.
+    ///
+    /// Secondary labels live in `DirGraph::secondary_label_index`, above
+    /// this backend — `NodeData` carries none — so *no* `GraphWrite` call
+    /// describes a label change and the recorded seam cannot infer one.
+    /// `DirGraph`'s label choke points call this instead; without it a
+    /// durable graph silently lost every `CREATE (n:A:B)` / `SET n:B` on
+    /// WAL replay while keeping the node's properties.
+    #[inline]
+    pub fn note_recorded_node_labels(&mut self, idx: NodeIndex) {
+        if let GraphBackend::Recording(rg) = self {
+            rg.note_node_labels(idx);
         }
     }
 

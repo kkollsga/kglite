@@ -32,8 +32,8 @@
 //! ## Crash safety of the format
 //!
 //! A frame is `[len: u32 LE][crc32: u32 LE][payload: codec(WalFrame)]`.
-//! The v2 file header selects Postcard for every frame. Older headers are
-//! rejected before any payload or torn-tail handling.
+//! The v2/v3 file headers select Postcard for every frame. Older headers
+//! are rejected before any payload or torn-tail handling.
 //! A crash mid-append leaves a torn trailing frame; [`read_frames`] stops
 //! at the first short read or CRC mismatch and returns every frame up to
 //! it. A torn frame is therefore *discarded*, never half-applied — the
@@ -52,15 +52,41 @@ use crate::datatypes::Value;
 /// File magic for a kglite WAL sidecar: `KWAL`.
 pub const WAL_MAGIC: [u8; 4] = *b"KWAL";
 
-/// On-disk WAL format version. Bumped only on a breaking frame-layout
-/// change; the WAL is a within-version recovery artefact (truncated at
-/// every checkpoint), not a long-term archival format like `.kgl`.
-pub const WAL_FORMAT_VERSION: u8 = 2;
+/// On-disk WAL format version *written* by this build. Bumped when the
+/// frame payload gains anything an older build could not parse; the WAL is
+/// a within-version recovery artefact (truncated at every checkpoint), not
+/// a long-term archival format like `.kgl`.
+///
+/// **v2 → v3** appended [`MutationOp::SetNodeLabels`] to the op enum.
+/// Postcard tags enum variants by index, so every v2 op (tags 0–3) encodes
+/// byte-identically under v3 — a v2 WAL is a *strict subset* of v3 and is
+/// read exactly, without a compat mirror of the old schema (see
+/// [`MIN_READABLE_WAL_FORMAT_VERSION`]). The version byte still moves,
+/// because the reverse direction is not safe: a v3 WAL handed to a
+/// v2-writing build would hit an unknown tag, and that build's recovery
+/// treats an unparseable payload as a torn tail — it would *silently
+/// discard* committed frames. The header bump converts that silent data
+/// loss into the loud "unsupported WAL format version" refusal such a
+/// build already implements.
+pub const WAL_FORMAT_VERSION: u8 = 3;
+
+/// Oldest WAL format this build can replay. Frames from any version in
+/// `MIN_READABLE_WAL_FORMAT_VERSION..=WAL_FORMAT_VERSION` decode with the
+/// current [`MutationOp`] schema; see [`WAL_FORMAT_VERSION`] for why that
+/// is sound rather than a shim. Reading these is deliberate
+/// format-lifecycle handling: a WAL that outlived the build that wrote it
+/// is exactly the crash-recovery case durability exists for, so an
+/// upgraded binary must recover it, not discard it.
+pub const MIN_READABLE_WAL_FORMAT_VERSION: u8 = 2;
 
 const MAX_WAL_FRAME_BYTES: u64 = u32::MAX as u64;
 
 /// One logical, identity-keyed mutation. See the module docs for why
 /// the state-changing shapes are idempotent upserts.
+///
+/// **Variant order is on-disk format.** Postcard tags variants by
+/// declaration index, so a new op must be *appended* — inserting one
+/// renumbers its successors and silently misparses every existing WAL.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MutationOp {
     /// Add-or-replace a node identified by `(node_type, id)` with the
@@ -91,6 +117,29 @@ pub enum MutationOp {
         src_id: Value,
         tgt_type: String,
         tgt_id: Value,
+    },
+    /// Replace the **secondary** labels of `(node_type, id)` with exactly
+    /// `labels` (the primary type is `node_type` and is never listed).
+    ///
+    /// A node's secondary labels live in `DirGraph::secondary_label_index`,
+    /// *above* the storage backend — `NodeData` carries none — so they are
+    /// invisible to the `GraphWrite` capture seam that produces
+    /// [`MutationOp::UpsertNode`]. Without this op a `:Label` added by
+    /// `CREATE (n:A:B)` / `SET n:B` was lost on WAL replay while every
+    /// property survived. Labels are therefore captured at their own choke
+    /// point ([`crate::graph::dir_graph::DirGraph::add_node_label`] and its
+    /// remove sibling) and carried as a whole set, which keeps the op
+    /// idempotent like every other: replaying it twice, or over a
+    /// checkpoint that already holds some of the labels, converges on the
+    /// same state.
+    ///
+    /// Ordered by label name, matching `DirGraph::node_labels`, so a
+    /// recovered graph reports labels in the same order as the graph that
+    /// logged them.
+    SetNodeLabels {
+        node_type: String,
+        id: Value,
+        labels: Vec<String>,
     },
 }
 
@@ -290,9 +339,14 @@ pub fn read_frames(mut r: impl Read, stream_len: u64) -> io::Result<Vec<WalFrame
     Ok(frames)
 }
 
+/// Codec for a WAL header version, or an error naming what this build can
+/// read. Every version in `MIN_READABLE..=CURRENT` shares one codec and one
+/// op schema — see [`WAL_FORMAT_VERSION`].
 fn wal_codec(version: u8) -> io::Result<crate::serde_codec::CodecVersion> {
     match version {
-        WAL_FORMAT_VERSION => Ok(crate::serde_codec::CodecVersion::PostcardV1),
+        MIN_READABLE_WAL_FORMAT_VERSION..=WAL_FORMAT_VERSION => {
+            Ok(crate::serde_codec::CodecVersion::PostcardV1)
+        }
         1 => Err(crate::graph::io::file::pre_014_bincode_error(
             "WAL format v1",
         )),
@@ -300,7 +354,11 @@ fn wal_codec(version: u8) -> io::Result<crate::serde_codec::CodecVersion> {
             io::ErrorKind::InvalidData,
             format!(
                 "unsupported WAL format version {version} (this build reads \
-                 v{WAL_FORMAT_VERSION})"
+                 v{MIN_READABLE_WAL_FORMAT_VERSION}-v{WAL_FORMAT_VERSION}). \
+                 A WAL newer than the binary cannot be replayed safely: open \
+                 the graph with a matching kglite build to recover it, or \
+                 delete the '-wal' sidecar to discard work committed since \
+                 the last save() checkpoint."
             ),
         )),
     }
@@ -347,6 +405,19 @@ fn sync_parent_dir(path: &Path) {
     }
 }
 
+/// Rewrite an existing WAL's version byte to [`WAL_FORMAT_VERSION`] and
+/// `fsync`. Needs its own non-append handle: the append-mode handle
+/// `Wal::open` holds ignores seeks on write, so it cannot patch a byte in
+/// place. Only ever called for a version the current schema reads exactly.
+fn upgrade_header_version(path: &Path) -> io::Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = OpenOptions::new().write(true).open(path)?;
+    file.seek(SeekFrom::Start(WAL_MAGIC.len() as u64))?;
+    file.write_all(&[WAL_FORMAT_VERSION])?;
+    file.sync_data()?;
+    Ok(())
+}
+
 /// An open, append-only WAL file. Session-scoped (one per open graph
 /// file) — it owns a `File` handle, so it lives *outside* the CoW-cloned
 /// `DirGraph` (which must stay `Clone`). Each [`append`](Self::append)
@@ -369,8 +440,11 @@ impl Wal {
     /// contain a frame — it is the residue of a crash between `create`
     /// and the header `fsync` — so it is truncated and re-initialised in
     /// place. A *longer* file with a bad magic could be somebody's data:
-    /// that errors loudly instead of destroying it. Supported v1 WALs are
-    /// Pre-0.14 and unknown versions are rejected before append.
+    /// that errors loudly instead of destroying it. A header naming a
+    /// version this build cannot read (pre-0.14 v1, or anything newer than
+    /// [`WAL_FORMAT_VERSION`]) is rejected before a single frame is
+    /// appended; a *readable* older version is upgraded in place, since the
+    /// frames already present parse under the current schema unchanged.
     pub fn open(path: PathBuf) -> io::Result<Self> {
         let existed = path.exists();
         let mut file = OpenOptions::new()
@@ -417,14 +491,21 @@ impl Wal {
                         path.display()
                     ),
                 ));
-            } else if header[4] != WAL_FORMAT_VERSION {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "unsupported WAL format version {} (this build writes v{})",
-                        header[4], WAL_FORMAT_VERSION
-                    ),
-                ));
+            } else {
+                // Reject an unreadable version before appending to it; the
+                // codec lookup owns the actionable message.
+                wal_codec(header[4])?;
+                if header[4] != WAL_FORMAT_VERSION {
+                    // A readable older version. We are about to append
+                    // current-format frames, so the header must advertise
+                    // the newer version or a future reader would parse the
+                    // new frames under the old schema. Rewriting the byte
+                    // is lossless precisely because the older format is a
+                    // subset (see `WAL_FORMAT_VERSION`): the frames already
+                    // in the file are valid current-format frames, and the
+                    // per-frame CRCs cover payloads only, not the header.
+                    upgrade_header_version(&path)?;
+                }
             }
         }
         Ok(Self { file, path })
@@ -465,6 +546,9 @@ mod tests {
     use std::io::Cursor;
     use tempfile::TempDir;
 
+    /// Deliberately **v2-only** ops (no `SetNodeLabels`): these double as
+    /// the fixture for `v2_frames_replay_exactly_under_current_schema`,
+    /// which is only meaningful if every op in it predates v3.
     fn sample_ops() -> Vec<MutationOp> {
         vec![
             MutationOp::UpsertNode {
@@ -639,6 +723,162 @@ mod tests {
     fn empty_reader_is_error() {
         let bytes: Vec<u8> = Vec::new();
         assert!(read_frames_all(bytes).is_err());
+    }
+
+    // ── op-schema stability (v2 ⊂ v3) ────────────────────────────────
+
+    /// Postcard tags enum variants by declaration index, so the tag of
+    /// every pre-existing op is on-disk format: renumbering one silently
+    /// misparses every WAL ever written. A single-op frame encodes as
+    /// `[lsn varint][ops len varint][variant tag varint]…`, so byte 2 is
+    /// the tag. Pinning all five keeps a future op from being *inserted*
+    /// rather than appended.
+    #[test]
+    fn variant_tags_are_stable_on_disk_format() {
+        let id = || Value::Int64(1);
+        let cases: [(u8, MutationOp); 5] = [
+            (
+                0,
+                MutationOp::UpsertNode {
+                    node_type: "T".into(),
+                    id: id(),
+                    title: Value::Null,
+                    properties: vec![],
+                },
+            ),
+            (
+                1,
+                MutationOp::RemoveNode {
+                    node_type: "T".into(),
+                    id: id(),
+                },
+            ),
+            (
+                2,
+                MutationOp::UpsertEdge {
+                    conn_type: "C".into(),
+                    src_type: "T".into(),
+                    src_id: id(),
+                    tgt_type: "T".into(),
+                    tgt_id: id(),
+                    properties: vec![],
+                },
+            ),
+            (
+                3,
+                MutationOp::RemoveEdge {
+                    conn_type: "C".into(),
+                    src_type: "T".into(),
+                    src_id: id(),
+                    tgt_type: "T".into(),
+                    tgt_id: id(),
+                },
+            ),
+            (
+                4,
+                MutationOp::SetNodeLabels {
+                    node_type: "T".into(),
+                    id: id(),
+                    labels: vec![],
+                },
+            ),
+        ];
+        for (tag, op) in cases {
+            let mut buf = Vec::new();
+            append_frame(
+                &mut buf,
+                &WalFrame {
+                    lsn: 1,
+                    ops: vec![op.clone()],
+                },
+            )
+            .unwrap();
+            // Skip the 8-byte [len][crc] prefix, then [lsn=1][ops_len=1].
+            assert_eq!(
+                buf[8 + 2],
+                tag,
+                "variant tag for {op:?} moved — this breaks every WAL on disk"
+            );
+        }
+    }
+
+    /// A v2 WAL (written before `SetNodeLabels` existed) must replay
+    /// *exactly* under the current schema — no compat mirror, no discarded
+    /// frames. This is the upgrade path for a graph that crashed under an
+    /// older build.
+    #[test]
+    fn v2_frames_replay_exactly_under_current_schema() {
+        let frames = vec![
+            WalFrame {
+                lsn: 1,
+                ops: sample_ops(),
+            },
+            WalFrame {
+                lsn: 2,
+                ops: sample_ops(),
+            },
+        ];
+        let bytes = write_wal_version(&frames, MIN_READABLE_WAL_FORMAT_VERSION);
+        assert_eq!(bytes[4], 2, "fixture must carry a v2 header");
+        assert_eq!(read_frames_all(bytes).unwrap(), frames);
+    }
+
+    /// Opening a readable older WAL for append upgrades its header, so the
+    /// current-format frames we are about to write are not later parsed
+    /// under the old version. The pre-existing frames survive.
+    #[test]
+    fn open_upgrades_readable_older_header_and_keeps_frames() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("g.kgl-wal");
+        std::fs::write(
+            &p,
+            write_wal_version(&[frame(1)], MIN_READABLE_WAL_FORMAT_VERSION),
+        )
+        .unwrap();
+
+        let mut wal = Wal::open(p.clone()).unwrap();
+        wal.append(&WalFrame {
+            lsn: 2,
+            ops: vec![MutationOp::SetNodeLabels {
+                node_type: "Person".into(),
+                id: Value::Int64(1),
+                labels: vec!["Employee".into()],
+            }],
+        })
+        .unwrap();
+        drop(wal);
+
+        assert_eq!(
+            std::fs::read(&p).unwrap()[4],
+            WAL_FORMAT_VERSION,
+            "header must be upgraded before newer frames are appended"
+        );
+        let got = recover(&p).unwrap();
+        assert_eq!(got.iter().map(|f| f.lsn).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(got[0], frame(1), "the pre-upgrade frame is unchanged");
+    }
+
+    /// A WAL from a *newer* build must be refused loudly rather than
+    /// silently truncated to the frames this build happens to parse.
+    #[test]
+    fn newer_wal_is_refused_with_actionable_message() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("g.kgl-wal");
+        // Header only, hand-built: this build cannot encode frames for a
+        // version it does not know.
+        let mut header = WAL_MAGIC.to_vec();
+        header.push(WAL_FORMAT_VERSION + 1);
+        std::fs::write(&p, &header).unwrap();
+        for message in [
+            Wal::open(p.clone()).unwrap_err().to_string(),
+            recover(&p).unwrap_err().to_string(),
+        ] {
+            assert!(
+                message.contains("unsupported WAL format version"),
+                "{message}"
+            );
+            assert!(message.contains("matching kglite build"), "{message}");
+        }
     }
 
     // ── file handle ──────────────────────────────────────────────────

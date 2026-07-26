@@ -32,11 +32,15 @@
 //! there. Folding then applying reaches the same final state as a
 //! frame-by-frame replay, and replaying twice is still harmless.
 //!
-//! Apply order — node upserts → edge upserts → edge removes → node removes —
-//! respects referential integrity (endpoints exist before their edges; a
-//! removed node's edges go with it via detach). An edge whose endpoint is
-//! net-removed is dropped from the edge-upsert batch (its node-remove will
-//! detach it anyway).
+//! Apply order — node upserts → label sets → edge upserts → edge removes →
+//! node removes — respects referential integrity (endpoints exist before
+//! their edges; a removed node's edges go with it via detach). An edge whose
+//! endpoint is net-removed is dropped from the edge-upsert batch (its
+//! node-remove will detach it anyway), and so is a label set.
+//!
+//! Labels fold in their own map rather than riding on `UpsertNode`, because
+//! in the live graph properties and labels are independent state: neither
+//! `SET n.x = 1` nor `SET n:B` disturbs the other. See [`LabelNet`].
 
 use std::collections::{HashMap, HashSet};
 
@@ -67,6 +71,16 @@ enum EdgeNet {
     Remove,
 }
 
+/// Net secondary-label set per node, folded independently of `NodeNet`.
+///
+/// Labels are *not* part of a node's property payload — in the live graph
+/// `SET n.x = 1` does not touch labels and `SET n:B` does not touch
+/// properties — so an `UpsertNode` must not be allowed to clobber a label
+/// set logged before it. Keeping them in their own last-write-wins map
+/// reproduces that independence regardless of the order the two op kinds
+/// appear in the log.
+type LabelNet = HashMap<NodeKey, Vec<String>>;
+
 /// Fold every frame with `lsn > after_lsn` into net per-entity state and
 /// apply it to `graph` in bulk. Returns the highest `lsn` folded in (or
 /// `after_lsn` if none), so the caller can set the recovered graph version.
@@ -80,6 +94,7 @@ pub fn apply_frames(
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
     let mut nodes: HashMap<NodeKey, NodeNet> = HashMap::new();
     let mut edges: HashMap<EdgeKey, EdgeNet> = HashMap::new();
+    let mut labels: LabelNet = HashMap::new();
     let mut max_lsn = after_lsn;
     let mut any = false;
 
@@ -147,34 +162,55 @@ pub fn apply_frames(
                         EdgeNet::Remove,
                     );
                 }
+                MutationOp::SetNodeLabels {
+                    node_type,
+                    id,
+                    labels: set,
+                } => {
+                    labels.insert((node_type.clone(), id.clone()), set.clone());
+                }
             }
         }
     }
 
     if any {
-        apply_net(graph, nodes, edges)?;
+        apply_net(graph, nodes, edges, labels)?;
     }
     Ok(max_lsn)
 }
 
-/// Apply folded net state in bulk. See the module docs for the ordering
-/// rationale.
+/// Apply folded net state in bulk, one phase per entity concern. See the
+/// module docs for why this order is the referentially-safe one.
 fn apply_net(
     graph: &mut DirGraph,
     nodes: HashMap<NodeKey, NodeNet>,
     edges: HashMap<EdgeKey, EdgeNet>,
+    labels: LabelNet,
 ) -> Result<(), String> {
-    // Node identities scheduled for removal — used to drop edge upserts whose
-    // endpoint won't exist.
+    // Node identities scheduled for removal — used to skip work whose
+    // subject won't exist once phase 5 runs.
     let removed_nodes: HashSet<NodeKey> = nodes
         .iter()
         .filter(|(_, v)| matches!(v, NodeNet::Remove))
         .map(|(k, _)| k.clone())
         .collect();
 
-    // ── Phase 1: node upserts, grouped by node_type, one add_nodes each ──
+    apply_node_upserts(graph, &nodes)?;
+    apply_label_sets(graph, &labels, &removed_nodes);
+    apply_edge_upserts(graph, &edges, &removed_nodes)?;
+    apply_edge_removes(graph, &edges);
+    apply_node_removes(graph, &nodes);
+    Ok(())
+}
+
+/// Phase 1 — node upserts, grouped by node_type, one `add_nodes` each so
+/// the type's id-index is rebuilt once rather than per row.
+fn apply_node_upserts(
+    graph: &mut DirGraph,
+    nodes: &HashMap<NodeKey, NodeNet>,
+) -> Result<(), String> {
     let mut node_groups: HashMap<&str, NodeRows> = HashMap::new();
-    for ((node_type, id), net) in &nodes {
+    for ((node_type, id), net) in nodes {
         if let NodeNet::Upsert { title, props } = net {
             let g = node_groups.entry(node_type.as_str()).or_default();
             for (k, _) in props {
@@ -195,10 +231,49 @@ fn apply_net(
             Some("replace".to_string()),
         )?;
     }
+    Ok(())
+}
 
-    // ── Phase 2: edge upserts, grouped by (conn, src_type, tgt_type) ──
+/// Phase 2 — secondary-label sets, applied through the `DirGraph` choke
+/// points so `secondary_label_index` and `has_secondary_labels` stay
+/// canonical (a direct map write would desynchronise the fast-skip flag).
+///
+/// Each op carries the node's **whole** label set, so this reconciles
+/// rather than adds: labels the checkpoint holds but the log does not are
+/// removed. That is what makes a `REMOVE n:Label` recoverable, and what
+/// keeps a re-replay idempotent. Runs after phase 1 so a node created by
+/// this same replay is already present.
+fn apply_label_sets(graph: &mut DirGraph, labels: &LabelNet, removed_nodes: &HashSet<NodeKey>) {
+    for (key @ (node_type, id), target) in labels {
+        if removed_nodes.contains(key) {
+            continue;
+        }
+        let Some(idx) = graph.lookup_by_id(node_type, id) else {
+            continue;
+        };
+        for stale in graph.secondary_label_names(idx) {
+            if !target.contains(&stale) {
+                let key = graph.interner.get_or_intern(&stale);
+                // Only errors when `stale` is the primary type, which
+                // `secondary_label_names` never yields.
+                let _ = graph.remove_node_label(idx, key);
+            }
+        }
+        for label in target {
+            let key = graph.interner.get_or_intern(label);
+            graph.add_node_label(idx, key);
+        }
+    }
+}
+
+/// Phase 3 — edge upserts, grouped by `(conn, src_type, tgt_type)`.
+fn apply_edge_upserts(
+    graph: &mut DirGraph,
+    edges: &HashMap<EdgeKey, EdgeNet>,
+    removed_nodes: &HashSet<NodeKey>,
+) -> Result<(), String> {
     let mut edge_groups: HashMap<(&str, &str, &str), EdgeRows> = HashMap::new();
-    for ((conn, src_type, src_id, tgt_type, tgt_id), net) in &edges {
+    for ((conn, src_type, src_id, tgt_type, tgt_id), net) in edges {
         if let EdgeNet::Upsert { props } = net {
             // Skip if either endpoint is being removed — the node-remove
             // detaches any such edge anyway, and add_connections would fail
@@ -236,10 +311,14 @@ fn apply_net(
             Some("replace".to_string()),
         )?;
     }
+    Ok(())
+}
 
-    // ── Phase 3: edge removes ─────────────────────────────────────────
+/// Phase 4 — edge removes by logical identity. The one thing the
+/// `maintain::*` helpers don't expose, so it reaches the storage layer.
+fn apply_edge_removes(graph: &mut DirGraph, edges: &HashMap<EdgeKey, EdgeNet>) {
     let mut removed_edges = 0usize;
-    for ((conn, src_type, src_id, tgt_type, tgt_id), net) in &edges {
+    for ((conn, src_type, src_id, tgt_type, tgt_id), net) in edges {
         if !matches!(net, EdgeNet::Remove) {
             continue;
         }
@@ -264,10 +343,13 @@ fn apply_net(
         graph.invalidate_edge_type_counts_cache();
         graph.connection_types.clear();
     }
+}
 
-    // ── Phase 4: node removes (detach incident edges + index cleanup) ─
+/// Phase 5 — node removes (detach incident edges + index cleanup). Last,
+/// so every earlier phase could still resolve identities it needed.
+fn apply_node_removes(graph: &mut DirGraph, nodes: &HashMap<NodeKey, NodeNet>) {
     let mut to_delete: HashSet<NodeIndex> = HashSet::new();
-    for ((node_type, id), net) in &nodes {
+    for ((node_type, id), net) in nodes {
         if matches!(net, NodeNet::Remove) {
             if let Some(idx) = graph.lookup_by_id(node_type, id) {
                 to_delete.insert(idx);
@@ -277,8 +359,6 @@ fn apply_net(
     if !to_delete.is_empty() {
         detach_delete_nodes(graph, &to_delete);
     }
-
-    Ok(())
 }
 
 /// Accumulator for one node_type's upsert rows.
@@ -485,6 +565,167 @@ mod tests {
         assert_eq!(max, 2);
         assert!(g.lookup_by_id("Person", &Value::Int64(1)).is_none());
         assert!(g.lookup_by_id("Person", &Value::Int64(2)).is_some());
+    }
+
+    /// Secondary labels a node carries in `labels(n)` order. The exact
+    /// list, not a set: `DirGraph::node_labels` promises primary-first then
+    /// name-sorted, and replay must not degrade that to arbitrary order.
+    fn labels_of(g: &mut DirGraph, id: i64) -> Vec<String> {
+        let idx = g
+            .lookup_by_id("Person", &Value::Int64(id))
+            .expect("node must exist");
+        g.node_labels(idx)
+            .into_iter()
+            .map(|k| g.interner.resolve(k).to_string())
+            .collect()
+    }
+
+    fn set_labels(id: i64, labels: &[&str]) -> MutationOp {
+        MutationOp::SetNodeLabels {
+            node_type: "Person".into(),
+            id: Value::Int64(id),
+            labels: labels.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// The regression this op exists for: before `SetNodeLabels`, a node's
+    /// properties survived replay and its secondary labels silently did
+    /// not.
+    #[test]
+    fn replay_restores_secondary_labels_in_exact_order() {
+        let mut g = DirGraph::new();
+        let frames = vec![frame(
+            1,
+            vec![
+                upsert_node(1, "Alice", vec![("age", Value::Int64(30))]),
+                // Logged unsorted on purpose: ordering is replay's job.
+                set_labels(1, &["Manager", "Employee"]),
+            ],
+        )];
+        apply_frames(&mut g, &frames, 0).unwrap();
+
+        assert_eq!(
+            labels_of(&mut g, 1),
+            vec!["Person", "Employee", "Manager"],
+            "primary first, then secondaries sorted by name"
+        );
+        assert_eq!(prop(&mut g, 1, "age"), Some(Value::Int64(30)));
+        assert!(g.has_secondary_labels, "fast-skip flag must be set");
+        // The label index is the candidate source for `MATCH (n:Employee)`.
+        assert_eq!(g.nodes_with_label("Employee").len(), 1);
+    }
+
+    /// A whole-set op reconciles: labels present in the checkpoint but
+    /// absent from the log are removed, which is what makes `REMOVE
+    /// n:Label` recoverable.
+    #[test]
+    fn replay_removes_labels_the_log_dropped() {
+        let mut g = DirGraph::new();
+        apply_frames(
+            &mut g,
+            &[frame(
+                1,
+                vec![upsert_node(1, "Alice", vec![]), set_labels(1, &["A", "B"])],
+            )],
+            0,
+        )
+        .unwrap();
+        assert_eq!(labels_of(&mut g, 1), vec!["Person", "A", "B"]);
+
+        // A later frame carries only "B" — "A" was removed in the session.
+        apply_frames(&mut g, &[frame(2, vec![set_labels(1, &["B"])])], 1).unwrap();
+        assert_eq!(labels_of(&mut g, 1), vec!["Person", "B"]);
+        assert!(
+            g.nodes_with_label("A").is_empty(),
+            "the dropped label must leave no index residue"
+        );
+    }
+
+    /// Emptying the set clears the fast-skip flag, so a graph whose last
+    /// label was removed pays no secondary-label scan cost after recovery.
+    #[test]
+    fn replay_to_an_empty_label_set_clears_the_flag() {
+        let mut g = DirGraph::new();
+        apply_frames(
+            &mut g,
+            &[
+                frame(
+                    1,
+                    vec![upsert_node(1, "Alice", vec![]), set_labels(1, &["A"])],
+                ),
+                frame(2, vec![set_labels(1, &[])]),
+            ],
+            0,
+        )
+        .unwrap();
+        assert_eq!(labels_of(&mut g, 1), vec!["Person"]);
+        assert!(!g.has_secondary_labels);
+    }
+
+    /// Labels and properties are independent state: an `UpsertNode` logged
+    /// after a label set (a later `SET n.age = …`) must not wipe the
+    /// labels, in either fold order.
+    #[test]
+    fn property_upsert_does_not_clobber_labels() {
+        for reversed in [false, true] {
+            let mut ops = vec![
+                upsert_node(1, "Alice", vec![]),
+                set_labels(1, &["Employee"]),
+                upsert_node(1, "Alice", vec![("age", Value::Int64(41))]),
+            ];
+            if reversed {
+                ops.swap(1, 2);
+            }
+            let mut g = DirGraph::new();
+            apply_frames(&mut g, &[frame(1, ops)], 0).unwrap();
+            assert_eq!(
+                labels_of(&mut g, 1),
+                vec!["Person", "Employee"],
+                "{reversed}"
+            );
+            assert_eq!(prop(&mut g, 1, "age"), Some(Value::Int64(41)), "{reversed}");
+        }
+    }
+
+    /// A node deleted later in the log must not be resurrected by its own
+    /// label op.
+    #[test]
+    fn label_set_for_a_removed_node_is_skipped() {
+        let mut g = DirGraph::new();
+        let frames = vec![frame(
+            1,
+            vec![
+                upsert_node(1, "Alice", vec![]),
+                set_labels(1, &["Employee"]),
+                MutationOp::RemoveNode {
+                    node_type: "Person".into(),
+                    id: Value::Int64(1),
+                },
+            ],
+        )];
+        apply_frames(&mut g, &frames, 0).unwrap();
+        assert_eq!(g.graph.node_count(), 0);
+        assert!(g.nodes_with_label("Employee").is_empty());
+    }
+
+    #[test]
+    fn replaying_labels_twice_is_idempotent() {
+        let frames = vec![frame(
+            1,
+            vec![
+                upsert_node(1, "Alice", vec![]),
+                set_labels(1, &["Employee", "Manager"]),
+            ],
+        )];
+        let mut g = DirGraph::new();
+        apply_frames(&mut g, &frames, 0).unwrap();
+        apply_frames(&mut g, &frames, 0).unwrap();
+        assert_eq!(labels_of(&mut g, 1), vec!["Person", "Employee", "Manager"]);
+        assert_eq!(
+            g.nodes_with_label("Employee").len(),
+            1,
+            "no duplicate bucket entry"
+        );
     }
 
     #[test]

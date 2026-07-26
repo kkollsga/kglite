@@ -353,7 +353,11 @@ impl KnowledgeGraph {
             if raw.is_empty() {
                 return Ok(());
             }
-            kglite_core::api::durable::resolve_ops(&raw, &dir.graph, &dir.interner)
+            // Secondary labels are read back through `dir` because they are
+            // not backend state — see `resolve_ops`.
+            kglite_core::api::durable::resolve_ops(&raw, &dir.graph, &dir.interner, |idx| {
+                dir.secondary_label_names(idx)
+            })
         };
         let ds = self
             .lifecycle
