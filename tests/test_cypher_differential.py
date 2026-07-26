@@ -1965,6 +1965,10 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
     # or that mix several seams in one statement, so a capture gap shows up
     # here as a diverging result.
     (
+        "create_with_secondary_labels",
+        "CREATE (p:Person:Employee:Remote {person_id: 400, name: 'L', age: 33}) RETURN labels(p) AS ls",
+    ),
+    (
         "set_label",
         "MATCH (p:Person {person_id: 1}) SET p:Employee RETURN labels(p) AS ls",
     ),

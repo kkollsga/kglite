@@ -1609,11 +1609,20 @@ impl DirGraph {
     /// InternedKey lookup, no allocation).
     ///
     /// Reads secondaries from `secondary_label_index` (the canonical
-    /// source maintained by the choke-point API) rather than from
-    /// `NodeData.extra_labels`. This works uniformly across backends:
-    /// in-memory + mapped have both in sync; on disk, `NodeData` is
-    /// materialised from a transient arena that doesn't carry the
-    /// extras, but the inverted index does.
+    /// source maintained by the choke-point API), which is an inverted
+    /// index — it has no record of the order the labels were declared in.
+    /// Secondaries are therefore returned **sorted by label name**, with the
+    /// primary type first.
+    ///
+    /// Sorting is not cosmetic: iterating the index directly leaked
+    /// `HashMap` iteration order into `labels(n)`, so two graphs holding
+    /// identical data disagreed about the order of a node's labels (each
+    /// `HashMap` seeds its own `RandomState`). That made results
+    /// irreproducible across processes and across two instances of the same
+    /// graph. Name order is stable everywhere and needs no extra state.
+    ///
+    /// Single-label graphs short-circuit on `has_secondary_labels` and never
+    /// reach the sort.
     pub fn node_labels(&self, idx: NodeIndex) -> Vec<InternedKey> {
         use crate::graph::storage::GraphRead;
         let Some(primary) = GraphRead::node_type_of(&self.graph, idx) else {
@@ -1622,12 +1631,16 @@ impl DirGraph {
         if !self.has_secondary_labels {
             return vec![primary];
         }
-        let mut labels = vec![primary];
-        for (&key, bucket) in &self.secondary_label_index {
-            if bucket.contains(&idx) {
-                labels.push(key);
-            }
-        }
+        let mut extras: Vec<InternedKey> = self
+            .secondary_label_index
+            .iter()
+            .filter(|(_, bucket)| bucket.contains(&idx))
+            .map(|(&key, _)| key)
+            .collect();
+        extras.sort_unstable_by(|a, b| self.interner.resolve(*a).cmp(self.interner.resolve(*b)));
+        let mut labels = Vec::with_capacity(extras.len() + 1);
+        labels.push(primary);
+        labels.extend(extras);
         labels
     }
 
