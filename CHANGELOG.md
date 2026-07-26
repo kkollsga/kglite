@@ -378,6 +378,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`count(*) AS n ORDER BY count(*)` — order by `n`). Ordering by a projected
   alias, by an unaliased aggregate's expression form (`ORDER BY count(p)`), and
   by any property of a grouping variable all keep working.
+- A Cypher write clause fed zero rows no longer writes anything. `MATCH (p:Project
+  {key: 'NOPE'}) CREATE (t:Task ...)` used to return a row and create the node
+  even though the `MATCH` found nothing; it now returns no rows and creates
+  nothing, matching Neo4j. The same fix covers `MERGE` and `FOREACH` after an
+  empty match, and `UNWIND [] AS x CREATE ...`.
+
+  The two-variable form was the damaging one: `MATCH (t:Task {...}), (u:User
+  {...}) CREATE (t)-[:ASSIGNED_TO]->(u)` where `u` matched nothing used to
+  fabricate `u` as a real node and attach the relationship to it, leaving an
+  edge pointing at a node with no label and no properties — invisible to any
+  label scan but reachable by traversal. With no referential-integrity
+  constraints in the engine, "MATCH the parent, then CREATE the child" is the
+  only way an application can enforce a foreign key, and this silently defeated
+  it while returning a plausible-looking id.
+
+  Cause: `CREATE`, `MERGE`, and `FOREACH` each decided whether to supply
+  Cypher's implicit single start row by testing whether the incoming row set was
+  empty — which is equally true at the start of a query and after a clause that
+  matched nothing. That decision now lives in the clause pipeline, which is the
+  only place that can tell the two apart. `SET`, `DELETE`, and `REMOVE` were
+  never affected. Behaviour that deliberately does *not* change: a leading
+  `CREATE`/`MERGE`/`FOREACH` with no preceding clause still runs exactly once,
+  and `OPTIONAL MATCH` still yields one null-padded row that a following
+  `CREATE` acts on.
 - `claude_config` now reads and writes Claude MCP config files as UTF-8. On a
   non-UTF-8 Windows codepage the read mis-decoded the file and the atomic write
   committed the damage over every unrelated MCP server entry; non-ASCII text in
