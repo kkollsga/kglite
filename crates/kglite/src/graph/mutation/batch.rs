@@ -322,10 +322,28 @@ impl BatchProcessor {
                 deferred_columnar.push((node_idx, creation.node_type.clone(), row_id));
             }
 
+            // Statement-rollback capture. No Cypher path reaches this batch
+            // funnel today (the Cypher executor creates nodes only through
+            // `DirGraph::insert_node_routed`), so no undo journal is installed
+            // while this runs and the hook is dead weight — deliberately. It
+            // costs one `Option` check per node and means that if a future
+            // `CALL` procedure ever does route bulk ingest through here inside
+            // a mutating statement, its `type_indices` append is reversible
+            // instead of silently surviving a rollback. Capturing at the
+            // storage seam already covers the node itself; only this
+            // above-storage index edit needs its own hook.
+            let bucket_was_new = !graph.type_indices.contains_key(&creation.node_type);
             graph
                 .type_indices
-                .entry_or_default(creation.node_type)
+                .entry_or_default(creation.node_type.clone())
                 .push(node_idx);
+            if let Some(journal) = graph.graph.undo_journal_mut() {
+                journal.note_bucket_appended(
+                    crate::graph::storage::undo::BucketId::NodeType(creation.node_type),
+                    node_idx,
+                    bucket_was_new,
+                );
+            }
             // id_indices is intentionally NOT updated incrementally here.
             // Writing into entry_or_default before any prior `build_id_index`
             // call would create a partial entry that subsequent lookups

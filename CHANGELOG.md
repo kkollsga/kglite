@@ -21,6 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indexes, and the `mapped`/`disk` backends keep the previous whole-graph
   checkpoint, so their write cost is unchanged.
 
+### Fixed
+
+- `labels(n)` now returns a node's secondary labels in a stable order (sorted
+  by name, primary label first). They were previously returned in hash-map
+  iteration order, so two graphs holding identical data could report a node's
+  labels in different orders, and the order could change between processes.
+  Any caller that compared, displayed, or serialized `labels(n)` could see
+  irreproducible results.
+
 ## [0.14.5] - 2026-07-22
 
 ### Changed
