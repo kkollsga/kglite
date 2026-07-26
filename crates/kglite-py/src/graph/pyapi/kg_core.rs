@@ -14,6 +14,7 @@ use kglite_core::api::introspection;
 use kglite_core::api::io;
 use kglite_core::api::io::{Cancelled, ProgressEvent, ProgressSink, ProgressValue};
 use kglite_core::api::mutation::OperationReport;
+use kglite_core::api::session::CsvImportPolicy;
 use kglite_core::api::GraphRead;
 use kglite_core::api::{ConnectionSchemaDefinition, NodeSchemaDefinition, SchemaDefinition};
 use pyo3::prelude::*;
@@ -1591,8 +1592,7 @@ impl KnowledgeGraph {
                 lazy_eligible: streaming,
                 disabled_passes: disabled_owned.as_ref(),
                 embedder: embedder_for_opts,
-                // value_codecs are an MCP-manifest feature; the Python API
-                // doesn't configure them (the engine path uses native types).
+                // value_codecs are an MCP-manifest feature, unused on this path.
                 value_codecs: None,
                 // Cancellation is deliberately NOT wired on the live-KG path:
                 // it mutates the single-owner graph *in place* (no working-copy
@@ -1605,6 +1605,7 @@ impl KnowledgeGraph {
                 write_scope: write_scope_set.as_ref(),
                 git_sha: git_sha.as_deref(),
                 modified_by: modified_by.as_deref(),
+                csv_import: CsvImportPolicy::LocalFilesystem,
             };
 
             let outcome = kglite_core::api::session::execute_mut(graph, query, &opts)
@@ -1672,8 +1673,7 @@ impl KnowledgeGraph {
                 lazy_eligible: streaming,
                 disabled_passes: disabled_owned.as_ref(),
                 embedder: embedder_for_opts,
-                // value_codecs are an MCP-manifest feature; the Python API
-                // doesn't configure them (the engine path uses native types).
+                // value_codecs are an MCP-manifest feature, unused on this path.
                 value_codecs: None,
                 // Overridden with the live cancel flag inside enter_kg below.
                 cancel: None,
@@ -1681,6 +1681,7 @@ impl KnowledgeGraph {
                 write_scope: None,
                 git_sha: None,
                 modified_by: None,
+                csv_import: CsvImportPolicy::LocalFilesystem,
             };
             let inner_for_detach = std::sync::Arc::clone(&inner);
             py.enter_kg(

@@ -957,6 +957,75 @@ Expand a list into rows:
 graph.cypher("UNWIND [1, 2, 3] AS x RETURN x, x * 2 AS doubled")
 ```
 
+## LOAD CSV
+
+Read a delimited file and pipe its rows through the rest of the query, in the
+spelling other Cypher databases use, so a ported load script runs unedited.
+
+```
+LOAD CSV [WITH HEADERS] FROM <source> AS <variable> [FIELDTERMINATOR <sep>]
+```
+
+```python
+graph.cypher("""
+    LOAD CSV WITH HEADERS FROM 'file:///data/people.csv' AS row
+    CREATE (:Person {id: toInteger(row.id), name: row.name})
+""")
+```
+
+**Row binding.** `WITH HEADERS` binds each record as a **map** keyed by the
+header row (`row.name`); without it, each record binds as a zero-indexed
+**list** (`row[0]`) and the first line is data, not a header. Fields are always
+**strings** — CSV carries no types, and inferring them would corrupt
+leading-zero identifiers, so convert explicitly with `toInteger(row.n)` /
+`toFloat(row.x)`. An **empty field is `null`**, and a short row nulls its
+missing columns rather than failing the load.
+
+**Position.** `LOAD CSV` must be the **first clause**. It is a row source, not
+a transform, and the executor drives everything after it (see below).
+
+**Sources.** `file://` URLs and plain local filesystem paths. `http(s)://` is
+**rejected with a message, never a syntax error** — the engine ships no HTTP
+client (network dependencies were removed in 0.14.x). Fetch the file first, or
+download and parse it in your own code and pass the rows in as a parameter.
+`FROM $path` works, so the location can be a parameter.
+
+**Reading local files is a capability the caller is granted, not a given:**
+
+| Caller | Default | Override |
+|---|---|---|
+| Python API, Rust library, CLI (in-process) | Allowed — the caller already has the host process's filesystem access | — |
+| `kglite-bolt-server` (remote clients) | **Denied** | `--allow-csv-import <DIR>` confines imports to `DIR` after symlink resolution, so `..` segments and symlinks cannot escape it |
+| `kglite-mcp-server` | **Denied** | none |
+
+Without this gate, any client that could open a Bolt connection could run
+`LOAD CSV FROM 'file:///etc/passwd'`. Server-mode graph databases generally
+gate CSV import the same way — an allowed import directory, off by default.
+
+### Memory: what streams and what does not
+
+`LOAD CSV` reads the file in **1000-row batches** and runs the clauses that
+follow once per batch, so peak memory does not scale with file size. Measured
+on a row-local pipeline, a 5 MB and a 109 MB input both cost ~20 MB of resident
+memory.
+
+Batching is only equivalent to a single whole-file pass when every following
+clause is **row-local** — `MATCH`, `WHERE`, `UNWIND`, `CREATE`, `MERGE`, `SET`,
+`DELETE`, `REMOVE`, `FOREACH`, and non-aggregating `WITH`/`RETURN`. That covers
+the ingest shape the clause exists for, and it streams at any file size.
+
+A clause that reasons over the **whole result** — any aggregate, `ORDER BY`,
+`SKIP`, `LIMIT`, `DISTINCT`, `UNION`, or `CALL` — cannot be batched without
+changing the answer (`RETURN count(*)` would report one count per batch). Those
+queries read the file into a single pass instead, capped at **1,000,000 rows**:
+past that the query fails naming the clause that forced it, rather than
+exhausting memory. Restructure to a row-local pipeline, or aggregate outside
+the query.
+
+**Not supported:** `CALL { ... } IN TRANSACTIONS` (and the older
+`USING PERIODIC COMMIT`). Batching here is automatic and internal, so there is
+no commit-interval to declare; a whole `LOAD CSV` statement commits once.
+
 ## UNION / INTERSECT / EXCEPT
 
 Set operators combine two queries with matching column shapes.
@@ -2218,7 +2287,7 @@ claimed openCypher-compatible subset.
 | `CALL ... YIELD` | Extension | Namespaced KGLite procedures plus `db.*` discovery procedures |
 | `CALL { ... }` subqueries | Partial | Uncorrelated + correlated (importing `WITH`) read subqueries. v1 excludes writes in the body, unit (no-`RETURN`) subqueries, `UNION` inside the body, and `IN TRANSACTIONS`. See the `CALL { ... }` Subqueries section. |
 | `FOREACH` | Covered | Updating bodies, including nested `FOREACH` |
-| `LOAD CSV` | Unsupported | Use Python, Rust, or blueprint ingestion APIs |
+| `LOAD CSV` | Partial | `LOAD CSV [WITH HEADERS] FROM <source> AS row [FIELDTERMINATOR <sep>]` over `file://` URLs and local paths, leading position only. Streams in batches for row-local pipelines; `http(s)://` and `IN TRANSACTIONS` are not supported. See [LOAD CSV](#load-csv) |
 
 ### Expressions & Operators
 
@@ -2298,4 +2367,4 @@ compatible subset.
 | Index names | Canonical and derived: `Label.property`, `Label.(a,b)` | User-assigned, unique | A name in `CREATE INDEX <name> …` is accepted for script portability but not stored; the persisted `.kgl` index state is a list of `(label, property)` keys |
 | Constraint DDL | `IS UNIQUE`, `IS NOT NULL`, `IS NODE KEY` — enforced on every write path. `IS :: TYPE` rejected | `CREATE CONSTRAINT … IS UNIQUE / IS NOT NULL / IS NODE KEY / IS :: TYPE` | KGLite has no write-time property-type constraint, so `IS :: TYPE` is rejected rather than accepted-and-ignored; use `lock_schema()` or `validate_schema()`. See [Cypher constraint DDL](#cypher-constraint-ddl) |
 | Constraint names | Stored, so `DROP CONSTRAINT <name>` works | User-assigned, unique per database | The opposite decision to index names above: a ported schema script almost always drops constraints by name, and the `.kgl` metadata section is JSON, so the field was free. A constraint declared without a name is addressable by its canonical descriptor |
-| `LOAD CSV` | Not supported | Supported | Python ecosystem (pandas) preferred for data loading |
+| `LOAD CSV` source | Local files only — `file://` URLs and filesystem paths, gated by a per-caller capability | `file://` plus `http(s)://`, gated by an import-directory setting | The engine ships no HTTP client (network dependencies were removed in 0.14.x), so there is nothing to fetch a URL with. Filesystem access is granted per caller: on for in-process use, off for Bolt clients unless the server was started with `--allow-csv-import <DIR>` |

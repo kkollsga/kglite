@@ -22,6 +22,7 @@ use boltr::server::{
 };
 use boltr::types::{BoltDict, BoltValue};
 
+use kglite::api::session::CsvImportPolicy;
 use kglite::api::{cypher, DirGraph, Value};
 
 use crate::error_map::kg_to_bolt;
@@ -85,6 +86,14 @@ pub struct KgliteBackend {
     /// but can differ when running behind a reverse proxy
     /// (`--advertise-addr` flag on `main.rs`).
     advertised_addr: String,
+    /// LOAD CSV filesystem capability for every query on this server.
+    ///
+    /// Server-wide rather than per-session because a Bolt client's identity
+    /// carries no filesystem authority here: `--auth basic` is a single shared
+    /// credential, not a user directory, so there is nothing to scope an import
+    /// grant to beyond "this server allows imports from this directory".
+    /// Default `Denied` — see the `--allow-csv-import` flag.
+    csv_import: CsvImportPolicy,
 }
 
 /// Per-Bolt-transaction state. Wraps the canonical
@@ -187,7 +196,12 @@ impl KgliteBackend {
     /// so it must be reachable from the client's network. Usually
     /// this matches the bind address but should differ when bound
     /// to `0.0.0.0` behind a hostname or reverse proxy.
-    pub fn new(graph: DirGraph, readonly: bool, advertised_addr: String) -> Self {
+    pub fn new(
+        graph: DirGraph,
+        readonly: bool,
+        advertised_addr: String,
+        csv_import: CsvImportPolicy,
+    ) -> Self {
         Self {
             session: Arc::new(kglite::api::session::Session::new(graph)),
             readonly,
@@ -195,6 +209,7 @@ impl KgliteBackend {
             session_counter: AtomicU64::new(0),
             tx_counter: AtomicU64::new(0),
             advertised_addr,
+            csv_import,
         }
     }
 }
@@ -517,7 +532,8 @@ impl BoltBackend for KgliteBackend {
         // Delegate to session::Session::commit which handles OCC +
         // Arc swap atomically. Phase E.4 wires OCC (was deferred in
         // C.5); concurrent writers now get
-        // ConflictDetected → BoltError::Transaction.
+        // ConflictDetected -> BoltError::Query carrying the documented
+        // `Neo.ClientError.Transaction.ConflictDetected` status code.
         let Some(tx) = state.inner.take() else {
             // Defensive fallthrough — was already consumed.
             return Ok(BoltDict::new());
@@ -549,11 +565,25 @@ impl BoltBackend for KgliteBackend {
                     base_version,
                     "commit conflict — another writer committed first"
                 );
-                return Err(BoltError::Transaction(format!(
-                    "Transaction conflict: graph was modified by another committer \
-                     since this transaction's BEGIN (base version {base_version}, \
-                     current version {current_version}). Retry the transaction."
-                )));
+                // `BoltError::Query` rather than `BoltError::Transaction`:
+                // boltr maps the latter to
+                // `Neo.ClientError.Transaction.TransactionStartFailed`, which
+                // is wrong twice over — the transaction started fine, and it
+                // contradicted the documented contract in this crate's README
+                // and the migration guide, both of which promise
+                // `ConflictDetected`. A ported client that branches on the
+                // status code (the normal way to write an OCC retry loop) was
+                // therefore told the wrong thing, and the Python tests could
+                // only match on the message text. `Query` lets us set the
+                // documented code directly.
+                return Err(BoltError::Query {
+                    code: "Neo.ClientError.Transaction.ConflictDetected".into(),
+                    message: format!(
+                        "Transaction conflict: graph was modified by another committer \
+                         since this transaction's BEGIN (base version {base_version}, \
+                         current version {current_version}). Retry the transaction."
+                    ),
+                });
             }
         }
 
@@ -750,6 +780,10 @@ impl KgliteBackend {
         opts.write_scope = meta.write_scope.as_ref();
         opts.git_sha = meta.git_sha.as_deref();
         opts.modified_by = meta.modified_by.as_deref();
+        // Every query reaching this backend came in over the wire, so the
+        // remote-caller policy applies unconditionally. `execute_opts` is the
+        // single chokepoint for both the auto-commit and in-transaction paths.
+        opts.csv_import = self.csv_import.clone();
         opts
     }
 
@@ -908,7 +942,8 @@ mod tests {
         let path = unique_disk_path();
         let graph = new_dir_graph_in_mode(StorageMode::Disk, Some(&path))
             .expect("create disk-backed graph");
-        let backend = KgliteBackend::new(graph, false, "127.0.0.1:0".into());
+        let backend =
+            KgliteBackend::new(graph, false, "127.0.0.1:0".into(), CsvImportPolicy::Denied);
         let session = SessionHandle("disk-session".into());
 
         mutate_and_finish(&backend, &session, "CREATE (:Person {id: 1})", true).await;
@@ -942,7 +977,7 @@ mod tests {
 
     fn memory_backend() -> KgliteBackend {
         let graph = new_dir_graph_in_mode(StorageMode::Memory, None).expect("create memory graph");
-        KgliteBackend::new(graph, false, "127.0.0.1:0".into())
+        KgliteBackend::new(graph, false, "127.0.0.1:0".into(), CsvImportPolicy::Denied)
     }
 
     #[tokio::test]

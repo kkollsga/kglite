@@ -56,6 +56,11 @@ pub enum Clause {
     Skip(SkipClause),
     Limit(LimitClause),
     Unwind(UnwindClause),
+    /// `LOAD CSV … AS row` — an external row source. Legal only as the leading
+    /// clause; the executor drives the rest of the pipeline over bounded row
+    /// batches rather than materializing the file (see
+    /// `executor/load_csv.rs`).
+    LoadCsv(LoadCsvClause),
     Union(UnionClause),
     Create(CreateClause),
     Set(SetClause),
@@ -676,6 +681,31 @@ pub struct LimitClause {
 pub struct UnwindClause {
     pub expression: Expression,
     pub alias: String,
+}
+
+/// `LOAD CSV [WITH HEADERS] FROM <source> AS <variable> [FIELDTERMINATOR <sep>]`
+///
+/// A row **source**: unlike every other clause it originates rows from outside
+/// the graph rather than transforming an upstream row set, so it is only legal
+/// as the leading clause (enforced in
+/// [`super::parser::CypherParser::parse_clause_sequence`]).
+///
+/// `source` stays an [`Expression`] rather than a resolved path because the
+/// parsed AST is plan-cached and replayed across executions: a literal path is
+/// the common form, but `FROM $path` must re-evaluate per call, and the file is
+/// only ever opened at execute time.
+#[derive(Debug, Clone)]
+pub struct LoadCsvClause {
+    /// `WITH HEADERS` present — bind each row as a map keyed by the header
+    /// row. Without it, rows bind as a zero-indexed list.
+    pub with_headers: bool,
+    /// The CSV location. Evaluated per execution; `file://` URLs and bare
+    /// filesystem paths resolve, other URL schemes are rejected.
+    pub source: Expression,
+    /// The variable each row binds to (`AS row`).
+    pub variable: String,
+    /// `FIELDTERMINATOR ';'` — a single-byte delimiter. `None` means comma.
+    pub field_terminator: Option<u8>,
 }
 
 /// Set-operator kind: UNION, INTERSECT, EXCEPT.

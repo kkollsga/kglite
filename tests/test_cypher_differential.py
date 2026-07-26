@@ -1922,6 +1922,16 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     # is that no pass rewrites or drops the clause and that it stays off the
     # mutation engine, where it would be rejected.
     ("show_constraints_ddl", "small_graph", "SHOW CONSTRAINTS", None),
+    # Dotted access on a map-valued parameter. Pins that no pass mangles
+    # the `ExprPropertyAccess` chain the parser now builds over a
+    # `Parameter` node (the bracket form was always accepted; the dotted
+    # form used to be a syntax error).
+    (
+        "parameter_map_property_access",
+        "small_graph",
+        "MATCH (p:Person) WHERE p.city = $filter.city RETURN p.name AS name ORDER BY name",
+        {"filter": {"city": "Oslo"}},
+    ),
 ]
 
 
@@ -2291,3 +2301,105 @@ def test_mutation_optimized_matches_naive(name: str, query: str) -> None:
     assert rows_opt == rows_naive, f"Mutation `{name}` rows: opt={rows_opt}, naive={rows_naive}"
     assert nodes_opt == nodes_naive, f"Mutation `{name}` post-state node count: opt={nodes_opt}, naive={nodes_naive}"
     assert edges_opt == edges_naive, f"Mutation `{name}` post-state edge count: opt={edges_opt}, naive={edges_naive}"
+
+
+# ---------------------------------------------------------------------------
+# LOAD CSV
+# ---------------------------------------------------------------------------
+#
+# A third corpus, separate from the two above for one mechanical reason: every
+# LOAD CSV query needs a real file, so the query text carries a `{csv}`
+# placeholder the runner substitutes with a per-test `tmp_path` file. It cannot
+# live in DIFFERENTIAL_QUERIES because that list is also consumed verbatim by
+# `scripts/bolt_conformance.py`, where LOAD CSV is denied by design (a Bolt
+# client is a remote caller — see `executor/load_csv.rs`).
+#
+# What these pin: LOAD CSV is an opaque barrier to every optimizer pass, and
+# the batch driver produces the same answer as the naive plan. Row counts
+# straddle the 1000-row batch size on purpose, so a pass that reordered or
+# fused across the clause would diverge rather than merely run slower.
+LOAD_CSV_QUERIES: list[tuple[str, str]] = [
+    (
+        "load_csv_headers_return",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row RETURN row.name AS name",
+    ),
+    (
+        "load_csv_no_headers_index",
+        "LOAD CSV FROM '{csv}' AS row RETURN row[0] AS id",
+    ),
+    (
+        "load_csv_where_filter",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row WITH row WHERE toInteger(row.id) % 7 = 0 RETURN row.id AS id",
+    ),
+    (
+        "load_csv_aggregate_barrier",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row RETURN count(*) AS n",
+    ),
+    (
+        "load_csv_group_aggregate",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row RETURN row.city AS city, count(*) AS n ORDER BY city",
+    ),
+    (
+        "load_csv_order_by_limit",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row RETURN row.name AS name ORDER BY name DESC LIMIT 5",
+    ),
+    (
+        "load_csv_distinct",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row RETURN DISTINCT row.city AS city ORDER BY city",
+    ),
+    (
+        "load_csv_create_ingest",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row CREATE (:Imported {id: toInteger(row.id), name: row.name})",
+    ),
+    (
+        "load_csv_merge_dedupe",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row MERGE (:City {id: row.city})",
+    ),
+    (
+        "load_csv_match_join",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row "
+        "WITH toInteger(row.id) AS pid MATCH (p:Person {person_id: pid}) "
+        "RETURN p.name AS name ORDER BY name",
+    ),
+    (
+        "load_csv_unwind_after",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row UNWIND [row.city, row.name] AS token RETURN count(token) AS n",
+    ),
+]
+
+# Straddles the engine's 1000-row batch size so batch-boundary bugs surface.
+_LOAD_CSV_ROWS = 1000 * 2 + 3
+
+
+def _write_differential_csv(path) -> str:
+    import csv as csv_module
+
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv_module.writer(fh)
+        writer.writerow(["id", "name", "city"])
+        for i in range(_LOAD_CSV_ROWS):
+            writer.writerow([i + 1, f"Name{i:05d}", f"City{i % 4}"])
+    return str(path)
+
+
+@pytest.mark.differential
+@pytest.mark.parametrize("name,query", LOAD_CSV_QUERIES, ids=[entry[0] for entry in LOAD_CSV_QUERIES])
+def test_load_csv_optimized_matches_naive(name: str, query: str, tmp_path) -> None:
+    """Optimized and naive plans must agree on rows and on post-state, with the
+    CSV batch driver in play on both sides."""
+    csv_path = _write_differential_csv(tmp_path / "differential.csv")
+    resolved = query.replace("{csv}", csv_path)
+
+    g_opt = _build_mutation_graph()
+    rows_opt = _normalize(g_opt.cypher(resolved).to_list())
+    nodes_opt = g_opt.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"]
+    edges_opt = g_opt.cypher("MATCH ()-[r]->() RETURN count(r) AS c").to_list()[0]["c"]
+
+    g_naive = _build_mutation_graph()
+    rows_naive = _normalize(g_naive.cypher(resolved, disable_optimizer=True).to_list())
+    nodes_naive = g_naive.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"]
+    edges_naive = g_naive.cypher("MATCH ()-[r]->() RETURN count(r) AS c").to_list()[0]["c"]
+
+    assert rows_opt == rows_naive, f"LOAD CSV `{name}` rows: opt={rows_opt}, naive={rows_naive}"
+    assert nodes_opt == nodes_naive, f"LOAD CSV `{name}` node count: opt={nodes_opt}, naive={nodes_naive}"
+    assert edges_opt == edges_naive, f"LOAD CSV `{name}` edge count: opt={edges_opt}, naive={edges_naive}"

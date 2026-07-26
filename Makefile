@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev dev-with-bin bundle-bin test test-full test-rust test-core test-mcp test-cli test-py bench bench-save bench-compare bench-check refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy gate lint lint-policy lint-full lint-py source-quality rustsec-policy cov stubtest
+.PHONY: dev dev-with-bin bundle-bin build-bolt-server test test-full test-rust test-core test-mcp test-cli test-py bench bench-save bench-compare bench-check refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy gate lint lint-policy lint-full lint-py source-quality rustsec-policy cov stubtest
 
 ## Build and install the package into the local .venv
 dev:
@@ -139,6 +139,11 @@ neo4j-conformance:
 	$(ACTIVATE) && python scripts/cypher_conformance.py \
 		--uri bolt://localhost:7687 --user neo4j --password conformance
 
+## Build the release kglite-bolt-server binary the `-m bolt` suites resolve.
+## `tests/conftest.py` and `scripts/bolt_conformance.py` both point users here.
+build-bolt-server:
+	cargo build -p kglite-bolt-server --release
+
 ## On-demand Bolt wire round-trip check: runs the differential corpus through
 ## kglite-bolt-server and compares against direct cypher(). Spawns its own
 ## server on an ephemeral port — no Neo4j / Docker needed. Not part of CI.
@@ -237,6 +242,7 @@ prune-dev: prune-target
 	rm -f .bench-current.json
 	rm -rf docs/_build .mypy_cache .ruff_cache .pytest_cache .uv-cache
 	find kglite -maxdepth 1 -name "kglite.*.so" ! -name "kglite.abi3.so" -delete
+	rm -rf tests/conformance/js/node_modules tests/conformance/java/target tests/conformance/java/.m2
 	find . \( -path ./target -o -path ./.venv \) -prune -o -name ".DS_Store" -type f -print0 | xargs -0 rm -f
 
 PRUNE_TARGET_GB := 40

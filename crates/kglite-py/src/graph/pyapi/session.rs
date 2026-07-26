@@ -53,7 +53,7 @@ use crate::graph::pyapi::result_view::ResultView;
 use crate::graph::{resolve_noderefs, DirGraph};
 use crate::util::EnterKg;
 use kglite_core::api::session::{
-    execute_mut, execute_read, ExecuteOptions, Session as CoreSession,
+    execute_mut, execute_read, CsvImportPolicy, ExecuteOptions, Session as CoreSession,
 };
 use kglite_core::api::GraphRead;
 
@@ -172,6 +172,7 @@ impl Session {
                 write_scope: None,
                 git_sha: None,
                 modified_by: None,
+                csv_import: CsvImportPolicy::LocalFilesystem,
             };
             let outcome = execute_read(&inner, &query_owned, &opts)?;
             let mut result = outcome.result;
@@ -225,6 +226,7 @@ impl Session {
                 write_scope: write_scope.as_ref(),
                 git_sha: git_sha.as_deref(),
                 modified_by: modified_by.as_deref(),
+                csv_import: CsvImportPolicy::LocalFilesystem,
             };
             let outcome = execute_mut(&mut graph, &query_owned, &opts)?;
             let mut result = outcome.result;

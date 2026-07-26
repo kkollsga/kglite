@@ -4,10 +4,14 @@
 [![License: MIT](https://img.shields.io/crates/l/kglite-bolt-server)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
 
 **Bolt v5.x protocol server for [kglite](https://crates.io/crates/kglite)
-knowledge graphs.** A pure-Rust single binary speaking the Neo4j wire protocol.
-The official Python driver is regression-tested; other Bolt v5 clients may
-connect but can rely on features outside KGLite's documented wire and Cypher
-contracts.
+knowledge graphs.** A pure-Rust single binary speaking the Bolt wire protocol.
+The official **Python, JavaScript, and Java** drivers are regression-tested in
+CI — session and explicit-transaction lifecycle, managed `executeWrite` retry,
+PackStream type round-trips, Node/Relationship/Path values, `Neo.*` error
+codes, and OCC conflict detection (`tests/conformance/js`,
+`tests/conformance/java`, driven by
+`tests/test_bolt_driver_conformance.py`). Other Bolt v5 clients may connect but
+can rely on features outside KGLite's documented wire and Cypher contracts.
 
 ```bash
 cargo install kglite-bolt-server

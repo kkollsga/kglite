@@ -8,6 +8,7 @@
 //! - [`clauses`] — RETURN / WITH / ORDER BY / LIMIT / SKIP / UNWIND / UNION /
 //!   CREATE / SET / DELETE / REMOVE / MERGE / CALL
 //! - [`schema_ddl`] — CREATE/DROP/SHOW INDEX and CONSTRAINT (Neo4j 5 DDL)
+//! - [`load_csv`] — LOAD CSV (leading-position external row source)
 //!
 //! Each submodule adds another `impl CypherParser` block; PyO3-style,
 //! Rust merges them at codegen.
@@ -20,6 +21,7 @@ use crate::error::KgError;
 
 pub mod clauses;
 pub mod expression;
+pub mod load_csv;
 pub mod match_pattern;
 pub mod predicate;
 pub mod schema_ddl;
@@ -151,6 +153,53 @@ impl CypherParser {
         self.peek() == Some(token)
     }
 
+    // ========================================================================
+    // Soft-keyword helpers
+    // ========================================================================
+    //
+    // Several Cypher constructs are spelled with words the tokenizer
+    // deliberately does *not* reserve — `INDEX`, `CONSTRAINT`, `FOR`,
+    // `OPTIONS` (schema DDL) and `LOAD`, `CSV`, `HEADERS`, `FROM`,
+    // `FIELDTERMINATOR` (`LOAD CSV`). Reserving them would break every graph
+    // that stores a property or label of the same name, so they arrive as
+    // [`CypherToken::Identifier`] and are matched case-insensitively here.
+    // Shared by `schema_ddl` and `load_csv`.
+
+    /// The identifier lexeme `offset` tokens ahead, if that token is one.
+    pub(super) fn soft_word_at(&self, offset: usize) -> Option<&str> {
+        match self.peek_at(offset) {
+            Some(CypherToken::Identifier(word)) => Some(word.as_str()),
+            _ => None,
+        }
+    }
+
+    /// True when the next token is the soft keyword `word`.
+    pub(super) fn peek_soft_word(&self, word: &str) -> bool {
+        self.soft_word_at(0).is_some_and(|w| soft_word_eq(w, word))
+    }
+
+    /// Consume the soft keyword `word` if it is next; report whether it was.
+    pub(super) fn eat_soft_word(&mut self, word: &str) -> bool {
+        if self.peek_soft_word(word) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Consume the soft keyword `word`, or fail naming `context`.
+    pub(super) fn expect_soft_word(&mut self, word: &str, context: &str) -> Result<(), String> {
+        if self.eat_soft_word(word) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Expected {word} in {context}, got {:?}",
+                self.peek()
+            ))
+        }
+    }
+
     /// Consume the next token as an alias name (after AS).
     /// Accepts identifiers and reserved keywords (e.g. `AS optional`, `AS type`).
     /// Case-preserving: a keyword alias keeps its verbatim source spelling
@@ -225,6 +274,14 @@ impl CypherParser {
                 self.peek_at(1) == Some(&CypherToken::By)
             }
             None => true,
+            // `LOAD CSV` is spelled with soft keywords, so it arrives as an
+            // identifier and would otherwise be swallowed by the preceding
+            // clause's expression/pattern parser — `MATCH (n) LOAD CSV FROM …`
+            // died on the `AS` with a pattern-property error instead of the
+            // positional rule. Stopping here hands the token back to the
+            // clause loop, which reports
+            // `CypherParser::misplaced_load_csv_error`.
+            Some(CypherToken::Identifier(_)) => self.identifier_opens_load_csv(),
             _ => false,
         }
     }
@@ -288,6 +345,37 @@ impl CypherParser {
     /// Returns the parsed clauses plus the trailing `OutputFormat` (only a
     /// top-level `FORMAT CSV` sets it to `Csv`; subquery bodies reject
     /// `FORMAT`).
+    /// Parse a leading `LOAD CSV`, or report the positional rule.
+    ///
+    /// Recognised even when misplaced, so a user who put it after a `MATCH`
+    /// gets the rule instead of `Unexpected token at start of clause:
+    /// Identifier("LOAD")`.
+    fn parse_leading_load_csv(&mut self, first: bool, in_subquery: bool) -> Result<Clause, String> {
+        if !first || in_subquery {
+            return Err(Self::misplaced_load_csv_error());
+        }
+        self.parse_load_csv_clause()
+    }
+
+    /// Parse the trailing `FORMAT <name>` marker. `FORMAT CSV` is the only
+    /// supported spelling, and it is rejected inside a `CALL { }` body.
+    fn parse_format_tail(&mut self, in_subquery: bool) -> Result<OutputFormat, String> {
+        if in_subquery {
+            return Err("FORMAT is not allowed inside a CALL { } subquery body".to_string());
+        }
+        self.advance(); // consume FORMAT
+        match self.peek() {
+            Some(CypherToken::Identifier(fmt)) if fmt.eq_ignore_ascii_case("CSV") => {
+                self.advance(); // consume CSV
+                Ok(OutputFormat::Csv)
+            }
+            other => Err(format!(
+                "Expected format name after FORMAT (supported: CSV), got {:?}",
+                other
+            )),
+        }
+    }
+
     pub(super) fn parse_clause_sequence(
         &mut self,
         end_at_rbrace: bool,
@@ -386,26 +474,16 @@ impl CypherParser {
                 Some(CypherToken::Foreach) => {
                     clauses.push(self.parse_foreach_clause()?);
                 }
+                // The two soft-keyword clause heads. Both arrive as
+                // `Identifier` (neither word is reserved), and both own a
+                // positional rule, so each parses in its own method rather
+                // than inline — see `parse_leading_load_csv` and
+                // `parse_format_tail`.
+                Some(CypherToken::Identifier(_)) if self.identifier_opens_load_csv() => {
+                    clauses.push(self.parse_leading_load_csv(clauses.is_empty(), end_at_rbrace)?)
+                }
                 Some(CypherToken::Identifier(s)) if s.eq_ignore_ascii_case("FORMAT") => {
-                    if end_at_rbrace {
-                        return Err(
-                            "FORMAT is not allowed inside a CALL { } subquery body".to_string()
-                        );
-                    }
-                    // FORMAT CSV — must be last clause
-                    self.advance(); // consume FORMAT
-                    match self.peek() {
-                        Some(CypherToken::Identifier(fmt)) if fmt.eq_ignore_ascii_case("CSV") => {
-                            self.advance(); // consume CSV
-                            return Ok((clauses, OutputFormat::Csv));
-                        }
-                        other => {
-                            return Err(format!(
-                                "Expected format name after FORMAT (supported: CSV), got {:?}",
-                                other
-                            ));
-                        }
-                    }
+                    return Ok((clauses, self.parse_format_tail(end_at_rbrace)?))
                 }
                 Some(t) => {
                     return Err(format!("Unexpected token at start of clause: {:?}", t));
@@ -416,6 +494,12 @@ impl CypherParser {
 
         Ok((clauses, OutputFormat::Default))
     }
+}
+
+/// Case-insensitive comparison of an identifier lexeme against a canonical
+/// soft keyword. Shared by the `schema_ddl` and `load_csv` clause parsers.
+pub(super) fn soft_word_eq(candidate: &str, canonical: &str) -> bool {
+    candidate.eq_ignore_ascii_case(canonical)
 }
 
 // ============================================================================

@@ -9,6 +9,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `LOAD CSV [WITH HEADERS] FROM <source> AS row [FIELDTERMINATOR <sep>]`, in
+  the spelling other Cypher databases use, so a ported import script runs
+  unedited. `WITH HEADERS`
+  binds each record as a map keyed by the header row; without it, records bind
+  as zero-indexed lists. Fields stay strings — CSV carries no types, and
+  inferring them would corrupt leading-zero identifiers — so conversion is
+  explicit (`toInteger(row.id)`); an empty field is `null`, and a short row
+  nulls its missing columns instead of failing the load. `FROM $path` works.
+  The clause must lead the query; anywhere else it is rejected with the
+  positional rule rather than a confusing pattern error. `CYPHER.md` documents
+  the full mapping under "LOAD CSV".
+- `LOAD CSV` **streams**: the executor reads 1000 rows at a time and runs the
+  following clauses once per batch, so peak memory does not scale with file
+  size — a 5 MB and a 109 MB input both cost about 20 MB resident on a
+  row-local pipeline. Batching applies to the clauses it is equivalent for
+  (`MATCH`, `WHERE`, `UNWIND`, `CREATE`, `MERGE`, `SET`, `DELETE`, `REMOVE`,
+  `FOREACH`, non-aggregating `WITH`/`RETURN`) — the ingest shape, which streams
+  at any file size. A downstream clause that reasons over the whole result
+  (aggregate, `ORDER BY`, `SKIP`/`LIMIT`, `DISTINCT`, `UNION`, `CALL`) cannot be
+  batched without changing the answer, so those queries take a single capped
+  pass and fail at 1,000,000 rows naming the clause that forced it, rather than
+  exhausting memory.
+- `LOAD CSV FROM 'http://…'` is rejected with a message naming the
+  network-free design and the local-file route, never a parse error: the engine
+  ships no HTTP client (network dependencies were removed in 0.14.x), so there
+  is nothing to fetch a URL with. Other URL schemes name the supported set.
+  The `CALL { ... } IN TRANSACTIONS` batching modifier (and the older
+  `USING PERIODIC COMMIT` spelling) remains unsupported — batching here is
+  automatic, so there is no commit interval to declare.
+- `--allow-csv-import <DIR>` on `kglite-bolt-server`, and a `csv_import` field
+  on `kglite::api::session::ExecuteOptions`. Reading local files through
+  `LOAD CSV` is a capability the caller is granted, defaulting to **denied**:
+  in-process callers (the Python API, the Rust library, the CLI) are allowed
+  because they already have the host process's filesystem access, while a Bolt
+  client is remote and gets nothing unless an operator names an import
+  directory. Imports are then confined to that directory after symlink
+  resolution, so `..` segments and symlinks cannot escape it. Without the gate,
+  anyone able to open a Bolt connection could run
+  `LOAD CSV FROM 'file:///etc/passwd'`.
+- Dotted property access on a map-valued parameter — `$row.name`, and nested
+  chains like `$cfg.a.b`. The bracket form (`$row['name']`) and the
+  via-variable form (`WITH $row AS r RETURN r.name`) already worked, so the
+  dotted form raising a syntax error was an inconsistency rather than a
+  decision; other Cypher implementations accept it, and a ported query passing
+  a map parameter hits it immediately. Absent keys yield `null`, as elsewhere.
+- Conformance suites for the official **JavaScript** and **Java** Bolt drivers
+  (`neo4j-driver`, `neo4j-java-driver`) under `tests/conformance/`, run in CI by
+  the new `bolt-driver-conformance` job. Each covers the same 22 checks — session
+  and explicit-transaction lifecycle, managed `executeWrite`, PackStream type
+  round-trips, Node/Relationship/Path values, `Neo.*` error codes, OCC conflict
+  detection, and the `LOAD CSV` capability refusal — and a source-level parity
+  test fails if the two drift apart. Previously only the official Python driver
+  was regression-tested; the other drivers "may connect", which nobody had
+  checked.
+
+- The migration guide (`docs/python/migrations/neo4j-to-kglite.md`) now
+  documents three data-transfer routes rather than one — driver+pandas,
+  export-to-CSV plus `LOAD CSV` (the route for consumers with no pandas), and
+  pandas-in-between — with the four `LOAD CSV` behaviour differences a ported
+  import script will meet spelled out.
+
 - Cypher index DDL, in the Neo4j 5 grammar, so a schema-setup script ports
   unedited: `CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:Label) ON
   (n.prop, ...)`, `DROP INDEX <name> [IF EXISTS]`, and `SHOW [ALL] INDEX[ES]`.
@@ -125,6 +186,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Neo.ClientError.Schema.ConstraintCreationFailed`; the C ABI gains
   `ConstraintViolation = 18` and `ConstraintCreationFailed = 19`, appended so
   existing discriminants stay stable.
+
+### Fixed
+
+- OCC commit conflicts over Bolt now report
+  `Neo.ClientError.Transaction.ConflictDetected`, the code the Bolt server's
+  README and the migration guide have always documented. They previously
+  reported `Neo.ClientError.Transaction.TransactionStartFailed` — wrong twice
+  over, since the transaction started fine — so a ported client branching on
+  the status code (the normal way to write a retry loop) was misled. Writing
+  the Java/JS driver suites is what surfaced it: the Python tests matched on
+  message text and could not see the code.
 
 ### Changed
 

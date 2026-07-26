@@ -186,6 +186,13 @@ pub fn clause_display_name(clause: &Clause) -> String {
         Clause::Skip(_) => "Skip".into(),
         Clause::Limit(_) => "Limit".into(),
         Clause::Unwind(_) => "Unwind".into(),
+        Clause::LoadCsv(l) => {
+            if l.with_headers {
+                "LoadCsv (with headers)".into()
+            } else {
+                "LoadCsv".into()
+            }
+        }
         Clause::Union(_) => "Union".into(),
         Clause::Create(_) => "Create".into(),
         Clause::Set(_) => "Set".into(),

@@ -1,0 +1,14 @@
+{
+  "name": "kglite-bolt-js-conformance",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Official Neo4j JavaScript driver conformance suite for kglite-bolt-server.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "conformance": "node conformance.mjs"
+  },
+  "dependencies": {
+    "neo4j-driver": "^5.28.0"
+  }
+}

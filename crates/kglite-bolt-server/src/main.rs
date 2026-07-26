@@ -15,6 +15,7 @@ use clap::{Parser, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
 use kglite::api::io::{open_or_create_graph, OpenDisposition};
+use kglite::api::session::CsvImportPolicy;
 use kglite::api::storage::StorageMode;
 
 use crate::backend::KgliteBackend;
@@ -68,6 +69,17 @@ struct Cli {
     /// Reject all mutation queries at the execute boundary.
     #[arg(long, default_value_t = false)]
     readonly: bool,
+
+    /// Allow `LOAD CSV` to read files inside this directory.
+    ///
+    /// Off by default, and deliberately: a Bolt client is a remote caller, so
+    /// an unrestricted `LOAD CSV` would let anyone who can connect read any
+    /// file this process can — `LOAD CSV FROM 'file:///etc/passwd'`. When set,
+    /// imports are confined to DIR after symlink resolution, so `..` segments
+    /// and symlinks cannot escape it. Server-mode graph databases generally
+    /// gate CSV import the same way: an allowed directory, off by default.
+    #[arg(long, value_name = "DIR")]
+    allow_csv_import: Option<PathBuf>,
 
     /// Authentication scheme. `none` (default) accepts any LOGON
     /// credentials; `basic` validates against `--auth-user` / `--auth-pass`.
@@ -184,7 +196,13 @@ async fn main() -> Result<()> {
         .advertise_addr
         .clone()
         .unwrap_or_else(|| format!("{}:{}", cli.bind, cli.port));
-    let backend = KgliteBackend::new(dir, cli.readonly, advertised_addr);
+    // LOAD CSV filesystem access. Denied unless the operator named an import
+    // directory: a Bolt client is remote, so this capability is opt-in.
+    let csv_import = match cli.allow_csv_import.clone() {
+        Some(dir) => CsvImportPolicy::Directory(dir),
+        None => CsvImportPolicy::Denied,
+    };
+    let backend = KgliteBackend::new(dir, cli.readonly, advertised_addr, csv_import);
 
     let addr = SocketAddr::new(cli.bind, cli.port);
 
