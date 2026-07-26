@@ -3480,11 +3480,6 @@ class KnowledgeGraph:
                 bulk loaders. All are opt-in: a type declaring none keeps the
                 permissive default, and older graphs load unchanged.
 
-        Raises:
-            ConstraintCreationError: A declared ``unique`` tuple or
-                ``primary_key`` is already duplicated by existing nodes. Nothing
-                is changed — deduplicate the node type and call again.
-
                 A node entry may also set ``layer`` to ``'managed'`` (rebuilt
                 from source by a batch writer) or ``'runtime'`` (owned/mutated
                 live by another writer, e.g. an agent). With layers declared, an
@@ -3505,6 +3500,11 @@ class KnowledgeGraph:
                 deterministic) and independent of ``layer`` / ``lock_schema``::
 
                     g.define_schema({"nodes": {"Task": {"auto_timestamp": True}}})
+
+        Raises:
+            ConstraintCreationError: A declared ``unique`` tuple or
+                ``primary_key`` is already duplicated by existing nodes. Nothing
+                is changed — deduplicate the node type and call again.
 
         Returns:
             Self with schema defined.
