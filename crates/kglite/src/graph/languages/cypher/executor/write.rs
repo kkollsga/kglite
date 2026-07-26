@@ -715,8 +715,10 @@ fn create_node(
         ));
     }
     // Clone the id for incremental index maintenance below (it is moved into
-    // insert_node_routed). Only needed for declared-PK types.
-    let pk_id = if pk_declared { Some(id.clone()) } else { None };
+    // insert_node_routed). Unconditional: the clone is what makes incremental
+    // maintenance possible at all, and it is far cheaper than the O(n) rebuild
+    // the alternative forces on the next id lookup.
+    let pk_id = Some(id.clone());
 
     // Role-scoped write guard (integrity): reject CREATE of a node type
     // outside the active write whitelist, before any storage mutation.
@@ -744,12 +746,20 @@ fn create_node(
         .entry_or_default(label.clone())
         .push(node_idx);
 
-    // Keep the id-index consistent. A declared-PK type maintains it
-    // incrementally — the readonly probe above already built it, so a
-    // sequential CREATE (e.g. UNWIND … CREATE) stays O(1)/node instead of
-    // O(n) rebuild-per-node. Other types invalidate for lazy rebuild (the
-    // established behaviour). The `contains_key` guard means we never insert
-    // into a partial index: if it isn't cached, fall back to invalidation.
+    // Keep the id-index consistent. Whenever the index is already cached — and
+    // therefore complete — insert into it, so a sequential CREATE (e.g.
+    // UNWIND … CREATE) stays O(1)/node instead of paying an O(n)
+    // rebuild-per-node. When it isn't cached, invalidate for lazy rebuild: the
+    // `contains_key` guard is what stops us building a *partial* entry that
+    // `build_id_index` would later short-circuit on and trust as complete.
+    //
+    // This is deliberately independent of whether a primary key is declared.
+    // The declaration governs *uniqueness enforcement*, not index freshness;
+    // gating maintenance on it meant an undeclared type dropped its entire
+    // cached id index on every single CREATE, and the only reason it did so was
+    // that `id` had already been moved into `insert_node_routed` and no clone
+    // was available. Nothing about duplicate ids is protected by invalidating:
+    // a rebuild and an incremental insert collapse a duplicate identically.
     match pk_id {
         Some(idv) if graph.id_indices.contains_key(&label) => {
             graph

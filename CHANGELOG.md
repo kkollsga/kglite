@@ -59,6 +59,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cypher `CREATE` no longer discards a node type's cached `id` index on every
+  insert. Incremental id-index maintenance was gated on the type having a
+  declared primary key, so an undeclared type invalidated the whole index per
+  created node and the next `MATCH (n {id: ...})` or `MERGE` paid an O(n)
+  rebuild. The gate protected nothing about uniqueness — a rebuild and an
+  incremental insert collapse a duplicate id identically; it existed only
+  because `id` had already been moved into the insert and no clone was
+  available. Maintenance is now driven purely by whether the index is already
+  cached (and therefore complete), replacing the per-`CREATE` O(n) rebuild with
+  one `id` clone.
+- Deleting nodes now evicts them from the B-tree range index.
+  `detach_delete_nodes` cleaned the type, id, property, composite, and
+  secondary-label indexes but skipped `range_indices`, so `WHERE n.prop > x` on
+  an indexed property kept returning tombstoned nodes as candidates.
 - Bulk loading no longer silently hides rows from an indexed `MATCH`.
   `add_nodes` (and the blueprint builder and edge stub vivification, which
   funnel into it) appends through the batch path, which skips the per-write
