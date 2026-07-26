@@ -763,6 +763,41 @@ pub(crate) fn parse_inline_timeseries(
 /// `get_graph_mut` callers compiling unchanged.
 pub(crate) use kglite_core::api::make_dir_graph_mut as get_graph_mut;
 
+/// Resolve the `selection_only` argument shared by every export entry point
+/// into the selection the exporter should actually use.
+///
+/// **The subtlety this centralises.** A fluent call leaves a selection *level*
+/// on the cursor even when that level matched nothing, so "does a selection
+/// exist" (`get_level_count() > 0`) is not the same question as "is there
+/// anything selected". Keying off the former means a graph whose last fluent
+/// call selected zero nodes exports an empty file — which `export_string` got
+/// right and `export` did not, until both were routed through here.
+///
+/// - `Some(true)`  — force the selection, even if it is empty.
+/// - `Some(false)` — force the whole graph.
+/// - `None`        — use the selection only if it actually holds nodes.
+pub(crate) fn resolve_export_selection(
+    kg: &KnowledgeGraph,
+    selection_only: Option<bool>,
+) -> Option<&kglite_core::api::CurrentSelection> {
+    let use_selection = selection_only.unwrap_or_else(|| selection_has_nodes(kg));
+    // Deref coercion: &CowSelection -> &CurrentSelection.
+    use_selection.then_some(&kg.cursor.selection)
+}
+
+/// Whether the cursor's newest selection level holds at least one node.
+fn selection_has_nodes(kg: &KnowledgeGraph) -> bool {
+    let levels = kg.cursor.selection.get_level_count();
+    if levels == 0 {
+        return false;
+    }
+    kg.cursor
+        .selection
+        .get_level(levels.saturating_sub(1))
+        .map(|level| level.node_count() > 0)
+        .unwrap_or(false)
+}
+
 /// Lightweight centrality result conversion: returns {title: score} dict.
 /// Creates ONE Python dict instead of N dicts — returns {title: score} format.
 /// ~3-4x faster PyO3 serialization for large graphs.
