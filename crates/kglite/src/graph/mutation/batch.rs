@@ -10,6 +10,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+/// `(node, node type, row id)` for every node whose columnar row reference has
+/// to be (re)attached once a mapped/disk append finishes.
+type DeferredColumnarRows = Vec<(NodeIndex, String, u32)>;
+
+/// Column stores held outright (refcount 1) for the duration of a mapped/disk
+/// append, keyed by node type — see `BatchProcessor::detach_columnar_stores`.
+type OwnedColumnStores = HashMap<String, crate::graph::storage::column_store::ColumnStore>;
+
 // Constants for batch size optimization
 const SMALL_BATCH_THRESHOLD: usize = 100;
 const MEDIUM_BATCH_THRESHOLD: usize = 1000;
@@ -183,45 +191,11 @@ impl BatchProcessor {
         //
         // This avoids Arc::make_mut cloning the entire store when existing nodes
         // hold shared references.
-        let mut deferred_columnar: Vec<(NodeIndex, String, u32)> = Vec::new();
-        // Owned mutable column stores, extracted from Arc to avoid clone-on-write
-        let mut owned_stores: HashMap<String, crate::graph::storage::column_store::ColumnStore> =
-            HashMap::new();
-
-        if mapped {
-            let affected_types: HashSet<String> = self
-                .creates_interned
-                .iter()
-                .map(|c| c.node_type.clone())
-                .collect();
-
-            // For each affected type: detach existing nodes and extract the store
-            for node_type in &affected_types {
-                // Detach existing nodes — record their (NodeIndex, row_id) for pass 2
-                if let Some(indices) = graph.type_indices.get(node_type) {
-                    for idx in indices.iter() {
-                        if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, idx) {
-                            if let PropertyStorage::Columnar { row_id, .. } = &node.properties {
-                                let rid = *row_id;
-                                node.properties = PropertyStorage::Map(HashMap::new());
-                                deferred_columnar.push((idx, node_type.clone(), rid));
-                            }
-                        }
-                    }
-                }
-                // Extract the store from Arc (now refcount=1, so try_unwrap succeeds)
-                if let Some(arc_store) = graph.column_stores.remove(node_type) {
-                    let mut store = Arc::try_unwrap(arc_store).unwrap_or_else(|a| (*a).clone());
-                    let meta = graph
-                        .node_type_metadata
-                        .get(node_type)
-                        .cloned()
-                        .unwrap_or_default();
-                    store.materialize_for_append(&meta, &graph.interner);
-                    owned_stores.insert(node_type.clone(), store);
-                }
-            }
-        }
+        let (mut deferred_columnar, mut owned_stores) = if mapped {
+            Self::detach_columnar_stores(&self.creates_interned, graph)
+        } else {
+            (Vec::new(), HashMap::new())
+        };
 
         // Process pre-interned creates (fast path — no string interning needed)
         for creation in self.creates_interned.drain(..) {
@@ -354,42 +328,119 @@ impl BatchProcessor {
             stats.creates += 1;
         }
 
-        // Mapped mode pass 2: wrap owned stores in Arc, assign refs to all nodes.
-        if !deferred_columnar.is_empty() {
-            // Put owned stores back into graph.column_stores as Arcs
-            for (node_type, store) in owned_stores {
-                graph.column_stores.insert(node_type, Arc::new(store));
-            }
-            // Assign Arc refs to all nodes (existing + newly created).
-            // For disk mode, also update the DiskNodeSlot.row_id directly:
-            // node_weight_mut() materializes into an arena that gets cleared on
-            // the next call, so the property assignment alone doesn't persist
-            // the per-type row_id back to the slot. Without this, slot.row_id
-            // keeps the slot-index value assigned by add_node().
-            for (node_idx, node_type, row_id) in deferred_columnar {
-                let arc_store = graph.column_stores.get(&node_type).unwrap().clone();
-                if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
-                    node.properties = PropertyStorage::Columnar {
-                        store: arc_store,
-                        row_id,
-                    };
+        Self::reattach_columnar_stores(graph, deferred_columnar, owned_stores);
+
+        self.apply_updates(graph, &mut stats);
+
+        // Update metrics
+        self.metrics.processing_time += start.elapsed().as_secs_f64();
+        self.metrics.batch_count += 1;
+        self.metrics.memory_used = self.creates_interned.capacity() + self.updates.capacity();
+
+        Ok(stats)
+    }
+
+    /// Pass 1 of the mapped/disk columnar append: detach every existing node
+    /// of an affected type from its shared `ColumnStore`, then take ownership
+    /// of that store.
+    ///
+    /// Detaching first is what keeps a bulk append linear. While nodes still
+    /// hold `Arc` refs into the store, the first `Arc::make_mut` in the append
+    /// loop clones the whole store — once per row, O(n²) overall. With every
+    /// ref dropped the refcount is 1, `try_unwrap` succeeds, and the append
+    /// mutates in place. [`Self::reattach_columnar_stores`] restores the refs.
+    ///
+    /// Returns `(rows awaiting reattachment, owned stores keyed by node type)`.
+    fn detach_columnar_stores(
+        creates: &[NodeCreationInterned],
+        graph: &mut DirGraph,
+    ) -> (DeferredColumnarRows, OwnedColumnStores) {
+        let mut deferred_columnar: DeferredColumnarRows = Vec::new();
+        // Owned mutable column stores, extracted from Arc to avoid clone-on-write
+        let mut owned_stores: OwnedColumnStores = HashMap::new();
+        let affected_types: HashSet<String> = creates.iter().map(|c| c.node_type.clone()).collect();
+        // For each affected type: detach existing nodes and extract the store
+        for node_type in &affected_types {
+            // Detach existing nodes — record their (NodeIndex, row_id) for pass 2
+            if let Some(indices) = graph.type_indices.get(node_type) {
+                for idx in indices.iter() {
+                    if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, idx) {
+                        if let PropertyStorage::Columnar { row_id, .. } = &node.properties {
+                            let rid = *row_id;
+                            node.properties = PropertyStorage::Map(HashMap::new());
+                            deferred_columnar.push((idx, node_type.clone(), rid));
+                        }
+                    }
                 }
-                GraphWrite::update_row_id(&mut graph.graph, node_idx, row_id);
             }
-            // 0.9.2: disk-side reads (node_weight, get_node_id, get_node_title)
-            // resolve via `disk_graph.column_stores`, NOT the DirGraph-level
-            // `graph.column_stores` we just populated. Without this sync, a
-            // freshly-built disk graph from `from_blueprint` (or any
-            // multi-create add_nodes path) has empty disk-side column_stores
-            // — every property read returns Null until save+reload bridges
-            // them. Existing sync site in the update path
-            // (`disk_updates_applied`) only fires when an UPDATE is in the
-            // chunk, never on creates-only.
-            if GraphRead::is_disk(&graph.graph) {
-                graph.sync_disk_column_stores();
+            // Extract the store from Arc (now refcount=1, so try_unwrap succeeds)
+            if let Some(arc_store) = graph.column_stores.remove(node_type) {
+                let mut store = Arc::try_unwrap(arc_store).unwrap_or_else(|a| (*a).clone());
+                let meta = graph
+                    .node_type_metadata
+                    .get(node_type)
+                    .cloned()
+                    .unwrap_or_default();
+                store.materialize_for_append(&meta, &graph.interner);
+                owned_stores.insert(node_type.clone(), store);
             }
         }
+        (deferred_columnar, owned_stores)
+    }
 
+    /// Pass 2 of the mapped/disk columnar append: publish the owned stores
+    /// back into the graph and point every touched node at its row — the
+    /// nodes detached in pass 1 plus the rows just created.
+    ///
+    /// No-op when pass 1 found nothing to detach and no columnar row was
+    /// appended, which is every in-memory flush.
+    fn reattach_columnar_stores(
+        graph: &mut DirGraph,
+        deferred_columnar: DeferredColumnarRows,
+        owned_stores: OwnedColumnStores,
+    ) {
+        if deferred_columnar.is_empty() {
+            return;
+        }
+        // Put owned stores back into graph.column_stores as Arcs
+        for (node_type, store) in owned_stores {
+            graph.column_stores.insert(node_type, Arc::new(store));
+        }
+        // Assign Arc refs to all nodes (existing + newly created).
+        // For disk mode, also update the DiskNodeSlot.row_id directly:
+        // node_weight_mut() materializes into an arena that gets cleared on
+        // the next call, so the property assignment alone doesn't persist
+        // the per-type row_id back to the slot. Without this, slot.row_id
+        // keeps the slot-index value assigned by add_node().
+        for (node_idx, node_type, row_id) in deferred_columnar {
+            let arc_store = graph.column_stores.get(&node_type).unwrap().clone();
+            if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
+                node.properties = PropertyStorage::Columnar {
+                    store: arc_store,
+                    row_id,
+                };
+            }
+            GraphWrite::update_row_id(&mut graph.graph, node_idx, row_id);
+        }
+        // 0.9.2: disk-side reads (node_weight, get_node_id, get_node_title)
+        // resolve via `disk_graph.column_stores`, NOT the DirGraph-level
+        // `graph.column_stores` we just populated. Without this sync, a
+        // freshly-built disk graph from `from_blueprint` (or any
+        // multi-create add_nodes path) has empty disk-side column_stores
+        // — every property read returns Null until save+reload bridges
+        // them. Existing sync site in the update path
+        // (`disk_updates_applied`) only fires when an UPDATE is in the
+        // chunk, never on creates-only.
+        if GraphRead::is_disk(&graph.graph) {
+            graph.sync_disk_column_stores();
+        }
+    }
+
+    /// Apply this chunk's pending updates. Split from [`Self::flush_chunk`]
+    /// because the update half shares nothing with the create half but the
+    /// stats counter: it resolves each target's storage representation and
+    /// dispatches to the matching writer.
+    fn apply_updates(&mut self, graph: &mut DirGraph, stats: &mut BatchStats) {
         // Process updates in current chunk.
         //
         // Disk vs memory/mapped split (Phase 5 xfail fix):
@@ -444,89 +495,26 @@ impl BatchProcessor {
                     continue;
                 };
                 let store = Arc::make_mut(arc_store);
-                match update.conflict_mode {
-                    ConflictHandling::Skip => unreachable!(),
-                    ConflictHandling::Replace => {
-                        if let Some(new_title) = update.title {
-                            store.set_title(row_id, &new_title);
-                        }
-                        // Null out every currently-set property on this row
-                        // before applying the new set — matches heap
-                        // `PropertyStorage::replace_all` semantics.
-                        let existing: Vec<InternedKey> = store
-                            .row_properties(row_id)
-                            .into_iter()
-                            .map(|(k, _)| k)
-                            .collect();
-                        for k in existing {
-                            store.set(row_id, k, &Value::Null, None);
-                        }
-                        for (k, v) in interned_props {
-                            store.set(row_id, k, &v, None);
-                        }
-                    }
-                    ConflictHandling::Update | ConflictHandling::Sum => {
-                        if let Some(new_title) = update.title {
-                            store.set_title(row_id, &new_title);
-                        }
-                        for (k, v) in interned_props {
-                            store.set(row_id, k, &v, None);
-                        }
-                        // Promote: a real-row upsert clears the stub marker.
-                        if store.get(row_id, provisional_key).is_some() {
-                            store.set(row_id, provisional_key, &Value::Null, None);
-                        }
-                    }
-                    ConflictHandling::Preserve => {
-                        if let Some(new_title) = update.title {
-                            let cur = store.get_title(row_id).unwrap_or(Value::Null);
-                            if matches!(cur, Value::Null) {
-                                store.set_title(row_id, &new_title);
-                            }
-                        }
-                        for (k, v) in interned_props {
-                            if store.get(row_id, k).is_none() {
-                                store.set(row_id, k, &v, None);
-                            }
-                        }
-                    }
-                }
+                Self::apply_row_update(
+                    store,
+                    row_id,
+                    update.title,
+                    interned_props,
+                    update.conflict_mode,
+                    provisional_key,
+                );
                 disk_updates_applied = true;
                 stats.updates += 1;
             } else if let Some(node) =
                 GraphWrite::node_weight_mut(&mut graph.graph, update.node_idx)
             {
-                match update.conflict_mode {
-                    ConflictHandling::Skip => unreachable!(),
-                    ConflictHandling::Replace => {
-                        if let Some(new_title) = update.title {
-                            node.title = new_title;
-                        }
-                        node.properties.replace_all(interned_props);
-                    }
-                    ConflictHandling::Update | ConflictHandling::Sum => {
-                        if let Some(new_title) = update.title {
-                            node.title = new_title;
-                        }
-                        for (k, v) in interned_props {
-                            node.properties.insert(k, v);
-                        }
-                        // Promote: a real-row upsert clears the stub marker.
-                        if node.properties.get(provisional_key).is_some() {
-                            node.properties.insert(provisional_key, Value::Null);
-                        }
-                    }
-                    ConflictHandling::Preserve => {
-                        if let Some(new_title) = update.title {
-                            if *node.title() == Value::Null {
-                                node.title = new_title;
-                            }
-                        }
-                        for (k, v) in interned_props {
-                            node.properties.insert_if_absent(k, v);
-                        }
-                    }
-                }
+                Self::apply_node_update(
+                    node,
+                    update.title,
+                    interned_props,
+                    update.conflict_mode,
+                    provisional_key,
+                );
                 stats.updates += 1;
             }
         }
@@ -534,13 +522,112 @@ impl BatchProcessor {
         if disk_updates_applied {
             graph.sync_disk_column_stores();
         }
+    }
 
-        // Update metrics
-        self.metrics.processing_time += start.elapsed().as_secs_f64();
-        self.metrics.batch_count += 1;
-        self.metrics.memory_used = self.creates_interned.capacity() + self.updates.capacity();
+    /// Write one pending update into a columnar row — the disk
+    /// representation, where the `ColumnStore` row *is* the node's property
+    /// storage. Arm for arm the twin of [`Self::apply_node_update`]; the two
+    /// stay separate because `node_weight_mut` on a disk graph materialises
+    /// `NodeData` into an arena that the next `&mut` call drops, so a disk
+    /// update has to reach the store directly.
+    fn apply_row_update(
+        store: &mut crate::graph::storage::column_store::ColumnStore,
+        row_id: u32,
+        title: Option<Value>,
+        properties: Vec<(InternedKey, Value)>,
+        conflict_mode: ConflictHandling,
+        provisional_key: InternedKey,
+    ) {
+        match conflict_mode {
+            ConflictHandling::Skip => unreachable!(),
+            ConflictHandling::Replace => {
+                if let Some(new_title) = title {
+                    store.set_title(row_id, &new_title);
+                }
+                // Null out every currently-set property on this row
+                // before applying the new set — matches heap
+                // `PropertyStorage::replace_all` semantics.
+                let existing: Vec<InternedKey> = store
+                    .row_properties(row_id)
+                    .into_iter()
+                    .map(|(k, _)| k)
+                    .collect();
+                for k in existing {
+                    store.set(row_id, k, &Value::Null, None);
+                }
+                for (k, v) in properties {
+                    store.set(row_id, k, &v, None);
+                }
+            }
+            ConflictHandling::Update | ConflictHandling::Sum => {
+                if let Some(new_title) = title {
+                    store.set_title(row_id, &new_title);
+                }
+                for (k, v) in properties {
+                    store.set(row_id, k, &v, None);
+                }
+                // Promote: a real-row upsert clears the stub marker.
+                if store.get(row_id, provisional_key).is_some() {
+                    store.set(row_id, provisional_key, &Value::Null, None);
+                }
+            }
+            ConflictHandling::Preserve => {
+                if let Some(new_title) = title {
+                    let cur = store.get_title(row_id).unwrap_or(Value::Null);
+                    if matches!(cur, Value::Null) {
+                        store.set_title(row_id, &new_title);
+                    }
+                }
+                for (k, v) in properties {
+                    if store.get(row_id, k).is_none() {
+                        store.set(row_id, k, &v, None);
+                    }
+                }
+            }
+        }
+    }
 
-        Ok(stats)
+    /// Write one pending update into a live `NodeData` — the memory/mapped
+    /// representation, where `PropertyStorage` mutation on the node is
+    /// immediately visible to reads. Twin of [`Self::apply_row_update`].
+    fn apply_node_update(
+        node: &mut NodeData,
+        title: Option<Value>,
+        properties: Vec<(InternedKey, Value)>,
+        conflict_mode: ConflictHandling,
+        provisional_key: InternedKey,
+    ) {
+        match conflict_mode {
+            ConflictHandling::Skip => unreachable!(),
+            ConflictHandling::Replace => {
+                if let Some(new_title) = title {
+                    node.title = new_title;
+                }
+                node.properties.replace_all(properties);
+            }
+            ConflictHandling::Update | ConflictHandling::Sum => {
+                if let Some(new_title) = title {
+                    node.title = new_title;
+                }
+                for (k, v) in properties {
+                    node.properties.insert(k, v);
+                }
+                // Promote: a real-row upsert clears the stub marker.
+                if node.properties.get(provisional_key).is_some() {
+                    node.properties.insert(provisional_key, Value::Null);
+                }
+            }
+            ConflictHandling::Preserve => {
+                if let Some(new_title) = title {
+                    if *node.title() == Value::Null {
+                        node.title = new_title;
+                    }
+                }
+                for (k, v) in properties {
+                    node.properties.insert_if_absent(k, v);
+                }
+            }
+        }
     }
 
     pub fn execute(mut self, graph: &mut DirGraph) -> Result<(BatchStats, BatchMetrics), String> {

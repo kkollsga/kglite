@@ -529,13 +529,6 @@
       "nesting": 6
     },
     {
-      "path": "crates/kglite/src/graph/mutation/batch.rs",
-      "qualified_name": "crate::BatchProcessor::flush_chunk",
-      "lines": 352,
-      "branches": 53,
-      "nesting": 6
-    },
-    {
       "path": "crates/kglite/src/graph/mutation/extend.rs",
       "qualified_name": "crate::extend_graph",
       "lines": 218,
