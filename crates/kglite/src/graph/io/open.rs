@@ -71,7 +71,7 @@ impl GraphWriterLease {
                     publish_owner_record(&writer_owner_path(graph_path));
                     return Ok(Self { file });
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Err(error) if is_lock_contended(&error) => {
                     if started.elapsed() >= timeout {
                         return Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -99,6 +99,27 @@ fn writer_lease_path(graph_path: &Path) -> std::path::PathBuf {
     let mut lock = graph_path.as_os_str().to_os_string();
     lock.push(".lock");
     lock.into()
+}
+
+/// Whether a failed `try_lock_*` means "someone else holds it" rather than a
+/// genuine I/O failure.
+///
+/// Deliberately **not** an `ErrorKind` comparison. `fs2` surfaces the
+/// platform's native lock errno — `EWOULDBLOCK` (35) on Unix,
+/// `ERROR_LOCK_VIOLATION` (33) on Windows — and only the Unix one maps to
+/// [`io::ErrorKind::WouldBlock`]; the Windows one is uncategorised. A `kind()`
+/// check therefore recognises contention on Unix and silently misses it on
+/// Windows, where two things then go wrong at once: the raw platform error
+/// escapes instead of a message naming the holder, *and* the retry loop below
+/// never runs, so a caller's timeout (the CLI and MCP server both pass 30s)
+/// returns instantly instead of waiting.
+///
+/// [`fs2::lock_contended_error`] exists precisely so callers can compare
+/// portably. The `WouldBlock` arm is kept as a belt-and-braces fallback for an
+/// error that carries the kind but no raw errno.
+fn is_lock_contended(error: &io::Error) -> bool {
+    error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+        || error.kind() == io::ErrorKind::WouldBlock
 }
 
 /// Sibling of the lock file holding the holder's identity. Never locked, so it
@@ -494,18 +515,74 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let graph = tmp.path().join("named.kgl");
         let _lease = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
-        let message = GraphWriterLease::acquire(&graph, Duration::ZERO)
+        let error = GraphWriterLease::acquire(&graph, Duration::ZERO)
             .err()
-            .expect("second acquire must be refused")
-            .to_string();
+            .expect("second acquire must be refused");
+        // Carry the raw platform error into the failure text. A refusal that
+        // still reads as the OS's own lock error means the contention check
+        // did not classify it, and naming the errno makes that diagnosable
+        // from a CI log alone instead of needing a local repro.
+        let diagnosis = format!(
+            "got {error:?} (raw OS error {:?}, kind {:?}). A raw platform lock \
+             error here means `is_lock_contended` failed to classify it — the \
+             errno differs per platform (EWOULDBLOCK on Unix, \
+             ERROR_LOCK_VIOLATION on Windows), so an `ErrorKind` comparison \
+             recognises only Unix.",
+            error.raw_os_error(),
+            error.kind()
+        );
+        let message = error.to_string();
         // Same-process contention is reported as such rather than as a
         // phantom "other process" carrying the caller's own pid.
         assert!(
             message.contains(&format!("pid {}", std::process::id())),
-            "{message}"
+            "the refusal must name the holding process; {diagnosis}"
         );
-        assert!(message.contains("named.kgl"), "{message}");
-        assert!(message.contains("does not release it"), "{message}");
+        assert!(message.contains("named.kgl"), "{diagnosis}");
+        assert!(message.contains("does not release it"), "{diagnosis}");
+    }
+
+    /// Pins the portable classification directly, so a regression is a one-line
+    /// failure rather than a confusing raw-errno leak somewhere downstream.
+    /// Un-gated on purpose: the whole point is that it must hold on the
+    /// platform whose errno is *not* the one `ErrorKind` understands.
+    #[test]
+    fn contention_is_classified_from_the_platform_lock_error() {
+        assert!(
+            is_lock_contended(&fs2::lock_contended_error()),
+            "the error fs2 returns for a contended lock must be recognised as \
+             contention on every platform"
+        );
+        assert!(is_lock_contended(&io::Error::from(
+            io::ErrorKind::WouldBlock
+        )));
+        // A real failure must still propagate rather than be retried as if
+        // someone else merely held the lock.
+        assert!(!is_lock_contended(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+    }
+
+    /// The misclassification also disabled waiting: an unrecognised error
+    /// returned immediately instead of entering the retry loop, so the CLI's
+    /// and MCP server's 30s lease timeouts silently became zero. Asserting the
+    /// call actually blocks catches that independently of the message.
+    #[test]
+    fn a_contended_acquire_waits_for_its_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("waiting.kgl");
+        let _lease = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
+
+        let started = Instant::now();
+        let error = GraphWriterLease::acquire(&graph, Duration::from_millis(300))
+            .err()
+            .expect("a held lease must still be refused after the timeout");
+        assert!(
+            started.elapsed() >= Duration::from_millis(250),
+            "acquire returned after {:?}, so it never waited — contention was \
+             not recognised and the retry loop was skipped ({error})",
+            started.elapsed()
+        );
     }
 
     /// The property whose platform split broke this: the owner record must be

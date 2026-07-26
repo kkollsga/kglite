@@ -45,6 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     so, since deleting lock files by reflex is how this class of guard gets
     defeated.
 
+  Contention is classified from the platform's lock errno via
+  `fs2::lock_contended_error()` rather than from `io::ErrorKind`. The kinds
+  differ per platform — `EWOULDBLOCK` maps to `WouldBlock` on Unix, but
+  `ERROR_LOCK_VIOLATION` is uncategorised on Windows — so a kind comparison
+  recognised contention only on Unix. On Windows that meant a blocked writer
+  saw the raw OS error instead of a message naming the holder, **and** the
+  retry loop was skipped entirely, so the 30-second lease timeouts used by
+  `kglite` CLI commands and the MCP server returned instantly rather than
+  waiting for the current writer to finish.
+
   The holder's identity lives in the unlocked `<path>.lock-owner` sidecar
   rather than inside the lock file, because `fs2` locks via `flock` on Unix
   (advisory — contenders can still read) but `LockFileEx` on Windows
