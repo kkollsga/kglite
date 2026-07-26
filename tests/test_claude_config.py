@@ -10,10 +10,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import shutil
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
 from kglite import claude_config
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def shutil_which_required(binary: str) -> str:
@@ -300,3 +305,74 @@ def test_atomic_write_no_tmp_leak_on_success(tmp_path):
     claude_config.add_mcp("srv", "cmd", path=p)
     leftover = [x for x in tmp_path.iterdir() if x.name != "cfg.json"]
     assert leftover == []
+
+
+# ── encoding ──────────────────────────────────────────────────────────
+#
+# These files belong to Claude Desktop / Claude Code, which write them as
+# UTF-8 on every platform. Reading or writing them through the locale
+# codepage is destructive rather than cosmetic: on a cp1252 console the
+# read mis-decodes silently, json.dump bakes the mojibake back in, and the
+# atomic os.replace commits it over every unrelated MCP server entry.
+
+NON_ASCII_CONFIG = {
+    "mcpServers": {"other-server": {"command": "/usr/bin/serve", "args": ["--user", "Kristján"]}},
+    "preferences": {"displayName": "Kristján Þórðarson", "note": "東京都・日本語テスト"},
+}
+
+
+def test_non_ascii_config_survives_a_mutation_byte_for_byte(tmp_path):
+    """The whole point: unrelated non-ASCII entries must round-trip intact."""
+    p = tmp_path / "claude_desktop_config.json"
+    p.write_text(json.dumps(NON_ASCII_CONFIG, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    claude_config.add_mcp("kglite", "cmd", resolve_command=False, path=p)
+
+    raw = p.read_bytes()
+    # Valid UTF-8, not a locale-codepage transcoding.
+    text = raw.decode("utf-8")
+    # Literal characters, not \uXXXX escapes of mojibake.
+    assert "Kristján Þórðarson" in text
+    assert "東京都・日本語テスト" in text
+    assert "Ã" not in text, f"mojibake reached the file: {text!r}"
+    cfg = json.loads(text)
+    assert cfg["preferences"] == NON_ASCII_CONFIG["preferences"]
+    assert cfg["mcpServers"]["other-server"] == NON_ASCII_CONFIG["mcpServers"]["other-server"]
+    assert cfg["mcpServers"]["kglite"]["command"] == "cmd"
+
+
+def test_non_ascii_values_round_trip_through_the_reader(tmp_path):
+    p = tmp_path / "cfg.json"
+    claude_config.add_mcp("srv", "cmd", ["--name", "Kristján", "--city", "東京"], resolve_command=False, path=p)
+    assert claude_config.get_mcp("srv", path=p)["args"] == ["--name", "Kristján", "--city", "東京"]
+
+
+def test_config_io_never_relies_on_the_locale_encoding(tmp_path):
+    """Guards the ``encoding=`` arguments themselves, not just their effect.
+
+    A UTF-8 host cannot reproduce the cp1252 mis-decode, so this asserts the
+    mechanism instead: with ``-X warn_default_encoding`` CPython emits an
+    ``EncodingWarning`` at every text-mode open that omits ``encoding=``.
+    Promoted to an error, that fails precisely when the argument is dropped.
+    """
+    p = tmp_path / "cfg.json"
+    p.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+    child = textwrap.dedent(
+        """
+        import sys, warnings
+        from kglite import claude_config
+        warnings.simplefilter("error", EncodingWarning)
+        path = sys.argv[1]
+        claude_config.add_mcp("srv", "cmd", resolve_command=False, path=path)
+        claude_config.list_mcps(path=path)
+        claude_config.edit_mcp("srv", args=["--x"], path=path)
+        claude_config.delete_mcp("srv", path=path)
+        """
+    )
+    done = subprocess.run(
+        [sys.executable, "-X", "warn_default_encoding", "-c", child, str(p)],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+    )
+    assert done.returncode == 0, f"encoding-less text I/O in claude_config:\n{done.stderr}"
