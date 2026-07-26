@@ -47,6 +47,10 @@ impl DirGraph {
     /// stops enforcing it. A constraint declared directly (by
     /// `DirGraph::create_unique_constraint`, e.g. from `CREATE CONSTRAINT`)
     /// rather than through a schema is untouched by this.
+    // `KgError` is a rich by-value error type across the whole public surface;
+    // every other `Result<_, KgError>` signature in the engine carries the same
+    // allow rather than boxing one variant in isolation.
+    #[allow(clippy::result_large_err)]
     pub fn set_schema(&mut self, schema: SchemaDefinition) -> Result<(), KgError> {
         let previous_schema = self.schema_definition.take();
         let withdrawn = Self::declared_unique_tuples(previous_schema.as_ref());

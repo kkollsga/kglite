@@ -308,9 +308,9 @@ pub fn add_nodes(
                 columns.read(&df_data, row_idx, property)
             };
             graph
-                .check_required_fields(&node_type, &read)
+                .check_required_fields(&node_type, read)
                 .map_err(|violation| violation.to_string())?;
-            let claims = graph.unique_claims(&node_type, &read);
+            let claims = graph.unique_claims(&node_type, read);
             graph
                 .check_unique_claims(&claims, existing_idx)
                 .map_err(|violation| violation.to_string())?;

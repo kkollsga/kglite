@@ -603,6 +603,36 @@ impl From<InternerCollision> for KgError {
 #[allow(dead_code)]
 pub type KgResult<T> = std::result::Result<T, KgError>;
 
+// ─── Constraint bridge ───────────────────────────────────────────────────────
+
+impl From<crate::graph::constraints::ConstraintViolation> for KgError {
+    /// Lift a core constraint violation to the public error type, splitting on
+    /// whether a *write* or a *declaration* failed — the two carry different
+    /// Neo4j status codes and call for different fixes.
+    fn from(violation: crate::graph::constraints::ConstraintViolation) -> Self {
+        let message = violation.to_string();
+        let descriptor = violation.descriptor();
+        let kind = violation.kind.keyword();
+        if violation.is_declaration_failure() {
+            KgError::ConstraintCreationFailed {
+                kind,
+                node_type: violation.node_type,
+                properties: violation.properties,
+                descriptor,
+                message,
+            }
+        } else {
+            KgError::ConstraintViolation {
+                kind,
+                node_type: violation.node_type,
+                properties: violation.properties,
+                descriptor,
+                message,
+            }
+        }
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -734,36 +764,6 @@ mod tests {
                 (400..=599).contains(&code_val),
                 "code {code:?} mapped to non-4xx-5xx http status: {code_val}"
             );
-        }
-    }
-}
-
-// ─── Constraint bridge ───────────────────────────────────────────────────────
-
-impl From<crate::graph::constraints::ConstraintViolation> for KgError {
-    /// Lift a core constraint violation to the public error type, splitting on
-    /// whether a *write* or a *declaration* failed — the two carry different
-    /// Neo4j status codes and call for different fixes.
-    fn from(violation: crate::graph::constraints::ConstraintViolation) -> Self {
-        let message = violation.to_string();
-        let descriptor = violation.descriptor();
-        let kind = violation.kind.keyword();
-        if violation.is_declaration_failure() {
-            KgError::ConstraintCreationFailed {
-                kind,
-                node_type: violation.node_type,
-                properties: violation.properties,
-                descriptor,
-                message,
-            }
-        } else {
-            KgError::ConstraintViolation {
-                kind,
-                node_type: violation.node_type,
-                properties: violation.properties,
-                descriptor,
-                message,
-            }
         }
     }
 }
