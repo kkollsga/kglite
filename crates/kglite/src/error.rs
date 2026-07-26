@@ -597,12 +597,6 @@ impl From<InternerCollision> for KgError {
     }
 }
 
-/// Public convenience alias for downstream Rust callers that prefer a
-/// single KGLite result spelling. Engine internals use explicit result types
-/// where the error boundary benefits from being visible.
-#[allow(dead_code)]
-pub type KgResult<T> = std::result::Result<T, KgError>;
-
 // ─── Constraint bridge ───────────────────────────────────────────────────────
 
 impl From<crate::graph::constraints::ConstraintViolation> for KgError {
@@ -632,6 +626,12 @@ impl From<crate::graph::constraints::ConstraintViolation> for KgError {
         }
     }
 }
+
+/// Public convenience alias for downstream Rust callers that prefer a
+/// single KGLite result spelling. Engine internals use explicit result types
+/// where the error boundary benefits from being visible.
+#[allow(dead_code)]
+pub type KgResult<T> = std::result::Result<T, KgError>;
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
