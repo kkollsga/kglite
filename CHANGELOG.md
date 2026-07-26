@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — behaviour
+
+- **`kglite.open()` is now crash-safe by default.** `durable` defaults to on, so
+  every committed mutation is `fsync`'d to the `<path>-wal` sidecar before the
+  call returns and is replayed on the next `open()`. Previously a graph opened
+  without `durable=True` lost every write since the last explicit `save()`
+  whenever the process died — the docstring said as much, but it was the
+  default.
+
+  Three things to know when upgrading:
+
+  - **It costs one `fsync` per committed mutation.** Writes now wait for
+    physical storage, which is dominated by device latency rather than graph
+    size — most visible in loops of many small writes, negligible for a few
+    large ones. Reads are unaffected. Pass `durable=False` to opt out; it
+    remains fully supported and is the right choice for bulk loading and for
+    graphs rebuildable from source data. Batching mutations into one statement,
+    or one `begin()` transaction, gives throughput *and* crash safety.
+  - **A `with` block is not a transaction.** Mutations commit as they run, so an
+    exception inside the block no longer discards them — they are recovered on
+    the next `open()`. The failed exit still declines to write a checkpoint. Use
+    `begin()` for discard-on-error, or `durable=False` for the old
+    snapshot-only behaviour.
+  - **`storage="disk"` is unaffected** — it opens non-durable, as before, rather
+    than raising. Only an explicit `durable=True` raises there. `durable` is now
+    tri-state (`None`/`True`/`False`) precisely so the new default cannot break
+    disk callers.
+
+  The MCP server, CLI, and Bolt server open graphs through the shared
+  engine-level helper rather than this function, so none of them changes
+  behaviour.
+
 ### Added
 
 - `kglite.open(path, storage="mapped", durable=True)` now works — write-ahead

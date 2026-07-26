@@ -266,20 +266,36 @@ fn from_bytes(py: Python<'_>, data: &[u8]) -> PyResult<KnowledgeGraph> {
 /// `storage` (`"mapped"` / `"disk"`) applies only when *creating* a new
 /// graph; opening an existing file uses whatever mode it was saved in.
 ///
-/// `durable=True` opens the graph in write-ahead-log mode: each committed
-/// Cypher mutation is `fsync`'d to a `<path>-wal` sidecar before returning,
-/// and on open any WAL frames are replayed onto the loaded checkpoint to
-/// recover work committed since the last `save()`. Supported for the
-/// in-memory default and `storage="mapped"`; `storage="disk"` raises
-/// `ValueError` (see `setup_durable`).
+/// Durability is **on by default**: each committed mutation is `fsync`'d to a
+/// `<path>-wal` sidecar before the call returns, and on open any WAL frames are
+/// replayed onto the loaded checkpoint to recover work committed since the last
+/// `save()`. This is the point of an embedded database — without it a hard
+/// crash loses everything since the last explicit save.
+///
+/// `durable` is tri-state so that the default can mean "wherever it is
+/// supported" without turning an unsupported mode into an error:
+///
+/// - `None` (the default) — enable it unless the graph is `storage="disk"`,
+///   whose commit boundary is a generation publish rather than a logical log.
+///   A disk graph therefore opens non-durable instead of raising, exactly as it
+///   did before durability had a default.
+/// - `True` — require it. `storage="disk"` raises `ValueError`, because
+///   silently handing back a non-durable graph to a caller who explicitly asked
+///   for crash safety is the one outcome worse than an error.
+/// - `False` — opt out. The graph still remembers `path` for `save()`; it just
+///   keeps no log, which is measurably faster for write-heavy bulk loading (no
+///   `fsync` per commit) and is the right choice when the graph is rebuildable
+///   from source data.
 #[pyfunction]
-#[pyo3(signature = (path, *, storage=None, durable=false))]
+#[pyo3(signature = (path, *, storage=None, durable=None))]
 fn open(
     py: Python<'_>,
     path: String,
     storage: Option<&str>,
-    durable: bool,
+    durable: Option<bool>,
 ) -> PyResult<KnowledgeGraph> {
+    use kglite_core::api::GraphRead;
+
     let mut kg = if std::path::Path::new(&path).exists() {
         py.detach(|| load_file(&path))
             .map(KnowledgeGraph::from_arc)
@@ -288,7 +304,10 @@ fn open(
         KnowledgeGraph::construct(storage, Some(&path))?
     };
     kg.lifecycle.source_path = Some(std::path::PathBuf::from(&path));
-    if durable {
+    // Resolved after the graph exists, because the mode of an *existing* path
+    // comes from the file, not from the `storage` argument.
+    let wanted = durable.unwrap_or(!kg.inner.graph.is_disk());
+    if wanted {
         setup_durable(&mut kg, &path)?;
     }
     Ok(kg)

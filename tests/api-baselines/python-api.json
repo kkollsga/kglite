@@ -1339,7 +1339,7 @@
     },
     "open": {
       "kind": "function",
-      "signature": "(path, *, storage=None, durable=False)"
+      "signature": "(path, *, storage=None, durable=None)"
     },
     "open_session": {
       "kind": "function",
