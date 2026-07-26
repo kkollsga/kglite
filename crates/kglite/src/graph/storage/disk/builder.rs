@@ -553,7 +553,16 @@ impl DiskGraph {
             }
         }
 
-        // Also swap conn_type_index files if present
+        // Also swap conn_type_index files if present. These fields map the
+        // destination paths whenever a previous build or load populated them,
+        // so they must be released before the destinations are removed and
+        // replaced — the same reason the CSR fields are cleared above. The
+        // block is dormant today (the index writer targets `active_write_dir`,
+        // not `build_dir`, so `src` never exists), but leaving the ordering
+        // wrong would make it a Windows failure the moment it is wired up.
+        self.conn_type_index_types = MmapOrVec::new();
+        self.conn_type_index_offsets = MmapOrVec::new();
+        self.conn_type_index_sources = MmapOrVec::new();
         let index_files = [
             "conn_type_index_types.bin",
             "conn_type_index_offsets.bin",
