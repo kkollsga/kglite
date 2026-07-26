@@ -209,9 +209,13 @@ cov:
 cov-rust-core:
 	cargo llvm-cov --package kglite --lib --tests --ignore-filename-regex 'src/bin/' --lcov --output-path rust-core-coverage.lcov
 
-## Check centralized production-source structure and complexity ceilings
+## Check centralized production-source structure, complexity ceilings, and
+## lint-allowance drift — both halves the CI `source-quality` job runs. Keep
+## these in step: this target ran only the first script, so a tree with an
+## unreviewed or stale #[allow] passed local verification and failed CI.
 source-quality:
 	python scripts/check_source_quality.py
+	python scripts/check_lint_allowances.py
 
 ## Validate that every temporary RustSec exception is justified and unexpired
 rustsec-policy:

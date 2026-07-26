@@ -95,6 +95,21 @@ pub(super) struct MutationCtx<'a> {
     pub leading: &'a [Clause],
 }
 
+/// The owned half of the mutation context: everything
+/// [`finalize_mutation`] needs to build the executor for a trailing `RETURN`.
+///
+/// Grouped for the same reason [`MutationCtx`] groups the *borrowed* pipeline
+/// state — these three always travel together and are only ever consumed to
+/// construct one `CypherExecutor`. Passing them individually pushed
+/// `finalize_mutation` to nine parameters as successive sprints added
+/// interrupt, budget, and profiling plumbing; grouping keeps the seam readable
+/// instead of registering a `too_many_arguments` allowance for it.
+struct FinalizeCtx {
+    params: HashMap<String, Value>,
+    interrupt: Interrupt,
+    budget: super::budget::ExecutionBudget,
+}
+
 impl MutationCtx<'_> {
     /// Variables declared by everything before `clauses[i]`, including the
     /// stripped leading clauses.
@@ -207,13 +222,14 @@ pub(crate) fn execute_mutable_with_csv(
     finalize_mutation(
         graph,
         query,
-        params,
-        interrupt,
-        budget,
+        FinalizeCtx {
+            params,
+            interrupt,
+            budget,
+        },
         result_set,
         stats,
-        profiling,
-        profile_stats,
+        profiling.then_some(profile_stats),
     )
 }
 
@@ -412,17 +428,13 @@ fn run_clause_pipeline(
 /// Split out of `execute_mutable_with_csv` alongside [`run_clause_pipeline`]:
 /// the flush and the projection happen exactly once per query, even when the
 /// `LOAD CSV` driver ran the pipeline many times.
-#[allow(clippy::too_many_arguments)]
 fn finalize_mutation(
     graph: &mut DirGraph,
     query: &CypherQuery,
-    params: HashMap<String, Value>,
-    interrupt: Interrupt,
-    budget: super::budget::ExecutionBudget,
+    ctx: FinalizeCtx,
     result_set: ResultSet,
     stats: MutationStats,
-    profiling: bool,
-    profile_stats: Vec<ClauseStats>,
+    profile: Option<Vec<ClauseStats>>,
 ) -> Result<CypherResult, String> {
     // Flush any pending mutation state into the steady-state stores so
     // (a) the trailing RETURN's reads observe the writes from this same
@@ -439,9 +451,13 @@ fn finalize_mutation(
 
     // Finalize: if RETURN was in the query, finalize with column projection
     let has_return = query.clauses.iter().any(|c| matches!(c, Clause::Return(_)));
-    let profile = if profiling { Some(profile_stats) } else { None };
 
     if has_return || !result_set.columns.is_empty() {
+        let FinalizeCtx {
+            params,
+            interrupt,
+            budget,
+        } = ctx;
         let executor = CypherExecutor::with_params(graph, &params, interrupt.deadline)
             .with_cancel(interrupt.cancel)
             .with_budget(budget);
