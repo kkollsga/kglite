@@ -1307,6 +1307,7 @@ pub fn kglite::api::session::Transaction::has_writes(&self) -> bool
 pub fn kglite::api::session::Transaction::is_read_only(&self) -> bool
 pub fn kglite::api::session::Transaction::take_working(self) -> (core::option::Option<kglite::api::DirGraph>, u64)
 pub fn kglite::api::session::Transaction::working_mut(&mut self) -> core::result::Result<&mut kglite::api::DirGraph, kglite::error::KgError>
+pub const kglite::api::session::QUERY_THREAD_STACK_SIZE: usize
 pub fn kglite::api::session::execute_mut(graph: &mut kglite::api::DirGraph, query: &str, opts: &kglite::api::session::ExecuteOptions<'_>) -> core::result::Result<kglite::api::session::ExecuteOutcome, kglite::error::KgError>
 pub fn kglite::api::session::execute_read(graph: &kglite::api::DirGraph, query: &str, opts: &kglite::api::session::ExecuteOptions<'_>) -> core::result::Result<kglite::api::session::ExecuteOutcome, kglite::error::KgError>
 pub fn kglite::api::session::resolve_noderefs(graph: &kglite::api::storage::GraphBackend, rows: &mut [alloc::vec::Vec<kglite::datatypes::values::Value>])
