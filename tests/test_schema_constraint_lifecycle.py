@@ -1,0 +1,352 @@
+"""Declaration paths must never *silently* discard enforcement.
+
+Every case here is one shape of a single failure mode: a call returns success
+while some integrity guarantee the user believes is in force has quietly stopped
+being enforced — or `SHOW CONSTRAINTS` reports one that is not. That listing is
+what an operator reads during a migration review, so it lying is the worst
+version of the bug.
+
+The audit that produced these tests found four distinct instances:
+
+1. `define_schema` replaced the whole schema, so a per-module call naming one
+   type withdrew every other type's constraints.
+2. `define_schema` wiped a NOT NULL declared through `CREATE CONSTRAINT`,
+   because `required_fields` live inside the schema being replaced — while the
+   uniqueness half survived, whose index does not.
+3. `required: ["title"]` (and `id`) reported itself as enforced while admitting
+   `CREATE (:T {title: null})`, `SET t.title = null` and `REMOVE t.title`.
+4. `clear_schema()` dropped the declaration but left the unique indexes it had
+   installed still rejecting writes — enforcement outliving its declaration.
+
+Each test asserts **both** halves: what is actually enforced, and what
+`SHOW CONSTRAINTS` reports about it. A fix to one half alone is not a fix.
+"""
+
+from __future__ import annotations
+
+import warnings
+
+import pandas as pd
+import pytest
+
+import kglite
+from kglite import KnowledgeGraph
+
+
+def constraints(g: KnowledgeGraph) -> list[tuple[str, str]]:
+    """`SHOW CONSTRAINTS` as `(name, type)` pairs — what an operator sees."""
+    return [(row["name"], row["type"]) for row in g.cypher("SHOW CONSTRAINTS").to_list()]
+
+
+def rejects(g: KnowledgeGraph, query: str) -> bool:
+    """Whether `query` is refused. The enforcement half of every assertion."""
+    try:
+        g.cypher(query)
+        return False
+    except Exception:
+        return True
+
+
+# ── 1. define_schema must not withdraw constraints on types it never named ──
+
+
+def test_a_second_define_schema_keeps_the_first_calls_constraints():
+    """The audit reproducer, verbatim.
+
+    Declaring per module is the natural pattern. Under the old replace default
+    the second call — which mentions only `Task` — withdrew `User`'s primary key,
+    and the duplicate that had just been correctly rejected was then admitted.
+    """
+    g = KnowledgeGraph()
+    g.define_schema({"nodes": {"User": {"primary_key": "email"}, "Task": {"required": ["title"]}}})
+    g.cypher("CREATE (:User {email:'a@x.com'})")
+    assert rejects(g, "CREATE (:User {email:'a@x.com'})"), "the primary key must reject a duplicate"
+
+    g.define_schema({"nodes": {"Task": {"required": ["title", "status"]}}})  # names only Task
+
+    assert ("User.email", "NODE_KEY") in constraints(g), "User's key must still be reported"
+    assert rejects(g, "CREATE (:User {email:'a@x.com'})"), "and must still be enforced"
+    assert g.cypher("MATCH (u:User) RETURN count(u) AS c").to_list()[0]["c"] == 1
+
+
+def test_replace_true_still_withdraws_but_says_what_it_withdrew():
+    """The escape hatch stays available — it just cannot be silent."""
+    g = KnowledgeGraph()
+    g.define_schema({"nodes": {"User": {"primary_key": "email"}, "Task": {"required": ["title"]}}})
+    g.cypher("CREATE (:User {email:'a@x.com'})")
+
+    with pytest.warns(UserWarning, match=r"User\.email \(PRIMARY KEY\)"):
+        g.define_schema({"nodes": {"Task": {"required": ["title"]}}}, replace=True)
+
+    assert ("User.email", "NODE_KEY") not in constraints(g)
+    assert not rejects(g, "CREATE (:User {email:'a@x.com'})")
+
+
+# ── 2. A DDL declaration is withdrawn only by DROP CONSTRAINT ──
+
+
+@pytest.mark.parametrize(
+    "ddl,violation",
+    [
+        ("CREATE CONSTRAINT c FOR (t:Task) REQUIRE t.name IS NOT NULL", "CREATE (:Task {x:1})"),
+        ("CREATE CONSTRAINT c FOR (t:Task) REQUIRE t.name IS UNIQUE", "CREATE (:Task {name:'a'})"),
+    ],
+    ids=["not_null", "unique"],
+)
+def test_define_schema_does_not_wipe_a_ddl_constraint(ddl: str, violation: str):
+    """`required_fields` live inside the SchemaDefinition, so installing a schema
+    used to withdraw a DDL-declared NOT NULL — while the uniqueness half, whose
+    index lives outside the schema, survived. The asymmetry meant an unrelated
+    `define_schema` silently un-enforced half of what `CREATE CONSTRAINT` set up.
+    """
+    g = KnowledgeGraph()
+    g.cypher(ddl)
+    g.cypher("CREATE (:Task {name:'a'})")
+
+    g.define_schema({"nodes": {"Unrelated": {"required": ["z"]}}})
+
+    assert ("c", "UNIQUENESS") in constraints(g) or ("c", "NODE_PROPERTY_EXISTENCE") in constraints(g)
+    assert rejects(g, violation), "a DDL constraint is withdrawn only by DROP CONSTRAINT"
+
+
+def test_drop_constraint_still_withdraws_a_ddl_not_null():
+    """Preserving DDL provenance must not make a constraint undroppable."""
+    g = KnowledgeGraph()
+    g.cypher("CREATE CONSTRAINT nn FOR (t:Task) REQUIRE t.name IS NOT NULL")
+    g.cypher("DROP CONSTRAINT nn")
+    g.define_schema({"nodes": {"Unrelated": {"required": ["z"]}}})
+
+    assert constraints(g) == [("Unrelated.z", "NODE_PROPERTY_EXISTENCE")]
+    assert not rejects(g, "CREATE (:Task {x:1})")
+
+
+# ── 3. Merging uniqueness and presence, in both orders, plus DROP ──
+
+
+@pytest.mark.parametrize(
+    "first,second",
+    [
+        (
+            "CREATE CONSTRAINT u FOR (t:Task) REQUIRE t.name IS UNIQUE",
+            "CREATE CONSTRAINT nn FOR (t:Task) REQUIRE t.name IS NOT NULL",
+        ),
+        (
+            "CREATE CONSTRAINT nn FOR (t:Task) REQUIRE t.name IS NOT NULL",
+            "CREATE CONSTRAINT u FOR (t:Task) REQUIRE t.name IS UNIQUE",
+        ),
+    ],
+    ids=["unique_then_not_null", "not_null_then_unique"],
+)
+def test_declaring_the_second_half_adds_to_the_first(first: str, second: str):
+    """Declaring one half on a property that already carries the other must
+    *add* to it. Order must not matter, and the merged pair reports as NODE_KEY
+    — which is honest only because both halves are still enforced."""
+    g = KnowledgeGraph()
+    g.cypher(first)
+    g.cypher(second)
+
+    assert [kind for _, kind in constraints(g)] == ["NODE_KEY"]
+    g.cypher("CREATE (:Task {name:'a'})")
+    assert rejects(g, "CREATE (:Task {name:'a'})"), "uniqueness half"
+    assert rejects(g, "CREATE (:Task {x:1})"), "presence half"
+
+
+@pytest.mark.parametrize(
+    "dropped,expected_kind,still_rejected,now_allowed",
+    [
+        (
+            "u",
+            "NODE_PROPERTY_EXISTENCE",
+            "CREATE (:Task {name:null})",
+            "CREATE (:Task {name:'a'})",
+        ),
+        (
+            "nn",
+            "UNIQUENESS",
+            "CREATE (:Task {name:'a'})",
+            "CREATE (:Task {name:null})",
+        ),
+    ],
+    ids=["drop_unique_half", "drop_not_null_half"],
+)
+def test_dropping_one_half_leaves_the_other_enforced_and_reported(
+    dropped: str, expected_kind: str, still_rejected: str, now_allowed: str
+):
+    """Dropping half a merged pair must demote the row rather than remove it, and
+    the surviving half must still be enforced. A row that kept claiming NODE_KEY
+    would overstate enforcement at exactly the moment an operator checks."""
+    g = KnowledgeGraph()
+    g.cypher("CREATE CONSTRAINT u FOR (t:Task) REQUIRE t.name IS UNIQUE")
+    g.cypher("CREATE CONSTRAINT nn FOR (t:Task) REQUIRE t.name IS NOT NULL")
+    g.cypher("CREATE (:Task {name:'a'})")
+
+    g.cypher(f"DROP CONSTRAINT {dropped}")
+
+    assert [kind for _, kind in constraints(g)] == [expected_kind]
+    assert rejects(g, still_rejected), "the surviving half must still be enforced"
+    assert not rejects(g, now_allowed), "the dropped half must stop being enforced"
+
+
+def test_a_merged_pair_survives_save_load_and_reports_the_same_name(tmp_path):
+    """Constraint state is persisted, so the round-trip must preserve both halves
+    *and* report them identically. The reported name was previously taken from
+    the first `HashMap` match, so the same graph named the row differently before
+    and after a reload."""
+    path = str(tmp_path / "merged.kgl")
+    g = KnowledgeGraph()
+    g.cypher("CREATE CONSTRAINT u FOR (t:Task) REQUIRE t.name IS UNIQUE")
+    g.cypher("CREATE CONSTRAINT nn FOR (t:Task) REQUIRE t.name IS NOT NULL")
+    g.cypher("CREATE (:Task {name:'a'})")
+    before = constraints(g)
+    g.save(path)
+
+    reloaded = kglite.load(path)
+
+    assert constraints(reloaded) == before
+    assert [kind for _, kind in before] == ["NODE_KEY"]
+    assert rejects(reloaded, "CREATE (:Task {name:'a'})"), "uniqueness half survived the reload"
+    assert rejects(reloaded, "CREATE (:Task {x:1})"), "presence half survived the reload"
+
+
+def test_a_define_schema_primary_key_survives_save_load(tmp_path):
+    path = str(tmp_path / "pk.kgl")
+    g = KnowledgeGraph()
+    g.define_schema({"nodes": {"User": {"primary_key": "email"}}})
+    g.cypher("CREATE (:User {email:'a@x.com'})")
+    g.save(path)
+
+    reloaded = kglite.load(path)
+
+    assert constraints(reloaded) == [("User.email", "NODE_KEY")]
+    assert rejects(reloaded, "CREATE (:User {email:'a@x.com'})")
+
+
+# ── 4. A reported presence constraint must actually reject a null ──
+
+
+@pytest.mark.parametrize("prop", ["title", "id"])
+def test_a_required_structural_field_rejects_an_explicit_null(prop: str):
+    """`id`/`title` are `NodeData` fields, but a write can null them explicitly
+    and the resulting node genuinely carries a null. Skipping them made the
+    declaration report itself through `SHOW CONSTRAINTS` while enforcing
+    nothing — success reported, guarantee absent."""
+    g = KnowledgeGraph()
+    g.define_schema({"nodes": {"Task": {"required": [prop]}}})
+
+    assert constraints(g) == [(f"Task.{prop}", "NODE_PROPERTY_EXISTENCE")]
+    assert rejects(g, f"CREATE (:Task {{{prop}:null}})"), "an explicit null must be rejected"
+    # Omitting it is still fine: every write path resolves it first (CREATE
+    # auto-assigns an id and synthesizes a title), so the requirement is met.
+    g.cypher("CREATE (:Task {x:1})")
+    assert g.cypher("MATCH (t:Task) RETURN count(t) AS c").to_list()[0]["c"] == 1
+
+
+def test_a_required_title_is_enforced_on_the_set_and_remove_paths():
+    g = KnowledgeGraph()
+    g.define_schema({"nodes": {"Task": {"required": ["title"]}}})
+    g.cypher("CREATE (:Task {title:'ok'})")
+
+    assert rejects(g, "MATCH (t:Task) SET t.title = null")
+    assert rejects(g, "MATCH (t:Task) REMOVE t.title")
+    assert g.cypher("MATCH (t:Task) RETURN t.title AS v").to_list()[0]["v"] == "ok"
+
+
+def test_a_required_title_is_enforced_on_the_bulk_path():
+    """`add_nodes` is how blueprints and every loader reach storage, so a
+    constraint the batch engine skipped would be theatre."""
+    g = KnowledgeGraph()
+    g.define_schema({"nodes": {"Task": {"required": ["title"]}}})
+    with pytest.raises(Exception):
+        g.add_nodes(pd.DataFrame({"pid": [1], "title": [None]}), "Task", "pid", "title")
+
+
+@pytest.mark.parametrize("prop", ["title", "name"])
+def test_ddl_refuses_a_presence_constraint_the_stored_data_violates(prop: str):
+    """`CREATE CONSTRAINT` verifies against stored data before installing, so a
+    constraint that would silently exempt the rows already present is refused
+    instead. `title` must behave exactly as an ordinary property here — it was
+    waved through while the data carried a null."""
+    g = KnowledgeGraph()
+    g.cypher("CREATE (:Task {title:null, x:1})")
+
+    with pytest.raises(Exception, match="cannot declare"):
+        g.cypher(f"CREATE CONSTRAINT c FOR (t:Task) REQUIRE t.{prop} IS NOT NULL")
+    assert constraints(g) == []
+
+
+@pytest.mark.parametrize("prop", ["title", "name"])
+def test_validate_schema_reports_a_required_field_the_data_lacks(prop: str):
+    """`define_schema` declares intent without re-verifying stored data — for
+    every property alike — and `validate_schema()` is the audit that reports what
+    the data violates. It must see a null `title` too, or the write path and the
+    validator disagree about what the same declaration means."""
+    g = KnowledgeGraph()
+    g.cypher("CREATE (:Task {title:null, x:1})")
+
+    g.define_schema({"nodes": {"Task": {"required": [prop]}}})
+
+    errors = g.validate_schema()
+    assert [e["field"] for e in errors] == [prop]
+    assert errors[0]["error_type"] == "missing_required_field"
+
+
+def test_requiring_type_stays_a_no_op():
+    """`type` is the node's label rather than a supplied value, so nothing a
+    write does can leave it absent."""
+    g = KnowledgeGraph()
+    g.define_schema({"nodes": {"Task": {"required": ["type"]}}})
+    g.cypher("CREATE (:Task {x:1})")
+    g.cypher("CREATE (:Task {type:null})")
+    assert g.cypher("MATCH (t:Task) RETURN count(t) AS c").to_list()[0]["c"] == 2
+
+
+# ── 5. Clearing a schema must clear its enforcement too ──
+
+
+def test_clear_schema_withdraws_the_constraints_it_installed():
+    """Dropping the declaration but keeping the unique index left writes being
+    rejected by a constraint nothing reported and nothing could drop."""
+    g = KnowledgeGraph()
+    g.define_schema({"nodes": {"User": {"primary_key": "email"}}})
+    g.cypher("CREATE (:User {email:'a@x.com'})")
+
+    g.clear_schema()
+
+    assert constraints(g) == []
+    assert not g.has_schema()
+    assert not rejects(g, "CREATE (:User {email:'a@x.com'})")
+
+
+def test_clear_schema_leaves_ddl_constraints_alone():
+    """`CREATE CONSTRAINT` is a separate declaration with its own `DROP`, so
+    clearing the *schema* must not take it down."""
+    g = KnowledgeGraph()
+    g.cypher("CREATE CONSTRAINT u FOR (t:Task) REQUIRE t.name IS UNIQUE")
+    g.cypher("CREATE CONSTRAINT nn FOR (t:Task) REQUIRE t.name IS NOT NULL")
+    g.define_schema({"nodes": {"User": {"primary_key": "email"}}})
+    g.cypher("CREATE (:Task {name:'a'})")
+
+    g.clear_schema()
+
+    assert [kind for _, kind in constraints(g)] == ["NODE_KEY"]
+    assert rejects(g, "CREATE (:Task {name:'a'})")
+    assert rejects(g, "CREATE (:Task {x:1})")
+
+
+def test_a_failed_define_schema_changes_nothing():
+    """A declaration the data violates is refused, and the refusal must leave
+    the previous constraints exactly as they were."""
+    g = KnowledgeGraph()
+    g.define_schema({"nodes": {"User": {"primary_key": "email"}}})
+    g.cypher("CREATE (:User {email:'a@x.com'})")
+    g.cypher("CREATE (:Task {name:'dup'})")
+    g.cypher("CREATE (:Task {name:'dup'})")
+
+    with pytest.raises(Exception):
+        g.define_schema({"nodes": {"Task": {"primary_key": "name"}}})
+
+    assert constraints(g) == [("User.email", "NODE_KEY")]
+    assert rejects(g, "CREATE (:User {email:'a@x.com'})")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # a merge must never warn
+        g.define_schema({"nodes": {"Other": {"required": ["z"]}}})

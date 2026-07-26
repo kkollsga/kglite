@@ -1458,8 +1458,12 @@ g.define_schema({
 })
 ```
 
-> **`define_schema` replaces the whole schema** — it is not a merge. A call with
-> a subset of types drops the omitted ones, so redefine all types each call.
+> **`define_schema` merges per node/connection type.** A type the call names
+> takes the new declaration entire; a type it omits keeps its own, so declaring
+> per module never withdraws another type's constraints. Pass `replace=True` for
+> whole-schema replacement — it warns, naming each constraint it stops
+> enforcing. Constraints declared with `CREATE CONSTRAINT` are unaffected by
+> either mode; drop them with `DROP CONSTRAINT`.
 
 Every write to an opted-in type then stamps a reserved **`updated_at`** (a
 `Timestamp`) — Cypher `CREATE`/`MERGE`/`SET` and `add_nodes`/`add_connections`.

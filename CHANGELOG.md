@@ -302,6 +302,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed — behaviour
 
+- **`define_schema()` now merges per node/connection type instead of replacing
+  the whole schema.** A type the call names takes the new declaration entire; a
+  type it does not name keeps the declaration it already had. Previously any
+  `define_schema` call superseded the entire schema, so the natural
+  per-module/per-type declaration pattern silently withdrew every constraint on
+  every type the call happened to omit — a graph that correctly rejected a
+  duplicate primary key one line earlier would accept it on the next, with no
+  error and no warning. Merging is per *type*, not per field, so re-declaring a
+  type is still how you narrow it.
+
+  Pass `replace=True` for the previous whole-schema semantics. Because that
+  withdraws enforcement from types the caller never mentioned, it emits a
+  `UserWarning` listing each constraint it stops enforcing. `clear_schema()`
+  removes everything.
+
+- **`clear_schema()` now withdraws the constraints the schema installed.**
+  It previously dropped the declaration but left the unique indexes a
+  `primary_key`/`unique` declaration had built still rejecting writes — with no
+  `SHOW CONSTRAINTS` row explaining them and no way to drop them. Constraints
+  declared through Cypher DDL are separate declarations and still survive;
+  `DROP CONSTRAINT` withdraws those.
+
+- **A `required` property named `id` or `title` is now enforced against an
+  explicit null.** Both are auto-supplied when a write omits them, so omitting
+  one still satisfies the requirement — but `CREATE (:T {title: null})`,
+  `SET t.title = null`, `REMOVE t.title` and a null title cell in an
+  `add_nodes` batch all produce a node that genuinely carries a null, and those
+  are now rejected. Previously they were waved through while `SHOW CONSTRAINTS`
+  reported the constraint as `NODE_PROPERTY_EXISTENCE` (or `NODE_KEY` alongside
+  a uniqueness declaration), and `validate_schema()` reported nothing.
+  `CREATE CONSTRAINT ... IS NOT NULL` on `id`/`title` likewise now refuses to
+  install against data that already violates it, as it does for any other
+  property. Requiring `type` remains a no-op — it is the node's label and
+  cannot be absent.
+
 - **`kglite.open()` is now crash-safe by default.** `durable` defaults to on, so
   every committed mutation is `fsync`'d to the `<path>-wal` sidecar before the
   call returns and is replayed on the next `open()`. Previously a graph opened
@@ -333,6 +368,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behaviour.
 
 ### Fixed
+
+- `define_schema()` no longer withdraws a NOT NULL declared through
+  `CREATE CONSTRAINT ... IS NOT NULL`. Presence constraints live in the same
+  `required_fields` list a schema owns, so installing any schema silently
+  un-enforced them — while the uniqueness half of a DDL declaration, whose index
+  lives outside the schema, survived. A DDL constraint is now withdrawn only by
+  `DROP CONSTRAINT`, in both modes.
+
+- `SHOW CONSTRAINTS` (and `CALL db.constraints()`) now report a stable name for
+  a constraint carrying more than one registered name — the case where
+  `CREATE CONSTRAINT u … IS UNIQUE` and `CREATE CONSTRAINT nn … IS NOT NULL` on
+  the same property merge into one `NODE_KEY` row. The reported name was taken
+  from the first hash-map match, so the same graph could name the row
+  differently before and after a save/load round-trip.
 
 - `claude_config` now reads and writes Claude MCP config files as UTF-8. On a
   non-UTF-8 Windows codepage the read mis-decoded the file and the atomic write

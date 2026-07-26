@@ -1,7 +1,7 @@
 // src/graph/subgraph.rs
 //! Subgraph extraction and selection expansion operations
 
-use crate::graph::schema::{CurrentSelection, DirGraph, EdgeData};
+use crate::graph::schema::{CurrentSelection, DirGraph, EdgeData, SchemaInstall};
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
@@ -133,7 +133,10 @@ pub fn extract_subgraph(
     // into a silently unconstrained copy.
     if let Some(schema) = source.get_schema() {
         new_graph
-            .set_schema(schema.clone())
+            // The target is a fresh graph, so merge and replace coincide; merge
+            // states the intent (install this schema) without also asserting
+            // that everything unnamed should be withdrawn.
+            .set_schema(schema.clone(), SchemaInstall::Merge)
             .map_err(|violation| format!("subgraph schema install failed: {violation}"))?;
     }
 

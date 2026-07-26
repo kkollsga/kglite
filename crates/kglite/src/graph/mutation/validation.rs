@@ -77,15 +77,24 @@ fn validate_single_node(
     };
     // Check required fields
     for required_field in &schema.required_fields {
-        // Skip built-in fields that are always present
-        if required_field == "id" || required_field == "title" || required_field == "type" {
+        // `type` is the node's label rather than a supplied value, so it cannot
+        // be missing. `id`/`title` live in `NodeData` fields rather than the
+        // property map but *can* be explicitly nulled, so they are read
+        // structurally rather than skipped — matching what the write-path
+        // `DirGraph::check_required_fields` enforces, so validation-time and
+        // write-time agree about what a declaration means.
+        if required_field == "type" {
             continue;
         }
 
-        let has_field = node
-            .get_property(required_field)
-            .map(|v| !matches!(*v, Value::Null))
-            .unwrap_or(false);
+        let has_field = match required_field.as_str() {
+            "id" => !matches!(*node.id(), Value::Null),
+            "title" => !matches!(*node_title, Value::Null),
+            other => node
+                .get_property(other)
+                .map(|v| !matches!(*v, Value::Null))
+                .unwrap_or(false),
+        };
 
         if !has_field {
             errors.push(ValidationError::MissingRequiredField {

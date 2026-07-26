@@ -34,7 +34,7 @@ fn test_create_single_node() {
 
 #[test]
 fn test_create_rejects_duplicate_primary_key() {
-    use crate::graph::schema::{NodeSchemaDefinition, SchemaDefinition};
+    use crate::graph::schema::{NodeSchemaDefinition, SchemaDefinition, SchemaInstall};
 
     let mut graph = DirGraph::new();
     // Declare Person.id as an enforced primary key; Doc has none.
@@ -46,7 +46,9 @@ fn test_create_rejects_duplicate_primary_key() {
             ..Default::default()
         },
     );
-    graph.set_schema(schema).expect("schema install");
+    graph
+        .set_schema(schema, SchemaInstall::Merge)
+        .expect("schema install");
 
     fn run(g: &mut DirGraph, q: &str) -> Result<(), String> {
         let query = parser::parse_cypher(q).unwrap();

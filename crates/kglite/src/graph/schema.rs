@@ -2169,12 +2169,46 @@ pub struct SchemaDefinition {
     pub connection_schemas: HashMap<String, ConnectionSchemaDefinition>,
 }
 
+/// How an incoming [`SchemaDefinition`] combines with the one already installed.
+///
+/// The distinction exists because a declaration is also a *withdrawal*: whatever
+/// the outgoing schema declared and the incoming one does not is no longer
+/// enforced. Under [`SchemaInstall::Replace`] that reaches every type in the
+/// graph, so a call naming one type silently stops enforcing every other type's
+/// constraints — the failure mode is duplicates entering the data unnoticed.
+/// Under [`SchemaInstall::Merge`] the withdrawal is scoped to the types the call
+/// actually names, so declaring per module is safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SchemaInstall {
+    /// Types the incoming schema names replace their previous entry; every other
+    /// type keeps the declaration it had. The default, because it is the mode
+    /// whose mistake is a rejected write rather than an admitted duplicate.
+    #[default]
+    Merge,
+    /// The incoming schema becomes the whole schema — every type it does not
+    /// name loses its declarations, and with them their enforcement.
+    Replace,
+}
+
 impl SchemaDefinition {
     pub fn new() -> Self {
         SchemaDefinition {
             node_schemas: HashMap::new(),
             connection_schemas: HashMap::new(),
         }
+    }
+
+    /// This schema with `incoming`'s entries layered over it: a named type takes
+    /// the incoming declaration wholesale, an unnamed one keeps its own.
+    ///
+    /// Per *type* rather than per *field* on purpose — a type's entry is one
+    /// declaration ("here is what a `Task` is"), so merging field-by-field would
+    /// make a re-declaration unable to withdraw anything and leave no way to
+    /// narrow a type short of replacing the whole schema.
+    pub fn merged_with(mut self, incoming: SchemaDefinition) -> Self {
+        self.node_schemas.extend(incoming.node_schemas);
+        self.connection_schemas.extend(incoming.connection_schemas);
+        self
     }
 
     /// Add a node type schema

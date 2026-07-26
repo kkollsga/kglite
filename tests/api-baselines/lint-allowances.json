@@ -237,7 +237,7 @@
       "classification": "test"
     },
     {
-      "identity": "crates/kglite/src/graph/dir_graph/schema_ops.rs::fn:set_schema:pub fn set_schema(&mut self, schema: SchemaDefinition) -> Result<(), KgError>::clippy::result_large_err",
+      "identity": "crates/kglite/src/graph/dir_graph/schema_ops.rs::fn:set_schema:pub fn set_schema( &mut self, schema: SchemaDefinition, mode: SchemaInstall, ) -> Result<(), KgError>::clippy::result_large_err",
       "classification": "api-shape"
     },
     {

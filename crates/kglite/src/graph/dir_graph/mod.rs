@@ -110,6 +110,20 @@ pub struct DirGraph {
     /// their constraints must be dropped by descriptor.
     #[serde(default)]
     pub(crate) constraint_names: HashMap<String, NamedConstraint>,
+    /// `(node_type, property)` presence constraints declared through DDL
+    /// (`CREATE CONSTRAINT ... IS NOT NULL`) rather than through a schema.
+    ///
+    /// The enforced list itself lives in `SchemaDefinition::required_fields`, so
+    /// without this provenance record an unrelated `define_schema` would replace
+    /// the schema and silently un-enforce a DDL declaration — the asymmetry that
+    /// does not exist for uniqueness, whose index lives outside the schema.
+    /// `set_schema` replays this set over the newly installed schema. A
+    /// `BTreeSet` so the persisted bytes are deterministic. Additive serde field
+    /// — older `.kgl` files load with an empty set, which only means their DDL
+    /// presence constraints are indistinguishable from schema-declared ones,
+    /// exactly as they are today.
+    #[serde(default)]
+    pub(crate) ddl_not_null_constraints: std::collections::BTreeSet<(String, String)>,
     /// Fast O(1) lookup by node ID: node_type -> TypeIdIndex
     /// Lazily built on first use for each node type, skipped during serialization.
     /// Uses compact u32 HashMap when all IDs are UniqueId (e.g., Wikidata mapped mode).
@@ -419,6 +433,7 @@ impl DirGraph {
             unique_indices: HashMap::new(),
             unique_constraint_keys: Vec::new(),
             constraint_names: HashMap::new(),
+            ddl_not_null_constraints: std::collections::BTreeSet::new(),
             id_indices: IdIndexStore::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: HashMap::new(),
@@ -474,6 +489,7 @@ impl DirGraph {
             unique_indices: HashMap::new(),
             unique_constraint_keys: Vec::new(),
             constraint_names: HashMap::new(),
+            ddl_not_null_constraints: std::collections::BTreeSet::new(),
             id_indices: IdIndexStore::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: HashMap::new(),

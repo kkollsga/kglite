@@ -564,13 +564,24 @@ impl DirGraph {
     /// stored ones, so a SET that nulls a required property is caught even
     /// though the property is present beforehand.
     ///
-    /// # Structural fields are exempt
+    /// # Structural fields: `type` is exempt, `id` and `title` are not
     ///
-    /// `id`, `title`, and `type` are always present by construction (they are
-    /// `NodeData` fields, not properties), so requiring them is a no-op rather
-    /// than an error — matching what the offline
-    /// `mutation::validation::validate_single_node` checker has always done, so
-    /// write-time and validation-time agree.
+    /// `type` is the node's label rather than a value a write supplies, so no
+    /// write can leave it absent and requiring it is a genuine no-op.
+    ///
+    /// `id` and `title` are **not** exempt, despite also being `NodeData`
+    /// fields. Each write path resolves them before this check — CREATE
+    /// auto-assigns an id and synthesizes a title from `name`/`title` or the
+    /// label, and the bulk path falls back to the id column — so an omitted one
+    /// reads as present and the requirement is satisfied. But both accept an
+    /// *explicit* null (`CREATE (:T {title: null})`, `SET t.title = null`,
+    /// `REMOVE t.title`, a null title cell in a batch), and the node that
+    /// results genuinely carries a null. Skipping them here made
+    /// `required: ["title"]` report itself through `SHOW CONSTRAINTS` as
+    /// `NODE_PROPERTY_EXISTENCE` — and, with uniqueness alongside it, as
+    /// `NODE_KEY` — while admitting exactly those writes: a constraint that
+    /// reported success and enforced nothing, the one outcome this module
+    /// refuses everywhere else (see `reject_structural_uniqueness`).
     ///
     /// # Provisional stubs are deferred, not exempt
     ///
@@ -613,7 +624,7 @@ impl DirGraph {
             return Ok(());
         }
         for property in required {
-            if matches!(property, "id" | "title" | "type") {
+            if property == "type" {
                 continue;
             }
             match read(property) {
@@ -674,17 +685,47 @@ impl DirGraph {
                 missing,
             ));
         }
-        self.node_schema_mut(node_type)
-            .required_fields
-            .push(property.to_string());
+        self.ddl_not_null_constraints
+            .insert((node_type.to_string(), property.to_string()));
+        self.require_property(node_type, property);
+        Ok(checked)
+    }
+
+    /// Add `property` to `node_type`'s `required_fields`, keeping the list
+    /// sorted and duplicate-free. The storage half of a presence declaration,
+    /// shared by the DDL entry point and by [`Self::reapply_ddl_not_null`].
+    fn require_property(&mut self, node_type: &str, property: &str) {
         let required = &mut self.node_schema_mut(node_type).required_fields;
+        required.push(property.to_string());
         required.sort();
         required.dedup();
-        Ok(checked)
+    }
+
+    /// Re-add every DDL-declared presence constraint to the schema now installed.
+    ///
+    /// `required_fields` lives inside the `SchemaDefinition`, so installing a
+    /// schema replaces the list a `CREATE CONSTRAINT ... IS NOT NULL` wrote into
+    /// — silently un-enforcing it. The uniqueness half has no such problem: its
+    /// index lives outside the schema and `set_schema` withdraws only what the
+    /// *outgoing schema* declared. This restores the symmetry, so a DDL
+    /// constraint is withdrawn only by `DROP CONSTRAINT`.
+    pub(crate) fn reapply_ddl_not_null(&mut self) {
+        if self.ddl_not_null_constraints.is_empty() {
+            return;
+        }
+        let declared: Vec<(String, String)> =
+            self.ddl_not_null_constraints.iter().cloned().collect();
+        for (node_type, property) in declared {
+            self.require_property(&node_type, &property);
+        }
     }
 
     /// Withdraw a NOT NULL declaration. Reports whether one was removed.
     pub(crate) fn drop_not_null_constraint(&mut self, node_type: &str, property: &str) -> bool {
+        // Forget the DDL provenance first, or the next schema install would
+        // reinstate what was just dropped.
+        self.ddl_not_null_constraints
+            .remove(&(node_type.to_string(), property.to_string()));
         let Some(node) = self
             .schema_definition
             .as_mut()
@@ -727,9 +768,11 @@ impl DirGraph {
     /// `(nodes_checked, nodes_missing_the_property)` for `node_type`.
     /// Provisional stubs are skipped — see [`Self::check_required_fields`].
     fn count_missing_property(&mut self, node_type: &str, property: &str) -> (usize, usize) {
-        // Structural fields are `NodeData` fields rather than properties, so
-        // they are present by construction and nothing can be missing.
-        if matches!(property, "id" | "title" | "type") {
+        // `type` is the node's label rather than a supplied value, so nothing
+        // can be missing. `id`/`title` are read through `read_indexed` like any
+        // other property — they are resolved on every write path but can be
+        // explicitly nulled, so existing nulls must block the declaration.
+        if property == "type" {
             let checked = self
                 .type_indices
                 .get(node_type)
@@ -799,6 +842,15 @@ impl DirGraph {
     /// The name registered for `(node_type, properties)`, if the constraint was
     /// declared with one. Property order is irrelevant, matching constraint
     /// identity. Lets `SHOW CONSTRAINTS` report the author's name.
+    ///
+    /// Several names can point at one tuple — `CREATE CONSTRAINT u … IS UNIQUE`
+    /// and `CREATE CONSTRAINT nn … IS NOT NULL` on the same property are two
+    /// declarations that `SHOW CONSTRAINTS` reports as a single `NODE_KEY` row.
+    /// Picking the first match out of a `HashMap` made *which* name that row
+    /// carried depend on hash order, so the same graph reported different names
+    /// before and after a save/load round-trip. The lowest name in sort order
+    /// wins instead: arbitrary, but stable across runs, processes and reloads,
+    /// which is what a listing an operator reads during a migration needs.
     pub(crate) fn name_for_constraint(
         &self,
         node_type: &str,
@@ -807,11 +859,12 @@ impl DirGraph {
         let wanted = normalize_properties(properties);
         self.constraint_names
             .iter()
-            .find(|(_, declared)| {
+            .filter(|(_, declared)| {
                 declared.node_type == node_type
                     && normalize_properties(&declared.properties) == wanted
             })
             .map(|(name, _)| name.as_str())
+            .min()
     }
 
     /// Drop every registered name whose constraint is no longer declared.
@@ -1079,15 +1132,50 @@ mod not_null_declaration_tests {
         assert!(graph.has_not_null_constraint("Person", "email"));
     }
 
-    /// Structural fields are `NodeData` fields, present by construction, so
-    /// requiring one is satisfied rather than rejected.
+    /// `type` is the node's label rather than a supplied value, so requiring it
+    /// is satisfied by construction — nothing a write does can leave it absent.
     #[test]
-    fn declaring_not_null_on_a_structural_field_is_satisfied() {
+    fn declaring_not_null_on_the_label_field_is_satisfied() {
         let mut graph = person_graph(&[(1, "Alice", None)]);
-        assert_eq!(graph.create_not_null_constraint("Person", "id").unwrap(), 1);
+        assert_eq!(
+            graph.create_not_null_constraint("Person", "type").unwrap(),
+            1
+        );
         graph
             .check_required_fields("Person", |_| None)
-            .expect("id is always present");
+            .expect("type is the label and always present");
+    }
+
+    /// `id`/`title` are `NodeData` fields too, but a write can null them
+    /// explicitly, so they are enforced rather than exempt. Every write path
+    /// resolves them before the check (CREATE auto-assigns an id and synthesizes
+    /// a title), which is what the reader models here: a resolved value passes,
+    /// an unresolved one is the explicit-null case and must be rejected.
+    /// Skipping them made `required: ["title"]` report itself through
+    /// `SHOW CONSTRAINTS` while admitting `CREATE (:T {title: null})`.
+    #[test]
+    fn declaring_not_null_on_id_or_title_is_enforced_against_an_explicit_null() {
+        for property in ["id", "title"] {
+            let mut graph = person_graph(&[(1, "Alice", None)]);
+            assert_eq!(
+                graph
+                    .create_not_null_constraint("Person", property)
+                    .unwrap(),
+                1
+            );
+
+            graph
+                .check_required_fields("Person", |name| {
+                    (name == property).then(|| Value::String("resolved".to_string()))
+                })
+                .expect("a write that carries the structural field passes");
+
+            let violation = graph
+                .check_required_fields("Person", |_| None)
+                .expect_err("an explicitly nulled structural field must be rejected");
+            assert_eq!(violation.kind, ConstraintKind::NotNull);
+            assert!(violation.to_string().contains(property), "{violation}");
+        }
     }
 
     #[test]
