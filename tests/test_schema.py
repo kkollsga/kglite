@@ -128,15 +128,29 @@ class TestPrimaryKeyDeclaration:
         sd = graph.schema_definition()
         assert sd["nodes"]["Person"]["primary_key"] == "id"
 
-    def test_non_id_primary_key_rejected(self):
-        """MVP enforces only on the identity key; a PK on an arbitrary property
-        is rejected at declaration (not silently a no-op)."""
+    def test_non_id_primary_key_is_accepted_and_enforced(self):
+        """A primary key on an arbitrary property is declarable and enforced —
+        unique *and* present (NODE KEY), backed by a unique secondary index.
+        Supersedes the earlier restriction that the key had to be ``id``."""
         graph = KnowledgeGraph()
+        graph.define_schema({"nodes": {"T": {"primary_key": "name"}}})
+        graph.cypher("CREATE (:T {id: 1, name: 'first'})")
+
+        # Duplicating the key is rejected.
         try:
-            graph.define_schema({"nodes": {"T": {"primary_key": "name"}}})
-            raise AssertionError("non-id primary_key should be rejected")
-        except ValueError as e:
-            assert "must be 'id'" in str(e)
+            graph.cypher("CREATE (:T {id: 2, name: 'first'})")
+            raise AssertionError("duplicate non-id primary key should be rejected")
+        except Exception as e:
+            assert "NODE KEY constraint" in str(e), str(e)
+
+        # Omitting it is rejected too — a primary key implies NOT NULL.
+        try:
+            graph.cypher("CREATE (:T {id: 3})")
+            raise AssertionError("missing non-id primary key should be rejected")
+        except Exception as e:
+            assert "NODE KEY constraint" in str(e), str(e)
+
+        assert graph.cypher("MATCH (n:T) RETURN count(n) AS c").to_dicts()[0]["c"] == 1
 
     def test_no_primary_key_means_none(self):
         graph = KnowledgeGraph()

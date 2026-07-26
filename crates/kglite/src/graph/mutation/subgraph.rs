@@ -126,9 +126,15 @@ pub fn extract_subgraph(
         }
     }
 
-    // Copy schema definition if present
+    // Copy schema definition if present. The subgraph's nodes are a subset of a
+    // graph that already satisfied these constraints, so installing them cannot
+    // find a duplicate the source did not have — but surface the error rather
+    // than discard it, so a genuine inconsistency in the source is not laundered
+    // into a silently unconstrained copy.
     if let Some(schema) = source.get_schema() {
-        new_graph.set_schema(schema.clone());
+        new_graph
+            .set_schema(schema.clone())
+            .map_err(|violation| format!("subgraph schema install failed: {violation}"))?;
     }
 
     Ok(new_graph)

@@ -77,6 +77,14 @@ pub enum KgErrorCode {
     Validation,
     Expr,
 
+    // Declared integrity constraints (UNIQUE / NOT NULL / NODE KEY).
+    // Split from `Schema` so a binding can distinguish "your write broke a
+    // constraint" (retry with different data) from "your declaration cannot be
+    // installed" (fix the data first, then re-declare) — they carry different
+    // Neo4j status codes.
+    ConstraintViolation,
+    ConstraintCreationFailed,
+
     // Resource / access
     NodeNotFound,
     ConnectionNotFound,
@@ -108,6 +116,8 @@ impl KgErrorCode {
             KgErrorCode::Schema => "Schema",
             KgErrorCode::Validation => "Validation",
             KgErrorCode::Expr => "Expr",
+            KgErrorCode::ConstraintViolation => "ConstraintViolation",
+            KgErrorCode::ConstraintCreationFailed => "ConstraintCreationFailed",
             KgErrorCode::NodeNotFound => "NodeNotFound",
             KgErrorCode::ConnectionNotFound => "ConnectionNotFound",
             KgErrorCode::PropertyNotFound => "PropertyNotFound",
@@ -158,7 +168,11 @@ impl KgErrorCode {
             // interrupted the query before it finished.
             KgErrorCode::Cancelled => 499,
 
-            KgErrorCode::Schema | KgErrorCode::Validation | KgErrorCode::Expr => 422,
+            KgErrorCode::Schema
+            | KgErrorCode::Validation
+            | KgErrorCode::Expr
+            | KgErrorCode::ConstraintViolation
+            | KgErrorCode::ConstraintCreationFailed => 422,
 
             // 5xx — server-side
             KgErrorCode::CypherExecution
@@ -187,6 +201,10 @@ impl KgErrorCode {
             KgErrorCode::CypherTypeMismatch => "Neo.ClientError.Statement.TypeError",
             KgErrorCode::CypherExecution => "Neo.DatabaseError.Statement.ExecutionFailed",
             KgErrorCode::Schema => "Neo.ClientError.Schema.ConstraintValidationFailed",
+            KgErrorCode::ConstraintViolation => "Neo.ClientError.Schema.ConstraintValidationFailed",
+            KgErrorCode::ConstraintCreationFailed => {
+                "Neo.ClientError.Schema.ConstraintCreationFailed"
+            }
             KgErrorCode::Validation | KgErrorCode::Expr => {
                 "Neo.ClientError.Statement.ArgumentError"
             }
@@ -275,6 +293,32 @@ pub enum KgError {
     /// connection endpoint, etc.). Wraps the existing 6-variant
     /// [`ValidationError`] enum verbatim.
     Validation(ValidationError),
+
+    /// A write violated a declared integrity constraint — a UNIQUE duplicate, or
+    /// a NOT NULL / NODE KEY property left absent. The write was rejected before
+    /// touching storage, so the graph is unchanged.
+    ///
+    /// `kind` is the Cypher spelling (`UNIQUE` / `NOT NULL` / `NODE KEY`) and
+    /// `descriptor` the canonical `Label.property` / `Label.(a, b)` name, so a
+    /// binding can report which constraint fired without parsing `message`.
+    ConstraintViolation {
+        kind: &'static str,
+        node_type: String,
+        properties: Vec<String>,
+        descriptor: String,
+        message: String,
+    },
+
+    /// Declaring a constraint failed because the existing data already violates
+    /// it. Distinct from [`Self::ConstraintViolation`]: the fix is to deduplicate
+    /// the stored rows and re-declare, not to change an incoming write.
+    ConstraintCreationFailed {
+        kind: &'static str,
+        node_type: String,
+        properties: Vec<String>,
+        descriptor: String,
+        message: String,
+    },
 
     /// Blueprint expression evaluation failure. Wraps the existing
     /// 7-variant [`ExprError`] enum verbatim.
@@ -384,6 +428,8 @@ impl KgError {
             KgError::Cancelled => KgErrorCode::Cancelled,
             KgError::Schema { .. } => KgErrorCode::Schema,
             KgError::Validation(_) => KgErrorCode::Validation,
+            KgError::ConstraintViolation { .. } => KgErrorCode::ConstraintViolation,
+            KgError::ConstraintCreationFailed { .. } => KgErrorCode::ConstraintCreationFailed,
             KgError::Expr(_) => KgErrorCode::Expr,
             KgError::NodeNotFound { .. } => KgErrorCode::NodeNotFound,
             KgError::ConnectionNotFound { .. } => KgErrorCode::ConnectionNotFound,
@@ -458,6 +504,11 @@ impl fmt::Display for KgError {
             ),
             KgError::Schema { message, .. } => write!(f, "Schema error: {}", message),
             KgError::Validation(v) => write!(f, "Validation error: {}", v),
+            // The core already renders these in Neo4j's shape (see
+            // `graph::constraints::ConstraintViolation`), so don't re-wrap them
+            // in a prefix that would bury the actionable part.
+            KgError::ConstraintViolation { message, .. }
+            | KgError::ConstraintCreationFailed { message, .. } => f.write_str(message),
             KgError::Expr(e) => write!(f, "Expression error: {}", e),
             KgError::NodeNotFound { node_type, id } => {
                 write!(f, "Node not found: {} with id {:?}", node_type, id)
@@ -543,6 +594,36 @@ impl From<std::io::Error> for KgError {
 impl From<InternerCollision> for KgError {
     fn from(e: InternerCollision) -> Self {
         KgError::InternerCollision(e)
+    }
+}
+
+// ─── Constraint bridge ───────────────────────────────────────────────────────
+
+impl From<crate::graph::constraints::ConstraintViolation> for KgError {
+    /// Lift a core constraint violation to the public error type, splitting on
+    /// whether a *write* or a *declaration* failed — the two carry different
+    /// Neo4j status codes and call for different fixes.
+    fn from(violation: crate::graph::constraints::ConstraintViolation) -> Self {
+        let message = violation.to_string();
+        let descriptor = violation.descriptor();
+        let kind = violation.kind.keyword();
+        if violation.is_declaration_failure() {
+            KgError::ConstraintCreationFailed {
+                kind,
+                node_type: violation.node_type,
+                properties: violation.properties,
+                descriptor,
+                message,
+            }
+        } else {
+            KgError::ConstraintViolation {
+                kind,
+                node_type: violation.node_type,
+                properties: violation.properties,
+                descriptor,
+                message,
+            }
+        }
     }
 }
 

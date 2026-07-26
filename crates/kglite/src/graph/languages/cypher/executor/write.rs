@@ -706,17 +706,51 @@ fn create_node(
     // amortised and behaves identically across memory/mapped/disk. Undeclared
     // types skip the probe entirely, leaving the permissive default (and the
     // dense-int hot path) untouched.
-    let pk_declared = graph.primary_key_for(&label).is_some();
-    if pk_declared && graph.lookup_by_id_readonly(&label, &id).is_some() {
+    // The `id` case keeps its dedicated path: `id` is the node's identity, not
+    // an entry in the property map, and the per-type id-index answers the probe
+    // in O(1) amortised across every backend. A primary key on any *other*
+    // property is enforced by the unique-constraint index instead, installed
+    // when the schema declares it (`DirGraph::set_schema`).
+    if graph.primary_key_for(&label) == Some("id")
+        && graph.lookup_by_id_readonly(&label, &id).is_some()
+    {
         return Err(format!(
             "duplicate primary key: node type '{label}' declares a primary key and a \
              node with id {id} already exists. Use MERGE to upsert instead of CREATE, \
              or remove the duplicate."
         ));
     }
+
+    // Declared UNIQUE / NOT NULL constraints. Both gates read through one
+    // closure over the values this CREATE is about to write: `id` and `title`
+    // are the identity fields, everything else comes from the evaluated property
+    // map. Skipped entirely for a type that declares nothing.
+    let constraint_read = |property: &str| -> Option<Value> {
+        match property {
+            "id" => (!matches!(id, Value::Null)).then(|| id.clone()),
+            "title" => (!matches!(title, Value::Null)).then(|| title.clone()),
+            other => match properties.get(other) {
+                Some(Value::Null) | None => None,
+                Some(value) => Some(value.clone()),
+            },
+        }
+    };
+    graph
+        .check_required_fields(&label, constraint_read)
+        .map_err(|violation| violation.to_string())?;
+    let unique_claims = graph.unique_claims(&label, constraint_read);
+    graph
+        .check_unique_claims(&unique_claims, None)
+        .map_err(|violation| violation.to_string())?;
+
     // Clone the id for incremental index maintenance below (it is moved into
-    // insert_node_routed). Only needed for declared-PK types.
-    let pk_id = if pk_declared { Some(id.clone()) } else { None };
+    // insert_node_routed). The id-index is maintained incrementally whenever it
+    // is already cached, regardless of whether a primary key is declared:
+    // inserting into a complete index keeps it complete, whereas dropping it
+    // forces the next id lookup to rebuild the whole type. The `contains_key`
+    // guard at the maintenance site is what prevents building a *partial* index
+    // that `build_id_index` would later trust as complete.
+    let pk_id = Some(id.clone());
 
     // Role-scoped write guard (integrity): reject CREATE of a node type
     // outside the active write whitelist, before any storage mutation.
@@ -744,12 +778,20 @@ fn create_node(
         .entry_or_default(label.clone())
         .push(node_idx);
 
-    // Keep the id-index consistent. A declared-PK type maintains it
-    // incrementally — the readonly probe above already built it, so a
-    // sequential CREATE (e.g. UNWIND … CREATE) stays O(1)/node instead of
-    // O(n) rebuild-per-node. Other types invalidate for lazy rebuild (the
-    // established behaviour). The `contains_key` guard means we never insert
-    // into a partial index: if it isn't cached, fall back to invalidation.
+    // Keep the id-index consistent. Whenever the index is already cached — and
+    // therefore complete — insert into it, so a sequential CREATE (e.g.
+    // UNWIND … CREATE) stays O(1)/node instead of paying an O(n)
+    // rebuild-per-node. When it isn't cached, invalidate for lazy rebuild: the
+    // `contains_key` guard is what stops us building a *partial* entry that
+    // `build_id_index` would later short-circuit on and trust as complete.
+    //
+    // This is deliberately independent of whether a primary key is declared.
+    // The declaration governs *uniqueness enforcement*, not index freshness;
+    // gating maintenance on it meant an undeclared type dropped its entire
+    // cached id index on every single CREATE, and the only reason it did so was
+    // that `id` had already been moved into `insert_node_routed` and no clone
+    // was available. Nothing about duplicate ids is protected by invalidating:
+    // a rebuild and an incremental insert collapse a duplicate identically.
     match pk_id {
         Some(idv) if graph.id_indices.contains_key(&label) => {
             graph
@@ -764,6 +806,8 @@ fn create_node(
 
     // Update property and composite indices for the new node
     graph.update_property_indices_for_add(&label, node_idx);
+    // Claim the unique tuples validated above, now that the node exists.
+    graph.commit_unique_claims(&unique_claims, node_idx);
 
     // Ensure type metadata exists for this type (consistent with Python add_nodes API)
     ensure_type_metadata(graph, &label, node_idx);
@@ -874,6 +918,63 @@ fn is_null_write_target(row: &ResultRow, variable: &str) -> bool {
 }
 
 /// Execute a SET clause, modifying node properties in the graph.
+/// A single-property node `SET` that has already landed in storage, as the
+/// post-write bookkeeping needs to see it.
+struct LandedPropertyWrite<'a> {
+    node_idx: NodeIndex,
+    node_type: &'a str,
+    property: &'a str,
+    old_value: Option<&'a Value>,
+    value: &'a Value,
+    constraint_plan: &'a crate::graph::dir_graph::constraints::PropertyWritePlan,
+}
+
+/// The bookkeeping a single-property node `SET` owes once the value has landed.
+///
+/// Split out of `execute_set` because none of it is about *writing* the value:
+/// it registers the property key on the type's `TypeSchema`, moves the node
+/// between index buckets, redeems the constraint plan (handing the vacated
+/// unique tuples back and taking the new ones), keeps `node_type_metadata`
+/// accurate so `schema()` reports the property's type, and notes the node for
+/// the post-loop `updated_at` bump.
+///
+/// Order is load-bearing and matches the sequence this replaced: the index move
+/// needs the old value, so it runs before the constraint plan is redeemed. The
+/// `updated_at` bump is skipped when the write *is* to `updated_at`, which would
+/// otherwise recurse. A `title` write touches only the title field, not a
+/// property map, so it skips both the schema key and the index move.
+fn finish_node_property_write(
+    graph: &mut DirGraph,
+    write: LandedPropertyWrite<'_>,
+    nodes_to_stamp: &mut std::collections::HashMap<NodeIndex, String>,
+) {
+    if write.property != "title" {
+        let ik = InternedKey::from_str(write.property);
+        if let Some(schema_arc) = graph.type_schemas.get_mut(write.node_type) {
+            if schema_arc.slot(ik).is_none() {
+                Arc::make_mut(schema_arc).add_key(ik);
+            }
+        }
+        graph.update_property_indices_for_set(
+            write.node_type,
+            write.node_idx,
+            write.property,
+            write.old_value,
+            write.value,
+        );
+    }
+
+    graph.apply_property_write_plan(write.constraint_plan, write.node_idx);
+
+    let mut prop_type = HashMap::new();
+    prop_type.insert(write.property.to_string(), value_type_name(write.value));
+    graph.upsert_node_type_metadata(write.node_type, prop_type);
+
+    if write.property != "updated_at" && graph.auto_timestamp_for(write.node_type) {
+        nodes_to_stamp.insert(write.node_idx, write.node_type.to_string());
+    }
+}
+
 fn execute_set(
     graph: &mut DirGraph,
     set: &SetClause,
@@ -1036,6 +1137,13 @@ fn execute_set(
                         )?;
                     }
 
+                    // Declared UNIQUE / NOT NULL gates. Planned before the write
+                    // so a violation returns without mutating storage; the
+                    // returned plan is redeemed after the value lands.
+                    let constraint_plan = graph
+                        .plan_property_write(&node_type_str, *node_idx, property, Some(&value))
+                        .map_err(|violation| violation.to_string())?;
+
                     // Clone value before it may be consumed by the mutation
                     let value_for_index = value.clone();
 
@@ -1131,40 +1239,18 @@ fn execute_set(
                         }
                     }
 
-                    // Ensure the DirGraph-level TypeSchema includes this property key
-                    if property != "title" {
-                        let ik = InternedKey::from_str(property);
-                        if let Some(schema_arc) = graph.type_schemas.get_mut(&node_type_str) {
-                            if schema_arc.slot(ik).is_none() {
-                                Arc::make_mut(schema_arc).add_key(ik);
-                            }
-                        }
-                    }
-
-                    // Update property/composite indices (no active borrows)
-                    // "title" only changes the title field, not a HashMap property
-                    if property != "title" {
-                        graph.update_property_indices_for_set(
-                            &node_type_str,
-                            *node_idx,
+                    finish_node_property_write(
+                        graph,
+                        LandedPropertyWrite {
+                            node_idx: *node_idx,
+                            node_type: &node_type_str,
                             property,
-                            old_value.as_ref(),
-                            &value_for_index,
-                        );
-                    }
-
-                    // Keep node_type_metadata in sync so schema() is accurate
-                    {
-                        let mut prop_type = HashMap::new();
-                        prop_type.insert(property.clone(), value_type_name(&value_for_index));
-                        graph.upsert_node_type_metadata(&node_type_str, prop_type);
-                    }
-
-                    // Record this node for a post-loop `updated_at` bump (don't
-                    // recurse on a write to the reserved key itself).
-                    if property != "updated_at" && graph.auto_timestamp_for(&node_type_str) {
-                        nodes_to_stamp.insert(*node_idx, node_type_str.clone());
-                    }
+                            old_value: old_value.as_ref(),
+                            value: &value_for_index,
+                            constraint_plan: &constraint_plan,
+                        },
+                        &mut nodes_to_stamp,
+                    );
                 }
                 SetItem::Map {
                     variable,
@@ -1616,6 +1702,14 @@ fn execute_remove(
                         .map(|n| n.get_node_type_ref(&graph.interner).to_string())
                         .unwrap_or_default();
 
+                    // Declared NOT NULL / UNIQUE gates. Removing a required
+                    // property is a violation; removing part of a unique tuple
+                    // just vacates it. Planned before the write so a rejection
+                    // leaves storage untouched.
+                    let constraint_plan = graph
+                        .plan_property_write(&node_type_str, *node_idx, property, None)
+                        .map_err(|violation| violation.to_string())?;
+
                     // Remove property (mutable borrow, returns old value).
                     //
                     // On disk-backed graphs, the staged-write flush only
@@ -1650,6 +1744,7 @@ fn execute_remove(
                             &old_val,
                         );
                     }
+                    graph.apply_property_write_plan(&constraint_plan, *node_idx);
                 }
                 RemoveItem::Label { variable, label } => {
                     let Some(&node_idx) = row.node_bindings.get(variable) else {

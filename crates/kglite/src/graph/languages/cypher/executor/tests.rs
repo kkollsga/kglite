@@ -744,7 +744,7 @@ fn test_create_rejects_duplicate_primary_key() {
             ..Default::default()
         },
     );
-    graph.set_schema(schema);
+    graph.set_schema(schema).expect("schema install");
 
     fn run(g: &mut DirGraph, q: &str) -> Result<(), String> {
         let query = super::super::parser::parse_cypher(q).unwrap();

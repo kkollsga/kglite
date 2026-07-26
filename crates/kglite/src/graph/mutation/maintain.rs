@@ -1,17 +1,133 @@
 // src/graph/maintain.rs
 use crate::datatypes::{DataFrame, Value};
+use crate::graph::constraints::UniqueConstraintKey;
 use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOperationReport};
 use crate::graph::mutation::batch::{
     BatchProcessor, ConflictHandling, ConnectionBatchProcessor, NodeAction,
 };
 use crate::graph::schema::{
-    CurrentSelection, DirGraph, InternedKey, TypeSchema, PROVISIONAL_KEY, RESERVED_PROVENANCE_KEYS,
+    CompositeValue, CurrentSelection, DirGraph, InternedKey, TypeSchema, PROVISIONAL_KEY,
+    RESERVED_PROVENANCE_KEYS,
 };
 use crate::graph::storage::lookups::{CombinedTypeLookup, TypeLookup};
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// Report returned by `add_properties()`.
+///
+/// Lives here rather than beside `add_properties` itself: it is the return type
+/// of the public `kglite::api::mutation::add_properties`, and the pinned Rust API
+/// baseline records it at this canonical path.
+pub struct AddPropertiesReport {
+    pub nodes_updated: usize,
+    pub properties_set: usize,
+}
+
+/// Column lookup for the bulk path's constraint gates: user-facing property
+/// name → column index, resolved once per call so the per-row read is a HashMap
+/// hit instead of repeated `get_column_index` string scans.
+///
+/// The identity and title columns are handled by the caller's closure (they may
+/// be named `npdid` / `prospect_name` rather than `id` / `title`), so this only
+/// covers ordinary property columns.
+struct ConstraintColumns {
+    by_name: HashMap<String, usize>,
+}
+
+/// One input row, as the constraint gate needs to see it: where to read
+/// ordinary columns from, plus the identity values and the column names they
+/// arrived under.
+///
+/// A constraint names the property the *user* queries by, which for the identity
+/// and title columns may be the original column name (`npdid`) rather than the
+/// canonical `id` / `title`.
+struct GateRow<'a> {
+    df_data: &'a DataFrame,
+    row_idx: usize,
+    id: &'a Value,
+    title: &'a Value,
+    id_field: &'a str,
+    title_field: &'a str,
+}
+
+impl ConstraintColumns {
+    /// The column lookup a batch of `node_type` rows needs, or `None` when the
+    /// type declares no constraint at all.
+    ///
+    /// UNIQUE / NOT NULL enforcement has to happen on the bulk path too: a
+    /// constraint the batch engine bypassed would be theatre, since `add_nodes`
+    /// is how blueprints, `from_records`, OKF, WAL replay and `extend_graph` all
+    /// reach storage. Returning `None` for an unconstrained type is what keeps
+    /// the common path free — one `is_empty` and one `Option` check per call
+    /// rather than per row.
+    fn for_batch(graph: &DirGraph, node_type: &str, df_data: &DataFrame) -> Option<Self> {
+        (graph.has_unique_constraints() || graph.has_required_fields(node_type))
+            .then(|| Self::new(df_data))
+    }
+
+    fn new(df_data: &DataFrame) -> Self {
+        let by_name = df_data
+            .get_column_names()
+            .into_iter()
+            .filter_map(|name| df_data.get_column_index(&name).map(|idx| (name, idx)))
+            .collect();
+        Self { by_name }
+    }
+
+    /// The row's value for `property`, or `None` when the column is absent or
+    /// the cell is null — both of which a constraint treats identically.
+    fn read(&self, df_data: &DataFrame, row_idx: usize, property: &str) -> Option<Value> {
+        let column = *self.by_name.get(property)?;
+        match df_data.get_value_by_index(row_idx, column) {
+            Some(Value::Null) | None => None,
+            Some(value) => Some(value),
+        }
+    }
+
+    /// Gate one input row against the declared NOT NULL and UNIQUE constraints.
+    ///
+    /// Called before the row is queued onto the batch, so a violation aborts the
+    /// whole `add_nodes` call with the graph untouched — no rollback needed and
+    /// no half-applied load. `batch_claims` carries the tuples earlier rows of
+    /// this same input already claimed, so a repeat *within* one batch is
+    /// rejected even when neither row conflicts with stored data.
+    fn gate_row(
+        &self,
+        graph: &DirGraph,
+        node_type: &str,
+        row: GateRow<'_>,
+        existing_idx: Option<NodeIndex>,
+        batch_claims: &mut HashSet<(UniqueConstraintKey, CompositeValue)>,
+    ) -> Result<(), String> {
+        // Both identity spellings are accepted, and identity wins over a
+        // same-named ordinary column — matching `DirGraph::resolve_alias` on the
+        // read side.
+        let read = |property: &str| -> Option<Value> {
+            if property == "id" || property == row.id_field {
+                return (!matches!(row.id, Value::Null)).then(|| row.id.clone());
+            }
+            if property == "title" || property == row.title_field {
+                return (!matches!(row.title, Value::Null)).then(|| row.title.clone());
+            }
+            self.read(row.df_data, row.row_idx, property)
+        };
+        graph
+            .check_required_fields(node_type, read)
+            .map_err(|violation| violation.to_string())?;
+        let claims = graph.unique_claims(node_type, read);
+        graph
+            .check_unique_claims(&claims, existing_idx)
+            .map_err(|violation| violation.to_string())?;
+        for claim in &claims {
+            if !batch_claims.insert((claim.key.clone(), claim.value.clone())) {
+                return Err(graph.unique_batch_conflict(claim).to_string());
+            }
+        }
+        Ok(())
+    }
+}
 
 fn check_data_validity(df_data: &DataFrame, unique_id_field: &str) -> Result<(), String> {
     // Remove strict UniqueId type verification to allow nulls
@@ -46,6 +162,101 @@ fn preflight_interner_names<'a>(
         .validate_names(names)
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// Append a human-readable reason for every row `add_nodes` dropped. Both cases
+/// are input problems the caller can act on, so they are reported rather than
+/// silently tolerated — and the parse failure names the `column_types` override
+/// that fixes it.
+fn describe_skipped_rows(
+    errors: &mut Vec<String>,
+    skipped_null_id: usize,
+    skipped_parse_fail: usize,
+    unique_id_field: &str,
+) {
+    if skipped_null_id > 0 {
+        errors.push(format!(
+            "Skipped {skipped_null_id} rows: null values in ID field '{unique_id_field}'"
+        ));
+    }
+    if skipped_parse_fail > 0 {
+        errors.push(format!(
+            "Skipped {skipped_parse_fail} rows: could not parse ID field \
+             '{unique_id_field}'. If IDs are strings, pass \
+             column_types={{'{unique_id_field}': 'string'}}"
+        ));
+    }
+}
+
+/// Everything about an `add_nodes` call that does not vary per row, so the row
+/// loop reads as "gate the row, build its action, queue it" rather than
+/// re-deriving the same context each iteration.
+struct RowBuilder<'a> {
+    node_type: &'a str,
+    interned_columns: &'a [(InternedKey, usize)],
+    provenance_stamps: &'a [(InternedKey, Value)],
+    property_count: usize,
+    should_update_title: bool,
+    conflict_mode: ConflictHandling,
+}
+
+impl RowBuilder<'_> {
+    /// One row's properties with keys already interned — no HashMap allocation
+    /// and no per-row string cloning. Null cells are dropped rather than
+    /// stored; provenance stamps are applied last so they win over a column of
+    /// the same name.
+    fn properties(&self, df_data: &DataFrame, row_idx: usize) -> Vec<(InternedKey, Value)> {
+        let mut properties = Vec::with_capacity(self.property_count);
+        for (interned_key, col_idx) in self.interned_columns {
+            let value = df_data
+                .get_value_by_index(row_idx, *col_idx)
+                .unwrap_or(Value::Null);
+            if !matches!(value, Value::Null) {
+                properties.push((*interned_key, value));
+            }
+        }
+        for (key, value) in self.provenance_stamps {
+            properties.retain(|(interned, _)| interned != key);
+            properties.push((*key, value.clone()));
+        }
+        properties
+    }
+
+    /// The batch action for one row: an update when the id already resolves to a
+    /// node, a create otherwise. The update path resolves keys back to strings
+    /// because it goes through the HashMap-based `NodeAction::Update` — less
+    /// frequent than create, which keeps its interned keys all the way down.
+    fn action(
+        &self,
+        graph: &DirGraph,
+        df_data: &DataFrame,
+        row_idx: usize,
+        id: Value,
+        title: Value,
+        existing_idx: Option<NodeIndex>,
+    ) -> NodeAction {
+        let properties_interned = self.properties(df_data, row_idx);
+        match existing_idx {
+            Some(node_idx) => {
+                let mut properties = HashMap::with_capacity(properties_interned.len());
+                for (ik, v) in properties_interned {
+                    properties.insert(graph.interner.resolve(ik).to_string(), v);
+                }
+                NodeAction::Update {
+                    node_idx,
+                    title: self.should_update_title.then_some(title),
+                    properties,
+                    conflict_mode: self.conflict_mode,
+                }
+            }
+            None => NodeAction::CreateInterned {
+                node_type: self.node_type.to_string(),
+                id,
+                title,
+                properties: properties_interned,
+            },
+        }
+    }
 }
 
 pub fn add_nodes(
@@ -204,6 +415,23 @@ pub fn add_nodes(
         std::collections::HashSet::new()
     };
 
+    let constraint_columns = ConstraintColumns::for_batch(graph, &node_type, &df_data);
+    // Tuples claimed by earlier rows of this same batch. A repeat inside one
+    // input is rejected even when neither row conflicts with the stored graph —
+    // otherwise the post-load index rebuild would silently keep one row and drop
+    // the other.
+    let row_builder = RowBuilder {
+        node_type: &node_type,
+        interned_columns: &interned_columns,
+        provenance_stamps: &provenance_stamps,
+        property_count,
+        should_update_title,
+        conflict_mode,
+    };
+
+    let mut batch_claims: std::collections::HashSet<(UniqueConstraintKey, CompositeValue)> =
+        std::collections::HashSet::new();
+
     for row_idx in 0..df_data.row_count() {
         let id = match df_data.get_value_by_index(row_idx, id_idx) {
             Some(Value::Null) => {
@@ -231,68 +459,37 @@ pub fn add_nodes(
             .get_value_by_index(row_idx, title_idx)
             .unwrap_or(Value::Null);
 
-        // Use pre-interned keys — avoids HashMap allocation and string cloning per row
-        let mut properties_interned = Vec::with_capacity(property_count);
-        for (interned_key, col_idx) in &interned_columns {
-            let value = df_data
-                .get_value_by_index(row_idx, *col_idx)
-                .unwrap_or(Value::Null);
-            if !matches!(value, Value::Null) {
-                properties_interned.push((*interned_key, value));
-            }
+        // Constraint gates. Run here, before the row is queued onto the batch,
+        // so a violation aborts the whole call with the graph untouched — no
+        // rollback needed and no half-applied load.
+        let existing_idx = type_lookup.check_uid(&id);
+        if let Some(columns) = &constraint_columns {
+            columns.gate_row(
+                graph,
+                &node_type,
+                GateRow {
+                    df_data: &df_data,
+                    row_idx,
+                    id: &id,
+                    title: &title,
+                    id_field: &unique_id_field,
+                    title_field: &title_field,
+                },
+                existing_idx,
+                &mut batch_claims,
+            )?;
         }
-        for (key, value) in &provenance_stamps {
-            properties_interned.retain(|(interned, _)| interned != key);
-            properties_interned.push((*key, value.clone()));
-        }
 
-        let action = match type_lookup.check_uid(&id) {
-            Some(node_idx) => {
-                // Determine if we should update the title
-                let title_update = if should_update_title {
-                    Some(title)
-                } else {
-                    None
-                };
-
-                // Update path still uses HashMap (less frequent, interning handled in batch)
-                let mut properties = HashMap::with_capacity(properties_interned.len());
-                for (ik, v) in properties_interned {
-                    let name = graph.interner.resolve(ik);
-                    properties.insert(name.to_string(), v);
-                }
-
-                NodeAction::Update {
-                    node_idx,
-                    title: title_update,
-                    properties,
-                    conflict_mode,
-                }
-            }
-            None => NodeAction::CreateInterned {
-                node_type: node_type.clone(),
-                id,
-                title,
-                properties: properties_interned,
-            },
-        };
+        let action = row_builder.action(graph, &df_data, row_idx, id, title, existing_idx);
         batch.add_action(action, graph)?;
     }
 
-    // Report skip reasons
-    if skipped_null_id > 0 {
-        errors.push(format!(
-            "Skipped {} rows: null values in ID field '{}'",
-            skipped_null_id, unique_id_field
-        ));
-    }
-    if skipped_parse_fail > 0 {
-        errors.push(format!(
-            "Skipped {} rows: could not parse ID field '{}'. If IDs are strings, pass column_types={{'{}'
-: 'string'}}",
-            skipped_parse_fail, unique_id_field, unique_id_field
-        ));
-    }
+    describe_skipped_rows(
+        &mut errors,
+        skipped_null_id,
+        skipped_parse_fail,
+        &unique_id_field,
+    );
 
     // Execute the batch and get the statistics
     let (stats, metrics) = batch.execute(graph)?;
@@ -309,6 +506,13 @@ pub fn add_nodes(
     // via build_id_index.
     graph.id_indices.remove(&node_type);
     graph.build_id_index(&node_type);
+
+    // Same staleness hazard for the *secondary* indexes: the batch path skips
+    // the per-write incremental maintenance the Cypher executor runs, and
+    // `try_index_lookup` trusts `property_indices` unconditionally — so an
+    // index built before this call would silently hide every row we just
+    // loaded. Rebuild the covering indexes once (no-op when the type has none).
+    graph.refresh_indexes_for_type(&node_type);
 
     // Calculate elapsed time
     let elapsed_ms = metrics.processing_time * 1000.0; // Convert to milliseconds
@@ -884,6 +1088,28 @@ pub(crate) fn detach_delete_nodes(
                 }
             }
         }
+        // The B-tree range index was omitted from this cleanup, so a deleted
+        // node stayed in its value bucket and `lookup_range` — the candidate
+        // source for `WHERE n.prop > x` on an indexed property, in both the
+        // matcher and the fluent filter path — kept handing out tombstoned
+        // NodeIndexes. Same shape as the property/composite eviction above.
+        let range_keys: Vec<_> = graph
+            .range_indices
+            .keys()
+            .filter(|(nt, _)| nt == node_type)
+            .cloned()
+            .collect();
+        for key in range_keys {
+            if let Some(value_map) = graph.range_indices.get_mut(&key) {
+                for indices in value_map.values_mut() {
+                    indices.retain(|idx| !nodes_to_delete.contains(idx));
+                }
+                value_map.retain(|_, indices| !indices.is_empty());
+            }
+        }
+        // A deleted node must give up its UNIQUE tuples, or the value stays
+        // reserved forever and re-inserting it is rejected.
+        graph.evict_unique_claims_for_nodes(node_type, nodes_to_delete);
     }
 
     // Secondary-label index is keyed by label (not primary type), so a
@@ -1515,583 +1741,6 @@ pub fn update_node_properties(
     Ok(report)
 }
 
-// ── add_properties ──────────────────────────────────────────────────────────
-
-/// Specifies how properties should be copied from a source type.
-#[derive(Debug)]
-pub enum PropertySpec {
-    /// Copy listed properties as-is: `['name', 'status']`
-    CopyList(Vec<String>),
-    /// Copy all properties: `[]`
-    CopyAll,
-    /// Rename/aggregate/spatial: `{'new_name': 'source_expr'}`
-    RenameMap(HashMap<String, String>),
-}
-
-/// Report returned by add_properties().
-pub struct AddPropertiesReport {
-    pub nodes_updated: usize,
-    pub properties_set: usize,
-}
-
-/// Enriches the leaf (most recent) level nodes by copying, renaming, aggregating,
-/// or computing properties from ancestor nodes in the traversal hierarchy.
-pub fn add_properties(
-    graph: &mut DirGraph,
-    selection: &CurrentSelection,
-    property_spec: HashMap<String, PropertySpec>,
-) -> Result<AddPropertiesReport, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
-    graph
-        .prepare_disk_mutation()
-        .map_err(|e| format!("disk mutation lease failed: {e}"))?;
-    let level_count = selection.get_level_count();
-    if level_count == 0 {
-        return Ok(AddPropertiesReport {
-            nodes_updated: 0,
-            properties_set: 0,
-        });
-    }
-
-    let target_level = level_count - 1;
-
-    // Build type → level index map
-    let mut type_to_level: HashMap<String, usize> = HashMap::new();
-    for lvl_idx in 0..level_count {
-        if let Some(level) = selection.get_level(lvl_idx) {
-            for node_idx in level.iter_node_indices() {
-                if let Some(node) = graph.get_node(node_idx) {
-                    type_to_level
-                        .entry(node.node_type_str(&graph.interner).to_string())
-                        .or_insert(lvl_idx);
-                }
-            }
-        }
-    }
-
-    // Validate requested types exist in the traversal chain
-    for source_type in property_spec.keys() {
-        if !type_to_level.contains_key(source_type) {
-            return Err(format!(
-                "Source type '{}' not found in traversal chain. Available: {:?}",
-                source_type,
-                type_to_level.keys().collect::<Vec<_>>()
-            ));
-        }
-    }
-
-    // Build reverse parent maps: child → parent for each level
-    let mut parent_maps: Vec<HashMap<NodeIndex, NodeIndex>> = vec![HashMap::new(); level_count];
-    for (lvl_idx, pmap) in parent_maps.iter_mut().enumerate().skip(1) {
-        if let Some(level) = selection.get_level(lvl_idx) {
-            for (parent_opt, children) in level.iter_groups() {
-                if let Some(parent) = parent_opt {
-                    for &child in children {
-                        pmap.insert(child, *parent);
-                    }
-                }
-            }
-        }
-    }
-
-    // Check if any spec requires aggregation
-    let has_aggregation = property_spec.values().any(|spec| {
-        if let PropertySpec::RenameMap(map) = spec {
-            map.values().any(|expr| is_aggregate_expr(expr))
-        } else {
-            false
-        }
-    });
-
-    if has_aggregation {
-        return add_properties_aggregate(
-            graph,
-            selection,
-            &property_spec,
-            &type_to_level,
-            &parent_maps,
-            target_level,
-        );
-    }
-
-    // Standard mode: copy/rename from ancestor onto each leaf node
-    let target_level_data = match selection.get_level(target_level) {
-        Some(level) if !level.is_empty() => level,
-        _ => {
-            return Ok(AddPropertiesReport {
-                nodes_updated: 0,
-                properties_set: 0,
-            });
-        }
-    };
-
-    // Collect updates first (to avoid borrow issues with graph)
-    let mut updates: Vec<(NodeIndex, HashMap<String, Value>)> = Vec::new();
-
-    // Arena guard: node_weight materializes on the disk backend (protocol
-    // in disk/graph.rs); dropped before the &mut apply loop below.
-    let collect_guard = graph.graph.begin_query();
-    for (_parent_opt, targets) in target_level_data.iter_groups() {
-        for &target_idx in targets {
-            let mut props_to_set: HashMap<String, Value> = HashMap::new();
-
-            for (source_type, spec) in &property_spec {
-                let source_level = match type_to_level.get(source_type) {
-                    Some(&lvl) => lvl,
-                    None => continue,
-                };
-
-                let ancestor_idx =
-                    walk_to_ancestor(target_idx, target_level, source_level, &parent_maps);
-                let ancestor_idx = match ancestor_idx {
-                    Some(idx) => idx,
-                    None => continue,
-                };
-
-                let ancestor_node = match graph.graph.node_weight(ancestor_idx) {
-                    Some(n) => n,
-                    None => continue,
-                };
-
-                match spec {
-                    PropertySpec::CopyAll => {
-                        for (k, v) in ancestor_node.property_iter(&graph.interner) {
-                            props_to_set.insert(k.to_string(), v.clone());
-                        }
-                    }
-                    PropertySpec::CopyList(prop_names) => {
-                        for prop_name in prop_names {
-                            if let Some(val) = ancestor_node.get_property(prop_name) {
-                                props_to_set.insert(prop_name.clone(), val.into_owned());
-                            }
-                        }
-                    }
-                    PropertySpec::RenameMap(map) => {
-                        for (target_name, source_expr) in map {
-                            if is_spatial_compute(source_expr) {
-                                if let Some(val) = compute_spatial_property(
-                                    graph,
-                                    target_idx,
-                                    ancestor_idx,
-                                    source_expr,
-                                ) {
-                                    props_to_set.insert(target_name.clone(), val);
-                                }
-                            } else if let Some(val) = ancestor_node.get_property(source_expr) {
-                                props_to_set.insert(target_name.clone(), val.into_owned());
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !props_to_set.is_empty() {
-                updates.push((target_idx, props_to_set));
-            }
-        }
-    }
-
-    drop(collect_guard);
-
-    // Apply updates
-    let mut nodes_updated = 0;
-    let mut properties_set = 0;
-    for (node_idx, props) in updates {
-        // Pre-intern keys before getting mutable node reference (split borrow)
-        let interned_props: Vec<(InternedKey, Value)> = props
-            .into_iter()
-            .map(|(k, v)| (graph.interner.get_or_intern(&k), v))
-            .collect();
-        if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
-            let count = interned_props.len();
-            for (ik, v) in interned_props {
-                node.properties.insert(ik, v);
-            }
-            nodes_updated += 1;
-            properties_set += count;
-        }
-    }
-
-    Ok(AddPropertiesReport {
-        nodes_updated,
-        properties_set,
-    })
-}
-
-fn walk_to_ancestor(
-    start: NodeIndex,
-    start_level: usize,
-    target_level: usize,
-    parent_maps: &[HashMap<NodeIndex, NodeIndex>],
-) -> Option<NodeIndex> {
-    if start_level == target_level {
-        return Some(start);
-    }
-    if target_level >= start_level {
-        return None;
-    }
-    let mut current = start;
-    for lvl in (target_level + 1..=start_level).rev() {
-        current = *parent_maps[lvl].get(&current)?;
-    }
-    Some(current)
-}
-
-fn is_aggregate_expr(expr: &str) -> bool {
-    let trimmed = expr.trim();
-    trimmed == "count(*)"
-        || trimmed.starts_with("sum(")
-        || trimmed.starts_with("mean(")
-        || trimmed.starts_with("avg(")
-        || trimmed.starts_with("min(")
-        || trimmed.starts_with("max(")
-        || trimmed.starts_with("std(")
-        || trimmed.starts_with("collect(")
-}
-
-fn is_spatial_compute(expr: &str) -> bool {
-    matches!(
-        expr.trim(),
-        "distance" | "area" | "perimeter" | "centroid_lat" | "centroid_lon"
-    )
-}
-
-fn extract_agg_property(expr: &str) -> Option<&str> {
-    let trimmed = expr.trim();
-    if trimmed == "count(*)" {
-        return None;
-    }
-    let start = trimmed.find('(')?;
-    let end = trimmed.rfind(')')?;
-    if start + 1 < end {
-        Some(trimmed[start + 1..end].trim())
-    } else {
-        None
-    }
-}
-
-fn compute_spatial_property(
-    graph: &DirGraph,
-    leaf_idx: NodeIndex,
-    ancestor_idx: NodeIndex,
-    spatial_fn: &str,
-) -> Option<Value> {
-    let leaf_node = graph.get_node(leaf_idx)?;
-    let ancestor_node = graph.get_node(ancestor_idx)?;
-    let leaf_spatial = graph.get_spatial_config(leaf_node.node_type_str(&graph.interner));
-    let ancestor_spatial = graph.get_spatial_config(ancestor_node.node_type_str(&graph.interner));
-
-    match spatial_fn.trim() {
-        "distance" => {
-            let (lat1, lon1) = resolve_location(leaf_node, leaf_spatial)?;
-            let (lat2, lon2) = resolve_location(ancestor_node, ancestor_spatial)?;
-            Some(Value::Float64(
-                crate::graph::features::spatial::geodesic_distance(lat1, lon1, lat2, lon2),
-            ))
-        }
-        "area" => {
-            let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
-            crate::graph::features::spatial::geometry_area_m2(&geom)
-                .ok()
-                .map(Value::Float64)
-        }
-        "perimeter" => {
-            let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
-            crate::graph::features::spatial::geometry_perimeter_m(&geom)
-                .ok()
-                .map(Value::Float64)
-        }
-        "centroid_lat" => {
-            let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
-            crate::graph::features::spatial::geometry_centroid(&geom)
-                .ok()
-                .map(|(lat, _)| Value::Float64(lat))
-        }
-        "centroid_lon" => {
-            let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
-            crate::graph::features::spatial::geometry_centroid(&geom)
-                .ok()
-                .map(|(_, lon)| Value::Float64(lon))
-        }
-        _ => None,
-    }
-}
-
-fn resolve_location(
-    node: &crate::graph::schema::NodeData,
-    spatial_config: Option<&crate::graph::schema::SpatialConfig>,
-) -> Option<(f64, f64)> {
-    let sc = spatial_config?;
-    if let Some((ref lat_f, ref lon_f)) = sc.location {
-        let lat = node
-            .get_property(lat_f)
-            .as_deref()
-            .and_then(mg_value_to_f64)?;
-        let lon = node
-            .get_property(lon_f)
-            .as_deref()
-            .and_then(mg_value_to_f64)?;
-        return Some((lat, lon));
-    }
-    if let Some(ref geom_f) = sc.geometry {
-        if let Some(Value::String(wkt)) = node.get_property(geom_f).as_deref() {
-            if let Ok(geom) = crate::graph::features::spatial::parse_wkt(wkt) {
-                return crate::graph::features::spatial::geometry_centroid(&geom).ok();
-            }
-        }
-    }
-    None
-}
-
-fn resolve_geometry(
-    node: &crate::graph::schema::NodeData,
-    spatial_config: Option<&crate::graph::schema::SpatialConfig>,
-) -> Option<geo::geometry::Geometry<f64>> {
-    let sc = spatial_config?;
-    let geom_field = sc.geometry.as_deref()?;
-    match node.get_property(geom_field).as_deref() {
-        Some(Value::String(wkt)) => crate::graph::features::spatial::parse_wkt(wkt).ok(),
-        _ => None,
-    }
-}
-
-fn mg_value_to_f64(v: &Value) -> Option<f64> {
-    match v {
-        Value::Float64(f) => Some(*f),
-        Value::Int64(i) => Some(*i as f64),
-        Value::String(s) => s.parse().ok(),
-        _ => None,
-    }
-}
-
-/// Aggregation mode: groups leaf nodes by ancestor and computes aggregate values.
-#[allow(clippy::too_many_arguments)]
-fn add_properties_aggregate(
-    graph: &mut DirGraph,
-    selection: &CurrentSelection,
-    property_spec: &HashMap<String, PropertySpec>,
-    type_to_level: &HashMap<String, usize>,
-    parent_maps: &[HashMap<NodeIndex, NodeIndex>],
-    target_level: usize,
-) -> Result<AddPropertiesReport, String> {
-    let target_level_data = match selection.get_level(target_level) {
-        Some(level) if !level.is_empty() => level,
-        _ => {
-            return Ok(AddPropertiesReport {
-                nodes_updated: 0,
-                properties_set: 0,
-            });
-        }
-    };
-
-    let mut updates: HashMap<NodeIndex, HashMap<String, Value>> = HashMap::new();
-
-    // Arena guard: node_weight materializes on the disk backend (protocol
-    // in disk/graph.rs); dropped before the &mut apply loop below.
-    let collect_guard = graph.graph.begin_query();
-    for (source_type, spec) in property_spec {
-        let source_level = match type_to_level.get(source_type) {
-            Some(&lvl) => lvl,
-            None => continue,
-        };
-
-        match spec {
-            PropertySpec::CopyList(props) => {
-                for (_parent_opt, targets) in target_level_data.iter_groups() {
-                    for &target_idx in targets {
-                        if let Some(ancestor_idx) =
-                            walk_to_ancestor(target_idx, target_level, source_level, parent_maps)
-                        {
-                            if let Some(ancestor_node) = graph.get_node(ancestor_idx) {
-                                for prop_name in props {
-                                    if let Some(val) = ancestor_node.get_property(prop_name) {
-                                        updates
-                                            .entry(target_idx)
-                                            .or_default()
-                                            .insert(prop_name.clone(), val.into_owned());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            PropertySpec::CopyAll => {
-                for (_parent_opt, targets) in target_level_data.iter_groups() {
-                    for &target_idx in targets {
-                        if let Some(ancestor_idx) =
-                            walk_to_ancestor(target_idx, target_level, source_level, parent_maps)
-                        {
-                            if let Some(ancestor_node) = graph.graph.node_weight(ancestor_idx) {
-                                for (k, v) in ancestor_node.property_iter(&graph.interner) {
-                                    updates
-                                        .entry(target_idx)
-                                        .or_default()
-                                        .insert(k.to_string(), v.clone());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            PropertySpec::RenameMap(rename_map) => {
-                for (target_name, source_expr) in rename_map {
-                    if is_aggregate_expr(source_expr) {
-                        let agg_prop = extract_agg_property(source_expr);
-
-                        // Group leaf nodes by ancestor at source_level
-                        let mut groups: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
-                        for (_parent_opt, targets) in target_level_data.iter_groups() {
-                            for &target_idx in targets {
-                                if let Some(ancestor) = walk_to_ancestor(
-                                    target_idx,
-                                    target_level,
-                                    source_level,
-                                    parent_maps,
-                                ) {
-                                    groups.entry(ancestor).or_default().push(target_idx);
-                                }
-                            }
-                        }
-
-                        for (ancestor_idx, leaf_indices) in &groups {
-                            let values: Vec<f64> = if let Some(prop) = agg_prop {
-                                leaf_indices
-                                    .iter()
-                                    .filter_map(|&idx| {
-                                        graph.get_node(idx).and_then(|n| {
-                                            n.get_property(prop)
-                                                .as_deref()
-                                                .and_then(mg_value_to_f64)
-                                        })
-                                    })
-                                    .collect()
-                            } else {
-                                vec![]
-                            };
-
-                            let agg_value =
-                                compute_aggregate(source_expr, &values, leaf_indices.len());
-                            updates
-                                .entry(*ancestor_idx)
-                                .or_default()
-                                .insert(target_name.clone(), agg_value);
-                        }
-                    } else if is_spatial_compute(source_expr) {
-                        for (_parent_opt, targets) in target_level_data.iter_groups() {
-                            for &target_idx in targets {
-                                if let Some(ancestor_idx) = walk_to_ancestor(
-                                    target_idx,
-                                    target_level,
-                                    source_level,
-                                    parent_maps,
-                                ) {
-                                    if let Some(val) = compute_spatial_property(
-                                        graph,
-                                        target_idx,
-                                        ancestor_idx,
-                                        source_expr,
-                                    ) {
-                                        updates
-                                            .entry(target_idx)
-                                            .or_default()
-                                            .insert(target_name.clone(), val);
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        // Simple rename
-                        for (_parent_opt, targets) in target_level_data.iter_groups() {
-                            for &target_idx in targets {
-                                if let Some(ancestor_idx) = walk_to_ancestor(
-                                    target_idx,
-                                    target_level,
-                                    source_level,
-                                    parent_maps,
-                                ) {
-                                    if let Some(ancestor_node) = graph.get_node(ancestor_idx) {
-                                        if let Some(val) = ancestor_node.get_property(source_expr) {
-                                            updates
-                                                .entry(target_idx)
-                                                .or_default()
-                                                .insert(target_name.clone(), val.into_owned());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    drop(collect_guard);
-
-    let mut nodes_updated = 0;
-    let mut properties_set = 0;
-
-    for (node_idx, props) in updates {
-        // Pre-intern keys before getting mutable node reference (split borrow)
-        let interned_props: Vec<(InternedKey, Value)> = props
-            .into_iter()
-            .map(|(k, v)| (graph.interner.get_or_intern(&k), v))
-            .collect();
-        if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
-            let count = interned_props.len();
-            for (ik, v) in interned_props {
-                node.properties.insert(ik, v);
-            }
-            nodes_updated += 1;
-            properties_set += count;
-        }
-    }
-
-    Ok(AddPropertiesReport {
-        nodes_updated,
-        properties_set,
-    })
-}
-
-fn compute_aggregate(expr: &str, values: &[f64], count: usize) -> Value {
-    let trimmed = expr.trim();
-    if trimmed == "count(*)" {
-        return Value::Int64(count as i64);
-    }
-    if trimmed.starts_with("collect(") {
-        let s = values
-            .iter()
-            .map(|v| format!("{}", v))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Value::String(s);
-    }
-    if values.is_empty() {
-        return Value::Null;
-    }
-    if trimmed.starts_with("sum(") {
-        Value::Float64(values.iter().sum())
-    } else if trimmed.starts_with("mean(") || trimmed.starts_with("avg(") {
-        Value::Float64(values.iter().sum::<f64>() / values.len() as f64)
-    } else if trimmed.starts_with("min(") {
-        Value::Float64(values.iter().copied().fold(f64::INFINITY, f64::min))
-    } else if trimmed.starts_with("max(") {
-        Value::Float64(values.iter().copied().fold(f64::NEG_INFINITY, f64::max))
-    } else if trimmed.starts_with("std(") {
-        if values.len() < 2 {
-            Value::Float64(0.0)
-        } else {
-            let mean = values.iter().sum::<f64>() / values.len() as f64;
-            let variance =
-                values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
-            Value::Float64(variance.sqrt())
-        }
-    } else {
-        Value::Null
-    }
-}
-
 #[cfg(test)]
 #[path = "maintain_edge_spec_tests.rs"]
 mod edge_spec_tests;
@@ -2185,7 +1834,7 @@ mod id_index_tests {
                 ..Default::default()
             },
         );
-        g.set_schema(schema);
+        g.set_schema(schema).expect("schema install");
 
         let dup = DataFrame::from_cypher_rows(
             vec!["id".to_string()],

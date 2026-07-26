@@ -1091,40 +1091,7 @@ impl KnowledgeGraph {
                         }
                     }
 
-                    // Parse the (opt-in) primary key. MVP enforces uniqueness only
-                    // on the identity key ('id'); a PK on an arbitrary property
-                    // needs a unique secondary index (follow-up), so reject it
-                    // explicitly rather than silently declaring a no-op constraint.
-                    if let Some(pk_val) = node_schema_dict.get_item("primary_key")? {
-                        let pk: String = pk_val.extract()?;
-                        if pk != "id" {
-                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "primary_key for node type '{node_type}' must be 'id' — \
-                                 enforcing a primary key on an arbitrary property is not yet \
-                                 supported (it needs a unique secondary index). Got '{pk}'."
-                            )));
-                        }
-                        node_schema.primary_key = Some(pk);
-                    }
-
-                    // Parse the (opt-in) ownership layer for the two-writer
-                    // contract. Reject an unknown value as a typo-guard.
-                    if let Some(layer_val) = node_schema_dict.get_item("layer")? {
-                        let layer: String = layer_val.extract()?;
-                        if layer != "managed" && layer != "runtime" {
-                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "layer for node type '{node_type}' must be 'managed' or \
-                                 'runtime'. Got '{layer}'."
-                            )));
-                        }
-                        node_schema.layer = Some(layer);
-                    }
-
-                    // Opt-in freshness provenance: stamp `updated_at` (+ the
-                    // caller's git_sha) on every write to this type.
-                    if let Some(ts_val) = node_schema_dict.get_item("auto_timestamp")? {
-                        node_schema.auto_timestamp = Some(ts_val.extract::<bool>()?);
-                    }
+                    parse_node_declarations(&node_type, node_schema_dict, &mut node_schema)?;
 
                     schema.add_node_schema(node_type, node_schema);
                 }
@@ -1209,7 +1176,12 @@ impl KnowledgeGraph {
             }
         }
 
-        get_graph_mut(&mut self.inner).set_schema(schema);
+        // Installing the schema installs the UNIQUE constraints it declares, so
+        // it fails when existing data already violates one — nothing is changed
+        // in that case, so the caller can fix the data and retry.
+        get_graph_mut(&mut self.inner)
+            .set_schema(schema)
+            .map_err(crate::error_py::kg_to_pyerr)?;
 
         Ok(self.clone())
     }
@@ -1978,6 +1950,92 @@ impl KnowledgeGraph {
 /// expands to all registered pass names; `disabled_passes` adds named
 /// passes on top, validated against the registry so typos surface as a
 /// `ValueError` instead of a silent no-op.
+/// Parse the opt-in per-node-type declarations `define_schema` accepts beyond
+/// the field list: `primary_key`, `unique`, `layer`, and `auto_timestamp`.
+///
+/// Grouped here because they share a shape — each is absent or validated — and
+/// because keeping them inline made `define_schema` a single function that both
+/// walked the schema dict and validated every leaf of it.
+fn parse_node_declarations(
+    node_type: &str,
+    node_schema_dict: &Bound<'_, PyDict>,
+    node_schema: &mut NodeSchemaDefinition,
+) -> PyResult<()> {
+    // Any property may be the primary key: `id` is enforced through the O(1)
+    // per-type id-index, anything else through a unique secondary index that
+    // `set_schema` installs. Either way the key is unique *and* required
+    // (NODE KEY semantics).
+    if let Some(pk_val) = node_schema_dict.get_item("primary_key")? {
+        let pk: String = pk_val.extract()?;
+        if pk.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "primary_key for node type '{node_type}' must name a property."
+            )));
+        }
+        node_schema.primary_key = Some(pk);
+    }
+
+    if let Some(unique_val) = node_schema_dict.get_item("unique")? {
+        node_schema.unique = Some(parse_unique_declaration(node_type, &unique_val)?);
+    }
+
+    // The ownership layer for the two-writer contract. An unknown value is
+    // rejected as a typo-guard.
+    if let Some(layer_val) = node_schema_dict.get_item("layer")? {
+        let layer: String = layer_val.extract()?;
+        if layer != "managed" && layer != "runtime" {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "layer for node type '{node_type}' must be 'managed' or 'runtime'. \
+                 Got '{layer}'."
+            )));
+        }
+        node_schema.layer = Some(layer);
+    }
+
+    // Freshness provenance: stamp `updated_at` (+ the caller's git_sha) on every
+    // write to this type.
+    if let Some(ts_val) = node_schema_dict.get_item("auto_timestamp")? {
+        node_schema.auto_timestamp = Some(ts_val.extract::<bool>()?);
+    }
+
+    Ok(())
+}
+
+/// Parse `define_schema`'s optional `unique` declaration for one node type into
+/// a list of property tuples, so `[["email"], ["first", "last"]]` declares one
+/// single-property and one composite constraint.
+///
+/// A bare property name and a flat list of names are both natural mistakes that
+/// would otherwise declare something surprising, so the two shorthands are
+/// accepted explicitly rather than guessed at: a flat list becomes one
+/// single-property constraint per entry, not one composite over all of them.
+fn parse_unique_declaration(
+    node_type: &str,
+    unique_val: &Bound<'_, PyAny>,
+) -> PyResult<Vec<Vec<String>>> {
+    let tuples: Vec<Vec<String>> = if let Ok(single) = unique_val.extract::<String>() {
+        vec![vec![single]]
+    } else if let Ok(flat) = unique_val.extract::<Vec<String>>() {
+        flat.into_iter().map(|property| vec![property]).collect()
+    } else {
+        unique_val.extract::<Vec<Vec<String>>>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "unique for node type '{node_type}' must be a property name, a list of \
+                 property names, or a list of property tuples — e.g. 'email', ['email'], \
+                 or [['first', 'last']]."
+            ))
+        })?
+    };
+    for tuple in &tuples {
+        if tuple.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "unique for node type '{node_type}' contains an empty property tuple."
+            )));
+        }
+    }
+    Ok(tuples)
+}
+
 fn build_disabled_passes(
     disable_optimizer: bool,
     disabled_passes: Option<Vec<String>>,

@@ -2090,16 +2090,37 @@ pub struct NodeSchemaDefinition {
     pub optional_fields: Vec<String>,
     /// Expected types for fields: "string", "integer", "float", "boolean", "datetime"
     pub field_types: HashMap<String, String>,
-    /// Declared PRIMARY KEY property for this node type (opt-in). When set,
-    /// the write path enforces uniqueness on this key — a CREATE that would
-    /// duplicate it is rejected (use MERGE to upsert). `None` = no constraint
-    /// (today's permissive behaviour). For the current release the key must be
-    /// the type's identity field (`id`); an enforced PK on an arbitrary
-    /// property would need a unique secondary index and is a follow-up.
+    /// Declared PRIMARY KEY property for this node type (opt-in). When set, the
+    /// write path enforces that the key is **unique and present** on every node
+    /// of the type — the NODE KEY semantics — so a CREATE that would duplicate
+    /// or omit it is rejected (use MERGE to upsert). `None` = no constraint
+    /// (the permissive default).
+    ///
+    /// The key may be any property. Two enforcement routes, chosen by whether
+    /// the key is the type's identity field:
+    ///
+    /// - `Some("id")` — enforced through the per-type id-index, an O(1)
+    ///   amortised probe across every backend. `id` is a `NodeData` field, not
+    ///   an entry in the property map, so it needs no secondary index.
+    /// - `Some(other)` — enforced through a unique secondary index, installed
+    ///   automatically by [`crate::graph::DirGraph::set_schema`] and rebuilt on
+    ///   load like every other index.
+    ///
     /// Serialized additively in the JSON metadata, so older `.kgl` files load
     /// with `None`.
     #[serde(default)]
     pub primary_key: Option<String>,
+    /// Declared UNIQUE constraints beyond the primary key, as property tuples:
+    /// `[["email"], ["first", "last"]]` declares `email` unique on its own and
+    /// `(first, last)` unique as a pair. A tuple only constrains nodes that
+    /// carry *every* property in it — matching Neo4j, where uniqueness does not
+    /// apply to nodes missing the property. Enforced on every write path,
+    /// including the bulk loader.
+    ///
+    /// `None` = no constraints. Additive serde field, so older `.kgl` files load
+    /// with `None` and stay permissive.
+    #[serde(default)]
+    pub unique: Option<Vec<Vec<String>>>,
     /// Ownership layer for the two-writer contract: `"managed"` (rebuilt from
     /// source by a batch writer) or `"runtime"` (owned/mutated live by another
     /// writer, e.g. an agent). A **managed reload** (`add_nodes(...,

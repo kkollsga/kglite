@@ -19,10 +19,57 @@ use crate::graph::storage::backend::GraphBackend;
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 
+/// One property name, pre-resolved and pre-interned for a per-node read loop.
+///
+/// Built once by [`DirGraph::property_reader`], then handed to
+/// [`DirGraph::read_indexed`] per node, so alias resolution and interning stay
+/// out of the loop. Every index and constraint build reads through this so they
+/// all cover exactly the value-space `MATCH` consults.
+pub(crate) struct PropertyReader {
+    /// The canonical name after id-alias / title-alias resolution.
+    resolved: String,
+    /// `resolved`, interned — the key the property stores are keyed by.
+    key: InternedKey,
+}
+
 impl DirGraph {
     // ========================================================================
     // Index Management Methods
     // ========================================================================
+
+    /// Pre-resolve and pre-intern `property` for a per-node read loop.
+    pub(crate) fn property_reader(&mut self, node_type: &str, property: &str) -> PropertyReader {
+        let resolved = self.resolve_alias(node_type, property).to_string();
+        let key = self.interner.get_or_intern(&resolved);
+        PropertyReader { resolved, key }
+    }
+
+    /// Read one property off `node_idx` **the way the matcher reads it**, so an
+    /// index or constraint built from this covers the same value-space `MATCH`
+    /// consults (`core/pattern_matching/matcher.rs::
+    /// node_matches_properties_columnar`). Three concerns that
+    /// `NodeData::get_property` does not handle:
+    ///
+    /// 1. **Alias resolution.** `starId` may be an id-alias for `id`; same for
+    ///    title-aliases. Without resolving, we would look up "starId" in
+    ///    PropertyStorage and miss the data (stored under "id"). Handled when
+    ///    the [`PropertyReader`] is built.
+    /// 2. **`id` / `title` are special.** Their values live in `node_slots`
+    ///    (disk) / dedicated `NodeData` fields, NOT in `properties`. The
+    ///    matcher reads them via `get_node_id` / `get_node_title`; so do we.
+    /// 3. **Column-aware reads.** For mapped/disk graphs loaded from `.kgl` the
+    ///    values live in a `ColumnStore`, not in the node's
+    ///    `PropertyStorage::Map`/`Compact` snapshot. The backend's
+    ///    `get_node_property` knows how to read each storage type;
+    ///    `NodeData::get_property` reads only the in-memory snapshot and
+    ///    silently returns `None` for column-stored values.
+    pub(crate) fn read_indexed(&self, reader: &PropertyReader, idx: NodeIndex) -> Option<Value> {
+        match reader.resolved.as_str() {
+            "id" => self.graph.get_node_id(idx),
+            "title" => self.graph.get_node_title(idx),
+            _ => self.graph.get_node_property(idx, reader.key),
+        }
+    }
 
     /// Create an index on a property for a specific node type.
     /// Returns the number of entries indexed.
@@ -44,41 +91,15 @@ impl DirGraph {
         // storage key matches.
         let store_key = (node_type.to_string(), property.to_string());
 
-        // Mirror the matcher's property-READ path
-        // (`core/pattern_matching/matcher.rs::
-        // node_matches_properties_columnar`) so the index covers the
-        // same value-space MATCH consults. Three concerns the read
-        // path handles that `node.get_property()` did not:
-        //
-        // 1. **Alias resolution.** `starId` may be an id-alias for
-        //    `id`; same for title-aliases. Without resolving, we'd
-        //    look up "starId" in PropertyStorage and miss the data
-        //    (stored under "id").
-        // 2. **`id` / `title` are special.** Their values live in
-        //    `node_slots` (disk) / dedicated NodeData fields, NOT in
-        //    `properties`. The matcher reads them via `get_node_id`
-        //    / `get_node_title`; we do the same.
-        // 3. **Column-aware reads.** For mapped/disk graphs loaded
-        //    from .kgl, the actual values live in a `ColumnStore`,
-        //    not in the node's `PropertyStorage::Map`/`Compact`
-        //    snapshot. The backend's `get_node_property` knows how
-        //    to read from each storage type; `NodeData::get_property`
-        //    only reads the in-memory snapshot and silently returns
-        //    None for column-stored values.
-        let read_key = self.resolve_alias(node_type, property).to_string();
-        let interned_key = self.interner.get_or_intern(&read_key);
+        // Read through the shared `PropertyReader` so this index covers exactly
+        // the value-space MATCH consults — see `read_indexed` for why
+        // `NodeData::get_property` is not enough.
+        let reader = self.property_reader(node_type, property);
         let mut index: HashMap<Value, Vec<NodeIndex>> = HashMap::new();
 
         if let Some(node_indices) = self.type_indices.get(node_type) {
             for idx in node_indices.iter() {
-                let value = if read_key == "id" {
-                    self.graph.get_node_id(idx)
-                } else if read_key == "title" {
-                    self.graph.get_node_title(idx)
-                } else {
-                    self.graph.get_node_property(idx, interned_key)
-                };
-                if let Some(value) = value {
+                if let Some(value) = self.read_indexed(&reader, idx) {
                     index.entry(value).or_default().push(idx);
                 }
             }
@@ -201,24 +222,13 @@ impl DirGraph {
     /// Returns the number of unique values indexed.
     pub fn create_range_index(&mut self, node_type: &str, property: &str) -> usize {
         let key = (node_type.to_string(), property.to_string());
-        // Same alias-resolution + column-aware property read as
-        // `create_index` — see the comment there for the full
-        // rationale on why we don't use `node.get_property`.
-        let resolved = self.resolve_alias(node_type, property).to_string();
-        let interned_key = self.interner.get_or_intern(&resolved);
+        let reader = self.property_reader(node_type, property);
         let mut index: std::collections::BTreeMap<Value, Vec<NodeIndex>> =
             std::collections::BTreeMap::new();
 
         if let Some(node_indices) = self.type_indices.get(node_type) {
             for idx in node_indices.iter() {
-                let value = if resolved == "id" {
-                    self.graph.get_node_id(idx)
-                } else if resolved == "title" {
-                    self.graph.get_node_title(idx)
-                } else {
-                    self.graph.get_node_property(idx, interned_key)
-                };
-                if let Some(value) = value {
+                if let Some(value) = self.read_indexed(&reader, idx) {
                     index.entry(value).or_default().push(idx);
                 }
             }
@@ -269,36 +279,20 @@ impl DirGraph {
             properties.iter().map(|s| s.to_string()).collect(),
         );
 
-        // Pre-resolve each property name (alias → canonical "id" /
-        // "title" when applicable) and pre-intern so the per-node
-        // loop is HashMap-only. Mirrors the matcher's read path —
-        // see `create_index`'s comment for the full rationale.
-        let resolved: Vec<String> = properties
+        // Pre-resolve + pre-intern each property so the per-node loop is
+        // store-lookup only. See `read_indexed` for the read-path rationale.
+        let readers: Vec<PropertyReader> = properties
             .iter()
-            .map(|p| self.resolve_alias(node_type, p).to_string())
-            .collect();
-        let interned_keys: Vec<InternedKey> = resolved
-            .iter()
-            .map(|r| self.interner.get_or_intern(r))
+            .map(|p| self.property_reader(node_type, p))
             .collect();
 
         let mut index: HashMap<CompositeValue, Vec<NodeIndex>> = HashMap::new();
 
         if let Some(node_indices) = self.type_indices.get(node_type) {
             for idx in node_indices.iter() {
-                let values: Vec<Value> = resolved
+                let values: Vec<Value> = readers
                     .iter()
-                    .zip(interned_keys.iter())
-                    .map(|(r, k)| {
-                        let v = if r == "id" {
-                            self.graph.get_node_id(idx)
-                        } else if r == "title" {
-                            self.graph.get_node_title(idx)
-                        } else {
-                            self.graph.get_node_property(idx, *k)
-                        };
-                        v.unwrap_or(Value::Null)
-                    })
+                    .map(|reader| self.read_indexed(reader, idx).unwrap_or(Value::Null))
                     .collect();
 
                 // Only index if at least one value is non-null
@@ -400,6 +394,85 @@ impl DirGraph {
             }
         }
         None
+    }
+
+    // ========================================================================
+    // Bulk-path Index Refresh
+    // ========================================================================
+
+    /// Rebuild every in-memory secondary index that covers `node_type` from
+    /// live graph state. Returns the number of indexes rebuilt.
+    ///
+    /// **Why the bulk paths need this.** `add_nodes` (and the blueprint builder
+    /// and stub vivification, which funnel into it) append rows straight through
+    /// `GraphWrite::add_node` and deliberately skip the per-write incremental
+    /// maintenance the Cypher mutation executor runs
+    /// ([`Self::update_property_indices_for_add`]) — the per-node bookkeeping is
+    /// exactly the cost the batch path exists to avoid. But
+    /// `try_index_lookup` (`core/pattern_matching/matcher.rs`) consults
+    /// `property_indices` **unconditionally**, with no version check, so a
+    /// stale index does not degrade to a scan: it silently returns the
+    /// pre-load candidate set and an indexed `MATCH` drops the freshly loaded
+    /// nodes. Rebuilding once at the end of the bulk call is O(nodes-of-type),
+    /// the same order as the `build_id_index` rebuild that path already pays,
+    /// instead of O(rows) incremental work.
+    ///
+    /// A no-op — three `is_empty` checks — when the type carries no index,
+    /// which is the common bulk-load case.
+    ///
+    /// Disk-backed persistent `PropertyIndex` stores are deliberately out of
+    /// scope here: they never land in `property_indices` (see
+    /// [`Self::create_property_index_routed`]), so this helper cannot see them.
+    pub(crate) fn refresh_indexes_for_type(&mut self, node_type: &str) -> usize {
+        let prop_keys = Self::keys_for_type(self.property_indices.keys(), node_type);
+        let range_keys = Self::keys_for_type(self.range_indices.keys(), node_type);
+        let comp_keys: Vec<Vec<String>> = self
+            .composite_indices
+            .keys()
+            .filter(|(nt, _)| nt == node_type)
+            .map(|(_, props)| props.clone())
+            .collect();
+
+        let unique_keys: Vec<Vec<String>> = self
+            .unique_indices
+            .keys()
+            .filter(|(nt, _)| nt == node_type)
+            .map(|(_, props)| props.clone())
+            .collect();
+
+        let rebuilt = prop_keys.len() + range_keys.len() + comp_keys.len() + unique_keys.len();
+        for property in &prop_keys {
+            self.create_index(node_type, property);
+        }
+        for property in &range_keys {
+            self.create_range_index(node_type, property);
+        }
+        for properties in &comp_keys {
+            let refs: Vec<&str> = properties.iter().map(String::as_str).collect();
+            self.create_composite_index(node_type, &refs);
+        }
+        // Unique-constraint occupancy is rebuilt from live data rather than
+        // maintained per row. The bulk path validates the whole batch *before*
+        // it writes anything (`mutation::maintain::add_nodes`), so by the time we
+        // get here the data is known conflict-free and a rebuild reproduces the
+        // correct occupancy — without threading per-node claims through the
+        // batch engine. Rebuilding is also what keeps a bulk *update* that moves
+        // a constrained value from stranding the vacated tuple.
+        for properties in &unique_keys {
+            let (index, _duplicates, _sample) = self.build_unique_index(node_type, properties);
+            let key = (node_type.to_string(), properties.clone());
+            self.unique_indices.insert(key, index);
+        }
+        rebuilt
+    }
+
+    /// The property names of the `(node_type, property)` index keys belonging to
+    /// `node_type`. Collected into an owned `Vec` so the caller can rebuild
+    /// while holding `&mut self`.
+    fn keys_for_type<'a>(keys: impl Iterator<Item = &'a IndexKey>, node_type: &str) -> Vec<String> {
+        keys.filter(|(nt, _)| nt == node_type)
+            .map(|(_, property)| property.clone())
+            .collect()
     }
 
     // ========================================================================

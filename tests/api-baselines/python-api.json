@@ -32,6 +32,9 @@
     "SchemaError",
     "ValidationError",
     "ExprError",
+    "ConstraintError",
+    "ConstraintViolationError",
+    "ConstraintCreationError",
     "NodeNotFoundError",
     "ConnectionNotFoundError",
     "PropertyNotFoundError",
@@ -101,6 +104,36 @@
     "ConnectionNotFoundError": {
       "bases": [
         "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "ConstraintCreationError": {
+      "bases": [
+        "ConstraintError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "ConstraintError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "ConstraintViolationError": {
+      "bases": [
+        "ConstraintError"
       ],
       "constructible": true,
       "constructor": null,

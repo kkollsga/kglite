@@ -5,6 +5,7 @@
 //! embedding stores, connection-type metadata, and schema definitions.
 
 use crate::datatypes::values::Value;
+use crate::graph::constraints::UniqueConstraintKey;
 use crate::graph::schema::{
     CompositeIndexKey, CompositeValue, ConnectionTypeInfo, ConnectivityTriple, EdgeData,
     EmbeddingStore, GraphBackend, IndexKey, InternedKey, NodeData, PropertyStorage, SaveMetadata,
@@ -41,6 +42,7 @@ fn next_graph_id() -> u64 {
 // connectivity, per-(type,property) NDV) live in a child module so the
 // file stays under the god-file ceiling; child = retains private access.
 mod caches;
+pub mod constraints;
 mod disk_persistence;
 mod independent_copy;
 mod indexes;
@@ -84,6 +86,19 @@ pub struct DirGraph {
     /// Persisted list of range index keys so indexes can be rebuilt on load
     #[serde(default)]
     pub range_index_keys: Vec<IndexKey>,
+    /// Declared UNIQUE constraints, as the enforcement structure itself:
+    /// (node_type, [properties]) -> tuple value -> the one node occupying it.
+    /// A single-occupant map (rather than the `Vec<NodeIndex>` the other index
+    /// kinds carry) *is* the constraint: an occupied slot is the violation.
+    /// Skipped during serialization — rebuilt from `unique_constraint_keys` on
+    /// load, which re-verifies the constraint as a side effect.
+    #[serde(skip)]
+    pub(crate) unique_indices: HashMap<UniqueConstraintKey, HashMap<CompositeValue, NodeIndex>>,
+    /// Persisted list of declared unique constraints so they survive
+    /// save/load. Additive serde field — older `.kgl` files load with an empty
+    /// list, i.e. no constraints, which is the pre-existing behaviour.
+    #[serde(default)]
+    pub(crate) unique_constraint_keys: Vec<UniqueConstraintKey>,
     /// Fast O(1) lookup by node ID: node_type -> TypeIdIndex
     /// Lazily built on first use for each node type, skipped during serialization.
     /// Uses compact u32 HashMap when all IDs are UniqueId (e.g., Wikidata mapped mode).
@@ -371,6 +386,8 @@ impl DirGraph {
             composite_index_keys: Vec::new(),
             range_indices: HashMap::new(),
             range_index_keys: Vec::new(),
+            unique_indices: HashMap::new(),
+            unique_constraint_keys: Vec::new(),
             id_indices: IdIndexStore::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: HashMap::new(),
@@ -422,6 +439,8 @@ impl DirGraph {
             composite_index_keys: Vec::new(),
             range_indices: HashMap::new(),
             range_index_keys: Vec::new(),
+            unique_indices: HashMap::new(),
+            unique_constraint_keys: Vec::new(),
             id_indices: IdIndexStore::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: HashMap::new(),
@@ -903,10 +922,29 @@ impl DirGraph {
         self.property_index_keys = self.property_indices.keys().cloned().collect();
         self.composite_index_keys = self.composite_indices.keys().cloned().collect();
         self.range_index_keys = self.range_indices.keys().cloned().collect();
+        // Declared UNIQUE constraints persist the same way. `unique_indices`
+        // keys *are* the declaration list, so snapshotting them keeps the two
+        // from drifting when a constraint is dropped.
+        //
+        // Sorted, unlike the index-key lists above: `unique_indices` is a
+        // `HashMap`, so its iteration order is reseeded per process and two
+        // saves of the same graph would otherwise disagree byte for byte. The
+        // order carries no meaning — `rebuild_unique_indices_from_keys` reads
+        // the list as a set — so imposing one costs nothing and makes a saved
+        // graph reproducible.
+        let mut unique_keys: Vec<UniqueConstraintKey> =
+            self.unique_indices.keys().cloned().collect();
+        unique_keys.sort_unstable();
+        self.unique_constraint_keys = unique_keys;
     }
 
     /// Rebuild property and composite indexes from the persisted key lists.
     /// Called automatically after load.
+    ///
+    /// Unique constraints are rebuilt too. Any violation the loaded data already
+    /// contains is discarded here rather than failing the load — see
+    /// [`Self::rebuild_unique_indices_from_keys`] for why a `.kgl` must always
+    /// open, and use [`Self::verify_unique_constraints`] to audit on demand.
     pub fn rebuild_indices_from_keys(&mut self) {
         let prop_keys: Vec<IndexKey> = std::mem::take(&mut self.property_index_keys);
         for (node_type, property) in &prop_keys {
@@ -926,6 +964,8 @@ impl DirGraph {
             self.create_range_index(node_type, property);
         }
         self.range_index_keys = range_keys;
+
+        let _preexisting_violations = self.rebuild_unique_indices_from_keys();
     }
 
     // ========================================================================

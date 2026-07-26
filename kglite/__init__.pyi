@@ -93,6 +93,29 @@ class InternerCollisionError(KgError):
 class InternalError(KgError):
     """Invariant violation — kglite-internal bug. Reports the source location."""
 
+class ConstraintError(KgError):
+    """Base class for declared-integrity-constraint failures.
+
+    Catch this to handle any constraint problem — a violated write or an
+    uninstallable declaration — without distinguishing the two.
+    """
+
+class ConstraintViolationError(ConstraintError):
+    """A write violated a declared UNIQUE / NOT NULL / NODE KEY constraint.
+
+    The write was rejected before touching storage, so the graph is unchanged.
+    Raised by ``cypher()`` for ``CREATE`` / ``MERGE`` / ``SET`` / ``REMOVE`` and
+    by the bulk writers (``add_nodes`` and everything funnelling through it).
+    """
+
+class ConstraintCreationError(ConstraintError):
+    """Declaring a constraint failed because the stored data already violates it.
+
+    Raised by :meth:`KnowledgeGraph.define_schema` when the schema declares a
+    ``unique`` tuple or ``primary_key`` that existing nodes already duplicate.
+    Nothing is changed, so deduplicate the node type and call it again.
+    """
+
 @runtime_checkable
 class EmbeddingModel(Protocol):
     """Protocol for embedding models passed to ``embed_texts`` / ``search_text``.
@@ -3414,17 +3437,42 @@ class KnowledgeGraph:
 
         Args:
             schema_dict: Schema definition with ``nodes`` and ``connections`` keys.
-                Each node entry may set ``required``/``optional``/``types`` and,
-                optionally, ``primary_key`` to declare an enforced PRIMARY KEY::
+                Each node entry may set ``required``/``optional``/``types``, and
+                optionally ``primary_key`` and ``unique`` to declare enforced
+                integrity constraints::
 
-                    g.define_schema({"nodes": {"Person": {"primary_key": "id"}}})
+                    g.define_schema({"nodes": {"Person": {
+                        "primary_key": "email",
+                        "unique": [["first", "last"]],
+                        "required": ["email"],
+                    }}})
 
-                Declaring ``primary_key`` makes the write path enforce uniqueness
-                on that key — a ``CREATE`` that would duplicate it is rejected
-                (use ``MERGE`` to upsert). It is opt-in: types without a declared
-                ``primary_key`` keep the permissive default. For now the key must
-                be ``"id"`` (the identity field); an enforced PK on an arbitrary
-                property is not yet supported.
+                ``primary_key`` may name **any** property and means unique *and*
+                present (NODE KEY): a ``CREATE`` that duplicates or omits it is
+                rejected — use ``MERGE`` to upsert. A key on ``"id"`` is enforced
+                through the O(1) identity index; any other key is backed by a
+                unique secondary index that persists and rebuilds on load.
+
+                ``unique`` declares additional UNIQUE constraints and accepts a
+                property name, a list of names, or a list of property tuples, so
+                ``"email"``, ``["email"]`` and ``[["first", "last"]]`` are all
+                valid — the last being a composite constraint. A tuple only
+                constrains nodes carrying *every* property in it, matching Neo4j,
+                where uniqueness does not apply to nodes missing the property.
+
+                ``required`` is enforced at **write time**, not only by
+                :meth:`validate_schema`: a ``CREATE`` that omits the property, a
+                ``SET`` that nulls it, and a ``REMOVE`` that drops it all raise.
+                ``id``/``title``/``type`` are structural and always present, so
+                requiring them is a no-op. Auto-vivified edge stubs are deferred
+                rather than exempt — vivification may create an incomplete
+                placeholder, but the ``add_nodes`` upsert that promotes it is a
+                normal enforced write, and an unpromoted stub stays reportable via
+                :meth:`validate_schema` and removable via ``purge_provisional()``.
+
+                All constraints are enforced on every write path, including the
+                bulk loaders. All are opt-in: a type declaring none keeps the
+                permissive default, and older graphs load unchanged.
 
                 A node entry may also set ``layer`` to ``'managed'`` (rebuilt
                 from source by a batch writer) or ``'runtime'`` (owned/mutated
@@ -3446,6 +3494,11 @@ class KnowledgeGraph:
                 deterministic) and independent of ``layer`` / ``lock_schema``::
 
                     g.define_schema({"nodes": {"Task": {"auto_timestamp": True}}})
+
+        Raises:
+            ConstraintCreationError: A declared ``unique`` tuple or
+                ``primary_key`` is already duplicated by existing nodes. Nothing
+                is changed — deduplicate the node type and call again.
 
         Returns:
             Self with schema defined.

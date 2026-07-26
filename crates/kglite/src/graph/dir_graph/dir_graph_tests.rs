@@ -197,3 +197,156 @@ mod multi_label_tests {
         assert_eq!(g.nodes_with_label("VIP"), vec![b]);
     }
 }
+
+#[cfg(test)]
+mod bulk_index_freshness_tests {
+    use super::*;
+    use crate::datatypes::values::{DataFrame, Value};
+    use crate::graph::mutation::maintain::add_nodes;
+
+    fn people(rows: Vec<(&str, &str)>) -> DataFrame {
+        DataFrame::from_cypher_rows(
+            vec!["id".to_string(), "city".to_string()],
+            rows.into_iter()
+                .map(|(id, city)| {
+                    vec![
+                        Value::String(id.to_string()),
+                        Value::String(city.to_string()),
+                    ]
+                })
+                .collect(),
+        )
+        .expect("dataframe")
+    }
+
+    #[test]
+    fn add_nodes_keeps_property_index_fresh() {
+        let mut g = DirGraph::new();
+        add_nodes(
+            &mut g,
+            people(vec![("p1", "Oslo")]),
+            "Person".to_string(),
+            "id".to_string(),
+            None,
+            None,
+        )
+        .expect("first load");
+
+        assert_eq!(g.create_index("Person", "city"), 1);
+
+        add_nodes(
+            &mut g,
+            people(vec![("p2", "Oslo"), ("p3", "Bergen")]),
+            "Person".to_string(),
+            "id".to_string(),
+            None,
+            None,
+        )
+        .expect("second load");
+
+        let oslo = g
+            .lookup_by_index("Person", "city", &Value::String("Oslo".to_string()))
+            .unwrap_or_default();
+        assert_eq!(oslo.len(), 2, "bulk load left the property index stale");
+    }
+
+    #[test]
+    fn add_nodes_keeps_range_and_composite_indexes_fresh() {
+        let mut g = DirGraph::new();
+        add_nodes(
+            &mut g,
+            people(vec![("p1", "Oslo")]),
+            "Person".to_string(),
+            "id".to_string(),
+            None,
+            None,
+        )
+        .expect("first load");
+
+        g.create_range_index("Person", "city");
+        g.create_composite_index("Person", &["city"]);
+
+        add_nodes(
+            &mut g,
+            people(vec![("p2", "Oslo")]),
+            "Person".to_string(),
+            "id".to_string(),
+            None,
+            None,
+        )
+        .expect("second load");
+
+        let oslo = Value::String("Oslo".to_string());
+        let ranged = g
+            .lookup_range(
+                "Person",
+                "city",
+                std::ops::Bound::Included(&oslo),
+                std::ops::Bound::Included(&oslo),
+            )
+            .unwrap_or_default();
+        assert_eq!(ranged.len(), 2, "bulk load left the range index stale");
+
+        let composite = g
+            .lookup_by_composite_index("Person", &["city".to_string()], &[oslo])
+            .unwrap_or_default();
+        assert_eq!(
+            composite.len(),
+            2,
+            "bulk load left the composite index stale"
+        );
+    }
+}
+
+#[cfg(test)]
+mod constraint_snapshot_tests {
+    use super::*;
+
+    /// `populate_index_keys` snapshots the declared UNIQUE constraints out of a
+    /// `HashMap`, whose iteration order is reseeded per process. Left unsorted,
+    /// two saves of the same graph produce different bytes — and because the
+    /// order only varies *between* processes, no single-process test catches it.
+    /// Asserting the snapshot is sorted pins the invariant directly.
+    #[test]
+    fn populate_index_keys_snapshots_unique_constraints_sorted() {
+        let mut graph = DirGraph::new();
+        // Declared out of order, and across two node types, so an unsorted
+        // snapshot has plenty of room to disagree with a sorted one.
+        for (node_type, properties) in [
+            ("Person", vec!["email"]),
+            ("Order", vec!["ref"]),
+            ("Person", vec!["city", "street"]),
+            ("Person", vec!["ssn"]),
+            ("Order", vec!["customer", "seq"]),
+        ] {
+            graph
+                .create_unique_constraint(node_type, &properties)
+                .expect("empty graph cannot violate a constraint");
+        }
+
+        graph.populate_index_keys();
+
+        // Spelled out rather than compared against `sorted(snapshot)`: a
+        // self-referential assertion can pass by luck when the HashMap happens
+        // to hand back an already-ordered set.
+        let expected: Vec<(String, Vec<String>)> = [
+            ("Order", vec!["customer", "seq"]),
+            ("Order", vec!["ref"]),
+            ("Person", vec!["city", "street"]),
+            ("Person", vec!["email"]),
+            ("Person", vec!["ssn"]),
+        ]
+        .into_iter()
+        .map(|(t, props)| {
+            (
+                t.to_string(),
+                props.into_iter().map(str::to_string).collect(),
+            )
+        })
+        .collect();
+        assert_eq!(
+            graph.unique_constraint_keys, expected,
+            "unique_constraint_keys must be persisted in a deterministic order"
+        );
+    }
+}

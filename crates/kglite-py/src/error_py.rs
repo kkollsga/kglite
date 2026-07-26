@@ -128,6 +128,27 @@ pyo3::create_exception!(
     "Blueprint expression evaluation failure."
 );
 
+pyo3::create_exception!(
+    kglite,
+    ConstraintError,
+    KgError,
+    "Base class for declared-integrity-constraint failures (UNIQUE / NOT NULL / NODE KEY). Catch this to handle any constraint problem."
+);
+
+pyo3::create_exception!(
+    kglite,
+    ConstraintViolationError,
+    ConstraintError,
+    "A write violated a declared constraint — a UNIQUE duplicate, or a NOT NULL / NODE KEY property left absent. The write was rejected before touching storage, so the graph is unchanged."
+);
+
+pyo3::create_exception!(
+    kglite,
+    ConstraintCreationError,
+    ConstraintError,
+    "Declaring a constraint failed because the stored data already violates it. Deduplicate the node type, then re-declare."
+);
+
 // ── Resource / access ────────────────────────────────────────────────
 
 pyo3::create_exception!(
@@ -242,6 +263,8 @@ pub fn kg_to_pyerr(e: RustKgError) -> PyErr {
         }
         RustKgError::Schema { .. } => SchemaError::new_err(message),
         RustKgError::Validation(_) => ValidationError::new_err(message),
+        RustKgError::ConstraintViolation { .. } => ConstraintViolationError::new_err(message),
+        RustKgError::ConstraintCreationFailed { .. } => ConstraintCreationError::new_err(message),
         RustKgError::Expr(_) => ExprError::new_err(message),
         RustKgError::NodeNotFound { .. } => NodeNotFoundError::new_err(message),
         RustKgError::ConnectionNotFound { .. } => ConnectionNotFoundError::new_err(message),
@@ -312,6 +335,15 @@ pub(crate) fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add("SchemaError", py.get_type::<SchemaError>())?;
     m.add("ValidationError", py.get_type::<ValidationError>())?;
     m.add("ExprError", py.get_type::<ExprError>())?;
+    m.add("ConstraintError", py.get_type::<ConstraintError>())?;
+    m.add(
+        "ConstraintViolationError",
+        py.get_type::<ConstraintViolationError>(),
+    )?;
+    m.add(
+        "ConstraintCreationError",
+        py.get_type::<ConstraintCreationError>(),
+    )?;
 
     // Resource / access
     m.add("NodeNotFoundError", py.get_type::<NodeNotFoundError>())?;

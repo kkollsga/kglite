@@ -40,11 +40,13 @@ surface at a glance — most of what you'd reach for is here, in-process:
 | **Transactions** | multi-statement with snapshot isolation + rollback (`Session` / `Transaction`) |
 | **Storage** | identical Cypher across in-memory, mmap, and on-disk modes (1B+ edges) |
 
-Deliberately **not** supported (by design, not gaps): per-write
-`UNIQUE` / `NOT NULL` / PRIMARY KEY constraints — uniqueness is a
-load-time concern, handled by `MERGE`, the duplicate-id warning, and the
-`duplicate_title` validator (see the data-integrity recipes), so it never
-costs the in-memory write path.
+Per-write `UNIQUE` / `NOT NULL` / NODE KEY constraints **are** supported and
+enforced on every write path, including the bulk loader — declare them through
+`define_schema` (`unique`, `required`, `primary_key`). Cypher constraint DDL
+(`CREATE`/`DROP`/`SHOW CONSTRAINT`) is not the route here: it parses and is
+rejected with the enforcement route that applies. A graph that declares no
+constraint pays one `HashMap::is_empty` check per write, so the in-memory write
+path is untouched by the feature existing.
 
 ### Node identity — use `id` as your primary key
 
@@ -62,9 +64,12 @@ on `id` is O(1) in every storage mode; an arbitrary property (`mid`, `key`, …)
 **not indexed**, so `MATCH (n {mid: $k})` is a full label scan (linear in node
 count). Two semantics to keep in mind:
 
-- **No uniqueness constraint** (see above): `CREATE` does not reject a duplicate
-  `id` — two `CREATE (:T {id: 'k'})` make two nodes. For primary-keyed writes use
-  **`MERGE`, not `CREATE`** — `MERGE (:T {id: $k})` is idempotent.
+- **Uniqueness is opt-in**: with no constraint declared, `CREATE` does not reject
+  a duplicate `id` — two `CREATE (:T {id: 'k'})` make two nodes. Either declare
+  the node type's primary key
+  (`define_schema({'nodes': {'T': {'primary_key': 'id'}}})`, after which the
+  second `CREATE` is rejected), or use **`MERGE`, not `CREATE`** —
+  `MERGE (:T {id: $k})` is idempotent either way.
 - **Matching is type-exact**: `'42'` ≠ `42`. Keep id types consistent across
   writes and reads.
 - **Property typos pass silently by default** (open schema): an unknown property
@@ -1775,7 +1780,7 @@ that works — never a syntax error, and never a no-op that reports success.
 | `CREATE INDEX FOR ()-[r:T]-() ON (r.p)` | KGLite indexes node properties only. Relationship properties are queryable, just scanned |
 | `... OPTIONS { ... }` | No index providers or per-index configuration to apply |
 | `CREATE RANGE INDEX ... ON (n.a, n.b)` | The B-tree is single-property. Use a composite equality index, or one `CREATE RANGE INDEX` per property |
-| `CREATE/DROP/SHOW CONSTRAINT` | No Cypher-managed constraints. Uniqueness comes from node-type primary keys and `MERGE`; presence and types from `lock_schema()` |
+| `CREATE/DROP/SHOW CONSTRAINT` | No Cypher-managed constraints. Real per-write `UNIQUE` / `NOT NULL` / NODE KEY constraints are declared through `define_schema` (`unique`, `required`, `primary_key`) and enforced on every write path; `MERGE` remains the idempotent alternative, and property *types* are enforced by `lock_schema()` |
 
 #### On disk-backed graphs
 
@@ -2142,5 +2147,5 @@ compatible subset.
 | Transactions | Snapshot isolation + OCC through `Session` / `Transaction` | Full ACID | Native session coordination is binding-independent; direct graph writes are in-place |
 | Indexing | Three separate structures — hash equality, composite, B-tree range — plus automatic type indexes and vector indexes | One general `RANGE` index serving equality, range, and ordering | An equality index cannot serve a range predicate, so KGLite exposes the distinction that Neo4j collapses. `CREATE INDEX` / `DROP INDEX` / `SHOW INDEXES` are supported — see [Cypher index DDL](#cypher-index-ddl) for exactly what each statement builds |
 | Index names | Canonical and derived: `Label.property`, `Label.(a,b)` | User-assigned, unique | A name in `CREATE INDEX <name> …` is accepted for script portability but not stored; the persisted `.kgl` index state is a list of `(label, property)` keys |
-| Constraint DDL | Not supported — rejected with the enforcement route that applies | `CREATE CONSTRAINT … IS UNIQUE / IS NOT NULL` | Uniqueness is a load-time concern (primary keys, `MERGE`); presence and types are enforced by `lock_schema()` |
+| Constraint DDL | Not supported — rejected with the enforcement route that applies | `CREATE CONSTRAINT … IS UNIQUE / IS NOT NULL` | The constraints themselves exist and are enforced on every write path; they are declared through `define_schema` (`unique`, `required`, `primary_key`) rather than Cypher DDL, so a `CREATE CONSTRAINT` statement names the route instead of silently no-opping |
 | `LOAD CSV` | Not supported | Supported | Python ecosystem (pandas) preferred for data loading |
