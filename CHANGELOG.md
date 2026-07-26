@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Two documentation guides covering the two ways a kglite graph gets used.
+  `Derived index over another system of record` documents the rebuild-and-swap
+  pattern — incremental refresh and its delete caveat, carrying embeddings
+  across a rebuild, freshness stamps, managed/runtime ownership layers.
+  `KGLite as a primary store: scope and limits` states what holds when the
+  graph is the authoritative copy, what the defaults are, and where the edges
+  are: crash-safe `open()` and the state the log cannot express, constraint
+  enforcement and the paths that bypass it, index and constraint DDL with their
+  naming and equality-vs-range asymmetries, `LOAD CSV`'s default-deny file
+  capability, forward-only migrations, and the storage modes that keep the
+  whole-graph write checkpoint.
+
 ### Changed
 
 - `KnowledgeGraph.define_schema` can now fail: installing a schema installs the
