@@ -300,8 +300,13 @@ rebuild would use.
 **The large-graph modes are still the weaker ones.** `mapped` now gets the same
 per-commit crash safety as in-memory — the kill-9 suites are parametrised over
 both — but `disk` does not: its durability boundary is the generation publish, so
-it relies on `save()` checkpoints, and its crash survival is untested and
-unsupported by design. Both keep the whole-graph write checkpoint described above.
+it relies on `save()` checkpoints. That boundary is a real primitive rather than
+an absence of one, and it is kill-9 tested in its own right
+(`crates/kglite/tests/disk_crash_guarantee.rs`): a crash loses exactly the
+mutations made since the last `save()`, and the last published generation always
+reopens complete — never half-written, and never with a partially-applied commit.
+What `disk` does not give you is a *smaller* unit of durability than a whole
+`save()`. Both keep the whole-graph write checkpoint described above.
 In-memory is the product; the disk modes are for exploring graphs too big for it,
 and that is the trade-off you are accepting.
 

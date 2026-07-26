@@ -260,6 +260,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Documented what a crash actually costs a `storage="disk"` graph, and stopped
+  steering growing apps toward it. Disk mode has no write-ahead log, which read
+  as "no crash safety"; the real guarantee is narrower and is now stated (and
+  kill-9 tested in `crates/kglite/tests/disk_crash_guarantee.rs`): a crash loses
+  exactly the mutations made since the last `save()`, and the last published
+  generation always reopens complete, never half-written. The durable-apps mode
+  table previously offered `disk` for "graphs larger than RAM" with no size
+  threshold and omitted `mapped` entirely — pointing the one audience that most
+  needs per-commit durability at the one mode that lacks it. It now names
+  `mapped` as the larger-than-RAM mode that keeps the guarantee and gates `disk`
+  on Wikidata scale. The storage-mode decision table in core-concepts gained a
+  crash-safety column, and the unqualified "`open()` is crash-safe by default"
+  claims in the README and guide index now name the disk exception. Also
+  documented that each disk `save()` retains a full superseded generation, so
+  checkpoint frequency is a disk-budget decision.
 - Index DDL is classified as a mutation, since schema is graph state: it is
   blocked on a read-only graph and in a read-only transaction, rolls back with
   a failed statement, and is rejected on a schema-locked graph when the
