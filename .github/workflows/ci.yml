@@ -819,6 +819,15 @@ jobs:
           shared-key: bolt-driver-conformance
           workspaces: ". -> target"
 
+      - name: Install test-harness dependencies
+        # Mirrors the `python-tests` job: pytest itself, pytest-timeout because
+        # `[tool.pytest.ini_options]` sets `timeout`, and pandas because
+        # tests/conftest.py imports it at module scope, so collection fails
+        # without it. Installing only the project (below) leaves none of these
+        # present — that is why this job's first real execution died with
+        # `pytest: command not found`.
+        run: pip install pytest pytest-timeout pandas
+
       - name: Install the Python test harness
         # The harness only drives the two suites and the server; it needs the
         # wheel for the fixture-graph builder in tests/conftest.py, and the
@@ -826,13 +835,41 @@ jobs:
         # through the shared bolt helpers.
         run: pip install -e '.[neo4j]'
 
+      - name: Verify the JS and Java toolchains are usable
+        # Both suites skip themselves when a toolchain is missing, which is
+        # right locally but would make this job pass vacuously in CI — the
+        # failure mode that hid here until its first real run. Prove each tool
+        # exists *and* executes before the suites get a chance to skip.
+        # `javac -version` rather than a which-check: macOS ships stubs, and a
+        # broken JDK install should read as broken, not absent.
+        run: |
+          set -euo pipefail
+          for tool in node npm javac java mvn; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::$tool is not on PATH — the conformance suites would skip and this job would pass without testing anything"
+              exit 1
+            fi
+          done
+          node --version
+          npm --version
+          javac -version
+          mvn -version
+
       - name: Build the Bolt server
         run: cargo build --release -p kglite-bolt-server
 
       - name: Run official JS + Java driver conformance
         # `-rs` prints skip reasons, so a toolchain that failed to install
         # shows up as a visible skip rather than a silent green.
-        run: pytest tests/test_bolt_driver_conformance.py -m bolt -v -rs --tb=short
+        run: pytest tests/test_bolt_driver_conformance.py -m bolt -v -rs --tb=short --junitxml=conformance.xml
+
+      - name: Assert both driver suites actually ran
+        # pytest exits 0 for an all-skipped run, so the step above cannot by
+        # itself distinguish "both drivers conform" from "nothing executed".
+        # This job exists to test the JS and Java drivers; if either skipped —
+        # offline Maven, a failed npm install, a missing Bolt binary — that is
+        # a CI failure, not a pass.
+        run: python scripts/assert_conformance_ran.py conformance.xml
 
   ci-success:
     name: CI success
