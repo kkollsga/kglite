@@ -11,42 +11,51 @@ impl CypherParser {
     }
 
     fn parse_boolean_or_expression(&mut self) -> Result<Expression, String> {
-        let mut left = self.parse_boolean_xor_expression()?;
-        while self.check(&CypherToken::Or) {
-            self.advance();
-            let right = self.parse_boolean_xor_expression()?;
-            left = Expression::PredicateExpr(Box::new(Predicate::Or(
-                Box::new(Self::expression_as_predicate(left)),
-                Box::new(Self::expression_as_predicate(right)),
-            )));
-        }
-        Ok(left)
+        self.chain(|p| {
+            let mut left = p.parse_boolean_xor_expression()?;
+            while p.check(&CypherToken::Or) {
+                p.advance();
+                p.deepen()?;
+                let right = p.parse_boolean_xor_expression()?;
+                left = Expression::PredicateExpr(Box::new(Predicate::Or(
+                    Box::new(Self::expression_as_predicate(left)),
+                    Box::new(Self::expression_as_predicate(right)),
+                )));
+            }
+            Ok(left)
+        })
     }
 
     fn parse_boolean_xor_expression(&mut self) -> Result<Expression, String> {
-        let mut left = self.parse_boolean_and_expression()?;
-        while self.check(&CypherToken::Xor) {
-            self.advance();
-            let right = self.parse_boolean_and_expression()?;
-            left = Expression::PredicateExpr(Box::new(Predicate::Xor(
-                Box::new(Self::expression_as_predicate(left)),
-                Box::new(Self::expression_as_predicate(right)),
-            )));
-        }
-        Ok(left)
+        self.chain(|p| {
+            let mut left = p.parse_boolean_and_expression()?;
+            while p.check(&CypherToken::Xor) {
+                p.advance();
+                p.deepen()?;
+                let right = p.parse_boolean_and_expression()?;
+                left = Expression::PredicateExpr(Box::new(Predicate::Xor(
+                    Box::new(Self::expression_as_predicate(left)),
+                    Box::new(Self::expression_as_predicate(right)),
+                )));
+            }
+            Ok(left)
+        })
     }
 
     fn parse_boolean_and_expression(&mut self) -> Result<Expression, String> {
-        let mut left = self.parse_boolean_not_expression()?;
-        while self.check(&CypherToken::And) {
-            self.advance();
-            let right = self.parse_boolean_not_expression()?;
-            left = Expression::PredicateExpr(Box::new(Predicate::And(
-                Box::new(Self::expression_as_predicate(left)),
-                Box::new(Self::expression_as_predicate(right)),
-            )));
-        }
-        Ok(left)
+        self.chain(|p| {
+            let mut left = p.parse_boolean_not_expression()?;
+            while p.check(&CypherToken::And) {
+                p.advance();
+                p.deepen()?;
+                let right = p.parse_boolean_not_expression()?;
+                left = Expression::PredicateExpr(Box::new(Predicate::And(
+                    Box::new(Self::expression_as_predicate(left)),
+                    Box::new(Self::expression_as_predicate(right)),
+                )));
+            }
+            Ok(left)
+        })
     }
 
     fn parse_boolean_not_expression(&mut self) -> Result<Expression, String> {
@@ -71,6 +80,26 @@ impl CypherParser {
                 right: Expression::Literal(Value::Boolean(false)),
             },
         }
+    }
+
+    /// Continue a `n:A:B:C` label chain, `first` being the already-parsed
+    /// `n:A` check. Each extra label nests one more `Predicate::And`, so each
+    /// is charged against the nesting budget like any other operator chain.
+    fn parse_label_chain(&mut self, var: String, first: Predicate) -> Result<Predicate, String> {
+        let mut pred = first;
+        while self.check(&CypherToken::Colon) {
+            self.advance();
+            self.deepen()?;
+            let next_label = self.expect_name("label name after ':'")?;
+            pred = Predicate::And(
+                Box::new(pred),
+                Box::new(Predicate::LabelCheck {
+                    variable: var.clone(),
+                    label: next_label,
+                }),
+            );
+        }
+        Ok(pred)
     }
 
     fn parse_comparison_expression(&mut self) -> Result<Expression, String> {
@@ -99,21 +128,11 @@ impl CypherParser {
                 let var = var.clone();
                 self.advance(); // consume :
                 let first_label = self.expect_name("label name after ':'")?;
-                let mut pred = Predicate::LabelCheck {
+                let first = Predicate::LabelCheck {
                     variable: var.clone(),
                     label: first_label,
                 };
-                while self.check(&CypherToken::Colon) {
-                    self.advance();
-                    let next_label = self.expect_name("label name after ':'")?;
-                    pred = Predicate::And(
-                        Box::new(pred),
-                        Box::new(Predicate::LabelCheck {
-                            variable: var.clone(),
-                            label: next_label,
-                        }),
-                    );
-                }
+                let pred = self.chain(|p| p.parse_label_chain(var, first))?;
                 return Ok(Expression::PredicateExpr(Box::new(pred)));
             }
         }
@@ -208,12 +227,17 @@ impl CypherParser {
     }
 
     pub(super) fn parse_additive_expression(&mut self) -> Result<Expression, String> {
+        self.chain(Self::parse_additive_chain)
+    }
+
+    fn parse_additive_chain(&mut self) -> Result<Expression, String> {
         let mut left = self.parse_multiplicative_expression()?;
 
         loop {
             match self.peek() {
                 Some(CypherToken::Plus) => {
                     self.advance();
+                    self.deepen()?;
                     let right = self.parse_multiplicative_expression()?;
                     left = Expression::Add(Box::new(left), Box::new(right));
                 }
@@ -236,11 +260,13 @@ impl CypherParser {
                         break;
                     }
                     self.advance();
+                    self.deepen()?;
                     let right = self.parse_multiplicative_expression()?;
                     left = Expression::Subtract(Box::new(left), Box::new(right));
                 }
                 Some(CypherToken::DoublePipe) => {
                     self.advance();
+                    self.deepen()?;
                     let right = self.parse_multiplicative_expression()?;
                     left = Expression::Concat(Box::new(left), Box::new(right));
                 }
@@ -252,22 +278,29 @@ impl CypherParser {
     }
 
     pub(super) fn parse_multiplicative_expression(&mut self) -> Result<Expression, String> {
+        self.chain(Self::parse_multiplicative_chain)
+    }
+
+    fn parse_multiplicative_chain(&mut self) -> Result<Expression, String> {
         let mut left = self.parse_unary_expression()?;
 
         loop {
             match self.peek() {
                 Some(CypherToken::Star) => {
                     self.advance();
+                    self.deepen()?;
                     let right = self.parse_unary_expression()?;
                     left = Expression::Multiply(Box::new(left), Box::new(right));
                 }
                 Some(CypherToken::Slash) => {
                     self.advance();
+                    self.deepen()?;
                     let right = self.parse_unary_expression()?;
                     left = Expression::Divide(Box::new(left), Box::new(right));
                 }
                 Some(CypherToken::Percent) => {
                     self.advance();
+                    self.deepen()?;
                     let right = self.parse_unary_expression()?;
                     left = Expression::Modulo(Box::new(left), Box::new(right));
                 }
@@ -292,9 +325,14 @@ impl CypherParser {
     }
 
     /// Parse postfix operators: expr[index] or expr[start..end]
-    pub(super) fn parse_postfix(&mut self, mut expr: Expression) -> Result<Expression, String> {
+    pub(super) fn parse_postfix(&mut self, expr: Expression) -> Result<Expression, String> {
+        self.chain(|p| p.parse_postfix_chain(expr))
+    }
+
+    fn parse_postfix_chain(&mut self, mut expr: Expression) -> Result<Expression, String> {
         while self.check(&CypherToken::LBracket) {
             self.advance(); // consume [
+            self.deepen()?;
 
             if self.check(&CypherToken::DotDot) {
                 // [..end] — slice with no start. Also accept [..] (both

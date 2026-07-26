@@ -30,10 +30,12 @@ pub mod predicate;
 pub struct CypherParser {
     tokens: Vec<CypherToken>,
     pos: usize,
-    /// Current recursion depth of the expression/predicate parser. Guarded by
-    /// [`Self::descend`] so pathologically nested input (thousands of nested
-    /// parens/lists/`NOT`s) returns a parse error instead of overflowing the
-    /// stack and aborting the process.
+    /// Nesting depth of the expression/predicate AST currently under
+    /// construction. Charged by [`Self::descend`] for *recursive* nesting
+    /// (parens/lists/`NOT`) and by [`Self::deepen`] for the *iteratively*
+    /// built left-associative operator chains, so pathologically nested
+    /// input returns a parse error instead of overflowing the stack and
+    /// aborting the process.
     depth: usize,
     /// Verbatim source lexeme per keyword-token index (see
     /// [`super::tokenizer::TokenizedCypher::keyword_lexemes`]). Keyword
@@ -45,7 +47,7 @@ pub struct CypherParser {
     keyword_lexemes: std::collections::HashMap<usize, String>,
 }
 
-/// Maximum expression-nesting depth accepted by the parser.
+/// Maximum expression/predicate AST nesting depth accepted by the parser.
 ///
 /// The recursive-descent expression parser, the planner's expression walkers,
 /// and the executor's `evaluate_expression` all recurse once per nesting
@@ -54,8 +56,18 @@ pub struct CypherParser {
 /// Debug-profile frames are several times larger than release frames — deep
 /// nesting within this budget can exhaust a default thread stack before the
 /// guard fires — so [`CypherParser::descend`] also grows the stack on demand
-/// via `stacker`; the budget is the semantic contract, not the overflow
-/// protection.
+/// via `stacker`.
+///
+/// The budget bounds **AST depth, not parser call depth**, and those differ:
+/// the left-associative operator chains (`OR`/`XOR`/`AND`, `+`/`-`/`||`,
+/// `*`/`/`/`%`, subscripting, `n:A:B` label chains) are parsed *iteratively*,
+/// so the parser itself stays shallow while each iteration adds one level to
+/// the tree it returns. Those levels are charged via [`CypherParser::deepen`]
+/// inside a [`CypherParser::chain`] scope; recursive nesting is charged by
+/// [`CypherParser::descend`]. Charging both is what makes the budget an
+/// actual bound on what the downstream walkers recurse through — the
+/// walkers themselves have no guard, and they run on server worker threads
+/// whose stacks are far smaller than the main thread's.
 const MAX_EXPRESSION_DEPTH: usize = 512;
 
 /// Remaining-stack threshold below which [`CypherParser::descend`] allocates
@@ -97,6 +109,21 @@ impl CypherParser {
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.deepen()?;
+        let result = stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || f(self));
+        self.depth -= 1;
+        result
+    }
+
+    /// Charge one level of AST nesting against [`MAX_EXPRESSION_DEPTH`],
+    /// failing with a clean parse error once the budget is exhausted.
+    ///
+    /// Call this — inside a [`Self::chain`] scope — once per iteration of an
+    /// iteratively-parsed operator chain, because each iteration wraps the
+    /// accumulated operand in one more AST node. Unlike [`Self::descend`]
+    /// the charge is *not* released when the current call returns; `chain`
+    /// releases the whole run at once.
+    pub(super) fn deepen(&mut self) -> Result<(), String> {
         if self.depth >= MAX_EXPRESSION_DEPTH {
             return Err(format!(
                 "Expression nesting exceeds {} levels; simplify the query",
@@ -104,8 +131,25 @@ impl CypherParser {
             ));
         }
         self.depth += 1;
-        let result = stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || f(self));
-        self.depth -= 1;
+        Ok(())
+    }
+
+    /// Run `f` as an iteratively-built operator chain, releasing every level
+    /// it charged via [`Self::deepen`] once the chain is complete.
+    ///
+    /// Releasing on exit is what makes the budget track AST *depth* rather
+    /// than total node count: two sibling chains each 400 levels deep form a
+    /// tree only 401 levels deep, so the second must not inherit the first's
+    /// charges. A chain nested inside another chain's operand is still parsed
+    /// while the outer chain holds its charges, so genuine nesting keeps
+    /// accumulating — the bound stays conservative in the safe direction.
+    pub(super) fn chain<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let entry_depth = self.depth;
+        let result = f(self);
+        self.depth = entry_depth;
         result
     }
 

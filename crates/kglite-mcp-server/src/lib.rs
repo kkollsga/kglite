@@ -483,8 +483,15 @@ where
     if cli.selftest {
         return selftest::run_selftest(&cli, &argv);
     }
+    // Tool handlers are synchronous closures that run the Cypher pipeline
+    // inline on a worker thread (see `tools.rs`), and that pipeline recurses
+    // per level of expression nesting. Tokio's default 2 MiB worker stack is
+    // too small for the deepest query the parser accepts, and a Rust stack
+    // overflow aborts the process rather than failing the one request — so
+    // give workers the same headroom the CLI's main thread has.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .thread_stack_size(kglite::api::session::QUERY_THREAD_STACK_SIZE)
         .build()
         .context("failed to build tokio runtime")?;
     runtime.block_on(run_async(cli, factory, extensions))

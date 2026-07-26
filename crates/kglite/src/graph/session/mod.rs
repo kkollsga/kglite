@@ -58,6 +58,24 @@ use crate::graph::schema::GraphBackend;
 // did `pub use kglite_core::graph::*` glob which brought it in.
 use crate::graph::storage::GraphRead;
 
+/// Stack size a thread must have to run [`execute_read`] / [`execute_mut`]
+/// safely — servers that dispatch queries onto their own threads should
+/// configure their pool with this value.
+///
+/// The pipeline recurses once per level of expression/predicate nesting, in
+/// the parser, in ~25 planner walkers, in the executor's predicate evaluator,
+/// and again in the drop glue of the boxed AST. The parser caps nesting so
+/// that recursion is bounded (a "simplify the query" parse error past the
+/// budget), but the *bound* still has to fit in the thread's stack, and a
+/// runtime default worker stack (tokio: 2 MiB) is not comfortably larger than
+/// the deepest permitted tree in a debug build. A thread with less than this
+/// cannot merely fail a query — a Rust stack overflow aborts the **process**,
+/// so one client's deep query would take down every other session sharing it.
+///
+/// 8 MiB matches the main-thread default that the CLI and the Python wheel
+/// already get for free, so every frontend has the same headroom.
+pub const QUERY_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 /// Resolve any `Value::NodeRef` entries in Cypher result rows to the
 /// referenced node's `title` value. Called by bindings just before
 /// emitting rows to their consumer (`PyDict`/`PyList` for the wheel,

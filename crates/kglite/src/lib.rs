@@ -440,7 +440,7 @@ pub mod api {
     pub mod session {
         pub use crate::graph::session::{
             execute_mut, execute_read, resolve_noderefs, CommitOutcome, ExecuteOptions,
-            ExecuteOutcome, Session, Transaction,
+            ExecuteOutcome, Session, Transaction, QUERY_THREAD_STACK_SIZE,
         };
     }
 }
