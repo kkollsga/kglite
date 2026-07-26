@@ -126,6 +126,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bulk path now rebuilds the equality, range, and composite indexes covering
   the loaded type once per call (no-op when the type carries none), the same
   order of work as the `id` index rebuild it already did.
+- Overwriting an indexed property through a fluent write no longer returns the
+  node under its *old* value. `add_properties(...)` writes the property map
+  directly and the `store_as=` paths (`unique_values`, `collect_children`,
+  `calculate`) write through the batch path, so neither refreshed the secondary
+  indexes — and the matcher trusts a property index unconditionally rather than
+  falling back to a scan. After `create_index('Child', 'tag')`, an
+  `add_properties` that changed `tag` left `MATCH (c:Child {tag: <old value>})`
+  returning the node whose `tag` was already the *new* value: a wrong answer
+  rather than a missing row. Both paths now refresh the indexes covering every
+  written node type, the same remedy as the bulk-append fix above. The two
+  `add_properties` write loops (copy and aggregate) were duplicated tails, which
+  is how one of them lost the maintenance; they now share one helper.
+- `add_properties` bumps the graph version, so version-keyed caches and
+  freshness checks observe the write.
 
 ## [0.14.5] - 2026-07-22
 

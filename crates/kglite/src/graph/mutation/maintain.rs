@@ -1613,6 +1613,17 @@ pub fn update_node_properties(
         errors.push("No nodes were updated".to_string());
     }
 
+    // The batch path writes the property map without the per-write index
+    // maintenance the Cypher SET path runs (`DirGraph::plan_property_write`),
+    // and `try_index_lookup` trusts `property_indices` unconditionally — so an
+    // index built before this call keeps answering with the *old* value and a
+    // `MATCH (n:T {prop: <old>})` returns a node that no longer holds it.
+    // Same hazard, same remedy as the bulk loader (see `add_nodes` above).
+    // A no-op when the touched types carry no index.
+    for node_type in node_types.keys() {
+        graph.refresh_indexes_for_type(node_type);
+    }
+
     // Calculate elapsed time
     let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 
@@ -1812,9 +1823,32 @@ pub fn add_properties(
 
     drop(collect_guard);
 
-    // Apply updates
+    Ok(apply_property_updates(graph, updates))
+}
+
+/// Apply collected per-node property writes, then refresh the secondary indexes
+/// of every written node type and publish the mutation.
+///
+/// Shared by [`add_properties`] and [`add_properties_aggregate`], which both
+/// write `node.properties` directly rather than going through the Cypher SET
+/// path. That bypasses the per-write index maintenance
+/// `DirGraph::plan_property_write` performs, and `try_index_lookup`
+/// (`core/pattern_matching/matcher.rs`) consults `property_indices`
+/// unconditionally, with no freshness check. So a stale index does not degrade
+/// to a scan: `MATCH (n:T {prop: <overwritten value>})` keeps returning the node
+/// that used to hold that value — a wrong answer, not a slow one.
+///
+/// One rebuild per written type, which is a no-op (three `is_empty` checks) when
+/// the type carries no index. Extracted so the two callers cannot drift: the
+/// duplicated tail is exactly how one of them lost this maintenance.
+fn apply_property_updates<I>(graph: &mut DirGraph, updates: I) -> AddPropertiesReport
+where
+    I: IntoIterator<Item = (NodeIndex, HashMap<String, Value>)>,
+{
     let mut nodes_updated = 0;
     let mut properties_set = 0;
+    let mut touched_types: HashSet<String> = HashSet::new();
+
     for (node_idx, props) in updates {
         // Pre-intern keys before getting mutable node reference (split borrow)
         let interned_props: Vec<(InternedKey, Value)> = props
@@ -1828,13 +1862,22 @@ pub fn add_properties(
             }
             nodes_updated += 1;
             properties_set += count;
+            touched_types.insert(node.node_type_str(&graph.interner).to_string());
         }
     }
 
-    Ok(AddPropertiesReport {
+    for node_type in &touched_types {
+        graph.refresh_indexes_for_type(node_type);
+    }
+    if nodes_updated > 0 {
+        // Publish the write so version-keyed caches and freshness checks see it.
+        graph.bump_version();
+    }
+
+    AddPropertiesReport {
         nodes_updated,
         properties_set,
-    })
+    }
 }
 
 fn walk_to_ancestor(
@@ -2148,29 +2191,7 @@ fn add_properties_aggregate(
 
     drop(collect_guard);
 
-    let mut nodes_updated = 0;
-    let mut properties_set = 0;
-
-    for (node_idx, props) in updates {
-        // Pre-intern keys before getting mutable node reference (split borrow)
-        let interned_props: Vec<(InternedKey, Value)> = props
-            .into_iter()
-            .map(|(k, v)| (graph.interner.get_or_intern(&k), v))
-            .collect();
-        if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
-            let count = interned_props.len();
-            for (ik, v) in interned_props {
-                node.properties.insert(ik, v);
-            }
-            nodes_updated += 1;
-            properties_set += count;
-        }
-    }
-
-    Ok(AddPropertiesReport {
-        nodes_updated,
-        properties_set,
-    })
+    Ok(apply_property_updates(graph, updates))
 }
 
 fn compute_aggregate(expr: &str, values: &[f64], count: usize) -> Value {
