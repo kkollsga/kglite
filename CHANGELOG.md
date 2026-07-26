@@ -65,6 +65,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Declaring a UNIQUE or NODE KEY constraint no longer reintroduces a
+  graph-sized copy on every mutating statement. The unique-occupancy map holds
+  one entry per node of the constrained type, and it was being deep-cloned into
+  each statement's rollback checkpoint, so a constrained type gave back the
+  saving the undo journal above is there to deliver. It is now parked like the
+  other graph-sized structures and recomputed only for the node types a *failed*
+  statement touched, moving the cost to the rare rollback path. Rollback
+  fidelity is unchanged in both directions: a claim the failed statement added
+  is released again (so the value stays insertable rather than being rejected
+  forever by a phantom occupant), and a claim it released is restored (so a real
+  duplicate is still refused).
 - `labels(n)` now returns a node's secondary labels in a stable order (sorted
   by name, primary label first). They were previously returned in hash-map
   iteration order, so two graphs holding identical data could report a node's

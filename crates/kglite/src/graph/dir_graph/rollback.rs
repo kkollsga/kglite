@@ -37,7 +37,15 @@
 //!   and each member has a documented undo story in [`apply`]:
 //!   `graph`, `type_indices`, `id_indices`, `property_indices`,
 //!   `composite_indices`, `range_indices`, `secondary_label_index`,
-//!   `embeddings`, `timeseries_store`.
+//!   `embeddings`, `timeseries_store`, `unique_indices`.
+//!
+//! Two parked fields are *rebuilt* rather than journal-reversed, because their
+//! own mutation sites record no inverse: `id_indices` (dropped per touched
+//! type, self-healing on the next read) and `unique_indices` (recomputed per
+//! touched type by [`DirGraph::rebuild_unique_indices_for_types`]). Both are
+//! driven by the [`ReplayFallout`] the replay collects. Parking a field with no
+//! undo story of *either* kind is the one way to make this module wrong — see
+//! the `unique_indices` note on [`swap_data_scale`].
 //!
 //! Getting that split wrong fails in the safe direction. Forgetting to park a
 //! new large field makes the checkpoint *slower*, never wrong; only an
@@ -86,6 +94,20 @@ fn swap_data_scale(a: &mut DirGraph, b: &mut DirGraph) {
     std::mem::swap(&mut a.secondary_label_index, &mut b.secondary_label_index);
     std::mem::swap(&mut a.embeddings, &mut b.embeddings);
     std::mem::swap(&mut a.timeseries_store, &mut b.timeseries_store);
+    // Parked because its inner map holds one entry per node of a constrained
+    // type, so cloning it would put an O(constrained-nodes) copy back on every
+    // mutating statement — the cost this module exists to remove.
+    //
+    // Parking alone would be a *correctness* bug, not just a cheaper one:
+    // `commit_unique_claims` / `release_unique_claims` /
+    // `evict_unique_claims_for_nodes` record nothing in the journal, and
+    // because parking keeps the live post-statement map (rather than restoring
+    // the shell's), a failed statement's claims would survive rollback — a
+    // phantom occupant (permanent spurious `ConstraintViolationError`) or a
+    // released claim (a real duplicate admitted). The paired undo story is the
+    // per-touched-type rebuild in `StatementCheckpoint::rollback`; do not park
+    // this field without it.
+    std::mem::swap(&mut a.unique_indices, &mut b.unique_indices);
 }
 
 /// Whether the undo journal can reverse everything this graph's mutations can
@@ -106,6 +128,11 @@ fn journal_covers(graph: &DirGraph) -> bool {
         && graph.property_indices.is_empty()
         && graph.composite_indices.is_empty()
         && graph.range_indices.is_empty()
+    // Deliberately *not* gated on `unique_indices.is_empty()`. It reads as
+    // doctrine-consistent but is a pessimisation: it would route every
+    // constrained graph to `fork_transaction()`, an O(V+E) clone of everything,
+    // which is strictly worse than the journal plus a per-touched-type unique
+    // rebuild. The rebuild is that field's undo story.
 }
 
 /// An open rollback checkpoint for exactly one mutating statement.
@@ -168,15 +195,21 @@ impl StatementCheckpoint {
                 recorded_ops,
             } => {
                 let journal = graph.graph.take_undo();
-                if let Some(journal) = journal {
-                    replay(graph, *journal);
-                }
+                let fallout = journal
+                    .map(|journal| replay(graph, *journal))
+                    .unwrap_or_default();
                 // Ops the failed statement buffered for the write-ahead log
                 // describe writes that no longer exist.
                 if let Some(len) = recorded_ops {
                     graph.graph.truncate_recorded_ops(len);
                 }
                 graph.restore_schema_shell(*shell);
+                // After the shell restore, so the rebuild reads the
+                // pre-statement schema (property readers and column metadata)
+                // against the restored data. `unique_indices` is parked, so
+                // what survives here is the failed statement's occupancy — see
+                // the note in `swap_data_scale`.
+                graph.rebuild_unique_indices_for_types(&fallout.stale_unique_indices);
                 // Edge-derived caches are `Arc`-shared with the shell, so the
                 // shell cannot restore them; drop them and let the next read
                 // rebuild.
@@ -209,29 +242,53 @@ impl DirGraph {
     }
 }
 
-/// Replay every entry in reverse capture order.
-fn replay(graph: &mut DirGraph, journal: UndoJournal) {
-    // Node types whose id-index the replay perturbed. `IdIndexStore` has no
-    // per-entry removal, and its read path self-heals via `lookup_or_build`,
-    // so whole-type invalidation is both the cheapest correct move and
-    // exactly what the delete path already does.
-    let mut stale_id_indices: HashSet<String> = HashSet::new();
-    for entry in journal.into_replay_order() {
-        apply(graph, entry, &mut stale_id_indices);
+/// The derived per-node-type state a replay perturbed, for the two parked
+/// fields that are rebuilt instead of journal-reversed.
+#[derive(Default)]
+struct ReplayFallout {
+    /// Node types whose id-index the replay perturbed. `IdIndexStore` has no
+    /// per-entry removal, and its read path self-heals via `lookup_or_build`,
+    /// so whole-type invalidation is both the cheapest correct move and
+    /// exactly what the delete path already does.
+    stale_id_indices: HashSet<String>,
+    /// Node types whose unique-occupancy maps must be recomputed from the
+    /// restored data. Wider than `stale_id_indices`: a plain property
+    /// overwrite leaves identity alone but can add or release a unique claim,
+    /// so `NodeWeight` counts here and not there.
+    stale_unique_indices: HashSet<String>,
+}
+
+impl ReplayFallout {
+    /// Record a node type whose identity *and* unique claims were perturbed —
+    /// a node appearing or disappearing does both.
+    fn node_identity_changed(&mut self, node_type: String) {
+        self.stale_unique_indices.insert(node_type.clone());
+        self.stale_id_indices.insert(node_type);
     }
-    for node_type in &stale_id_indices {
+}
+
+/// Replay every entry in reverse capture order, reporting what has to be
+/// rebuilt afterwards.
+fn replay(graph: &mut DirGraph, journal: UndoJournal) -> ReplayFallout {
+    let mut fallout = ReplayFallout::default();
+    for entry in journal.into_replay_order() {
+        apply(graph, entry, &mut fallout);
+    }
+    for node_type in &fallout.stale_id_indices {
         graph.id_indices.remove(node_type);
     }
+    fallout
 }
 
 /// Reverse one edit. The journal is already uninstalled, so the `GraphWrite`
 /// calls below are not re-captured.
-fn apply(graph: &mut DirGraph, entry: UndoEntry, stale_id_indices: &mut HashSet<String>) {
+fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
     match entry {
         UndoEntry::NodeAdded { idx, node_type } => {
             // `type_indices` is reversed by the `BucketAppended` entry the
-            // create path recorded; only the id index needs invalidating here.
-            stale_id_indices.insert(graph.interner.resolve(node_type).to_string());
+            // create path recorded; only the derived per-type structures need
+            // invalidating here.
+            fallout.node_identity_changed(graph.interner.resolve(node_type).to_string());
             // A node created by this statement can only carry edges this
             // statement created, and those replayed first (they were captured
             // later), so it is isolated by now.
@@ -251,6 +308,18 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, stale_id_indices: &mut HashSet<
             GraphWrite::remove_node(&mut graph.graph, idx);
         }
         UndoEntry::NodeWeight { idx, prior } => {
+            // Both spellings of the type, so a claim under either is recomputed.
+            // The primary type is immutable in practice, but reading it costs
+            // one interner lookup on a path that only runs when a statement
+            // already failed.
+            let restored_type = graph.interner.resolve(prior.node_type).to_string();
+            if let Some(current) = GraphRead::node_type_of(&graph.graph, idx) {
+                let current = graph.interner.resolve(current).to_string();
+                if current != restored_type {
+                    fallout.stale_unique_indices.insert(current);
+                }
+            }
+            fallout.stale_unique_indices.insert(restored_type);
             if let Some(slot) = GraphWrite::node_weight_mut(&mut graph.graph, idx) {
                 *slot = prior;
             }
@@ -259,7 +328,7 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, stale_id_indices: &mut HashSet<
             let type_name = graph.interner.resolve(prior.node_type).to_string();
             let restored = GraphWrite::add_node(&mut graph.graph, prior);
             debug_assert_slot_reused(restored.index(), idx.index(), "node");
-            stale_id_indices.insert(type_name);
+            fallout.node_identity_changed(type_name);
         }
         UndoEntry::EdgeAdded { idx } => {
             GraphWrite::remove_edge(&mut graph.graph, idx);

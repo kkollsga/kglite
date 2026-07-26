@@ -893,6 +893,39 @@ impl DirGraph {
         violations
     }
 
+    /// Recompute the unique-occupancy maps of every declared constraint on
+    /// `node_types`, from live data.
+    ///
+    /// The statement-rollback counterpart of
+    /// [`Self::rebuild_unique_indices_from_keys`]. `unique_indices` is parked by
+    /// `rollback::swap_data_scale`, so a journal rollback leaves the *failed
+    /// statement's* occupancy in place while the data underneath is restored;
+    /// the claims the statement added or released have to be recomputed, or the
+    /// graph keeps a phantom occupant (a permanent spurious
+    /// `ConstraintViolationError` for a value nothing holds) or has silently
+    /// released one (a real duplicate admitted on the next write).
+    ///
+    /// Scoped to the types the replay touched, so an untouched or unconstrained
+    /// type costs nothing and an unconstrained graph returns immediately.
+    /// Duplicates are not reported: the restored data is the pre-statement data,
+    /// which the write path already accepted, so a contested tuple here could
+    /// only be a pre-existing violation the load path already surfaced.
+    pub(super) fn rebuild_unique_indices_for_types(&mut self, node_types: &HashSet<String>) {
+        if node_types.is_empty() || self.unique_indices.is_empty() {
+            return;
+        }
+        let keys: Vec<UniqueConstraintKey> = self
+            .unique_indices
+            .keys()
+            .filter(|(node_type, _)| node_types.contains(node_type))
+            .cloned()
+            .collect();
+        for key in keys {
+            let (index, _duplicates, _sample) = self.build_unique_index(&key.0, &key.1);
+            self.unique_indices.insert(key, index);
+        }
+    }
+
     /// Re-scan live data and report every unique-constraint violation currently
     /// present. The on-demand counterpart of the load-time rebuild, for callers
     /// that want to audit a graph filled by a path that bypasses enforcement.
