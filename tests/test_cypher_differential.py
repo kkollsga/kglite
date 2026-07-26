@@ -2001,20 +2001,21 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
     # Constraint DDL. Declaring a constraint rebuilds an enforcement structure
     # from live data, so a pass that reordered or duplicated the statement would
     # change post-statement graph state — which this harness compares. The
-    # fixture's `person_id` is unique and `name` is present on every row, so each
-    # of these declarations is satisfiable.
-    ("create_constraint_unique_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.person_id IS UNIQUE"),
+    # fixture's `name` and `age` are both distinct across all three rows, so each
+    # declaration is satisfiable. `person_id` is deliberately avoided: it is the
+    # fixture's id field, and uniqueness DDL over `id` is refused.
+    ("create_constraint_unique_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE"),
     (
         "create_constraint_unique_ddl_if_not_exists",
-        "CREATE CONSTRAINT person_id_u IF NOT EXISTS FOR (p:Person) REQUIRE p.person_id IS UNIQUE",
+        "CREATE CONSTRAINT person_name_u IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS UNIQUE",
     ),
     (
         "create_constraint_composite_unique_ddl",
-        "CREATE CONSTRAINT FOR (p:Person) REQUIRE (p.person_id, p.name) IS UNIQUE",
+        "CREATE CONSTRAINT FOR (p:Person) REQUIRE (p.name, p.age) IS UNIQUE",
     ),
     ("create_constraint_not_null_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL"),
-    ("create_constraint_node_key_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.person_id IS NODE KEY"),
-    ("drop_constraint_ddl_missing_if_exists", "DROP CONSTRAINT person_id_u IF EXISTS"),
+    ("create_constraint_node_key_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NODE KEY"),
+    ("drop_constraint_ddl_missing_if_exists", "DROP CONSTRAINT person_name_u IF EXISTS"),
 ]
 
 

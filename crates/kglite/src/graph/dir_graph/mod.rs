@@ -107,7 +107,7 @@ pub struct DirGraph {
     /// serde field — older `.kgl` files load with an empty map, which only means
     /// their constraints must be dropped by descriptor.
     #[serde(default)]
-    pub constraint_names: HashMap<String, NamedConstraint>,
+    pub(crate) constraint_names: HashMap<String, NamedConstraint>,
     /// Fast O(1) lookup by node ID: node_type -> TypeIdIndex
     /// Lazily built on first use for each node type, skipped during serialization.
     /// Uses compact u32 HashMap when all IDs are UniqueId (e.g., Wikidata mapped mode).

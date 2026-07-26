@@ -656,7 +656,7 @@ impl DirGraph {
     ///
     /// Idempotent: re-declaring an existing requirement re-verifies it and
     /// changes nothing, so `IF NOT EXISTS` and a reload both work.
-    pub fn create_not_null_constraint(
+    pub(crate) fn create_not_null_constraint(
         &mut self,
         node_type: &str,
         property: &str,
@@ -680,7 +680,7 @@ impl DirGraph {
     }
 
     /// Withdraw a NOT NULL declaration. Reports whether one was removed.
-    pub fn drop_not_null_constraint(&mut self, node_type: &str, property: &str) -> bool {
+    pub(crate) fn drop_not_null_constraint(&mut self, node_type: &str, property: &str) -> bool {
         let Some(node) = self
             .schema_definition
             .as_mut()
@@ -695,14 +695,14 @@ impl DirGraph {
 
     /// Whether `property` is declared NOT NULL on `node_type`. A non-`id`
     /// primary key counts: it is required by definition.
-    pub fn has_not_null_constraint(&self, node_type: &str, property: &str) -> bool {
+    pub(crate) fn has_not_null_constraint(&self, node_type: &str, property: &str) -> bool {
         self.required_property_names(node_type).contains(&property)
     }
 
     /// Every declared presence constraint, as `(node_type, property)` sorted.
     /// Backs `SHOW CONSTRAINTS` together with
     /// [`Self::list_unique_constraints`].
-    pub fn list_not_null_constraints(&self) -> Vec<(String, String)> {
+    pub(crate) fn list_not_null_constraints(&self) -> Vec<(String, String)> {
         let Some(schema) = self.schema_definition.as_ref() else {
             return Vec::new();
         };
@@ -783,7 +783,7 @@ impl DirGraph {
     }
 
     /// The declaration registered under `name`, if any.
-    pub fn constraint_by_name(&self, name: &str) -> Option<&NamedConstraint> {
+    pub(crate) fn constraint_by_name(&self, name: &str) -> Option<&NamedConstraint> {
         self.constraint_names.get(name)
     }
 
@@ -795,7 +795,11 @@ impl DirGraph {
     /// The name registered for `(node_type, properties)`, if the constraint was
     /// declared with one. Property order is irrelevant, matching constraint
     /// identity. Lets `SHOW CONSTRAINTS` report the author's name.
-    pub fn name_for_constraint(&self, node_type: &str, properties: &[String]) -> Option<&str> {
+    pub(crate) fn name_for_constraint(
+        &self,
+        node_type: &str,
+        properties: &[String],
+    ) -> Option<&str> {
         let wanted = normalize_properties(properties);
         self.constraint_names
             .iter()
@@ -814,7 +818,7 @@ impl DirGraph {
     /// `set_schema` replacing a schema that declared one. Without this, those
     /// names would leak into every subsequent save and `DROP CONSTRAINT <name>`
     /// would claim to drop something that had already gone.
-    pub fn prune_constraint_names(&mut self) {
+    pub(crate) fn prune_constraint_names(&mut self) {
         if self.constraint_names.is_empty() {
             return;
         }

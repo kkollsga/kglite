@@ -737,9 +737,9 @@ fn create_node(
         }
     };
     graph
-        .check_required_fields(&label, &constraint_read)
+        .check_required_fields(&label, constraint_read)
         .map_err(|violation| violation.to_string())?;
-    let unique_claims = graph.unique_claims(&label, &constraint_read);
+    let unique_claims = graph.unique_claims(&label, constraint_read);
     graph
         .check_unique_claims(&unique_claims, None)
         .map_err(|violation| violation.to_string())?;

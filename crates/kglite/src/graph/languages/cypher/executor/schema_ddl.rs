@@ -139,6 +139,36 @@ fn index_info_to_row(info: &IndexInfo) -> ResultRow {
     row
 }
 
+/// Whether `command` is one of the schema *reads* (`SHOW INDEXES` /
+/// `SHOW CONSTRAINTS`) rather than a schema mutation.
+///
+/// The read/mutation split for schema commands lives here, next to both
+/// implementations, so the engine-routing arm in `executor/mod.rs` stays a single
+/// case and `clause_is_mutation` has one place to agree with.
+pub(crate) fn is_schema_read(command: &SchemaCommand) -> bool {
+    matches!(
+        command,
+        SchemaCommand::ShowIndexes | SchemaCommand::Constraint(ConstraintCommand::Show)
+    )
+}
+
+/// Execute a schema read. Precondition: [`is_schema_read`] returned true.
+pub(crate) fn execute_schema_read(
+    graph: &DirGraph,
+    command: &SchemaCommand,
+) -> Result<ResultSet, String> {
+    match command {
+        SchemaCommand::ShowIndexes => Ok(show_indexes_result_set(graph)),
+        SchemaCommand::Constraint(ConstraintCommand::Show) => {
+            Ok(show_constraints_result_set(graph))
+        }
+        _ => Err(
+            "internal: a schema mutation reached the read engine; is_schema_read must gate it"
+                .to_string(),
+        ),
+    }
+}
+
 /// Execute a schema DDL statement that mutates schema state.
 ///
 /// Called from the mutable engine (`executor/write.rs`) because schema is graph
@@ -615,6 +645,12 @@ fn execute_create_constraint(
         }
     };
 
+    // Uniqueness over a structural field is not served by the secondary index,
+    // and must not be accepted. See `reject_structural_uniqueness`.
+    if matches!(plan, ConstraintPlan::Unique | ConstraintPlan::NodeKey) {
+        reject_structural_uniqueness(graph, &label, &create.properties)?;
+    }
+
     // Schema-locked graphs accept mutations only against the declared schema, so
     // constraining an undeclared property would install a constraint the schema
     // says cannot exist. Same guard index DDL applies.
@@ -756,6 +792,52 @@ fn reject_name_collision(
          graph: drop it first, or choose another name.",
         descriptor(&existing.node_type, &existing.properties)
     ))
+}
+
+/// Refuse a uniqueness constraint over the `id` field (or a column aliased to
+/// it) — measured to be the one shape where declaring one reports success and
+/// enforces nothing.
+///
+/// `id` is a `NodeData` field, not an entry in the property map. The unique
+/// secondary index is built by reading it through `property_reader` (which
+/// resolves aliases), but the write-path claim is derived from the *pending
+/// property map*, where `id` never appears — the CREATE path routes it to the
+/// node's identity instead. So no claim is produced and no check runs: a
+/// duplicate `id` is admitted by a constraint that reported success.
+///
+/// Verified empirically before adding this guard, because the neighbouring cases
+/// look identical and are not: `title`, a column aliased to `title`, and ordinary
+/// properties all enforce correctly, so **only** `id` is refused. Over-refusing
+/// here would cost the very common `REQUIRE p.name IS UNIQUE`.
+///
+/// Identity uniqueness has a route that does work, on every write path and both
+/// spellings — the declared primary key, which probes the per-type id index — so
+/// this points there rather than pretending. Enforcing `id` through the secondary
+/// index is a gap in the enforcement layer, not something constraint DDL can
+/// paper over.
+///
+/// `IS NOT NULL` on `id` is unaffected: it is present by construction, so the
+/// requirement is genuinely satisfied rather than ignored.
+fn reject_structural_uniqueness(
+    graph: &DirGraph,
+    label: &str,
+    properties: &[String],
+) -> Result<(), String> {
+    for property in properties {
+        if graph.resolve_alias(label, property) != "id" {
+            continue;
+        }
+        return Err(format!(
+            "CREATE CONSTRAINT ... IS UNIQUE on '{property}' is not supported: it resolves to \
+             the structural 'id' field rather than a stored property, so the unique secondary \
+             index would never see the write and the constraint would admit duplicates while \
+             reporting success. Identity uniqueness is enforced by declaring the node type's \
+             primary key — `define_schema({{'nodes': {{'{label}': {{'primary_key': 'id'}}}}}})` \
+             — which probes the per-type id index on every write path. `MERGE` is the \
+             idempotent alternative to CREATE."
+        ));
+    }
+    Ok(())
 }
 
 /// `IS :: <TYPE>` / `IS TYPED <TYPE>`.

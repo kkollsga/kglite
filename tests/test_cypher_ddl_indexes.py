@@ -317,8 +317,16 @@ NEO4J_SCHEMA_SCRIPT: list[tuple[str, str | None]] = [
     # Constraint DDL is served as of Sprint 4b: uniqueness, presence, and node
     # keys all route to real enforcement. `person_id` is unique across the
     # fixture and `name` is present on every row, so each declaration holds.
+    # `person_id` is this fixture's unique_id_field, so it resolves to the
+    # structural `id`. Uniqueness DDL over `id` is refused and points at the
+    # primary-key route, rather than declaring a constraint that would admit
+    # duplicates while reporting success.
     (
         "CREATE CONSTRAINT person_id_u IF NOT EXISTS FOR (p:Person) REQUIRE p.person_id IS UNIQUE",
+        "primary_key",
+    ),
+    (
+        "CREATE CONSTRAINT person_city_u IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS UNIQUE",
         None,
     ),
     (
@@ -326,7 +334,7 @@ NEO4J_SCHEMA_SCRIPT: list[tuple[str, str | None]] = [
         None,
     ),
     (
-        "CREATE CONSTRAINT person_key IF NOT EXISTS FOR (p:Person) REQUIRE (p.person_id, p.name) IS NODE KEY",
+        "CREATE CONSTRAINT person_key IF NOT EXISTS FOR (p:Person) REQUIRE (p.name, p.age) IS NODE KEY",
         None,
     ),
     # Property-type constraints have no write-time enforcement route, so they are
@@ -338,7 +346,7 @@ NEO4J_SCHEMA_SCRIPT: list[tuple[str, str | None]] = [
     # Neo4j 4 spelled REQUIRE as ASSERT; a 4.x-era script must reach the same
     # enforcement rather than a parse error.
     (
-        "CREATE CONSTRAINT person_id_u4 IF NOT EXISTS FOR (p:Person) ASSERT p.person_id IS UNIQUE",
+        "CREATE CONSTRAINT person_id_u4 IF NOT EXISTS FOR (p:Person) ASSERT p.name IS UNIQUE",
         None,
     ),
     ("SHOW CONSTRAINTS", None),

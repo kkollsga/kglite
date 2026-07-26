@@ -770,11 +770,8 @@ impl<'a> CypherExecutor<'a> {
             // mutable engine and only reaches here via that same direct path.
             // `SHOW INDEXES` is the one schema command that reads rather than
             // writes, so it lives on this side of the engine split.
-            Clause::Schema(SchemaCommand::ShowIndexes) => {
-                Ok(schema_ddl::show_indexes_result_set(self.graph))
-            }
-            Clause::Schema(SchemaCommand::Constraint(ConstraintCommand::Show)) => {
-                Ok(schema_ddl::show_constraints_result_set(self.graph))
+            Clause::Schema(command) if schema_ddl::is_schema_read(command) => {
+                schema_ddl::execute_schema_read(self.graph, command)
             }
             Clause::Create(_)
             | Clause::Set(_)

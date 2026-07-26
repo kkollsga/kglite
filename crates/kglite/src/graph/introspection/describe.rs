@@ -796,6 +796,72 @@ fn cypher_literal(v: &Value) -> String {
     }
 }
 
+/// Build the `<prop .../>` attribute string for one property.
+///
+/// Extracted from `write_type_detail`, which was well past the size a single
+/// function should carry: this is a self-contained rendering step needing only
+/// the property's stats plus the graph's index/constraint state, and every new
+/// annotation grew the caller.
+fn property_attrs(
+    graph: &DirGraph,
+    node_type: &str,
+    prop: &PropertyStatInfo,
+    prop_truncate: Option<usize>,
+) -> String {
+    let unique_str = if prop.approx {
+        format!("{}+", prop.unique)
+    } else {
+        prop.unique.to_string()
+    };
+    let mut attrs = format!(
+        "name=\"{}\" type=\"{}\" unique=\"{}\"",
+        xml_escape(&prop.property_name),
+        xml_escape(&prop.type_string),
+        unique_str
+    );
+    if prop.approx {
+        attrs.push_str(" approx=\"true\"");
+    }
+    if graph.has_any_index(node_type, &prop.property_name) {
+        // All string indexes are sorted-array layouts and
+        // support both equality and prefix (STARTS WITH)
+        // lookup. Numeric indexes (when added) will need to
+        // differentiate.
+        let kind = if matches!(prop.type_string.as_str(), "String" | "string") {
+            "eq,prefix"
+        } else {
+            "eq"
+        };
+        attrs.push_str(&format!(" indexed=\"{}\"", kind));
+    }
+    // Declared constraints, so an agent knows a write will be
+    // rejected *before* attempting it. `SHOW CONSTRAINTS` gives the
+    // full picture including composite tuples; this annotation
+    // covers the single-property case, which is where a write is
+    // most often planned.
+    if let Some(constraint) = describe_property_constraint(graph, node_type, &prop.property_name) {
+        attrs.push_str(&format!(" constraint=\"{constraint}\""));
+    }
+    if let Some(ref vals) = prop.values {
+        if !vals.is_empty() {
+            let val_strs: Vec<String> = vals
+                .iter()
+                .map(|v| value_display_compact(v, prop_truncate))
+                .collect();
+            attrs.push_str(&format!(" vals=\"{}\"", xml_escape(&val_strs.join("|"))));
+        }
+    } else if let Some(ref s) = prop.sample {
+        // 0.9.30: high-cardinality props show one example
+        // value so the agent can see what the property
+        // looks like instead of guessing from the name.
+        attrs.push_str(&format!(
+            " sample=\"{}\"",
+            xml_escape(&value_display_compact(s, prop_truncate))
+        ));
+    }
+    attrs
+}
+
 fn write_type_detail(
     xml: &mut String,
     graph: &DirGraph,
@@ -912,59 +978,7 @@ fn write_type_detail(
                 // When stats are approximate (sampled or the distinct set hit
                 // its cap), `unique` is a lower bound — render `N+` and flag
                 // `approx="true"` so any listed `vals` reads as non-exhaustive.
-                let unique_str = if prop.approx {
-                    format!("{}+", prop.unique)
-                } else {
-                    prop.unique.to_string()
-                };
-                let mut attrs = format!(
-                    "name=\"{}\" type=\"{}\" unique=\"{}\"",
-                    xml_escape(&prop.property_name),
-                    xml_escape(&prop.type_string),
-                    unique_str
-                );
-                if prop.approx {
-                    attrs.push_str(" approx=\"true\"");
-                }
-                if graph.has_any_index(node_type, &prop.property_name) {
-                    // All string indexes are sorted-array layouts and
-                    // support both equality and prefix (STARTS WITH)
-                    // lookup. Numeric indexes (when added) will need to
-                    // differentiate.
-                    let kind = if matches!(prop.type_string.as_str(), "String" | "string") {
-                        "eq,prefix"
-                    } else {
-                        "eq"
-                    };
-                    attrs.push_str(&format!(" indexed=\"{}\"", kind));
-                }
-                // Declared constraints, so an agent knows a write will be
-                // rejected *before* attempting it. `SHOW CONSTRAINTS` gives the
-                // full picture including composite tuples; this annotation
-                // covers the single-property case, which is where a write is
-                // most often planned.
-                if let Some(constraint) =
-                    describe_property_constraint(graph, node_type, &prop.property_name)
-                {
-                    attrs.push_str(&format!(" constraint=\"{constraint}\""));
-                }
-                if let Some(ref vals) = prop.values {
-                    if !vals.is_empty() {
-                        let val_strs: Vec<String> = vals
-                            .iter()
-                            .map(|v| value_display_compact(v, prop_truncate))
-                            .collect();
-                        attrs.push_str(&format!(" vals=\"{}\"", xml_escape(&val_strs.join("|"))));
-                    }
-                } else if let Some(ref s) = prop.sample {
-                    // 0.9.30: high-cardinality props show one example
-                    // value so the agent can see what the property
-                    // looks like instead of guessing from the name.
-                    attrs.push_str(&format!(
-                        " sample=\"{}\"",
-                        xml_escape(&value_display_compact(s, prop_truncate))
-                    ));
-                }
+                let attrs = property_attrs(graph, node_type, prop, prop_truncate);
                 xml.push_str(&format!("{}    <prop {}/>\n", indent, attrs));
             }
             xml.push_str(&format!("{}  </properties>\n", indent));
@@ -2029,6 +2043,28 @@ extensions:
     )
 }
 
+/// The declared constraint on a single property, for the `describe()` annotation:
+/// `node_key` when it is both unique and required, else `unique` or `not_null`,
+/// and `None` when the property is unconstrained.
+///
+/// Single-property only. A composite tuple constrains the *combination*, so
+/// tagging its members individually would overstate what is enforced — `SHOW
+/// CONSTRAINTS` reports those in full.
+fn describe_property_constraint(
+    graph: &DirGraph,
+    node_type: &str,
+    property: &str,
+) -> Option<&'static str> {
+    let unique = graph.has_unique_constraint(node_type, &[property.to_string()]);
+    let required = graph.has_not_null_constraint(node_type, property);
+    match (unique, required) {
+        (true, true) => Some("node_key"),
+        (true, false) => Some("unique"),
+        (false, true) => Some("not_null"),
+        (false, false) => None,
+    }
+}
+
 #[cfg(test)]
 mod mcp_quickstart_tests {
     use super::mcp_quickstart;
@@ -2051,27 +2087,5 @@ mod mcp_quickstart_tests {
                 "retired contract returned: {retired:?}"
             );
         }
-    }
-}
-
-/// The declared constraint on a single property, for the `describe()` annotation:
-/// `node_key` when it is both unique and required, else `unique` or `not_null`,
-/// and `None` when the property is unconstrained.
-///
-/// Single-property only. A composite tuple constrains the *combination*, so
-/// tagging its members individually would overstate what is enforced — `SHOW
-/// CONSTRAINTS` reports those in full.
-fn describe_property_constraint(
-    graph: &DirGraph,
-    node_type: &str,
-    property: &str,
-) -> Option<&'static str> {
-    let unique = graph.has_unique_constraint(node_type, &[property.to_string()]);
-    let required = graph.has_not_null_constraint(node_type, property);
-    match (unique, required) {
-        (true, true) => Some("node_key"),
-        (true, false) => Some("unique"),
-        (false, true) => Some("not_null"),
-        (false, false) => None,
     }
 }

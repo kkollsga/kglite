@@ -135,6 +135,61 @@ def test_property_type_constraint_is_rejected_not_silently_accepted(graph) -> No
     assert _constraint_rows(graph) == []
 
 
+@pytest.mark.parametrize("property_name", ["person_id", "id"])
+def test_uniqueness_on_the_id_field_is_rejected_not_silently_unenforced(
+    property_name: str,
+) -> None:
+    """`id` is a NodeData field, not a stored property, so the write path never
+    produces a claim for it — the constraint admitted duplicates while reporting
+    success. It is now refused and points at the route that does enforce.
+
+    (`person_id` is the fixture's unique_id_field, so it aliases `id`.)
+    """
+    g = _graph()
+    with pytest.raises(kglite.CypherExecutionError) as exc:
+        g.cypher(f"CREATE CONSTRAINT c FOR (p:Person) REQUIRE p.{property_name} IS UNIQUE")
+    message = str(exc.value)
+    assert "is not supported" in message, message
+    assert "primary_key" in message, message
+    assert _constraint_rows(g) == []
+
+
+@pytest.mark.parametrize("property_name", ["name", "title", "age"])
+def test_uniqueness_on_title_and_ordinary_properties_stays_allowed(property_name: str) -> None:
+    """The guard above must not over-refuse. `name` is the fixture's
+    node_title_field and `title` is the structural field itself; both enforce
+    correctly, so refusing them would cost the very common
+    `REQUIRE p.name IS UNIQUE`."""
+    g = _graph()
+    g.cypher(f"CREATE CONSTRAINT c FOR (p:Person) REQUIRE p.{property_name} IS UNIQUE")
+    assert g.last_mutation_stats["constraints_added"] == 1
+    existing = g.cypher(f"MATCH (p:Person) RETURN p.{property_name} AS v").to_list()[0]["v"]
+    with pytest.raises(Exception, match=UNIQUE_ERROR):
+        g.cypher(f"CREATE (p:Person {{{property_name}: $v}})".replace("$v", repr(existing)))
+
+
+def test_node_key_on_the_id_field_is_rejected_too(graph) -> None:
+    """A node key carries a uniqueness half, so it inherits the restriction."""
+    with pytest.raises(kglite.CypherExecutionError, match="is not supported"):
+        graph.cypher("CREATE CONSTRAINT c FOR (p:Person) REQUIRE p.person_id IS NODE KEY")
+    assert _constraint_rows(graph) == []
+
+
+def test_not_null_on_the_id_field_is_still_accepted(graph) -> None:
+    """`id` is present by construction, so the requirement is genuinely satisfied
+    rather than ignored — no reason to refuse it."""
+    graph.cypher("CREATE CONSTRAINT c FOR (p:Person) REQUIRE p.person_id IS NOT NULL")
+    assert graph.last_mutation_stats["constraints_added"] == 1
+
+
+def test_the_primary_key_route_actually_enforces_identity_uniqueness(graph) -> None:
+    """The route the rejection message names must work, under both spellings."""
+    graph.define_schema({"nodes": {"Person": {"primary_key": "id"}}})
+    for duplicate in ["CREATE (p:Person {id: 1})", "CREATE (p:Person {person_id: 1})"]:
+        with pytest.raises(Exception, match="duplicate primary key"):
+            graph.cypher(duplicate)
+
+
 def test_relationship_constraint_is_rejected_by_name(graph) -> None:
     with pytest.raises(kglite.CypherExecutionError, match="KNOWS"):
         graph.cypher("CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE")
@@ -327,17 +382,23 @@ def test_a_dropped_name_does_not_come_back_after_a_reload(tmp_path) -> None:
 # statement must succeed; a string is a substring the unsupported-feature message
 # must contain. Nothing in this list may raise a syntax error.
 NEO4J_CONSTRAINT_SCRIPT: list[tuple[str, str | None]] = [
-    ("CREATE CONSTRAINT person_id_u IF NOT EXISTS FOR (p:Person) REQUIRE p.person_id IS UNIQUE", None),
-    ("CREATE CONSTRAINT person_name_e IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS NOT NULL", None),
-    ("CREATE CONSTRAINT person_nk IF NOT EXISTS FOR (p:Person) REQUIRE p.person_id IS NODE KEY", None),
+    # `person_id` is the fixture's id field, so uniqueness on it is refused with
+    # the primary-key route rather than silently not enforced.
     (
-        "CREATE CONSTRAINT person_ck IF NOT EXISTS FOR (p:Person) REQUIRE (p.person_id, p.name) IS NODE KEY",
+        "CREATE CONSTRAINT person_id_u IF NOT EXISTS FOR (p:Person) REQUIRE p.person_id IS UNIQUE",
+        "primary_key",
+    ),
+    ("CREATE CONSTRAINT person_age_u IF NOT EXISTS FOR (p:Person) REQUIRE p.age IS UNIQUE", None),
+    ("CREATE CONSTRAINT person_name_e IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS NOT NULL", None),
+    ("CREATE CONSTRAINT person_nk IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS NODE KEY", None),
+    (
+        "CREATE CONSTRAINT person_ck IF NOT EXISTS FOR (p:Person) REQUIRE (p.age, p.city) IS NODE KEY",
         None,
     ),
     # The optional NODE / RELATIONSHIP scope word before UNIQUE.
-    ("CREATE CONSTRAINT person_nu IF NOT EXISTS FOR (p:Person) REQUIRE p.person_id IS NODE UNIQUE", None),
+    ("CREATE CONSTRAINT person_nu IF NOT EXISTS FOR (p:Person) REQUIRE p.age IS NODE UNIQUE", None),
     # Neo4j 4 spellings.
-    ("CREATE CONSTRAINT person_id_u4 FOR (p:Person) ASSERT p.person_id IS UNIQUE", None),
+    ("CREATE CONSTRAINT person_id_u4 FOR (p:Person) ASSERT p.age IS UNIQUE", None),
     # Not served, and rejected rather than silently accepted.
     ("CREATE CONSTRAINT person_t IF NOT EXISTS FOR (p:Person) REQUIRE p.age IS :: INTEGER", "is not supported"),
     ("CREATE CONSTRAINT person_t2 IF NOT EXISTS FOR (p:Person) REQUIRE p.age IS TYPED STRING", "is not supported"),
