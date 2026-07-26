@@ -35,6 +35,11 @@ their own dependencies: `kglite[pandas]` for DataFrame workflows,
   round-trip.
 - At release time, the macOS arm64 wheel is installed on CPython 3.14 with
   current pyarrow for the allocator-coexistence canary.
+- Windows x86_64 and macOS arm64 run the Rust engine's unit suite, which covers
+  the storage backends — including disk mode, whose memory-mapped file
+  lifetimes behave differently on Windows than on POSIX. This is a native-engine
+  test, not a Python-level one: the Python API surface on Windows remains
+  build-verified rather than runtime-tested.
 
 ### Release-blocking wheel builds
 

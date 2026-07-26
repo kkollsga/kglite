@@ -473,6 +473,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   emitted and so cannot collide — `to_df(include_type=False)` still returns a
   stored `type` property as itself.
 
+- **Disk storage mode now works on Windows.** The backend memory-maps its CSR
+  and index files, and Windows — unlike POSIX — refuses to resize, replace, or
+  delete a file that still has a mapped view open. Several places rewrote a file
+  while the graph was still mapping it, so `save()`, `compact()`, and building a
+  disk graph from N-Triples all failed there with "The requested operation
+  cannot be performed on a file with a user-mapped section open". The mappings
+  are now released before their backing files are rewritten, and `MmapOrVec`
+  releases its view before resizing on Windows while keeping the POSIX ordering
+  that makes a failed remap leave the buffer intact.
+
+  Publishing a saved generation failed for an unrelated reason with the same
+  symptom: the durability `fsync` over the staging directory opened each file
+  read-only, and Windows requires write access to flush a file's buffers, so the
+  save aborted with "Access is denied" before the atomic rename it was
+  protecting. Staged files are now fsynced through a writable handle.
+
+  This was never caught because no CI job ran the engine's test suite on
+  Windows, even though Windows wheels are published. The native-lifecycle job
+  now runs it.
 - `claude_config` now reads and writes Claude MCP config files as UTF-8. On a
   non-UTF-8 Windows codepage the read mis-decoded the file and the atomic write
   committed the damage over every unrelated MCP server entry; non-ASCII text in

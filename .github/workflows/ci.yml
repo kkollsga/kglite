@@ -663,6 +663,14 @@ jobs:
         run: cargo test -p kglite --lib graph::io::open::tests::crashed_process_releases_writer_lease -- --exact --nocapture
       - name: Test core lease-protected publication
         run: cargo test -p kglite --lib graph::io::open::tests::writer_lease_serializes_open_create_and_publish -- --exact
+      # The two filters above already compile the whole engine test binary, so
+      # running it costs little beyond the test time — and it is the only job
+      # that exercises the storage backends on Windows, where mmap and file
+      # lifetimes differ from POSIX (a file with an open mapped view cannot be
+      # resized, replaced, or deleted). Published Windows wheels ship this
+      # engine, so the suite needs to run somewhere on the platform.
+      - name: Test core engine unit suite
+        run: cargo test -p kglite --lib
       - name: Test CLI lifecycle unit suite
         run: cargo test -p kglite-cli
 

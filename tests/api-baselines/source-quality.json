@@ -560,8 +560,8 @@
     {
       "path": "crates/kglite/src/graph/storage/disk/builder.rs",
       "qualified_name": "crate::DiskGraph::build_csr_partitioned",
-      "lines": 368,
-      "branches": 52,
+      "lines": 246,
+      "branches": 33,
       "nesting": 4
     },
     {

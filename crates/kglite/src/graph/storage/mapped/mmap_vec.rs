@@ -40,6 +40,36 @@ fn file_len(byte_len: usize) -> io::Result<u64> {
     })
 }
 
+/// Re-establish a mapping of `byte_len` bytes after the view was deliberately
+/// released to resize the file — the ordering Windows requires.
+///
+/// Once the view is gone the buffer is unusable until a mapping exists again,
+/// including on the failure path of the resize itself. If the retained handle
+/// can no longer back a mapping, reopen the path and adopt the fresh handle, so
+/// a failed resize leaves a readable, retryable buffer instead of a poisoned
+/// one. Returns `None` only for a genuinely empty region.
+#[cfg(windows)]
+fn remap_after_resize(
+    file: &mut File,
+    path: &Path,
+    byte_len: usize,
+) -> io::Result<Option<MmapMut>> {
+    if byte_len == 0 {
+        return Ok(None);
+    }
+    // SAFETY: the backing file covers at least `byte_len` bytes, and the handle
+    // stays owned by the caller for the mapping's lifetime.
+    if let Ok(mapped) = unsafe { MmapOptions::new().len(byte_len).map_mut(&*file) } {
+        return Ok(Some(mapped));
+    }
+    let reopened = OpenOptions::new().read(true).write(true).open(path)?;
+    // SAFETY: same invariant; `reopened` refers to the same file, and it is
+    // moved into `*file` below so it outlives the mapping.
+    let mapped = unsafe { MmapOptions::new().len(byte_len).map_mut(&reopened)? };
+    *file = reopened;
+    Ok(Some(mapped))
+}
+
 fn grown_capacity<T>(capacity: usize, needed: usize) -> io::Result<(usize, usize)> {
     let doubled = capacity
         .checked_mul(2)
@@ -507,23 +537,78 @@ impl<T: MmapPod> MmapOrVec<T> {
                 })?;
                 if needed > *capacity {
                     let (new_capacity, new_byte_len) = grown_capacity::<T>(*capacity, needed)?;
-                    file.set_len(file_len(new_byte_len)?)?;
-                    injected_failure(1)?;
-                    // SAFETY: file was extended to new_byte_len above. Build
-                    // the replacement before dropping the still-valid old map.
-                    let new_mmap = unsafe {
-                        MmapOptions::new()
-                            .len(new_byte_len)
-                            .map_mut(&*file)
-                            .map_err(|error| {
-                                io::Error::new(
+                    // Windows refuses to change the size of a file that still
+                    // has a mapped view (`ERROR_USER_MAPPED_FILE`), so there the
+                    // old mapping must be released before `set_len`.
+                    //
+                    // POSIX deliberately keeps the opposite order: mapping the
+                    // replacement *before* dropping the original is what makes a
+                    // failed remap leave the buffer completely intact (see
+                    // `mapped_growth_remap_failure_keeps_state_and_retry_succeeds`).
+                    // Unmapping first everywhere would trade a Windows bug for a
+                    // POSIX atomicity regression, and would add an unmap/remap
+                    // round trip to every capacity doubling in the bulk-build
+                    // path. The two orders therefore stay split on purpose —
+                    // please do not "simplify" this into one branch.
+                    // Windows: release the view, resize, re-map. Both the resize
+                    // and the re-map can fail with the view already gone, so
+                    // either failure restores a mapping of the previous length.
+                    // That leaves the buffer readable and the retry path working
+                    // — the same observable guarantee the POSIX order provides.
+                    #[cfg(windows)]
+                    {
+                        let previous_byte_len = capacity_bytes::<T>(*capacity)?;
+                        drop(mmap.take());
+                        let grown = file
+                            .set_len(file_len(new_byte_len)?)
+                            .and_then(|()| injected_failure(1))
+                            .and_then(|()| {
+                                // SAFETY: the file is now new_byte_len bytes long.
+                                unsafe { MmapOptions::new().len(new_byte_len).map_mut(&*file) }
+                            });
+                        match grown {
+                            Ok(mapped) => {
+                                *mmap = Some(mapped);
+                                *capacity = new_capacity;
+                            }
+                            Err(error) => {
+                                // The file is still at least its original
+                                // length — it is only ever extended — so a
+                                // previous-length mapping is always in range.
+                                *mmap = remap_after_resize(file, path, previous_byte_len)
+                                    .ok()
+                                    .flatten();
+                                return Err(io::Error::new(
                                     error.kind(),
                                     format!("mmap remap failed for {}: {error}", path.display()),
-                                )
-                            })?
-                    };
-                    *mmap = Some(new_mmap);
-                    *capacity = new_capacity;
+                                ));
+                            }
+                        }
+                    }
+
+                    #[cfg(not(windows))]
+                    {
+                        file.set_len(file_len(new_byte_len)?)?;
+                        injected_failure(1)?;
+                        // SAFETY: file was extended to new_byte_len above. Build
+                        // the replacement before dropping the still-valid old map.
+                        let new_mmap = unsafe {
+                            MmapOptions::new()
+                                .len(new_byte_len)
+                                .map_mut(&*file)
+                                .map_err(|error| {
+                                    io::Error::new(
+                                        error.kind(),
+                                        format!(
+                                            "mmap remap failed for {}: {error}",
+                                            path.display()
+                                        ),
+                                    )
+                                })?
+                        };
+                        *mmap = Some(new_mmap);
+                        *capacity = new_capacity;
+                    }
                 }
                 let offset = *len * std::mem::size_of::<T>();
                 // SAFETY: `*len < *capacity` after the grow branch; `offset`
@@ -733,43 +818,93 @@ impl<T: MmapPod> MmapOrVec<T> {
                     existing.flush()?;
                 }
                 let byte_len = capacity_bytes::<T>(*len)?;
-                injected_failure(2)?;
-                // Map the shorter view while the file is still at least its
-                // old capacity. A remap failure leaves every field untouched.
-                let replacement = if byte_len == 0 {
-                    None
-                } else {
-                    // SAFETY: `byte_len` is at most the old mapped capacity,
-                    // and truncation happens only after this replacement map
-                    // succeeds, so the open file currently covers the entire
-                    // requested range and remains owned for the map's lifetime.
-                    Some(unsafe {
-                        MmapOptions::new()
-                            .len(byte_len)
-                            .map_mut(&*file)
-                            .map_err(|error| {
-                                io::Error::new(
-                                    error.kind(),
-                                    format!("trim remap failed for {}: {error}", path.display()),
-                                )
-                            })?
-                    })
-                };
 
-                // Dropping the old, longer map before truncation avoids a map
-                // whose range extends beyond EOF. If truncation fails, the
-                // replacement remains coherent against the still-larger file.
-                *mmap = replacement;
-                *capacity = *len;
-                injected_failure(4)?;
-                file.set_len(file_len(byte_len)?)
+                // Windows cannot shrink a file that has *any* live mapped view,
+                // not even a shorter one, so there the mapping is released
+                // before `set_len` and re-established afterwards. POSIX keeps
+                // the original order because mapping the shorter view first is
+                // what lets a failed remap leave every field untouched (see
+                // `trim_remap_failure_leaves_original_mapping_unchanged`) — a
+                // guarantee unmap-first would forfeit. Deliberately two orders.
+                //
+                // The injected failure points move with the order: on Windows
+                // the remap point fires before any state changes, and the
+                // truncate point after the buffer is coherent again, so both
+                // failure-injection tests still assert real observable state.
+                #[cfg(windows)]
+                {
+                    injected_failure(2)?;
+                    drop(mmap.take());
+                    let truncated = file.set_len(file_len(byte_len)?);
+                    // Re-establish the view whether or not the truncation
+                    // succeeded: on success the file is exactly `byte_len`, on
+                    // failure it is still its old, larger size, and `byte_len`
+                    // is within range either way. Restoring before propagating
+                    // keeps a failed trim from leaving an unmapped buffer.
+                    *mmap = remap_after_resize(file, path, byte_len).map_err(|error| {
+                        io::Error::new(
+                            error.kind(),
+                            format!("trim remap failed for {}: {error}", path.display()),
+                        )
+                    })?;
+                    *capacity = *len;
+                    truncated?;
+                    injected_failure(4)?;
+                    Ok(())
+                }
+
+                #[cfg(not(windows))]
+                {
+                    injected_failure(2)?;
+                    // Map the shorter view while the file is still at least its
+                    // old capacity. A remap failure leaves every field untouched.
+                    let replacement = if byte_len == 0 {
+                        None
+                    } else {
+                        // SAFETY: `byte_len` is at most the old mapped capacity,
+                        // and truncation happens only after this replacement map
+                        // succeeds, so the open file currently covers the entire
+                        // requested range and remains owned for the map's lifetime.
+                        Some(unsafe {
+                            MmapOptions::new()
+                                .len(byte_len)
+                                .map_mut(&*file)
+                                .map_err(|error| {
+                                    io::Error::new(
+                                        error.kind(),
+                                        format!(
+                                            "trim remap failed for {}: {error}",
+                                            path.display()
+                                        ),
+                                    )
+                                })?
+                        })
+                    };
+
+                    // Dropping the old, longer map before truncation avoids a map
+                    // whose range extends beyond EOF. If truncation fails, the
+                    // replacement remains coherent against the still-larger file.
+                    *mmap = replacement;
+                    *capacity = *len;
+                    injected_failure(4)?;
+                    file.set_len(file_len(byte_len)?)
+                }
             }
         }
     }
 
     /// Write the data to a file (for save_mmap). For heap, writes Vec contents.
     /// For mapped, flushes then copies the file.
-    pub fn save_to_file(&self, path: &Path) -> io::Result<()> {
+    ///
+    /// Takes `&mut self` because writing to the buffer's *own* backing path is
+    /// a resize of a mapped file, which requires releasing the mapping on
+    /// Windows. That case is delegated to [`Self::trim_to_logical_length`],
+    /// which owns the per-platform ordering.
+    pub fn save_to_file(&mut self, path: &Path) -> io::Result<()> {
+        // Same-file save is a truncation to the logical length, not a copy.
+        if self.file_path() == Some(path) {
+            return self.trim_to_logical_length();
+        }
         match self {
             MmapOrVec::Heap { data } => {
                 // SAFETY: Vec<T> with `T: MmapPod` is contiguous and has no
@@ -782,23 +917,13 @@ impl<T: MmapPod> MmapOrVec<T> {
                 };
                 std::fs::write(path, bytes)
             }
-            MmapOrVec::Mapped {
-                mmap, len, file, ..
-            } => {
+            MmapOrVec::Mapped { mmap, len, .. } => {
                 // Flush first
                 if let Some(mmap) = mmap.as_ref() {
                     mmap.flush()?;
                 }
                 let byte_len = capacity_bytes::<T>(*len)?;
-                // If it's the same file, just flush; otherwise copy
-                let src_path = self.file_path();
-                if let Some(sp) = src_path {
-                    if sp == path {
-                        // Just truncate to exact size
-                        file.set_len(file_len(byte_len)?)?;
-                        return Ok(());
-                    }
-                }
+                // The same-path case returned above; this is always a copy.
                 let bytes = match mmap.as_ref() {
                     Some(mmap) => &mmap[..byte_len],
                     None => &[],
