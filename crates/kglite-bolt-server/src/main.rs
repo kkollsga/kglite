@@ -156,8 +156,24 @@ fn init_tracing() {
         .init();
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Build the runtime by hand rather than via `#[tokio::main]` so the worker
+/// threads get `QUERY_THREAD_STACK_SIZE` instead of tokio's 2 MiB default.
+/// Connection tasks run the Cypher pipeline inline on a worker (see
+/// `KgliteBackend::execute` in `backend.rs`), and that pipeline recurses per
+/// level of expression nesting — on a 2 MiB worker a deeply nested query overflows
+/// the stack, which in Rust aborts the whole process and so disconnects every
+/// other client. The parser's nesting cap bounds the recursion; this gives
+/// that bound room to land.
+fn main() -> Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(kglite::api::session::QUERY_THREAD_STACK_SIZE)
+        .build()
+        .context("failed to build tokio runtime")?
+        .block_on(serve())
+}
+
+async fn serve() -> Result<()> {
     init_tracing();
 
     let cli = Cli::parse();

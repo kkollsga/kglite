@@ -293,16 +293,111 @@ def test_edge_whitespace_only_query(bolt_server):
 def test_edge_long_query_10kb(bolt_server):
     """10 KB query — long but valid WHERE clause built from many small
     OR predicates. Pins that the parser doesn't have an unreasonable
-    short-query bias and that boltr framing handles the size."""
-    # ~10 KB of predicates: WHERE n.title = 'X0' OR n.title = 'X1' OR ...
-    predicates = " OR ".join([f"n.title = 'X{i}'" for i in range(1500)])
+    short-query bias and that boltr framing handles the size.
+
+    Deliberately sized *under* the parser's nesting budget (see
+    `test_deep_query_errors_without_killing_server`): query length and
+    query nesting depth are independent, and this test is about length.
+    """
+    # >10 KB of predicates, 500 levels deep:
+    # WHERE n.title = 'X00000' OR n.title = 'X00001' OR ...
+    predicates = " OR ".join([f"n.title = 'X{i:05d}'" for i in range(500)])
     query = f"MATCH (n:Person) WHERE {predicates} RETURN count(n) AS c"
     assert len(query) >= 10_000, f"query is only {len(query)} bytes, want >= 10000"
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             result = session.run(query)
-            # None of the X0..X1499 match Alice/Bob/Carol/Dave, so 0 rows.
+            # None of the X00000..X00499 match Alice/Bob/Carol/Dave, so 0 rows.
             assert result.single()["c"] == 0
+
+
+# Query shapes that nest one AST level per operator. Each is parsed by an
+# *iterative* loop, so the parser itself stays shallow while the tree it
+# returns grows one level per term — the shape that used to walk the
+# planner/executor recursion off the end of a 2 MiB tokio worker stack and
+# abort the whole process, taking every other session with it.
+_DEEP_QUERY_SHAPES = {
+    "or_chain": lambda n: (
+        "MATCH (n:Person) WHERE " + " OR ".join(f"n.title = 'X{i}'" for i in range(n)) + " RETURN count(n) AS c"
+    ),
+    "and_chain": lambda n: (
+        "MATCH (n:Person) WHERE " + " AND ".join(f"n.title <> 'X{i}'" for i in range(n)) + " RETURN count(n) AS c"
+    ),
+    "additive_chain": lambda n: "RETURN " + " + ".join(["1"] * n) + " AS s",
+    "multiplicative_chain": lambda n: "RETURN " + " * ".join(["1"] * n) + " AS s",
+    "concat_chain": lambda n: "RETURN " + " || ".join(["'a'"] * n) + " AS s",
+    "subscript_chain": lambda n: "RETURN [1]" + "[0]" * n + " AS s",
+    # Recursively-parsed shapes — already guarded before this fix; kept so
+    # both families stay covered by one test.
+    "paren_nest": lambda n: "RETURN " + "(" * n + "1" + ")" * n + " AS s",
+    "not_chain": lambda n: "MATCH (n:Person) WHERE " + "NOT " * n + "n.title = 'A' RETURN count(n) AS c",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_DEEP_QUERY_SHAPES))
+def test_deep_query_errors_without_killing_server(tmp_path, shape):
+    """A pathologically deep query must fail *that one query* — not abort
+    the server process.
+
+    A Rust stack overflow is an abort, not an unwind, so a query that
+    recursed past the worker thread's stack used to kill the process and
+    disconnect every other client. The parser now caps AST nesting, so the
+    client gets a SyntaxError and the server keeps serving.
+
+    Asserts, per shape: (1) a proper Bolt `Neo.ClientError.*` error rather
+    than a dropped connection; (2) the *same* process is still running
+    afterwards — never restarted, PID unchanged; (3) a fresh session still
+    executes queries; (4) stderr shows no stack-overflow abort.
+    """
+    from tests.conftest import (
+        _build_bolt_fixture_graph,
+        _spawn_bolt_server,
+        _teardown_bolt_server,
+    )
+
+    query = _DEEP_QUERY_SHAPES[shape](2000)
+
+    fixture = tmp_path / "fixture.kgl"
+    _build_bolt_fixture_graph(fixture)
+    proc, url = _spawn_bolt_server(fixture)
+    pid_before = proc.pid
+    try:
+        with neo4j.GraphDatabase.driver(url, auth=("neo4j", "password")) as driver:
+            with driver.session() as session:
+                with pytest.raises(neo4j.exceptions.ClientError) as exc_info:
+                    session.run(query).consume()
+        # A *client* error, not ServiceUnavailable — which is what a dead
+        # process looks like from the driver's side.
+        assert exc_info.value.code.startswith("Neo.ClientError."), exc_info.value.code
+
+        # The process must still be the one we started.
+        assert proc.poll() is None, f"server exited with {proc.returncode} — a deep query must not kill the process"
+        assert proc.pid == pid_before, "server was restarted, not survived"
+
+        # A brand-new session on the same process still works.
+        with neo4j.GraphDatabase.driver(url, auth=("neo4j", "password")) as driver:
+            with driver.session() as session:
+                assert session.run("RETURN 1 AS x").single()["x"] == 1
+    finally:
+        _teardown_bolt_server(proc)
+        stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+        assert "overflowed its stack" not in stderr, stderr[-2000:]
+
+
+@pytest.mark.parametrize("shape", sorted(_DEEP_QUERY_SHAPES))
+def test_moderately_deep_query_still_succeeds(bolt_server, shape):
+    """Control for `test_deep_query_errors_without_killing_server`: the
+    guard must reject only pathological nesting, not ordinary queries.
+
+    Without this control, a guard that rejected *everything* would pass
+    the abort test.
+    """
+    query = _DEEP_QUERY_SHAPES[shape](100)
+    with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
+        with driver.session() as session:
+            # Succeeds and returns exactly one row; the value differs per
+            # shape, so assert only that the query ran.
+            assert session.run(query).single() is not None
 
 
 def test_edge_unicode_in_param_value(bolt_server):

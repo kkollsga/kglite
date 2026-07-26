@@ -117,6 +117,82 @@ def test_not_chain_past_budget_is_a_clean_syntax_error():
         g.cypher("RETURN " + "NOT " * 600 + "false AS x")
 
 
+# The left-associative operator chains are parsed *iteratively*, so the
+# parser's own call depth stays flat while the tree it returns grows one level
+# per term. The budget has to charge those levels too: the planner walkers, the
+# executor's predicate evaluator, and the AST's drop glue all recurse per
+# level, and on a server worker thread (tokio default: 2 MiB) that recursion
+# used to overflow — aborting the whole process, not just failing the query.
+# `n` is the number of nesting levels the shape produces.
+_CHAIN_SHAPES = {
+    "or": lambda n: "RETURN " + " OR ".join(["false"] * (n + 1)) + " AS x",
+    "xor": lambda n: "RETURN " + " XOR ".join(["false"] * (n + 1)) + " AS x",
+    "and": lambda n: "RETURN " + " AND ".join(["true"] * (n + 1)) + " AS x",
+    "add": lambda n: "RETURN " + " + ".join(["1"] * (n + 1)) + " AS x",
+    "subtract": lambda n: "RETURN 0" + " - 0" * n + " AS x",
+    "multiply": lambda n: "RETURN " + " * ".join(["1"] * (n + 1)) + " AS x",
+    "divide": lambda n: "RETURN 1" + " / 1" * n + " AS x",
+    "modulo": lambda n: "RETURN 3" + " % 5" * n + " AS x",
+    "concat": lambda n: "RETURN " + " || ".join(["'a'"] * (n + 1)) + " AS x",
+    "subscript": lambda n: "RETURN [1]" + "[0]" * n + " AS x",
+    "label_chain": lambda n: "MATCH (h:Hop) WHERE h" + ":Hop" * n + " RETURN count(h) AS x",
+}
+
+_CHAIN_EXPECTED_WITHIN_BUDGET = {
+    "or": False,
+    "xor": False,
+    "and": True,
+    "add": 400,
+    "subtract": 0,
+    "multiply": 1,
+    "divide": 1,
+    "modulo": 3,
+    "concat": "a" * 400,
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_CHAIN_EXPECTED_WITHIN_BUDGET))
+def test_operator_chain_within_budget_parses_and_executes(shape):
+    # 399 levels — comfortably inside the budget, so charging chain levels
+    # must not reject ordinary (if long) queries.
+    g = KnowledgeGraph()
+    got = g.cypher(_CHAIN_SHAPES[shape](399)).scalar()
+    assert got == _CHAIN_EXPECTED_WITHIN_BUDGET[shape]
+
+
+def test_label_chain_within_budget_parses_and_executes(chain):
+    assert chain.cypher(_CHAIN_SHAPES["label_chain"](399)).scalar() == 13
+
+
+@pytest.mark.parametrize("shape", sorted(_CHAIN_SHAPES))
+def test_operator_chain_past_budget_is_a_clean_syntax_error(shape, chain):
+    # Every iteratively-parsed chain must hit the same budget as the
+    # recursively-parsed shapes rather than running off the stack.
+    with pytest.raises(kglite.CypherSyntaxError, match=f"nesting exceeds {BUDGET} levels"):
+        chain.cypher(_CHAIN_SHAPES[shape](BUDGET + 100))
+
+
+@pytest.mark.parametrize("shape", sorted(_CHAIN_SHAPES))
+def test_pathological_operator_chain_cannot_kill_the_process(shape):
+    # Subprocess for the same reason as the nesting crash-shape test below:
+    # on regression this aborts the interpreter, which would otherwise take
+    # the whole test run with it. 20k levels is far past any stack.
+    code = (
+        "import kglite\n"
+        "g = kglite.KnowledgeGraph()\n"
+        "g.cypher('CREATE (:Hop {id: 0})')\n"
+        f"q = {_CHAIN_SHAPES[shape](20_000)!r}\n"
+        "try:\n"
+        "    g.cypher(q)\n"
+        "    print('UNEXPECTED-SUCCESS')\n"
+        "except kglite.CypherSyntaxError:\n"
+        "    print('CLEAN-ERROR')\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, f"process died (rc={proc.returncode}): {proc.stderr[-300:]}"
+    assert proc.stdout.strip() == "CLEAN-ERROR", proc.stdout
+
+
 @pytest.mark.parametrize("opener,closer", [("(", ")"), ("[", "]")], ids=["parens", "lists"])
 def test_pathological_nesting_cannot_kill_the_process(opener, closer):
     # Run in a subprocess: before the recursion budget existed this shape

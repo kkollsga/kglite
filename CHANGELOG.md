@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
 ### Changed
 
 - `KnowledgeGraph.define_schema` can now fail: installing a schema installs the
@@ -45,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Graphs in columnar mode, graphs with user-created property/range/composite
   indexes, and the `mapped`/`disk` backends keep the previous whole-graph
   checkpoint, so their write cost is unchanged.
+- The Bolt and MCP servers now give their tokio worker threads an 8 MiB stack
+  (`kglite::api::session::QUERY_THREAD_STACK_SIZE`) instead of tokio's 2 MiB
+  default, matching the headroom the CLI and Python wheel already get on the
+  main thread. Bindings that dispatch queries onto their own threads should
+  size them with this constant.
 
 ### Fixed
 
@@ -63,6 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Cypher script splitter behind the REPL's `.read` (and now `migrate`) is
   quote-aware: a `;` inside a string literal is data, so
   `CREATE (:Note {body: 'a;b'})` is no longer torn into two invalid fragments.
+- `n:A:B` label chains, subscript chains, and long arithmetic/boolean operator
+  chains past the nesting budget now report the documented
+  "nesting exceeds 512 levels" syntax error instead of aborting the process
+  (all frontends, including in-process Python).
 
 ### Changed — behaviour
 
@@ -95,6 +102,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The MCP server, CLI, and Bolt server open graphs through the shared
   engine-level helper rather than this function, so none of them changes
   behaviour.
+
+### Security
+
+- Fixed a denial of service in the Bolt and MCP servers: a single deeply
+  nested query from any client could overflow a server worker thread's stack,
+  and because a Rust stack overflow aborts rather than unwinds, the whole
+  server process died — disconnecting every other connected session. The
+  query is now rejected with a `Neo.ClientError.Statement.SyntaxError`
+  ("Expression nesting exceeds 512 levels; simplify the query") and the server
+  keeps serving.
+
+  The parser's 512-level nesting budget previously counted only *recursively*
+  parsed nesting (parentheses, lists, `NOT`, unary minus). The
+  left-associative operator chains — `OR` / `XOR` / `AND`, `+` / `-` / `||`,
+  `*` / `/` / `%`, subscripting, and `n:A:B` label chains — are parsed
+  iteratively, so the parser stayed shallow while the tree it returned grew
+  one level per term. The planner's expression walkers, the executor's
+  predicate evaluator, and the AST's drop glue all recurse per level, so an
+  unbounded chain walked off the end of the stack. Those chains now charge the
+  same budget, making it a bound on AST depth rather than on parser call depth.
 
 ## [0.14.5] - 2026-07-22
 
