@@ -93,6 +93,16 @@ impl DiskGraph {
         }
 
         let count = entries.len();
+        // Evict the cached index before rebuilding it. `PropertyIndex::build`
+        // truncates the same `keys`/`offsets`/`ids` files that a cached entry
+        // still has memory-mapped, and Windows refuses to re-create a mapped
+        // file (`ERROR_USER_MAPPED_FILE`). Removing the key (rather than
+        // storing `None`, which means "no such index") lets a concurrent
+        // lookup fall back to opening the bundle from disk.
+        self.property_indexes
+            .write()
+            .unwrap()
+            .remove(&(node_type.to_string(), property.to_string()));
         let idx = property_index::PropertyIndex::build(
             self.active_write_dir(),
             node_type,
@@ -261,6 +271,12 @@ impl DiskGraph {
         }
 
         let count = entries.len();
+        // Same rebuild-over-a-live-mapping hazard as `build_property_index`:
+        // release the cached bundle before `build_global` truncates the files
+        // it maps. `save_disk` rebuilds the `title` and `nid` global indexes on
+        // every save, so on Windows the second save of a graph would otherwise
+        // fail here.
+        self.global_indexes.write().unwrap().remove(property);
         let idx = property_index::PropertyIndex::build_global(
             self.active_write_dir(),
             property,

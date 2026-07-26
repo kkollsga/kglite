@@ -67,7 +67,9 @@ pub mod api {
     // (The code-tree handle helpers `resolve_code_entity` / `CODE_TYPES` /
     // `source_location` live in `api::code_entities`.)
     pub use crate::graph::handle::{
-        discover_property_keys_from_data, infer_selection_node_type, KnowledgeGraph,
+        discover_property_keys_excluding, discover_property_keys_from_data,
+        infer_selection_node_type, is_canonical_node_column, KnowledgeGraph,
+        CANONICAL_NODE_COLUMNS,
     };
     /// Core schema data types — the node record (`NodeData`), the projected
     /// `NodeInfo`, geo/temporal validity configs (`SpatialConfig` /
@@ -77,7 +79,7 @@ pub mod api {
     pub use crate::graph::schema::{
         parse_spatial_column_types_from_pairs, parse_temporal_column_types_from_pairs,
         ConnectionSchemaDefinition, NodeData, NodeInfo, NodeSchemaDefinition, SchemaDefinition,
-        SpatialConfig, TemporalConfig, ValidationError,
+        SchemaInstall, SpatialConfig, TemporalConfig, ValidationError,
     };
     /// The fluent **selection** data model — the cursor state threaded
     /// through the fluent query chain (and through Selection-scoped

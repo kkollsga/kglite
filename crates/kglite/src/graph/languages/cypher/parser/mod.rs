@@ -61,12 +61,32 @@ pub struct CypherParser {
 /// It does not, however, bound their *stack use* equally. Only
 /// [`CypherParser::descend`] grows the stack on demand (via `stacker`); the
 /// planner, executor and `Drop` walkers recurse on whatever stack their
-/// thread already has. Debug-profile frames are several times larger than
-/// release frames, so the guarantee those stages actually carry is "at most
-/// 512 levels", not "cannot overflow" — a thread with a small stack (Windows
-/// defaults to 1 MB) has not been measured against a 512-level AST. Extending
-/// the `stacker` guard past the parser is deliberately deferred until that
-/// measurement exists.
+/// thread already has. That has now been measured
+/// (`super::stack_probe`, macOS/aarch64, worst shape: an `OR`/`AND`/`NOT`
+/// tree walked by the executor):
+///
+/// | stage | debug | release |
+/// |---|---|---|
+/// | executor `evaluate_predicate`/`evaluate_expression` | 7,248 B/level | 1,056 B/level |
+/// | planner walkers (WHERE chains) | 2,160 B/level | 480 B/level |
+/// | recursive `Drop` | 112 B/level | 64 B/level |
+///
+/// At this budget the deepest accepted query therefore peaks at ~3.7 MiB in
+/// debug and ~0.54 MiB in release, against the 8 MiB every frontend runs on
+/// ([`crate::graph::session::QUERY_THREAD_STACK_SIZE`], and the main-thread
+/// default for the CLI and the Python wheel). So the stages downstream of the
+/// parser do not need their own `stacker` guard — the budget alone keeps them
+/// inside the stack they are given, and
+/// `stack_probe::budget_ceiling_query_fits_the_query_thread_stack` holds that
+/// true on every platform CI runs.
+///
+/// The corollary is that this budget is load-bearing, not decorative: raising
+/// it scales the peak linearly, and the release peak would pass 1 MiB — the
+/// smallest in-process stack in play — somewhere around 1,000 levels. Raising
+/// the budget means adding a guard first, and a guard on the per-row
+/// `evaluate_expression` measured **+14%** on the in-memory expression path.
+/// Growing the stack once at executor entry measured free, and is the shape
+/// to reach for if the budget ever has to move.
 ///
 /// The budget bounds **AST depth, not parser call depth**, and those differ:
 /// the left-associative operator chains (`OR`/`XOR`/`AND`, `+`/`-`/`||`,
@@ -79,7 +99,7 @@ pub struct CypherParser {
 /// walkers themselves have neither a depth guard nor stack growth, and they
 /// run on server worker threads whose stacks are far smaller than the main
 /// thread's.
-const MAX_EXPRESSION_DEPTH: usize = 512;
+pub(super) const MAX_EXPRESSION_DEPTH: usize = 512;
 
 /// Remaining-stack threshold below which [`CypherParser::descend`] allocates
 /// a fresh segment, and the size of that segment. The red zone must cover the
@@ -137,8 +157,18 @@ impl CypherParser {
     /// releases the whole run at once.
     pub(super) fn deepen(&mut self) -> Result<(), String> {
         if self.depth >= MAX_EXPRESSION_DEPTH {
+            // Name the rewrite. The overwhelmingly common way to reach this
+            // limit is generated code — a filter/facet builder emitting one
+            // `OR` term per selected value — and each term costs a nesting
+            // level while the equivalent `IN [...]` costs one level no matter
+            // how many values it holds. "Simplify the query" alone leaves the
+            // author guessing at a limit they did not know existed.
             return Err(format!(
-                "Expression nesting exceeds {} levels; simplify the query",
+                "Expression nesting exceeds {} levels; simplify the query. \
+                 Long chains of OR'd equality tests are the usual cause and \
+                 nest one level per term — rewrite `x = a OR x = b OR ...` as \
+                 `x IN [a, b, ...]`, which nests one level however many \
+                 values the list holds.",
                 MAX_EXPRESSION_DEPTH
             ));
         }

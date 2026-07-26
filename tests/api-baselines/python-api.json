@@ -512,7 +512,7 @@
         },
         "define_schema": {
           "kind": "method",
-          "signature": "(self, /, schema_dict)"
+          "signature": "(self, /, schema_dict, *, replace=False)"
         },
         "degree_centrality": {
           "kind": "method",

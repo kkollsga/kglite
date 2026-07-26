@@ -1825,6 +1825,20 @@ impl core::hash::Hash for kglite::error::KgErrorCode
 pub fn kglite::error::KgErrorCode::hash<__H: core::hash::Hasher>(&self, state: &mut __H)
 impl core::marker::Copy for kglite::error::KgErrorCode
 impl core::marker::StructuralPartialEq for kglite::error::KgErrorCode
+pub enum kglite::api::SchemaInstall
+pub kglite::api::SchemaInstall::Merge
+pub kglite::api::SchemaInstall::Replace
+impl core::clone::Clone for kglite::api::SchemaInstall
+pub fn kglite::api::SchemaInstall::clone(&self) -> kglite::api::SchemaInstall
+impl core::cmp::Eq for kglite::api::SchemaInstall
+impl core::cmp::PartialEq for kglite::api::SchemaInstall
+pub fn kglite::api::SchemaInstall::eq(&self, other: &kglite::api::SchemaInstall) -> bool
+impl core::default::Default for kglite::api::SchemaInstall
+pub fn kglite::api::SchemaInstall::default() -> kglite::api::SchemaInstall
+impl core::fmt::Debug for kglite::api::SchemaInstall
+pub fn kglite::api::SchemaInstall::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::SchemaInstall
+impl core::marker::StructuralPartialEq for kglite::api::SchemaInstall
 pub enum kglite::api::SelectionOperation
 pub kglite::api::SelectionOperation::Custom(alloc::string::String)
 pub kglite::api::SelectionOperation::Filter(std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::FilterCondition>)
@@ -2079,12 +2093,13 @@ impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::auto_timestamp_for(&self, node_type: &str) -> bool
 pub fn kglite::api::DirGraph::auto_timestamp_for_connection(&self, conn_type: &str) -> bool
 pub fn kglite::api::DirGraph::clear_schema(&mut self)
+pub fn kglite::api::DirGraph::constraints_dropped_by_replace(&self, incoming: &kglite::api::SchemaDefinition) -> alloc::vec::Vec<alloc::string::String>
 pub fn kglite::api::DirGraph::get_instructions(&self, channel: core::option::Option<&str>) -> core::option::Option<&str>
 pub fn kglite::api::DirGraph::get_schema(&self) -> core::option::Option<&kglite::api::SchemaDefinition>
 pub fn kglite::api::DirGraph::layer_for(&self, node_type: &str) -> core::option::Option<&str>
 pub fn kglite::api::DirGraph::primary_key_for(&self, node_type: &str) -> core::option::Option<&str>
 pub fn kglite::api::DirGraph::set_instructions(&mut self, text: &str, channel: core::option::Option<&str>)
-pub fn kglite::api::DirGraph::set_schema(&mut self, schema: kglite::api::SchemaDefinition) -> core::result::Result<(), kglite::error::KgError>
+pub fn kglite::api::DirGraph::set_schema(&mut self, schema: kglite::api::SchemaDefinition, mode: kglite::api::SchemaInstall) -> core::result::Result<(), kglite::error::KgError>
 pub fn kglite::api::DirGraph::with_write_provenance<R>(&mut self, git_sha: core::option::Option<&str>, modified_by: core::option::Option<&str>, write: impl core::ops::function::FnOnce(&mut Self) -> R) -> R
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::compact_disk(&mut self) -> core::result::Result<usize, alloc::string::String>
@@ -2388,6 +2403,7 @@ pub kglite::api::SchemaDefinition::node_schemas: std::collections::hash::map::Ha
 impl kglite::api::SchemaDefinition
 pub fn kglite::api::SchemaDefinition::add_connection_schema(&mut self, connection_type: alloc::string::String, schema: kglite::api::ConnectionSchemaDefinition)
 pub fn kglite::api::SchemaDefinition::add_node_schema(&mut self, node_type: alloc::string::String, schema: kglite::api::NodeSchemaDefinition)
+pub fn kglite::api::SchemaDefinition::merged_with(self, incoming: kglite::api::SchemaDefinition) -> Self
 pub fn kglite::api::SchemaDefinition::new() -> Self
 impl core::clone::Clone for kglite::api::SchemaDefinition
 pub fn kglite::api::SchemaDefinition::clone(&self) -> kglite::api::SchemaDefinition
@@ -2464,6 +2480,7 @@ impl serde_core::ser::Serialize for kglite::api::TemporalConfig
 pub fn kglite::api::TemporalConfig::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::TemporalConfig
 pub fn kglite::api::TemporalConfig::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub const kglite::api::CANONICAL_NODE_COLUMNS: [&str; 3]
 pub trait kglite::api::Embedder: core::marker::Send + core::marker::Sync
 pub fn kglite::api::Embedder::dimension(&self) -> usize
 pub fn kglite::api::Embedder::embed(&self, texts: &[alloc::string::String]) -> core::result::Result<alloc::vec::Vec<alloc::vec::Vec<f32>>, alloc::string::String>
@@ -2692,10 +2709,12 @@ pub fn kglite::api::durable::RecordingGraph<G>::node_weight(&self, idx: petgraph
 pub fn kglite::api::durable::RecordingGraph<G>::reset_arenas(&self)
 pub fn kglite::api::durable::RecordingGraph<G>::sources_for_conn_type_bounded(&self, conn_type: kglite::api::InternedKey, max: core::option::Option<usize>) -> core::option::Option<alloc::vec::Vec<u32>>
 pub fn kglite::api::durable::RecordingGraph<G>::str_prop_eq(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, target: &str) -> core::option::Option<bool>
+pub fn kglite::api::discover_property_keys_excluding(nodes: &[(&str, &kglite::api::NodeData)], interner: &kglite::api::StringInterner, excluded: &[&str]) -> alloc::vec::Vec<alloc::string::String>
 pub fn kglite::api::discover_property_keys_from_data(nodes: &[(&str, &kglite::api::NodeData)], interner: &kglite::api::StringInterner) -> alloc::vec::Vec<alloc::string::String>
 pub fn kglite::api::explore_markdown(dir: &kglite::api::DirGraph, query: &str, opts: &kglite::api::ExploreOptions, source_roots: &[std::path::PathBuf]) -> alloc::string::String
 pub fn kglite::api::graphgen(cfg: &kglite::graphgen::GraphGenConfig, out_dir: &std::path::Path) -> core::io::error::Result<kglite::graphgen::GraphGenStats>
 pub fn kglite::api::infer_selection_node_type(selection: &kglite::api::CowSelection, dir: &alloc::sync::Arc<kglite::api::DirGraph>) -> core::option::Option<alloc::string::String>
+pub fn kglite::api::is_canonical_node_column(key: &str) -> bool
 pub fn kglite::api::make_dir_graph_mut(arc: &mut alloc::sync::Arc<kglite::api::DirGraph>) -> &mut kglite::api::DirGraph
 pub fn kglite::api::parse_spatial_column_types_from_pairs(pairs: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>) -> core::result::Result<(core::option::Option<kglite::api::SpatialConfig>, alloc::vec::Vec<(alloc::string::String, alloc::string::String)>), alloc::string::String>
 pub fn kglite::api::parse_temporal_column_types_from_pairs(pairs: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>) -> core::result::Result<(core::option::Option<kglite::api::TemporalConfig>, alloc::vec::Vec<(alloc::string::String, alloc::string::String)>), alloc::string::String>

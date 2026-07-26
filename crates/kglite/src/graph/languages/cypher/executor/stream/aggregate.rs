@@ -19,7 +19,7 @@
 
 use super::super::super::ast::{is_aggregate_expression, Expression, ReturnClause};
 use super::super::super::result::{Bindings, ResultRow};
-use super::super::helpers::return_item_column_name;
+use super::super::helpers::{carry_group_bindings, grouping_variables, return_item_column_name};
 use super::super::CypherExecutor;
 use super::RowStream;
 use crate::datatypes::values::Value;
@@ -249,19 +249,19 @@ impl AggState {
 /// aggregate specs.
 struct GroupAcc {
     states: Vec<AggState>,
-    /// Captured node-binding for the first row in this group, by
-    /// variable name. Used to preserve `node_bindings` on the output
-    /// row so downstream MATCH/OPTIONAL MATCH clauses can constrain
-    /// patterns to the same nodes (matches existing materialized
+    /// Bindings-only row holding the first input row's node/edge/path
+    /// bindings for the variables the grouping keys read. Preserved on the
+    /// output row so a trailing ORDER BY and downstream MATCH/OPTIONAL MATCH
+    /// clauses can still resolve those variables (matches the materialized
     /// behavior in `execute_return_with_aggregation`).
-    first_node_bindings: Bindings<NodeIndex>,
+    carried: ResultRow,
 }
 
 impl GroupAcc {
     fn new(specs: &[AggSpec]) -> Self {
         GroupAcc {
             states: specs.iter().map(AggState::new).collect(),
-            first_node_bindings: Bindings::new(),
+            carried: ResultRow::new(),
         }
     }
 }
@@ -398,17 +398,11 @@ pub fn apply<'q>(
     let mut surrogate_groups: Vec<(Vec<GroupKeyPart>, GroupAcc)> = Vec::new();
     let mut surrogate_index: FxHashMap<Vec<GroupKeyPart>, usize> = FxHashMap::default();
 
-    // Capture variable names of group-key expressions that are pure
-    // variable references — used to copy node bindings forward on the
-    // first row of each group.
-    let group_var_names: Vec<Option<String>> = group_indices
-        .iter()
-        .map(|&i| match &return_clause.items[i].expression {
-            Expression::Variable(v) => Some(v.clone()),
-            Expression::PropertyAccess { variable, .. } => Some(variable.clone()),
-            _ => None,
-        })
-        .collect();
+    // Variables the grouping keys read — copied forward from the first row of
+    // each group so a trailing ORDER BY / downstream MATCH can still resolve
+    // them. Shared with the materialized and fused-OPTIONAL paths so all three
+    // agree on what survives aggregation.
+    let carried_vars = grouping_variables(&return_clause.items);
 
     for (row_count, row_result) in upstream.enumerate() {
         let row = row_result?;
@@ -442,13 +436,9 @@ pub fn apply<'q>(
                 let idx = surrogate_groups.len();
                 surrogate_index.insert(key_parts.clone(), idx);
                 let mut acc = GroupAcc::new(specs);
-                // Capture node bindings for variables that are
-                // group-key expressions (pure Variable or PropertyAccess).
-                for var_opt in group_var_names.iter().flatten() {
-                    if let Some(&node_idx) = row.node_bindings.get(var_opt) {
-                        acc.first_node_bindings.insert(var_opt.clone(), node_idx);
-                    }
-                }
+                // Capture this first row's bindings for every variable the
+                // grouping keys read.
+                carry_group_bindings(&carried_vars, &row, &mut acc.carried);
                 surrogate_groups.push((key_parts, acc));
                 idx
             }
@@ -536,9 +526,7 @@ pub fn apply<'q>(
         }
 
         let mut row = ResultRow::from_projected(projected);
-        for (k, v) in acc.first_node_bindings.iter() {
-            row.node_bindings.insert(k.clone(), *v);
-        }
+        carry_group_bindings(&carried_vars, &acc.carried, &mut row);
         output_rows.push(row);
     }
 
@@ -648,11 +636,11 @@ fn merge_group_accs(mut a: GroupAcc, b: GroupAcc) -> GroupAcc {
         merged_states.push(sa);
     }
     a.states = merged_states;
-    // Keep the first-seen node bindings — matches materialized behavior
+    // Keep the first-seen bindings — matches materialized behavior
     // (execute_return_with_aggregation uses the first row of the group).
     GroupAcc {
         states: a.states,
-        first_node_bindings: a.first_node_bindings,
+        carried: a.carried,
     }
 }
 

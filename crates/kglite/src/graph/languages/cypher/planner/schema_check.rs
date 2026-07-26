@@ -46,6 +46,8 @@
 //! - `crates/kglite-bolt-server/src/backend.rs::execute`
 
 use super::super::ast::*;
+use super::super::executor::helpers::expression_to_string;
+use super::simplification::collect_expression_refs;
 use crate::graph::core::pattern_matching::{Pattern, PatternElement};
 use crate::graph::mutation::validation::did_you_mean;
 use crate::graph::schema::{DirGraph, InternedKey};
@@ -152,9 +154,205 @@ fn bind_row_source(clause: &Clause, scope: &mut HashSet<String>) -> Result<(), S
     Ok(())
 }
 
+/// What a trailing `ORDER BY` may reference after an **aggregating** RETURN.
+///
+/// An aggregating RETURN emits one row per group. Only two kinds of thing have
+/// a defined value on that row: the projected columns, and the variables the
+/// grouping keys pin down (the executor carries their bindings forward — see
+/// `executor::helpers::carry_group_bindings`). Ordering by anything else is
+/// what Neo4j rejects outright: `count(c)` collapses many `c`s into a scalar,
+/// so `ORDER BY c.label` has no single value to sort on.
+///
+/// kglite splits the difference: the well-defined half sorts correctly, the
+/// ambiguous half is rejected with a message naming the fix. What it must
+/// never do — and did before this check existed — is evaluate the sort key to
+/// NULL on every row and hand back insertion order as though the clause had
+/// been honoured.
+struct AggregateOrderScope {
+    /// Projected column names plus every variable the grouping keys read.
+    allowed: HashSet<String>,
+    /// Rendered aggregate projections → their alias, if any. `ORDER BY count(p)`
+    /// resolves at runtime only when `count(p)` is projected *unaliased*, since
+    /// then the result column is literally named `count(p)`; aliasing it moves
+    /// the value to the alias and leaves the expression form unresolvable.
+    aggregates: HashMap<String, Option<String>>,
+    /// Projected aliases, listed in the error message as the way out.
+    aliases: Vec<String>,
+}
+
+impl AggregateOrderScope {
+    /// `None` when no restriction applies — either the projection does not
+    /// aggregate (a plain projection keeps every binding on its rows, so
+    /// ordering by a non-projected expression stays well defined), or it
+    /// contains `*` and we cannot enumerate what it carries.
+    fn for_projection(items: &[ReturnItem]) -> Option<Self> {
+        if !items
+            .iter()
+            .any(|item| is_aggregate_expression(&item.expression))
+        {
+            return None;
+        }
+        if items
+            .iter()
+            .any(|item| matches!(item.expression, Expression::Star))
+        {
+            return None;
+        }
+
+        let mut allowed = HashSet::new();
+        let mut aliases = Vec::new();
+        let mut aggregates = HashMap::new();
+        for item in items {
+            if let Some(alias) = &item.alias {
+                allowed.insert(alias.clone());
+                aliases.push(alias.clone());
+            } else if let Expression::Variable(name) = &item.expression {
+                allowed.insert(name.clone());
+                aliases.push(name.clone());
+            }
+            if is_aggregate_expression(&item.expression) {
+                aggregates.insert(expression_to_string(&item.expression), item.alias.clone());
+            } else {
+                collect_expression_refs(&item.expression, &mut allowed);
+            }
+        }
+        Some(AggregateOrderScope {
+            allowed,
+            aggregates,
+            aliases,
+        })
+    }
+
+    fn projected_hint(&self) -> String {
+        if self.aliases.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ", or order by a projected column ({})",
+                self.aliases.join(", ")
+            )
+        }
+    }
+
+    fn validate(&self, order: &OrderByClause) -> Result<(), SchemaError> {
+        for item in &order.items {
+            if is_aggregate_expression(&item.expression) {
+                let rendered = expression_to_string(&item.expression);
+                match self.aggregates.get(&rendered) {
+                    // Projected unaliased — the executor resolves the sort key
+                    // from the identically-named result column.
+                    Some(None) => continue,
+                    Some(Some(alias)) => {
+                        return Err(SchemaError {
+                            kind: SchemaErrorKind::UndefinedVariable,
+                            message: format!(
+                                "ORDER BY '{rendered}' cannot be resolved after an aggregating \
+                                 RETURN because that aggregate is projected as '{alias}'. \
+                                 Order by the alias instead (`ORDER BY {alias}`)."
+                            ),
+                        });
+                    }
+                    None => {
+                        return Err(SchemaError {
+                            kind: SchemaErrorKind::UndefinedVariable,
+                            message: format!(
+                                "ORDER BY cannot compute the aggregate '{rendered}' after an \
+                                 aggregating RETURN. Project it first \
+                                 (e.g. `RETURN ..., {rendered} AS sort_key ORDER BY sort_key`){}.",
+                                self.projected_hint()
+                            ),
+                        });
+                    }
+                }
+            }
+            let mut refs = HashSet::new();
+            collect_expression_refs(&item.expression, &mut refs);
+            for name in refs {
+                if !self.allowed.contains(&name) {
+                    return Err(SchemaError {
+                        kind: SchemaErrorKind::UndefinedVariable,
+                        message: format!(
+                            "ORDER BY cannot use '{name}' after an aggregating RETURN: \
+                             '{name}' is not part of the grouping keys, so it has no single \
+                             value per group. Add the sort key to the RETURN list \
+                             (e.g. `RETURN ..., {name}.<property> AS sort_key ORDER BY sort_key`){}.",
+                            self.projected_hint()
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Validate a RETURN's own expressions, then produce the scope its trailing
+/// clauses see: everything already in scope plus the projection's aliases.
+///
+/// RETURN is terminal for the pipeline, so unlike WITH it does not narrow the
+/// scope — HAVING and a trailing ORDER BY may still name pre-projection
+/// variables. Whether an *aggregating* RETURN leaves those variables with a
+/// usable value is a separate question, answered by [`AggregateOrderScope`].
+fn scope_after_return(
+    return_clause: &ReturnClause,
+    scope: HashSet<String>,
+) -> Result<HashSet<String>, SchemaError> {
+    for item in &return_clause.items {
+        validate_expression_scope(&item.expression, &scope)?;
+    }
+    let mut having_scope = scope;
+    having_scope.extend(
+        return_clause
+            .items
+            .iter()
+            .filter_map(|item| item.alias.clone()),
+    );
+    if let Some(having) = &return_clause.having {
+        validate_predicate_scope(having, &having_scope)?;
+    }
+    Ok(having_scope)
+}
+
+/// Validate a WITH's own expressions, then produce the scope it projects
+/// forward: only the aliases and bare variables it names, unless it carries
+/// `*` (which preserves the incoming scope wholesale).
+fn scope_after_with(
+    with_clause: &WithClause,
+    scope: HashSet<String>,
+) -> Result<HashSet<String>, SchemaError> {
+    for item in &with_clause.items {
+        validate_expression_scope(&item.expression, &scope)?;
+    }
+    let preserves_all = with_clause
+        .items
+        .iter()
+        .any(|item| matches!(item.expression, Expression::Star));
+    let mut projected = if preserves_all { scope } else { HashSet::new() };
+    for item in &with_clause.items {
+        if let Some(alias) = &item.alias {
+            projected.insert(alias.clone());
+        } else if let Expression::Variable(name) = &item.expression {
+            projected.insert(name.clone());
+        }
+    }
+    if let Some(where_clause) = &with_clause.where_clause {
+        validate_predicate_scope(&where_clause.predicate, &projected)?;
+    }
+    Ok(projected)
+}
+
 fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), SchemaError> {
     let mut scope = initial.clone();
+    // Set by an aggregating RETURN, consumed by the ORDER BY that follows it.
+    // Rides through a trailing SKIP/LIMIT; any other clause clears it.
+    let mut aggregate_order_scope: Option<AggregateOrderScope> = None;
     for clause in &query.clauses {
+        if !matches!(
+            clause,
+            Clause::OrderBy(_) | Clause::Skip(_) | Clause::Limit(_)
+        ) {
+            aggregate_order_scope = None;
+        }
         match clause {
             Clause::Match(m) | Clause::OptionalMatch(m) => {
                 for pattern in &m.patterns {
@@ -166,49 +364,18 @@ fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), 
                 validate_predicate_scope(&where_clause.predicate, &scope)?
             }
             Clause::Return(return_clause) => {
-                for item in &return_clause.items {
-                    validate_expression_scope(&item.expression, &scope)?;
-                }
-                let mut having_scope = scope.clone();
-                having_scope.extend(
-                    return_clause
-                        .items
-                        .iter()
-                        .filter_map(|item| item.alias.clone()),
-                );
-                if let Some(having) = &return_clause.having {
-                    validate_predicate_scope(having, &having_scope)?;
-                }
-                scope = having_scope;
+                scope = scope_after_return(return_clause, scope)?;
+                aggregate_order_scope = AggregateOrderScope::for_projection(&return_clause.items);
             }
             Clause::With(with_clause) => {
-                for item in &with_clause.items {
-                    validate_expression_scope(&item.expression, &scope)?;
-                }
-                let preserves_all = with_clause
-                    .items
-                    .iter()
-                    .any(|item| matches!(item.expression, Expression::Star));
-                let mut projected = if preserves_all {
-                    scope.clone()
-                } else {
-                    HashSet::new()
-                };
-                for item in &with_clause.items {
-                    if let Some(alias) = &item.alias {
-                        projected.insert(alias.clone());
-                    } else if let Expression::Variable(name) = &item.expression {
-                        projected.insert(name.clone());
-                    }
-                }
-                if let Some(where_clause) = &with_clause.where_clause {
-                    validate_predicate_scope(&where_clause.predicate, &projected)?;
-                }
-                scope = projected;
+                scope = scope_after_with(with_clause, scope)?;
             }
             Clause::OrderBy(order) => {
                 for item in &order.items {
                     validate_expression_scope(&item.expression, &scope)?;
+                }
+                if let Some(restriction) = &aggregate_order_scope {
+                    restriction.validate(order)?;
                 }
             }
             Clause::Skip(skip) => validate_expression_scope(&skip.count, &scope)?,

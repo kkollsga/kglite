@@ -1,6 +1,9 @@
 """Tests for schema definition and validation."""
 
+import warnings
+
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
 
@@ -228,14 +231,43 @@ class TestManagedReloadGuard:
         except ValueError as e:
             assert "'managed' or 'runtime'" in str(e)
 
-    def test_define_schema_replaces_not_merges(self):
-        """define_schema replaces the whole schema — a subset call drops omitted
-        types (documented behaviour; locks against an accidental switch to merge)."""
+    def test_define_schema_merges_leaving_undeclared_types_alone(self):
+        """define_schema merges per node type: a subset call keeps the types it
+        does not name. Declaring per module is the natural pattern, and under the
+        old replace default it silently un-enforced every type a call omitted."""
         g = KnowledgeGraph()
         g.define_schema({"nodes": {"A": {"primary_key": "id"}, "B": {"layer": "runtime"}}})
         assert set(g.schema_definition()["nodes"]) == {"A", "B"}
         g.define_schema({"nodes": {"A": {"primary_key": "id"}}})  # subset
-        assert set(g.schema_definition()["nodes"]) == {"A"}  # B dropped
+        assert set(g.schema_definition()["nodes"]) == {"A", "B"}  # B retained
+
+    def test_define_schema_replaces_a_named_type_wholesale(self):
+        """Merging is per *type*, not per field: a type the call names takes the
+        new declaration entire, so re-declaring it is still how you narrow it."""
+        g = KnowledgeGraph()
+        g.define_schema({"nodes": {"A": {"required": ["x", "y"], "layer": "runtime"}}})
+        g.define_schema({"nodes": {"A": {"required": ["x"]}}})
+        assert g.schema_definition()["nodes"]["A"]["required"] == ["x"]
+        assert "layer" not in g.schema_definition()["nodes"]["A"]
+
+    def test_define_schema_replace_true_drops_omitted_types_and_warns(self):
+        """replace=True restores whole-schema replacement — and names every
+        constraint it stops enforcing, so the loss is never silent."""
+        g = KnowledgeGraph()
+        g.define_schema({"nodes": {"A": {"primary_key": "email"}, "B": {"required": ["t"]}}})
+        with pytest.warns(UserWarning, match=r"A\.email \(PRIMARY KEY\)"):
+            g.define_schema({"nodes": {"B": {"required": ["t"]}}}, replace=True)
+        assert set(g.schema_definition()["nodes"]) == {"B"}
+
+    def test_define_schema_replace_true_is_quiet_when_nothing_is_enforced(self):
+        """The warning tracks lost *enforcement*, not merely lost declarations,
+        so a replace that drops nothing enforced stays quiet."""
+        g = KnowledgeGraph()
+        g.define_schema({"nodes": {"A": {"optional": ["x"]}}})
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            g.define_schema({"nodes": {"B": {"optional": ["y"]}}}, replace=True)
+        assert set(g.schema_definition()["nodes"]) == {"B"}
 
     def test_auto_timestamp_tag_roundtrips(self, tmp_path):
         g = KnowledgeGraph()

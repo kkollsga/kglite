@@ -1334,7 +1334,7 @@ pub(super) fn write_fluent_topic_schema(xml: &mut String) {
     xml.push_str(
         "      <m sig=\"describe(types=['...'])\">AI-optimised XML for specific types.</m>\n",
     );
-    xml.push_str("      <m sig=\"define_schema(schema_dict)\">Enforce schema constraints on future loads.</m>\n");
+    xml.push_str("      <m sig=\"define_schema(schema_dict, replace=False)\">Enforce schema constraints. Merges per node/connection type: a type the call names takes the new declaration, a type it omits keeps its own. replace=True makes the incoming schema the whole schema, withdrawing constraints on every type it omits.</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"full schema\">graph.schema()</ex>\n");

@@ -161,21 +161,82 @@ so a dump can be committed and diffed.
 
 KGLite does **not** export Parquet directly, and this is a deliberate scope
 decision rather than a gap. Doing it in Rust means taking on the
-`arrow` + `parquet` dependency tree, which is large; an earlier review of
-columnar/Arrow export reached the same conclusion and dropped it. KGLite has
-been steadily *shedding* dependencies, and re-adding a heavy one for a format
-already one line away would cut against that.
+`arrow` + `parquet` dependency tree — measured at **+35 crates** on top of the
+CLI's 143 for a minimal Arrow-backed writer, and +336 lines of `Cargo.lock`.
+KGLite has been steadily *shedding* dependencies (309 → 171 across 0.14.x), and
+`arrow` in particular is a library this project already keeps at arm's length:
+kglite pins its bundled allocator to mimalloc v2 specifically to survive being
+imported alongside `pyarrow`.
 
-If you want Parquet, go through the DataFrame you already have — the
-dependency then lives in your environment, where you control it:
+Parquet is a format you can reach with tools you already have. Pick whichever
+end of the pipe you prefer.
+
+**One table, from a query.** The dependency lives in your environment, where
+you control it:
 
 ```python
 graph.cypher("MATCH (p:Person) RETURN p.id, p.title, p.age").to_df().to_parquet('people.parquet')
 ```
 
-For a whole-graph dump, {meth}`~kglite.KnowledgeGraph.export_csv` writes one
-CSV per node and connection type plus a `blueprint.json` for re-import, and
-SQLite (above) covers the "give me a real database" case.
+**The whole graph, no Python at all.** The SQLite dump above already turns
+every node type and connection type into a table, and DuckDB writes Parquet
+from those tables directly:
+
+```bash
+kglite export-sqlite mygraph.kgl dump.sql
+sqlite3 mygraph.db < dump.sql
+duckdb -c "INSTALL sqlite; LOAD sqlite; ATTACH 'mygraph.db' AS g (TYPE sqlite);
+           COPY (SELECT * FROM g.Person)   TO 'Person.parquet'   (FORMAT PARQUET);
+           COPY (SELECT * FROM g.WORKS_AT) TO 'WORKS_AT.parquet' (FORMAT PARQUET);"
+```
+
+**The whole graph, from Python.** `to_df()` covers nodes; edges come from a
+Cypher query in the same link-table shape the SQLite export uses. Drive both
+off the graph's own type lists rather than hand-writing a query per type:
+
+```python
+import pathlib
+import pandas as pd
+
+def export_parquet(graph, out_dir):
+    out = pathlib.Path(out_dir)
+    (out / 'nodes').mkdir(parents=True, exist_ok=True)
+    (out / 'edges').mkdir(exist_ok=True)
+
+    for node_type in graph.node_types:
+        graph.select(node_type).to_df().to_parquet(out / 'nodes' / f'{node_type}.parquet')
+
+    for conn in graph.connection_types():
+        ct = conn['type']
+        df = graph.cypher(f"""
+            MATCH (a)-[r:{ct}]->(b)
+            RETURN labels(a)[0] AS source_type, a.id AS source_id,
+                   labels(b)[0] AS target_type, b.id AS target_id,
+                   properties(r) AS props
+        """).to_df()
+        props = pd.json_normalize(df.pop('props')).drop(columns=['type'], errors='ignore')
+        pd.concat([df, props], axis=1).to_parquet(out / 'edges' / f'{ct}.parquet')
+```
+
+This produces `nodes/Person.parquet` with columns `type, title, id, age, city`
+and `edges/WORKS_AT.parquet` with `source_type, source_id, target_type,
+target_id, salary, since` — the same mapping the SQLite table/link-table export
+uses. Properties absent on a given node or edge become nulls, and integers,
+floats, booleans and datetimes keep their types through the round-trip.
+
+Two things to know when you write your own variant:
+
+- **`properties(r)` includes the connection type under a `type` key**; drop it
+  (as above) or it becomes a redundant column.
+- **A node's `id`, `title` and `type` come from its canonical identity**, not
+  from its property bag. If a node also stores a property under one of those
+  names, the canonical value wins and the column is not repeated — a
+  duplicated column name would make `to_parquet()` fail outright.
+
+For a whole-graph dump without a DataFrame,
+{meth}`~kglite.KnowledgeGraph.export_csv` writes one CSV per node and
+connection type plus a `blueprint.json` for re-import, and SQLite (above)
+covers the "give me a real database" case.
 
 ## Back up before upgrading
 

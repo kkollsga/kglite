@@ -30,8 +30,9 @@ KGLite stores nodes and relationships in a Rust graph structure ([petgraph](http
   results are already materialized in Rust (Python values convert on access)
 - **Fluent API** chains build a *selection* (a set of node indices) — no data is copied until you call `collect()`, `to_df()`, etc.
 - **Persistence** uses `save()`/`load()` snapshots; `open()` is crash-safe by
-  default via a write-ahead log (`durable=False` opts out), and
-  context-managed `open()` also persists on clean exit
+  default via a write-ahead log (`durable=False` opts out; `storage="disk"`
+  is the exception — see [Choosing a storage mode](#choosing-a-storage-mode)),
+  and context-managed `open()` also persists on clean exit
 
 ## Storage Modes
 
@@ -61,15 +62,26 @@ everything that fits in RAM. Reach for `mapped` only when the graph
 stops fitting comfortably on the heap, and for `disk` only at the
 Wikidata scale where you want the OS to page data in lazily.
 
-| If your graph is… | …and you want | Use |
-|---|---|---|
-| Up to a few million nodes | Lowest latency, simplest setup | **memory** (default) |
-| Large but you still query it interactively | RAM headroom without giving up typed-lookup speed | **mapped** |
-| 100 M+ nodes / won't fit in RAM | Lazy, page-on-demand access to a huge graph | **disk** |
+| If your graph is… | …and you want | Use | `open()` crash safety |
+|---|---|---|---|
+| Up to a few million nodes | Lowest latency, simplest setup | **memory** (default) | Per-commit WAL, on by default |
+| Large but you still query it interactively | RAM headroom without giving up typed-lookup speed | **mapped** | Per-commit WAL, on by default |
+| 100 M+ nodes / won't fit in RAM | Lazy, page-on-demand access to a huge graph | **disk** | **No WAL** — durability is your `save()` calls |
 
 When in doubt, stay in-memory; switch only once you hit a real RAM
 ceiling. Both larger-than-RAM modes keep the identical Python and
 Cypher API, so moving up is a one-line constructor change.
+
+**The two larger-than-RAM modes differ in durability, not just in layout.**
+`mapped` keeps the same per-commit crash safety as in-memory, so growing out
+of RAM costs you nothing there. `disk` commits by publishing an immutable
+generation instead of by logging a write: `kglite.open(path, storage="disk")`
+opens **non-durable** (passing `durable=True` raises rather than pretending),
+and a crash loses every mutation made since the last `save()`. That is a real
+and bounded guarantee — the published generation always survives intact — but
+it is *your* `save()` calls, not the engine, that decide how much a crash can
+cost. Pick `disk` for its scale, not because a graph outgrew RAM; `mapped`
+covers that case with the guarantee intact. See {doc}`guides/durable-apps`.
 
 ## Return Types
 

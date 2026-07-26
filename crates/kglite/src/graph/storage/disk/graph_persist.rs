@@ -591,16 +591,19 @@ impl DiskGraph {
         // the loader can't distinguish from real u64 type hashes. Without
         // this trim, `[r:TYPE]` typed-edge queries return 0 rows after
         // reload (pre-existing bug on v0.8.10).
+        // Trimming a buffer to its own backing file is a resize of a mapped
+        // file, so go through `trim_to_logical_length`, which releases and
+        // re-establishes the mapping in the order each platform requires.
         for field in [
-            &self.conn_type_index_types as &MmapOrVec<u64>,
-            &self.conn_type_index_offsets,
+            &mut self.conn_type_index_types as &mut MmapOrVec<u64>,
+            &mut self.conn_type_index_offsets,
         ] {
-            if let Some(path) = field.file_path().map(PathBuf::from) {
-                field.save_to_file(&path)?;
+            if field.file_path().is_some() {
+                field.trim_to_logical_length()?;
             }
         }
-        if let Some(path) = self.conn_type_index_sources.file_path().map(PathBuf::from) {
-            self.conn_type_index_sources.save_to_file(&path)?;
+        if self.conn_type_index_sources.file_path().is_some() {
+            self.conn_type_index_sources.trim_to_logical_length()?;
         }
 
         // PR1 phase 8: trim the core CSR mmap files to their logical

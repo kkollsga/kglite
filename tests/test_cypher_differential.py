@@ -589,6 +589,40 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "ORDER BY count(p) DESC, company LIMIT 3",
         None,
     ),
+    # ORDER BY a non-projected property of a *grouping* variable, after an
+    # aggregate. Aggregation rebuilds its output rows, so `p` survives only
+    # if the operator carries its binding forward — and the three
+    # aggregation operators (streaming, materialized, fused OPTIONAL) used
+    # to disagree about that. Where the binding was dropped the sort key
+    # evaluated to NULL on every row and the ORDER BY was silently ignored.
+    # The optimizer decides which operator runs, so opt-vs-naive is exactly
+    # the axis that exposed it. Row-order assertions live in
+    # tests/test_cypher_order_by_after_aggregate.py; these entries guard the
+    # row-set equality the corpus is responsible for.
+    (
+        "optional_match_aggregate_order_by_non_projected",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:WORKS_AT]->(c:Company) "
+        "RETURN p.name AS person, count(c) AS jobs ORDER BY p.age DESC",
+        None,
+    ),
+    (
+        "optional_match_aggregate_order_by_non_projected_paged",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) "
+        "RETURN p.name AS person, count(f) AS friends "
+        "ORDER BY p.age DESC SKIP 5 LIMIT 5",
+        None,
+    ),
+    # `collect()` is outside the streaming aggregate's reach, so this one
+    # takes the materialized path — the same defect with no OPTIONAL MATCH
+    # involved at all.
+    (
+        "collect_aggregate_order_by_non_projected",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.city AS city, collect(p.name) AS names ORDER BY p.city DESC",
+        None,
+    ),
     # Aggregate on the EDGE variable (not a node variable). Pre-fix the
     # gate at fuse_match_return_aggregate only accepted count(<other-node>);
     # count(<edge_var>) silently fell out of fusion despite being
@@ -2026,6 +2060,15 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
     ("create_constraint_not_null_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL"),
     ("create_constraint_node_key_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NODE KEY"),
     ("drop_constraint_ddl_missing_if_exists", "DROP CONSTRAINT person_name_u IF EXISTS"),
+    # Declaring one half of a node key on a property that already carries the
+    # other must *add* to it rather than replace it, so the post-statement graph
+    # state carries both. A pass that dropped or reordered the second statement
+    # would leave only one half enforced — which this harness sees as diverging
+    # post-state once a later write is rejected on one path and not the other.
+    # Both orders, because the merge is order-sensitive code.
+    # Multi-statement constraint shapes live in CONSTRAINT_DDL_SEQUENCES below:
+    # a schema command is a standalone statement, so a merge (declaring one half
+    # of a node key over the other) cannot be expressed as one query here.
     # ── Shapes whose rollback checkpoint is an undo journal ──────────────
     #
     # Statement atomicity is bought with an inverse-op journal rather than a
@@ -2091,6 +2134,70 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
         # intermediate add that survives to the end.
         "many_labels_one_node",
         "MATCH (p:Person {person_id: 2}) SET p:A SET p:B SET p:C WITH p REMOVE p:B RETURN labels(p) AS ls",
+    ),
+    # ── Write clauses fed an empty binding stream ────────────────────────
+    #
+    # A clause that produced zero rows must leave every downstream write with
+    # nothing to do. What these pin for the optimizer specifically: no pass may
+    # drop, hoist, or fuse a write clause out from behind the emptying clause,
+    # because doing so would restore the write to a *leading* position — where
+    # Cypher's implicit start row legitimately applies and one node really is
+    # created. Optimized and naive therefore have to agree on post-state node
+    # and edge counts, which is what the harness compares.
+    #
+    # `person_id: 999` and the `Ghost` label are chosen to match nothing in the
+    # fixture; `Ghost` also makes the pattern's node type unknown, the shape the
+    # planner emits an "unknown node label … returns no rows" warning for.
+    (
+        "create_after_empty_inline_map_match",
+        "MATCH (p:Person {person_id: 999}) CREATE (t:Task {person_id: 900}) RETURN t.person_id AS pid",
+    ),
+    (
+        "create_after_empty_where_match",
+        "MATCH (p:Person) WHERE p.person_id = 999 CREATE (t:Task {person_id: 901}) RETURN t.person_id AS pid",
+    ),
+    (
+        "create_after_empty_match_with",
+        "MATCH (p:Person {person_id: 999}) WITH p CREATE (t:Task {person_id: 902}) RETURN t.person_id AS pid",
+    ),
+    (
+        "create_after_empty_relationship_match",
+        "MATCH (p:Person)-[:NO_SUCH_EDGE]->(q:Person) CREATE (t:Task {person_id: 903}) RETURN t.person_id AS pid",
+    ),
+    (
+        # The phantom-endpoint shape: `g` binds nothing, so creating the edge
+        # would have to invent its target node. Post-state edge count is the
+        # assertion that bites.
+        "create_edge_after_partially_unmatched_multi_pattern",
+        "MATCH (p:Person {person_id: 1}), (g:Ghost {person_id: 999}) "
+        "CREATE (p)-[:ASSIGNED_TO]->(g) RETURN count(*) AS n",
+    ),
+    (
+        "merge_after_empty_match",
+        "MATCH (p:Person {person_id: 999}) MERGE (t:Task {person_id: 904}) RETURN t.person_id AS pid",
+    ),
+    (
+        "foreach_after_empty_match",
+        "MATCH (p:Person {person_id: 999}) FOREACH (i IN [910, 911] | CREATE (:Task {person_id: i})) "
+        "WITH 1 AS done MATCH (n) RETURN count(n) AS n",
+    ),
+    (
+        "create_after_unwind_empty_list",
+        "UNWIND [] AS x CREATE (t:Task {person_id: 905}) RETURN t.person_id AS pid",
+    ),
+    (
+        # The control living in the corpus: a *leading* CREATE still gets
+        # Cypher's implicit start row. Pins that the empty-stream rule was not
+        # over-applied to writes that open a query.
+        "leading_create_still_runs_once",
+        "CREATE (t:Task {person_id: 906}) WITH 1 AS done MATCH (n) RETURN count(n) AS n",
+    ),
+    (
+        # OPTIONAL MATCH is the deliberate opposite: it null-pads rather than
+        # emptying, so the CREATE downstream of it must still run.
+        "create_after_optional_match_miss",
+        "MATCH (p:Person {person_id: 1}) OPTIONAL MATCH (g:Ghost) "
+        "CREATE (t:Task {person_id: 907}) RETURN t.person_id AS pid, g AS g",
     ),
 ]
 
@@ -2367,6 +2474,106 @@ def test_mutation_optimized_matches_naive(name: str, query: str) -> None:
     assert rows_opt == rows_naive, f"Mutation `{name}` rows: opt={rows_opt}, naive={rows_naive}"
     assert nodes_opt == nodes_naive, f"Mutation `{name}` post-state node count: opt={nodes_opt}, naive={nodes_naive}"
     assert edges_opt == edges_naive, f"Mutation `{name}` post-state edge count: opt={edges_opt}, naive={edges_naive}"
+
+
+# ---------------------------------------------------------------------------
+# Constraint DDL sequences
+# ---------------------------------------------------------------------------
+#
+# A fourth corpus, separate for one mechanical reason: a schema command is a
+# standalone statement, so the shapes that matter here — declaring one half of a
+# node key on a property that already carries the other, then dropping one half
+# again — need *several* statements, which MUTATION_QUERIES cannot express.
+#
+# What these pin: constraint declaration is state accumulation, not replacement.
+# Comparing `SHOW CONSTRAINTS` after the sequence catches a divergence in what
+# is *reported*; the enforcement probes catch a divergence in what is actually
+# in force. Both halves are needed — the audit that produced this corpus found a
+# listing reporting NODE_KEY for a pair whose presence half was not enforced,
+# and a report whose constraint name changed across a save/load round-trip.
+CONSTRAINT_DDL_SEQUENCES: list[tuple[str, list[str], list[str]]] = [
+    (
+        "not_null_over_existing_unique",
+        [
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE",
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL",
+        ],
+        # Both halves in force: a duplicate name and a missing name are refused.
+        ["CREATE (p:Person {person_id: 900, name: 'Alice', age: 1})", "CREATE (p:Person {person_id: 901, age: 1})"],
+    ),
+    (
+        "unique_over_existing_not_null",
+        [
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL",
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        ],
+        ["CREATE (p:Person {person_id: 900, name: 'Alice', age: 1})", "CREATE (p:Person {person_id: 901, age: 1})"],
+    ),
+    (
+        "drop_the_unique_half_of_a_pair",
+        [
+            "CREATE CONSTRAINT pn_u FOR (p:Person) REQUIRE p.name IS UNIQUE",
+            "CREATE CONSTRAINT pn_nn FOR (p:Person) REQUIRE p.name IS NOT NULL",
+            "DROP CONSTRAINT pn_u",
+        ],
+        ["CREATE (p:Person {person_id: 901, age: 1})"],
+    ),
+    (
+        "drop_the_not_null_half_of_a_pair",
+        [
+            "CREATE CONSTRAINT pn_u FOR (p:Person) REQUIRE p.name IS UNIQUE",
+            "CREATE CONSTRAINT pn_nn FOR (p:Person) REQUIRE p.name IS NOT NULL",
+            "DROP CONSTRAINT pn_nn",
+        ],
+        ["CREATE (p:Person {person_id: 900, name: 'Alice', age: 1})"],
+    ),
+]
+
+
+def _constraint_state(g, probes: list[str]) -> tuple[list[dict], list[bool]]:
+    """What the graph reports, and what it actually enforces.
+
+    A fix to either half alone is not a fix, so the differential compares both.
+    """
+    reported = _normalize(g.cypher("SHOW CONSTRAINTS").to_list())
+    enforced = []
+    for probe in probes:
+        try:
+            g.cypher(probe)
+            enforced.append(False)
+        except Exception:
+            enforced.append(True)
+    return reported, enforced
+
+
+@pytest.mark.differential
+@pytest.mark.parametrize(
+    "name,statements,probes",
+    CONSTRAINT_DDL_SEQUENCES,
+    ids=[entry[0] for entry in CONSTRAINT_DDL_SEQUENCES],
+)
+def test_constraint_ddl_sequence_optimized_matches_naive(name: str, statements: list[str], probes: list[str]) -> None:
+    opt_reported, opt_enforced = _constraint_state(
+        _run_constraint_sequence(statements, disable_optimizer=False), probes
+    )
+    naive_reported, naive_enforced = _constraint_state(
+        _run_constraint_sequence(statements, disable_optimizer=True), probes
+    )
+
+    assert opt_reported == naive_reported, f"`{name}` SHOW CONSTRAINTS: opt={opt_reported}, naive={naive_reported}"
+    assert opt_enforced == naive_enforced, f"`{name}` enforcement: opt={opt_enforced}, naive={naive_enforced}"
+    # Every sequence above leaves at least one constraint declared and every
+    # probe violating it, so a run that silently enforced nothing is a failure
+    # rather than a vacuous pass.
+    assert opt_reported, f"`{name}` declared no constraint at all"
+    assert all(opt_enforced), f"`{name}` reported constraints it does not enforce: {opt_enforced}"
+
+
+def _run_constraint_sequence(statements: list[str], *, disable_optimizer: bool):
+    g = _build_mutation_graph()
+    for statement in statements:
+        g.cypher(statement, disable_optimizer=disable_optimizer)
+    return g
 
 
 # ---------------------------------------------------------------------------

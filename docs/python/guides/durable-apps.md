@@ -134,13 +134,20 @@ optimising for:
 |---|---|---|
 | Every committed write to survive a hard crash | `open(path)` (the default) | One `fsync` per commit; reopen is O(graph) (loads the whole graph). |
 | Maximum write throughput on rebuildable data | `open(path, durable=False)` | No `fsync` per write; a crash loses work since the last checkpoint. |
-| Graphs larger than RAM, cheap reopen | `open(path, storage="disk")` | Paged mmap, lazy load; not a crash-safe-per-write WAL mode. |
+| Crash safety on a graph that outgrows RAM | `open(path, storage="mapped")` | Same per-commit WAL guarantee; property columns spill to mmap. |
+| 100 M+ nodes (Wikidata-scale), cheap cold-open | `open(path, storage="disk")` | Paged mmap, lazy load; **no per-commit WAL** — durability is your `save()` calls. |
 
 The first two are **in-memory** — the whole graph lives in RAM, which is what
 makes traversal and multi-hop queries fast. Durability adds crash-safety on
-top of that model without changing the in-memory read path. `storage="disk"`
-(see {doc}`/python/core-concepts`) is the separate answer for *larger-than-RAM*
-graphs and cheap cold-open; it is not combined with the WAL.
+top of that model without changing the in-memory read path.
+
+**If your app is simply growing, reach for `mapped`, not `disk`.** `mapped`
+is the larger-than-RAM mode that keeps this guide's guarantee: it is durable by
+default and its crash recovery is kill-9 tested alongside in-memory. `disk` is
+a different trade — a Wikidata-scale exploration mode whose commit boundary is
+an explicit `save()`, not a logged write (see the Limitations below). Choosing
+`disk` because a graph got big means giving up per-commit crash safety you
+did not have to give up.
 
 ## Serving concurrent reads
 
@@ -194,9 +201,32 @@ model.
   logical log; reconciling a replayed frame against a published generation needs
   a generation-aware log this release does not have. `open(path,
   storage="disk")` therefore opens **non-durable**, and passing an explicit
-  `durable=True` raises `ValueError` rather than pretending. Use `save()`
-  checkpoints there. The in-memory default and `storage="mapped"` are both
-  fully durable.
+  `durable=True` raises `ValueError` rather than pretending. The in-memory
+  default and `storage="mapped"` are both fully durable — if you want crash
+  safety on a graph that outgrew RAM, `mapped` is the answer.
+
+  What disk mode *does* guarantee is worth stating exactly, because it is
+  stronger than "no crash safety" and is kill-9 tested
+  (`crates/kglite/tests/disk_crash_guarantee.rs`):
+
+  > A crash loses exactly the mutations made since the last `save()`, and
+  > nothing else. The graph reopens at the last published generation, complete
+  > and uncorrupted — never at a partially-written one.
+
+  Between `save()` calls, disk-mode mutations live only in the process's heap
+  overlay; nothing is written, so nothing can be half-written. The publish
+  itself is crash-atomic: the staged snapshot is `fsync`'d, renamed into place,
+  and only then does an atomically-replaced `CURRENT` pointer select it, so a
+  crash mid-publish leaves the previous generation selected. No acknowledged
+  commit is ever lost — the acknowledgement point is your `save()` call.
+
+  **Budget for the checkpoint's cost before you sprinkle `save()` calls.**
+  Every disk `save()` writes a complete new generation and the superseded ones
+  are retained, so *N* checkpoints leave *N* full copies of the graph on disk.
+  That is deliberate — readers hold their generation mmap'd and must not have
+  it deleted underneath them — but there is no retention policy yet, so
+  checkpoint on a schedule you have the disk budget for, and prune old
+  `generations/gen_*` directories yourself once no reader is using them.
 - **Some state is checkpoint-only.** The log describes nodes, edges, and
   labels. Schema and config metadata, user-created indexes, embeddings, and
   timeseries have no log entry, so they are persisted by `save()` rather than

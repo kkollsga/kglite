@@ -323,12 +323,16 @@ fn merge_sort_build(
         }
     }
 
-    // Cleanup chunk files.
+    // Cleanup chunk files. The mappings must go first: Windows refuses to
+    // delete a file that still has a mapped view open, so removing before the
+    // drop leaked every chunk there (and the failure was swallowed by the old
+    // `let _ =`). Removal is now checked so a future ordering regression
+    // surfaces as an error rather than a pile of stray spill files.
+    drop(chunk_mmaps);
     for c in 0..num_chunks {
         let path = chunk_dir.join(format!("chunk_{}_{}.bin", label, c));
-        let _ = std::fs::remove_file(path);
+        super::remove_scratch_file(&path)?;
     }
-    drop(chunk_mmaps);
 
     if verbose {
         eprintln!(

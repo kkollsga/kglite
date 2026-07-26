@@ -1717,3 +1717,85 @@ fn test_fuse_optional_match_aggregate_bails_on_multi_pattern() {
         "multi-pattern OPTIONAL MATCH must not fuse into FusedOptionalMatchAggregate"
     );
 }
+
+/// The lazy-eligibility contract, pinned as a corpus.
+///
+/// `mark_lazy_eligibility` decides whether a result is returned deferred, and a
+/// deferred result holds an `Arc<DirGraph>` for its whole life — which makes the
+/// next write through the owning graph copy-on-write the entire graph. So this
+/// gate is not merely a projection optimisation: it decides who pays an O(V+E)
+/// fork. Pinning the exact shape keeps that reach visible and honest.
+///
+/// The surprising member is `WHERE`: `optimize` keeps a standalone
+/// `Clause::Where` as a safety net even after pushing every predicate into the
+/// MATCH (see `test_predicate_pushdown_simple`), and the eligibility walk has no
+/// arm for it. So the same point lookup is eligible written with an inline map
+/// and ineligible written with `WHERE`.
+#[test]
+fn lazy_eligibility_corpus() {
+    fn is_lazy(q: &str) -> bool {
+        let mut query = parse_cypher(q).unwrap();
+        let graph = DirGraph::new();
+        let params = HashMap::new();
+        optimize(&mut query, &graph, &params);
+        mark_lazy_eligibility(&mut query);
+        query.clauses.iter().any(|c| match c {
+            Clause::Return(r) => r.lazy_eligible,
+            _ => false,
+        })
+    }
+
+    // Eligible: bare property projections over an unfiltered or inline-filtered
+    // MATCH, with nothing but SKIP/LIMIT after the RETURN.
+    for q in [
+        "MATCH (u:User) RETURN u.name",
+        "MATCH (u:User {id: 1}) RETURN u.name, u.email",
+        "MATCH (u:User {id: 1}) RETURN u.name AS name",
+        "MATCH (u:User) RETURN u.name LIMIT 10",
+        "MATCH (u:User)-[:OWNS]->(t:Task) RETURN u.name, t.title",
+        "OPTIONAL MATCH (u:User) RETURN u.name",
+    ] {
+        assert!(is_lazy(q), "expected lazy-eligible: {q}");
+    }
+
+    // Ineligible. Each of these takes the eager path and therefore never pins
+    // the graph, whatever its size.
+    for q in [
+        // A standalone WHERE survives optimisation and disqualifies.
+        "MATCH (u:User) WHERE u.id = 1 RETURN u.name",
+        // Whole-node returns resolve via NodeRef, not the lazy resolver.
+        "MATCH (u:User) RETURN u",
+        // Any non-PropertyAccess return item.
+        "MATCH (u:User) RETURN u.age + 1",
+        "MATCH (u:User) RETURN count(u)",
+        // Ordering, dedup and multi-stage pipelines all disqualify.
+        "MATCH (u:User) RETURN u.name ORDER BY u.name",
+        "MATCH (u:User) RETURN DISTINCT u.name",
+        "MATCH (u:User) WITH u.name AS n RETURN n",
+        "UNWIND [1, 2] AS x RETURN x",
+    ] {
+        assert!(!is_lazy(q), "expected NOT lazy-eligible: {q}");
+    }
+
+    // The same lookup, two spellings, opposite classifications. Asserted as an
+    // explicit pair because it is the least defensible part of the rule: the
+    // two queries are semantically identical and a user has no way to know
+    // which one they wrote. Whichever way the rule moves, these two should
+    // arrive at the same answer — if a future change makes them agree, delete
+    // this pair rather than "fixing" it.
+    assert!(is_lazy("MATCH (u:User {id: 1}) RETURN u.name"));
+    assert!(!is_lazy("MATCH (u:User) WHERE u.id = 1 RETURN u.name"));
+
+    // The exact shapes the graph-pin benchmark relies on. Pinned here because
+    // measuring the pin with an ineligible read reports no change and looks
+    // like a working fix doing nothing.
+    assert!(is_lazy(
+        "MATCH (p:Person {id: 0}) RETURN p.name AS name, p.age AS age"
+    ));
+    assert!(!is_lazy(
+        "MATCH (p:Person) WHERE p.id = 0 RETURN p.name AS name, p.age AS age"
+    ));
+    assert!(is_lazy(
+        "MATCH (p:Person) RETURN p.name AS name, p.age AS age"
+    ));
+}

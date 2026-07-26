@@ -16,7 +16,9 @@ use kglite_core::api::io::{Cancelled, ProgressEvent, ProgressSink, ProgressValue
 use kglite_core::api::mutation::OperationReport;
 use kglite_core::api::session::CsvImportPolicy;
 use kglite_core::api::GraphRead;
-use kglite_core::api::{ConnectionSchemaDefinition, NodeSchemaDefinition, SchemaDefinition};
+use kglite_core::api::{
+    ConnectionSchemaDefinition, NodeSchemaDefinition, SchemaDefinition, SchemaInstall,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use pyo3::{Bound, IntoPyObjectExt};
@@ -1049,139 +1051,40 @@ impl KnowledgeGraph {
     ///             }
     ///         }
     ///
+    ///     replace: When False (the default) the call **merges**: types named in
+    ///         `schema_dict` take the new declaration, types it does not name
+    ///         keep theirs. When True the incoming schema becomes the whole
+    ///         schema, so every unnamed type loses its constraints — a warning
+    ///         names each one that stops being enforced.
+    ///
     /// Returns:
     ///     Self with schema defined
-    fn define_schema(&mut self, schema_dict: &Bound<'_, PyDict>) -> PyResult<Self> {
+    #[pyo3(signature = (schema_dict, *, replace = false))]
+    fn define_schema(
+        &mut self,
+        py: Python<'_>,
+        schema_dict: &Bound<'_, PyDict>,
+        replace: bool,
+    ) -> PyResult<Self> {
         let mut schema = SchemaDefinition::new();
+        parse_node_schemas(schema_dict, &mut schema)?;
+        parse_connection_schemas(schema_dict, &mut schema)?;
 
-        // Parse node schemas
-        if let Some(nodes_dict) = schema_dict.get_item("nodes")? {
-            if let Ok(nodes) = nodes_dict.cast::<PyDict>() {
-                for (node_type_key, node_schema_val) in nodes.iter() {
-                    let node_type: String = node_type_key.extract()?;
-                    let node_schema_dict = node_schema_val.cast::<PyDict>().map_err(|_| {
-                        PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-                            "Schema for node type '{}' must be a dictionary",
-                            node_type
-                        ))
-                    })?;
-
-                    let mut node_schema = NodeSchemaDefinition::default();
-
-                    // Parse required fields
-                    if let Some(required) = node_schema_dict.get_item("required")? {
-                        node_schema.required_fields = required.extract::<Vec<String>>()?;
-                    }
-
-                    // Parse optional fields
-                    if let Some(optional) = node_schema_dict.get_item("optional")? {
-                        node_schema.optional_fields = optional.extract::<Vec<String>>()?;
-                    }
-
-                    // Parse field types
-                    if let Some(types) = node_schema_dict.get_item("types")? {
-                        let types_dict = types.cast::<PyDict>().map_err(|_| {
-                            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                                "types must be a dictionary",
-                            )
-                        })?;
-                        for (field, type_val) in types_dict.iter() {
-                            node_schema
-                                .field_types
-                                .insert(field.extract::<String>()?, type_val.extract::<String>()?);
-                        }
-                    }
-
-                    parse_node_declarations(&node_type, node_schema_dict, &mut node_schema)?;
-
-                    schema.add_node_schema(node_type, node_schema);
-                }
-            }
-        }
-
-        // Parse connection schemas
-        if let Some(connections_dict) = schema_dict.get_item("connections")? {
-            if let Ok(connections) = connections_dict.cast::<PyDict>() {
-                for (conn_type_key, conn_schema_val) in connections.iter() {
-                    let conn_type: String = conn_type_key.extract()?;
-                    let conn_schema_dict = conn_schema_val.cast::<PyDict>().map_err(|_| {
-                        PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-                            "Schema for connection type '{}' must be a dictionary",
-                            conn_type
-                        ))
-                    })?;
-
-                    let source_type: String = conn_schema_dict
-                        .get_item("source")?
-                        .ok_or_else(|| {
-                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                                "Connection '{}' missing required 'source' field",
-                                conn_type
-                            ))
-                        })?
-                        .extract()?;
-
-                    let target_type: String = conn_schema_dict
-                        .get_item("target")?
-                        .ok_or_else(|| {
-                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                                "Connection '{}' missing required 'target' field",
-                                conn_type
-                            ))
-                        })?
-                        .extract()?;
-
-                    let mut conn_schema = ConnectionSchemaDefinition {
-                        source_type,
-                        target_type,
-                        cardinality: None,
-                        required_properties: Vec::new(),
-                        property_types: HashMap::new(),
-                        auto_timestamp: None,
-                    };
-
-                    // Parse optional cardinality
-                    if let Some(cardinality) = conn_schema_dict.get_item("cardinality")? {
-                        conn_schema.cardinality = Some(cardinality.extract::<String>()?);
-                    }
-
-                    // Opt-in freshness provenance for edges of this type.
-                    if let Some(ts_val) = conn_schema_dict.get_item("auto_timestamp")? {
-                        conn_schema.auto_timestamp = Some(ts_val.extract::<bool>()?);
-                    }
-
-                    // Parse required_properties
-                    if let Some(required_props) =
-                        conn_schema_dict.get_item("required_properties")?
-                    {
-                        conn_schema.required_properties =
-                            required_props.extract::<Vec<String>>()?;
-                    }
-
-                    // Parse property_types
-                    if let Some(prop_types) = conn_schema_dict.get_item("property_types")? {
-                        let types_dict = prop_types.cast::<PyDict>().map_err(|_| {
-                            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                                "property_types must be a dictionary",
-                            )
-                        })?;
-                        for (field, type_val) in types_dict.iter() {
-                            conn_schema
-                                .property_types
-                                .insert(field.extract::<String>()?, type_val.extract::<String>()?);
-                        }
-                    }
-
-                    schema.add_connection_schema(conn_type, conn_schema);
-                }
-            }
-        }
+        // Replacing withdraws the declarations of every type this call did not
+        // name, so say which enforcement is going away. The default merge cannot
+        // reach an unnamed type, and so has nothing to warn about.
+        let mode = if replace {
+            warn_about_constraints_dropped_by_replace(py, &self.inner, &schema)?;
+            SchemaInstall::Replace
+        } else {
+            SchemaInstall::Merge
+        };
 
         // Installing the schema installs the UNIQUE constraints it declares, so
         // it fails when existing data already violates one — nothing is changed
         // in that case, so the caller can fix the data and retry.
         get_graph_mut(&mut self.inner)
-            .set_schema(schema)
+            .set_schema(schema, mode)
             .map_err(crate::error_py::kg_to_pyerr)?;
 
         Ok(self.clone())
@@ -1862,7 +1765,9 @@ impl KnowledgeGraph {
     ///
     /// **Note:** the snapshot is a full deep-clone of the graph, so creating a
     /// transaction on a very large graph has a one-time memory cost proportional
-    /// to graph size. Embeddings are *not* cloned (they live outside `DirGraph`).
+    /// to graph size. Embeddings, indexes and timeseries are part of `DirGraph`
+    /// and are cloned with it, so the copy covers the whole graph — budget for
+    /// it on an embedding-heavy graph.
     ///
     /// Can also be used as a context manager:
     ///
@@ -1938,6 +1843,164 @@ impl KnowledgeGraph {
 /// expands to all registered pass names; `disabled_passes` adds named
 /// passes on top, validated against the registry so typos surface as a
 /// `ValueError` instead of a silent no-op.
+/// Warn, naming every constraint a `replace=True` install stops enforcing.
+///
+/// Replacement is the one mode that reaches types the caller never mentioned,
+/// and losing an integrity constraint silently is how duplicates enter a graph
+/// unnoticed. Quiet when nothing enforced is being dropped, so the warning stays
+/// worth reading. Warning rather than refusing, because withdrawing a constraint
+/// is a legitimate migration step — it just must not be invisible.
+fn warn_about_constraints_dropped_by_replace(
+    py: Python<'_>,
+    graph: &kglite_core::api::DirGraph,
+    incoming: &SchemaDefinition,
+) -> PyResult<()> {
+    let dropped = graph.constraints_dropped_by_replace(incoming);
+    if dropped.is_empty() {
+        return Ok(());
+    }
+    let message = std::ffi::CString::new(format!(
+        "define_schema(replace=True) stops enforcing {} constraint(s) on types this call did not \
+         declare: {}. Drop `replace=True` to merge instead, leaving undeclared types untouched.",
+        dropped.len(),
+        dropped.join(", ")
+    ))
+    .map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "constraint descriptor contained an interior NUL",
+        )
+    })?;
+    PyErr::warn(
+        py,
+        &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+        message.as_c_str(),
+        1,
+    )
+}
+
+/// Parse `define_schema`'s `nodes` mapping into `schema`.
+///
+/// Absent or non-dict `nodes` is a no-op rather than an error, matching the
+/// long-standing behaviour of the inline walk this was extracted from.
+fn parse_node_schemas(
+    schema_dict: &Bound<'_, PyDict>,
+    schema: &mut SchemaDefinition,
+) -> PyResult<()> {
+    let Some(nodes_dict) = schema_dict.get_item("nodes")? else {
+        return Ok(());
+    };
+    let Ok(nodes) = nodes_dict.cast::<PyDict>() else {
+        return Ok(());
+    };
+    for (node_type_key, node_schema_val) in nodes.iter() {
+        let node_type: String = node_type_key.extract()?;
+        let node_schema_dict = node_schema_val.cast::<PyDict>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Schema for node type '{}' must be a dictionary",
+                node_type
+            ))
+        })?;
+
+        let mut node_schema = NodeSchemaDefinition::default();
+        if let Some(required) = node_schema_dict.get_item("required")? {
+            node_schema.required_fields = required.extract::<Vec<String>>()?;
+        }
+        if let Some(optional) = node_schema_dict.get_item("optional")? {
+            node_schema.optional_fields = optional.extract::<Vec<String>>()?;
+        }
+        if let Some(types) = node_schema_dict.get_item("types")? {
+            let types_dict = types.cast::<PyDict>().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>("types must be a dictionary")
+            })?;
+            for (field, type_val) in types_dict.iter() {
+                node_schema
+                    .field_types
+                    .insert(field.extract::<String>()?, type_val.extract::<String>()?);
+            }
+        }
+
+        parse_node_declarations(&node_type, node_schema_dict, &mut node_schema)?;
+        schema.add_node_schema(node_type, node_schema);
+    }
+    Ok(())
+}
+
+/// Parse `define_schema`'s `connections` mapping into `schema`. The edge
+/// counterpart of [`parse_node_schemas`]; `source`/`target` are the only
+/// required keys.
+fn parse_connection_schemas(
+    schema_dict: &Bound<'_, PyDict>,
+    schema: &mut SchemaDefinition,
+) -> PyResult<()> {
+    let Some(connections_dict) = schema_dict.get_item("connections")? else {
+        return Ok(());
+    };
+    let Ok(connections) = connections_dict.cast::<PyDict>() else {
+        return Ok(());
+    };
+    for (conn_type_key, conn_schema_val) in connections.iter() {
+        let conn_type: String = conn_type_key.extract()?;
+        let conn_schema_dict = conn_schema_val.cast::<PyDict>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Schema for connection type '{}' must be a dictionary",
+                conn_type
+            ))
+        })?;
+
+        let mut conn_schema = ConnectionSchemaDefinition {
+            source_type: required_endpoint(conn_schema_dict, &conn_type, "source")?,
+            target_type: required_endpoint(conn_schema_dict, &conn_type, "target")?,
+            cardinality: None,
+            required_properties: Vec::new(),
+            property_types: HashMap::new(),
+            auto_timestamp: None,
+        };
+
+        if let Some(cardinality) = conn_schema_dict.get_item("cardinality")? {
+            conn_schema.cardinality = Some(cardinality.extract::<String>()?);
+        }
+        // Opt-in freshness provenance for edges of this type.
+        if let Some(ts_val) = conn_schema_dict.get_item("auto_timestamp")? {
+            conn_schema.auto_timestamp = Some(ts_val.extract::<bool>()?);
+        }
+        if let Some(required_props) = conn_schema_dict.get_item("required_properties")? {
+            conn_schema.required_properties = required_props.extract::<Vec<String>>()?;
+        }
+        if let Some(prop_types) = conn_schema_dict.get_item("property_types")? {
+            let types_dict = prop_types.cast::<PyDict>().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "property_types must be a dictionary",
+                )
+            })?;
+            for (field, type_val) in types_dict.iter() {
+                conn_schema
+                    .property_types
+                    .insert(field.extract::<String>()?, type_val.extract::<String>()?);
+            }
+        }
+
+        schema.add_connection_schema(conn_type, conn_schema);
+    }
+    Ok(())
+}
+
+/// One of a connection schema's two mandatory endpoint keys.
+fn required_endpoint(
+    conn_schema_dict: &Bound<'_, PyDict>,
+    conn_type: &str,
+    key: &str,
+) -> PyResult<String> {
+    conn_schema_dict
+        .get_item(key)?
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Connection '{}' missing required '{}' field",
+                conn_type, key
+            ))
+        })?
+        .extract()
+}
+
 /// Parse the opt-in per-node-type declarations `define_schema` accepts beyond
 /// the field list: `primary_key`, `unique`, `layer`, and `auto_timestamp`.
 ///

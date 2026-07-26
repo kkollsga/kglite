@@ -269,6 +269,21 @@ fn run_clause_pipeline(
     let profiling = ctx.profiling;
     let mut result_set = seed;
 
+    // `result_set.rows.is_empty()` means two opposite things depending on where
+    // the pipeline is. Before any clause has run it means "no binding stream
+    // exists yet", and Cypher's implicit single empty row applies — a leading
+    // `CREATE` runs once. After a clause has run it means "the stream exists and
+    // holds zero rows", and every downstream clause must produce zero rows and
+    // no side effects. Only the pipeline can tell the two apart, so it owns the
+    // distinction here; individual clauses must never re-derive it from
+    // emptiness (doing so is what made `MATCH`-finds-nothing + `CREATE`
+    // fabricate a row and create an unbound node).
+    //
+    // `leading` is non-empty only for the `LOAD CSV` driver, which strips its
+    // own clause and re-enters this pipeline once per batch — those batch rows
+    // are an already-established stream.
+    let mut stream_established = !ctx.leading.is_empty();
+
     for (i, clause) in clauses.iter().enumerate() {
         if interrupt.exceeded() {
             // Deadline passed or the caller flipped the cancel flag (Ctrl-C).
@@ -276,11 +291,13 @@ fn run_clause_pipeline(
             // changes, leaving the graph unchanged.
             return Err("Query interrupted".to_string());
         }
-        // Seed first-clause WITH/UNWIND (same as read-only path)
-        if i == 0
-            && result_set.rows.is_empty()
-            && matches!(clause, Clause::With(_) | Clause::Unwind(_))
-        {
+        // Materialize Cypher's implicit start row for the clauses that consume
+        // one. Deliberately lazy rather than seeding `ResultSet::new()` up
+        // front: MATCH/OPTIONAL MATCH select their leading (scan) form over
+        // their correlated (extend-each-row) form by testing `rows.is_empty()`,
+        // so handing them a row would change how they plan. Same seed the
+        // read-only path applies in `executor/mod.rs`.
+        if !stream_established && clause_needs_implicit_row(clause) {
             result_set.rows.push(ResultRow::new());
         }
 
@@ -291,9 +308,11 @@ fn run_clause_pipeline(
             None
         };
 
-        // If a prior clause produced 0 rows, MATCH/OPTIONAL MATCH cannot
-        // extend an empty pipeline — short-circuit to 0 rows.
-        if i > 0
+        // An established-but-empty stream cannot be extended: MATCH has nothing
+        // to join against, and OPTIONAL MATCH null-pads incoming rows of which
+        // there are none. Short-circuit rather than dispatch, so neither reaches
+        // its leading form and re-scans the graph.
+        if stream_established
             && result_set.rows.is_empty()
             && matches!(clause, Clause::Match(_) | Clause::OptionalMatch(_))
         {
@@ -418,9 +437,34 @@ fn run_clause_pipeline(
                 elapsed_us: s.elapsed().as_micros() as u64,
             });
         }
+
+        // From here on, `rows.is_empty()` means "zero rows", never "not started".
+        stream_established = true;
     }
 
     Ok(result_set)
+}
+
+/// Does `clause` consume Cypher's implicit single empty start row when it opens
+/// a query?
+///
+/// These are the clauses that produce output per incoming row and therefore
+/// need one row to act on even with nothing before them: `CREATE (:T)`,
+/// `MERGE (:T)`, a standalone `FOREACH`, and a leading `WITH`/`UNWIND`. Read
+/// clauses are absent on purpose — MATCH/OPTIONAL MATCH open a query by
+/// scanning, not by extending a row.
+///
+/// Only ever consulted while the stream is unestablished, so it cannot
+/// resurrect a stream that a preceding clause emptied.
+fn clause_needs_implicit_row(clause: &Clause) -> bool {
+    matches!(
+        clause,
+        Clause::With(_)
+            | Clause::Unwind(_)
+            | Clause::Create(_)
+            | Clause::Merge(_)
+            | Clause::Foreach { .. }
+    )
 }
 
 /// Flush staged writes and project the pipeline's rows into a `CypherResult`.
@@ -483,8 +527,9 @@ fn finalize_mutation(
 /// For each incoming row, evaluate `list` in that row's context and run
 /// `body`'s update clauses once per element with `variable` bound to it.
 /// The outer row set is a side-effect input only — it is not modified
-/// and body bindings do not propagate out. A standalone FOREACH (no
-/// incoming rows) still runs once over an empty binding row.
+/// and body bindings do not propagate out. Zero incoming rows means the
+/// body never runs; a standalone FOREACH still runs once, over the implicit
+/// start row the pipeline seeds for it.
 #[allow(clippy::too_many_arguments)]
 fn execute_foreach(
     graph: &mut DirGraph,
@@ -497,16 +542,7 @@ fn execute_foreach(
     interrupt: &Interrupt,
     budget: &super::budget::ExecutionBudget,
 ) -> Result<(), String> {
-    // A FOREACH at the start of a query has no incoming rows; run it once
-    // over a single empty binding row so standalone loops work.
-    let seed = [ResultRow::new()];
-    let rows: &[ResultRow] = if outer.rows.is_empty() {
-        &seed
-    } else {
-        &outer.rows
-    };
-
-    for (row_idx, row) in rows.iter().enumerate() {
+    for (row_idx, row) in outer.rows.iter().enumerate() {
         check_interrupt_periodic(interrupt, row_idx)?;
         // Evaluate the list in this row's context (read-only borrow of the
         // graph, dropped before the per-element mutations below).
@@ -654,12 +690,12 @@ fn execute_create(
     // same mechanism `add_nodes` uses), and the disk read-side is synced once
     // at the end of this function — see the `sync_disk_column_stores` call
     // below. (SET/DELETE/REMOVE already work on disk via the staged-write path.)
-    let source_rows = if existing.rows.is_empty() {
-        // No prior MATCH: execute once with an empty row
-        vec![ResultRow::new()]
-    } else {
-        existing.rows
-    };
+    // One CREATE per incoming row, and nothing at all for zero rows. A leading
+    // CREATE gets its single empty row from the pipeline's implicit-start-row
+    // seed (`clause_needs_implicit_row`) — this function must not synthesize
+    // one, because from here an empty `existing` is indistinguishable from a
+    // preceding MATCH that found nothing.
+    let source_rows = existing.rows;
 
     let mut new_rows = Vec::with_capacity(source_rows.len());
 
@@ -1969,11 +2005,9 @@ fn execute_merge(
     // branch routes through `execute_create` (disk-capable via
     // `DirGraph::insert_node_routed`); ON CREATE/MATCH SET route through
     // `execute_set` (already disk-capable). No disk guard needed.
-    let source_rows = if existing.rows.is_empty() {
-        vec![ResultRow::new()]
-    } else {
-        existing.rows
-    };
+    // As in `execute_create`: one MERGE per incoming row, none for zero rows.
+    // The implicit start row for a leading MERGE is seeded by the pipeline.
+    let source_rows = existing.rows;
 
     let mut new_rows = Vec::with_capacity(source_rows.len());
 

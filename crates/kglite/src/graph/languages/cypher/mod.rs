@@ -19,6 +19,8 @@ pub mod parser;
 pub mod plan_cache;
 pub mod planner;
 pub mod result;
+#[cfg(test)]
+mod stack_probe;
 pub mod tokenizer;
 pub mod value_codec;
 mod window;

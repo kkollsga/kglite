@@ -226,7 +226,8 @@ building saves a lot of argument later.
   This is what most kglite deployments are, and it is the cheapest correct
   answer. **→ [Derived index guide](https://kglite.readthedocs.io/en/latest/python/guides/derived-index.html).**
 - **Primary store** — the graph *is* the authoritative copy. `open()` is
-  crash-safe by default, statements are atomic, readers get snapshot isolation,
+  crash-safe by default for the in-memory and `mapped` backends (`disk`
+  checkpoints on `save()` instead), statements are atomic, readers get snapshot isolation,
   UNIQUE / NOT NULL / node-key constraints are enforced on every write path
   including the bulk loaders, and for in-memory graphs the cost of a write scales
   with the size of the change rather than the size of the graph. One process owns

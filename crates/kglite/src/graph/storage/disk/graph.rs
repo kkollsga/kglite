@@ -2024,15 +2024,24 @@ impl DiskGraph {
             .get_mut()
             .file_path()
             .map(|p| p.to_path_buf());
+        // The assignment drops the previous buffer's mapping, so the old
+        // backing file is unmapped before it is deleted.
         *self.pending_edges.get_mut() = new_pending;
         if let Some(path) = old_pending_path {
-            let _ = std::fs::remove_file(path);
+            super::remove_scratch_file(&path)?;
         }
 
         self.build_csr_from_pending()?;
 
-        // Clean up compact temp file
-        let _ = std::fs::remove_file(&pending_path);
+        // Clean up the compaction scratch file. `build_csr_from_pending`
+        // normally clears `pending_edges` (releasing this mapping), but it
+        // returns early when the buffer is empty — so release it explicitly
+        // rather than relying on that. Deleting a still-mapped file is an
+        // error on Windows, and the removal is checked so it stays visible.
+        if self.pending_edges.get_mut().file_path() == Some(pending_path.as_path()) {
+            *self.pending_edges.get_mut() = MmapOrVec::new();
+        }
+        super::remove_scratch_file(&pending_path)?;
 
         if verbose {
             eprintln!(

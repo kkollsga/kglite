@@ -405,16 +405,94 @@ fn sync_parent_dir(path: &Path) {
     }
 }
 
-/// Rewrite an existing WAL's version byte to [`WAL_FORMAT_VERSION`] and
-/// `fsync`. Needs its own non-append handle: the append-mode handle
-/// `Wal::open` holds ignores seeks on write, so it cannot patch a byte in
-/// place. Only ever called for a version the current schema reads exactly.
-fn upgrade_header_version(path: &Path) -> io::Result<()> {
+/// Truncate a WAL to nothing and lay down a fresh header, `fsync`ing the
+/// result. The caller supplies a handle opened for ordinary writing — never
+/// the append handle (see [`prepare_wal_file`]).
+fn truncate_to_header(file: &mut File) -> io::Result<()> {
     use std::io::{Seek, SeekFrom};
-    let mut file = OpenOptions::new().write(true).open(path)?;
-    file.seek(SeekFrom::Start(WAL_MAGIC.len() as u64))?;
-    file.write_all(&[WAL_FORMAT_VERSION])?;
-    file.sync_data()?;
+    file.set_len(0)?;
+    // The read that classified the header left the cursor mid-file. Without
+    // this seek an ordinary (non-append) write would land at that offset and
+    // leave a hole in front of the header.
+    file.seek(SeekFrom::Start(0))?;
+    write_header(file)?;
+    file.sync_all()
+}
+
+/// Validate the WAL at `path`, creating or repairing its header as needed, so
+/// that [`Wal::open`] can take an append handle over a file already known to
+/// be well-formed.
+///
+/// All header maintenance happens here, on an ordinary read/write handle, and
+/// finishes before the append handle exists. **An append handle is not a
+/// general-purpose write handle.** Rust maps `OpenOptions::append(true)` to
+/// `FILE_GENERIC_WRITE & !FILE_WRITE_DATA` on Windows — deliberately dropping
+/// the very right that truncation and in-place rewrites require — and an
+/// append handle ignores seeks on write on every platform. The previous code
+/// repaired torn headers through the append handle, which POSIX tolerates and
+/// Windows does not; `upgrade_header_version` had already been forced to open
+/// its own handle for the same reason, and its job is now folded in here.
+///
+/// Classification is unchanged: a file too short for a header, or exactly
+/// header-sized with the wrong magic, is crash residue that can hold no frame
+/// and is repaired in place; a *longer* file with a bad magic could be
+/// somebody's data and is refused; an unreadable version is rejected and a
+/// readable older one is upgraded.
+fn prepare_wal_file(path: &Path) -> io::Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let header_len = (WAL_MAGIC.len() + 1) as u64;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    let file_len = file.metadata()?.len();
+
+    if file_len == 0 {
+        write_header(&mut file)?;
+        file.sync_all()?;
+        // fsync the parent directory so the file's creation itself survives a
+        // crash (same doctrine as io/file.rs's atomic save: without this the
+        // fsync'd file can vanish with the unsynced directory entry).
+        sync_parent_dir(path);
+        return Ok(());
+    }
+
+    let mut header = [0u8; 5];
+    let read_len = file_len.min(header_len) as usize;
+    file.read_exact(&mut header[..read_len])?;
+    let magic_ok = read_len >= WAL_MAGIC.len() && header[..4] == WAL_MAGIC;
+
+    if file_len < header_len || (!magic_ok && file_len == header_len) {
+        return truncate_to_header(&mut file);
+    }
+    if !magic_ok {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is not a kglite WAL file (bad magic) and is not empty; \
+                 refusing to overwrite it. Move the file aside if it is stale.",
+                path.display()
+            ),
+        ));
+    }
+
+    // Reject an unreadable version before appending to it; the codec lookup
+    // owns the actionable message.
+    wal_codec(header[4])?;
+    if header[4] != WAL_FORMAT_VERSION {
+        // A readable older version. We are about to append current-format
+        // frames, so the header must advertise the newer version or a future
+        // reader would parse the new frames under the old schema. Rewriting
+        // the byte is lossless precisely because the older format is a subset
+        // (see `WAL_FORMAT_VERSION`): the frames already in the file are valid
+        // current-format frames, and the per-frame CRCs cover payloads only,
+        // not the header.
+        file.seek(SeekFrom::Start(WAL_MAGIC.len() as u64))?;
+        file.write_all(&[WAL_FORMAT_VERSION])?;
+        file.sync_data()?;
+    }
     Ok(())
 }
 
@@ -446,68 +524,11 @@ impl Wal {
     /// appended; a *readable* older version is upgraded in place, since the
     /// frames already present parse under the current schema unchanged.
     pub fn open(path: PathBuf) -> io::Result<Self> {
-        let existed = path.exists();
-        let mut file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(&path)?;
-        let header_len = (WAL_MAGIC.len() + 1) as u64;
-        let file_len = file.metadata()?.len();
-        if !existed || file_len == 0 {
-            write_header(&mut file)?;
-            file.sync_all()?;
-            // fsync the parent directory so the file's creation itself
-            // survives a crash (same doctrine as io/file.rs's atomic
-            // save: without this the fsync'd file can vanish with the
-            // unsynced directory entry).
-            sync_parent_dir(&path);
-        } else {
-            let mut header = [0u8; 5];
-            let read_len = file_len.min(header_len) as usize;
-            {
-                use std::io::{Read, Seek, SeekFrom};
-                // `append` mode only affects writes; reads may seek.
-                file.seek(SeekFrom::Start(0))?;
-                file.read_exact(&mut header[..read_len])?;
-                file.seek(SeekFrom::End(0))?;
-            }
-            let magic_ok = read_len >= WAL_MAGIC.len() && header[..4] == WAL_MAGIC;
-            if file_len < header_len || (!magic_ok && file_len == header_len) {
-                // Torn header (crash between create and header fsync):
-                // shorter than a header, or exactly header-sized with a
-                // bad magic. No frame can exist — repair in place.
-                file.set_len(0)?;
-                write_header(&mut file)?;
-                file.sync_all()?;
-            } else if !magic_ok {
-                // Bad magic with data after the header position: this is
-                // not a torn header — refuse to touch it.
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "{} is not a kglite WAL file (bad magic) and is not empty; \
-                         refusing to overwrite it. Move the file aside if it is stale.",
-                        path.display()
-                    ),
-                ));
-            } else {
-                // Reject an unreadable version before appending to it; the
-                // codec lookup owns the actionable message.
-                wal_codec(header[4])?;
-                if header[4] != WAL_FORMAT_VERSION {
-                    // A readable older version. We are about to append
-                    // current-format frames, so the header must advertise
-                    // the newer version or a future reader would parse the
-                    // new frames under the old schema. Rewriting the byte
-                    // is lossless precisely because the older format is a
-                    // subset (see `WAL_FORMAT_VERSION`): the frames already
-                    // in the file are valid current-format frames, and the
-                    // per-frame CRCs cover payloads only, not the header.
-                    upgrade_header_version(&path)?;
-                }
-            }
-        }
+        // Create/validate/repair the header first, on an ordinary handle. By
+        // the time the append handle below exists the file is well-formed, so
+        // that handle only ever has to do what append handles can portably do.
+        prepare_wal_file(&path)?;
+        let file = OpenOptions::new().read(true).append(true).open(&path)?;
         Ok(Self { file, path })
     }
 
@@ -524,10 +545,14 @@ impl Wal {
     /// Called after a checkpoint (a full `.kgl` save) has folded every
     /// frame into the snapshot, so the log can start fresh.
     pub fn reset(&mut self) -> io::Result<()> {
-        self.file.set_len(0)?;
-        write_header(&mut self.file)?;
-        self.file.sync_all()?;
-        Ok(())
+        // Truncation and header rewrite go through a dedicated read/write
+        // handle for the same reason `prepare_wal_file` does: the append
+        // handle lacks the write-data right on Windows and ignores seeks on
+        // write everywhere. `self.file` stays usable afterwards — append mode
+        // resolves the end of the file at write time, so the next frame lands
+        // straight after the fresh header.
+        let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
+        truncate_to_header(&mut file)
     }
 
     /// The WAL's filesystem path.

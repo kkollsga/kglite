@@ -273,7 +273,18 @@ fn sync_tree(root: &Path) -> io::Result<()> {
     for entry in walkdir::WalkDir::new(root).follow_links(false) {
         let entry = entry.map_err(io::Error::other)?;
         if entry.file_type().is_file() {
-            File::open(entry.path())?.sync_all()?;
+            // `sync_all` is `FlushFileBuffers` on Windows, which MSDN
+            // documents as requiring `GENERIC_WRITE` on the handle: fsyncing
+            // a staged file through a read-only handle fails there with
+            // `ERROR_ACCESS_DENIED`, aborting `publish` before it ever
+            // reaches the rename. Open the file for writing so the durability
+            // fsync is portable — the stage directory is owned exclusively by
+            // this writer, so write access is always grantable.
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(entry.path())?
+                .sync_all()?;
         } else if entry.file_type().is_dir() {
             dirs.push(entry.path().to_path_buf());
         }

@@ -67,10 +67,25 @@ fn one_doc_frame(id: i64) -> DataFrame {
     .unwrap()
 }
 
+/// Byte-for-byte contents of every *data* file under `root`, for asserting that
+/// one graph's mutations never reach another's published files.
+///
+/// Dot-prefixed entries are skipped. They are coordination and scratch state —
+/// `.kglite.lock` (the writer lease) and `.working-*` (a mutation workspace) —
+/// not graph data, so folding them into the comparison makes it wrong on every
+/// platform: the snapshot would differ purely because a lease happened to be
+/// held. On Windows it also fails outright, because `fs2` takes that lease with
+/// `LockFileEx`, whose byte-range locks are *mandatory* rather than advisory
+/// like `flock`, so reading the file returns ERROR_LOCK_VIOLATION (33). No
+/// disk-graph data file starts with a dot.
 fn snapshot_files(root: &std::path::Path) -> BTreeMap<String, Vec<u8>> {
     fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut BTreeMap<String, Vec<u8>>) {
         for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
             if path.is_dir() {
                 collect(root, &path, out);
             } else {
@@ -184,6 +199,48 @@ fn transaction_fork_inherits_lease_but_uses_private_workspace() {
     assert_ne!(parent_dir, child.active_write_dir());
     assert!(parent_dir.exists());
     assert!(child.active_write_dir().exists());
+}
+
+/// Once `save_disk` returns, every mapping the writer holds must live inside
+/// the generation it just published.
+///
+/// The mutation workspace — and, for a detached copy, its private root — are
+/// removed at the end of `finish_generation`. POSIX keeps a mapping valid after
+/// its file is unlinked, so arrays left pointing into the deleted scratch
+/// directory kept working and the bug was invisible; Windows refuses to remove
+/// a directory that still holds a mapped file, so the scratch roots survived
+/// and piled up. Asserting on paths makes the invariant fail loudly on every
+/// platform instead of only on the one that complains.
+#[test]
+fn save_rebases_every_mapping_onto_the_published_generation() {
+    let root = TempDir::new().unwrap();
+    let root_path = root.path().to_str().unwrap();
+
+    let mut graph = DirGraph::new();
+    add_docs(&mut graph, &[1, 2, 3]);
+    graph.enable_disk_mode().unwrap();
+    graph.save_disk(root_path).unwrap();
+
+    // Mutate after the first save so a mutation workspace exists and the CSR
+    // is rebuilt inside it, then publish a second generation over the top.
+    add_docs(&mut graph, &[4]);
+    graph.save_disk(root_path).unwrap();
+
+    let disk = match &mut graph.graph {
+        GraphBackend::Disk(disk) => disk,
+        _ => panic!("expected disk backend"),
+    };
+    let data_dir = disk.data_dir.clone();
+    let stray: Vec<_> = disk
+        .mapped_file_paths()
+        .into_iter()
+        .filter(|path| !path.starts_with(&data_dir))
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "writer still maps files outside the published generation {}: {stray:?}",
+        data_dir.display()
+    );
 }
 
 #[test]

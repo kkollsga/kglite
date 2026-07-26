@@ -8,16 +8,7 @@ use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::PatternElement;
 use crate::graph::languages::cypher::ast::*;
 
-/// Push simple equality predicates from WHERE into MATCH pattern properties.
-/// This enables the pattern executor to filter during matching rather than after.
-///
-/// Fold OR chains of equalities on the same variable.property into IN predicates.
-///
-/// Example: `WHERE n.name = 'A' OR n.name = 'B' OR n.name = 'C'`
-/// Becomes: `WHERE n.name IN ['A', 'B', 'C']`
-///
-/// This enables predicate pushdown into MATCH patterns and index acceleration.
-/// Must run BEFORE `push_where_into_match`.
+/// Fuse `OPTIONAL MATCH` followed by an aggregate into a single pass.
 pub(crate) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
     let mut i = 0;
     while i + 1 < query.clauses.len() {
@@ -1744,10 +1735,36 @@ pub(crate) fn mark_return_lazy_eligible(query: &mut CypherQuery) {
     if n == 0 {
         return;
     }
-    // Conservative shape: every clause must be one of MATCH /
-    // OPTIONAL MATCH / WHERE (predicate-only) / RETURN / SKIP / LIMIT. WITH
-    // / UNWIND / CALL / fused-aggregate variants all consume row values
-    // and their consumer paths haven't been audited for the lazy resolver.
+    // Conservative shape: every clause must be one of MATCH / OPTIONAL MATCH /
+    // RETURN / SKIP / LIMIT. WITH / UNWIND / CALL / ORDER BY / fused-aggregate
+    // variants all consume row values and their consumer paths haven't been
+    // audited for the lazy resolver.
+    //
+    // A standalone `Clause::Where` disqualifies too, and that is easy to miss:
+    // `optimize` keeps the WHERE as a safety net even once every predicate has
+    // been pushed into the MATCH pattern (see
+    // `planner_tests::test_predicate_pushdown_simple`), so it is still a clause
+    // here and falls to the catch-all below. This is the gate that decides
+    // whether a result holds an `Arc<DirGraph>` open, so the exact membership
+    // is pinned by `planner_tests::lazy_eligibility_corpus`.
+    //
+    // KNOWN WART, deliberately left alone rather than papered over. The WHERE
+    // rule splits two spellings of the same lookup:
+    //
+    //     MATCH (u:User {id: 1}) RETURN u.name        -> deferred
+    //     MATCH (u:User) WHERE u.id = 1 RETURN u.name -> eager
+    //
+    // They are semantically identical and a caller has no way to know which one
+    // they wrote, yet they take different paths with different performance
+    // characteristics. That unpredictability is a defect in its own right,
+    // independent of what the deferred path costs. Accepting a standalone WHERE
+    // here would be the obvious "fix" and is NOT one: the resolver has not been
+    // audited against pushed-down predicates, so widening the gate on that
+    // assumption would trade an arbitrary cliff for a correctness risk. The
+    // principled repair is to make the two spellings converge — either by
+    // folding a fully-pushed WHERE out of the clause list in `optimize`, or by
+    // auditing the resolver and admitting predicate-only WHERE — and either is a
+    // deliberate change with its own tests, not a one-line arm added here.
     let mut return_idx: Option<usize> = None;
     for (i, c) in query.clauses.iter().enumerate() {
         match c {

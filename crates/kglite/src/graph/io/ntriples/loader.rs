@@ -911,7 +911,7 @@ struct LoadSpills {
     qnum_to_idx: Option<MmapOrVec<u32>>,
 }
 
-fn initialize_spills(graph: &DirGraph, config: &NTriplesConfig) -> Result<LoadSpills, String> {
+fn initialize_spills(graph: &mut DirGraph, config: &NTriplesConfig) -> Result<LoadSpills, String> {
     let use_streaming_build = graph.graph.is_disk() || graph.graph.is_mapped();
     let use_compact = use_streaming_build;
 
@@ -958,10 +958,16 @@ fn initialize_spills(graph: &DirGraph, config: &NTriplesConfig) -> Result<LoadSp
                     }
                 }
             }
-            // Clean up stale pending_edges from previous killed builds
-            if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
+            // Clean up stale pending_edges from previous killed builds.
+            //
+            // Never remove the file the live graph is currently mapping: it is
+            // not stale by definition, and unlinking it silently detaches the
+            // active buffer from its path on POSIX while failing outright on
+            // Windows, which refuses to delete a file with a mapped view.
+            if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
                 let stale = dg.active_write_dir().join("_pending_edges.bin");
-                if stale.exists() {
+                let mapped_live = dg.pending_edges.get_mut().file_path() == Some(stale.as_path());
+                if stale.exists() && !mapped_live {
                     let _ = std::fs::remove_file(&stale);
                 }
             }

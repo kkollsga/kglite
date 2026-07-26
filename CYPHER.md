@@ -126,6 +126,33 @@ graph.cypher("MATCH (n:Person) WHERE n.name =~ '(?i)^ali.*' RETURN n.name")
 graph.cypher("MATCH (n:Person) WHERE n.email =~ '.*@example\\.com$' RETURN n.name")
 ```
 
+### Generated filters: prefer `IN [...]` over long `OR` chains
+
+Expression nesting is capped at **512 levels**, and every `OR` term adds one
+level — so a filter builder that emits one term per selected value
+(`n.sku = 'a' OR n.sku = 'b' OR ...`) stops parsing at ~512 selections:
+
+```
+Expression nesting exceeds 512 levels; simplify the query. ...
+```
+
+A list membership test is one level no matter how long the list is, so the
+same filter expressed with `IN` has no practical ceiling — and it is faster,
+because it can be pushed into the MATCH and use an index:
+
+```python
+# Fragile above ~512 values, and slower below it
+graph.cypher("MATCH (n:Product) WHERE " + " OR ".join(f"n.sku = '{s}'" for s in skus) + " RETURN n")
+
+# Prefer this — one AST level for any number of values, and parameterised
+graph.cypher("MATCH (n:Product) WHERE n.sku IN $skus RETURN n", params={"skus": skus})
+```
+
+The planner already rewrites `OR` chains of equalities on a *single* property
+into `IN` for you, but only after the query parses — so it cannot rescue a
+chain that is already too long, and it does not fire for chains spanning
+different properties. Generating `IN` directly is the robust habit.
+
 ## Relationship Properties
 
 Relationships can have properties. Access them with `r.property` syntax:
@@ -185,6 +212,48 @@ graph.cypher("MATCH (n:Person) RETURN count(DISTINCT n.city) AS unique_cities")
 graph.cypher("MATCH (n:Person) RETURN median(n.age), percentile_cont(n.age, 0.9)")
 graph.cypher("MATCH (n:Person) RETURN variance(n.age), std(n.age)")
 ```
+
+### ORDER BY after an aggregate
+
+An aggregating `RETURN` emits one row per group, so a sort key must have a
+single value on that row. Two things do:
+
+- **Projected columns** — an alias, or an unaliased item's expression form:
+  `RETURN c.name AS company, count(p) ORDER BY count(p) DESC, company`.
+- **Anything read by a grouping key** — every non-aggregate item is a grouping
+  key, so any property of a variable it names is sortable even when it is not
+  itself projected:
+
+```python
+# t is named by the grouping key t.title, so t.priority is sortable.
+graph.cypher("""
+    MATCH (t:Task)
+    OPTIONAL MATCH (t)-[:X]->(c)
+    RETURN t.title AS title, count(c) AS n
+    ORDER BY t.priority DESC
+""")
+```
+
+The value used is the group's first row. When several distinct nodes collapse
+into one group (two `Task`s sharing a title), that representative is which one
+the group met first — project the sort key explicitly if you need it pinned.
+
+Ordering by anything else is rejected rather than silently ignored:
+
+```python
+# ERROR: c collapses into count(c), so c.label has no value per group.
+"... RETURN t.title AS title, count(c) AS n ORDER BY c.label DESC"
+
+# ERROR: aggregate not projected. Project it, then order by the alias.
+"... RETURN t.title AS title, count(*) AS n ORDER BY max(t.priority) DESC"
+
+# ERROR: the aggregate is projected as `n` — order by `n`.
+"... RETURN t.title AS title, count(*) AS n ORDER BY count(*) DESC"
+```
+
+A `RETURN` **without** aggregates keeps every binding on its rows, so ordering
+by a non-projected expression is unrestricted there. `WITH` narrows scope to
+what it projects, so a sort key after `WITH` must be one of its columns.
 
 ## HAVING
 
@@ -1458,8 +1527,12 @@ g.define_schema({
 })
 ```
 
-> **`define_schema` replaces the whole schema** — it is not a merge. A call with
-> a subset of types drops the omitted ones, so redefine all types each call.
+> **`define_schema` merges per node/connection type.** A type the call names
+> takes the new declaration entire; a type it omits keeps its own, so declaring
+> per module never withdraws another type's constraints. Pass `replace=True` for
+> whole-schema replacement — it warns, naming each constraint it stops
+> enforcing. Constraints declared with `CREATE CONSTRAINT` are unaffected by
+> either mode; drop them with `DROP CONSTRAINT`.
 
 Every write to an opted-in type then stamps a reserved **`updated_at`** (a
 `Timestamp`) — Cypher `CREATE`/`MERGE`/`SET` and `add_nodes`/`add_connections`.

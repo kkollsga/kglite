@@ -260,6 +260,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Documented what a crash actually costs a `storage="disk"` graph, and stopped
+  steering growing apps toward it. Disk mode has no write-ahead log, which read
+  as "no crash safety"; the real guarantee is narrower and is now stated (and
+  kill-9 tested in `crates/kglite/tests/disk_crash_guarantee.rs`): a crash loses
+  exactly the mutations made since the last `save()`, and the last published
+  generation always reopens complete, never half-written. The durable-apps mode
+  table previously offered `disk` for "graphs larger than RAM" with no size
+  threshold and omitted `mapped` entirely — pointing the one audience that most
+  needs per-commit durability at the one mode that lacks it. It now names
+  `mapped` as the larger-than-RAM mode that keeps the guarantee and gates `disk`
+  on Wikidata scale. The storage-mode decision table in core-concepts gained a
+  crash-safety column, and the unqualified "`open()` is crash-safe by default"
+  claims in the README and guide index now name the disk exception. Also
+  documented that each disk `save()` retains a full superseded generation, so
+  checkpoint frequency is a disk-budget decision.
+- The expression-nesting limit now names the fix instead of only the problem.
+  The overwhelmingly common way to reach 512 levels is generated code — a
+  filter or facet builder emitting one `OR` term per selected value — and each
+  term costs a nesting level, so an app that worked with 400 selections breaks
+  at 600 with nothing to go on but "simplify the query". The error now points
+  at the rewrite that actually works: `x = a OR x = b OR ...` becomes
+  `x IN [a, b, ...]`, which costs one nesting level however many values the
+  list holds (and is faster, since it can be pushed into the MATCH and use an
+  index). `CYPHER.md` documents the ceiling and the habit alongside the WHERE
+  clause. Note the planner already folds single-property `OR` chains into `IN`
+  automatically, but only once the query has parsed, so it cannot rescue a
+  chain that is already over the limit.
+
 - Index DDL is classified as a mutation, since schema is graph state: it is
   blocked on a read-only graph and in a read-only transaction, rolls back with
   a failed statement, and is rejected on a schema-locked graph when the
@@ -302,6 +330,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed — behaviour
 
+- **`define_schema()` now merges per node/connection type instead of replacing
+  the whole schema.** A type the call names takes the new declaration entire; a
+  type it does not name keeps the declaration it already had. Previously any
+  `define_schema` call superseded the entire schema, so the natural
+  per-module/per-type declaration pattern silently withdrew every constraint on
+  every type the call happened to omit — a graph that correctly rejected a
+  duplicate primary key one line earlier would accept it on the next, with no
+  error and no warning. Merging is per *type*, not per field, so re-declaring a
+  type is still how you narrow it.
+
+  Pass `replace=True` for the previous whole-schema semantics. Because that
+  withdraws enforcement from types the caller never mentioned, it emits a
+  `UserWarning` listing each constraint it stops enforcing. `clear_schema()`
+  removes everything.
+
+- **`clear_schema()` now withdraws the constraints the schema installed.**
+  It previously dropped the declaration but left the unique indexes a
+  `primary_key`/`unique` declaration had built still rejecting writes — with no
+  `SHOW CONSTRAINTS` row explaining them and no way to drop them. Constraints
+  declared through Cypher DDL are separate declarations and still survive;
+  `DROP CONSTRAINT` withdraws those.
+
+- **A `required` property named `id` or `title` is now enforced against an
+  explicit null.** Both are auto-supplied when a write omits them, so omitting
+  one still satisfies the requirement — but `CREATE (:T {title: null})`,
+  `SET t.title = null`, `REMOVE t.title` and a null title cell in an
+  `add_nodes` batch all produce a node that genuinely carries a null, and those
+  are now rejected. Previously they were waved through while `SHOW CONSTRAINTS`
+  reported the constraint as `NODE_PROPERTY_EXISTENCE` (or `NODE_KEY` alongside
+  a uniqueness declaration), and `validate_schema()` reported nothing.
+  `CREATE CONSTRAINT ... IS NOT NULL` on `id`/`title` likewise now refuses to
+  install against data that already violates it, as it does for any other
+  property. Requiring `type` remains a no-op — it is the node's label and
+  cannot be absent.
+
 - **`kglite.open()` is now crash-safe by default.** `durable` defaults to on, so
   every committed mutation is `fsync`'d to the `<path>-wal` sidecar before the
   call returns and is replayed on the next `open()`. Previously a graph opened
@@ -333,6 +396,163 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behaviour.
 
 ### Fixed
+
+- `ORDER BY` is no longer silently ignored after an aggregating `RETURN` when
+  the sort key is not one of the projected columns. `MATCH (t:Task) OPTIONAL
+  MATCH (t)-[:X]->(c) RETURN t.title AS title, count(c) AS n ORDER BY
+  t.priority DESC` — the shape behind every "list with a count, most important
+  first" view — returned every correct row in **insertion order**, with the
+  clause dropped and no error. Combined with `SKIP`/`LIMIT` it made pagination
+  incoherent: because the underlying order was unspecified, pages could repeat
+  some rows and skip others.
+
+  Aggregation rebuilds its output rows, so a variable survives onto them only
+  if the executor carries its binding forward. The three aggregation operators
+  (streaming, materialized, and the fused `OPTIONAL MATCH` + `count()`) each
+  carried a different subset, so whether the clause worked depended on which
+  one the planner happened to pick — `count()` worked, `collect()` did not, and
+  adding an `OPTIONAL MATCH` broke a query that was correct without it. Where
+  the binding was missing the sort key evaluated to `NULL` on every row, all
+  keys tied, and the stable sort returned the input order. All three operators
+  now carry bindings for every variable the grouping keys read, so the same
+  query orders identically whichever one runs.
+
+  Ordering by a variable that is **not** determined by the grouping is now a
+  query error instead of a silent non-sort. In `RETURN t.title, count(c) ORDER
+  BY c.label`, `c` collapses into the aggregate and has no single value per
+  group; Neo4j rejects this shape and kglite now does too, with a message
+  naming the fix. The same applies to an aggregate in `ORDER BY` that is not
+  projected (`ORDER BY max(t.priority)`) or that is projected under an alias
+  (`count(*) AS n ORDER BY count(*)` — order by `n`). Ordering by a projected
+  alias, by an unaliased aggregate's expression form (`ORDER BY count(p)`), and
+  by any property of a grouping variable all keep working.
+- A Cypher write clause fed zero rows no longer writes anything. `MATCH (p:Project
+  {key: 'NOPE'}) CREATE (t:Task ...)` used to return a row and create the node
+  even though the `MATCH` found nothing; it now returns no rows and creates
+  nothing, matching Neo4j. The same fix covers `MERGE` and `FOREACH` after an
+  empty match, and `UNWIND [] AS x CREATE ...`.
+
+  The two-variable form was the damaging one: `MATCH (t:Task {...}), (u:User
+  {...}) CREATE (t)-[:ASSIGNED_TO]->(u)` where `u` matched nothing used to
+  fabricate `u` as a real node and attach the relationship to it, leaving an
+  edge pointing at a node with no label and no properties — invisible to any
+  label scan but reachable by traversal. With no referential-integrity
+  constraints in the engine, "MATCH the parent, then CREATE the child" is the
+  only way an application can enforce a foreign key, and this silently defeated
+  it while returning a plausible-looking id.
+
+  Cause: `CREATE`, `MERGE`, and `FOREACH` each decided whether to supply
+  Cypher's implicit single start row by testing whether the incoming row set was
+  empty — which is equally true at the start of a query and after a clause that
+  matched nothing. That decision now lives in the clause pipeline, which is the
+  only place that can tell the two apart. `SET`, `DELETE`, and `REMOVE` were
+  never affected. Behaviour that deliberately does *not* change: a leading
+  `CREATE`/`MERGE`/`FOREACH` with no preceding clause still runs exactly once,
+  and `OPTIONAL MATCH` still yields one null-padded row that a following
+  `CREATE` acts on.
+- `define_schema()` no longer withdraws a NOT NULL declared through
+  `CREATE CONSTRAINT ... IS NOT NULL`. Presence constraints live in the same
+  `required_fields` list a schema owns, so installing any schema silently
+  un-enforced them — while the uniqueness half of a DDL declaration, whose index
+  lives outside the schema, survived. A DDL constraint is now withdrawn only by
+  `DROP CONSTRAINT`, in both modes.
+
+- `SHOW CONSTRAINTS` (and `CALL db.constraints()`) now report a stable name for
+  a constraint carrying more than one registered name — the case where
+  `CREATE CONSTRAINT u … IS UNIQUE` and `CREATE CONSTRAINT nn … IS NOT NULL` on
+  the same property merge into one `NODE_KEY` row. The reported name was taken
+  from the first hash-map match, so the same graph could name the row
+  differently before and after a save/load round-trip.
+- A property named `id`, `title` or `type` no longer duplicates its column in
+  the table exports. Those three columns come from a node's canonical identity,
+  but a node can also *store* a property under one of those names — Cypher
+  `CREATE (:T {title: 'a'})` sets `title` both ways, so this hit almost every
+  Cypher-built graph. The affected surfaces were `select(...).to_df()`,
+  `collect()`, `sample()`, and `export_csv()`; the SQL-dump, d3/JSON and
+  `to_text()` exporters already dropped the colliding key and are unchanged.
+
+  The duplicate was not cosmetic. The column map backing a DataFrame is keyed
+  by name, so the second write **overwrote the canonical value** — a graph
+  built with `add_nodes(df, 'T', 'id', 'name')` plus a separate `title` column
+  silently lost the canonical title. `DataFrame.to_parquet()` rejects a
+  non-unique header outright, so the documented
+  `to_df().to_parquet(...)` recipe failed with `ValueError: Duplicate column
+  names found`; `pandas.read_csv` and DuckDB silently renamed the second column
+  to `title.1`/`title_1`, inventing a phantom column in what `export_csv`
+  documents as the portable **backup** format.
+
+  A property colliding with an emitted canonical column is now dropped and the
+  canonical value wins. A canonical column the caller opted out of is not
+  emitted and so cannot collide — `to_df(include_type=False)` still returns a
+  stored `type` property as itself.
+
+- **Disk storage mode now works on Windows.** The backend memory-maps its CSR
+  and index files, and Windows — unlike POSIX — refuses to resize, replace, or
+  delete a file that still has a mapped view open. Several places rewrote a file
+  while the graph was still mapping it, so `save()`, `compact()`, and building a
+  disk graph from N-Triples all failed there with "The requested operation
+  cannot be performed on a file with a user-mapped section open". The mappings
+  are now released before their backing files are rewritten, and `MmapOrVec`
+  releases its view before resizing on Windows while keeping the POSIX ordering
+  that makes a failed remap leave the buffer intact.
+
+  Publishing a saved generation failed for an unrelated reason with the same
+  symptom: the durability `fsync` over the staging directory opened each file
+  read-only, and Windows requires write access to flush a file's buffers, so the
+  save aborted with "Access is denied" before the atomic rename it was
+  protecting. Staged files are now fsynced through a writable handle.
+
+  Saving also left the writer's arrays mapping its scratch workspace instead of
+  the generation just published. Windows will not delete a directory that still
+  holds a mapped file, so those scratch directories accumulated inside the
+  graph directory; the writer now re-maps onto the published snapshot, which
+  also means it observes exactly what a fresh reader would on every platform.
+- **Repairing a torn write-ahead log header now works on Windows.** A `.kgl-wal`
+  left truncated by a crash is repaired on open, but the repair truncated and
+  rewrote the file through the log's append handle. An append handle is not a
+  general-purpose write handle — on Windows it is opened without the access
+  right that truncation requires — so recovering from a torn header failed
+  there. Header creation, repair, and version upgrade now happen on an ordinary
+  handle before the append handle is opened.
+
+  This was never caught because no CI job ran the engine's test suite on
+  Windows, even though Windows wheels are published. The native-lifecycle job
+  now runs it.
+- Holding a deferred query result in a variable no longer makes the next write
+  copy the whole graph. A deferred (`streaming`) result keeps a reference to the
+  graph so it can serve rows later, and that reference made the next write
+  through the same `KnowledgeGraph` deep-clone every node, edge, index and
+  embedding — a cost that grows with graph size rather than with the work done,
+  so it is invisible on a small test fixture and severe on a large one.
+
+  The reach is narrower than it first looks, and worth stating precisely: only
+  results that are *deferred* hold the graph, and deferral requires a query of
+  just `MATCH`/`OPTIONAL MATCH`/`RETURN`/`SKIP`/`LIMIT` returning bare property
+  accesses. Anything with `WHERE`, `ORDER BY`, `DISTINCT`, `WITH`, `UNWIND`, an
+  aggregate, a whole-node `RETURN n`, or a computed value was already eager and
+  never pinned anything. So the shape that paid was a read-modify-write handler
+  whose read is an inline-filtered point lookup or unfiltered projection —
+  `rows = graph.cypher("MATCH (u:User {id: 1}) RETURN u.name, u.balance")`
+  followed by a write with `rows` still in scope. That query is common, but the
+  `WHERE`-spelled equivalent of it never had the problem.
+
+  Very small results — a budget of `rows × columns`, so a single-entity lookup
+  or a handful of rows — are now converted up front and hold no graph
+  reference, so that shape costs nothing extra. The budget is deliberately
+  small: every deferred-eligible query pays the conversion, while only a result
+  held across a write benefits, so the cost to readers has to stay inside noise
+  before the saving counts. Larger results still defer and still hold the graph;
+  `ResultView`'s documentation explains when that matters and how to avoid it.
+  Behaviour is unchanged: a held result has always shown the data as of query
+  time, and still does.
+
+  Consumers gain a little either way — materialising a result in one batched
+  pass is 12–15% faster than resolving it row by row, at every size measured.
+
+- `KnowledgeGraph.begin()` documented that embeddings are excluded from the
+  transaction snapshot's copy. They are not — embeddings, indexes and timeseries
+  are part of the graph and are copied with it, so the note understated the cost
+  of opening a transaction on an embedding-heavy graph. Corrected.
 
 - `claude_config` now reads and writes Claude MCP config files as UTF-8. On a
   non-UTF-8 Windows codepage the read mis-decoded the file and the atomic write
