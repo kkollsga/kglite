@@ -310,6 +310,13 @@ pub fn add_nodes(
     graph.id_indices.remove(&node_type);
     graph.build_id_index(&node_type);
 
+    // Same staleness hazard for the *secondary* indexes: the batch path skips
+    // the per-write incremental maintenance the Cypher executor runs, and
+    // `try_index_lookup` trusts `property_indices` unconditionally — so an
+    // index built before this call would silently hide every row we just
+    // loaded. Rebuild the covering indexes once (no-op when the type has none).
+    graph.refresh_indexes_for_type(&node_type);
+
     // Calculate elapsed time
     let elapsed_ms = metrics.processing_time * 1000.0; // Convert to milliseconds
 

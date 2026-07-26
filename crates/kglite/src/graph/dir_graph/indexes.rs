@@ -398,6 +398,66 @@ impl DirGraph {
     }
 
     // ========================================================================
+    // Bulk-path Index Refresh
+    // ========================================================================
+
+    /// Rebuild every in-memory secondary index that covers `node_type` from
+    /// live graph state. Returns the number of indexes rebuilt.
+    ///
+    /// **Why the bulk paths need this.** `add_nodes` (and the blueprint builder
+    /// and stub vivification, which funnel into it) append rows straight through
+    /// `GraphWrite::add_node` and deliberately skip the per-write incremental
+    /// maintenance the Cypher mutation executor runs
+    /// ([`Self::update_property_indices_for_add`]) — the per-node bookkeeping is
+    /// exactly the cost the batch path exists to avoid. But
+    /// `try_index_lookup` (`core/pattern_matching/matcher.rs`) consults
+    /// `property_indices` **unconditionally**, with no version check, so a
+    /// stale index does not degrade to a scan: it silently returns the
+    /// pre-load candidate set and an indexed `MATCH` drops the freshly loaded
+    /// nodes. Rebuilding once at the end of the bulk call is O(nodes-of-type),
+    /// the same order as the `build_id_index` rebuild that path already pays,
+    /// instead of O(rows) incremental work.
+    ///
+    /// A no-op — three `is_empty` checks — when the type carries no index,
+    /// which is the common bulk-load case.
+    ///
+    /// Disk-backed persistent `PropertyIndex` stores are deliberately out of
+    /// scope here: they never land in `property_indices` (see
+    /// [`Self::create_property_index_routed`]), so this helper cannot see them.
+    pub fn refresh_indexes_for_type(&mut self, node_type: &str) -> usize {
+        let prop_keys = Self::keys_for_type(self.property_indices.keys(), node_type);
+        let range_keys = Self::keys_for_type(self.range_indices.keys(), node_type);
+        let comp_keys: Vec<Vec<String>> = self
+            .composite_indices
+            .keys()
+            .filter(|(nt, _)| nt == node_type)
+            .map(|(_, props)| props.clone())
+            .collect();
+
+        let rebuilt = prop_keys.len() + range_keys.len() + comp_keys.len();
+        for property in &prop_keys {
+            self.create_index(node_type, property);
+        }
+        for property in &range_keys {
+            self.create_range_index(node_type, property);
+        }
+        for properties in &comp_keys {
+            let refs: Vec<&str> = properties.iter().map(String::as_str).collect();
+            self.create_composite_index(node_type, &refs);
+        }
+        rebuilt
+    }
+
+    /// The property names of the `(node_type, property)` index keys belonging to
+    /// `node_type`. Collected into an owned `Vec` so the caller can rebuild
+    /// while holding `&mut self`.
+    fn keys_for_type<'a>(keys: impl Iterator<Item = &'a IndexKey>, node_type: &str) -> Vec<String> {
+        keys.filter(|(nt, _)| nt == node_type)
+            .map(|(_, property)| property.clone())
+            .collect()
+    }
+
+    // ========================================================================
     // Incremental Index Maintenance (called by Cypher mutations)
     // ========================================================================
 

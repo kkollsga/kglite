@@ -197,3 +197,103 @@ mod multi_label_tests {
         assert_eq!(g.nodes_with_label("VIP"), vec![b]);
     }
 }
+
+#[cfg(test)]
+mod bulk_index_freshness_tests {
+    use super::*;
+    use crate::datatypes::values::{DataFrame, Value};
+    use crate::graph::mutation::maintain::add_nodes;
+
+    fn people(rows: Vec<(&str, &str)>) -> DataFrame {
+        DataFrame::from_cypher_rows(
+            vec!["id".to_string(), "city".to_string()],
+            rows.into_iter()
+                .map(|(id, city)| {
+                    vec![
+                        Value::String(id.to_string()),
+                        Value::String(city.to_string()),
+                    ]
+                })
+                .collect(),
+        )
+        .expect("dataframe")
+    }
+
+    #[test]
+    fn add_nodes_keeps_property_index_fresh() {
+        let mut g = DirGraph::new();
+        add_nodes(
+            &mut g,
+            people(vec![("p1", "Oslo")]),
+            "Person".to_string(),
+            "id".to_string(),
+            None,
+            None,
+        )
+        .expect("first load");
+
+        assert_eq!(g.create_index("Person", "city"), 1);
+
+        add_nodes(
+            &mut g,
+            people(vec![("p2", "Oslo"), ("p3", "Bergen")]),
+            "Person".to_string(),
+            "id".to_string(),
+            None,
+            None,
+        )
+        .expect("second load");
+
+        let oslo = g
+            .lookup_by_index("Person", "city", &Value::String("Oslo".to_string()))
+            .unwrap_or_default();
+        assert_eq!(oslo.len(), 2, "bulk load left the property index stale");
+    }
+
+    #[test]
+    fn add_nodes_keeps_range_and_composite_indexes_fresh() {
+        let mut g = DirGraph::new();
+        add_nodes(
+            &mut g,
+            people(vec![("p1", "Oslo")]),
+            "Person".to_string(),
+            "id".to_string(),
+            None,
+            None,
+        )
+        .expect("first load");
+
+        g.create_range_index("Person", "city");
+        g.create_composite_index("Person", &["city"]);
+
+        add_nodes(
+            &mut g,
+            people(vec![("p2", "Oslo")]),
+            "Person".to_string(),
+            "id".to_string(),
+            None,
+            None,
+        )
+        .expect("second load");
+
+        let oslo = Value::String("Oslo".to_string());
+        let ranged = g
+            .lookup_range(
+                "Person",
+                "city",
+                std::ops::Bound::Included(&oslo),
+                std::ops::Bound::Included(&oslo),
+            )
+            .unwrap_or_default();
+        assert_eq!(ranged.len(), 2, "bulk load left the range index stale");
+
+        let composite = g
+            .lookup_by_composite_index("Person", &["city".to_string()], &[oslo])
+            .unwrap_or_default();
+        assert_eq!(
+            composite.len(),
+            2,
+            "bulk load left the composite index stale"
+        );
+    }
+}

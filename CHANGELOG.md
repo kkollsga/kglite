@@ -57,6 +57,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rejected with the reason (persistent property indexes cover string columns)
   instead of reporting success for an empty index.
 
+### Fixed
+
+- Bulk loading no longer silently hides rows from an indexed `MATCH`.
+  `add_nodes` (and the blueprint builder and edge stub vivification, which
+  funnel into it) appends through the batch path, which skips the per-write
+  index maintenance the Cypher executor runs — but the matcher trusts a
+  property index unconditionally rather than falling back to a scan. So after
+  `create_index('Person', 'city')`, a subsequent `add_nodes` left
+  `MATCH (n:Person {city: 'Oslo'})` returning only the pre-load nodes. The
+  bulk path now rebuilds the equality, range, and composite indexes covering
+  the loaded type once per call (no-op when the type carries none), the same
+  order of work as the `id` index rebuild it already did.
+
 ## [0.14.5] - 2026-07-22
 
 ### Changed
