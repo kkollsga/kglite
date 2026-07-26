@@ -4317,7 +4317,14 @@ class KnowledgeGraph:
         (``Label.property``). ``IS :: TYPE`` / ``IS TYPED TYPE`` is rejected —
         there is no write-time property-type enforcement, so accepting it would
         report success while enforcing nothing; use ``lock_schema()`` or
-        ``validate_schema()``. ``SHOW CONSTRAINTS`` and ``SHOW INDEXES`` are
+        ``validate_schema()``. ``IS UNIQUE`` / ``IS NODE KEY`` over the identity
+        field is rejected for the same reason, under any spelling that resolves
+        to it (``id`` itself or the node type's own id column): ``id`` is a
+        structural field rather than a stored property, so the unique secondary
+        index never sees the write. Declare ``primary_key`` through
+        :meth:`define_schema` instead — it probes the per-type id index on every
+        write path. ``IS NOT NULL`` on ``id`` **is** accepted, since it is
+        present by construction. ``SHOW CONSTRAINTS`` and ``SHOW INDEXES`` are
         reads and work on a read-only graph. See the "Cypher constraint DDL"
         section of ``CYPHER.md``.
 

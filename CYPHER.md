@@ -65,9 +65,14 @@ count). Two semantics to keep in mind:
 
 - **Uniqueness is opt-in**: with no constraint declared, `CREATE` does not reject
   a duplicate `id` — two `CREATE (:T {id: 'k'})` make two nodes. Either declare
-  one (`CREATE CONSTRAINT FOR (t:T) REQUIRE t.id IS UNIQUE`, after which the
+  the node type's primary key
+  (`define_schema({'nodes': {'T': {'primary_key': 'id'}}})`, after which the
   second `CREATE` is rejected), or use **`MERGE`, not `CREATE`** —
-  `MERGE (:T {id: $k})` is idempotent either way.
+  `MERGE (:T {id: $k})` is idempotent either way. Constraint DDL is deliberately
+  *not* the route here: `REQUIRE t.id IS UNIQUE` is refused, because `id` is a
+  structural field rather than a stored property and the unique secondary index
+  would never see the write — see
+  [Cypher constraint DDL](#cypher-constraint-ddl).
 - **Matching is type-exact**: `'42'` ≠ `42`. Keep id types consistent across
   writes and reads.
 - **Property typos pass silently by default** (open schema): an unknown property
@@ -1924,6 +1929,7 @@ works — never a syntax error, and **never a success that enforces nothing**.
 |---|---|
 | `REQUIRE n.p IS :: INTEGER` | No write-time property-type constraint exists. Accepting it would report success while enforcing nothing, so it is refused. `lock_schema()` rejects a write whose value disagrees with the node type's recorded property type; `validate_schema()` audits existing data against `define_schema`'s `field_types` |
 | `REQUIRE n.p IS TYPED STRING` | The same thing, spelled the Neo4j 5 way |
+| `REQUIRE n.id IS UNIQUE` / `IS NODE KEY` | Uniqueness over the identity field — under **any** spelling that resolves to it, `id` itself or the node type's own id column (`person_id`) — is refused. `id` is a `NodeData` field, not an entry in the property map, so the write-path claim is never produced and the constraint would admit duplicates while reporting success. Declare the node type's primary key instead: `define_schema({'nodes': {'Person': {'primary_key': 'id'}}})` probes the per-type id index on every write path, and `MERGE` is the idempotent alternative to `CREATE`. Only `id` is affected — `title`, a column aliased to `title`, and ordinary properties all enforce correctly. `IS NOT NULL` on `id` **is** accepted: it is present by construction, so the requirement is genuinely satisfied |
 | `FOR ()-[r:T]-() REQUIRE r.p IS UNIQUE` | KGLite constrains node properties only |
 | `REQUIRE …` with no properties | Nothing to constrain |
 | `CREATE CONSTRAINT <name> …` reusing a live name | Names are unique per graph; drop the existing one or choose another name |
