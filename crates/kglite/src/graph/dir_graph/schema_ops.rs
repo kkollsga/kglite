@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use super::DirGraph;
 use crate::datatypes::values::Value;
+use crate::error::KgError;
 use crate::graph::schema::SchemaDefinition;
 
 impl DirGraph {
@@ -32,9 +33,76 @@ impl DirGraph {
         result
     }
 
-    /// Set the schema definition for this graph
-    pub fn set_schema(&mut self, schema: SchemaDefinition) {
+    /// Set the schema definition for this graph, installing the UNIQUE
+    /// constraints it declares.
+    ///
+    /// A declaration is enforced from here on, so it has to be checkable against
+    /// what is already stored: if existing data already violates a declared
+    /// constraint the call fails and **nothing changes** — neither the schema nor
+    /// the indexes — rather than installing a constraint that silently lies about
+    /// the rows already present.
+    ///
+    /// Constraints implied by the *outgoing* schema are withdrawn first, so
+    /// replacing a schema that declared a primary key with one that does not
+    /// stops enforcing it. A constraint declared directly (by
+    /// `DirGraph::create_unique_constraint`, e.g. from `CREATE CONSTRAINT`)
+    /// rather than through a schema is untouched by this.
+    pub fn set_schema(&mut self, schema: SchemaDefinition) -> Result<(), KgError> {
+        let previous_schema = self.schema_definition.take();
+        let withdrawn = Self::declared_unique_tuples(previous_schema.as_ref());
+        for (node_type, properties) in &withdrawn {
+            self.drop_unique_constraint(node_type, properties);
+        }
+
+        // Install with the new schema already in place, so a violation reports
+        // itself as NODE KEY rather than UNIQUE when the tuple is a primary key.
         self.schema_definition = Some(schema);
+        let incoming = Self::declared_unique_tuples(self.schema_definition.as_ref());
+        for (index, (node_type, properties)) in incoming.iter().enumerate() {
+            let refs: Vec<&str> = properties.iter().map(String::as_str).collect();
+            if let Err(violation) = self.create_unique_constraint(node_type, &refs) {
+                // Roll back to the outgoing schema and its constraints so a
+                // rejected declaration is a no-op.
+                for (rollback_type, rollback_props) in incoming.iter().take(index) {
+                    self.drop_unique_constraint(rollback_type, rollback_props);
+                }
+                self.schema_definition = previous_schema;
+                for (node_type, properties) in &withdrawn {
+                    let refs: Vec<&str> = properties.iter().map(String::as_str).collect();
+                    // Reinstalling what was live a moment ago cannot fail on the
+                    // same unchanged data; ignore rather than mask the real error.
+                    let _ = self.create_unique_constraint(node_type, &refs);
+                }
+                return Err(violation.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Every unique tuple a schema implies: each non-`id` primary key (a primary
+    /// key on `id` is enforced by the id-index, not a secondary index) plus every
+    /// entry of `unique`. Sorted so installation order is deterministic.
+    fn declared_unique_tuples(schema: Option<&SchemaDefinition>) -> Vec<(String, Vec<String>)> {
+        let Some(schema) = schema else {
+            return Vec::new();
+        };
+        let mut tuples: Vec<(String, Vec<String>)> = Vec::new();
+        for (node_type, node) in &schema.node_schemas {
+            if let Some(pk) = node.primary_key.as_deref() {
+                if pk != "id" {
+                    tuples.push((node_type.clone(), vec![pk.to_string()]));
+                }
+            }
+            for properties in node.unique.iter().flatten() {
+                if properties.is_empty() {
+                    continue;
+                }
+                tuples.push((node_type.clone(), properties.clone()));
+            }
+        }
+        tuples.sort();
+        tuples.dedup();
+        tuples
     }
 
     /// Get the schema definition if one is set
@@ -48,10 +116,15 @@ impl DirGraph {
     }
 
     /// The declared PRIMARY KEY property for `node_type`, if one is set via
-    /// `define_schema`. `Some("id")` means uniqueness on the type's identity
-    /// key is enforced at the write path (CREATE rejects a duplicate); `None`
-    /// means the permissive default. Single source of truth for the
-    /// enforcement check and for introspection, so they never diverge.
+    /// `define_schema`. `None` means the permissive default. Single source of
+    /// truth for the enforcement check and for introspection, so they never
+    /// diverge.
+    ///
+    /// The key may be any property, and is enforced as unique *and* present
+    /// (NODE KEY semantics) on every write path. Two routes:
+    /// `Some("id")` probes the per-type id-index directly, since `id` is a
+    /// `NodeData` field rather than a property; any other key is backed by the
+    /// unique secondary index [`Self::set_schema`] installs.
     pub fn primary_key_for(&self, node_type: &str) -> Option<&str> {
         self.schema_definition
             .as_ref()?

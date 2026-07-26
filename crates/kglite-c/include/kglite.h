@@ -57,6 +57,18 @@ enum KgliteStatusCode
    */
   KGLITE_STATUS_CODE_CANCELLED = 17,
   /**
+   * A write violated a declared integrity constraint (UNIQUE / NOT
+   * NULL / NODE KEY). The write was rejected before touching
+   * storage, so the graph is unchanged. Appended to keep the
+   * existing discriminants stable across this ABI major version.
+   */
+  KGLITE_STATUS_CODE_CONSTRAINT_VIOLATION = 18,
+  /**
+   * Declaring a constraint failed because the stored data already
+   * violates it. Deduplicate the node type, then re-declare.
+   */
+  KGLITE_STATUS_CODE_CONSTRAINT_CREATION_FAILED = 19,
+  /**
    * A string argument failed UTF-8 validation. The C-side
    * caller passed a `*const c_char` whose bytes didn't decode
    * as UTF-8 — typically a corrupted buffer or a non-UTF-8

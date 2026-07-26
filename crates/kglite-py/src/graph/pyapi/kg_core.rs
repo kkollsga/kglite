@@ -1091,20 +1091,53 @@ impl KnowledgeGraph {
                         }
                     }
 
-                    // Parse the (opt-in) primary key. MVP enforces uniqueness only
-                    // on the identity key ('id'); a PK on an arbitrary property
-                    // needs a unique secondary index (follow-up), so reject it
-                    // explicitly rather than silently declaring a no-op constraint.
+                    // Parse the (opt-in) primary key. Any property may be the key:
+                    // `id` is enforced through the O(1) per-type id-index, and
+                    // anything else through a unique secondary index that
+                    // `set_schema` installs. Either way the key is unique *and*
+                    // required (NODE KEY semantics).
                     if let Some(pk_val) = node_schema_dict.get_item("primary_key")? {
                         let pk: String = pk_val.extract()?;
-                        if pk != "id" {
+                        if pk.is_empty() {
                             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "primary_key for node type '{node_type}' must be 'id' — \
-                                 enforcing a primary key on an arbitrary property is not yet \
-                                 supported (it needs a unique secondary index). Got '{pk}'."
+                                "primary_key for node type '{node_type}' must name a property."
                             )));
                         }
                         node_schema.primary_key = Some(pk);
+                    }
+
+                    // Parse the (opt-in) UNIQUE constraints: a list of property
+                    // tuples, so `[["email"], ["first", "last"]]` declares one
+                    // single-property and one composite constraint. A bare string
+                    // or a flat list of strings is a natural mistake that would
+                    // otherwise declare something surprising, so accept the
+                    // shorthand explicitly instead of guessing.
+                    if let Some(unique_val) = node_schema_dict.get_item("unique")? {
+                        let tuples: Vec<Vec<String>> =
+                            if let Ok(single) = unique_val.extract::<String>() {
+                                vec![vec![single]]
+                            } else if let Ok(flat) = unique_val.extract::<Vec<String>>() {
+                                flat.into_iter().map(|property| vec![property]).collect()
+                            } else {
+                                unique_val.extract::<Vec<Vec<String>>>().map_err(|_| {
+                                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                    "unique for node type '{node_type}' must be a property name, \
+                                     a list of property names, or a list of property tuples — \
+                                     e.g. 'email', ['email'], or [['first', 'last']]."
+                                ))
+                                })?
+                            };
+                        for tuple in &tuples {
+                            if tuple.is_empty() {
+                                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                    format!(
+                                        "unique for node type '{node_type}' contains an empty \
+                                         property tuple."
+                                    ),
+                                ));
+                            }
+                        }
+                        node_schema.unique = Some(tuples);
                     }
 
                     // Parse the (opt-in) ownership layer for the two-writer
@@ -1209,7 +1242,12 @@ impl KnowledgeGraph {
             }
         }
 
-        get_graph_mut(&mut self.inner).set_schema(schema);
+        // Installing the schema installs the UNIQUE constraints it declares, so
+        // it fails when existing data already violates one — nothing is changed
+        // in that case, so the caller can fix the data and retry.
+        get_graph_mut(&mut self.inner)
+            .set_schema(schema)
+            .map_err(crate::error_py::kg_to_pyerr)?;
 
         Ok(self.clone())
     }

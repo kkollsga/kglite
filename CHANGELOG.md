@@ -40,8 +40,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   naming the construct and the route that works today, instead of a syntax
   error or a silent no-op.
 
+- Real integrity constraints, enforced on **every** write path — Cypher
+  `CREATE` / `MERGE` / `SET` / `REMOVE` *and* the bulk loader (`add_nodes`, and
+  therefore blueprints, `from_records`, OKF, WAL replay and `extend_graph`).
+  Declared through the existing `define_schema`:
+
+      graph.define_schema({"nodes": {"Person": {
+          "unique": [["email"], ["first", "last"]],
+          "required": ["email"],
+          "primary_key": "email",
+      }}})
+
+  `unique` takes a property name, a list of names, or a list of property tuples,
+  so single-property and composite constraints share one surface. A tuple only
+  constrains nodes carrying *every* property in it, matching Neo4j, where
+  uniqueness does not apply to nodes missing the property.
+- `required` (NOT NULL) is now enforced at **write time**, not only by
+  `validate_schema()`. A `CREATE` that omits the property, a `SET` that nulls
+  it, and a `REMOVE` that drops it are all rejected. Auto-vivified edge stubs
+  are *deferred*, not exempt: vivification may create an incomplete placeholder,
+  but the later `add_nodes` upsert that promotes it is a normal, fully-enforced
+  write, and an unpromoted stub stays reportable via `validate_schema()` and
+  removable via `purge_provisional_nodes()`.
+- `primary_key` accepts any property, not just `id`, and now means unique **and
+  present** (NODE KEY semantics). A key on `id` still routes through the O(1)
+  per-type id index; any other key is backed by a unique secondary index that
+  persists and rebuilds on load like every other index. Older `.kgl` files load
+  unchanged — both `unique` and the generalization are additive.
+- Declaring a constraint that the stored data already violates is rejected, and
+  changes nothing, rather than installing a constraint that silently lies about
+  the rows already present.
+- Typed constraint errors: `ConstraintViolationError` (a write broke a
+  constraint) and `ConstraintCreationError` (a declaration cannot be installed),
+  both under a new `ConstraintError` base class, so `except ConstraintError`
+  catches either. Over Bolt they carry
+  `Neo.ClientError.Schema.ConstraintValidationFailed` and
+  `Neo.ClientError.Schema.ConstraintCreationFailed`; the C ABI gains
+  `ConstraintViolation = 18` and `ConstraintCreationFailed = 19`, appended so
+  existing discriminants stay stable.
+
 ### Changed
 
+- `KnowledgeGraph.define_schema` can now fail: installing a schema installs the
+  UNIQUE constraints it declares, so it raises `ConstraintCreationError` when
+  existing data already violates one. Nothing is changed in that case, so the
+  data can be fixed and the call retried.
 - Index DDL is classified as a mutation, since schema is graph state: it is
   blocked on a read-only graph and in a read-only transaction, rolls back with
   a failed statement, and is rejected on a schema-locked graph when the

@@ -1,17 +1,51 @@
 // src/graph/maintain.rs
 use crate::datatypes::{DataFrame, Value};
+use crate::graph::constraints::UniqueConstraintKey;
 use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOperationReport};
 use crate::graph::mutation::batch::{
     BatchProcessor, ConflictHandling, ConnectionBatchProcessor, NodeAction,
 };
 use crate::graph::schema::{
-    CurrentSelection, DirGraph, InternedKey, TypeSchema, PROVISIONAL_KEY, RESERVED_PROVENANCE_KEYS,
+    CompositeValue, CurrentSelection, DirGraph, InternedKey, TypeSchema, PROVISIONAL_KEY,
+    RESERVED_PROVENANCE_KEYS,
 };
 use crate::graph::storage::lookups::{CombinedTypeLookup, TypeLookup};
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// Column lookup for the bulk path's constraint gates: user-facing property
+/// name → column index, resolved once per call so the per-row read is a HashMap
+/// hit instead of repeated `get_column_index` string scans.
+///
+/// The identity and title columns are handled by the caller's closure (they may
+/// be named `npdid` / `prospect_name` rather than `id` / `title`), so this only
+/// covers ordinary property columns.
+struct ConstraintColumns {
+    by_name: HashMap<String, usize>,
+}
+
+impl ConstraintColumns {
+    fn new(df_data: &DataFrame) -> Self {
+        let by_name = df_data
+            .get_column_names()
+            .into_iter()
+            .filter_map(|name| df_data.get_column_index(&name).map(|idx| (name, idx)))
+            .collect();
+        Self { by_name }
+    }
+
+    /// The row's value for `property`, or `None` when the column is absent or
+    /// the cell is null — both of which a constraint treats identically.
+    fn read(&self, df_data: &DataFrame, row_idx: usize, property: &str) -> Option<Value> {
+        let column = *self.by_name.get(property)?;
+        match df_data.get_value_by_index(row_idx, column) {
+            Some(Value::Null) | None => None,
+            Some(value) => Some(value),
+        }
+    }
+}
 
 fn check_data_validity(df_data: &DataFrame, unique_id_field: &str) -> Result<(), String> {
     // Remove strict UniqueId type verification to allow nulls
@@ -204,6 +238,29 @@ pub fn add_nodes(
         std::collections::HashSet::new()
     };
 
+    // UNIQUE / NOT NULL enforcement for the bulk path. A constraint the batch
+    // engine bypassed would be theatre — `add_nodes` is how blueprints,
+    // `from_records`, OKF, WAL replay and `extend_graph` all reach storage — so
+    // the whole batch is validated in this row loop, *before* `batch.execute`
+    // writes anything. That also means a rejected batch needs no rollback: the
+    // graph was never touched.
+    //
+    // Both gates are skipped entirely when the type declares nothing, so the
+    // common bulk path pays one `is_empty` and one `Option` check per call, not
+    // per row.
+    let constraint_columns =
+        if graph.has_unique_constraints() || graph.has_required_fields(&node_type) {
+            Some(ConstraintColumns::new(&df_data))
+        } else {
+            None
+        };
+    // Tuples claimed by earlier rows of this same batch. A repeat inside one
+    // input is rejected even when neither row conflicts with the stored graph —
+    // otherwise the post-load index rebuild would silently keep one row and drop
+    // the other.
+    let mut batch_claims: std::collections::HashSet<(UniqueConstraintKey, CompositeValue)> =
+        std::collections::HashSet::new();
+
     for row_idx in 0..df_data.row_count() {
         let id = match df_data.get_value_by_index(row_idx, id_idx) {
             Some(Value::Null) => {
@@ -231,6 +288,39 @@ pub fn add_nodes(
             .get_value_by_index(row_idx, title_idx)
             .unwrap_or(Value::Null);
 
+        // Constraint gates. Run here, before the row is queued onto the batch,
+        // so a violation aborts the whole call with the graph untouched — no
+        // rollback needed and no half-applied load.
+        let existing_idx = type_lookup.check_uid(&id);
+        if let Some(columns) = &constraint_columns {
+            // A constraint names the property the user queries by, which for the
+            // identity / title columns may be the original column name
+            // (`npdid`) rather than the canonical `id` / `title`. Accept both
+            // spellings; identity wins over a same-named ordinary column,
+            // matching `DirGraph::resolve_alias` on the read side.
+            let read = |property: &str| -> Option<Value> {
+                if property == "id" || property == unique_id_field {
+                    return (!matches!(id, Value::Null)).then(|| id.clone());
+                }
+                if property == "title" || property == title_field {
+                    return (!matches!(title, Value::Null)).then(|| title.clone());
+                }
+                columns.read(&df_data, row_idx, property)
+            };
+            graph
+                .check_required_fields(&node_type, &read)
+                .map_err(|violation| violation.to_string())?;
+            let claims = graph.unique_claims(&node_type, &read);
+            graph
+                .check_unique_claims(&claims, existing_idx)
+                .map_err(|violation| violation.to_string())?;
+            for claim in &claims {
+                if !batch_claims.insert((claim.key.clone(), claim.value.clone())) {
+                    return Err(graph.unique_batch_conflict(claim).to_string());
+                }
+            }
+        }
+
         // Use pre-interned keys — avoids HashMap allocation and string cloning per row
         let mut properties_interned = Vec::with_capacity(property_count);
         for (interned_key, col_idx) in &interned_columns {
@@ -246,7 +336,7 @@ pub fn add_nodes(
             properties_interned.push((*key, value.clone()));
         }
 
-        let action = match type_lookup.check_uid(&id) {
+        let action = match existing_idx {
             Some(node_idx) => {
                 // Determine if we should update the title
                 let title_update = if should_update_title {
@@ -910,6 +1000,9 @@ pub(crate) fn detach_delete_nodes(
                 value_map.retain(|_, indices| !indices.is_empty());
             }
         }
+        // A deleted node must give up its UNIQUE tuples, or the value stays
+        // reserved forever and re-inserting it is rejected.
+        graph.evict_unique_claims_for_nodes(node_type, nodes_to_delete);
     }
 
     // Secondary-label index is keyed by label (not primary type), so a
@@ -2211,7 +2304,7 @@ mod id_index_tests {
                 ..Default::default()
             },
         );
-        g.set_schema(schema);
+        g.set_schema(schema).expect("schema install");
 
         let dup = DataFrame::from_cypher_rows(
             vec!["id".to_string()],

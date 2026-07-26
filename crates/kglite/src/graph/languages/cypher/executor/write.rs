@@ -706,18 +706,50 @@ fn create_node(
     // amortised and behaves identically across memory/mapped/disk. Undeclared
     // types skip the probe entirely, leaving the permissive default (and the
     // dense-int hot path) untouched.
-    let pk_declared = graph.primary_key_for(&label).is_some();
-    if pk_declared && graph.lookup_by_id_readonly(&label, &id).is_some() {
+    // The `id` case keeps its dedicated path: `id` is the node's identity, not
+    // an entry in the property map, and the per-type id-index answers the probe
+    // in O(1) amortised across every backend. A primary key on any *other*
+    // property is enforced by the unique-constraint index instead, installed
+    // when the schema declares it (`DirGraph::set_schema`).
+    if graph.primary_key_for(&label) == Some("id")
+        && graph.lookup_by_id_readonly(&label, &id).is_some()
+    {
         return Err(format!(
             "duplicate primary key: node type '{label}' declares a primary key and a \
              node with id {id} already exists. Use MERGE to upsert instead of CREATE, \
              or remove the duplicate."
         ));
     }
+
+    // Declared UNIQUE / NOT NULL constraints. Both gates read through one
+    // closure over the values this CREATE is about to write: `id` and `title`
+    // are the identity fields, everything else comes from the evaluated property
+    // map. Skipped entirely for a type that declares nothing.
+    let constraint_read = |property: &str| -> Option<Value> {
+        match property {
+            "id" => (!matches!(id, Value::Null)).then(|| id.clone()),
+            "title" => (!matches!(title, Value::Null)).then(|| title.clone()),
+            other => match properties.get(other) {
+                Some(Value::Null) | None => None,
+                Some(value) => Some(value.clone()),
+            },
+        }
+    };
+    graph
+        .check_required_fields(&label, &constraint_read)
+        .map_err(|violation| violation.to_string())?;
+    let unique_claims = graph.unique_claims(&label, &constraint_read);
+    graph
+        .check_unique_claims(&unique_claims, None)
+        .map_err(|violation| violation.to_string())?;
+
     // Clone the id for incremental index maintenance below (it is moved into
-    // insert_node_routed). Unconditional: the clone is what makes incremental
-    // maintenance possible at all, and it is far cheaper than the O(n) rebuild
-    // the alternative forces on the next id lookup.
+    // insert_node_routed). The id-index is maintained incrementally whenever it
+    // is already cached, regardless of whether a primary key is declared:
+    // inserting into a complete index keeps it complete, whereas dropping it
+    // forces the next id lookup to rebuild the whole type. The `contains_key`
+    // guard at the maintenance site is what prevents building a *partial* index
+    // that `build_id_index` would later trust as complete.
     let pk_id = Some(id.clone());
 
     // Role-scoped write guard (integrity): reject CREATE of a node type
@@ -774,6 +806,8 @@ fn create_node(
 
     // Update property and composite indices for the new node
     graph.update_property_indices_for_add(&label, node_idx);
+    // Claim the unique tuples validated above, now that the node exists.
+    graph.commit_unique_claims(&unique_claims, node_idx);
 
     // Ensure type metadata exists for this type (consistent with Python add_nodes API)
     ensure_type_metadata(graph, &label, node_idx);
@@ -1046,6 +1080,13 @@ fn execute_set(
                         )?;
                     }
 
+                    // Declared UNIQUE / NOT NULL gates. Planned before the write
+                    // so a violation returns without mutating storage; the
+                    // returned plan is redeemed after the value lands.
+                    let constraint_plan = graph
+                        .plan_property_write(&node_type_str, *node_idx, property, Some(&value))
+                        .map_err(|violation| violation.to_string())?;
+
                     // Clone value before it may be consumed by the mutation
                     let value_for_index = value.clone();
 
@@ -1162,6 +1203,9 @@ fn execute_set(
                             &value_for_index,
                         );
                     }
+
+                    // Hand the vacated unique tuples back and take the new ones.
+                    graph.apply_property_write_plan(&constraint_plan, *node_idx);
 
                     // Keep node_type_metadata in sync so schema() is accurate
                     {
@@ -1626,6 +1670,14 @@ fn execute_remove(
                         .map(|n| n.get_node_type_ref(&graph.interner).to_string())
                         .unwrap_or_default();
 
+                    // Declared NOT NULL / UNIQUE gates. Removing a required
+                    // property is a violation; removing part of a unique tuple
+                    // just vacates it. Planned before the write so a rejection
+                    // leaves storage untouched.
+                    let constraint_plan = graph
+                        .plan_property_write(&node_type_str, *node_idx, property, None)
+                        .map_err(|violation| violation.to_string())?;
+
                     // Remove property (mutable borrow, returns old value).
                     //
                     // On disk-backed graphs, the staged-write flush only
@@ -1660,6 +1712,7 @@ fn execute_remove(
                             &old_val,
                         );
                     }
+                    graph.apply_property_write_plan(&constraint_plan, *node_idx);
                 }
                 RemoveItem::Label { variable, label } => {
                     let Some(&node_idx) = row.node_bindings.get(variable) else {
