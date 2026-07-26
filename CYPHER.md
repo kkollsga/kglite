@@ -1784,7 +1784,6 @@ that works — never a syntax error, and never a no-op that reports success.
 | `CREATE INDEX FOR ()-[r:T]-() ON (r.p)` | KGLite indexes node properties only. Relationship properties are queryable, just scanned |
 | `... OPTIONS { ... }` | No index providers or per-index configuration to apply |
 | `CREATE RANGE INDEX ... ON (n.a, n.b)` | The B-tree is single-property. Use a composite equality index, or one `CREATE RANGE INDEX` per property |
-| `CREATE/DROP/SHOW CONSTRAINT` | No Cypher-managed constraints. Uniqueness comes from node-type primary keys and `MERGE`; presence and types from `lock_schema()` |
 
 #### On disk-backed graphs
 
