@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use super::DirGraph;
 use crate::datatypes::values::Value;
 use crate::error::KgError;
-use crate::graph::schema::SchemaDefinition;
+use crate::graph::schema::{SchemaDefinition, SchemaInstall};
 
 impl DirGraph {
     /// Run one write with caller-supplied freshness provenance, restoring the
@@ -43,15 +43,35 @@ impl DirGraph {
     /// the rows already present.
     ///
     /// Constraints implied by the *outgoing* schema are withdrawn first, so
-    /// replacing a schema that declared a primary key with one that does not
-    /// stops enforcing it. A constraint declared directly (by
-    /// `DirGraph::create_unique_constraint`, e.g. from `CREATE CONSTRAINT`)
-    /// rather than through a schema is untouched by this.
+    /// re-declaring a type without the primary key it used to declare stops
+    /// enforcing it. `mode` decides how far that withdrawal reaches:
+    /// [`SchemaInstall::Merge`] scopes it to the types `schema` actually names,
+    /// [`SchemaInstall::Replace`] applies it to every type in the graph.
+    ///
+    /// Constraints declared directly through DDL (`CREATE CONSTRAINT`) rather
+    /// than through a schema survive either mode — the unique half because the
+    /// withdrawal is computed from the outgoing *schema* rather than from the
+    /// live indexes, and the presence half because
+    /// [`Self::reapply_ddl_not_null`] reinstates it. Without that second half a
+    /// schema call would wipe a DDL NOT NULL, since `required_fields` live
+    /// inside the schema being replaced.
     // `KgError` is a rich by-value error type across the whole public surface;
     // every other `Result<_, KgError>` signature in the engine carries the same
     // allow rather than boxing one variant in isolation.
     #[allow(clippy::result_large_err)]
-    pub fn set_schema(&mut self, schema: SchemaDefinition) -> Result<(), KgError> {
+    pub fn set_schema(
+        &mut self,
+        schema: SchemaDefinition,
+        mode: SchemaInstall,
+    ) -> Result<(), KgError> {
+        let schema = match mode {
+            SchemaInstall::Replace => schema,
+            SchemaInstall::Merge => self
+                .schema_definition
+                .clone()
+                .unwrap_or_default()
+                .merged_with(schema),
+        };
         let previous_schema = self.schema_definition.take();
         let withdrawn = Self::declared_unique_tuples(previous_schema.as_ref());
         for (node_type, properties) in &withdrawn {
@@ -61,6 +81,11 @@ impl DirGraph {
         // Install with the new schema already in place, so a violation reports
         // itself as NODE KEY rather than UNIQUE when the tuple is a primary key.
         self.schema_definition = Some(schema);
+        // A DDL-declared NOT NULL lives in the same `required_fields` list the
+        // schema owns, so installing a schema would otherwise withdraw it — the
+        // asymmetry that let an unrelated `define_schema` silently un-enforce a
+        // `CREATE CONSTRAINT ... IS NOT NULL`.
+        self.reapply_ddl_not_null();
         let incoming = Self::declared_unique_tuples(self.schema_definition.as_ref());
         for (index, (node_type, properties)) in incoming.iter().enumerate() {
             let refs: Vec<&str> = properties.iter().map(String::as_str).collect();
@@ -109,14 +134,66 @@ impl DirGraph {
         tuples
     }
 
+    /// The enforced constraints installing `incoming` under
+    /// [`SchemaInstall::Replace`] would stop enforcing, as human-readable
+    /// descriptors.
+    ///
+    /// Replacement is the one mode that reaches types the caller never named, so
+    /// a binding can turn this into a warning naming exactly what it is about to
+    /// un-enforce. Reports only constraints that are *live* — a declaration the
+    /// graph never installed cannot be lost — and only ones the incoming schema
+    /// does not re-declare.
+    pub fn constraints_dropped_by_replace(&self, incoming: &SchemaDefinition) -> Vec<String> {
+        let Some(current) = self.schema_definition.as_ref() else {
+            return Vec::new();
+        };
+        let mut dropped: Vec<String> = Vec::new();
+        for (node_type, node) in &current.node_schemas {
+            if incoming.node_schemas.contains_key(node_type) {
+                continue;
+            }
+            if let Some(pk) = node.primary_key.as_deref() {
+                dropped.push(format!("{node_type}.{pk} (PRIMARY KEY)"));
+            }
+            for properties in node.unique.iter().flatten() {
+                if !properties.is_empty() {
+                    dropped.push(format!("{node_type}.({}) (UNIQUE)", properties.join(", ")));
+                }
+            }
+            for property in &node.required_fields {
+                dropped.push(format!("{node_type}.{property} (NOT NULL)"));
+            }
+        }
+        dropped.sort();
+        dropped
+    }
+
     /// Get the schema definition if one is set
     pub fn get_schema(&self) -> Option<&SchemaDefinition> {
         self.schema_definition.as_ref()
     }
 
-    /// Clear the schema definition
+    /// Clear the schema definition **and** the enforcement it installed.
+    ///
+    /// Dropping the declaration alone would leave the unique indexes a
+    /// `primary_key`/`unique` declaration built still rejecting writes, with
+    /// nothing left to explain why and no `SHOW CONSTRAINTS` row reporting them
+    /// as a node key — enforcement outliving its declaration. Routing through
+    /// `set_schema` makes clearing the withdrawal of everything the schema
+    /// declared, which is what a caller asking to clear it means.
+    ///
+    /// DDL-declared constraints are untouched, as they are by any other schema
+    /// install: `CREATE CONSTRAINT` is a separate declaration with its own
+    /// `DROP CONSTRAINT`.
     pub fn clear_schema(&mut self) {
-        self.schema_definition = None;
+        // Withdrawing declarations can never fail on unchanged data — there is
+        // nothing left to violate — so the result carries no information.
+        let _ = self.set_schema(SchemaDefinition::new(), SchemaInstall::Replace);
+        if self.schema_definition.as_ref().is_some_and(|schema| {
+            schema.node_schemas.is_empty() && schema.connection_schemas.is_empty()
+        }) {
+            self.schema_definition = None;
+        }
     }
 
     /// The declared PRIMARY KEY property for `node_type`, if one is set via

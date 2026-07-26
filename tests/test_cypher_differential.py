@@ -2060,6 +2060,15 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
     ("create_constraint_not_null_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL"),
     ("create_constraint_node_key_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NODE KEY"),
     ("drop_constraint_ddl_missing_if_exists", "DROP CONSTRAINT person_name_u IF EXISTS"),
+    # Declaring one half of a node key on a property that already carries the
+    # other must *add* to it rather than replace it, so the post-statement graph
+    # state carries both. A pass that dropped or reordered the second statement
+    # would leave only one half enforced — which this harness sees as diverging
+    # post-state once a later write is rejected on one path and not the other.
+    # Both orders, because the merge is order-sensitive code.
+    # Multi-statement constraint shapes live in CONSTRAINT_DDL_SEQUENCES below:
+    # a schema command is a standalone statement, so a merge (declaring one half
+    # of a node key over the other) cannot be expressed as one query here.
     # ── Shapes whose rollback checkpoint is an undo journal ──────────────
     #
     # Statement atomicity is bought with an inverse-op journal rather than a
@@ -2465,6 +2474,106 @@ def test_mutation_optimized_matches_naive(name: str, query: str) -> None:
     assert rows_opt == rows_naive, f"Mutation `{name}` rows: opt={rows_opt}, naive={rows_naive}"
     assert nodes_opt == nodes_naive, f"Mutation `{name}` post-state node count: opt={nodes_opt}, naive={nodes_naive}"
     assert edges_opt == edges_naive, f"Mutation `{name}` post-state edge count: opt={edges_opt}, naive={edges_naive}"
+
+
+# ---------------------------------------------------------------------------
+# Constraint DDL sequences
+# ---------------------------------------------------------------------------
+#
+# A fourth corpus, separate for one mechanical reason: a schema command is a
+# standalone statement, so the shapes that matter here — declaring one half of a
+# node key on a property that already carries the other, then dropping one half
+# again — need *several* statements, which MUTATION_QUERIES cannot express.
+#
+# What these pin: constraint declaration is state accumulation, not replacement.
+# Comparing `SHOW CONSTRAINTS` after the sequence catches a divergence in what
+# is *reported*; the enforcement probes catch a divergence in what is actually
+# in force. Both halves are needed — the audit that produced this corpus found a
+# listing reporting NODE_KEY for a pair whose presence half was not enforced,
+# and a report whose constraint name changed across a save/load round-trip.
+CONSTRAINT_DDL_SEQUENCES: list[tuple[str, list[str], list[str]]] = [
+    (
+        "not_null_over_existing_unique",
+        [
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE",
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL",
+        ],
+        # Both halves in force: a duplicate name and a missing name are refused.
+        ["CREATE (p:Person {person_id: 900, name: 'Alice', age: 1})", "CREATE (p:Person {person_id: 901, age: 1})"],
+    ),
+    (
+        "unique_over_existing_not_null",
+        [
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL",
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        ],
+        ["CREATE (p:Person {person_id: 900, name: 'Alice', age: 1})", "CREATE (p:Person {person_id: 901, age: 1})"],
+    ),
+    (
+        "drop_the_unique_half_of_a_pair",
+        [
+            "CREATE CONSTRAINT pn_u FOR (p:Person) REQUIRE p.name IS UNIQUE",
+            "CREATE CONSTRAINT pn_nn FOR (p:Person) REQUIRE p.name IS NOT NULL",
+            "DROP CONSTRAINT pn_u",
+        ],
+        ["CREATE (p:Person {person_id: 901, age: 1})"],
+    ),
+    (
+        "drop_the_not_null_half_of_a_pair",
+        [
+            "CREATE CONSTRAINT pn_u FOR (p:Person) REQUIRE p.name IS UNIQUE",
+            "CREATE CONSTRAINT pn_nn FOR (p:Person) REQUIRE p.name IS NOT NULL",
+            "DROP CONSTRAINT pn_nn",
+        ],
+        ["CREATE (p:Person {person_id: 900, name: 'Alice', age: 1})"],
+    ),
+]
+
+
+def _constraint_state(g, probes: list[str]) -> tuple[list[dict], list[bool]]:
+    """What the graph reports, and what it actually enforces.
+
+    A fix to either half alone is not a fix, so the differential compares both.
+    """
+    reported = _normalize(g.cypher("SHOW CONSTRAINTS").to_list())
+    enforced = []
+    for probe in probes:
+        try:
+            g.cypher(probe)
+            enforced.append(False)
+        except Exception:
+            enforced.append(True)
+    return reported, enforced
+
+
+@pytest.mark.differential
+@pytest.mark.parametrize(
+    "name,statements,probes",
+    CONSTRAINT_DDL_SEQUENCES,
+    ids=[entry[0] for entry in CONSTRAINT_DDL_SEQUENCES],
+)
+def test_constraint_ddl_sequence_optimized_matches_naive(name: str, statements: list[str], probes: list[str]) -> None:
+    opt_reported, opt_enforced = _constraint_state(
+        _run_constraint_sequence(statements, disable_optimizer=False), probes
+    )
+    naive_reported, naive_enforced = _constraint_state(
+        _run_constraint_sequence(statements, disable_optimizer=True), probes
+    )
+
+    assert opt_reported == naive_reported, f"`{name}` SHOW CONSTRAINTS: opt={opt_reported}, naive={naive_reported}"
+    assert opt_enforced == naive_enforced, f"`{name}` enforcement: opt={opt_enforced}, naive={naive_enforced}"
+    # Every sequence above leaves at least one constraint declared and every
+    # probe violating it, so a run that silently enforced nothing is a failure
+    # rather than a vacuous pass.
+    assert opt_reported, f"`{name}` declared no constraint at all"
+    assert all(opt_enforced), f"`{name}` reported constraints it does not enforce: {opt_enforced}"
+
+
+def _run_constraint_sequence(statements: list[str], *, disable_optimizer: bool):
+    g = _build_mutation_graph()
+    for statement in statements:
+        g.cypher(statement, disable_optimizer=disable_optimizer)
+    return g
 
 
 # ---------------------------------------------------------------------------

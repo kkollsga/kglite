@@ -1865,7 +1865,7 @@ mod id_index_tests {
     /// clean batch loads. Undeclared types keep the permissive default.
     #[test]
     fn add_nodes_rejects_within_batch_pk_duplicate() {
-        use crate::graph::schema::{NodeSchemaDefinition, SchemaDefinition};
+        use crate::graph::schema::{NodeSchemaDefinition, SchemaDefinition, SchemaInstall};
 
         let mut g = DirGraph::new();
         let mut schema = SchemaDefinition::new();
@@ -1876,7 +1876,8 @@ mod id_index_tests {
                 ..Default::default()
             },
         );
-        g.set_schema(schema).expect("schema install");
+        g.set_schema(schema, SchemaInstall::Merge)
+            .expect("schema install");
 
         let dup = DataFrame::from_cypher_rows(
             vec!["id".to_string()],

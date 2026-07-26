@@ -77,7 +77,7 @@ pub mod api {
     pub use crate::graph::schema::{
         parse_spatial_column_types_from_pairs, parse_temporal_column_types_from_pairs,
         ConnectionSchemaDefinition, NodeData, NodeInfo, NodeSchemaDefinition, SchemaDefinition,
-        SpatialConfig, TemporalConfig, ValidationError,
+        SchemaInstall, SpatialConfig, TemporalConfig, ValidationError,
     };
     /// The fluent **selection** data model — the cursor state threaded
     /// through the fluent query chain (and through Selection-scoped

@@ -3504,13 +3504,31 @@ class KnowledgeGraph:
     # Schema Definition & Validation
     # ====================================================================
 
-    def define_schema(self, schema_dict: dict[str, Any]) -> KnowledgeGraph:
+    def define_schema(self, schema_dict: dict[str, Any], *, replace: bool = False) -> KnowledgeGraph:
         """Define the expected schema for the graph.
 
-        **Replaces** the entire schema — this is not a merge. Any previous
-        ``define_schema`` call is fully superseded, so a call with a *subset* of
-        types drops the types it omits. Redefine all types each call (or read
-        the current schema via :meth:`schema_definition` and merge yourself).
+        **Merges per node/connection type.** A type named in ``schema_dict``
+        takes the new declaration *entire*; a type it does not name keeps the
+        declaration it already had. So declaring per module or per type is safe
+        — it cannot affect the constraints of a type this call never mentions::
+
+            g.define_schema({"nodes": {"User": {"primary_key": "email"}}})
+            g.define_schema({"nodes": {"Task": {"required": ["title"]}}})
+            # User.email is still a NODE KEY and still enforced.
+
+        Merging is per *type*, not per field, so re-declaring a type is still
+        how you narrow it — declare ``Task`` without a ``required`` entry it
+        used to have and that requirement is withdrawn.
+
+        Pass ``replace=True`` for the whole-schema semantics: the incoming
+        schema becomes the entire schema and every type it does not name loses
+        its declarations. Because that withdraws enforcement from types the
+        caller never mentioned, it emits a ``UserWarning`` naming each
+        constraint it stops enforcing. :meth:`clear_schema` removes everything.
+
+        Constraints declared through Cypher DDL (``CREATE CONSTRAINT``) are not
+        schema declarations and are unaffected by either mode — they are
+        withdrawn only by ``DROP CONSTRAINT``.
 
         Args:
             schema_dict: Schema definition with ``nodes`` and ``connections`` keys.
@@ -3540,8 +3558,14 @@ class KnowledgeGraph:
                 ``required`` is enforced at **write time**, not only by
                 :meth:`validate_schema`: a ``CREATE`` that omits the property, a
                 ``SET`` that nulls it, and a ``REMOVE`` that drops it all raise.
-                ``id``/``title``/``type`` are structural and always present, so
-                requiring them is a no-op. Auto-vivified edge stubs are deferred
+                ``type`` is the node's label and cannot be absent, so requiring
+                it is a no-op; ``id`` and ``title`` are auto-supplied when
+                omitted (so omitting them satisfies the requirement) but *can*
+                be explicitly nulled, and that is rejected. Unlike
+                ``CREATE CONSTRAINT ... IS NOT NULL``, which verifies stored data
+                before installing, ``required`` declares intent without
+                re-checking what is already there — :meth:`validate_schema`
+                reports existing violations. Auto-vivified edge stubs are deferred
                 rather than exempt — vivification may create an incomplete
                 placeholder, but the ``add_nodes`` upsert that promotes it is a
                 normal enforced write, and an unpromoted stub stays reportable via
@@ -3598,7 +3622,15 @@ class KnowledgeGraph:
         ...
 
     def clear_schema(self) -> KnowledgeGraph:
-        """Remove the schema definition from the graph."""
+        """Remove the schema definition from the graph, and with it every
+        constraint the schema declared.
+
+        The unique indexes a ``primary_key``/``unique`` declaration installed are
+        withdrawn too — enforcement never outlives the declaration that
+        explains it. Constraints declared through Cypher DDL
+        (``CREATE CONSTRAINT``) are separate declarations and survive; drop them
+        with ``DROP CONSTRAINT``.
+        """
         ...
 
     def set_instructions(self, text: str, *, channel: str | None = None) -> KnowledgeGraph:
