@@ -108,7 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are *deferred*, not exempt: vivification may create an incomplete placeholder,
   but the later `add_nodes` upsert that promotes it is a normal, fully-enforced
   write, and an unpromoted stub stays reportable via `validate_schema()` and
-  removable via `purge_provisional_nodes()`.
+  removable via `purge_provisional()`.
 - `primary_key` accepts any property, not just `id`, and now means unique **and
   present** (NODE KEY semantics). A key on `id` still routes through the O(1)
   per-type id index; any other key is backed by a unique secondary index that
