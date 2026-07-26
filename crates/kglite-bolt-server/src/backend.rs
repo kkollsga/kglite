@@ -532,7 +532,8 @@ impl BoltBackend for KgliteBackend {
         // Delegate to session::Session::commit which handles OCC +
         // Arc swap atomically. Phase E.4 wires OCC (was deferred in
         // C.5); concurrent writers now get
-        // ConflictDetected → BoltError::Transaction.
+        // ConflictDetected -> BoltError::Query carrying the documented
+        // `Neo.ClientError.Transaction.ConflictDetected` status code.
         let Some(tx) = state.inner.take() else {
             // Defensive fallthrough — was already consumed.
             return Ok(BoltDict::new());
@@ -564,11 +565,25 @@ impl BoltBackend for KgliteBackend {
                     base_version,
                     "commit conflict — another writer committed first"
                 );
-                return Err(BoltError::Transaction(format!(
-                    "Transaction conflict: graph was modified by another committer \
-                     since this transaction's BEGIN (base version {base_version}, \
-                     current version {current_version}). Retry the transaction."
-                )));
+                // `BoltError::Query` rather than `BoltError::Transaction`:
+                // boltr maps the latter to
+                // `Neo.ClientError.Transaction.TransactionStartFailed`, which
+                // is wrong twice over — the transaction started fine, and it
+                // contradicted the documented contract in this crate's README
+                // and the Neo4j migration guide, both of which promise
+                // `ConflictDetected`. A ported client that branches on the
+                // status code (the normal way to write an OCC retry loop) was
+                // therefore told the wrong thing, and the Python tests could
+                // only match on the message text. `Query` lets us set the
+                // documented code directly.
+                return Err(BoltError::Query {
+                    code: "Neo.ClientError.Transaction.ConflictDetected".into(),
+                    message: format!(
+                        "Transaction conflict: graph was modified by another committer \
+                         since this transaction's BEGIN (base version {base_version}, \
+                         current version {current_version}). Retry the transaction."
+                    ),
+                });
             }
         }
 
