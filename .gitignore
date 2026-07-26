@@ -78,3 +78,10 @@ docs/autoapi/
 .perf_audit_*.json
 # local cargo litter from running the fixture in-place; CI copies it to /tmp
 /tests/fixtures/rust-embed-consumer/target/
+
+# Bolt driver-conformance toolchain artifacts (tests/conformance/*). Fetched
+# dependencies and build output, never sources. Bounded by `make prune-dev`.
+tests/conformance/js/node_modules/
+tests/conformance/js/package-lock.json
+tests/conformance/java/target/
+tests/conformance/java/.m2/

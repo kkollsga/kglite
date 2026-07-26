@@ -770,6 +770,66 @@ jobs:
       - name: Run bounded Bolt stress
         run: .venv/bin/pytest tests/test_bolt_server_concurrency.py -m bolt_stress -v --tb=short
 
+  bolt-driver-conformance:
+    name: Bolt conformance (official JS + Java drivers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The Python driver has always been regression-tested; these are the two
+    # other official Bolt drivers that matter. Java is the load-bearing one:
+    # the JVM has no in-process route to a kglite graph, so this server is the
+    # entire integration surface there and the driver's behaviour cannot be
+    # assumed. Both suites live in tests/conformance/<lang>/ and cover the same
+    # checks; tests/test_bolt_driver_conformance.py starts the server and
+    # asserts parity between them.
+    #
+    # Deliberately its own job rather than a step in `python-tests`: that job is
+    # a 4-way Python matrix, and neither driver suite depends on the Python
+    # version, so running them there would cost four redundant JVM setups.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/conformance/js/package.json
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bolt-driver-conformance
+          workspaces: ". -> target"
+
+      - name: Install the Python test harness
+        # The harness only drives the two suites and the server; it needs the
+        # wheel for the fixture-graph builder in tests/conftest.py, and the
+        # neo4j Python driver is what `_build_bolt_fixture_graph` imports
+        # through the shared bolt helpers.
+        run: pip install -e '.[neo4j]'
+
+      - name: Build the Bolt server
+        run: cargo build --release -p kglite-bolt-server
+
+      - name: Run official JS + Java driver conformance
+        # `-rs` prints skip reasons, so a toolchain that failed to install
+        # shows up as a visible skip rather than a silent green.
+        run: pytest tests/test_bolt_driver_conformance.py -m bolt -v -rs --tb=short
+
   ci-success:
     name: CI success
     # Single aggregate gate the publish workflows wait on. It fails if ANY CI
@@ -789,6 +849,7 @@ jobs:
       - kglite-c
       - python-lint
       - python-tests
+      - bolt-driver-conformance
       - free-threading
       - perf-regression
       - public-api

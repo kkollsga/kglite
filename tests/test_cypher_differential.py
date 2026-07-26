@@ -1916,6 +1916,16 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     # writing DDL statements live in MUTATION_QUERIES, which builds a fresh
     # graph per mode.
     ("show_indexes_ddl", "small_graph", "SHOW INDEXES", None),
+    # Dotted access on a map-valued parameter. Pins that no pass mangles
+    # the `ExprPropertyAccess` chain the parser now builds over a
+    # `Parameter` node (the bracket form was always accepted; the dotted
+    # form used to be a syntax error).
+    (
+        "parameter_map_property_access",
+        "small_graph",
+        "MATCH (p:Person) WHERE p.city = $filter.city RETURN p.name AS name ORDER BY name",
+        {"filter": {"city": "Oslo"}},
+    ),
 ]
 
 

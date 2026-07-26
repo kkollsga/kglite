@@ -46,6 +46,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolution, so `..` segments and symlinks cannot escape it. Without the gate,
   anyone able to open a Bolt connection could run
   `LOAD CSV FROM 'file:///etc/passwd'`.
+- Dotted property access on a map-valued parameter — `$row.name`, and nested
+  chains like `$cfg.a.b`. The bracket form (`$row['name']`) and the
+  via-variable form (`WITH $row AS r RETURN r.name`) already worked, so the
+  dotted form raising a syntax error was an inconsistency rather than a
+  decision; Neo4j accepts it, and a ported query passing a map parameter hits
+  it immediately. Absent keys yield `null`, as elsewhere.
+- Conformance suites for the official **JavaScript** and **Java** Neo4j
+  drivers (`tests/conformance/js`, `tests/conformance/java`), run in CI by the
+  new `bolt-driver-conformance` job. Each covers the same 22 checks — session
+  and explicit-transaction lifecycle, managed `executeWrite`, PackStream type
+  round-trips, Node/Relationship/Path values, `Neo.*` error codes, OCC conflict
+  detection, and the `LOAD CSV` capability refusal — and a source-level parity
+  test fails if the two drift apart. Previously only the official Python driver
+  was regression-tested; the other drivers "may connect", which nobody had
+  checked.
+
 - Cypher index DDL, in the Neo4j 5 grammar, so a schema-setup script ports
   unedited: `CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:Label) ON
   (n.prop, ...)`, `DROP INDEX <name> [IF EXISTS]`, and `SHOW [ALL] INDEX[ES]`.
@@ -76,6 +92,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spelling) — now parses and fails with a specific unsupported-feature error
   naming the construct and the route that works today, instead of a syntax
   error or a silent no-op.
+
+### Fixed
+
+- OCC commit conflicts over Bolt now report
+  `Neo.ClientError.Transaction.ConflictDetected`, the code this crate's README
+  and the Neo4j migration guide have always documented. They previously
+  reported `Neo.ClientError.Transaction.TransactionStartFailed` — wrong twice
+  over, since the transaction started fine — so a ported client branching on
+  the status code (the normal way to write a retry loop) was misled. Writing
+  the Java/JS driver suites is what surfaced it: the Python tests matched on
+  message text and could not see the code.
 
 ### Changed
 

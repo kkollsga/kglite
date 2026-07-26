@@ -429,10 +429,27 @@ impl CypherParser {
                 self.parse_case_expression()
             }
 
-            // Parameter: $name
+            // Parameter: $name, optionally followed by a `.field` chain when
+            // the parameter holds a map — `$row.name`, `$cfg.a.b`.
+            //
+            // The bracket form (`$row['name']`) and the via-variable form
+            // (`WITH $row AS r RETURN r.name`) already worked, so the dotted
+            // form being a syntax error was an inconsistency rather than a
+            // decision: Neo4j accepts it, and a ported query that passes a map
+            // parameter hits it immediately. Strictly additive — a `$param`
+            // followed by `.` had no valid reading before.
             Some(CypherToken::Parameter(name)) => {
                 self.advance();
-                Ok(Expression::Parameter(name))
+                let mut expr = Expression::Parameter(name);
+                while self.check(&CypherToken::Dot) {
+                    self.advance();
+                    let property = self.expect_name("property name after '.'")?;
+                    expr = Expression::ExprPropertyAccess {
+                        expr: Box::new(expr),
+                        property,
+                    };
+                }
+                Ok(expr)
             }
 
             // Identifier: could be variable, property access, function call, or list quantifier

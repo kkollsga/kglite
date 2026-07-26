@@ -26,6 +26,7 @@ REQUIRED_JOBS = {
     "address-sanitizer",
     "dependency-maintenance",
     "scheduled-concurrency-stress",
+    "bolt-driver-conformance",
 }
 
 
@@ -188,3 +189,17 @@ def test_scheduled_stress_is_bounded_and_excludes_large_runner_case() -> None:
     assert "tests/test_stress.py" not in stress
     large = (REPO_ROOT / "tests" / "test_stress.py").read_text()
     assert "manual/large-runner" in large
+
+
+def test_bolt_driver_conformance_installs_both_toolchains() -> None:
+    """The suites skip when their toolchain is missing, which is right locally
+    and useless in CI — a runner without a JDK would report green while never
+    executing the Java driver at all. So CI must install both, and `-rs` must
+    stay on so any skip is visible in the log rather than silent."""
+    job = _job_block("bolt-driver-conformance")
+    assert "actions/setup-java@v4" in job
+    assert "distribution: temurin" in job
+    assert "actions/setup-node@v4" in job
+    assert "cargo build --release -p kglite-bolt-server" in job
+    assert "pytest tests/test_bolt_driver_conformance.py -m bolt" in job
+    assert "-rs" in job
