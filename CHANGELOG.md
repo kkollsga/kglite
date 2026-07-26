@@ -334,6 +334,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Holding a query result in a variable no longer makes the next write copy the
+  whole graph. A deferred (`streaming`) result keeps a reference to the graph so
+  it can serve rows later, and that reference made the next write through the
+  same `KnowledgeGraph` deep-clone every node, edge, index and embedding. The
+  ordinary read-then-write shape — `rows = graph.cypher(...)` followed by
+  `graph.cypher("... SET ...")` with `rows` still in scope — therefore paid a
+  whole-graph copy on *every* pass, growing with graph size rather than with the
+  work done. Results up to a few thousand rows are now converted up front and
+  hold no graph reference, so that shape costs nothing extra. Genuinely large
+  results still defer, and `ResultView`'s documentation now explains when that
+  matters and how to avoid it. Behaviour is unchanged: a held result has always
+  shown the data as of query time, and still does.
+
+- `KnowledgeGraph.begin()` documented that embeddings are excluded from the
+  transaction snapshot's copy. They are not — embeddings, indexes and timeseries
+  are part of the graph and are copied with it, so the note understated the cost
+  of opening a transaction on an embedding-heavy graph. Corrected.
+
 - `claude_config` now reads and writes Claude MCP config files as UTF-8. On a
   non-UTF-8 Windows codepage the read mis-decoded the file and the atomic write
   committed the damage over every unrelated MCP server entry; non-ASCII text in

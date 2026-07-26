@@ -1862,7 +1862,9 @@ impl KnowledgeGraph {
     ///
     /// **Note:** the snapshot is a full deep-clone of the graph, so creating a
     /// transaction on a very large graph has a one-time memory cost proportional
-    /// to graph size. Embeddings are *not* cloned (they live outside `DirGraph`).
+    /// to graph size. Embeddings, indexes and timeseries are part of `DirGraph`
+    /// and are cloned with it, so the copy covers the whole graph — budget for
+    /// it on an embedding-heavy graph.
     ///
     /// Can also be used as a context manager:
     ///

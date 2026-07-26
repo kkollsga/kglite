@@ -72,6 +72,20 @@ use std::sync::{Arc, Mutex};
 /// on demand. The graph `Arc` keeps the storage alive for the lifetime of
 /// the view; the `Mutex<Vec<...>>` caches materialised rows so repeat
 /// access doesn't re-read from disk.
+/// Row count at or below which a lazy-eligible result is materialised up front
+/// instead of holding the graph open — see
+/// [`ResultView::from_cypher_result_with_graph`].
+///
+/// The two costs being traded are not symmetric. Materialising `n` rows of a
+/// lazy-eligible RETURN is `O(n × columns)` bounded property reads. Keeping the
+/// `Arc<DirGraph>` alive risks an `O(V+E)` fork of the graph *and* every index,
+/// interner and embedding store the next write touches. So the threshold does
+/// not need to find a break-even point — it only needs to be high enough to
+/// cover the result sizes an application actually holds in a variable while
+/// writing (lookups, pages, small aggregates) and low enough that the wasted
+/// work is negligible when the rows go unread.
+const EAGER_MATERIALISE_MAX_ROWS: usize = 4096;
+
 struct LazyRows {
     descriptor: LazyResultDescriptor,
     graph: Arc<DirGraph>,
@@ -141,9 +155,38 @@ impl ResultView {
     /// pending rows and graph reference so cells materialise on demand at
     /// the Python boundary. Falls back to the eager
     /// `from_preprocessed`-equivalent path when `result.lazy` is `None`.
+    ///
+    /// **Small results materialise immediately and keep no graph reference.**
+    /// A retained lazy view pins the `Arc<DirGraph>` it was built from, so the
+    /// next write through the owning `KnowledgeGraph` finds a shared Arc and
+    /// `Arc::make_mut` deep-clones the entire graph — every node, edge, index
+    /// and embedding. That turns the ordinary read-then-write request handler
+    /// (`rows = g.cypher(...)` then `g.cypher("... SET ...")`, with `rows`
+    /// still in scope) into a whole-graph copy *per request*.
+    ///
+    /// Deferral only earns that risk when most rows are never consumed, which
+    /// needs a large result to matter. Below the threshold the projection is
+    /// bounded and cheap, and paying it up front is strictly better than
+    /// risking an O(V+E) fork — so the view drops the `Arc` and becomes eager.
+    /// Materialisation failures fall through to the lazy path deliberately, so
+    /// an error still surfaces at access time exactly as before.
     pub fn from_cypher_result_with_graph(result: CypherResult, graph: Arc<DirGraph>) -> Self {
         if let Some(lazy_desc) = result.lazy {
             let n = lazy_desc.len();
+            if n <= EAGER_MATERIALISE_MAX_ROWS {
+                if let Ok(rows) =
+                    kglite_core::api::cypher::materialise_lazy_range(&lazy_desc, &graph, 0..n)
+                {
+                    return ResultView {
+                        columns: result.columns,
+                        rows: preprocess_values_owned(rows),
+                        stats: result.stats,
+                        profile: result.profile,
+                        diagnostics: result.diagnostics,
+                        lazy: None,
+                    };
+                }
+            }
             let cache = Mutex::new((0..n).map(|_| None).collect::<Vec<_>>());
             return ResultView {
                 columns: result.columns,
