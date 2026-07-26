@@ -160,7 +160,7 @@ def _wal(root: Path, mutations: int, rounds: int) -> dict:
     sizes = []
     for index in range(rounds):
         path = root / f"wal-{index}.kgl"
-        graph = kglite.open(str(path), durable=True, encoding="utf-8")
+        graph = kglite.open(str(path), durable=True)
         start = time.perf_counter()
         for item in range(mutations):
             graph.cypher(
@@ -174,7 +174,7 @@ def _wal(root: Path, mutations: int, rounds: int) -> dict:
         gc.collect()
 
         start = time.perf_counter()
-        recovered = kglite.open(str(path), durable=True, encoding="utf-8")
+        recovered = kglite.open(str(path), durable=True)
         count = recovered.cypher("MATCH (n:Event) RETURN count(n) AS n").scalar()
         recover_samples.append(time.perf_counter() - start)
         assert count == mutations

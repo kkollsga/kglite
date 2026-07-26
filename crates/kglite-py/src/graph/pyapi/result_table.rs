@@ -247,7 +247,7 @@ fn render(style: &TableStyle, columns: &[String], rows: &[Vec<PreProcessedValue>
     buf
 }
 
-fn cells_of<'a>(row: &'a [String], num_cols: usize) -> impl Iterator<Item = &'a str> {
+fn cells_of(row: &[String], num_cols: usize) -> impl Iterator<Item = &str> {
     (0..num_cols).map(move |j| row.get(j).map(|s| s.as_str()).unwrap_or(""))
 }
 

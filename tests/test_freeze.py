@@ -92,7 +92,7 @@ def test_disk_snapshot_keeps_stable_reads_while_source_mutates_and_saves(tmp_pat
     graph.save()
 
     assert _count(snapshot, "MATCH (n:Doc) RETURN count(n) AS c") == 2
-    assert _count(kglite.open(str(path), encoding="utf-8"), "MATCH (n:Doc) RETURN count(n) AS c") == 3
+    assert _count(kglite.open(str(path)), "MATCH (n:Doc) RETURN count(n) AS c") == 3
     assert not list(path.glob(".working-*"))
 
 
@@ -107,7 +107,7 @@ def test_disk_save_with_held_freeze_reuses_writer_lineage(tmp_path):
     current_after = (path / "CURRENT").read_text(encoding="utf-8")
     assert current_after != current_before
     assert _count(snapshot, "MATCH (n:Doc) RETURN count(n) AS c") == 2
-    assert _count(kglite.open(str(path), encoding="utf-8"), "MATCH (n:Doc) RETURN count(n) AS c") == 2
+    assert _count(kglite.open(str(path)), "MATCH (n:Doc) RETURN count(n) AS c") == 2
     assert not list(path.glob(".working-*"))
 
 

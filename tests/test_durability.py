@@ -59,7 +59,7 @@ def _open(path, storage: str = "memory"):
     kwargs = {"durable": True}
     if storage != "memory":
         kwargs["storage"] = storage
-    return kglite.open(str(path), **kwargs, encoding="utf-8")
+    return kglite.open(str(path), **kwargs)
 
 
 def _child_script(tmp_path, body: str, storage: str, ending: str) -> str:
@@ -532,7 +532,7 @@ def test_durable_rejects_disk_mode(tmp_path):
     and point at what to do instead — silently accepting the flag would promise
     crash safety the mode does not provide."""
     with pytest.raises(ValueError) as excinfo:
-        kglite.open(str(tmp_path / "g"), storage="disk", durable=True, encoding="utf-8")
+        kglite.open(str(tmp_path / "g"), storage="disk", durable=True)
     message = str(excinfo.value)
     assert "storage='disk'" in message
     assert "save()" in message, "must name the supported alternative"
@@ -540,7 +540,7 @@ def test_durable_rejects_disk_mode(tmp_path):
 
 
 def test_non_durable_open_writes_no_wal(tmp_path):
-    g = kglite.open(str(tmp_path / "app.kgl"), durable=False, encoding="utf-8")
+    g = kglite.open(str(tmp_path / "app.kgl"), durable=False)
     g.cypher("CREATE (:Person {id: 1})")
     g.save()
     # Non-durable mode never creates a WAL sidecar.

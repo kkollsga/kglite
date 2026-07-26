@@ -275,7 +275,7 @@ def test_descriptor_snapshot_retries_concurrent_in_place_mutation(tmp_path, monk
 
     def mutate():
         assert first_read.wait(timeout=5)
-        with target.open("r+b", encoding="utf-8") as stream:
+        with target.open("r+b") as stream:
             stream.write(b"b")
             stream.flush()
             os.fsync(stream.fileno())

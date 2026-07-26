@@ -240,7 +240,7 @@ class TestDiskBuildReloadWithoutSave:
         assert stats["entities"] == entities
         del g
 
-        reloaded = kglite.open(str(graph_dir), encoding="utf-8")
+        reloaded = kglite.open(str(graph_dir))
         assert reloaded.cypher("MATCH (n:Entity) RETURN count(n) AS c").to_list() == [{"c": entities}]
         # Titles and traversals prove the interner + column stores + CSR all
         # reloaded, not just the counts.

@@ -31,19 +31,35 @@ SCANNED_ROOTS = ("tests", "scripts", "benchmarks", "examples", "kglite")
 
 TEXT_IO_METHODS = frozenset({"read_text", "write_text"})
 
+#: `x.open(...)` is only the text-file builtin for some `x`. These receivers
+#: name something else entirely — `kglite.open` opens a *graph*, `os.open`
+#: returns a file descriptor — or take an encoding only in text mode
+#: (`gzip`/`bz2`/`lzma` default to binary). Checking them produces noise, not
+#: findings.
+NON_TEXT_OPEN_RECEIVERS = frozenset({"os", "kglite", "gzip", "bz2", "lzma", "tarfile", "zipfile", "webbrowser"})
+
 #: Positional slot at which each call already accepts `encoding`.
 #: `Path.read_text(encoding, errors)`, `Path.write_text(data, encoding, ...)`,
-#: `open(file, mode, buffering, encoding, ...)`.
+#: `open(file, mode, buffering, encoding, ...)`, `Path.open(mode, buffering,
+#: encoding, ...)` — the bound method drops the leading `file`, so both the
+#: encoding slot and the mode slot shift by one.
 ENCODING_POSITION = {"read_text": 0, "write_text": 1, "open": 3}
+BOUND_OPEN_ENCODING_POSITION = 2
 
 
 def _has_keyword(call: ast.Call, name: str) -> bool:
     return any(kw.arg == name for kw in call.keywords)
 
 
-def _is_binary_mode(call: ast.Call) -> bool:
-    """`open(..., "rb")` / `mode="wb"` — no encoding applies."""
-    candidates = [call.args[1]] if len(call.args) >= 2 else []
+def _is_binary_mode(call: ast.Call, mode_position: int) -> bool:
+    """`open(path, "rb")` / `path.open("rb")` / `mode="wb"` — passing an
+    encoding alongside these is a `ValueError`, not an improvement.
+
+    `mode` sits at a different positional slot for the builtin (`open(file,
+    mode)`) than for the bound method (`Path.open(mode)`), which is exactly
+    the distinction a mechanical sweep gets wrong.
+    """
+    candidates = [call.args[mode_position]] if len(call.args) > mode_position else []
     candidates += [kw.value for kw in call.keywords if kw.arg == "mode"]
     return any(isinstance(node, ast.Constant) and "b" in str(node.value) for node in candidates)
 
@@ -51,9 +67,9 @@ def _is_binary_mode(call: ast.Call) -> bool:
 def _missing_encoding(call: ast.Call) -> str | None:
     """The call's name when it opens text without pinning an encoding."""
     func = call.func
-    if isinstance(func, ast.Attribute):
-        # os.open / os.fdopen take file descriptors, not encodings.
-        if isinstance(func.value, ast.Name) and func.value.id == "os":
+    bound = isinstance(func, ast.Attribute)
+    if bound:
+        if isinstance(func.value, ast.Name) and func.value.id in NON_TEXT_OPEN_RECEIVERS:
             return None
         name = func.attr
     elif isinstance(func, ast.Name):
@@ -65,9 +81,16 @@ def _missing_encoding(call: ast.Call) -> str | None:
         return None
     if _has_keyword(call, "encoding"):
         return None
-    if len(call.args) > ENCODING_POSITION[name]:
+
+    encoding_position = ENCODING_POSITION[name]
+    mode_position = 1
+    if name == "open" and bound:  # Path.open(mode, buffering, encoding, ...)
+        encoding_position = BOUND_OPEN_ENCODING_POSITION
+        mode_position = 0
+
+    if len(call.args) > encoding_position:
         return None  # passed positionally
-    if name == "open" and _is_binary_mode(call):
+    if name == "open" and _is_binary_mode(call, mode_position):
         return None
     return name
 

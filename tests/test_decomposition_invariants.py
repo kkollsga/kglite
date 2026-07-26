@@ -104,7 +104,7 @@ def test_disk_copy_bulk_load_isolated_and_save_as_rebases(tmp_path):
 
     copied.save(str(destination))
     assert persisted_bytes(source) == before
-    reloaded = kglite.open(str(destination), encoding="utf-8")
+    reloaded = kglite.open(str(destination))
     assert reloaded.cypher("MATCH (n) RETURN count(n) AS c").to_list() == [{"c": 4}]
 
 
@@ -122,7 +122,7 @@ def test_disk_copy_and_loaded_source_mutate_in_either_order(tmp_path, copy_first
     seed.save(str(source_path))
     del seed
 
-    source = kglite.open(str(source_path), encoding="utf-8")
+    source = kglite.open(str(source_path))
     copied = source.copy()
 
     def source_mutation():
@@ -146,12 +146,8 @@ def test_disk_copy_and_loaded_source_mutate_in_either_order(tmp_path, copy_first
     assert _count(copied) == 3
     source.save()
     copied.save(str(copy_path))
-    assert kglite.open(str(source_path), encoding="utf-8").cypher(
-        "MATCH (:Person {id: 20}) RETURN count(*) AS c"
-    ).to_list() == [{"c": 0}]
-    assert kglite.open(str(copy_path), encoding="utf-8").cypher(
-        "MATCH (:Person {id: 10}) RETURN count(*) AS c"
-    ).to_list() == [{"c": 0}]
+    assert kglite.open(str(source_path)).cypher("MATCH (:Person {id: 20}) RETURN count(*) AS c").to_list() == [{"c": 0}]
+    assert kglite.open(str(copy_path)).cypher("MATCH (:Person {id: 10}) RETURN count(*) AS c").to_list() == [{"c": 0}]
 
 
 # ── Clone / derived views: preserve identity fields ──────────────────────────
