@@ -891,6 +891,25 @@ pub(crate) fn detach_delete_nodes(
                 }
             }
         }
+        // The B-tree range index was omitted from this cleanup, so a deleted
+        // node stayed in its value bucket and `lookup_range` — the candidate
+        // source for `WHERE n.prop > x` on an indexed property, in both the
+        // matcher and the fluent filter path — kept handing out tombstoned
+        // NodeIndexes. Same shape as the property/composite eviction above.
+        let range_keys: Vec<_> = graph
+            .range_indices
+            .keys()
+            .filter(|(nt, _)| nt == node_type)
+            .cloned()
+            .collect();
+        for key in range_keys {
+            if let Some(value_map) = graph.range_indices.get_mut(&key) {
+                for indices in value_map.values_mut() {
+                    indices.retain(|idx| !nodes_to_delete.contains(idx));
+                }
+                value_map.retain(|_, indices| !indices.is_empty());
+            }
+        }
     }
 
     // Secondary-label index is keyed by label (not primary type), so a
