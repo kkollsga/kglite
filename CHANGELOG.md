@@ -334,18 +334,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Holding a query result in a variable no longer makes the next write copy the
-  whole graph. A deferred (`streaming`) result keeps a reference to the graph so
-  it can serve rows later, and that reference made the next write through the
-  same `KnowledgeGraph` deep-clone every node, edge, index and embedding. The
-  ordinary read-then-write shape — `rows = graph.cypher(...)` followed by
-  `graph.cypher("... SET ...")` with `rows` still in scope — therefore paid a
-  whole-graph copy on *every* pass, growing with graph size rather than with the
-  work done. Results up to a few thousand rows are now converted up front and
-  hold no graph reference, so that shape costs nothing extra. Genuinely large
-  results still defer, and `ResultView`'s documentation now explains when that
-  matters and how to avoid it. Behaviour is unchanged: a held result has always
-  shown the data as of query time, and still does.
+- Holding a deferred query result in a variable no longer makes the next write
+  copy the whole graph. A deferred (`streaming`) result keeps a reference to the
+  graph so it can serve rows later, and that reference made the next write
+  through the same `KnowledgeGraph` deep-clone every node, edge, index and
+  embedding — a cost that grows with graph size rather than with the work done,
+  so it is invisible on a small test fixture and severe on a large one.
+
+  The reach is narrower than it first looks, and worth stating precisely: only
+  results that are *deferred* hold the graph, and deferral requires a query of
+  just `MATCH`/`OPTIONAL MATCH`/`RETURN`/`SKIP`/`LIMIT` returning bare property
+  accesses. Anything with `WHERE`, `ORDER BY`, `DISTINCT`, `WITH`, `UNWIND`, an
+  aggregate, a whole-node `RETURN n`, or a computed value was already eager and
+  never pinned anything. So the shape that paid was a read-modify-write handler
+  whose read is an inline-filtered point lookup or unfiltered projection —
+  `rows = graph.cypher("MATCH (u:User {id: 1}) RETURN u.name, u.balance")`
+  followed by a write with `rows` still in scope. That query is common, but the
+  `WHERE`-spelled equivalent of it never had the problem.
+
+  Results up to a few thousand rows are now converted up front and hold no graph
+  reference, so that shape costs nothing extra. Genuinely large results still
+  defer, and `ResultView`'s documentation now explains when that matters and how
+  to avoid it. Behaviour is unchanged: a held result has always shown the data as
+  of query time, and still does.
 
 - `KnowledgeGraph.begin()` documented that embeddings are excluded from the
   transaction snapshot's copy. They are not — embeddings, indexes and timeseries
