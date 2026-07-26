@@ -231,9 +231,7 @@ pub(crate) fn execute_mutable_bounded(
             // rollback guards as a data mutation. `SHOW INDEXES` classifies as
             // a read and never reaches this arm.
             Clause::Schema(command) => {
-                let ddl_stats = schema_ddl::execute_schema_mutation(graph, command)?;
-                stats.indexes_added += ddl_stats.indexes_added;
-                stats.indexes_removed += ddl_stats.indexes_removed;
+                schema_ddl::execute_schema_mutation(graph, command, &mut stats)?;
             }
             // Read clauses: create temporary immutable executor
             _ => {

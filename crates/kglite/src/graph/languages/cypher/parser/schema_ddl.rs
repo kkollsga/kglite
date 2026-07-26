@@ -1,14 +1,14 @@
 //! Cypher parser: schema DDL — `CREATE INDEX`, `DROP INDEX`, `SHOW INDEXES`,
 //! and the `CONSTRAINT` counterparts, in the Neo4j 5 grammar.
 //!
-//! **Zero cost for non-DDL queries.** `INDEX`, `CONSTRAINT`, `DROP`, `SHOW`,
-//! `FOR`, `IF`, `OPTIONS`, `REQUIRE` and the index-type words are *not*
-//! tokenizer keywords — they arrive as [`CypherToken::Identifier`]. So the
-//! dispatch in [`super::CypherParser::parse_clause_sequence`] is a token
-//! comparison on a stream position it already has in hand: a `MATCH`-leading
-//! query never reaches this module, and a `CREATE`-leading one pays one extra
-//! `peek_at(1)` before routing to the node-pattern parser. There is no
-//! speculative re-parse.
+//! **Zero cost for non-DDL queries.** A schema command is a whole statement,
+//! not a pipeline stage, so [`CypherParser::try_parse_schema_ddl_statement`] is
+//! called **once per query** from [`super::CypherParser::parse_query`] — never
+//! from the per-clause loop, which keeps its shape and its cost. That one call
+//! is peek-only: `INDEX`, `CONSTRAINT`, `DROP`, `SHOW`, `FOR`, `IF`, `OPTIONS`,
+//! `REQUIRE` and the index-type words are *not* tokenizer keywords, so they
+//! arrive as [`CypherToken::Identifier`] and the test is a token comparison on
+//! a position the parser already holds. There is no speculative re-parse.
 //!
 //! **What is deliberately not modelled.** Unsupported index *types* (`TEXT`,
 //! `POINT`, `FULLTEXT`, `VECTOR`, `LOOKUP`) parse to
@@ -88,35 +88,38 @@ impl CypherParser {
             .is_some_and(is_index_or_constraint_noun)
     }
 
-    /// Which of the two identifier-led statements is next. Only meaningful
-    /// once [`Self::identifier_opens_schema_ddl`] has returned true.
-    pub(super) fn peek_ddl_word_is_drop(&self) -> bool {
-        self.peek_ddl_word("DROP")
+    /// Parse a whole schema-DDL statement, or `None` when the token stream does
+    /// not open one. Called once per query from
+    /// [`super::CypherParser::parse_query`] — never from the per-clause loop,
+    /// because a schema command is a statement rather than a pipeline stage.
+    ///
+    /// Both discriminators are peek-only, so an ordinary query pays one token
+    /// comparison for the whole parse and never a speculative re-parse.
+    pub(super) fn try_parse_schema_ddl_statement(&mut self) -> Result<Option<Clause>, String> {
+        if self.check(&CypherToken::Create) && self.create_opens_schema_ddl() {
+            return self.parse_create_schema_ddl().map(Some);
+        }
+        if !self.identifier_opens_schema_ddl() {
+            return Ok(None);
+        }
+        if self.peek_ddl_word("DROP") {
+            self.parse_drop_schema_ddl().map(Some)
+        } else {
+            self.parse_show_schema_ddl().map(Some)
+        }
     }
 
-    /// A schema command is a standalone statement: reject it wherever a
-    /// pipeline is already in flight, so `MATCH (n) CREATE INDEX …` and
-    /// `CALL { CREATE INDEX … }` fail on the clause itself rather than on a
-    /// confusing token further along.
-    pub(super) fn require_standalone_schema_statement(
-        clauses: &[Clause],
-        end_at_rbrace: bool,
-    ) -> Result<(), String> {
-        if end_at_rbrace {
-            return Err(
-                "schema commands (CREATE/DROP INDEX, CREATE/DROP CONSTRAINT, SHOW \
-                        INDEXES) are not allowed inside a CALL { } subquery body"
-                    .to_string(),
-            );
-        }
-        if !clauses.is_empty() {
-            return Err(
-                "schema commands (CREATE/DROP INDEX, CREATE/DROP CONSTRAINT, SHOW \
-                        INDEXES) are standalone statements and cannot follow another clause"
-                    .to_string(),
-            );
-        }
-        Ok(())
+    /// The error a schema command gets when it appears where a pipeline clause
+    /// belongs — after another clause, or inside a `CALL { }` body. Reached from
+    /// [`super::CypherParser::parse_create_clause`], because by then
+    /// [`Self::try_parse_schema_ddl_statement`] has already declined the
+    /// statement position, and `CREATE INDEX` would otherwise die on a
+    /// confusing "expected `(`" further along.
+    pub(super) fn misplaced_schema_statement_error() -> String {
+        "schema commands (CREATE/DROP INDEX, CREATE/DROP CONSTRAINT, SHOW INDEXES) are \
+         standalone statements: they cannot follow another clause or appear inside a \
+         CALL { } subquery body"
+            .to_string()
     }
 
     // ========================================================================

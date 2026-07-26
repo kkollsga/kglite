@@ -245,6 +245,20 @@ impl CypherParser {
             profile = true;
         }
 
+        // Schema DDL is a whole statement, not a pipeline stage, so it is
+        // recognised here rather than inside the clause loop: one check per
+        // query instead of one per clause, and `parse_clause_sequence` keeps
+        // its shape. A DDL statement consumes the entire token stream.
+        if let Some(clause) = self.try_parse_schema_ddl_statement()? {
+            return Ok(CypherQuery {
+                clauses: vec![clause],
+                explain,
+                profile,
+                output_format: OutputFormat::Default,
+                optimizer_tags: Vec::new(),
+            });
+        }
+
         let (clauses, output_format) = self.parse_clause_sequence(false)?;
 
         if clauses.is_empty() {
@@ -351,29 +365,8 @@ impl CypherParser {
                 Some(CypherToken::Except) => {
                     clauses.push(self.parse_except_clause()?);
                 }
-                // Schema DDL shares the CREATE keyword with graph writes. The
-                // discriminator is a single `peek_at(1)`: `CREATE (`/`CREATE <`
-                // (a pattern) can never be DDL, and `CREATE INDEX` can never
-                // be a pattern. Non-CREATE queries never reach this test at
-                // all, so DDL support adds no per-query parse cost.
-                Some(CypherToken::Create) if self.create_opens_schema_ddl() => {
-                    Self::require_standalone_schema_statement(&clauses, end_at_rbrace)?;
-                    clauses.push(self.parse_create_schema_ddl()?);
-                }
                 Some(CypherToken::Create) => {
                     clauses.push(self.parse_create_clause()?);
-                }
-                // DROP / SHOW are not tokenizer keywords; at clause position
-                // they are otherwise always an error, so recognising them here
-                // only turns "unexpected token" into a real statement.
-                Some(CypherToken::Identifier(_)) if self.identifier_opens_schema_ddl() => {
-                    Self::require_standalone_schema_statement(&clauses, end_at_rbrace)?;
-                    let clause = if self.peek_ddl_word_is_drop() {
-                        self.parse_drop_schema_ddl()?
-                    } else {
-                        self.parse_show_schema_ddl()?
-                    };
-                    clauses.push(clause);
                 }
                 Some(CypherToken::Set) => {
                     clauses.push(self.parse_set_clause()?);

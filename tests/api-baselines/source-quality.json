@@ -9,6 +9,7 @@
   "file_exceptions": {},
   "enum_match_whitelist": {
     "dir_graph/mod.rs": "DirGraph index maintenance (petgraph-only fast paths)",
+    "dir_graph/indexes.rs": "DirGraph secondary-index build/drop dispatch (petgraph fast paths vs persistent disk index)",
     "dir_graph/disk_persistence.rs": "DirGraph disk lifecycle and durable-save dispatch",
     "introspection/connectivity.rs": "disk-mode Rayon connectivity fast path",
     "io/file.rs": "persisted-graph construction and disk sidecar restoration boundary",
@@ -328,8 +329,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/mod.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_single_clause",
-      "lines": 323,
-      "branches": 46,
+      "lines": 329,
+      "branches": 47,
       "nesting": 3
     },
     {
@@ -419,8 +420,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
       "qualified_name": "crate::execute_mutable_bounded",
-      "lines": 204,
-      "branches": 30,
+      "lines": 211,
+      "branches": 32,
       "nesting": 3
     },
     {

@@ -41,7 +41,7 @@
 //! sidesteps the naming question entirely.
 
 use super::super::ast::*;
-use super::super::result::{MutationStats, ResultRow};
+use super::super::result::{MutationStats, ResultRow, ResultSet};
 use crate::datatypes::values::Value;
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::introspection::schema_overview::{collect_indexes_structured, IndexInfo};
@@ -65,11 +65,14 @@ pub(crate) const SHOW_INDEXES_COLUMNS: &[&str] = &[
 
 /// `SHOW INDEXES` — a read. Rows come from the same collector that backs
 /// `CALL db.indexes()`, so the two surfaces can never drift.
-pub(crate) fn execute_show_indexes(graph: &DirGraph) -> Vec<ResultRow> {
-    collect_indexes_structured(graph)
+pub(crate) fn show_indexes_result_set(graph: &DirGraph) -> ResultSet {
+    let mut out = ResultSet::new();
+    out.rows = collect_indexes_structured(graph)
         .iter()
         .map(index_info_to_row)
-        .collect()
+        .collect();
+    out.columns = SHOW_INDEXES_COLUMNS.iter().map(|c| c.to_string()).collect();
+    out
 }
 
 fn index_info_to_row(info: &IndexInfo) -> ResultRow {
@@ -111,8 +114,19 @@ fn index_info_to_row(info: &IndexInfo) -> ResultRow {
 /// classify as a mutation to be covered by them.
 ///
 /// `SHOW INDEXES` is not handled here — it is a read
-/// ([`execute_show_indexes`]).
+/// ([`show_indexes_result_set`]).
 pub(crate) fn execute_schema_mutation(
+    graph: &mut DirGraph,
+    command: &SchemaCommand,
+    stats: &mut MutationStats,
+) -> Result<(), String> {
+    let ddl_stats = dispatch_schema_mutation(graph, command)?;
+    stats.indexes_added += ddl_stats.indexes_added;
+    stats.indexes_removed += ddl_stats.indexes_removed;
+    Ok(())
+}
+
+fn dispatch_schema_mutation(
     graph: &mut DirGraph,
     command: &SchemaCommand,
 ) -> Result<MutationStats, String> {

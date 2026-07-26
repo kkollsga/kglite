@@ -771,13 +771,7 @@ impl<'a> CypherExecutor<'a> {
             // `SHOW INDEXES` is the one schema command that reads rather than
             // writes, so it lives on this side of the engine split.
             Clause::Schema(SchemaCommand::ShowIndexes) => {
-                let mut out = ResultSet::new();
-                out.rows = schema_ddl::execute_show_indexes(self.graph);
-                out.columns = schema_ddl::SHOW_INDEXES_COLUMNS
-                    .iter()
-                    .map(|c| c.to_string())
-                    .collect();
-                Ok(out)
+                Ok(schema_ddl::show_indexes_result_set(self.graph))
             }
             Clause::Create(_)
             | Clause::Set(_)
