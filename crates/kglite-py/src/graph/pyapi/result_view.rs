@@ -200,6 +200,11 @@ impl ResultView {
     }
 
     /// Discover property keys by scanning all nodes (fallback path).
+    ///
+    /// Excludes keys naming a canonical identity column — `from_nodes_with_graph`
+    /// leads every row with `type`/`title`/`id` from the node header, so a
+    /// stored property of the same name would repeat the column and shadow the
+    /// canonical value.
     fn discover_property_keys(
         nodes: &[&NodeData],
         interner: &kglite_core::api::StringInterner,
@@ -208,6 +213,9 @@ impl ResultView {
         let mut keys: Vec<String> = Vec::new();
         for node in nodes {
             for key in node.property_keys(interner) {
+                if kglite_core::api::is_canonical_node_column(key) {
+                    continue;
+                }
                 if seen.insert(key) {
                     keys.push(key.to_string());
                 }
@@ -238,7 +246,13 @@ impl ResultView {
                 if let Some(schema) = graph.type_schemas.get(first_type_str) {
                     let mut keys: Vec<String> = schema
                         .iter()
-                        .filter_map(|(_, ik)| graph.interner.try_resolve(ik).map(|s| s.to_string()))
+                        .filter_map(|(_, ik)| {
+                            graph
+                                .interner
+                                .try_resolve(ik)
+                                .filter(|s| !kglite_core::api::is_canonical_node_column(s))
+                                .map(|s| s.to_string())
+                        })
                         .collect();
                     keys.sort();
                     keys
