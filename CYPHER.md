@@ -1777,6 +1777,25 @@ that works — never a syntax error, and never a no-op that reports success.
 | `CREATE RANGE INDEX ... ON (n.a, n.b)` | The B-tree is single-property. Use a composite equality index, or one `CREATE RANGE INDEX` per property |
 | `CREATE/DROP/SHOW CONSTRAINT` | No Cypher-managed constraints. Uniqueness comes from node-type primary keys and `MERGE`; presence and types from `lock_schema()` |
 
+#### On disk-backed graphs
+
+`CREATE INDEX` on a `storage='disk'` graph builds the **persistent** mmap-backed
+index — the same one `create_index(...)` builds there, not the in-memory
+HashMap (which would need multiple GB of heap for a large type and be rebuilt on
+every load). Two consequences:
+
+- Persistent property indexes cover **string columns**. A statement that indexes
+  nothing on a populated node type is **rejected** rather than reported as
+  succeeding, so a numeric property gets an error naming the reason. Use an
+  in-memory or mapped graph if you need to index a non-string property.
+- `SHOW INDEXES` and `CALL db.indexes()` list the in-memory index structures,
+  so a disk graph's persistent indexes do **not** appear there yet. The index is
+  real and the planner consults it; only this listing is incomplete. Re-running
+  `create_index(...)` reports `created=False` for an installed persistent index.
+
+`CREATE RANGE INDEX` and composite `CREATE INDEX` build in-memory structures in
+every storage mode.
+
 #### Guards
 
 Schema is graph state, so index DDL is a **mutation**: it is blocked on a

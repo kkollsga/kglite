@@ -367,3 +367,89 @@ def test_neo4j_schema_script_statements_are_all_actionable(statement: str, expec
         assert expected_error in str(exc), f"`{statement}`: {exc}"
     else:
         assert expected_error is None, f"`{statement}` should have been rejected"
+
+
+# ── Disk mode: DDL must make the same backend decision as the API ────
+
+
+def _disk_graph(path: str) -> kglite.KnowledgeGraph:
+    g = kglite.KnowledgeGraph(storage="disk", path=path)
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "nid": [f"Q{i}" for i in range(1, 6)],
+                "label": ["Norway", "Sweden", "Denmark", "Finland", "Iceland"],
+            }
+        ),
+        "Country",
+        "nid",
+        "label",
+    )
+    return g
+
+
+def test_disk_ddl_builds_the_persistent_index_not_the_heap_map(tmp_path) -> None:
+    """On a disk graph the equality index must be the mmap-backed one.
+
+    `DirGraph::create_index` builds an in-memory HashMap that would need
+    multiple GB of heap for a large type — which is why `create_index` routes
+    to the persistent index on disk. Cypher DDL has to make the same call, so
+    the two are compared directly here.
+    """
+    via_api = _disk_graph(str(tmp_path / "api"))
+    api_info = via_api.create_index("Country", "label")
+    assert api_info["persistent"] is True
+
+    via_ddl = _disk_graph(str(tmp_path / "ddl"))
+    via_ddl.cypher("CREATE INDEX FOR (c:Country) ON (c.label)")
+
+    # The persistent index is visible to `has_index`; the heap map is not
+    # populated on either path.
+    assert via_ddl.has_index("Country", "label") == via_api.has_index("Country", "label")
+    assert via_ddl.list_indexes() == via_api.list_indexes()
+    assert (
+        via_ddl.cypher("MATCH (c:Country {label: 'Norway'}) RETURN c.nid AS nid").to_list()
+        == via_api.cypher("MATCH (c:Country {label: 'Norway'}) RETURN c.nid AS nid").to_list()
+    )
+
+
+def test_disk_ddl_if_not_exists_sees_the_persistent_index(tmp_path) -> None:
+    """The duplicate check must consult `has_any_index`, or a disk graph would
+    silently rebuild the index on every `IF NOT EXISTS` statement."""
+    g = _disk_graph(str(tmp_path / "g"))
+    g.create_index("Country", "label")
+    g.cypher("CREATE INDEX IF NOT EXISTS FOR (c:Country) ON (c.label)")
+    assert g.last_mutation_stats["indexes_added"] == 0
+    with pytest.raises(kglite.CypherExecutionError, match="already exists"):
+        g.cypher("CREATE INDEX FOR (c:Country) ON (c.label)")
+
+
+def test_disk_ddl_refuses_to_claim_a_zero_entry_index(tmp_path) -> None:
+    """A disk graph's persistent index covers string columns only; a numeric
+    property yields zero entries. Reporting success there would leave the
+    caller believing their lookups are indexed."""
+    g = kglite.KnowledgeGraph(storage="disk", path=str(tmp_path / "g"))
+    g.add_nodes(
+        pd.DataFrame({"nid": ["Q1", "Q2"], "label": ["Norway", "Sweden"], "pop": [5, 10]}),
+        "Country",
+        "nid",
+        "label",
+    )
+    with pytest.raises(kglite.CypherExecutionError, match="indexed no values"):
+        g.cypher("CREATE INDEX FOR (c:Country) ON (c.pop)")
+
+    # The string column still indexes. `has_index` reads the in-memory map
+    # only, so probe the persistent index the disk-aware way: a second
+    # create reports `created=False` (it consults `has_any_index`).
+    g.cypher("CREATE INDEX FOR (c:Country) ON (c.label)")
+    assert g.create_index("Country", "label")["created"] is False
+    assert g.cypher("MATCH (c:Country {label: 'Norway'}) RETURN c.nid AS nid").to_list() == [{"nid": "Q1"}]
+
+
+def test_disk_ddl_allows_an_empty_type(tmp_path) -> None:
+    """Zero entries is legitimate when the type has no nodes — the emptiness
+    check, not the count, gates the error."""
+    g = kglite.KnowledgeGraph(storage="disk", path=str(tmp_path / "g"))
+    g.add_nodes(pd.DataFrame({"nid": ["Q1"], "label": ["Norway"]}), "Country", "nid", "label")
+    g.cypher("MATCH (c:Country) DETACH DELETE c")
+    g.cypher("CREATE INDEX FOR (c:Country) ON (c.label)")

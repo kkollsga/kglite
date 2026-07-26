@@ -47,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a failed statement, and is rejected on a schema-locked graph when the
   property is undeclared. `SHOW INDEXES` is a read and works on a read-only
   graph.
+- Lifted the backend routing behind `create_index` into the core as
+  `DirGraph::create_property_index_routed`, so Cypher `CREATE INDEX` makes the
+  same decision the Python API does: on a `storage='disk'` graph it builds the
+  persistent mmap-backed index rather than the in-memory HashMap. On disk,
+  a `CREATE INDEX` that indexes no values on a populated node type is now
+  rejected with the reason (persistent property indexes cover string columns)
+  instead of reporting success for an empty index.
 
 ## [0.14.5] - 2026-07-22
 

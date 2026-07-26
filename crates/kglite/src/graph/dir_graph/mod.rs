@@ -959,6 +959,34 @@ impl DirGraph {
         count
     }
 
+    /// Install the single-property equality index for `(node_type, property)`,
+    /// **routing by storage backend**. Returns `(entries_indexed, persistent)`.
+    ///
+    /// On the Disk backend this builds the mmap-backed `PropertyIndex` and
+    /// reports `persistent = true`; the in-memory `property_indices` HashMap
+    /// would need multiple GB of heap for a ~13M-row type and be rebuilt on
+    /// every load. Memory and mapped backends build the HashMap via
+    /// [`Self::create_index`].
+    ///
+    /// **Every caller that installs an equality index on behalf of a user must
+    /// route through here.** [`Self::create_index`] is the in-memory primitive
+    /// and bypasses the disk decision; calling it directly on a disk graph is
+    /// the OOM this method exists to avoid. The counterpart
+    /// [`Self::drop_index`] already routes internally.
+    pub fn create_property_index_routed(
+        &mut self,
+        node_type: &str,
+        property: &str,
+    ) -> Result<(usize, bool), String> {
+        if let GraphBackend::Disk(disk) = &mut self.graph {
+            let count = disk
+                .build_property_index(node_type, property)
+                .map_err(|error| error.to_string())?;
+            return Ok((count, true));
+        }
+        Ok((self.create_index(node_type, property), false))
+    }
+
     /// Drop an index on a property for a specific node type.
     /// Returns true if the index existed and was removed.
     pub fn drop_index(&mut self, node_type: &str, property: &str) -> Result<bool, String> {
