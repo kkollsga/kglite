@@ -315,132 +315,8 @@ impl DiskGraph {
         // Merge sort uses only sequential I/O: read → sort chunks → merge → write.
         let step = std::time::Instant::now();
 
-        let in_edges = {
-            // Chunk size for sort: fit in available heap after edge_endpoints mmap.
-            let sort_chunk_mb: usize = std::env::var("KGLITE_CSR_CHUNK_MB")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(5120); // 5 GB default — safe on 16 GB machine
-            let max_entries = (sort_chunk_mb << 20) / std::mem::size_of::<MergeSortEntry>();
-            let sort_chunk_size = max_entries.min(edge_count);
-            let num_sort_chunks = edge_count.div_ceil(sort_chunk_size);
-
-            let sort_dir = out_dir.join("_in_sort");
-            std::fs::create_dir_all(&sort_dir)?;
-
-            if num_sort_chunks == 1 {
-                // Single-chunk: sort in memory, write directly
-                let substep = std::time::Instant::now();
-                let mut entries: Vec<MergeSortEntry> = Vec::with_capacity(edge_count);
-                for i in 0..edge_count {
-                    let ep = edge_endpoints_vec.get(i);
-                    entries.push(MergeSortEntry {
-                        key: ep.target,
-                        conn_type: ep.connection_type,
-                        peer: ep.source,
-                        orig_idx: i as u32,
-                        padding: 0,
-                    });
-                }
-                entries.sort_unstable_by_key(|e| (e.key, e.conn_type));
-
-                let mut output = MmapOrVec::mapped(&out_dir.join("in_edges.bin"), edge_count)?;
-                for entry in &entries {
-                    output.try_push(CsrEdge {
-                        peer: entry.peer,
-                        edge_idx: entry.orig_idx,
-                    })?;
-                }
-                drop(entries);
-                if verbose {
-                    eprintln!(
-                        "      in sort single-chunk: {:.1}s",
-                        substep.elapsed().as_secs_f64()
-                    );
-                }
-                output
-            } else {
-                // Multi-chunk: external merge sort with k-way heap merge
-                let substep = std::time::Instant::now();
-                let mut chunk_mmaps: Vec<MmapOrVec<MergeSortEntry>> = Vec::new();
-                let mut chunk_lens: Vec<usize> = Vec::new();
-
-                for c in 0..num_sort_chunks {
-                    let start = c * sort_chunk_size;
-                    let end = (start + sort_chunk_size).min(edge_count);
-                    let len = end - start;
-
-                    let mut entries: Vec<MergeSortEntry> = Vec::with_capacity(len);
-                    for i in start..end {
-                        let ep = edge_endpoints_vec.get(i);
-                        entries.push(MergeSortEntry {
-                            key: ep.target,
-                            conn_type: ep.connection_type,
-                            peer: ep.source,
-                            orig_idx: i as u32,
-                            padding: 0,
-                        });
-                    }
-                    entries.sort_unstable_by_key(|e| (e.key, e.conn_type));
-
-                    let chunk_path = sort_dir.join(format!("chunk_in_{}.bin", c));
-                    let mut chunk_mmap = MmapOrVec::mapped(&chunk_path, len)?;
-                    for entry in &entries {
-                        chunk_mmap.try_push(*entry)?;
-                    }
-                    drop(entries);
-                    chunk_lens.push(len);
-                    chunk_mmaps.push(chunk_mmap);
-                }
-                if verbose {
-                    eprintln!(
-                        "      in sort {} chunks: {:.1}s",
-                        num_sort_chunks,
-                        substep.elapsed().as_secs_f64()
-                    );
-                }
-
-                // K-way merge via binary heap — all reads and writes sequential
-                let substep = std::time::Instant::now();
-                let mut positions: Vec<usize> = vec![0; num_sort_chunks];
-                let mut output = MmapOrVec::mapped(&out_dir.join("in_edges.bin"), edge_count)?;
-
-                use std::cmp::Reverse;
-                let mut heap: std::collections::BinaryHeap<Reverse<(u32, u64, usize)>> =
-                    std::collections::BinaryHeap::with_capacity(num_sort_chunks);
-                for c in 0..num_sort_chunks {
-                    if chunk_lens[c] > 0 {
-                        let entry = chunk_mmaps[c].get(0);
-                        heap.push(Reverse((entry.key, entry.conn_type, c)));
-                    }
-                }
-
-                for _ in 0..edge_count {
-                    let Reverse((_key, _ct, best_chunk)) = heap.pop().unwrap();
-                    let entry = chunk_mmaps[best_chunk].get(positions[best_chunk]);
-                    positions[best_chunk] += 1;
-                    output.try_push(CsrEdge {
-                        peer: entry.peer,
-                        edge_idx: entry.orig_idx,
-                    })?;
-                    if positions[best_chunk] < chunk_lens[best_chunk] {
-                        let next = chunk_mmaps[best_chunk].get(positions[best_chunk]);
-                        heap.push(Reverse((next.key, next.conn_type, best_chunk)));
-                    }
-                }
-
-                // Cleanup sort chunks. Dropping the mappings first is load
-                // bearing on Windows, which will not delete a mapped file;
-                // the removal is checked so a regression is loud.
-                drop(chunk_mmaps);
-                super::remove_scratch_dir(&sort_dir)?;
-
-                if verbose {
-                    eprintln!("      in merge: {:.1}s", substep.elapsed().as_secs_f64());
-                }
-                output
-            }
-        };
+        let in_edges =
+            build_in_edges_merge_sort(&edge_endpoints_vec, edge_count, out_dir, verbose)?;
         if verbose {
             eprintln!(
                 "    CSR step 4/4: in_edges merge sort ({:.1}s)",
@@ -839,6 +715,148 @@ pub(super) fn write_peer_count_histogram(
 /// Parallelised via Rayon: each thread scans a partition of nodes and
 /// builds a local `HashMap<conn_type, Vec<node_id>>`; the maps are merged,
 /// each type's sources sorted, then flushed to the three on-disk files.
+/// Build the `in_edges` CSR array by external merge sort on target node.
+///
+/// Split out of [`DiskGraph::build_csr_partitioned`], which handles the four
+/// build steps and had grown past the point where the merge sort could be read
+/// on its own. Scatter is slow here because target degree is power-law
+/// distributed and popular targets thrash the page cache, so this path uses
+/// only sequential I/O: read -> sort chunks -> merge -> write.
+///
+/// Writes `out_dir/in_edges.bin` and spills sort chunks under `out_dir/_in_sort`,
+/// which is removed before returning.
+fn build_in_edges_merge_sort(
+    edge_endpoints_vec: &MmapOrVec<EdgeEndpoints>,
+    edge_count: usize,
+    out_dir: &Path,
+    verbose: bool,
+) -> io::Result<MmapOrVec<CsrEdge>> {
+    // Chunk size for sort: fit in available heap after edge_endpoints mmap.
+    let sort_chunk_mb: usize = std::env::var("KGLITE_CSR_CHUNK_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5120); // 5 GB default — safe on 16 GB machine
+    let max_entries = (sort_chunk_mb << 20) / std::mem::size_of::<MergeSortEntry>();
+    let sort_chunk_size = max_entries.min(edge_count);
+    let num_sort_chunks = edge_count.div_ceil(sort_chunk_size);
+
+    let sort_dir = out_dir.join("_in_sort");
+    std::fs::create_dir_all(&sort_dir)?;
+
+    if num_sort_chunks == 1 {
+        // Single-chunk: sort in memory, write directly
+        let substep = std::time::Instant::now();
+        let mut entries: Vec<MergeSortEntry> = Vec::with_capacity(edge_count);
+        for i in 0..edge_count {
+            let ep = edge_endpoints_vec.get(i);
+            entries.push(MergeSortEntry {
+                key: ep.target,
+                conn_type: ep.connection_type,
+                peer: ep.source,
+                orig_idx: i as u32,
+                padding: 0,
+            });
+        }
+        entries.sort_unstable_by_key(|e| (e.key, e.conn_type));
+
+        let mut output = MmapOrVec::mapped(&out_dir.join("in_edges.bin"), edge_count)?;
+        for entry in &entries {
+            output.try_push(CsrEdge {
+                peer: entry.peer,
+                edge_idx: entry.orig_idx,
+            })?;
+        }
+        drop(entries);
+        if verbose {
+            eprintln!(
+                "      in sort single-chunk: {:.1}s",
+                substep.elapsed().as_secs_f64()
+            );
+        }
+        Ok(output)
+    } else {
+        // Multi-chunk: external merge sort with k-way heap merge
+        let substep = std::time::Instant::now();
+        let mut chunk_mmaps: Vec<MmapOrVec<MergeSortEntry>> = Vec::new();
+        let mut chunk_lens: Vec<usize> = Vec::new();
+
+        for c in 0..num_sort_chunks {
+            let start = c * sort_chunk_size;
+            let end = (start + sort_chunk_size).min(edge_count);
+            let len = end - start;
+
+            let mut entries: Vec<MergeSortEntry> = Vec::with_capacity(len);
+            for i in start..end {
+                let ep = edge_endpoints_vec.get(i);
+                entries.push(MergeSortEntry {
+                    key: ep.target,
+                    conn_type: ep.connection_type,
+                    peer: ep.source,
+                    orig_idx: i as u32,
+                    padding: 0,
+                });
+            }
+            entries.sort_unstable_by_key(|e| (e.key, e.conn_type));
+
+            let chunk_path = sort_dir.join(format!("chunk_in_{}.bin", c));
+            let mut chunk_mmap = MmapOrVec::mapped(&chunk_path, len)?;
+            for entry in &entries {
+                chunk_mmap.try_push(*entry)?;
+            }
+            drop(entries);
+            chunk_lens.push(len);
+            chunk_mmaps.push(chunk_mmap);
+        }
+        if verbose {
+            eprintln!(
+                "      in sort {} chunks: {:.1}s",
+                num_sort_chunks,
+                substep.elapsed().as_secs_f64()
+            );
+        }
+
+        // K-way merge via binary heap — all reads and writes sequential
+        let substep = std::time::Instant::now();
+        let mut positions: Vec<usize> = vec![0; num_sort_chunks];
+        let mut output = MmapOrVec::mapped(&out_dir.join("in_edges.bin"), edge_count)?;
+
+        use std::cmp::Reverse;
+        let mut heap: std::collections::BinaryHeap<Reverse<(u32, u64, usize)>> =
+            std::collections::BinaryHeap::with_capacity(num_sort_chunks);
+        for c in 0..num_sort_chunks {
+            if chunk_lens[c] > 0 {
+                let entry = chunk_mmaps[c].get(0);
+                heap.push(Reverse((entry.key, entry.conn_type, c)));
+            }
+        }
+
+        for _ in 0..edge_count {
+            let Reverse((_key, _ct, best_chunk)) = heap.pop().unwrap();
+            let entry = chunk_mmaps[best_chunk].get(positions[best_chunk]);
+            positions[best_chunk] += 1;
+            output.try_push(CsrEdge {
+                peer: entry.peer,
+                edge_idx: entry.orig_idx,
+            })?;
+            if positions[best_chunk] < chunk_lens[best_chunk] {
+                let next = chunk_mmaps[best_chunk].get(positions[best_chunk]);
+                heap.push(Reverse((next.key, next.conn_type, best_chunk)));
+            }
+        }
+
+        // Cleanup sort chunks. Dropping the mappings first is load
+        // bearing on Windows, which will not delete a mapped file;
+        // the removal is checked so a regression is loud.
+        drop(chunk_mmaps);
+        super::remove_scratch_dir(&sort_dir)?;
+
+        if verbose {
+            eprintln!("      in merge: {:.1}s", substep.elapsed().as_secs_f64());
+        }
+        Ok(output)
+    }
+}
+
 pub(super) fn write_conn_type_index(
     out_offsets: &MmapOrVec<u64>,
     out_edges: &MmapOrVec<CsrEdge>,
