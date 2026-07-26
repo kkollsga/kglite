@@ -27,31 +27,31 @@ use crate::graph::storage::GraphRead;
 // ─────────────────────────────────────────────────────────────────────
 
 /// Everything about a graph that a rollback must restore exactly.
+/// Properties as `(key, value)` text pairs, sorted — comparable regardless of
+/// the underlying property-storage representation.
+type PropPairs = Vec<(String, String)>;
+
+/// `(slot, node_type, id, title, sorted properties, sorted labels)`, keyed by
+/// petgraph slot so a node that comes back on a different slot is a failure.
+type NodeFingerprint = (usize, String, String, String, PropPairs, Vec<String>);
+
+/// `(slot, src slot, tgt slot, conn type, sorted properties)`.
+type EdgeFingerprint = (usize, usize, usize, String, PropPairs);
+
 #[derive(Debug, PartialEq, Eq)]
 struct Fingerprint {
     version: u64,
     node_count: usize,
     edge_count: usize,
-    /// `(slot, node_type, id, title, sorted properties, sorted labels)` —
-    /// keyed by petgraph slot so a node that comes back on a different slot
-    /// is a failure.
-    nodes: Vec<(
-        usize,
-        String,
-        String,
-        String,
-        Vec<(String, String)>,
-        Vec<String>,
-    )>,
-    /// `(slot, src slot, tgt slot, conn type, sorted properties)`.
-    edges: Vec<(usize, usize, usize, String, Vec<(String, String)>)>,
+    nodes: Vec<NodeFingerprint>,
+    edges: Vec<EdgeFingerprint>,
     /// `type_indices` in bucket order — the scan order of `MATCH (n:T)`.
     type_indices: Vec<(String, Vec<usize>)>,
     /// `secondary_label_index` in bucket order.
     secondary_labels: Vec<(String, Vec<usize>)>,
     has_secondary_labels: bool,
     /// Schema growth a failed statement must not leave behind.
-    node_type_metadata: Vec<(String, Vec<(String, String)>)>,
+    node_type_metadata: Vec<(String, PropPairs)>,
     connection_type_metadata: Vec<String>,
     /// `(node_type, id)` → slot, read through the id index so a stale or
     /// unrebuilt index shows up as a mismatch.
