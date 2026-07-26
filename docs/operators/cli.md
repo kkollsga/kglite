@@ -177,3 +177,42 @@ kglite export-text app.kgl
 ```bash
 kglite diff before.kgl after.kgl
 ```
+
+`export-sqlite` writes a SQLite-dialect SQL script — node types become
+tables, connection types become link tables — so the graph can leave
+KGLite entirely. Give it an output path, or omit one to write to stdout:
+
+```bash
+kglite export-sqlite app.kgl dump.sql
+sqlite3 app.db < dump.sql
+
+kglite export-sqlite app.kgl | sqlite3 app.db     # or pipe it straight through
+```
+
+Deterministic (the same graph always produces byte-identical SQL) and
+dependency-free — no SQLite library is linked into KGLite. The full
+mapping and its trade-offs are in the
+[import/export guide](../python/guides/import-export.md).
+
+`schema-version` reads, and with `--set` writes, the graph's
+**user-schema version** — your own data-model revision, distinct from the
+`.kgl` format version, which the engine stores but never interprets:
+
+```bash
+kglite schema-version app.kgl            # prints e.g. 3
+kglite schema-version app.kgl --set 2    # stamp without running anything
+```
+
+`migrate` applies pending Cypher migrations and advances that stamp.
+Migrations are `<version>_<name>.cypher` files in one directory, applied
+in ascending version order:
+
+```bash
+kglite migrate app.kgl migrations --dry-run   # show the plan, change nothing
+kglite migrate app.kgl migrations             # apply
+```
+
+Re-running is a no-op, statements run against an in-memory copy so a
+failure part-way leaves the `.kgl` byte-identical, and a stamp the
+migration set cannot explain is refused rather than guessed at. See the
+[schema-migrations guide](../python/guides/schema-migrations.md).

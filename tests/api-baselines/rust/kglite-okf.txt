@@ -1147,6 +1147,7 @@ pub fn kglite::api::io::to_csv_dir(graph: &kglite::api::DirGraph, output_dir: &s
 pub fn kglite::api::io::to_d3_json(graph: &kglite::api::DirGraph, selection: core::option::Option<&kglite::api::CurrentSelection>) -> core::result::Result<alloc::string::String, alloc::string::String>
 pub fn kglite::api::io::to_gexf(graph: &kglite::api::DirGraph, selection: core::option::Option<&kglite::api::CurrentSelection>) -> core::result::Result<alloc::string::String, alloc::string::String>
 pub fn kglite::api::io::to_graphml(graph: &kglite::api::DirGraph, selection: core::option::Option<&kglite::api::CurrentSelection>) -> core::result::Result<alloc::string::String, alloc::string::String>
+pub fn kglite::api::io::to_sqlite_dump(graph: &kglite::api::DirGraph, selection: core::option::Option<&kglite::api::CurrentSelection>) -> core::result::Result<alloc::string::String, alloc::string::String>
 pub fn kglite::api::io::to_text(graph: &kglite::api::DirGraph) -> alloc::string::String
 pub fn kglite::api::io::write_kgl(graph: &kglite::api::DirGraph, path: &str) -> core::io::error::Result<()>
 pub fn kglite::api::io::write_kgl_to<W: std::io::Write>(graph: &kglite::api::DirGraph, writer: &mut W) -> core::io::error::Result<()>
@@ -1993,6 +1994,7 @@ pub kglite::api::DirGraph::title_field_aliases: rustc_hash::FxHashMap<alloc::str
 pub kglite::api::DirGraph::type_connectivity_cache: alloc::sync::Arc<std::sync::poison::rwlock::RwLock<core::option::Option<alloc::vec::Vec<kglite::graph::schema::ConnectivityTriple>>>>
 pub kglite::api::DirGraph::type_indices: kglite::graph::storage::disk::type_index::TypeIndexStore
 pub kglite::api::DirGraph::type_schemas: std::collections::hash::map::HashMap<alloc::string::String, alloc::sync::Arc<kglite::graph::schema::TypeSchema>>
+pub kglite::api::DirGraph::user_schema_version: u32
 pub kglite::api::DirGraph::version: u64
 pub kglite::api::DirGraph::wkt_cache: alloc::sync::Arc<std::sync::poison::rwlock::RwLock<std::collections::hash::map::HashMap<alloc::string::String, alloc::sync::Arc<geo_types::geometry::Geometry<f64>>>>>
 impl kglite::api::DirGraph

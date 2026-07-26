@@ -10,6 +10,7 @@
 mod exec;
 mod format;
 mod helper;
+mod migrate;
 mod repl;
 mod skill;
 
@@ -177,6 +178,38 @@ enum Command {
         /// The "after" `.kgl`.
         b: PathBuf,
     },
+    /// Export a `.kgl` as a SQLite-dialect SQL script — the no-lock-in exit.
+    /// Node types become tables, connection types become link tables. Ingest
+    /// with: `sqlite3 target.db < dump.sql`.
+    ExportSqlite {
+        /// Path to the `.kgl` file.
+        graph: PathBuf,
+        /// Where to write the SQL script. Omit to write to stdout.
+        output: Option<PathBuf>,
+    },
+    /// Apply pending Cypher migrations and advance the graph's user-schema
+    /// version. Migrations are `<version>_<name>.cypher` files in one
+    /// directory, applied in ascending version order; a re-run is a no-op.
+    Migrate {
+        /// Path to the `.kgl` file.
+        graph: PathBuf,
+        /// Directory holding the `<version>_<name>.cypher` migrations.
+        directory: PathBuf,
+        /// Print the plan without applying or saving anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Print the graph's user-schema version (the caller's own data-model
+    /// revision, distinct from the `.kgl` format version).
+    SchemaVersion {
+        /// Path to the `.kgl` file.
+        graph: PathBuf,
+        /// Stamp this version instead of printing — the "adopt migrations on an
+        /// existing graph" operation. Runs nothing; it asserts that the data
+        /// already has the shape migrations up to this version produce.
+        #[arg(long)]
+        set: Option<u32>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -329,6 +362,23 @@ where
         }
         return Ok(());
     }
+    if let Some(Command::ExportSqlite { graph, output }) = &cli.command {
+        return run_export_sqlite(graph, output.as_deref());
+    }
+    if let Some(Command::Migrate {
+        graph,
+        directory,
+        dry_run,
+    }) = &cli.command
+    {
+        return migrate::run(graph, directory, *dry_run);
+    }
+    if let Some(Command::SchemaVersion { graph, set }) = &cli.command {
+        return match set {
+            Some(version) => migrate::set_version(graph, *version),
+            None => migrate::print_version(graph),
+        };
+    }
 
     let (graph, source, source_identity) = match &cli.graph {
         Some(path) => {
@@ -358,6 +408,24 @@ fn fresh_graph() -> Result<DirGraph> {
 fn load_graph(path: &Path) -> Result<Arc<DirGraph>> {
     let p = path.to_string_lossy().to_string();
     load_file(&p).with_context(|| format!("failed to open {p}"))
+}
+
+/// Write the SQL projection of a graph to a file, or to stdout when no output
+/// path is given — the same shape as `export-text`, so the dump can be piped
+/// straight into `sqlite3`.
+fn run_export_sqlite(graph_path: &Path, output: Option<&Path>) -> Result<()> {
+    let graph = load_graph(graph_path)?;
+    let sql = kglite::api::io::to_sqlite_dump(&graph, None)
+        .map_err(|e| anyhow::anyhow!("SQL export failed: {e}"))?;
+    match output {
+        Some(path) => {
+            std::fs::write(path, &sql)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+            eprintln!("wrote {} ({} bytes)", path.display(), sql.len());
+        }
+        None => exec::write_stdout(&sql)?,
+    }
+    Ok(())
 }
 
 fn run_query(path: &Path, query: &str, mode: Mode) -> Result<()> {

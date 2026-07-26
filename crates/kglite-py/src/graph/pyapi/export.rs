@@ -18,11 +18,13 @@ impl KnowledgeGraph {
     /// - "gexf" - GEXF XML format (Gephi native)
     /// - "d3" or "json" - D3.js compatible JSON format
     /// - "csv" - CSV format (creates two files: path_nodes.csv and path_edges.csv)
+    /// - "sqlite" - SQLite-dialect SQL script; ingest with `sqlite3 out.db < path`
     ///
     /// Args:
     ///     path: Output file path
     ///     format: Export format (default: inferred from file extension)
-    ///     selection_only: If True, export only selected nodes (default: True if selection exists)
+    ///     selection_only: If True, export only selected nodes. Default: use the
+    ///         selection when it actually holds nodes, otherwise the whole graph.
     ///
     /// Example:
     ///     ```python
@@ -54,18 +56,15 @@ impl KnowledgeGraph {
                 "d3"
             } else if path.ends_with(".csv") {
                 "csv"
+            } else if path.ends_with(".sql") {
+                "sqlite"
             } else {
                 "graphml" // Default
             }
         });
 
-        // Determine if we should use selection
-        let use_selection = selection_only.unwrap_or(self.cursor.selection.get_level_count() > 0);
-        let selection: Option<&CurrentSelection> = if use_selection {
-            Some(&self.cursor.selection) // Deref coercion: &CowSelection -> &CurrentSelection
-        } else {
-            None
-        };
+        let selection: Option<&CurrentSelection> =
+            crate::graph::resolve_export_selection(self, selection_only);
 
         match fmt {
             "graphml" => {
@@ -101,9 +100,15 @@ impl KnowledgeGraph {
                 std::fs::write(&edges_path, edges_csv)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
             }
+            "sqlite" => {
+                let content = kglite_core::api::io::to_sqlite_dump(&self.inner, selection)
+                    .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+                std::fs::write(path, content)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
+            }
             _ => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Unknown export format: '{}'. Supported: graphml, gexf, d3, json, csv",
+                    "Unknown export format: '{}'. Supported: graphml, gexf, d3, json, csv, sqlite",
                     fmt
                 )));
             }
@@ -158,26 +163,8 @@ impl KnowledgeGraph {
         // Check if selection actually has nodes (not just levels)
         // Same pattern as export_string() — avoids empty export when
         // add_nodes creates a selection level with 0 nodes.
-        let selection_has_nodes = if self.cursor.selection.get_level_count() > 0 {
-            let level_idx = self.cursor.selection.get_level_count().saturating_sub(1);
-            self.cursor
-                .selection
-                .get_level(level_idx)
-                .map(|l| l.node_count() > 0)
-                .unwrap_or(false)
-        } else {
-            false
-        };
-        let use_selection = match selection_only {
-            Some(true) => true,
-            Some(false) => false,
-            None => selection_has_nodes,
-        };
-        let selection: Option<&CurrentSelection> = if use_selection {
-            Some(&self.cursor.selection)
-        } else {
-            None
-        };
+        let selection: Option<&CurrentSelection> =
+            crate::graph::resolve_export_selection(self, selection_only);
 
         let summary = kglite_core::api::io::to_csv_dir(
             &self.inner,
@@ -244,31 +231,8 @@ impl KnowledgeGraph {
     ///     Use selection_only=False to always export the entire graph
     #[pyo3(signature = (format, selection_only=None))]
     fn export_string(&self, format: &str, selection_only: Option<bool>) -> PyResult<String> {
-        // Check if selection has actual nodes
-        let selection_has_nodes = if self.cursor.selection.get_level_count() > 0 {
-            let level_idx = self.cursor.selection.get_level_count().saturating_sub(1);
-            self.cursor
-                .selection
-                .get_level(level_idx)
-                .map(|l| l.node_count() > 0)
-                .unwrap_or(false)
-        } else {
-            false
-        };
-
-        // Default behavior: use selection only if it has nodes
-        // If selection_only is explicitly set, respect that
-        let use_selection = match selection_only {
-            Some(true) => true,          // User explicitly wants selection only
-            Some(false) => false,        // User explicitly wants full graph
-            None => selection_has_nodes, // Auto: use selection if it has nodes
-        };
-
-        let selection: Option<&CurrentSelection> = if use_selection {
-            Some(&self.cursor.selection) // Deref coercion
-        } else {
-            None
-        };
+        let selection: Option<&CurrentSelection> =
+            crate::graph::resolve_export_selection(self, selection_only);
 
         match format {
             "graphml" => kglite_core::api::io::to_graphml(&self.inner, selection)
@@ -277,8 +241,10 @@ impl KnowledgeGraph {
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>),
             "d3" | "json" => kglite_core::api::io::to_d3_json(&self.inner, selection)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>),
+            "sqlite" => kglite_core::api::io::to_sqlite_dump(&self.inner, selection)
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>),
             _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Unknown export format: '{}'. Supported: graphml, gexf, d3, json",
+                "Unknown export format: '{}'. Supported: graphml, gexf, d3, json, sqlite",
                 format
             ))),
         }

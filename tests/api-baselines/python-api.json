@@ -850,6 +850,10 @@
           "kind": "method",
           "signature": "(self, /)"
         },
+        "schema_version": {
+          "kind": "attribute",
+          "type": "getset_descriptor"
+        },
         "search": {
           "kind": "method",
           "signature": "(self, /, text, *, property='title', limit=10)"
@@ -901,6 +905,10 @@
         "set_parent_type": {
           "kind": "method",
           "signature": "(self, /, node_type, parent_type)"
+        },
+        "set_schema_version": {
+          "kind": "method",
+          "signature": "(self, /, version)"
         },
         "set_spatial": {
           "kind": "method",

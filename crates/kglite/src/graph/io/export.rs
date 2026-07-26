@@ -869,7 +869,7 @@ pub fn to_csv_dir(
 }
 
 /// Extract the selected node indices (or all nodes if no selection).
-fn selected_node_indices(
+pub(crate) fn selected_node_indices(
     graph: &DirGraph,
     selection: Option<&CurrentSelection>,
 ) -> Vec<petgraph::graph::NodeIndex> {

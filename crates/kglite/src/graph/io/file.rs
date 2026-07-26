@@ -155,6 +155,18 @@ pub(crate) struct FileMetadata {
     /// describe()). Additive — old files default to empty.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     graph_instructions: HashMap<String, String>,
+    /// The caller's own data-model revision (see `DirGraph::user_schema_version`),
+    /// carried across save/load so a migration runner can tell which of its
+    /// ordered scripts a graph has already had applied. Not an engine version:
+    /// `core_data_version` above and the `.kgl` magic own the format lifecycle.
+    ///
+    /// Additive and *invisible when unset*: `skip_serializing_if` omits the key
+    /// entirely at the baseline value, so a graph that never stamps a schema
+    /// version serializes byte-for-byte as it did before this field existed —
+    /// which is what keeps the `test_phase4_parity` golden digest stable. Older
+    /// files simply lack the key and default to 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    user_schema_version: u32,
     /// Spatial configuration per node type.
     #[serde(default)]
     spatial_configs: HashMap<String, SpatialConfig>,
@@ -209,6 +221,12 @@ fn default_ts_data_version() -> u32 {
     2
 }
 
+/// `skip_serializing_if` predicate for the additive `user_schema_version` key:
+/// omitting it at the baseline keeps saves byte-identical to pre-field ones.
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 // ─── Metadata transfer helpers ───────────────────────────────────────────────
 
 impl FileMetadata {
@@ -231,6 +249,7 @@ impl FileMetadata {
             auto_vacuum_threshold: graph.auto_vacuum_threshold,
             parent_types: graph.parent_types.clone(),
             graph_instructions: graph.graph_instructions.clone(),
+            user_schema_version: graph.user_schema_version,
             spatial_configs: graph.spatial_configs.clone(),
             timeseries_configs: graph.timeseries_configs.clone(),
             temporal_node_configs: graph.temporal_node_configs.clone(),
@@ -287,6 +306,7 @@ impl FileMetadata {
         graph.auto_vacuum_threshold = self.auto_vacuum_threshold;
         graph.parent_types = self.parent_types;
         graph.graph_instructions = self.graph_instructions;
+        graph.user_schema_version = self.user_schema_version;
         graph.spatial_configs = self.spatial_configs;
         graph.timeseries_configs = self.timeseries_configs;
         graph.temporal_node_configs = self.temporal_node_configs;

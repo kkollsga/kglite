@@ -2222,6 +2222,40 @@ class KnowledgeGraph:
         """Whether the schema is currently locked."""
         ...
 
+    @property
+    def schema_version(self) -> int:
+        """Your own data-model revision, persisted with the graph.
+
+        This is *your* number, not kglite's: the engine stores and returns it
+        but never interprets it. It exists so a migration script can ask how
+        far this graph has been migrated. ``0`` means unversioned, which is
+        also what a graph saved before this field existed reports.
+
+        Distinct from ``graph_info()['format_version']``, which is the ``.kgl``
+        on-disk layout version and belongs to the engine.
+
+        See the :doc:`migrations guide </python/guides/schema-migrations>`.
+        """
+        ...
+
+    def set_schema_version(self, version: int) -> KnowledgeGraph:
+        """Stamp your data-model revision on the graph.
+
+        Persisted on the next :meth:`save`.
+
+        Args:
+            version: The revision number. ``0`` marks the graph unversioned.
+
+        Returns:
+            Self for method chaining.
+
+        Example::
+
+            graph.cypher("MATCH (p:Person) SET p.email = 'unknown'")
+            graph.set_schema_version(1).save("graph.kgl")
+        """
+        ...
+
     def graph_info(self) -> dict[str, Any]:
         """Get diagnostic information about graph storage health.
 
@@ -2238,6 +2272,10 @@ class KnowledgeGraph:
                 - ``type_count``: Number of distinct node types
                 - ``property_index_count``: Number of single-property indexes
                 - ``composite_index_count``: Number of composite indexes
+                - ``format_version``: ``.kgl`` on-disk layout version (engine-owned)
+                - ``library_version``: kglite version that last saved the graph
+                - ``user_schema_version``: your data-model revision (see
+                  :attr:`schema_version`); ``0`` when unversioned
                 - ``columnar_heap_bytes``: Heap-resident bytes in columnar stores
                 - ``columnar_is_mapped``: Whether any columnar data is file-backed
                 - ``memory_limit``: Configured memory limit (None if unset)
@@ -3986,8 +4024,20 @@ class KnowledgeGraph:
     ) -> None:
         """Export the graph to a file.
 
-        Supported formats: ``graphml``, ``gexf``, ``d3``/``json``, ``csv``.
-        Format is inferred from the file extension if not specified.
+        Supported formats: ``graphml``, ``gexf``, ``d3``/``json``, ``csv``,
+        ``sqlite``. Format is inferred from the file extension if not
+        specified (``.sql`` → ``sqlite``).
+
+        ``sqlite`` writes a SQLite-dialect SQL script — node types become
+        tables, connection types become link tables — which you ingest with the
+        stock CLI::
+
+            graph.export("dump.sql")
+            # then: sqlite3 out.db < dump.sql
+
+        A script rather than a ``.db`` file keeps kglite dependency-free while
+        still handing you a real, queryable database. See the
+        :doc:`migrations guide </python/guides/schema-migrations>`.
 
         Args:
             path: Output file path.
@@ -4068,7 +4118,7 @@ class KnowledgeGraph:
     ) -> str:
         """Export the graph to a string.
 
-        Supported formats: ``graphml``, ``gexf``, ``d3``/``json``.
+        Supported formats: ``graphml``, ``gexf``, ``d3``/``json``, ``sqlite``.
 
         Args:
             format: Export format.

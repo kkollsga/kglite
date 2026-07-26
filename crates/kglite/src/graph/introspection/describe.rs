@@ -72,6 +72,20 @@ fn write_read_only_notice(xml: &mut String, graph: &DirGraph) {
     }
 }
 
+/// Write the caller's own data-model revision, when they have set one, so an
+/// agent opening the graph cold knows which schema generation it is looking at
+/// (and can tell that pending migrations may exist). Omitted entirely at the
+/// unversioned baseline: an agent shouldn't have to reason about a number the
+/// graph's owner never opted into.
+fn write_user_schema_version(xml: &mut String, graph: &DirGraph) {
+    if graph.user_schema_version != 0 {
+        xml.push_str(&format!(
+            "  <user-schema-version>{}</user-schema-version>\n",
+            graph.user_schema_version
+        ));
+    }
+}
+
 /// Write the graph-level `<instructions>` block (the default-channel briefing)
 /// verbatim at the top of describe(), so an agent opening the graph cold reads
 /// it first. Rendered in full — NOT subject to the sample-value truncation.
@@ -1267,6 +1281,7 @@ fn build_inventory_capped(graph: &DirGraph, max_types: Option<usize>) -> String 
     write_graph_instructions(&mut xml, graph);
     write_conventions(&mut xml, &caps);
     write_read_only_notice(&mut xml, graph);
+    write_user_schema_version(&mut xml, graph);
 
     // Collect types: if tiers active, only core types; otherwise all types
     let mut entries: Vec<(String, usize, usize)> = graph
@@ -1371,6 +1386,7 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
     write_graph_instructions(&mut xml, graph);
     xml.push_str("  <conventions>All nodes have .id and .title</conventions>\n");
     write_read_only_notice(&mut xml, graph);
+    write_user_schema_version(&mut xml, graph);
 
     // Type distribution by size tier + top-20 types
     let mut type_entries: Vec<(&str, usize)> = graph
@@ -1500,6 +1516,7 @@ fn build_inventory_with_detail(graph: &DirGraph, truncate_at: Option<usize>) -> 
     write_graph_instructions(&mut xml, graph);
     write_conventions(&mut xml, &caps);
     write_read_only_notice(&mut xml, graph);
+    write_user_schema_version(&mut xml, graph);
 
     // Full detail for each type (core only if tiers active)
     let has_tiers = !graph.parent_types.is_empty();
@@ -1585,6 +1602,7 @@ fn build_focused_detail(
     ));
     write_graph_instructions(&mut xml, graph);
     write_read_only_notice(&mut xml, graph);
+    write_user_schema_version(&mut xml, graph);
 
     for t in types {
         let tc = caps.get(t).unwrap_or(&empty_caps);

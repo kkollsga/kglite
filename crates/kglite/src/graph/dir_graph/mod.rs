@@ -154,6 +154,14 @@ pub struct DirGraph {
     /// a trivial v2 without changing the format. Additive — absent in old files.
     #[serde(default)]
     pub graph_instructions: HashMap<String, String>,
+    /// **User**-schema version — the caller's own data-model revision, bumped by
+    /// their migrations. Distinct from the engine's format stamps
+    /// (`save_metadata.format_version`, the `.kgl` magic), which the engine owns
+    /// and this never touches. `0` = unversioned, which is also what a `.kgl`
+    /// written before this field existed loads as (additive, absent in old
+    /// files). Docs: `docs/python/guides/schema-migrations.md`.
+    #[serde(default)]
+    pub user_schema_version: u32,
     /// Auto-vacuum threshold: if Some(t), vacuum() is triggered automatically after
     /// DELETE operations when fragmentation_ratio exceeds t and tombstones > 100.
     /// Default: Some(0.3). Set to None to disable.
@@ -420,6 +428,7 @@ impl DirGraph {
             title_field_aliases: FxHashMap::default(),
             parent_types: HashMap::new(),
             graph_instructions: HashMap::new(),
+            user_schema_version: 0,
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -474,6 +483,7 @@ impl DirGraph {
             title_field_aliases: FxHashMap::default(),
             parent_types: HashMap::new(),
             graph_instructions: HashMap::new(),
+            user_schema_version: 0,
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
