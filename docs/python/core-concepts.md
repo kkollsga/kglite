@@ -30,7 +30,8 @@ KGLite stores nodes and relationships in a Rust graph structure ([petgraph](http
   results are already materialized in Rust (Python values convert on access)
 - **Fluent API** chains build a *selection* (a set of node indices) — no data is copied until you call `collect()`, `to_df()`, etc.
 - **Persistence** uses `save()`/`load()` snapshots; `open()` is crash-safe by
-  default via a write-ahead log (`durable=False` opts out; `storage="disk"`
+  default via a write-ahead log (`durable="normal"` keeps the log without the
+  per-commit barrier, `durable="off"` opts out entirely; `storage="disk"`
   is the exception — see [Choosing a storage mode](#choosing-a-storage-mode)),
   and context-managed `open()` also persists on clean exit
 
@@ -76,7 +77,8 @@ Cypher API, so moving up is a one-line constructor change.
 `mapped` keeps the same per-commit crash safety as in-memory, so growing out
 of RAM costs you nothing there. `disk` commits by publishing an immutable
 generation instead of by logging a write: `kglite.open(path, storage="disk")`
-opens **non-durable** (passing `durable=True` raises rather than pretending),
+opens **non-durable** (passing any logging level — `durable=True`/`"full"` or
+`durable="normal"` — raises rather than pretending),
 and a crash loses every mutation made since the last `save()`. That is a real
 and bounded guarantee — the published generation always survives intact — but
 it is *your* `save()` calls, not the engine, that decide how much a crash can
