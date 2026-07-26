@@ -16,9 +16,10 @@
 //!   while evaluating a later pattern's properties.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::datatypes::Value;
-use crate::graph::schema::DirGraph;
+use crate::graph::schema::{DirGraph, PropertyStorage};
 use crate::graph::session::execute::{execute_mut, ExecuteOptions};
 use crate::graph::storage::GraphRead;
 
@@ -38,6 +39,16 @@ type NodeFingerprint = (usize, String, String, String, PropPairs, Vec<String>);
 /// `(slot, src slot, tgt slot, conn type, sorted properties)`.
 type EdgeFingerprint = (usize, usize, usize, String, PropPairs);
 
+/// One master column store's rows: `(row id, id, title, sorted properties)`.
+///
+/// Read from `DirGraph::column_stores` — the *master* handle — not from a
+/// node's own `Arc` clone of it. The two can diverge (`Arc::make_mut` forks
+/// them on every columnar write), and only the node-side half shows up in
+/// `NodeFingerprint`. A rollback that restored the nodes but left the master
+/// carrying the failed statement's values would look clean node-side and then
+/// resurrect those values on the next `SET` or `save()`.
+type MasterRows = Vec<(u32, String, String, PropPairs)>;
+
 #[derive(Debug, PartialEq, Eq)]
 struct Fingerprint {
     version: u64,
@@ -56,6 +67,16 @@ struct Fingerprint {
     /// `(node_type, id)` → slot, read through the id index so a stale or
     /// unrebuilt index shows up as a mismatch.
     id_lookup: Vec<(String, String, usize)>,
+    /// Master column stores per node type. Empty on a non-columnar graph.
+    column_masters: Vec<(String, MasterRows)>,
+    /// Per columnar node slot: is its own `Arc<ColumnStore>` handle still the
+    /// same allocation as its type's master? `execute_set` writes the master
+    /// through `Arc::make_mut` — which forks it away from every node holding a
+    /// handle — and then re-points all of them at the fork. A rollback has to
+    /// put both halves back *together*: leaving the nodes on the pre-statement
+    /// store while the master keeps the fork (or the reverse) is the failure
+    /// mode this pins, and it is invisible to a values-only comparison.
+    columnar_handles: Vec<(usize, bool)>,
 }
 
 fn sorted_props(props: &HashMap<String, Value>) -> Vec<(String, String)> {
@@ -165,6 +186,53 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
     }
     id_lookup.sort();
 
+    let mut column_masters: Vec<(String, MasterRows)> = graph
+        .column_stores
+        .iter()
+        .map(|(node_type, store)| {
+            let rows: MasterRows = (0..store.row_count())
+                .map(|row| {
+                    let mut props: PropPairs = store
+                        .row_properties(row)
+                        .into_iter()
+                        .map(|(key, value)| {
+                            (
+                                graph.interner.resolve(key).to_string(),
+                                format!("{value:?}"),
+                            )
+                        })
+                        .collect();
+                    props.sort();
+                    (
+                        row,
+                        format!("{:?}", store.get_id(row)),
+                        format!("{:?}", store.get_title(row)),
+                        props,
+                    )
+                })
+                .collect();
+            (node_type.clone(), rows)
+        })
+        .collect();
+    column_masters.sort();
+
+    let mut columnar_handles: Vec<(usize, bool)> = Vec::new();
+    for idx in graph.graph.node_indices().collect::<Vec<_>>() {
+        let Some(node) = graph.graph.node_weight(idx) else {
+            continue;
+        };
+        let PropertyStorage::Columnar { store, .. } = &node.properties else {
+            continue;
+        };
+        let node_type = node.node_type_str(&graph.interner);
+        let matches_master = graph
+            .column_stores
+            .get(node_type)
+            .is_some_and(|master| Arc::ptr_eq(store, master));
+        columnar_handles.push((idx.index(), matches_master));
+    }
+    columnar_handles.sort();
+
     Fingerprint {
         version: graph.version,
         node_count: graph.graph.node_count(),
@@ -177,6 +245,8 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
         node_type_metadata,
         connection_type_metadata,
         id_lookup,
+        column_masters,
+        columnar_handles,
     }
 }
 
@@ -241,176 +311,160 @@ fn seeded() -> DirGraph {
     graph
 }
 
+/// `seeded()` after `enable_columnar()` — the shape every graph takes the
+/// moment it is saved, and keeps for the rest of its life. `save()` calls
+/// `enable_columnar` (`io/file.rs`), and only the explicit `disable_columnar`
+/// ever empties `column_stores` again, so "has been saved once" is a permanent
+/// property of a live graph and every mutation after it runs in this shape.
+///
+/// The preconditions are asserted, not assumed. If `enable_columnar` ever
+/// stopped installing master stores, or stopped re-pointing nodes at them, the
+/// columnar arms below would quietly become a second run of the plain fixture
+/// and prove nothing.
+fn seeded_columnar() -> DirGraph {
+    let mut graph = seeded();
+    graph.enable_columnar();
+    assert!(
+        !graph.column_stores.is_empty(),
+        "the fixture must own master column stores, or the columnar arms are vacuous"
+    );
+    let columnar_nodes = graph
+        .graph
+        .node_indices()
+        .filter(|idx| {
+            matches!(
+                graph.graph.node_weight(*idx).map(|node| &node.properties),
+                Some(PropertyStorage::Columnar { .. })
+            )
+        })
+        .count();
+    assert_eq!(
+        columnar_nodes,
+        graph.graph.node_count(),
+        "every seeded node must read its properties through a column store"
+    );
+    graph
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Per-shape rollback fidelity
 // ─────────────────────────────────────────────────────────────────────
 
-#[test]
-fn create_nodes_roll_back() {
-    let mut graph = seeded();
-    assert_rolls_back(
-        &mut graph,
-        "CREATE (:Item {id: 100}), (:Item {id: 101, bad: duration({months: 2147483648})})",
-        None,
-    );
+/// Every mid-statement-failure shape, run against every graph configuration.
+///
+/// One entry generates one module holding one test per fixture, so a failure
+/// names both the shape and the configuration it failed in
+/// (`create_nodes::columnar`).
+///
+/// The extra arms exist because the plain fixture cannot detect the bug class
+/// this file is for. `seeded()` is never saved and never indexed, so it can
+/// never trip a `journal_covers` veto — it takes the journal path
+/// unconditionally, and is therefore structurally incapable of noticing a
+/// journal path that is wrong for a graph that *has* been saved or indexed.
+/// Every shape must hold in every configuration a real application graph can
+/// be in.
+macro_rules! rollback_shapes {
+    ($($(#[$doc:meta])* $name:ident: $query:expr, $scope:expr;)*) => {
+        $(
+            $(#[$doc])*
+            mod $name {
+                use super::*;
+
+                /// A fresh in-memory graph: no column stores, no user indexes.
+                #[test]
+                fn plain() {
+                    assert_rolls_back(&mut seeded(), $query, $scope);
+                }
+
+                /// The saved-graph shape — `enable_columnar` has installed
+                /// master column stores that no mutation path ever removes.
+                #[test]
+                fn columnar() {
+                    assert_rolls_back(&mut seeded_columnar(), $query, $scope);
+                }
+            }
+        )*
+    };
 }
 
-#[test]
-fn create_nodes_and_edges_roll_back() {
-    let mut graph = seeded();
-    // The first pattern (nodes + edge) commits, the second is rejected by the
-    // write whitelist — so the journal must reverse two nodes and an edge.
-    assert_rolls_back(
-        &mut graph,
+rollback_shapes! {
+    create_nodes:
+        "CREATE (:Item {id: 100}), (:Item {id: 101, bad: duration({months: 2147483648})})",
+        None;
+
+    /// The first pattern (nodes + edge) commits, the second is rejected by the
+    /// write whitelist — so the journal must reverse two nodes and an edge.
+    create_nodes_and_edges:
         "CREATE (x:Item {id: 200})-[:LINKS {weight: 1}]->(y:Item {id: 201}), \
                 (z:Blocked {id: 202})",
-        Some(&["Item"]),
-    );
-}
+        Some(&["Item"]);
 
-#[test]
-fn create_with_secondary_labels_rolls_back() {
-    let mut graph = seeded();
-    assert_rolls_back(
-        &mut graph,
+    create_with_secondary_labels:
         "CREATE (:Tag:Hot:Fresh {id: 300}), (:Blocked {id: 301})",
-        Some(&["Tag"]),
-    );
-}
+        Some(&["Tag"]);
 
-#[test]
-fn set_properties_roll_back() {
-    let mut graph = seeded();
-    // Every Item is updated, then the expression on the last SET item blows
-    // up — a multi-property SET across multiple rows.
-    assert_rolls_back(
-        &mut graph,
+    /// Every Item is updated, then the expression on the last SET item blows
+    /// up — a multi-property SET across multiple rows.
+    set_properties:
         "MATCH (n:Item) SET n.qty = n.qty + 1, n.name = 'touched', \
                              n.bad = duration({months: 2147483648})",
-        None,
-    );
-}
+        None;
 
-#[test]
-fn set_on_second_type_rolls_back_first() {
-    let mut graph = seeded();
-    // One SET clause writing two node types: the Item write commits, then the
-    // Tag write is rejected by the whitelist mid-clause.
-    assert_rolls_back(
-        &mut graph,
+    /// One SET clause writing two node types: the Item write commits, then the
+    /// Tag write is rejected by the whitelist mid-clause.
+    set_on_second_type:
         "MATCH (n:Item), (t:Tag) WHERE n.id = 1 AND t.id = 1 \
          SET n.marker = 'x', t.marker = 'y'",
-        Some(&["Item"]),
-    );
-}
+        Some(&["Item"]);
 
-#[test]
-fn set_label_rolls_back() {
-    let mut graph = seeded();
-    assert_rolls_back(
-        &mut graph,
+    set_label:
         "MATCH (t:Tag {id: 2}) SET t:Hot, t.bad = duration({months: 2147483648})",
-        None,
-    );
-}
+        None;
 
-#[test]
-fn remove_property_and_label_roll_back() {
-    let mut graph = seeded();
-    assert_rolls_back(
-        &mut graph,
+    remove_property_and_label:
         "MATCH (t:Tag {id: 1}) REMOVE t.name, t:Hot \
          CREATE (:Blocked {id: 400})",
-        Some(&["Tag"]),
-    );
-}
+        Some(&["Tag"]);
 
-#[test]
-fn detach_delete_rolls_back_nodes_edges_and_bucket_order() {
-    let mut graph = seeded();
-    // Deletes the middle Item — so its slot is a hole in the middle of the
-    // type_indices bucket, and restoring it at the end instead of in place
-    // would fail the fingerprint.
-    assert_rolls_back(
-        &mut graph,
+    /// Deletes the middle Item — so its slot is a hole in the middle of the
+    /// type_indices bucket, and restoring it at the end instead of in place
+    /// would fail the fingerprint.
+    detach_delete_one:
         "MATCH (n:Item {id: 2}) DETACH DELETE n CREATE (:Blocked {id: 500})",
-        Some(&["Item"]),
-    );
-}
+        Some(&["Item"]);
 
-#[test]
-fn detach_delete_all_rolls_back() {
-    let mut graph = seeded();
-    assert_rolls_back(
-        &mut graph,
+    detach_delete_all:
         "MATCH (n) DETACH DELETE n CREATE (:Blocked {id: 501})",
-        Some(&["Item", "Tag"]),
-    );
-}
+        Some(&["Item", "Tag"]);
 
-#[test]
-fn delete_labelled_node_restores_its_labels() {
-    let mut graph = seeded();
-    assert_rolls_back(
-        &mut graph,
+    delete_labelled_node:
         "MATCH (t:Tag) DETACH DELETE t CREATE (:Blocked {id: 502})",
-        Some(&["Tag"]),
-    );
-}
+        Some(&["Tag"]);
 
-#[test]
-fn delete_edge_rolls_back() {
-    let mut graph = seeded();
-    assert_rolls_back(
-        &mut graph,
+    delete_edge:
         "MATCH ()-[r:LINKS]->() DELETE r CREATE (:Blocked {id: 600})",
-        Some(&["Item"]),
-    );
-}
+        Some(&["Item"]);
 
-#[test]
-fn merge_create_arm_rolls_back() {
-    let mut graph = seeded();
-    assert_rolls_back(
-        &mut graph,
+    merge_create_arm:
         "MERGE (n:Item {id: 700}) ON CREATE SET n.name = 'new' \
          CREATE (:Blocked {id: 701})",
-        Some(&["Item"]),
-    );
-}
+        Some(&["Item"]);
 
-#[test]
-fn merge_match_arm_rolls_back() {
-    let mut graph = seeded();
-    assert_rolls_back(
-        &mut graph,
+    merge_match_arm:
         "MERGE (n:Item {id: 1}) ON MATCH SET n.name = 'seen' \
          CREATE (:Blocked {id: 702})",
-        Some(&["Item"]),
-    );
-}
+        Some(&["Item"]);
 
-#[test]
-fn foreach_rolls_back() {
-    let mut graph = seeded();
-    assert_rolls_back(
-        &mut graph,
+    foreach:
         "FOREACH (i IN [1, 2, 3] | CREATE (:Item {id: 800 + i})) \
          CREATE (:Blocked {id: 804})",
-        Some(&["Item"]),
-    );
-}
+        Some(&["Item"]);
 
-#[test]
-fn multi_clause_create_then_set_then_delete_rolls_back() {
-    let mut graph = seeded();
-    assert_rolls_back(
-        &mut graph,
+    multi_clause_create_then_set_then_delete:
         "MATCH (n:Item {id: 3}) SET n.qty = 999 \
          CREATE (:Item {id: 900}) \
          CREATE (:Blocked {id: 901})",
-        Some(&["Item"]),
-    );
+        Some(&["Item"]);
 }
 
 // ─────────────────────────────────────────────────────────────────────

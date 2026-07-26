@@ -52,6 +52,39 @@
 //! explicit addition to [`swap_data_scale`] can introduce a correctness gap,
 //! and that is a change a reviewer is looking straight at.
 //!
+//! ## Columnar mode rides on the unparked half
+//!
+//! `column_stores` — the per-type master `Arc<ColumnStore>` map that `save()`
+//! installs via `enable_columnar` — is deliberately **not** parked, and that
+//! is the whole of its undo story. The shell clone captures one pre-statement
+//! `Arc` handle per type and `restore_schema_shell` reinstalls it verbatim.
+//! What makes that sufficient rather than merely hopeful:
+//!
+//! - `ColumnStore` has no interior mutability, and the only in-statement
+//!   writer of a master store is `execute_set`'s columnar fast path, which
+//!   goes through `Arc::make_mut`. The shell's handle keeps the refcount above
+//!   one for the whole statement, so `make_mut` provably copies-on-write and
+//!   the shell's store is never mutated in place.
+//! - Every node of a columnar type holds its own `Arc` clone of the store, so
+//!   the post-`make_mut` handle-refresh sweep re-points them all. That sweep
+//!   runs through `node_weight_mut_silent`, which is silent only towards the
+//!   WAL recorder — `MemoryGraph` does not override it, so each re-pointed
+//!   node's pre-statement `NodeData` (old handle and row id included) lands in
+//!   the journal as a `NodeWeight` entry.
+//! - `CREATE` and `DELETE` never reach a master store in memory mode: the
+//!   in-memory insert branch always builds a `Compact` node, and node removal
+//!   is a plain backend edit. Every other writer of `column_stores`
+//!   (`enable_columnar`, `disable_columnar`, `vacuum`, the spill and bulk-batch
+//!   paths, disk sync) runs outside the statement window.
+//!
+//! So a columnar graph is restored on both halves — master by verbatim shell
+//! restore, per-node handles by the journal — and needs no veto. The one cost
+//! to know about: because the refresh sweep touches every node of the type, a
+//! columnar `SET` journals one `NodeData` pre-image per node of that type
+//! rather than per row written. That is O(type), not O(changes) — still
+//! strictly cheaper than the O(V+E) fork it replaces, and it is the sweep's
+//! own cost that dominates either way.
+//!
 //! ## When the journal is not used
 //!
 //! [`journal_covers`] is the gate. It is conservative on purpose: any shape
@@ -116,11 +149,15 @@ fn swap_data_scale(a: &mut DirGraph, b: &mut DirGraph) {
 fn journal_covers(graph: &DirGraph) -> bool {
     // Only the heap backend can express an inverse petgraph edit.
     graph.graph.supports_undo_journal()
-        // Columnar `SET` writes the shared per-type `Arc<ColumnStore>` through
-        // a side channel that bypasses `GraphWrite` entirely
-        // (`cypher::executor::write`'s columnar-master fast path), so the
-        // journal never sees the pre-image.
-        && graph.column_stores.is_empty()
+        // Deliberately *not* gated on `column_stores.is_empty()`. That read as
+        // a narrow guard on the columnar-`SET` master side channel, but it
+        // vetoed every statement shape on every saved graph — `save()` calls
+        // `enable_columnar`, and nothing on a mutation path ever empties the
+        // map again. The side channel is covered instead: the master store is
+        // restored verbatim from the unparked shell (`Arc::make_mut` cannot
+        // touch the shell's handle) and the per-node handles come back through
+        // the journal. See the module doc for the full argument.
+        //
         // User-created indexes need per-bucket position undo on the delete
         // path, which the journal does not record yet. Empty in the default
         // graph — `create_index` opts in. Follow-up, tracked in the sprint

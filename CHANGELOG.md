@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The undo-journal fast path now applies to graphs that have been saved.**
+  Statement rollback uses a cheap O(changes) undo journal wherever it can, and
+  falls back to a whole-graph O(V+E) clone taken before *every* mutating
+  statement otherwise. The fast path previously excluded any graph holding
+  columnar property stores — which is every graph that has been through
+  `save()`, since saving enables columnar storage and nothing on a mutation
+  path turns it off again. A single `save()` therefore moved the process onto
+  the clone path permanently, and the cost of each subsequent write scaled
+  with the size of the whole graph rather than with what the write touched.
+
+  The exclusion was aimed at one real side channel — `SET` on a columnar
+  property writes the shared per-type store directly — which is now covered
+  instead of avoided: the master store is restored from the checkpoint's
+  schema copy, and the per-node handles come back through the journal. `CREATE`
+  and `DELETE` never touch a column store in memory mode at all.
+
+  Rollback behaviour is unchanged; this is a cost change only. The rollback
+  fidelity suite now runs every statement shape against a saved-graph fixture
+  as well as a fresh one.
+
 ### Fixed
 
 - **`kglite.open()` now enforces one writer per graph, instead of silently
