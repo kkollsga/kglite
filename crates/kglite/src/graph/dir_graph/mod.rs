@@ -46,7 +46,9 @@ pub mod constraints;
 mod disk_persistence;
 mod independent_copy;
 mod indexes;
+mod labels;
 mod node_write;
+pub(crate) mod rollback;
 mod schema_ops;
 
 /// Version-keyed cache of per-`(type, property)` distinct-value counts (NDV)
@@ -1025,143 +1027,6 @@ impl DirGraph {
         // the in-memory .kgl section).
     }
 
-    /// Add a secondary label to a node. Choke-point API for label
-    /// mutations — every mutation site routes through here so the
-    /// `secondary_label_index` stays canonical across all three
-    /// backends. NodeData itself never carries extra labels; the
-    /// inverted index is the single source of truth.
-    ///
-    /// Returns `true` if the label was added, `false` if it was already
-    /// present (idempotent) or equal to the primary type.
-    pub fn add_node_label(&mut self, idx: NodeIndex, label: InternedKey) -> bool {
-        use crate::graph::storage::GraphRead;
-        let primary = match GraphRead::node_type_of(&self.graph, idx) {
-            Some(k) => k,
-            None => return false,
-        };
-        if primary == label {
-            return false;
-        }
-        let bucket = self.secondary_label_index.entry(label).or_default();
-        if bucket.contains(&idx) {
-            return false;
-        }
-        bucket.push(idx);
-        self.has_secondary_labels = true;
-        true
-    }
-
-    /// Remove a secondary label from a node. Choke-point API for label
-    /// mutations.
-    ///
-    /// Returns `Ok(true)` if removed, `Ok(false)` if the node never had
-    /// the label, `Err(...)` if `label` is the primary type (use
-    /// `SET n.type = ...` to retype instead).
-    pub fn remove_node_label(
-        &mut self,
-        idx: NodeIndex,
-        label: InternedKey,
-    ) -> Result<bool, String> {
-        use crate::graph::storage::GraphRead;
-        let Some(primary) = GraphRead::node_type_of(&self.graph, idx) else {
-            return Ok(false);
-        };
-        if primary == label {
-            return Err(
-                "Cannot remove a node's primary label via REMOVE n:Label; use \
-                 SET n.type = 'NewType' to retype."
-                    .to_string(),
-            );
-        }
-        let Some(bucket) = self.secondary_label_index.get_mut(&label) else {
-            return Ok(false);
-        };
-        let before = bucket.len();
-        bucket.retain(|&i| i != idx);
-        let removed = bucket.len() < before;
-        if removed && bucket.is_empty() {
-            self.secondary_label_index.remove(&label);
-        }
-        if self.secondary_label_index.is_empty() {
-            self.has_secondary_labels = false;
-        }
-        Ok(removed)
-    }
-
-    /// Return a node's labels as `[primary, ...extras]`. Returns an
-    /// empty Vec if the node is missing. Consumers that only need the
-    /// primary type should keep using `GraphRead::node_type_of` (one
-    /// InternedKey lookup, no allocation).
-    ///
-    /// Reads secondaries from `secondary_label_index` (the canonical
-    /// source maintained by the choke-point API) rather than from
-    /// `NodeData.extra_labels`. This works uniformly across backends:
-    /// in-memory + mapped have both in sync; on disk, `NodeData` is
-    /// materialised from a transient arena that doesn't carry the
-    /// extras, but the inverted index does.
-    pub fn node_labels(&self, idx: NodeIndex) -> Vec<InternedKey> {
-        use crate::graph::storage::GraphRead;
-        let Some(primary) = GraphRead::node_type_of(&self.graph, idx) else {
-            return Vec::new();
-        };
-        if !self.has_secondary_labels {
-            return vec![primary];
-        }
-        let mut labels = vec![primary];
-        for (&key, bucket) in &self.secondary_label_index {
-            if bucket.contains(&idx) {
-                labels.push(key);
-            }
-        }
-        labels
-    }
-
-    /// All nodes carrying `label` as EITHER their primary type or a
-    /// secondary label — the canonical "candidates for `MATCH (n:label)`"
-    /// set. This is the single source of truth that every label-based
-    /// candidate-selection site should route through, mirroring
-    /// `PatternExecutor::find_matching_nodes`'s `needs_secondary_path`.
-    ///
-    /// Single-label fast path: when no node anywhere carries a secondary
-    /// label, this returns exactly `type_indices[label].to_vec()` — byte
-    /// for byte what every primary-only call site produced before
-    /// multi-label existed, so single-label performance is unchanged.
-    ///
-    /// The choke-point API (`add_node_label`) forbids a node holding the
-    /// same key as both primary and secondary, so the union is
-    /// duplicate-free.
-    pub fn nodes_with_label(&self, label: &str) -> Vec<NodeIndex> {
-        let mut out = self
-            .type_indices
-            .get(label)
-            .map(|v| v.to_vec())
-            .unwrap_or_default();
-        if self.has_secondary_labels {
-            if let Some(secondary) = self
-                .secondary_label_index
-                .get(&InternedKey::from_str(label))
-            {
-                out.extend(secondary.iter().copied());
-            }
-        }
-        out
-    }
-
-    /// True if `idx` carries `key` as its primary type or a secondary
-    /// label. Membership test companion to `nodes_with_label` for sites
-    /// that filter an existing candidate set rather than enumerate one.
-    pub fn node_has_label(&self, idx: NodeIndex, key: InternedKey) -> bool {
-        use crate::graph::storage::GraphRead;
-        if GraphRead::node_type_of(&self.graph, idx) == Some(key) {
-            return true;
-        }
-        self.has_secondary_labels
-            && self
-                .secondary_label_index
-                .get(&key)
-                .is_some_and(|bucket| bucket.contains(&idx))
-    }
-
     /// Convert all node properties from PropertyStorage::Map to PropertyStorage::Compact.
     /// Called after deserialization to convert the transient Map storage to dense slot-vec.
     /// Builds TypeSchemas per node type and stores them in `self.type_schemas`.
@@ -1995,3 +1860,6 @@ pub struct GraphInfo {
 #[cfg(test)]
 #[path = "dir_graph_tests.rs"]
 mod dir_graph_tests;
+
+#[cfg(test)]
+mod rollback_tests;

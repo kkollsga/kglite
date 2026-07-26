@@ -10,6 +10,7 @@ use crate::graph::schema::{
     RESERVED_PROVENANCE_KEYS,
 };
 use crate::graph::storage::lookups::{CombinedTypeLookup, TypeLookup};
+use crate::graph::storage::undo::BucketId;
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use std::collections::{HashMap, HashSet};
@@ -128,7 +129,6 @@ impl ConstraintColumns {
         Ok(())
     }
 }
-
 fn check_data_validity(df_data: &DataFrame, unique_id_field: &str) -> Result<(), String> {
     // Remove strict UniqueId type verification to allow nulls
     if !df_data.verify_column(unique_id_field) {
@@ -1053,7 +1053,38 @@ pub(crate) fn detach_delete_nodes(
 
     for &node_idx in nodes_to_delete {
         GraphWrite::remove_node(&mut graph.graph, node_idx);
-        graph.timeseries_store.remove(&node_idx.index());
+        if let Some(prior) = graph.timeseries_store.remove(&node_idx.index()) {
+            // Statement-rollback capture: `timeseries_store` is O(V) and so is
+            // deliberately not part of the checkpoint's schema clone; the
+            // journal carries the dropped value instead.
+            if let Some(journal) = graph.graph.undo_journal_mut() {
+                journal.note_timeseries_removed(node_idx.index(), prior);
+            }
+        }
+    }
+
+    // Statement-rollback capture: record every inverted-index eviction with
+    // its *position*, so a failed statement restores bucket order and not
+    // merely membership — bucket order is the scan order an un-`ORDER BY`'d
+    // `MATCH` returns. Read before the `retain` sweeps below, while the doomed
+    // indices are still present. One `Option` check when no checkpoint is open.
+    if graph.graph.undo_journal_mut().is_some() {
+        let mut evictions: Vec<(BucketId, Vec<NodeIndex>)> = Vec::new();
+        for node_type in &affected_types {
+            if let Some(members) = graph.type_indices.get(node_type) {
+                evictions.push((BucketId::NodeType(node_type.clone()), members.to_vec()));
+            }
+        }
+        if graph.has_secondary_labels {
+            for (label, members) in &graph.secondary_label_index {
+                evictions.push((BucketId::SecondaryLabel(*label), members.clone()));
+            }
+        }
+        if let Some(journal) = graph.graph.undo_journal_mut() {
+            for (bucket, members) in &evictions {
+                journal.note_bucket_retain(bucket, members.iter().copied(), nodes_to_delete);
+            }
+        }
     }
 
     // Index cleanup — StableDiGraph keeps surviving indices stable.

@@ -5,7 +5,7 @@
 //! Split out of `maintain.rs`, which had grown past the file-size ceiling. This
 //! is a self-contained unit: one public entry point (`add_properties`), the
 //! aggregate-mode branch it delegates to, and the expression/geometry helpers
-//! only those two use.
+//! only those two use. Nothing here writes topology.
 //!
 //! # Index maintenance is part of the contract here
 //!
@@ -223,7 +223,6 @@ where
     let mut nodes_updated = 0;
     let mut properties_set = 0;
     let mut touched_types: HashSet<String> = HashSet::new();
-
     for (node_idx, props) in updates {
         // Pre-intern keys before getting mutable node reference (split borrow)
         let interned_props: Vec<(InternedKey, Value)> = props

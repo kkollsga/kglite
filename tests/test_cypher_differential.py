@@ -2026,6 +2026,54 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
     ("create_constraint_not_null_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL"),
     ("create_constraint_node_key_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NODE KEY"),
     ("drop_constraint_ddl_missing_if_exists", "DROP CONSTRAINT person_name_u IF EXISTS"),
+    # ── Shapes whose rollback checkpoint is an undo journal ──────────────
+    #
+    # Statement atomicity is bought with an inverse-op journal rather than a
+    # whole-graph clone, and the journal captures at two seams: the storage
+    # backend, and the DirGraph-level choke points for secondary labels and
+    # node deletion. The shapes below are the ones that reach the second seam
+    # or that mix several seams in one statement, so a capture gap shows up
+    # here as a diverging result.
+    (
+        "create_with_secondary_labels",
+        "CREATE (p:Person:Employee:Remote {person_id: 400, name: 'L', age: 33}) RETURN labels(p) AS ls",
+    ),
+    (
+        "set_label",
+        "MATCH (p:Person {person_id: 1}) SET p:Employee RETURN labels(p) AS ls",
+    ),
+    (
+        "remove_label",
+        "MATCH (p:Person {person_id: 1}) SET p:Employee WITH p REMOVE p:Employee RETURN labels(p) AS ls",
+    ),
+    (
+        "delete_edge_only",
+        "MATCH (p:Person)-[r:KNOWS]->(q:Person) DELETE r "
+        "WITH 1 AS done MATCH (:Person)-[r2:KNOWS]->(:Person) RETURN count(r2) AS n",
+    ),
+    (
+        "foreach_create",
+        "FOREACH (i IN [500, 501, 502] | CREATE (:Person {person_id: i, age: 1})) "
+        "WITH 1 AS done MATCH (p:Person) RETURN count(p) AS n",
+    ),
+    (
+        # Three seams in one statement: a property write, a node create, and a
+        # detach-delete — the journal must interleave their inverses.
+        "multi_clause_set_create_delete",
+        "MATCH (p:Person {person_id: 1}) SET p.age = 77 "
+        "CREATE (n:Person {person_id: 600, name: 'N', age: 2}) "
+        "WITH n MATCH (d:Person {person_id: 2}) DETACH DELETE d "
+        "WITH 1 AS done MATCH (p:Person) RETURN count(p) AS n",
+    ),
+    (
+        # Delete then re-create the same identity in one statement: the
+        # journal's structural entries must replay in order for the freed slot
+        # to be handed back correctly.
+        "delete_then_recreate_same_id",
+        "MATCH (p:Person {person_id: 3}) DETACH DELETE p "
+        "CREATE (q:Person {person_id: 3, name: 'again', age: 44}) "
+        "RETURN q.name AS name",
+    ),
 ]
 
 

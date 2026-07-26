@@ -45,7 +45,7 @@ def test_create_multi_label_findable_by_secondary(g):
 def test_create_three_labels(g):
     g.cypher("CREATE (n:Animal:Pet:Dog {name: 'Rex'})")
     labels = g.cypher("MATCH (n:Animal) RETURN labels(n) AS labels").to_list()[0]["labels"]
-    assert set(labels) == {"Animal", "Pet", "Dog"}
+    assert labels == ["Animal", "Dog", "Pet"]
     # Findable by every label.
     for label in ("Animal", "Pet", "Dog"):
         rows = g.cypher(f"MATCH (n:{label}) RETURN n.name AS name").to_list()
@@ -65,9 +65,10 @@ def test_labels_multi_order_primary_first(g):
     g.cypher("CREATE (n:Person:Director:Producer {name: 'Carol'})")
     rows = g.cypher("MATCH (n:Person) RETURN labels(n) AS labels").to_list()
     labels = rows[0]["labels"]
-    # Primary first, insertion order for the rest.
-    assert labels[0] == "Person"
-    assert set(labels) == {"Person", "Director", "Producer"}
+    # Primary first, then secondaries sorted by name. The order is part of the
+    # contract: reading it out of the inverted index's HashMap made two graphs
+    # holding identical data disagree.
+    assert labels == ["Person", "Director", "Producer"]
 
 
 # ─── SET n:Label ───────────────────────────────────────────────────────────

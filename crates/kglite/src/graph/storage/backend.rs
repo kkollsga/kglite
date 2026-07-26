@@ -7,6 +7,7 @@
 
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use crate::graph::storage::recording::RecordingGraph;
+use crate::graph::storage::undo::UndoJournal;
 use crate::graph::storage::{GraphRead, GraphWrite, MappedGraph, MemoryGraph};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
@@ -18,16 +19,28 @@ use crate::graph::storage::disk::graph::{DiskGraph, DiskQueryGuard};
 #[cfg(test)]
 thread_local! {
     static BACKEND_CLONE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Nodes copied by backend clones, summed. Distinguishes a genuinely
+    /// expensive whole-graph clone from the O(1) clone of an intentionally
+    /// emptied backend (the statement checkpoint's schema shell), which the
+    /// bare count cannot tell apart.
+    static BACKEND_CLONE_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 pub(crate) fn reset_backend_clone_count() {
     BACKEND_CLONE_COUNT.set(0);
+    BACKEND_CLONE_NODES.set(0);
 }
 
 #[cfg(test)]
 pub(crate) fn backend_clone_count() -> usize {
     BACKEND_CLONE_COUNT.get()
+}
+
+/// Total nodes copied by backend clones since the last reset.
+#[cfg(test)]
+pub(crate) fn backend_clone_nodes() -> usize {
+    BACKEND_CLONE_NODES.get()
 }
 
 // ============================================================================
@@ -80,6 +93,81 @@ impl GraphBackend {
     #[inline]
     pub(crate) fn supports_checkpoint_free_mutation(&self) -> bool {
         matches!(self, GraphBackend::Memory(_))
+    }
+
+    /// Whether this backend can capture inverse operations for a
+    /// statement-scoped undo journal, i.e. whether rollback can avoid the
+    /// whole-graph clone.
+    ///
+    /// Only the heap backend can. `Mapped` maintains lazy mmap-columnar
+    /// indexes and `Disk` mutates through generation overlays whose inverse is
+    /// not expressible as a petgraph edit, so both keep the clone checkpoint
+    /// (see `dir_graph/rollback.rs`). `Recording` forwards: a durable graph is
+    /// `Recording(Memory)` and every write still lands on the heap backend
+    /// underneath, so it participates.
+    #[inline]
+    pub(crate) fn supports_undo_journal(&self) -> bool {
+        match self {
+            GraphBackend::Memory(_) => true,
+            GraphBackend::Recording(rg) => rg.inner().supports_undo_journal(),
+            GraphBackend::Mapped(_) | GraphBackend::Disk(_) => false,
+        }
+    }
+
+    /// Install a fresh undo journal on the heap backend. No-op on backends
+    /// that do not support one — callers gate on
+    /// [`Self::supports_undo_journal`] first.
+    #[inline]
+    pub(crate) fn begin_undo(&mut self) {
+        match self {
+            GraphBackend::Memory(g) => g.begin_undo(),
+            GraphBackend::Recording(rg) => rg.inner_mut().begin_undo(),
+            GraphBackend::Mapped(_) | GraphBackend::Disk(_) => {}
+        }
+    }
+
+    /// Uninstall and return the undo journal, ending capture.
+    #[inline]
+    pub(crate) fn take_undo(&mut self) -> Option<Box<UndoJournal>> {
+        match self {
+            GraphBackend::Memory(g) => g.take_undo(),
+            GraphBackend::Recording(rg) => rg.inner_mut().take_undo(),
+            GraphBackend::Mapped(_) | GraphBackend::Disk(_) => None,
+        }
+    }
+
+    /// Mutable access to the active undo journal, for the `DirGraph`-level
+    /// capture seam (inverted-index and timeseries edits, which live above
+    /// storage and so cannot be seen from a `GraphWrite` impl).
+    #[inline]
+    pub(crate) fn undo_journal_mut(&mut self) -> Option<&mut UndoJournal> {
+        match self {
+            GraphBackend::Memory(g) => g.undo_journal_mut(),
+            GraphBackend::Recording(rg) => rg.inner_mut().undo_journal_mut(),
+            GraphBackend::Mapped(_) | GraphBackend::Disk(_) => None,
+        }
+    }
+
+    /// Number of raw WAL-capture ops buffered by a `Recording` wrapper, or
+    /// `None` for a backend that captures nothing. Paired with
+    /// [`Self::truncate_recorded_ops`] so a rolled-back statement's writes
+    /// never reach the write-ahead log.
+    #[inline]
+    pub(crate) fn recorded_ops_len(&self) -> Option<usize> {
+        match self {
+            GraphBackend::Recording(rg) => Some(rg.ops_len()),
+            _ => None,
+        }
+    }
+
+    /// Drop buffered WAL-capture ops past `len`, discarding the ops a
+    /// rolled-back statement produced while keeping any earlier, still-unflushed
+    /// ones.
+    #[inline]
+    pub(crate) fn truncate_recorded_ops(&mut self, len: usize) {
+        if let GraphBackend::Recording(rg) = self {
+            rg.truncate_ops(len);
+        }
     }
 
     /// Transfer writer-lineage authority to an already-cloned child that keeps
@@ -322,7 +410,10 @@ impl std::ops::Index<EdgeIndex> for GraphBackend {
 impl Clone for GraphBackend {
     fn clone(&self) -> Self {
         #[cfg(test)]
-        BACKEND_CLONE_COUNT.set(BACKEND_CLONE_COUNT.get() + 1);
+        {
+            BACKEND_CLONE_COUNT.set(BACKEND_CLONE_COUNT.get() + 1);
+            BACKEND_CLONE_NODES.set(BACKEND_CLONE_NODES.get() + self.node_count());
+        }
         match self {
             GraphBackend::Memory(g) => GraphBackend::Memory(g.clone()),
             GraphBackend::Mapped(g) => GraphBackend::Mapped(g.clone()),

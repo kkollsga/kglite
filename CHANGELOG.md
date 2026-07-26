@@ -63,13 +63,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test fails if the two drift apart. Previously only the official Python driver
   was regression-tested; the other drivers "may connect", which nobody had
   checked.
-
 - The migration guide (`docs/python/migrations/neo4j-to-kglite.md`) now
   documents three data-transfer routes rather than one — driver+pandas,
   export-to-CSV plus `LOAD CSV` (the route for consumers with no pandas), and
   pandas-in-between — with the four `LOAD CSV` behaviour differences a ported
   import script will meet spelled out.
-
 - Cypher index DDL, in the Neo4j 5 grammar, so a schema-setup script ports
   unedited: `CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:Label) ON
   (n.prop, ...)`, `DROP INDEX <name> [IF EXISTS]`, and `SHOW [ALL] INDEX[ES]`.
@@ -98,7 +96,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LOOKUP`, relationship indexes and `OPTIONS { ... }` — now parses and fails
   with a specific unsupported-feature error naming the construct and the route
   that works today, instead of a syntax error or a silent no-op.
-
 - Cypher **constraint** DDL, in the Neo4j 5 grammar, routing to the per-write
   enforcement above: `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label)
   REQUIRE n.prop IS UNIQUE | IS NOT NULL | IS NODE KEY`, `DROP CONSTRAINT
@@ -147,7 +144,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `describe()` annotates a property with `constraint="unique" | "not_null" |
   "node_key"` when one is declared on it, so an agent can see a write will be
   rejected before attempting it.
-
 - Real integrity constraints, enforced on **every** write path — Cypher
   `CREATE` / `MERGE` / `SET` / `REMOVE` *and* the bulk loader (`add_nodes`, and
   therefore blueprints, `from_records`, OKF, WAL replay and `extend_graph`).
@@ -187,17 +183,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ConstraintViolation = 18` and `ConstraintCreationFailed = 19`, appended so
   existing discriminants stay stable.
 
-### Fixed
-
-- OCC commit conflicts over Bolt now report
-  `Neo.ClientError.Transaction.ConflictDetected`, the code the Bolt server's
-  README and the migration guide have always documented. They previously
-  reported `Neo.ClientError.Transaction.TransactionStartFailed` — wrong twice
-  over, since the transaction started fine — so a ported client branching on
-  the status code (the normal way to write a retry loop) was misled. Writing
-  the Java/JS driver suites is what surfaced it: the Python tests matched on
-  message text and could not see the code.
-
 ### Changed
 
 - `KnowledgeGraph.define_schema` can now fail: installing a schema installs the
@@ -223,9 +208,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `CREATE INDEX` that indexes no values on a populated node type is now
   rejected with the reason (persistent property indexes cover string columns)
   instead of reporting success for an empty index.
+- Mutating Cypher statements no longer deep-copy the graph to stay atomic. A
+  statement-scoped undo journal records the inverse of each write, so the cost
+  of a write now scales with the number of changes instead of with the size of
+  the graph — a single `SET` takes the same time on a thousand-node graph as on
+  a million-node one. Rollback fidelity is unchanged: a failed statement
+  restores node and relationship identity, properties, labels, index ordering,
+  schema metadata, and the version counter exactly.
+
+  Graphs in columnar mode, graphs with user-created property/range/composite
+  indexes, and the `mapped`/`disk` backends keep the previous whole-graph
+  checkpoint, so their write cost is unchanged.
 
 ### Fixed
 
+- OCC commit conflicts over Bolt now report
+  `Neo.ClientError.Transaction.ConflictDetected`, the code the Bolt server's
+  README and the migration guide have always documented. They previously
+  reported `Neo.ClientError.Transaction.TransactionStartFailed` — wrong twice
+  over, since the transaction started fine — so a ported client branching on
+  the status code (the normal way to write a retry loop) was misled. Writing
+  the Java/JS driver suites is what surfaced it: the Python tests matched on
+  message text and could not see the code.
 - Cypher `CREATE` no longer discards a node type's cached `id` index on every
   insert. Incremental id-index maintenance was gated on the type having a
   declared primary key, so an undeclared type invalidated the whole index per
@@ -273,6 +277,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The persisted constraint list is sorted at save time. It was snapshotted
   straight from `HashMap::keys()`, so any graph carrying a constraint saved in
   nondeterministic byte order.
+- `labels(n)` now returns a node's secondary labels in a stable order (sorted
+  by name, primary label first). They were previously returned in hash-map
+  iteration order, so two graphs holding identical data could report a node's
+  labels in different orders, and the order could change between processes.
+  Any caller that compared, displayed, or serialized `labels(n)` could see
+  irreproducible results.
 
 ## [0.14.5] - 2026-07-22
 

@@ -121,6 +121,25 @@ impl<G: GraphRead> RecordingGraph<G> {
     pub fn ops_len(&self) -> usize {
         self.ops.len()
     }
+
+    /// Drop buffered ops past `len`.
+    ///
+    /// Used by statement rollback: a failed mutation's writes are undone in
+    /// the graph, so the ops describing them must not survive into the next
+    /// WAL flush — [`resolve_ops`] reads *final* state, so a stale upsert op
+    /// would resolve against the restored node and persist a mutation that
+    /// never committed. Truncating to the pre-statement length is precise: it
+    /// discards this statement's ops and keeps any earlier unflushed ones.
+    ///
+    /// Crate-internal, unlike [`ops_len`](Self::ops_len): reading the capture
+    /// depth is safe for anyone, but truncating the buffer is only correct when
+    /// paired with the matching graph-state undo, which `GraphBackend`'s
+    /// rollback path is the sole site able to guarantee. Keeping it off the
+    /// public surface means no binding can drop committed ops on the floor.
+    #[inline]
+    pub(crate) fn truncate_ops(&mut self, len: usize) {
+        self.ops.truncate(len);
+    }
 }
 
 impl<G: GraphRead + Clone> Clone for RecordingGraph<G> {
