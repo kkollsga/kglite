@@ -226,7 +226,12 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install ruff
-        run: pip install ruff
+        # Pinned deliberately: `pip install ruff` floats to the newest release,
+        # and a newer ruff widens both its formatter's file discovery and its
+        # rule set, so an unrelated release turns every open branch red without
+        # a single source change. Keep this in step with the ruff the local
+        # `make lint` / `make fmt-py` targets run.
+        run: pip install ruff==0.15.16
 
       - name: Check formatting
         run: ruff format --check .
