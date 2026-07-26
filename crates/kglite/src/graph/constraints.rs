@@ -15,6 +15,8 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::datatypes::values::Value;
 
 /// Key for a unique constraint: `(node_type, property_names)` in declaration
@@ -34,7 +36,11 @@ pub fn normalize_properties(properties: &[String]) -> Vec<String> {
 }
 
 /// Which declared constraint a write ran into.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serialized as part of [`NamedConstraint`] in the `.kgl` JSON metadata, so the
+/// variant names are part of the persisted format — rename one and older files
+/// stop resolving their constraint names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConstraintKind {
     /// No two nodes of the type may share the property tuple.
     Unique,
@@ -72,6 +78,38 @@ pub enum ConstraintFailure {
         duplicate_tuples: usize,
         sample: Vec<Value>,
     },
+    /// Declaring a NOT NULL / NODE KEY constraint failed because existing nodes
+    /// of the type have no value for the property. The uniqueness counterpart of
+    /// this is [`ConstraintFailure::Preexisting`]; presence needs its own
+    /// variant because "N nodes lack the property" is a different fact from
+    /// "N tuples collide", and reporting one as the other sends the reader
+    /// looking for duplicates that do not exist.
+    PreexistingMissing { nodes: usize },
+}
+
+/// A constraint under the name its author gave it.
+///
+/// KGLite's enforcement structures are keyed by `(node_type, properties)` —
+/// see [`UniqueConstraintKey`] and `NodeSchemaDefinition::required_fields` —
+/// so a Neo4j-style `CREATE CONSTRAINT <name> …` has nowhere to put its name.
+/// This is that place: a persisted `name -> declaration` registry, so
+/// `DROP CONSTRAINT <name>` works on the very common ported-script shape
+///
+/// ```cypher
+/// CREATE CONSTRAINT person_email_unique FOR (p:Person) REQUIRE p.email IS UNIQUE;
+/// DROP CONSTRAINT person_email_unique;
+/// ```
+///
+/// The registry is a *lookup aid*, never the source of truth: the constraint
+/// itself lives in the enforcement structure, and `DirGraph::prune_constraint_names`
+/// discards any name whose declaration has gone away. So a stale or missing name
+/// can never make a constraint stop being enforced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NamedConstraint {
+    pub kind: ConstraintKind,
+    pub node_type: String,
+    /// The constrained property tuple, as declared.
+    pub properties: Vec<String>,
 }
 
 /// A declared constraint that a write (or a declaration) violated.
@@ -143,7 +181,25 @@ impl ConstraintViolation {
     /// Whether this reports a failed *declaration* rather than a failed write.
     /// The two carry different Neo4j status codes.
     pub fn is_declaration_failure(&self) -> bool {
-        matches!(self.failure, ConstraintFailure::Preexisting { .. })
+        matches!(
+            self.failure,
+            ConstraintFailure::Preexisting { .. } | ConstraintFailure::PreexistingMissing { .. }
+        )
+    }
+
+    /// Declaring a presence constraint failed against existing data.
+    pub fn preexisting_missing(
+        kind: ConstraintKind,
+        node_type: impl Into<String>,
+        property: impl Into<String>,
+        nodes: usize,
+    ) -> Self {
+        Self {
+            kind,
+            node_type: node_type.into(),
+            properties: vec![property.into()],
+            failure: ConstraintFailure::PreexistingMissing { nodes },
+        }
     }
 
     /// `Person.email` / `Person.(first, last)` — the canonical descriptor,
@@ -230,6 +286,16 @@ impl fmt::Display for ConstraintViolation {
                      (for example {}). Deduplicate the node type before declaring the \
                      constraint.",
                     render_pairs(&self.properties, sample),
+                )
+            }
+            ConstraintFailure::PreexistingMissing { nodes } => {
+                let plural = if *nodes == 1 { "node" } else { "nodes" };
+                write!(
+                    f,
+                    "cannot declare a {kind} constraint on {descriptor}: {nodes} existing \
+                     {plural} of type '{}' have no value for it. Populate or delete those \
+                     nodes before declaring the constraint.",
+                    self.node_type,
                 )
             }
         }
