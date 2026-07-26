@@ -69,6 +69,13 @@ enum KgliteStatusCode
    */
   KGLITE_STATUS_CODE_CONSTRAINT_CREATION_FAILED = 19,
   /**
+   * An optimistic-concurrency commit lost its race: the graph advanced
+   * between `begin()` and `commit()`, so nothing was applied. Retry the
+   * whole transaction. Appended to keep the existing discriminants
+   * stable across this ABI major version.
+   */
+  KGLITE_STATUS_CODE_TRANSACTION_CONFLICT = 20,
+  /**
    * A string argument failed UTF-8 validation. The C-side
    * caller passed a `*const c_char` whose bytes didn't decode
    * as UTF-8 — typically a corrupted buffer or a non-UTF-8

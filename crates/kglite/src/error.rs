@@ -85,6 +85,12 @@ pub enum KgErrorCode {
     ConstraintViolation,
     ConstraintCreationFailed,
 
+    // Optimistic concurrency control. Split from `InvalidArgument` because a
+    // conflict is the one error in the taxonomy whose correct handling is
+    // "retry the whole transaction" rather than "fix the call" — bindings and
+    // drivers route on that difference.
+    TransactionConflict,
+
     // Resource / access
     NodeNotFound,
     ConnectionNotFound,
@@ -118,6 +124,7 @@ impl KgErrorCode {
             KgErrorCode::Expr => "Expr",
             KgErrorCode::ConstraintViolation => "ConstraintViolation",
             KgErrorCode::ConstraintCreationFailed => "ConstraintCreationFailed",
+            KgErrorCode::TransactionConflict => "TransactionConflict",
             KgErrorCode::NodeNotFound => "NodeNotFound",
             KgErrorCode::ConnectionNotFound => "ConnectionNotFound",
             KgErrorCode::PropertyNotFound => "PropertyNotFound",
@@ -140,6 +147,7 @@ impl KgErrorCode {
     /// - `NodeNotFound`, `ConnectionNotFound`, `PropertyNotFound`,
     ///   `FileNotFound` → 404 Not Found
     /// - `CypherTimeout` → 408 Request Timeout
+    /// - `TransactionConflict` → 409 Conflict
     /// - `Schema`, `Validation`, `Expr` → 422 Unprocessable Entity
     /// - `CypherExecution`, `FileFormat`, `FileIo`, `Internal` →
     ///   500 Internal Server Error
@@ -163,6 +171,11 @@ impl KgErrorCode {
             | KgErrorCode::FileNotFound => 404,
 
             KgErrorCode::CypherTimeout => 408,
+
+            // 409 Conflict — the request was well-formed but lost an
+            // optimistic-concurrency race. Retriable as-is, unlike every
+            // other 4xx here.
+            KgErrorCode::TransactionConflict => 409,
 
             // 499 Client Closed Request (nginx convention) — the caller
             // interrupted the query before it finished.
@@ -205,6 +218,10 @@ impl KgErrorCode {
             KgErrorCode::ConstraintCreationFailed => {
                 "Neo.ClientError.Schema.ConstraintCreationFailed"
             }
+            // Matches the string `kglite-bolt-server` has published for OCC
+            // conflicts since the transaction work landed; the driver
+            // conformance suite pins it (tests/test_bolt_server_transactions.py).
+            KgErrorCode::TransactionConflict => "Neo.ClientError.Transaction.ConflictDetected",
             KgErrorCode::Validation | KgErrorCode::Expr => {
                 "Neo.ClientError.Statement.ArgumentError"
             }
@@ -320,6 +337,26 @@ pub enum KgError {
         message: String,
     },
 
+    // ── Concurrency ──────────────────────────────────────────────────
+    /// An optimistic-concurrency commit lost its race: the graph advanced
+    /// between `begin()` and `commit()`, so the transaction's working copy is
+    /// stale and applying it would silently discard the newer commit.
+    ///
+    /// The transaction is spent — the caller re-runs its work against a fresh
+    /// `begin()`. Both versions are carried so a binding can report the gap
+    /// (and a retry loop can log how far behind it was) without parsing
+    /// `message`.
+    ///
+    /// Note this is a *whole-graph* version check, not a read/write-set
+    /// intersection: commit publishes the transaction's working copy by
+    /// pointer swap, so any concurrent commit — even one touching entirely
+    /// different nodes — makes this transaction's copy stale. See
+    /// `docs/concepts/concurrency.md`.
+    TransactionConflict {
+        base_version: u64,
+        current_version: u64,
+    },
+
     /// Blueprint expression evaluation failure. Wraps the existing
     /// 7-variant [`ExprError`] enum verbatim.
     Expr(ExprError),
@@ -430,6 +467,7 @@ impl KgError {
             KgError::Validation(_) => KgErrorCode::Validation,
             KgError::ConstraintViolation { .. } => KgErrorCode::ConstraintViolation,
             KgError::ConstraintCreationFailed { .. } => KgErrorCode::ConstraintCreationFailed,
+            KgError::TransactionConflict { .. } => KgErrorCode::TransactionConflict,
             KgError::Expr(_) => KgErrorCode::Expr,
             KgError::NodeNotFound { .. } => KgErrorCode::NodeNotFound,
             KgError::ConnectionNotFound { .. } => KgErrorCode::ConnectionNotFound,
@@ -509,6 +547,18 @@ impl fmt::Display for KgError {
             // in a prefix that would bury the actionable part.
             KgError::ConstraintViolation { message, .. }
             | KgError::ConstraintCreationFailed { message, .. } => f.write_str(message),
+            KgError::TransactionConflict {
+                base_version,
+                current_version,
+            } => write!(
+                f,
+                "Transaction conflict: the graph was modified since begin() \
+                 (began at version {}, now at version {}), so this \
+                 transaction's changes are based on a stale snapshot and were \
+                 not applied. Retry the transaction — re-run the work against \
+                 a fresh begin().",
+                base_version, current_version
+            ),
             KgError::Expr(e) => write!(f, "Expression error: {}", e),
             KgError::NodeNotFound { node_type, id } => {
                 write!(f, "Node not found: {} with id {:?}", node_type, id)

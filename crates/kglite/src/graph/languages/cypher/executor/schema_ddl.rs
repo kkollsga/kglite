@@ -722,10 +722,11 @@ fn install_constraint(
 
 fn declare_unique(graph: &mut DirGraph, label: &str, properties: &[String]) -> Result<(), String> {
     let refs: Vec<&str> = properties.iter().map(String::as_str).collect();
-    graph
-        .create_unique_constraint(label, &refs)
-        .map(|_| ())
-        .map_err(|violation| violation.to_string())
+    let declared = graph.create_unique_constraint(label, &refs);
+    match declared {
+        Ok(_) => Ok(()),
+        Err(violation) => Err(graph.record_constraint_violation(violation)),
+    }
 }
 
 /// Declare every property NOT NULL, recording which ones landed so a failed
@@ -741,9 +742,10 @@ fn declare_not_null<'p>(
     installed: &mut Vec<&'p String>,
 ) -> Result<(), String> {
     for property in properties {
-        graph
-            .create_not_null_constraint(label, property)
-            .map_err(|violation| violation.to_string())?;
+        let declared = graph.create_not_null_constraint(label, property);
+        if let Err(violation) = declared {
+            return Err(graph.record_constraint_violation(violation));
+        }
         installed.push(property);
     }
     Ok(())

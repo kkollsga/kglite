@@ -281,11 +281,10 @@ impl Transaction {
         let current_version = Python::attach(|py| self.owner.borrow(py).inner.version);
         if current_version != base_version {
             return Err(crate::error_py::kg_to_pyerr(
-                crate::error::KgError::Argument(
-                    "Transaction conflict: graph was modified since begin(). \
-                     Retry the transaction."
-                        .to_string(),
-                ),
+                crate::error::KgError::TransactionConflict {
+                    base_version,
+                    current_version,
+                },
             ));
         }
 

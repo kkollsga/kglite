@@ -177,11 +177,14 @@ impl<'a> ExecuteOptions<'a> {
 /// execution error. `cancel == None` (every server binding) always
 /// takes the `CypherExecution` branch, so behaviour is unchanged there.
 #[inline]
-fn exec_err(opts: &ExecuteOptions<'_>, message: String) -> KgError {
-    if opts
-        .cancel
+fn is_cancelled(opts: &ExecuteOptions<'_>) -> bool {
+    opts.cancel
         .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
-    {
+}
+
+#[inline]
+fn exec_err(opts: &ExecuteOptions<'_>, message: String) -> KgError {
+    if is_cancelled(opts) {
         KgError::Cancelled
     } else {
         KgError::CypherExecution {
@@ -189,6 +192,26 @@ fn exec_err(opts: &ExecuteOptions<'_>, message: String) -> KgError {
             position: None,
         }
     }
+}
+
+/// [`exec_err`] for the mutation path, which can additionally recover the
+/// structured constraint violation parked by
+/// [`DirGraph::record_constraint_violation`].
+///
+/// Cancellation keeps precedence: an interrupt is a user action and stays
+/// `KgError::Cancelled` regardless of what the aborted statement had parked.
+/// The park is drained on every path so nothing survives into a later run.
+fn mutation_err(graph: &mut DirGraph, opts: &ExecuteOptions<'_>, message: String) -> KgError {
+    if is_cancelled(opts) {
+        graph.clear_pending_constraint_violation();
+        return KgError::Cancelled;
+    }
+    graph
+        .take_constraint_error(&message)
+        .unwrap_or(KgError::CypherExecution {
+            message,
+            position: None,
+        })
 }
 
 /// Result of a successful execute. Wraps `CypherResult` with the
@@ -386,6 +409,9 @@ pub fn execute_mut(
         // mutation, then clear it unconditionally (even on error) so it never
         // leaks into a later execution on the same working copy.
         graph.active_write_scope = opts.write_scope.cloned();
+        // Same lifecycle as the write scope: no violation parked by an earlier
+        // execution on this working copy may be read by this one.
+        graph.clear_pending_constraint_violation();
         let r = graph.with_write_provenance(opts.git_sha, opts.modified_by, |graph| {
             cypher::executor::write::execute_mutable_with_csv(
                 graph,
@@ -400,8 +426,12 @@ pub fn execute_mut(
         let r = match r {
             Ok(result) => result,
             Err(message) => {
+                // Recover the structured violation *before* rolling back, so
+                // the typed error never depends on what a checkpoint restore
+                // does to the graph's transient fields.
+                let error = mutation_err(graph, opts, message);
                 checkpoint.rollback(graph);
-                return Err(exec_err(opts, message));
+                return Err(error);
             }
         };
         checkpoint.commit(graph);

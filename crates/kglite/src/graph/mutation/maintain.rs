@@ -1,6 +1,6 @@
 // src/graph/maintain.rs
 use crate::datatypes::{DataFrame, Value};
-use crate::graph::constraints::UniqueConstraintKey;
+use crate::graph::constraints::{ConstraintViolation, UniqueConstraintKey};
 use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOperationReport};
 use crate::graph::mutation::batch::{
     BatchProcessor, ConflictHandling, ConnectionBatchProcessor, NodeAction,
@@ -63,9 +63,32 @@ impl ConstraintColumns {
     /// reach storage. Returning `None` for an unconstrained type is what keeps
     /// the common path free — one `is_empty` and one `Option` check per call
     /// rather than per row.
-    fn for_batch(graph: &DirGraph, node_type: &str, df_data: &DataFrame) -> Option<Self> {
+    fn for_batch(graph: &mut DirGraph, node_type: &str, df_data: &DataFrame) -> Option<Self> {
+        // Batch entry point: no violation parked by an earlier load may be
+        // attributed to this one.
+        graph.clear_pending_constraint_violation();
         (graph.has_unique_constraints() || graph.has_required_fields(node_type))
             .then(|| Self::new(df_data))
+    }
+
+    /// [`Self::gate_row`] for callers on the `Result<_, String>` channel: parks
+    /// the structured violation so the binding raises
+    /// `ConstraintViolationError` instead of a generic argument error, and
+    /// returns the prose the caller would have produced itself.
+    fn gate_row_parked(
+        &self,
+        graph: &mut DirGraph,
+        node_type: &str,
+        row: GateRow<'_>,
+        existing_idx: Option<NodeIndex>,
+        batch_claims: &mut HashSet<(UniqueConstraintKey, CompositeValue)>,
+    ) -> Result<(), String> {
+        // Bound before reporting: recording needs a second mutable borrow.
+        let gated = self.gate_row(graph, node_type, row, existing_idx, batch_claims);
+        match gated {
+            Ok(()) => Ok(()),
+            Err(violation) => Err(graph.record_constraint_violation(violation)),
+        }
     }
 
     fn new(df_data: &DataFrame) -> Self {
@@ -101,7 +124,7 @@ impl ConstraintColumns {
         row: GateRow<'_>,
         existing_idx: Option<NodeIndex>,
         batch_claims: &mut HashSet<(UniqueConstraintKey, CompositeValue)>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ConstraintViolation> {
         // Both identity spellings are accepted, and identity wins over a
         // same-named ordinary column — matching `DirGraph::resolve_alias` on the
         // read side.
@@ -114,16 +137,15 @@ impl ConstraintColumns {
             }
             self.read(row.df_data, row.row_idx, property)
         };
-        graph
-            .check_required_fields(node_type, read)
-            .map_err(|violation| violation.to_string())?;
+        // Every failure this gate can report is a declared-constraint
+        // violation, so it returns the structured value and lets `add_nodes`
+        // decide how to render it.
+        graph.check_required_fields(node_type, read)?;
         let claims = graph.unique_claims(node_type, read);
-        graph
-            .check_unique_claims(&claims, existing_idx)
-            .map_err(|violation| violation.to_string())?;
+        graph.check_unique_claims(&claims, existing_idx)?;
         for claim in &claims {
             if !batch_claims.insert((claim.key.clone(), claim.value.clone())) {
-                return Err(graph.unique_batch_conflict(claim).to_string());
+                return Err(graph.unique_batch_conflict(claim));
             }
         }
         Ok(())
@@ -464,7 +486,7 @@ pub fn add_nodes(
         // rollback needed and no half-applied load.
         let existing_idx = type_lookup.check_uid(&id);
         if let Some(columns) = &constraint_columns {
-            columns.gate_row(
+            columns.gate_row_parked(
                 graph,
                 &node_type,
                 GateRow {

@@ -51,6 +51,11 @@ pub enum KgliteStatusCode {
     /// Declaring a constraint failed because the stored data already
     /// violates it. Deduplicate the node type, then re-declare.
     ConstraintCreationFailed = 19,
+    /// An optimistic-concurrency commit lost its race: the graph advanced
+    /// between `begin()` and `commit()`, so nothing was applied. Retry the
+    /// whole transaction. Appended to keep the existing discriminants
+    /// stable across this ABI major version.
+    TransactionConflict = 20,
 
     // 100+: C-ABI-only errors.
     /// A string argument failed UTF-8 validation. The C-side
@@ -88,6 +93,7 @@ impl KgliteStatusCode {
             KgErrorCode::Cancelled => Self::Cancelled,
             KgErrorCode::ConstraintViolation => Self::ConstraintViolation,
             KgErrorCode::ConstraintCreationFailed => Self::ConstraintCreationFailed,
+            KgErrorCode::TransactionConflict => Self::TransactionConflict,
         }
     }
 
@@ -105,6 +111,7 @@ impl KgliteStatusCode {
             Self::Schema => KgErrorCode::Schema,
             Self::ConstraintViolation => KgErrorCode::ConstraintViolation,
             Self::ConstraintCreationFailed => KgErrorCode::ConstraintCreationFailed,
+            Self::TransactionConflict => KgErrorCode::TransactionConflict,
             Self::Validation => KgErrorCode::Validation,
             Self::Expr => KgErrorCode::Expr,
             Self::NodeNotFound => KgErrorCode::NodeNotFound,

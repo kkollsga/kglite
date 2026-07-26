@@ -89,6 +89,12 @@ mod tests {
             KgErrorCode::InvalidArgument,
             KgErrorCode::MissingArgument,
             KgErrorCode::Internal,
+            // Appended after the original list was written; without these the
+            // check silently stopped covering newly-added codes.
+            KgErrorCode::Cancelled,
+            KgErrorCode::ConstraintViolation,
+            KgErrorCode::ConstraintCreationFailed,
+            KgErrorCode::TransactionConflict,
         ] {
             let s = code.neo4j_status_code();
             assert!(

@@ -18,6 +18,10 @@ Exception
     ├── kglite.SchemaError
     ├── kglite.ValidationError
     ├── kglite.ExprError
+    ├── kglite.ConstraintError
+    │   ├── kglite.ConstraintViolationError
+    │   └── kglite.ConstraintCreationError
+    ├── kglite.TransactionConflictError
     ├── kglite.NodeNotFoundError
     ├── kglite.ConnectionNotFoundError
     ├── kglite.PropertyNotFoundError
@@ -33,6 +37,57 @@ Exception
 `CypherSyntaxError` always has `.line` and `.col` attributes (either may be
 `None`). `CypherExecutionError` has them when the executor can identify the
 source position. Timeout messages report the elapsed and configured limit.
+
+## Stable codes
+
+Every instance carries `.code`, a stable classifier string — branch on that
+rather than on message prose, which is free to improve between releases:
+
+```python
+try:
+    graph.cypher(query)
+except kglite.KgError as exc:
+    log.warning("kglite failed", extra={"kglite_code": exc.code})
+```
+
+`.code` is also readable on the concrete classes themselves
+(`kglite.ConstraintViolationError.code == "ConstraintViolation"`), so a
+dispatch table can be built up front. It is `None` on the three abstract bases
+— `KgError`, `CypherError`, `ConstraintError` — which each span several codes.
+The same strings appear as `KGLITE_STATUS_*` in the C ABI and drive the Bolt
+`Neo.*` status mapping, so one code means the same thing in every binding.
+
+## Constraint violations
+
+A write that breaks a declared UNIQUE / NOT NULL / NODE KEY constraint raises
+`ConstraintViolationError` — from **every** write path, `cypher()` and the bulk
+loaders alike. Declaring a constraint the stored data already violates is a
+different problem with a different fix, so it raises the sibling
+`ConstraintCreationError`; both subclass `ConstraintError`.
+
+```python
+try:
+    graph.cypher("CREATE (u:User {email: $email})", params={"email": email})
+except kglite.ConstraintViolationError:
+    raise Conflict("that email is already registered")
+```
+
+The message names the constraint, the property, and the offending value, so it
+is worth logging — but the type and `.code` are the contract.
+
+## Transaction conflicts
+
+`Transaction.commit()` raises `TransactionConflictError` when the graph moved
+since `begin()`. Nothing was applied, so the fix is to re-run the work against
+a fresh `begin()` — see {doc}`transactions` for `retry_on_conflict`, which is
+that loop.
+
+```python
+try:
+    tx.commit()
+except kglite.TransactionConflictError:
+    ...  # rebuild the transaction and try again
+```
 
 ## Catching errors
 

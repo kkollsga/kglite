@@ -607,7 +607,7 @@ fn apply_node_batch(
     provenance: (Option<String>, Option<String>),
 ) -> PyResult<NodeOperationReport> {
     let (git_sha, modified_by) = provenance;
-    detach_mutation(py, || {
+    let outcome = py.detach(|| {
         graph.with_write_provenance(git_sha.as_deref(), modified_by.as_deref(), |graph| {
             kglite_core::api::mutation::add_nodes(
                 graph,
@@ -618,6 +618,16 @@ fn apply_node_batch(
                 input.conflict_handling,
             )
         })
+    });
+    // The mutable borrow ends with the detach closure, so the structured
+    // violation `add_nodes` parked is recoverable here: a constraint failure
+    // raises `kglite.ConstraintViolationError`, anything else keeps the
+    // existing `ArgumentError`.
+    outcome.map_err(|message| {
+        let error = graph
+            .take_constraint_error(&message)
+            .unwrap_or(crate::error::KgError::Argument(message));
+        crate::error_py::kg_to_pyerr(error)
     })
 }
 

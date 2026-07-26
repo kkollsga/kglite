@@ -22,6 +22,20 @@ class KgError(Exception):
     Query, schema, graph-engine, transaction, and storage failures use this
     hierarchy. Python lookup, argument-shape, filesystem, and object-lifecycle
     protocols may instead raise their conventional built-in exceptions.
+
+    Every instance carries :attr:`code`, a stable classifier string, so an
+    application can branch on the failure kind without matching message prose.
+    """
+
+    code: str | None
+    """Stable error classifier — e.g. ``"ConstraintViolation"``,
+    ``"TransactionConflict"``, ``"CypherSyntax"``.
+
+    Set on every raised instance, and also readable on the concrete classes
+    themselves (``kglite.ConstraintViolationError.code``). It is ``None`` only
+    on the three abstract bases — ``KgError``, ``CypherError``,
+    ``ConstraintError`` — which span several codes. The same strings appear as
+    ``KGLITE_STATUS_*`` in the C ABI and drive the Bolt ``Neo.*`` mapping.
     """
 
 class CypherError(KgError):
@@ -115,6 +129,65 @@ class ConstraintCreationError(ConstraintError):
     ``unique`` tuple or ``primary_key`` that existing nodes already duplicate.
     Nothing is changed, so deduplicate the node type and call it again.
     """
+
+class TransactionConflictError(KgError):
+    """A transaction's commit lost an optimistic-concurrency race.
+
+    The graph advanced between :meth:`KnowledgeGraph.begin` and
+    :meth:`Transaction.commit`, so the transaction's working copy is stale and
+    **nothing was applied**. Re-run the work against a fresh ``begin()``;
+    :func:`retry_on_conflict` is that loop.
+
+    Note this is a whole-graph version check, not a read/write-set
+    intersection: a commit publishes the transaction's working copy by pointer
+    swap, so *any* concurrent commit conflicts — including one that touched
+    entirely different nodes. See :doc:`/concepts/concurrency`.
+    """
+
+def retry_on_conflict(
+    graph: KnowledgeGraph,
+    work: Callable[[Transaction], Any],
+    *,
+    attempts: int = 5,
+    base_delay: float = 0.005,
+    max_delay: float = 0.5,
+    jitter: bool = True,
+) -> Any:
+    """Run ``work`` in a transaction, retrying the whole unit on conflict.
+
+    ``work`` is called as ``work(tx)`` with a fresh :class:`Transaction` and is
+    re-invoked from the start on each attempt, so it must be safe to run more
+    than once — read what you need *inside* it rather than closing over values
+    read beforehand. The transaction commits when ``work`` returns and rolls
+    back if it raises.
+
+    Args:
+        graph: The graph to transact against.
+        work: Callable taking the transaction and returning the result.
+        attempts: Maximum tries, including the first.
+        base_delay: Seconds before the second attempt; doubles each further
+            attempt (exponential backoff).
+        max_delay: Upper bound on any single wait.
+        jitter: Spread each wait randomly over ``[0, delay]`` so competing
+            writers don't retry in lockstep. Disable only for deterministic
+            tests.
+
+    Returns:
+        Whatever ``work`` returned on the successful attempt.
+
+    Raises:
+        TransactionConflictError: Every attempt conflicted; the final error is
+            re-raised unchanged.
+        ValueError: ``attempts`` is less than 1.
+
+    Example:
+        >>> def signup(tx):
+        ...     tx.cypher("CREATE (u:User {email: $e})", params={"e": email})
+        ...     return "created"
+        >>> kglite.retry_on_conflict(graph, signup)
+        'created'
+    """
+    ...
 
 @runtime_checkable
 class EmbeddingModel(Protocol):

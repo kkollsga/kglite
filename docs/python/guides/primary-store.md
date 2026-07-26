@@ -92,10 +92,33 @@ rather than silently truncated.
 snapshot; a `session()` serializes writers, begins each from the last committed
 state, and publishes with a pointer swap only on success — though note the
 durable-graph restriction on `Session` writes below. Explicit transactions
-are optimistically concurrent: independent work proceeds, and a commit against a
-state that moved underneath returns a conflict rather than winning silently.
-{doc}`/concepts/concurrency` is the full model, and worth reading before you rely
-on any of it.
+are optimistically concurrent: a commit against a state that moved underneath
+raises `TransactionConflictError` rather than winning silently.
+
+Be precise about how coarse that check is, because it is coarser than most
+databases you have used. It compares a **whole-graph version counter**, not the
+read/write sets of the two transactions — a commit publishes the transaction's
+working copy by pointer swap, so a transaction that began before *any* other
+commit is working from a stale snapshot regardless of which nodes it touched.
+Two transactions editing entirely unrelated nodes therefore conflict, and the
+second one loses. That is not over-caution: its working copy genuinely does not
+contain the first one's write, so applying it would silently revert that write.
+
+The practical consequence is that conflicts are ordinary rather than rare, and
+every concurrent writer needs a retry loop. Use `kglite.retry_on_conflict`
+rather than writing one:
+
+```python
+def signup(tx):
+    tx.cypher("CREATE (u:User {email: $email})", params={"email": email})
+
+kglite.retry_on_conflict(graph, signup)
+```
+
+If your workload has many short concurrent writers, prefer `session()` — it
+serializes writers and begins each from the last committed state, so they queue
+instead of colliding. {doc}`/concepts/concurrency` is the full model, and worth
+reading before you rely on any of it.
 
 **Failures are typed.** Errors arrive as a `KgError` hierarchy with stable
 codes, not as strings to match on — see {doc}`/python/error-handling`.
@@ -138,18 +161,26 @@ embedding-carry path. A graph filled through those can hold data that violates a
 declared constraint; `verify_unique_constraints()` exists to audit exactly that
 case.
 
-Two things about the error surface are worth knowing before you write `except`
-clauses. A declaration that cannot be installed raises `ConstraintCreationError`,
-and a violation from the bulk writers raises `ConstraintViolationError`; both
-subclass `ConstraintError`, so `except ConstraintError` catches either. Note that
-`define_schema` *can* now fail this way, because installing a schema installs the
+One thing about the error surface is worth knowing before you write `except`
+clauses. A violation raises `ConstraintViolationError` and a declaration that
+cannot be installed raises `ConstraintCreationError`; both subclass
+`ConstraintError`, so `except ConstraintError` catches either. This holds on
+every write path — `cypher()` and the bulk writers alike — so the duplicate-signup
+handler is a type check, not a substring match:
+
+```python
+try:
+    graph.cypher("CREATE (u:User {email: $email})", params={"email": email})
+except kglite.ConstraintViolationError:
+    raise Conflict("that email is already registered")
+```
+
+Each carries a stable `.code` (`"ConstraintViolation"` /
+`"ConstraintCreationFailed"`) for logging and cross-binding dispatch. Note that
+`define_schema` *can* fail this way, because installing a schema installs the
 constraints it declares — nothing is changed when it does, so you can fix the data
-and retry. A violation raised through **Cypher**, however, arrives as
-`CypherExecutionError` rather than the typed exception: the executor's internal
-error channel is a string, so the structured violation is rendered to text before
-any binding sees it. The message is stable and names the constraint, the property,
-and the offending value — match on that. Enforcement is identical either way; only
-the exception type differs.
+and retry. The message still names the constraint, the property, and the
+offending value, and is worth logging; the type and code are the contract.
 
 ## Defaults, and how to change them
 
