@@ -615,6 +615,41 @@ fn a_second_statement_after_a_rollback_still_commits() {
     );
 }
 
+/// One statement of each mutating shape, run in an order where each leaves the
+/// graph as the next expects it.
+const ZERO_COPY_QUERIES: &[&str] = &[
+    "CREATE (:Item {id: 2000, name: 'x'})",
+    "MATCH (n:Item {id: 1}) SET n.qty = 11, n.name = 'renamed'",
+    "MATCH (n:Item {id: 2000}) SET n:Featured",
+    "MATCH (a:Item {id: 1}), (b:Item {id: 3}) CREATE (a)-[:LINKS {weight: 2}]->(b)",
+    "MATCH (n:Item {id: 2000}) DETACH DELETE n",
+    "MERGE (n:Item {id: 2001}) ON CREATE SET n.name = 'merged'",
+];
+
+/// Assert no statement copies a node, i.e. every one of them took the journal
+/// path rather than the clone checkpoint.
+///
+/// The counter is `BACKEND_CLONE_NODES`, bumped by `impl Clone for
+/// GraphBackend` by the number of nodes copied. That is what makes it a real
+/// oracle for *which path ran*: the clone checkpoint forks the whole graph and
+/// registers the fixture's node count, while the journal checkpoint clones a
+/// `DirGraph` whose backend was deliberately emptied first and registers zero.
+/// It counts nodes only — a `HashMap` clone bumps nothing — so it says nothing
+/// about how much *else* a statement copied.
+fn assert_statements_copy_zero_nodes(graph: &mut DirGraph, fixture: &str) {
+    use crate::graph::storage::backend::{backend_clone_nodes, reset_backend_clone_count};
+
+    for &query in ZERO_COPY_QUERIES {
+        reset_backend_clone_count();
+        run(graph, query);
+        assert_eq!(
+            backend_clone_nodes(),
+            0,
+            "statement must not copy any node on the {fixture} fixture: {query}"
+        );
+    }
+}
+
 /// The point of the whole exercise: a mutating statement on the journal path
 /// must not copy a single node. This is the regression guard for the
 /// O(V+E)-per-write cost the sprint removed — a benchmark would only notice
@@ -625,41 +660,91 @@ fn a_second_statement_after_a_rollback_still_commits() {
 /// that O(1) clone is the design, not a regression.
 #[test]
 fn journalled_statements_copy_zero_nodes() {
-    use crate::graph::storage::backend::{backend_clone_nodes, reset_backend_clone_count};
+    assert_statements_copy_zero_nodes(&mut seeded(), "plain");
+}
 
-    let mut graph = seeded();
-    for query in [
-        "CREATE (:Item {id: 2000, name: 'x'})",
-        "MATCH (n:Item {id: 1}) SET n.qty = 11, n.name = 'renamed'",
-        "MATCH (n:Item {id: 2000}) SET n:Featured",
-        "MATCH (a:Item {id: 1}), (b:Item {id: 3}) CREATE (a)-[:LINKS {weight: 2}]->(b)",
-        "MATCH (n:Item {id: 2000}) DETACH DELETE n",
-        "MERGE (n:Item {id: 2001}) ON CREATE SET n.name = 'merged'",
-    ] {
-        reset_backend_clone_count();
-        run(&mut graph, query);
-        assert_eq!(
-            backend_clone_nodes(),
-            0,
-            "statement must not copy any node: {query}"
-        );
-    }
+/// The same guard on a graph that has been saved.
+///
+/// This arm is the one that would have caught the columnar veto. A fresh
+/// `seeded()` graph has no column stores and no user indexes, so it cannot
+/// take the clone path no matter what the gate says — which made the guard
+/// above structurally blind to a gate that sends every *real* application
+/// graph down the expensive path.
+#[test]
+fn journalled_statements_copy_zero_nodes_on_a_saved_graph() {
+    assert_statements_copy_zero_nodes(&mut seeded_columnar(), "columnar");
+}
+
+/// The same guard on a graph with user-created indexes — the other half of
+/// the blind spot.
+#[test]
+fn journalled_statements_copy_zero_nodes_on_an_indexed_graph() {
+    assert_statements_copy_zero_nodes(&mut seeded_indexed(), "indexed");
 }
 
 /// Rollback is allowed to be the expensive direction, but it must still not
 /// reach for a whole-graph copy on the journal path.
-#[test]
-fn journalled_rollback_copies_zero_nodes() {
+fn assert_rollback_copies_zero_nodes(graph: &mut DirGraph, fixture: &str) {
     use crate::graph::storage::backend::{backend_clone_nodes, reset_backend_clone_count};
 
-    let mut graph = seeded();
     reset_backend_clone_count();
     expect_failure(
-        &mut graph,
+        graph,
         "MATCH (n:Item) DETACH DELETE n CREATE (:Blocked {id: 1})",
         Some(&["Item"]),
     );
-    assert_eq!(backend_clone_nodes(), 0);
+    assert_eq!(
+        backend_clone_nodes(),
+        0,
+        "rollback must not copy any node on the {fixture} fixture"
+    );
+}
+
+#[test]
+fn journalled_rollback_copies_zero_nodes() {
+    assert_rollback_copies_zero_nodes(&mut seeded(), "plain");
+}
+
+#[test]
+fn journalled_rollback_copies_zero_nodes_on_a_saved_graph() {
+    assert_rollback_copies_zero_nodes(&mut seeded_columnar(), "columnar");
+}
+
+#[test]
+fn journalled_rollback_copies_zero_nodes_on_an_indexed_graph() {
+    assert_rollback_copies_zero_nodes(&mut seeded_indexed(), "indexed");
+}
+
+/// Pins that the `columnar` arms exercise the master side channel rather than
+/// quietly falling through to the per-node setter.
+///
+/// `execute_set`'s columnar fast path only fires for an in-memory `Columnar`
+/// node writing a property that is neither `title` nor `name`. If that stopped
+/// holding for this fixture — a storage-mode change, a different fallthrough
+/// condition — every columnar rollback arm above would still pass, while
+/// testing the write path that was never at risk. The veto this file's change
+/// removed was aimed squarely at the master write, so "the master write
+/// happens here" is a precondition of the whole exercise, not a detail.
+#[test]
+fn the_columnar_fixture_writes_through_the_master_store() {
+    let mut graph = seeded_columnar();
+    let before = fingerprint(&mut graph);
+    run(&mut graph, "MATCH (n:Item {id: 1}) SET n.qty = 12345");
+    let after = fingerprint(&mut graph);
+
+    assert_ne!(
+        before.column_masters, after.column_masters,
+        "a successful columnar SET must land in the master store; if it does \
+         not, the columnar arms are exercising the per-node fallback"
+    );
+    assert!(
+        after
+            .columnar_handles
+            .iter()
+            .all(|(_, matches_master)| *matches_master),
+        "the post-write refresh sweep must leave every node's handle on the \
+         new master — that sweep is what the journal has to reverse"
+    );
 }
 
 /// An indexed graph rolls back through the journal, not through a whole-graph
