@@ -125,7 +125,7 @@ constraint that quietly lies about the rows already present.
 A composite `unique` tuple constrains only nodes carrying *every* property in it,
 and NULL is exempt throughout — a node sits outside a uniqueness constraint
 unless every property in the tuple is present and non-null, so many nodes may
-share "no email" while `email` is `UNIQUE`. This matches Neo4j.
+share "no email" while `email` is `UNIQUE`.
 
 Two gaps to know, because both are the kind that look like guarantees until they
 are not. **A large bulk load is not all-or-nothing.** `add_nodes` gates each row
