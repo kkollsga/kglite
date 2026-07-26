@@ -14,9 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pattern — incremental refresh and its delete caveat, carrying embeddings
   across a rebuild, freshness stamps, managed/runtime ownership layers.
   `KGLite as a primary store: scope and limits` states what holds when the
-  graph is the authoritative copy, what is opt-in, and the limits:
-  single-writer, `primary_key` restricted to `id`, no Cypher DDL, no
-  `LOAD CSV`, no migration framework, and the storage modes that keep the
+  graph is the authoritative copy, what the defaults are, and where the edges
+  are: crash-safe `open()` and the state the log cannot express, constraint
+  enforcement and the paths that bypass it, index and constraint DDL with their
+  naming and equality-vs-range asymmetries, `LOAD CSV`'s default-deny file
+  capability, forward-only migrations, and the storage modes that keep the
   whole-graph write checkpoint.
 
 ### Changed
