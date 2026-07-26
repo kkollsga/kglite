@@ -232,7 +232,7 @@ def run_profiles(manifest: dict[str, Any], *, check: bool) -> int:
                 print(f"{name}: exact API match")
         else:
             baseline.parent.mkdir(parents=True, exist_ok=True)
-            baseline.write_text(current, encoding="utf-8")
+            baseline.write_text(current, encoding="utf-8", newline="\n")
             print(f"{name}: wrote {profile['baseline']}")
 
     for companion in manifest.get("companion_packages", []):
@@ -256,7 +256,7 @@ def run_profiles(manifest: dict[str, Any], *, check: bool) -> int:
                 print(f"{pkg}: exact API match")
         else:
             baseline.parent.mkdir(parents=True, exist_ok=True)
-            baseline.write_text(current, encoding="utf-8")
+            baseline.write_text(current, encoding="utf-8", newline="\n")
             print(f"{pkg}: wrote {companion['baseline']}")
 
     default_surface = captures["default"]
@@ -317,7 +317,7 @@ def main() -> int:
         result = run_profiles(manifest, check=args.command == "check")
         if args.command == "refresh" and result == 0:
             STAMP_PATH.parent.mkdir(parents=True, exist_ok=True)
-            STAMP_PATH.write_text(compute_source_digest(manifest) + "\n", encoding="utf-8")
+            STAMP_PATH.write_text(compute_source_digest(manifest) + "\n", encoding="utf-8", newline="\n")
         return result
     except (OSError, RuntimeError, subprocess.CalledProcessError, ValueError) as error:
         print(f"rust API profile error: {error}", file=sys.stderr)

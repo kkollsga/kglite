@@ -646,7 +646,7 @@ def test_cypher_set_visible_on_mmap_backed_columnstore(mode, tmp_path):
             f"<http://www.wikidata.org/prop/direct/P31> "
             f"<http://www.wikidata.org/entity/Q5> ."
         )
-    nt_path.write_text("\n".join(nt_lines) + "\n")
+    nt_path.write_text("\n".join(nt_lines) + "\n", encoding="utf-8")
 
     if mode == "mapped":
         kg = KnowledgeGraph(storage="mapped")

@@ -128,7 +128,13 @@ src = ["kglite"]
 extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W"]
+# PLW1514 (`open`/`read_text`/`write_text` without an explicit encoding) is
+# still a preview rule, so preview is enabled with `explicit-preview-rules`:
+# only preview rules named by their exact code are active, and the E/F/I/W
+# sets keep their stable behaviour.
+preview = true
+explicit-preview-rules = true
+select = ["E", "F", "I", "W", "PLW1514"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["kglite", "tests"]

@@ -49,7 +49,7 @@ def ingest(graph: kglite.KnowledgeGraph, tmp_path) -> sqlite3.Connection:
     dump = tmp_path / "dump.sql"
     graph.export(str(dump))  # .sql infers format="sqlite"
     connection = sqlite3.connect(":memory:")
-    connection.executescript(dump.read_text())
+    connection.executescript(dump.read_text(encoding="utf-8"))
     return connection
 
 

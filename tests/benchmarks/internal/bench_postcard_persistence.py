@@ -253,7 +253,7 @@ def main() -> None:
             "property_log": _property_log(work_root, args.ntriples_entities, args.rounds),
             "peak_rss_bytes": _peak_rss_bytes(),
         }
-        args.output.write_text(json.dumps(result, indent=2) + "\n")
+        args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(result, indent=2))
     finally:
         shutil.rmtree(work_root, ignore_errors=True)

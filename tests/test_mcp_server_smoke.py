@@ -54,7 +54,7 @@ def _discover_github_token() -> Optional[str]:
     for env_path in candidates:
         if not env_path.is_file():
             continue
-        for line in env_path.read_text().splitlines():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line.startswith("#") or "=" not in line:
                 continue
@@ -98,7 +98,7 @@ def _write_savegraph_manifest(path: Path) -> Path:
     made save_graph opt-in to avoid exposing a destructive operation
     on every server boot)."""
     manifest = path / "smoke_mcp.yaml"
-    manifest.write_text("name: smoke\nbuiltins:\n  save_graph: true\n")
+    manifest.write_text("name: smoke\nbuiltins:\n  save_graph: true\n", encoding="utf-8")
     return manifest
 
 
@@ -502,12 +502,13 @@ class TestSourceRootMode:
         d = tmp_path / "src"
         d.mkdir()
         (d / "hello.py").write_text(
-            "def greet(name):\n    return f'Hello, {name}'\n\ndef shout(name):\n    return greet(name).upper()\n"
+            "def greet(name):\n    return f'Hello, {name}'\n\ndef shout(name):\n    return greet(name).upper()\n",
+            encoding="utf-8",
         )
-        (d / "README.md").write_text("# Sample\n\nA tiny demo.\n")
+        (d / "README.md").write_text("# Sample\n\nA tiny demo.\n", encoding="utf-8")
         sub = d / "sub"
         sub.mkdir()
-        (sub / "nested.txt").write_text("nested file content\n")
+        (sub / "nested.txt").write_text("nested file content\n", encoding="utf-8")
         return d
 
     def test_lists_source_tools(self, source_dir: Path):
@@ -695,7 +696,7 @@ class TestEnvFileLoading:
         """Putting `.env` one dir above the workspace should be discovered."""
         outer = tmp_path / "outer"
         outer.mkdir()
-        (outer / ".env").write_text("GITHUB_TOKEN=ghp_walkup_test_token_not_real\n")
+        (outer / ".env").write_text("GITHUB_TOKEN=ghp_walkup_test_token_not_real\n", encoding="utf-8")
         ws = outer / "workspace"
         ws.mkdir()
         # Use --source-root mode (workspace mode would try to read inventory).
@@ -719,9 +720,9 @@ class TestEnvFileLoading:
         explicit path relative to the manifest's directory."""
         env_dir = tmp_path / "stash"
         env_dir.mkdir()
-        (env_dir / "my.env").write_text("GITHUB_TOKEN=ghp_explicit_test_token_not_real\n")
+        (env_dir / "my.env").write_text("GITHUB_TOKEN=ghp_explicit_test_token_not_real\n", encoding="utf-8")
         manifest = tmp_path / "explicit_mcp.yaml"
-        manifest.write_text("name: Explicit Env Test\nenv_file: stash/my.env\n")
+        manifest.write_text("name: Explicit Env Test\nenv_file: stash/my.env\n", encoding="utf-8")
         client = _spawn(
             ["--mcp-config", str(manifest)],
             cwd=tmp_path,
@@ -775,7 +776,8 @@ class TestYamlManifest:
             "    parameters:\n"
             "      city:\n"
             "        type: string\n"
-            "        description: City name to filter by.\n"
+            "        description: City name to filter by.\n",
+            encoding="utf-8",
         )
         return kgl
 
@@ -809,9 +811,9 @@ class TestLocalWorkspace:
     def local_workspace(self, tmp_path: Path) -> tuple[Path, Path]:
         ws = tmp_path / "workspace"
         ws.mkdir()
-        (ws / "demo.py").write_text("print('hello')\n")
+        (ws / "demo.py").write_text("print('hello')\n", encoding="utf-8")
         manifest = tmp_path / "ws_mcp.yaml"
-        manifest.write_text(f"name: Local WS Test\nworkspace:\n  kind: local\n  root: {ws}\n")
+        manifest.write_text(f"name: Local WS Test\nworkspace:\n  kind: local\n  root: {ws}\n", encoding="utf-8")
         return manifest, ws
 
     def test_set_root_dir_registered(self, local_workspace):
@@ -872,7 +874,8 @@ class TestReadCodeSource:
             "\n"
             "def shout(name):\n"
             '    """Greet then upper-case."""\n'
-            "    return greet(name).upper()\n"
+            "    return greet(name).upper()\n",
+            encoding="utf-8",
         )
         # Save the .kgl inside the project dir so the --graph mode's
         # auto-bound source root (parent of the .kgl) lines up with the
@@ -968,7 +971,7 @@ class TestBareBoot:
 
     def test_boots_with_minimal_manifest(self, tmp_path: Path):
         manifest = tmp_path / "bare_mcp.yaml"
-        manifest.write_text("name: Bare Smoke Test\n")
+        manifest.write_text("name: Bare Smoke Test\n", encoding="utf-8")
         client = _spawn(["--mcp-config", str(manifest)])
         try:
             names = {t["name"] for t in client.list_tools()}
@@ -1000,7 +1003,7 @@ class TestExploreAndSkills:
         project = tmp_path / "demo_proj"
         project.mkdir()
         (project / "demo_mod.py").write_text(
-            "def hub():\n    return leaf()\n\ndef leaf():\n    return 1\n\nclass Bar:\n    pass\n"
+            "def hub():\n    return leaf()\n\ndef leaf():\n    return 1\n\nclass Bar:\n    pass\n", encoding="utf-8"
         )
         kgl = project / "demo_code.kgl"
         _build_code_graph_kgl(
@@ -1034,7 +1037,7 @@ class TestExploreAndSkills:
             calls=[("demo_mod.hub", "demo_mod.leaf")],
         )
         manifest = project / "demo_mcp.yaml"
-        manifest.write_text("name: explore_smoke\nskills: true\n")
+        manifest.write_text("name: explore_smoke\nskills: true\n", encoding="utf-8")
         return kgl
 
     def test_explore_registered_and_callable(self, code_graph_fixture):
@@ -1096,7 +1099,7 @@ class TestSteeringFooters:
         project = tmp_path / "steer_proj"
         project.mkdir()
         (project / "m.py").write_text(
-            "def hub():\n    return leaf()\n\ndef leaf():\n    return 1\n\nclass Bar:\n    pass\n"
+            "def hub():\n    return leaf()\n\ndef leaf():\n    return 1\n\nclass Bar:\n    pass\n", encoding="utf-8"
         )
         kgl = project / "code.kgl"
         _build_code_graph_kgl(
@@ -1171,7 +1174,8 @@ class TestValueCodecs:
             "    - property: id\n"
             "      kind: prefix\n"
             '      prefix: "Q"\n'
-            "      stored_type: int\n"
+            "      stored_type: int\n",
+            encoding="utf-8",
         )
         client = _spawn(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
         try:
@@ -1196,7 +1200,8 @@ class TestValueCodecs:
             "name: vc2\n"
             "extensions:\n"
             "  value_codecs:\n"
-            '    - property: id\n      kind: prefix\n      prefix: "Q"\n      stored_type: int\n'
+            '    - property: id\n      kind: prefix\n      prefix: "Q"\n      stored_type: int\n',
+            encoding="utf-8",
         )
         client = _spawn(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
         try:
@@ -1219,7 +1224,8 @@ class TestValueCodecs:
             "name: vc_bad\n"
             "extensions:\n"
             "  value_codecs:\n"
-            "    - property: status\n      kind: map\n      map: { a: 1, b: 1 }\n"
+            "    - property: status\n      kind: map\n      map: { a: 1, b: 1 }\n",
+            encoding="utf-8",
         )
         proc = subprocess.Popen(
             [str(BINARY), "--graph", str(graph_fixture), "--mcp-config", str(manifest)],
@@ -1248,7 +1254,8 @@ class TestEmbedderLibrary:
         manifest = tmp_path / "py_embed_mcp.yaml"
         manifest.write_text(
             "name: py_embed\ntrust:\n  allow_embedder: true\nextensions:\n"
-            "  embedder:\n    library: sentence-transformers\n    model: BAAI/bge-m3\n"
+            "  embedder:\n    library: sentence-transformers\n    model: BAAI/bge-m3\n",
+            encoding="utf-8",
         )
         proc = subprocess.Popen(
             [str(BINARY), "--graph", str(graph_fixture), "--mcp-config", str(manifest)],
@@ -1304,9 +1311,9 @@ class TestSelftest:
     def test_local_workspace_passes(self, tmp_path: Path):
         ws = tmp_path / "ws"
         ws.mkdir()
-        (ws / "demo.py").write_text("def greet(name):\n    return name\n")
+        (ws / "demo.py").write_text("def greet(name):\n    return name\n", encoding="utf-8")
         manifest = tmp_path / "ws_mcp.yaml"
-        manifest.write_text(f"name: WS Selftest\nworkspace:\n  kind: local\n  root: {ws}\n")
+        manifest.write_text(f"name: WS Selftest\nworkspace:\n  kind: local\n  root: {ws}\n", encoding="utf-8")
         rc, out = _run_selftest(["--mcp-config", str(manifest)])
         assert rc == 0, out
         assert "Selftest PASSED" in out

@@ -124,7 +124,7 @@ class Dataset:
         import json
 
         staged = Path(staged)
-        manifest = json.loads((staged / "manifest.json").read_text())
+        manifest = json.loads((staged / "manifest.json").read_text(encoding="utf-8"))
         ranges = {k: tuple(v) for k, v in manifest["ranges"].items()}
 
         nodes: dict[str, list[dict[str, Any]]] = {}

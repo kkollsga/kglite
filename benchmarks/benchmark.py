@@ -54,7 +54,7 @@ def main() -> int:
         try:
             stats = kglite.graphgen(args.scale, seed=1234, out=staged)
             print(
-                f"[dataset] kglite.graphgen({args.scale!r}) → {stats['nodes']:,} nodes / {stats['edges']:,} edges\n",
+                f"[dataset] kglite.graphgen({args.scale!r}) -> {stats['nodes']:,} nodes / {stats['edges']:,} edges\n",
                 flush=True,
             )
             cmd = [
@@ -81,7 +81,7 @@ def main() -> int:
 
     md = render()
     out = pathlib.Path(args.out)
-    out.write_text(md)
+    out.write_text(md, encoding="utf-8")
     print(f"\nwrote {out.relative_to(ROOT) if out.is_relative_to(ROOT) else out}")
     return 0
 

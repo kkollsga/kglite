@@ -14,14 +14,15 @@ def test_binary_size_refresh_updates_platform_entry_idempotently(tmp_path, monke
         "}\n\n"
         "    Baseline history:\n"
         "    Raising the baseline is a deliberate act\n"
-        '    f"(+10% over 0.1.0 darwin baseline {baseline:,}). "\n'
+        '    f"(+10% over 0.1.0 darwin baseline {baseline:,}). "\n',
+        encoding="utf-8",
     )
     monkeypatch.setattr(refresh, "PHASE5_TEST", phase5)
     monkeypatch.setattr(refresh.sys, "platform", "darwin")
 
     changed, _ = refresh.refresh_binary_size("1.2.3", 12_345)
     assert changed
-    text = phase5.read_text()
+    text = phase5.read_text(encoding="utf-8")
     assert '"darwin": 12_345,  # 1.2.3 darwin baseline' in text
     assert '"linux": 20_000' in text
     assert text.count("- 1.2.3:") == 1
@@ -29,4 +30,4 @@ def test_binary_size_refresh_updates_platform_entry_idempotently(tmp_path, monke
 
     changed, _ = refresh.refresh_binary_size("1.2.3", 12_345)
     assert not changed
-    assert phase5.read_text().count("- 1.2.3:") == 1
+    assert phase5.read_text(encoding="utf-8").count("- 1.2.3:") == 1

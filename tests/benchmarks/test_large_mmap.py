@@ -11,7 +11,6 @@ Usage (standalone — not part of normal test suite):
 
 import argparse
 import os
-import resource
 import shutil
 import sys
 import tempfile
@@ -22,17 +21,9 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import kglite  # noqa: E402
+from tests.conftest import rss_mb  # noqa: E402
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-
-def rss_mb():
-    """Current RSS in MB (macOS / Linux)."""
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    # ru_maxrss is in bytes on macOS, KB on Linux
-    if sys.platform == "darwin":
-        return usage.ru_maxrss / (1024 * 1024)
-    return usage.ru_maxrss / 1024
+# -- Helpers -------------------------------------------------------------------
 
 
 def fmt_time(seconds):
@@ -50,22 +41,22 @@ def fmt_mb(mb):
 
 
 def section(title):
-    print(f"\n{'─' * 60}")
+    print(f"\n{'-' * 60}")
     print(f"  {title}")
-    print(f"{'─' * 60}")
+    print(f"{'-' * 60}")
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# -- Constants -----------------------------------------------------------------
 
 # Each node has ~20 string properties averaging ~30 chars each.
-# Estimated per-node footprint: ~800 bytes raw data + overhead ≈ 1 KB in compact,
-# less in columnar.  So 1M nodes ≈ 1 GB, 2M ≈ 2 GB, etc.
+# Estimated per-node footprint: ~800 bytes raw data + overhead ~ 1 KB in compact,
+# less in columnar.  So 1M nodes ~ 1 GB, 2M ~ 2 GB, etc.
 PROPS_PER_NODE = 20
 BATCH_SIZE = 100_000
 EDGE_RATIO = 2  # edges per node
 
 
-# ── Build ─────────────────────────────────────────────────────────────────────
+# -- Build ---------------------------------------------------------------------
 
 
 def build_graph(target_gb):
@@ -75,11 +66,11 @@ def build_graph(target_gb):
     total_nodes = num_batches * BATCH_SIZE
     total_edges = total_nodes * EDGE_RATIO
 
-    section(f"Building graph: {total_nodes:,} nodes, {total_edges:,} edges  (target ≈ {target_gb} GB)")
+    section(f"Building graph: {total_nodes:,} nodes, {total_edges:,} edges  (target ~ {target_gb} GB)")
 
     kg = kglite.KnowledgeGraph()
 
-    # ── Nodes ──
+    # -- Nodes --
     t0 = time.perf_counter()
     for batch_idx in range(num_batches):
         start = batch_idx * BATCH_SIZE
@@ -104,7 +95,7 @@ def build_graph(target_gb):
     node_time = time.perf_counter() - t0
     print(f"  Nodes done: {total_nodes:,} in {fmt_time(node_time)}  RSS={fmt_mb(rss_mb())}")
 
-    # ── Edges ──
+    # -- Edges --
     t1 = time.perf_counter()
     edge_batches = max(1, total_edges // BATCH_SIZE)
     for batch_idx in range(edge_batches):
@@ -139,13 +130,13 @@ def build_graph(target_gb):
     return kg, stats
 
 
-# ── Save / Load ───────────────────────────────────────────────────────────────
+# -- Save / Load ---------------------------------------------------------------
 
 
 def save_and_load(kg, kgl_path):
     results = {}
 
-    # ── save v3 .kgl ──
+    # -- save v3 .kgl --
     section("Saving v3 .kgl file")
     t0 = time.perf_counter()
     kg.save(kgl_path)
@@ -154,7 +145,7 @@ def save_and_load(kg, kgl_path):
     print(f"  save(): {fmt_time(results['save_kgl_time'])}")
     print(f"  File size: {fmt_mb(results['kgl_size_mb'])}")
 
-    # ── load v3 .kgl ──
+    # -- load v3 .kgl --
     section("Loading from v3 .kgl file")
     t0 = time.perf_counter()
     kg2 = kglite.load(kgl_path)
@@ -165,7 +156,7 @@ def save_and_load(kg, kgl_path):
     return kg2, results
 
 
-# ── Queries ───────────────────────────────────────────────────────────────────
+# -- Queries -------------------------------------------------------------------
 
 
 def run_queries(kg, label, total_nodes):
@@ -202,7 +193,7 @@ def run_queries(kg, label, total_nodes):
     return timings
 
 
-# ── Disk-lookup stress (cold reads) ──────────────────────────────────────────
+# -- Disk-lookup stress (cold reads) ------------------------------------------
 
 
 def disk_lookup_test(kgl_path, total_nodes):
@@ -225,7 +216,7 @@ def disk_lookup_test(kgl_path, total_nodes):
     return {"cold_lookups": len(lookup_ids), "cold_total": elapsed, "cold_avg": per_lookup}
 
 
-# ── Summary ───────────────────────────────────────────────────────────────────
+# -- Summary -------------------------------------------------------------------
 
 
 def print_summary(build_stats, io_results, query_timings, disk_stats):
@@ -251,7 +242,7 @@ def print_summary(build_stats, io_results, query_timings, disk_stats):
     print(f"  Cold avg per lookup: {fmt_time(disk_stats['cold_avg'])}")
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ----------------------------------------------------------------------
 
 
 def main():

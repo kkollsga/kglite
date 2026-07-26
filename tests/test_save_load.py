@@ -1,5 +1,6 @@
 """Tests for save/load persistence."""
 
+import importlib.util
 import os
 import tempfile
 
@@ -384,9 +385,14 @@ class TestV3Format:
             if os.path.exists(path):
                 os.unlink(path)
 
+    # The guard cannot itself import `resource`: decorators are evaluated when
+    # the class body executes at import time, so on Windows (no `resource`
+    # module at all) `__import__("resource")` raised during collection —
+    # failing in exactly the way this platform guard exists to prevent, and
+    # taking the whole pytest run down with a collection error.
     @pytest.mark.skipif(
-        not hasattr(__import__("resource"), "RLIMIT_FSIZE"),
-        reason="RLIMIT_FSIZE not available on this platform",
+        importlib.util.find_spec("resource") is None,
+        reason="resource/RLIMIT_FSIZE is POSIX-only",
     )
     def test_disk_full_during_save(self, tmp_path):
         """Simulate disk-full via RLIMIT_FSIZE; save must fail cleanly and not

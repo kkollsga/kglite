@@ -117,7 +117,7 @@ def collect_allowances(root: Path) -> list[Allowance]:
     for path in sorted((root / "crates").rglob("*.rs")):
         if "/target/" in path.as_posix():
             continue
-        source = path.read_text()
+        source = path.read_text(encoding="utf-8")
         relative = path.relative_to(root).as_posix()
         for match in ALLOW_ATTRIBUTE.finditer(source):
             scope = _scope_after(source, match.end(), match.group("inner") == "#!")
@@ -165,7 +165,7 @@ def classify(allowance: Allowance) -> str:
 
 
 def _load(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("schema_version") != 1:
         raise ValueError(f"{path}: unsupported lint allowance schema")
     return data
@@ -224,7 +224,7 @@ def write_baseline(path: Path, allowances: list[Allowance], previous: dict[str, 
         "allowances": ordinary,
         "dead_code_allowances": dead_code,
     }
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
     print(f"wrote {len(ordinary)} lint and {len(dead_code)} dead-code identities to {path}")
 
 
@@ -234,9 +234,9 @@ def self_test() -> None:
         source_dir = root / "crates" / "demo" / "src"
         source_dir.mkdir(parents=True)
         source = source_dir / "lib.rs"
-        source.write_text("#[allow(clippy::too_many_arguments)]\nfn demo(a: u8) {}\n")
+        source.write_text("#[allow(clippy::too_many_arguments)]\nfn demo(a: u8) {}\n", encoding="utf-8")
         first = collect_allowances(root)
-        source.write_text("\n\n#[allow(clippy::too_many_arguments)]\nfn demo(a: u8) {}\n")
+        source.write_text("\n\n#[allow(clippy::too_many_arguments)]\nfn demo(a: u8) {}\n", encoding="utf-8")
         second = collect_allowances(root)
         assert first[0].identity == second[0].identity
         baseline = {
@@ -248,7 +248,8 @@ def self_test() -> None:
         source.write_text(
             "// Boundary signature mirrors the wire protocol.\n"
             "#[allow(clippy::too_many_arguments)]\n"
-            "fn demo(a: u8) {}\n"
+            "fn demo(a: u8) {}\n",
+            encoding="utf-8",
         )
         assert collect_allowances(root)[0].has_reason
     print("lint-allowance self-test: OK")

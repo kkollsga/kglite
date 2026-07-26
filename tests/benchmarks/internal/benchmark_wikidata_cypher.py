@@ -34,7 +34,7 @@ TIMEOUT_MS = 20_000  # 20s per query
 # ═══════════════════════════════════════════════════════════════════
 
 BENCHMARKS = [
-    # ── 1. BASICS — instant queries ─────────────────────────────────
+    # -- 1. BASICS — instant queries ---------------------------------
     # Note: Wikidata Q-numbers are stored as UniqueId in the `id` field.
     # Use {id: 42} for Q42 (O(1) index lookup), NOT {nid: 'Q42'} (full scan).
     ("count_all_nodes", "basics", "MATCH (n) RETURN count(n) AS c"),
@@ -45,7 +45,7 @@ BENCHMARKS = [
     ("lookup_Q76", "basics", "MATCH (n {id: 76}) RETURN n.title, n.description"),
     ("lookup_Q5", "basics", "MATCH (n {id: 5}) RETURN n.title, n.description"),
     ("lookup_Q515", "basics", "MATCH (n {id: 515}) RETURN n.title, n.description"),
-    # ── 2. ANCHORED HOPS — the MCP sweet spot ──────────────────────
+    # -- 2. ANCHORED HOPS — the MCP sweet spot ----------------------
     ("Q42_outgoing", "anchored", "MATCH ({id: 42})-[r]->(m) RETURN type(r), m.title LIMIT 20"),
     ("Q42_incoming", "anchored", "MATCH (m)-[r]->({id: 42}) RETURN type(r), m.title LIMIT 20"),
     ("Q76_outgoing", "anchored", "MATCH ({id: 76})-[r]->(m) RETURN type(r), m.title LIMIT 20"),
@@ -55,12 +55,12 @@ BENCHMARKS = [
     ("Q42_2hop", "anchored", "MATCH ({id: 42})-[]->(b)-[]->(c) RETURN b.title, c.title LIMIT 20"),
     ("Q76_2hop", "anchored", "MATCH ({id: 76})-[]->(b)-[]->(c) RETURN b.title, c.title LIMIT 20"),
     ("Q42_optional", "anchored", "MATCH (n {id: 42}) OPTIONAL MATCH (n)-[r]->(m) RETURN type(r), m.title LIMIT 30"),
-    # ── 3. LIMIT PUSH-DOWN — should be fast on any type ────────────
+    # -- 3. LIMIT PUSH-DOWN — should be fast on any type ------------
     ("limit_10_P31", "limit", "MATCH (a)-[:P31]->(b) RETURN a.title, b.title LIMIT 10"),
     ("limit_50_P31", "limit", "MATCH (a)-[:P31]->(b) RETURN a.title, b.title LIMIT 50"),
     ("limit_100_any_edge", "limit", "MATCH (a)-[r]->(b) RETURN a.title, type(r), b.title LIMIT 100"),
     ("limit_10_2hop", "limit", "MATCH (a)-[:P31]->(b)-[:P279]->(c) RETURN a.title, c.title LIMIT 10"),
-    # ── 4. EDGE-TYPE FILTERING (sorted CSR binary search) ──────────
+    # -- 4. EDGE-TYPE FILTERING (sorted CSR binary search) ----------
     # Q5 "human" — massive P31 hub. Binary search should skip millions.
     ("Q5_incoming_P31_lim50", "edge_type", "MATCH (n)-[:P31]->({id: 5}) RETURN n.title LIMIT 50"),
     ("Q515_incoming_P31_lim50", "edge_type", "MATCH (n)-[:P31]->({id: 515}) RETURN n.title LIMIT 50"),
@@ -69,7 +69,7 @@ BENCHMARKS = [
     ("Q515_count_P31", "edge_type", "MATCH (n)-[:P31]->({id: 515}) RETURN count(n) AS cities"),
     ("born_in_Berlin", "edge_type", "MATCH (p)-[:P19]->({id: 64}) RETURN p.title LIMIT 20"),
     ("citizens_of_Germany", "edge_type", "MATCH (p)-[:P27]->({id: 183}) RETURN p.title LIMIT 20"),
-    # ── 5. AGGREGATION (fused paths) ───────────────────────────────
+    # -- 5. AGGREGATION (fused paths) -------------------------------
     # FusedMatchReturnAggregate: group by one node, count the other
     (
         "agg_P31_by_target",
@@ -83,16 +83,16 @@ BENCHMARKS = [
     ),
     # FusedNodeScanAggregate with WHERE (Phase 3 optimization)
     ("agg_count_by_type_top20", "aggregation", "MATCH (n) RETURN n.type, count(n) AS c ORDER BY c DESC LIMIT 20"),
-    # ── 6. PROPERTY SCANS (direct columnar access) ─────────────────
+    # -- 6. PROPERTY SCANS (direct columnar access) -----------------
     # These scan large types filtering by property — tests our columnar fast path
     ("contains_Einstein", "prop_scan", "MATCH (n) WHERE n.title CONTAINS 'Einstein' RETURN n.id, n.title LIMIT 20"),
     ("contains_Norway", "prop_scan", "MATCH (n) WHERE n.title CONTAINS 'Norway' RETURN n.id, n.title LIMIT 20"),
     ("startswith_Albert", "prop_scan", "MATCH (n) WHERE n.title STARTS WITH 'Albert' RETURN n.id, n.title LIMIT 20"),
-    # ── 7. HUB NODES — stress test high-degree vertices ────────────
+    # -- 7. HUB NODES — stress test high-degree vertices ------------
     ("Q5_all_outgoing", "hub", "MATCH ({id: 5})-[r]->(m) RETURN type(r), m.title LIMIT 50"),
     ("Q5_all_incoming_lim100", "hub", "MATCH (m)-[r]->({id: 5}) RETURN type(r), m.title LIMIT 100"),
     ("Q515_all_incoming_lim100", "hub", "MATCH (m)-[r]->({id: 515}) RETURN type(r), m.title LIMIT 100"),
-    # ── 8. PAIN POINTS — expected slow, measuring for future work ──
+    # -- 8. PAIN POINTS — expected slow, measuring for future work --
     # Full type scan without index — scans all entities
     ("full_scan_contains_2024", "pain", "MATCH (n) WHERE n.description CONTAINS '2024' RETURN n.id, n.title LIMIT 20"),
     # Unanchored expansion — no start anchor, relies on LIMIT
@@ -137,7 +137,7 @@ def main():
     # Open CSV at start and flush per row so partial runs (SIGKILL, OOM, Ctrl-C)
     # still leave a populated CSV behind. The previous end-of-main writerows path
     # lost everything on crash.
-    csv_file = open(CSV_OUT, "w", newline="")
+    csv_file = open(CSV_OUT, "w", newline="", encoding="utf-8")
     writer = csv.DictWriter(csv_file, fieldnames=["name", "category", "status", "rows", "time_ms"])
     writer.writeheader()
     csv_file.flush()
@@ -148,7 +148,7 @@ def main():
     for name, category, query in BENCHMARKS:
         if category != current_category:
             current_category = category
-            print(f"\n  ── {category.upper()} {'─' * (55 - len(category))}")
+            print(f"\n  -- {category.upper()} {'-' * (55 - len(category))}")
 
         t0 = time.perf_counter()
         try:

@@ -158,7 +158,7 @@ def _maxrss_mb():
 
 def _append_row(csv_path, row):
     new_file = not Path(csv_path).exists()
-    with open(csv_path, "a", newline="") as f:
+    with open(csv_path, "a", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
         if new_file:
             w.writeheader()

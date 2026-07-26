@@ -43,7 +43,10 @@ def test_report_only_command_is_deterministic(tmp_path: Path) -> None:
         cwd=REPO_ROOT,
         check=True,
     )
-    assert output.read_bytes() == REPORT.read_bytes()
+    # Text comparison, not bytes: a byte compare is only accidentally
+    # CRLF-safe, and would fail against a checked-in report whose line
+    # endings were translated on checkout.
+    assert output.read_text(encoding="utf-8") == REPORT.read_text(encoding="utf-8")
 
 
 def test_future_run_shape_carries_exact_provenance(monkeypatch) -> None:

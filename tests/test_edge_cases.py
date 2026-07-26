@@ -486,7 +486,7 @@ class TestExportEdgeCases:
         try:
             graph.export(path, "graphml")
             assert os.path.exists(path)
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 content = f.read()
                 assert "<?xml" in content
                 assert "graphml" in content

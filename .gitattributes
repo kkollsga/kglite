@@ -1,0 +1,19 @@
+# Normalize line endings so a Windows checkout does not turn every text file
+# into CRLF. Several gates compare file bytes or digests (the `.kgl` golden
+# hash, the benchmark-report contract, the docs-facts renderer), and a
+# whole-file CRLF translation breaks them while showing as a whole-file diff.
+* text=auto eol=lf
+
+# Binary fixtures must never be line-ending-converted or diffed as text.
+# Git's auto-detection only sniffs the first 8000 bytes for a NUL, so the
+# `.kgl` fixtures currently pass by luck rather than by rule — a future save
+# whose first 8 KB happen to be NUL-free would be silently corrupted on a
+# Windows checkout.
+*.kgl binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.gz binary
+*.bz2 binary
+*.zst binary
+*.whl binary

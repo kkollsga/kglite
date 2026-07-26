@@ -138,7 +138,7 @@ pipelines.to_csv(output / "connections" / "PIPELINE.csv", index=False)
 
 # Write blueprint (root = absolute path so from_blueprint resolves CSVs)
 blueprint["settings"]["root"] = str(output)
-with open(output / "blueprint.json", "w") as f:
+with open(output / "blueprint.json", "w", encoding="utf-8") as f:
     json.dump(blueprint, f, indent=2)
 
 # Load via blueprint

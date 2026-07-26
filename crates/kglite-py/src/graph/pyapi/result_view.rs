@@ -14,6 +14,7 @@ use crate::graph::languages::cypher::py_convert::{
 use crate::graph::languages::cypher::{
     ClauseStats, CypherResult, LazyResultDescriptor, MutationStats, QueryDiagnostics,
 };
+use crate::graph::pyapi::result_table::format_table;
 use kglite_core::api::algorithms::CentralityResult;
 use kglite_core::api::{DirGraph, NodeData};
 use pyo3::prelude::*;
@@ -523,19 +524,19 @@ impl ResultView {
         }
     }
 
-    fn __repr__(&self) -> PyResult<String> {
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         // Materialise lazy rows for printing; format_table needs concrete
         // PreProcessedValues. For very large lazy results, callers should
         // use head()/tail() instead of repr.
         if self.lazy.is_some() {
             let rows = self.materialise_all()?;
-            return Ok(format_table(&self.columns, &rows));
+            return Ok(format_table(py, &self.columns, &rows));
         }
-        Ok(format_table(&self.columns, &self.rows))
+        Ok(format_table(py, &self.columns, &self.rows))
     }
 
-    fn __str__(&self) -> PyResult<String> {
-        self.__repr__()
+    fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        self.__repr__(py)
     }
 
     /// Column names as a list of strings.
@@ -893,172 +894,4 @@ impl ResultIter {
         self.index += 1;
         Ok(Some(result))
     }
-}
-
-// ========================================================================
-// Pretty-print formatting for ResultView
-// ========================================================================
-
-fn format_preprocessed_value(pv: &PreProcessedValue) -> String {
-    // Phase A.1 / C7a — ParsedJson variant deleted; only Plain remains.
-    match pv {
-        PreProcessedValue::Plain(v) => crate::datatypes::values::format_value(v),
-    }
-}
-
-/// Format a ResultView as a Polars-style table.
-///
-/// Shows `shape: (rows, cols)` header, a bordered table with column names,
-/// and for large results shows the first and last rows with `…` in between.
-fn format_table(columns: &[String], rows: &[Vec<PreProcessedValue>]) -> String {
-    if rows.is_empty() {
-        return format!("shape: (0, {})\n(empty)", columns.len());
-    }
-
-    let n = rows.len();
-    let max_col_width = 30;
-    let max_display_rows = 20;
-
-    // Decide which rows to show
-    let (show_head, show_tail, truncated) = if n <= max_display_rows {
-        (n, 0, false)
-    } else {
-        (10, 5, true)
-    };
-
-    // Format all visible cell values
-    let mut formatted: Vec<Vec<String>> = Vec::new();
-    for row in rows.iter().take(show_head) {
-        formatted.push(
-            row.iter()
-                .map(|v| truncate_middle(&format_preprocessed_value(v), max_col_width))
-                .collect(),
-        );
-    }
-    if truncated {
-        for row in rows.iter().skip(n - show_tail) {
-            formatted.push(
-                row.iter()
-                    .map(|v| truncate_middle(&format_preprocessed_value(v), max_col_width))
-                    .collect(),
-            );
-        }
-    }
-
-    // Compute column widths (header vs data)
-    let num_cols = columns.len();
-    let mut widths: Vec<usize> = columns.iter().map(|c| c.len()).collect();
-    for row in &formatted {
-        for (j, cell) in row.iter().enumerate() {
-            if j < num_cols {
-                widths[j] = widths[j].max(cell.len());
-            }
-        }
-    }
-    if truncated {
-        // Ensure columns are wide enough for "…"
-        for w in &mut widths {
-            *w = (*w).max(1);
-        }
-    }
-
-    let mut buf = String::with_capacity(n * 100);
-
-    // Shape header
-    buf.push_str(&format!("shape: ({}, {})\n", n, num_cols));
-
-    // Top border: ┌──────┬──────┐
-    buf.push('┌');
-    for (j, w) in widths.iter().enumerate() {
-        if j > 0 {
-            buf.push('┬');
-        }
-        for _ in 0..(w + 2) {
-            buf.push('─');
-        }
-    }
-    buf.push_str("┐\n");
-
-    // Header row: │ col1 ┆ col2 │
-    buf.push('│');
-    for (j, col) in columns.iter().enumerate() {
-        if j > 0 {
-            buf.push_str(" ┆");
-        }
-        buf.push_str(&format!(" {:width$}", col, width = widths[j]));
-    }
-    buf.push_str(" │\n");
-
-    // Separator: ╞══════╪══════╡
-    buf.push('╞');
-    for (j, w) in widths.iter().enumerate() {
-        if j > 0 {
-            buf.push('╪');
-        }
-        for _ in 0..(w + 2) {
-            buf.push('═');
-        }
-    }
-    buf.push_str("╡\n");
-
-    // Data rows (head)
-    for row in &formatted[..show_head] {
-        buf.push('│');
-        for (j, w) in widths.iter().enumerate() {
-            if j > 0 {
-                buf.push_str(" ┆");
-            }
-            let cell = row.get(j).map(|s| s.as_str()).unwrap_or("");
-            buf.push_str(&format!(" {:width$}", cell, width = *w));
-        }
-        buf.push_str(" │\n");
-    }
-
-    // Truncation row: │ …    ┆ …    │
-    if truncated {
-        buf.push('│');
-        for (j, w) in widths.iter().enumerate() {
-            if j > 0 {
-                buf.push_str(" ┆");
-            }
-            buf.push_str(&format!(" {:width$}", "…", width = *w));
-        }
-        buf.push_str(" │\n");
-
-        // Tail rows
-        for row in &formatted[show_head..] {
-            buf.push('│');
-            for (j, w) in widths.iter().enumerate() {
-                if j > 0 {
-                    buf.push_str(" ┆");
-                }
-                let cell = row.get(j).map(|s| s.as_str()).unwrap_or("");
-                buf.push_str(&format!(" {:width$}", cell, width = *w));
-            }
-            buf.push_str(" │\n");
-        }
-    }
-
-    // Bottom border: └──────┴──────┘
-    buf.push('└');
-    for (j, w) in widths.iter().enumerate() {
-        if j > 0 {
-            buf.push('┴');
-        }
-        for _ in 0..(w + 2) {
-            buf.push('─');
-        }
-    }
-    buf.push_str("┘\n");
-
-    buf
-}
-
-/// Truncate a string in the middle if it exceeds `max_len`, keeping both ends visible.
-fn truncate_middle(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        return s.to_string();
-    }
-    let keep = (max_len - 5) / 2; // 5 chars for " ... "
-    format!("{} ... {}", &s[..keep], &s[s.len() - keep..])
 }

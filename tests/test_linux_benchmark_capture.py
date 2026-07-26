@@ -48,8 +48,8 @@ def test_promotion_accepts_only_verified_reference_and_strips_samples(tmp_path: 
     provenance_path = tmp_path / "provenance.json"
     versioned = tmp_path / "0_13_2.linux.json"
     current = tmp_path / "current.linux.json"
-    reference_path.write_text(json.dumps(_result("one", "two")))
-    expected_path.write_text(json.dumps(_result("one", "two")))
+    reference_path.write_text(json.dumps(_result("one", "two")), encoding="utf-8")
+    expected_path.write_text(json.dumps(_result("one", "two")), encoding="utf-8")
     provenance_path.write_text(
         json.dumps(
             {
@@ -63,24 +63,25 @@ def test_promotion_accepts_only_verified_reference_and_strips_samples(tmp_path: 
                     "result_sha256": sha256(reference_path),
                 },
             }
-        )
+        ),
+        encoding="utf-8",
     )
 
     promote(reference_path, provenance_path, expected_path, versioned, current)
-    promoted = json.loads(versioned.read_text())
-    assert versioned.read_text() == current.read_text()
+    promoted = json.loads(versioned.read_text(encoding="utf-8"))
+    assert versioned.read_text(encoding="utf-8") == current.read_text(encoding="utf-8")
     assert promoted["kglite_baseline"]["source_distribution"] == "kglite==0.13.2 (PyPI wheel)"
     assert all("data" not in item["stats"] for item in promoted["benchmarks"])
 
-    provenance = json.loads(provenance_path.read_text())
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
     provenance["reference"]["result_sha256"] = "tampered"
-    provenance_path.write_text(json.dumps(provenance))
+    provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
     with pytest.raises(ValueError, match="digest"):
         promote(reference_path, provenance_path, expected_path, versioned, current)
 
 
 def test_committed_linux_and_generic_baselines_track_the_same_workloads() -> None:
     baselines = REPO_ROOT / "tests" / "benchmarks" / "baselines"
-    generic = json.loads((baselines / "current.json").read_text())
-    linux = json.loads((baselines / "current.linux.json").read_text())
+    generic = json.loads((baselines / "current.json").read_text(encoding="utf-8"))
+    linux = json.loads((baselines / "current.linux.json").read_text(encoding="utf-8"))
     assert benchmark_names(linux) == benchmark_names(generic)

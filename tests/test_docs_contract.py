@@ -52,7 +52,7 @@ def test_check_mode_rejects_a_stale_fixture(tmp_path: Path) -> None:
 
 
 def test_generated_source_paths_exist() -> None:
-    paths = re.findall(r"`((?:crates|tests|scripts|docs)/[^`]+)`", GENERATED.read_text())
+    paths = re.findall(r"`((?:crates|tests|scripts|docs)/[^`]+)`", GENERATED.read_text(encoding="utf-8"))
     assert paths
     missing = [path for path in paths if not (REPO_ROOT / path).exists()]
     assert not missing, f"generated documentation names missing source paths: {missing}"
@@ -65,7 +65,7 @@ def test_active_docs_only_name_declared_extras() -> None:
     declared = set(re.findall(r"(?m)^(\w+)\s*=", optional))
     references: set[str] = set()
     for path in _active_markdown():
-        references.update(re.findall(r"kglite\[([a-z0-9_-]+)\]", path.read_text()))
+        references.update(re.findall(r"kglite\[([a-z0-9_-]+)\]", path.read_text(encoding="utf-8")))
     assert references <= declared, f"docs name removed extras: {sorted(references - declared)}"
 
 
@@ -171,7 +171,7 @@ def test_documented_make_commands_are_real_targets() -> None:
     targets = set(re.findall(r"(?m)^([A-Za-z0-9_.-]+):", makefile))
     documented: set[str] = set()
     for path in _active_markdown():
-        documented.update(re.findall(r"(?m)^\s*(?:\$\s*)?make\s+([A-Za-z0-9_.-]+)", path.read_text()))
+        documented.update(re.findall(r"(?m)^\s*(?:\$\s*)?make\s+([A-Za-z0-9_.-]+)", path.read_text(encoding="utf-8")))
     assert documented <= targets, f"docs name missing Make targets: {sorted(documented - targets)}"
 
 
@@ -189,10 +189,10 @@ def test_active_markdown_local_links_resolve() -> None:
 
 
 def test_retired_architecture_claims_do_not_return() -> None:
-    architecture = (REPO_ROOT / "docs" / "concepts" / "architecture.md").read_text()
-    decisions = (REPO_ROOT / "docs" / "concepts" / "design-decisions.md").read_text()
-    contributing = (REPO_ROOT / "CONTRIBUTING.md").read_text()
-    readme = (REPO_ROOT / "README.md").read_text()
+    architecture = (REPO_ROOT / "docs" / "concepts" / "architecture.md").read_text(encoding="utf-8")
+    decisions = (REPO_ROOT / "docs" / "concepts" / "design-decisions.md").read_text(encoding="utf-8")
+    contributing = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     retired = {
         "architecture": ["There is no R-tree", "RGF\\x02", "Gzip-compressed"],
         "design decisions": ["Single-process only", "Memory-bound", "Why no R-tree"],

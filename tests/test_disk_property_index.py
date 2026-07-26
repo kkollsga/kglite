@@ -40,7 +40,7 @@ def _build_disk_graph(path: str) -> KnowledgeGraph:
 
 def _published_snapshot(path: str) -> Path:
     root = Path(path)
-    generation = (root / "CURRENT").read_text().strip()
+    generation = (root / "CURRENT").read_text(encoding="utf-8").strip()
     return root / "generations" / generation
 
 
@@ -88,7 +88,7 @@ class TestCollisionFreeIdentity:
         reloaded.save(disk_dir)
         import json
 
-        manifest = json.loads((_published_snapshot(disk_dir) / "seg_manifest.json").read_text())
+        manifest = json.loads((_published_snapshot(disk_dir) / "seg_manifest.json").read_text(encoding="utf-8"))
         pairs = {(entry[0], entry[1]) for entry in manifest["segments"][0]["indexed_prop_ranges"]}
         assert pairs == {
             (_fnv1a_64("a_b"), _fnv1a_64("c")),
@@ -312,7 +312,7 @@ class TestSegmentManifestRecordsIndexes:
         g.save(disk_dir)
         del g
 
-        manifest = json.loads((_published_snapshot(disk_dir) / "seg_manifest.json").read_text())
+        manifest = json.loads((_published_snapshot(disk_dir) / "seg_manifest.json").read_text(encoding="utf-8"))
         assert len(manifest["segments"]) == 1
         ranges = manifest["segments"][0]["indexed_prop_ranges"]
         # Expect exactly one entry for (Country, label) as StringBloomPlaceholder.
@@ -328,7 +328,7 @@ class TestSegmentManifestRecordsIndexes:
 
         g = _build_disk_graph(disk_dir)
         g.save(disk_dir)
-        manifest = json.loads((_published_snapshot(disk_dir) / "seg_manifest.json").read_text())
+        manifest = json.loads((_published_snapshot(disk_dir) / "seg_manifest.json").read_text(encoding="utf-8"))
         assert manifest["segments"][0]["indexed_prop_ranges"] == []
 
     def test_manifest_survives_reload_and_resave(self, disk_dir):
@@ -347,7 +347,7 @@ class TestSegmentManifestRecordsIndexes:
         reloaded = load(disk_dir)
         reloaded.save(disk_dir)
 
-        manifest = json.loads((_published_snapshot(disk_dir) / "seg_manifest.json").read_text())
+        manifest = json.loads((_published_snapshot(disk_dir) / "seg_manifest.json").read_text(encoding="utf-8"))
         ranges = manifest["segments"][0]["indexed_prop_ranges"]
         t_hash = _fnv1a_64("Country")
         p_hash = _fnv1a_64("label")
@@ -372,6 +372,6 @@ class TestSegmentManifestRecordsIndexes:
         g.create_global_index("label")
         g.save(disk_dir)
 
-        manifest = json.loads((_published_snapshot(disk_dir) / "seg_manifest.json").read_text())
+        manifest = json.loads((_published_snapshot(disk_dir) / "seg_manifest.json").read_text(encoding="utf-8"))
         # Only the global index was built — no per-type indexes.
         assert manifest["segments"][0]["indexed_prop_ranges"] == []

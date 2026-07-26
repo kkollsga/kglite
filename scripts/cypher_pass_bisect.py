@@ -111,7 +111,7 @@ def main() -> int:
     matches: list[str] = []
     for name in kglite.cypher_pass_names():
         actual = _normalize(g.cypher(args.query, disabled_passes=[name], **kwargs).to_list())
-        marker = "✓" if actual == naive else " "
+        marker = "x" if actual == naive else " "
         print(f"  [{marker}] disabled `{name}`: {len(actual)} rows")
         if actual == naive:
             matches.append(name)
@@ -120,7 +120,7 @@ def main() -> int:
     if matches:
         print("Pass(es) whose individual absence resolves the divergence:")
         for m in matches:
-            print(f"  → {m}")
+            print(f"  -> {m}")
         print()
         print("Most likely culprit:", matches[0])
         return 1

@@ -58,7 +58,7 @@ class TestStreaming:
             assert os.path.samefile(stats["out"], d)
             for f in ("Person.csv", "Company.csv", "KNOWS.csv", "DEPENDS_ON.csv", "manifest.json"):
                 assert os.path.exists(os.path.join(d, f)), f"missing {f}"
-            manifest = json.loads(open(os.path.join(d, "manifest.json")).read())
+            manifest = json.loads(open(os.path.join(d, "manifest.json"), encoding="utf-8").read())
             assert manifest["schema"] == "graphsuite"
             assert manifest["counts"]["Person"] == 1000
             assert "params" in manifest and "seed_persons" in manifest["params"]

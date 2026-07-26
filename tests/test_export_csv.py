@@ -188,7 +188,7 @@ class TestExportCsvBlueprint:
         bp_path = os.path.join(out, "blueprint.json")
         assert os.path.isfile(bp_path)
 
-        with open(bp_path) as f:
+        with open(bp_path, encoding="utf-8") as f:
             bp = json.load(f)
 
         assert "settings" in bp
@@ -199,7 +199,7 @@ class TestExportCsvBlueprint:
         out = os.path.join(export_dir, "out")
         small_graph.export_csv(out)
 
-        with open(os.path.join(out, "blueprint.json")) as f:
+        with open(os.path.join(out, "blueprint.json"), encoding="utf-8") as f:
             bp = json.load(f)
 
         person = bp["nodes"]["Person"]
@@ -212,7 +212,7 @@ class TestExportCsvBlueprint:
         out = os.path.join(export_dir, "out")
         small_graph.export_csv(out)
 
-        with open(os.path.join(out, "blueprint.json")) as f:
+        with open(os.path.join(out, "blueprint.json"), encoding="utf-8") as f:
             bp = json.load(f)
 
         person = bp["nodes"]["Person"]
@@ -224,7 +224,7 @@ class TestExportCsvBlueprint:
         out = os.path.join(export_dir, "out")
         graph_with_subnodes.export_csv(out)
 
-        with open(os.path.join(out, "blueprint.json")) as f:
+        with open(os.path.join(out, "blueprint.json"), encoding="utf-8") as f:
             bp = json.load(f)
 
         assert "Log" in bp["nodes"]

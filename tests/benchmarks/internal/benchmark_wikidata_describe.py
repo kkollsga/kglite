@@ -86,7 +86,7 @@ def main():
     record(label, dt, f"chars={len(dc):,}")
 
     # ── Write CSV ──
-    with open(CSV_PATH, "w", newline="") as f:
+    with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["stage", "seconds", "detail"])
         writer.writeheader()
         writer.writerows(rows)
