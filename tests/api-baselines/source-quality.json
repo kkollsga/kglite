@@ -189,9 +189,9 @@
     {
       "path": "crates/kglite/src/graph/introspection/describe.rs",
       "qualified_name": "crate::write_type_detail",
-      "lines": 406,
-      "branches": 47,
-      "nesting": 6
+      "lines": 364,
+      "branches": 40,
+      "nesting": 5
     },
     {
       "path": "crates/kglite/src/graph/io/export.rs",
@@ -259,8 +259,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/call_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_call",
-      "lines": 787,
-      "branches": 132,
+      "lines": 704,
+      "branches": 100,
       "nesting": 5
     },
     {
@@ -553,8 +553,8 @@
     {
       "path": "crates/kglite/src/graph/mutation/add_properties.rs",
       "qualified_name": "crate::add_properties_aggregate",
-      "lines": 187,
-      "branches": 39,
+      "lines": 165,
+      "branches": 36,
       "nesting": 10
     },
     {

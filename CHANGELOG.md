@@ -33,12 +33,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than silently ignored.
 - `indexes_added` and `indexes_removed` in `graph.last_mutation_stats`,
   mirroring Neo4j's `indexesAdded` / `indexesRemoved` summary counters.
-- Index and constraint DDL that KGLite cannot serve — `TEXT`, `POINT`,
-  `FULLTEXT`, `VECTOR`, `LOOKUP`, relationship indexes, `OPTIONS { ... }`, and
-  every `CREATE`/`DROP`/`SHOW CONSTRAINT` form (including the Neo4j 4 `ASSERT`
-  spelling) — now parses and fails with a specific unsupported-feature error
-  naming the construct and the route that works today, instead of a syntax
-  error or a silent no-op.
+- Index DDL that KGLite cannot serve — `TEXT`, `POINT`, `FULLTEXT`, `VECTOR`,
+  `LOOKUP`, relationship indexes and `OPTIONS { ... }` — now parses and fails
+  with a specific unsupported-feature error naming the construct and the route
+  that works today, instead of a syntax error or a silent no-op.
+
+- Cypher **constraint** DDL, in the Neo4j 5 grammar, routing to the per-write
+  enforcement above: `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label)
+  REQUIRE n.prop IS UNIQUE | IS NOT NULL | IS NODE KEY`, `DROP CONSTRAINT
+  <name> [IF EXISTS]`, and `SHOW CONSTRAINTS`. Composite tuples
+  (`REQUIRE (n.a, n.b) IS UNIQUE`) constrain the combination rather than each
+  property; the Neo4j 4 `ASSERT` spelling and the optional `NODE` /
+  `RELATIONSHIP` scope word are accepted, so a 4.x-era script ports unedited.
+  A declaration is not documentation — once it succeeds, a violating write is
+  rejected on every path including the bulk loader.
+- `IS NODE KEY` is served as uniqueness **and** presence, installed atomically:
+  if the presence half cannot be declared the uniqueness half is rolled back, so
+  a statement that reported failure has changed nothing. `DROP CONSTRAINT` on a
+  node key withdraws both halves, and a tuple that is unique and fully required
+  now reports itself as `NODE KEY` rather than as plain `UNIQUE`.
+- `CREATE CONSTRAINT ... IS :: TYPE` / `IS TYPED TYPE` is **rejected**, not
+  accepted-and-ignored. KGLite has no write-time property-type constraint —
+  `field_types` is read only by the offline `validate_schema()`, and a locked
+  schema type-checks against the node type's recorded property types — so
+  accepting the statement would report success while enforcing nothing, which is
+  worse than an error for a promise users build data-integrity assumptions on.
+  The message names both routes that do enforce.
+- Constraint **names are persisted**, deliberately unlike index names, so the
+  dominant ported-script shape works: `CREATE CONSTRAINT person_email_unique
+  ...` followed by `DROP CONSTRAINT person_email_unique`. A constraint declared
+  without a name is addressable by its canonical descriptor
+  (`Label.property`, `Label.(a, b)`), which is also what `SHOW CONSTRAINTS`
+  prints for it, so that output pastes straight into `DROP CONSTRAINT`. Names
+  are unique per graph, survive save/load, and a name whose constraint has been
+  dropped is discarded at save time so it cannot resurrect. The registry is a
+  lookup aid rather than the source of truth, so a lost name can cost
+  addressability but never enforcement. Additive JSON metadata, skipped when
+  empty — older `.kgl` files load unchanged and files without named constraints
+  are byte-identical.
+- `SHOW CONSTRAINTS` is a **read**, like `SHOW INDEXES`: it works on a read-only
+  graph and is unaffected by a write scope. Returns `name`, `type`
+  (`UNIQUENESS` / `NODE_KEY` / `NODE_PROPERTY_EXISTENCE`), `entityType`,
+  `labelsOrTypes`, `properties`. Neo4j's `id`, `ownedIndex`, and `propertyType`
+  are omitted — KGLite holds no equivalent state — and a node key is one row
+  rather than a uniqueness row plus an existence row.
+- `CALL db.constraints()` returns the same rows from the same collector, so the
+  two surfaces cannot drift. `SHOW CONSTRAINTS YIELD ...` now points at it
+  rather than at `CALL db.indexes()`, which listed the wrong objects.
+- `constraints_added` and `constraints_removed` in `graph.last_mutation_stats`,
+  mirroring Neo4j's `constraintsAdded` / `constraintsRemoved`. They count
+  constraints rather than the structures behind them, so `IS NODE KEY` reports 1.
+- `describe()` annotates a property with `constraint="unique" | "not_null" |
+  "node_key"` when one is declared on it, so an agent can see a write will be
+  rejected before attempting it.
 
 - Real integrity constraints, enforced on **every** write path — Cypher
   `CREATE` / `MERGE` / `SET` / `REMOVE` *and* the bulk loader (`add_nodes`, and
@@ -85,6 +132,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   UNIQUE constraints it declares, so it raises `ConstraintCreationError` when
   existing data already violates one. Nothing is changed in that case, so the
   data can be fixed and the call retried.
+- Constraint DDL is classified as a mutation for the same reason index DDL is —
+  schema is graph state — so `CREATE`/`DROP CONSTRAINT` are blocked on a
+  read-only graph and in a read-only transaction, roll back with a failed
+  statement, respect `write_scope=[...]`, and are rejected on a schema-locked
+  graph when the property is undeclared. `SHOW CONSTRAINTS` is a read.
 - Index DDL is classified as a mutation, since schema is graph state: it is
   blocked on a read-only graph and in a read-only transaction, rolls back with
   a failed statement, and is rejected on a schema-locked graph when the
@@ -126,6 +178,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bulk path now rebuilds the equality, range, and composite indexes covering
   the loaded type once per call (no-op when the type carries none), the same
   order of work as the `id` index rebuild it already did.
+- Overwriting an indexed property through a fluent write no longer returns the
+  node under its *old* value. `add_properties(...)` writes the property map
+  directly and the `store_as=` paths (`unique_values`, `collect_children`,
+  `calculate`) write through the batch path, so neither refreshed the secondary
+  indexes — and the matcher trusts a property index unconditionally rather than
+  falling back to a scan. After `create_index('Child', 'tag')`, an
+  `add_properties` that changed `tag` left `MATCH (c:Child {tag: <old value>})`
+  returning the node whose `tag` was already the *new* value: a wrong answer
+  rather than a missing row. Both paths now refresh the indexes covering every
+  written node type, the same remedy as the bulk-append fix above. The two
+  `add_properties` write loops (copy and aggregate) were duplicated tails, which
+  is how one of them lost the maintenance; they now share one helper.
+- `add_properties` bumps the graph version, so version-keyed caches and
+  freshness checks observe the write.
+- Declaring UNIQUE constraints no longer shifts the `.kgl` format for graphs
+  that have none. The persisted `unique_constraint_keys` list emitted
+  `"unique_constraint_keys":[]` into *every* file, changing the bytes of the
+  overwhelming majority of graphs — which carry no constraints — and tripping the
+  format-drift gate. It is now skipped when empty, so a constraint-free graph
+  writes byte-identical output to one produced before constraints existed.
+- The persisted constraint list is sorted at save time. It was snapshotted
+  straight from `HashMap::keys()`, so any graph carrying a constraint saved in
+  nondeterministic byte order.
 
 ## [0.14.5] - 2026-07-22
 

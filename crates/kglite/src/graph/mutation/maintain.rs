@@ -1720,6 +1720,17 @@ pub fn update_node_properties(
         errors.push("No nodes were updated".to_string());
     }
 
+    // The batch path writes the property map without the per-write index
+    // maintenance the Cypher SET path runs (`DirGraph::plan_property_write`),
+    // and `try_index_lookup` trusts `property_indices` unconditionally — so an
+    // index built before this call keeps answering with the *old* value and a
+    // `MATCH (n:T {prop: <old>})` returns a node that no longer holds it.
+    // Same hazard, same remedy as the bulk loader (see `add_nodes` above).
+    // A no-op when the touched types carry no index.
+    for node_type in node_types.keys() {
+        graph.refresh_indexes_for_type(node_type);
+    }
+
     // Calculate elapsed time
     let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 

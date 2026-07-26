@@ -152,6 +152,9 @@ pub mod api {
         };
         pub use crate::graph::mutation::add_properties::{add_properties, PropertySpec};
         pub use crate::graph::mutation::extend::{extend_graph, ExtendReport};
+        // `AddPropertiesReport` is deliberately not re-exported: it was not part
+        // of the public surface before this module was split out, and the API
+        // baseline pins that surface.
         pub use crate::graph::mutation::maintain::{
             add_connections, add_edges_from_specs, add_nodes, create_connections,
             purge_provisional_nodes, replace_connections, update_node_properties, EdgeSpec,

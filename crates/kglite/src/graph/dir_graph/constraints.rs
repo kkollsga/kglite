@@ -46,9 +46,11 @@ use super::indexes::PropertyReader;
 use super::DirGraph;
 use crate::datatypes::values::Value;
 use crate::graph::constraints::{
-    normalize_properties, ConstraintKind, ConstraintViolation, UniqueConstraintKey,
+    normalize_properties, ConstraintKind, ConstraintViolation, NamedConstraint, UniqueConstraintKey,
 };
-use crate::graph::schema::{CompositeValue, PROVISIONAL_KEY};
+use crate::graph::schema::{
+    CompositeValue, NodeSchemaDefinition, SchemaDefinition, PROVISIONAL_KEY,
+};
 
 /// One node's occupancy of one declared unique tuple.
 ///
@@ -201,14 +203,30 @@ impl DirGraph {
         keys.len()
     }
 
-    /// Report `NODE KEY` when the tuple is exactly the type's declared primary
-    /// key (which is unique *and* not null), `UNIQUE` otherwise. Derived rather
-    /// than stored, so the two declarations cannot drift apart.
-    fn unique_kind_for(&self, node_type: &str, properties: &[String]) -> ConstraintKind {
-        match self.primary_key_for(node_type) {
-            Some(pk) if properties.len() == 1 && properties[0] == pk => ConstraintKind::NodeKey,
-            _ => ConstraintKind::Unique,
+    /// Report `NODE KEY` when the tuple is unique *and* every property in it is
+    /// required — which is what a node key is — and `UNIQUE` otherwise. Derived
+    /// rather than stored, so the declarations cannot drift apart.
+    ///
+    /// The type's declared primary key satisfies this by construction. The
+    /// second arm is what lets `CREATE CONSTRAINT … IS NODE KEY` report itself
+    /// honestly: KGLite serves that statement as uniqueness plus presence, and
+    /// there is only one primary-key slot per type, so a node key declared
+    /// through DDL is not the primary key and would otherwise report as a plain
+    /// `UNIQUE` violation.
+    pub(crate) fn unique_kind_for(&self, node_type: &str, properties: &[String]) -> ConstraintKind {
+        if matches!(self.primary_key_for(node_type), Some(pk) if properties.len() == 1 && properties[0] == pk)
+        {
+            return ConstraintKind::NodeKey;
         }
+        let required = self.required_property_names(node_type);
+        if !properties.is_empty()
+            && properties
+                .iter()
+                .all(|property| required.contains(&property.as_str()))
+        {
+            return ConstraintKind::NodeKey;
+        }
+        ConstraintKind::Unique
     }
 
     /// Scan `node_type` and build the single-occupant map for `properties`.
@@ -623,6 +641,224 @@ impl DirGraph {
     }
 
     // ========================================================================
+    // NOT NULL declaration
+    // ========================================================================
+
+    /// Declare `property` NOT NULL on `node_type` — i.e. add it to the type's
+    /// `required_fields`, the list [`Self::check_required_fields`] enforces on
+    /// every write path.
+    ///
+    /// Returns the number of nodes of the type that were checked.
+    ///
+    /// Fails with [`ConstraintViolation::preexisting_missing`] when existing
+    /// nodes have no value for the property, and installs nothing in that case —
+    /// mirroring [`Self::create_unique_constraint`], because a constraint that
+    /// silently exempts the rows already present is worse than a rejected
+    /// declaration. Provisional stubs are skipped, matching the write-path rule:
+    /// a stub is *deferred*, not exempt, and stays reportable via
+    /// `validate_schema()`.
+    ///
+    /// Idempotent: re-declaring an existing requirement re-verifies it and
+    /// changes nothing, so `IF NOT EXISTS` and a reload both work.
+    pub(crate) fn create_not_null_constraint(
+        &mut self,
+        node_type: &str,
+        property: &str,
+    ) -> Result<usize, ConstraintViolation> {
+        let (checked, missing) = self.count_missing_property(node_type, property);
+        if missing > 0 {
+            return Err(ConstraintViolation::preexisting_missing(
+                self.required_kind_for(node_type, property),
+                node_type,
+                property,
+                missing,
+            ));
+        }
+        self.node_schema_mut(node_type)
+            .required_fields
+            .push(property.to_string());
+        let required = &mut self.node_schema_mut(node_type).required_fields;
+        required.sort();
+        required.dedup();
+        Ok(checked)
+    }
+
+    /// Withdraw a NOT NULL declaration. Reports whether one was removed.
+    pub(crate) fn drop_not_null_constraint(&mut self, node_type: &str, property: &str) -> bool {
+        let Some(node) = self
+            .schema_definition
+            .as_mut()
+            .and_then(|schema| schema.node_schemas.get_mut(node_type))
+        else {
+            return false;
+        };
+        let before = node.required_fields.len();
+        node.required_fields.retain(|field| field != property);
+        before != node.required_fields.len()
+    }
+
+    /// Whether `property` is declared NOT NULL on `node_type`. A non-`id`
+    /// primary key counts: it is required by definition.
+    pub(crate) fn has_not_null_constraint(&self, node_type: &str, property: &str) -> bool {
+        self.required_property_names(node_type).contains(&property)
+    }
+
+    /// Every declared presence constraint, as `(node_type, property)` sorted.
+    /// Backs `SHOW CONSTRAINTS` together with
+    /// [`Self::list_unique_constraints`].
+    pub(crate) fn list_not_null_constraints(&self) -> Vec<(String, String)> {
+        let Some(schema) = self.schema_definition.as_ref() else {
+            return Vec::new();
+        };
+        let mut all: Vec<(String, String)> = schema
+            .node_schemas
+            .keys()
+            .flat_map(|node_type| {
+                self.required_property_names(node_type)
+                    .into_iter()
+                    .map(move |property| (node_type.clone(), property.to_string()))
+            })
+            .collect();
+        all.sort();
+        all.dedup();
+        all
+    }
+
+    /// `(nodes_checked, nodes_missing_the_property)` for `node_type`.
+    /// Provisional stubs are skipped — see [`Self::check_required_fields`].
+    fn count_missing_property(&mut self, node_type: &str, property: &str) -> (usize, usize) {
+        // Structural fields are `NodeData` fields rather than properties, so
+        // they are present by construction and nothing can be missing.
+        if matches!(property, "id" | "title" | "type") {
+            let checked = self
+                .type_indices
+                .get(node_type)
+                .map_or(0, |nodes| nodes.iter().count());
+            return (checked, 0);
+        }
+        let reader = self.property_reader(node_type, property);
+        let provisional = self.property_reader(node_type, PROVISIONAL_KEY);
+        let Some(node_indices) = self.type_indices.get(node_type) else {
+            return (0, 0);
+        };
+        let indices: Vec<NodeIndex> = node_indices.iter().collect();
+        let mut missing = 0usize;
+        for idx in &indices {
+            if matches!(
+                self.read_indexed(&provisional, *idx),
+                Some(Value::Boolean(true))
+            ) {
+                continue;
+            }
+            match self.read_indexed(&reader, *idx) {
+                Some(Value::Null) | None => missing += 1,
+                Some(_) => {}
+            }
+        }
+        (indices.len(), missing)
+    }
+
+    /// The mutable `NodeSchemaDefinition` for `node_type`, creating the schema
+    /// container and the per-type entry when they do not exist yet.
+    ///
+    /// Declaring a constraint on a graph with no `define_schema` call is
+    /// legitimate — `CREATE CONSTRAINT` is exactly that — so this materializes
+    /// the schema rather than refusing. It deliberately does **not** go through
+    /// `set_schema`, which installs the unique constraints a *whole* schema
+    /// implies; presence constraints install no index, and the caller owns the
+    /// uniqueness half of a NODE KEY.
+    fn node_schema_mut(&mut self, node_type: &str) -> &mut NodeSchemaDefinition {
+        self.schema_definition
+            .get_or_insert_with(SchemaDefinition::new)
+            .node_schemas
+            .entry(node_type.to_string())
+            .or_default()
+    }
+
+    // ========================================================================
+    // Named constraints
+    // ========================================================================
+
+    /// Record the name its author gave a constraint, so
+    /// `DROP CONSTRAINT <name>` can find it. Replaces any previous registration
+    /// of the same name.
+    pub(crate) fn register_constraint_name(&mut self, name: &str, constraint: NamedConstraint) {
+        self.constraint_names.insert(name.to_string(), constraint);
+    }
+
+    /// The declaration registered under `name`, if any.
+    pub(crate) fn constraint_by_name(&self, name: &str) -> Option<&NamedConstraint> {
+        self.constraint_names.get(name)
+    }
+
+    /// Forget a name. Called when its constraint is dropped.
+    pub(crate) fn forget_constraint_name(&mut self, name: &str) {
+        self.constraint_names.remove(name);
+    }
+
+    /// The name registered for `(node_type, properties)`, if the constraint was
+    /// declared with one. Property order is irrelevant, matching constraint
+    /// identity. Lets `SHOW CONSTRAINTS` report the author's name.
+    pub(crate) fn name_for_constraint(
+        &self,
+        node_type: &str,
+        properties: &[String],
+    ) -> Option<&str> {
+        let wanted = normalize_properties(properties);
+        self.constraint_names
+            .iter()
+            .find(|(_, declared)| {
+                declared.node_type == node_type
+                    && normalize_properties(&declared.properties) == wanted
+            })
+            .map(|(name, _)| name.as_str())
+    }
+
+    /// Drop every registered name whose constraint is no longer declared.
+    ///
+    /// The registry is a lookup aid, not the source of truth, and several paths
+    /// remove a constraint without going through `DROP CONSTRAINT` —
+    /// [`Self::drop_unique_constraints_for_type`] when a type is deleted, and
+    /// `set_schema` replacing a schema that declared one. Without this, those
+    /// names would leak into every subsequent save and `DROP CONSTRAINT <name>`
+    /// would claim to drop something that had already gone.
+    pub(crate) fn prune_constraint_names(&mut self) {
+        if self.constraint_names.is_empty() {
+            return;
+        }
+        let live: Vec<String> = self
+            .constraint_names
+            .iter()
+            .filter(|(_, declared)| self.constraint_is_declared(declared))
+            .map(|(name, _)| name.clone())
+            .collect();
+        self.constraint_names.retain(|name, _| live.contains(name));
+    }
+
+    /// Whether the declaration a registered name points at is still in force.
+    fn constraint_is_declared(&self, declared: &NamedConstraint) -> bool {
+        match declared.kind {
+            ConstraintKind::Unique => {
+                self.has_unique_constraint(&declared.node_type, &declared.properties)
+            }
+            ConstraintKind::NotNull => declared
+                .properties
+                .iter()
+                .all(|property| self.has_not_null_constraint(&declared.node_type, property)),
+            // A NODE KEY is the conjunction, so it survives only while both
+            // halves do — a dropped uniqueness half demotes it, and reporting it
+            // as still declared would overstate what is enforced.
+            ConstraintKind::NodeKey => {
+                self.has_unique_constraint(&declared.node_type, &declared.properties)
+                    && declared
+                        .properties
+                        .iter()
+                        .all(|property| self.has_not_null_constraint(&declared.node_type, property))
+            }
+        }
+    }
+
+    // ========================================================================
     // Load-time rebuild
     // ========================================================================
 
@@ -676,5 +912,308 @@ impl DirGraph {
             }
         }
         violations
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod not_null_declaration_tests {
+    use super::*;
+    use crate::graph::schema::NodeData;
+    use crate::graph::storage::GraphWrite;
+
+    /// `Person` nodes carrying whichever properties each row supplies, so a row
+    /// can deliberately omit one.
+    fn person_graph(rows: &[(i64, &str, Option<&str>)]) -> DirGraph {
+        let mut graph = DirGraph::new();
+        for (id, name, email) in rows {
+            let mut props =
+                HashMap::from([("name".to_string(), Value::String((*name).to_string()))]);
+            if let Some(email) = email {
+                props.insert("email".to_string(), Value::String((*email).to_string()));
+            }
+            let node = NodeData::new(
+                Value::UniqueId(*id as u32),
+                Value::String((*name).to_string()),
+                "Person".to_string(),
+                props,
+                &mut graph.interner,
+            );
+            let idx = graph.graph.add_node(node);
+            graph
+                .type_indices
+                .entry_or_default("Person".to_string())
+                .push(idx);
+        }
+        graph
+    }
+
+    #[test]
+    fn declaring_not_null_on_clean_data_installs_and_enforces_it() {
+        let mut graph = person_graph(&[(1, "Alice", Some("a@b.c")), (2, "Bob", Some("b@b.c"))]);
+        assert_eq!(
+            graph.create_not_null_constraint("Person", "email").unwrap(),
+            2
+        );
+        assert!(graph.has_not_null_constraint("Person", "email"));
+        assert!(graph.has_required_fields("Person"));
+
+        // A write that omits the property is now rejected.
+        let violation = graph
+            .check_required_fields("Person", |_| None)
+            .expect_err("a write with no email must be rejected");
+        assert_eq!(violation.kind, ConstraintKind::NotNull);
+        assert!(violation.to_string().contains("'email'"));
+
+        // A write that supplies it passes.
+        graph
+            .check_required_fields("Person", |name| {
+                (name == "email").then(|| Value::String("c@b.c".to_string()))
+            })
+            .expect("a write with an email must pass");
+    }
+
+    #[test]
+    fn declaring_not_null_against_missing_values_is_rejected_and_changes_nothing() {
+        let mut graph = person_graph(&[(1, "Alice", Some("a@b.c")), (2, "Bob", None)]);
+        let violation = graph
+            .create_not_null_constraint("Person", "email")
+            .expect_err("one node has no email");
+
+        assert!(violation.is_declaration_failure());
+        let message = violation.to_string();
+        assert!(message.contains("cannot declare"), "{message}");
+        assert!(message.contains("1 existing node"), "{message}");
+
+        // Nothing installed: the graph must be as permissive as before.
+        assert!(!graph.has_not_null_constraint("Person", "email"));
+        assert!(!graph.has_required_fields("Person"));
+    }
+
+    #[test]
+    fn declaring_not_null_is_idempotent() {
+        let mut graph = person_graph(&[(1, "Alice", Some("a@b.c"))]);
+        graph.create_not_null_constraint("Person", "email").unwrap();
+        graph.create_not_null_constraint("Person", "email").unwrap();
+        assert_eq!(
+            graph.list_not_null_constraints(),
+            vec![("Person".to_string(), "email".to_string())]
+        );
+    }
+
+    #[test]
+    fn dropping_not_null_stops_enforcement_and_reports_whether_it_existed() {
+        let mut graph = person_graph(&[(1, "Alice", Some("a@b.c"))]);
+        graph.create_not_null_constraint("Person", "email").unwrap();
+
+        assert!(graph.drop_not_null_constraint("Person", "email"));
+        assert!(!graph.has_not_null_constraint("Person", "email"));
+        graph
+            .check_required_fields("Person", |_| None)
+            .expect("no requirement remains");
+
+        // A second drop has nothing to remove.
+        assert!(!graph.drop_not_null_constraint("Person", "email"));
+        assert!(!graph.drop_not_null_constraint("Person", "nonexistent"));
+    }
+
+    /// A provisional stub carries only its id by construction, so counting it as
+    /// a missing value would make declaring NOT NULL impossible on any graph
+    /// built from an edge list. Deferred, not exempt — see
+    /// `check_required_fields`.
+    #[test]
+    fn provisional_stubs_do_not_block_a_declaration() {
+        let mut graph = person_graph(&[(1, "Alice", Some("a@b.c"))]);
+        let stub = NodeData::new(
+            Value::UniqueId(2),
+            Value::String("stub".to_string()),
+            "Person".to_string(),
+            HashMap::from([(PROVISIONAL_KEY.to_string(), Value::Boolean(true))]),
+            &mut graph.interner,
+        );
+        let idx = graph.graph.add_node(stub);
+        graph
+            .type_indices
+            .entry_or_default("Person".to_string())
+            .push(idx);
+
+        graph
+            .create_not_null_constraint("Person", "email")
+            .expect("the stub must not block the declaration");
+        assert!(graph.has_not_null_constraint("Person", "email"));
+    }
+
+    /// Structural fields are `NodeData` fields, present by construction, so
+    /// requiring one is satisfied rather than rejected.
+    #[test]
+    fn declaring_not_null_on_a_structural_field_is_satisfied() {
+        let mut graph = person_graph(&[(1, "Alice", None)]);
+        assert_eq!(graph.create_not_null_constraint("Person", "id").unwrap(), 1);
+        graph
+            .check_required_fields("Person", |_| None)
+            .expect("id is always present");
+    }
+
+    #[test]
+    fn declaring_not_null_needs_no_prior_define_schema() {
+        let mut graph = person_graph(&[(1, "Alice", Some("a@b.c"))]);
+        assert!(graph.get_schema().is_none());
+        graph.create_not_null_constraint("Person", "email").unwrap();
+        assert!(graph.get_schema().is_some());
+    }
+
+    /// A tuple that is both unique and fully required *is* a node key, so it
+    /// must report itself as one — otherwise `CREATE CONSTRAINT … IS NODE KEY`
+    /// would raise `UNIQUE` violations for a constraint the user declared as a
+    /// node key.
+    #[test]
+    fn unique_plus_required_reports_as_node_key() {
+        let mut graph = person_graph(&[(1, "Alice", Some("a@b.c"))]);
+        graph
+            .create_unique_constraint("Person", &["email"])
+            .unwrap();
+        assert_eq!(
+            graph.unique_kind_for("Person", &["email".to_string()]),
+            ConstraintKind::Unique
+        );
+
+        graph.create_not_null_constraint("Person", "email").unwrap();
+        assert_eq!(
+            graph.unique_kind_for("Person", &["email".to_string()]),
+            ConstraintKind::NodeKey
+        );
+    }
+}
+
+#[cfg(test)]
+mod constraint_name_registry_tests {
+    use super::*;
+
+    fn named(kind: ConstraintKind, properties: &[&str]) -> NamedConstraint {
+        NamedConstraint {
+            kind,
+            node_type: "Person".to_string(),
+            properties: properties.iter().map(|p| (*p).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_registered_name_resolves_to_its_declaration() {
+        let mut graph = DirGraph::new();
+        graph
+            .create_unique_constraint("Person", &["email"])
+            .unwrap();
+        graph.register_constraint_name(
+            "person_email_unique",
+            named(ConstraintKind::Unique, &["email"]),
+        );
+
+        assert_eq!(
+            graph.constraint_by_name("person_email_unique"),
+            Some(&named(ConstraintKind::Unique, &["email"]))
+        );
+        assert_eq!(graph.constraint_by_name("nope"), None);
+        assert_eq!(
+            graph.name_for_constraint("Person", &["email".to_string()]),
+            Some("person_email_unique")
+        );
+    }
+
+    /// Constraint identity ignores property order, so a name lookup must too.
+    #[test]
+    fn a_name_resolves_regardless_of_property_order() {
+        let mut graph = DirGraph::new();
+        graph
+            .create_unique_constraint("Person", &["first", "last"])
+            .unwrap();
+        graph.register_constraint_name(
+            "full_name",
+            named(ConstraintKind::Unique, &["first", "last"]),
+        );
+        assert_eq!(
+            graph.name_for_constraint("Person", &["last".to_string(), "first".to_string()]),
+            Some("full_name")
+        );
+    }
+
+    #[test]
+    fn forgetting_a_name_leaves_the_constraint_in_force() {
+        let mut graph = DirGraph::new();
+        graph
+            .create_unique_constraint("Person", &["email"])
+            .unwrap();
+        graph.register_constraint_name("c", named(ConstraintKind::Unique, &["email"]));
+
+        graph.forget_constraint_name("c");
+        assert_eq!(graph.constraint_by_name("c"), None);
+        assert!(graph.has_unique_constraint("Person", &["email".to_string()]));
+    }
+
+    /// The registry is a lookup aid, so a name whose declaration went away by
+    /// another route must not survive into the next save.
+    #[test]
+    fn pruning_discards_names_whose_declaration_is_gone() {
+        let mut graph = DirGraph::new();
+        graph
+            .create_unique_constraint("Person", &["email"])
+            .unwrap();
+        graph.register_constraint_name("live", named(ConstraintKind::Unique, &["email"]));
+        graph.register_constraint_name("dangling", named(ConstraintKind::Unique, &["nickname"]));
+
+        graph.prune_constraint_names();
+        assert!(graph.constraint_by_name("live").is_some());
+        assert!(
+            graph.constraint_by_name("dangling").is_none(),
+            "a name with no declaration behind it must be pruned"
+        );
+
+        // Dropping the type's constraints strands the surviving name too.
+        graph.drop_unique_constraints_for_type("Person");
+        graph.prune_constraint_names();
+        assert!(graph.constraint_by_name("live").is_none());
+    }
+
+    /// A NODE KEY is uniqueness *and* presence, so losing either half must
+    /// demote it rather than leave the name claiming both are enforced.
+    #[test]
+    fn a_node_key_name_is_pruned_when_either_half_goes() {
+        let mut graph = DirGraph::new();
+        graph
+            .create_unique_constraint("Person", &["email"])
+            .unwrap();
+        graph.create_not_null_constraint("Person", "email").unwrap();
+        graph.register_constraint_name("person_key", named(ConstraintKind::NodeKey, &["email"]));
+
+        graph.prune_constraint_names();
+        assert!(graph.constraint_by_name("person_key").is_some());
+
+        graph.drop_not_null_constraint("Person", "email");
+        graph.prune_constraint_names();
+        assert!(
+            graph.constraint_by_name("person_key").is_none(),
+            "a NODE KEY without its presence half is no longer a NODE KEY"
+        );
+    }
+
+    #[test]
+    fn populate_index_keys_prunes_and_sorts_deterministically() {
+        let mut graph = DirGraph::new();
+        graph
+            .create_unique_constraint("Person", &["email"])
+            .unwrap();
+        graph
+            .create_unique_constraint("Person", &["nickname"])
+            .unwrap();
+        graph.register_constraint_name("dangling", named(ConstraintKind::Unique, &["absent"]));
+
+        graph.populate_index_keys();
+        assert!(graph.constraint_by_name("dangling").is_none());
+        // Sorted, so a graph carrying constraints saves reproducible bytes.
+        let mut sorted = graph.unique_constraint_keys.clone();
+        sorted.sort();
+        assert_eq!(graph.unique_constraint_keys, sorted);
     }
 }

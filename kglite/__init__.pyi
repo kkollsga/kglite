@@ -1092,13 +1092,19 @@ class KnowledgeGraph:
         Returns ``None`` if no mutation has been executed yet.
         Keys: ``nodes_created``, ``relationships_created``, ``properties_set``,
         ``nodes_deleted``, ``relationships_deleted``, ``properties_removed``,
-        ``indexes_added``, ``indexes_removed``.
+        ``indexes_added``, ``indexes_removed``, ``constraints_added``,
+        ``constraints_removed``.
 
         ``indexes_added`` / ``indexes_removed`` count KGLite index
         *structures*, mirroring Neo4j's ``indexesAdded`` / ``indexesRemoved``
         counters. ``CREATE RANGE INDEX`` reports 2 — a hash equality index
         plus a B-tree range index, which together serve what Neo4j's single
         RANGE index does.
+
+        ``constraints_added`` / ``constraints_removed`` count *constraints*
+        rather than the structures behind them, mirroring Neo4j's
+        ``constraintsAdded`` / ``constraintsRemoved``. ``IS NODE KEY`` reports
+        1 even though KGLite serves it as uniqueness plus presence.
         """
         ...
 
@@ -4287,7 +4293,8 @@ class KnowledgeGraph:
         DDL below) store statistics on ``graph.last_mutation_stats`` with keys
         ``nodes_created``, ``relationships_created``, ``properties_set``,
         ``nodes_deleted``, ``relationships_deleted``, ``properties_removed``,
-        ``indexes_added``, ``indexes_removed``.
+        ``indexes_added``, ``indexes_removed``, ``constraints_added``,
+        ``constraints_removed``.
 
         Schema DDL — ``CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:L)
         ON (n.p, ...)``, ``DROP INDEX <name> [IF EXISTS]``, and ``SHOW
@@ -4296,8 +4303,30 @@ class KnowledgeGraph:
         B-tree range structures) and index names are canonical rather than
         user-assigned; see the "Cypher index DDL" section of ``CYPHER.md``.
         Index DDL counts as a mutation, so it is blocked on a read-only graph.
-        Constraint DDL is not supported and is rejected with the enforcement
-        route that applies (primary keys, ``lock_schema()``).
+
+        Constraint DDL — ``CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:L)
+        REQUIRE n.p IS UNIQUE | IS NOT NULL | IS NODE KEY``,
+        ``DROP CONSTRAINT <name> [IF EXISTS]``, and ``SHOW CONSTRAINTS`` —
+        declares constraints that are enforced on every write path, including
+        the bulk loader. ``REQUIRE (n.a, n.b) IS UNIQUE`` constrains the tuple;
+        ``IS NODE KEY`` is uniqueness *and* presence, installed atomically.
+        Declaring a constraint the existing data already violates is rejected
+        and changes nothing. Unlike index names, constraint names **are**
+        stored, so ``DROP CONSTRAINT <name>`` works; a constraint declared
+        without a name is addressable by its canonical descriptor
+        (``Label.property``). ``IS :: TYPE`` / ``IS TYPED TYPE`` is rejected —
+        there is no write-time property-type enforcement, so accepting it would
+        report success while enforcing nothing; use ``lock_schema()`` or
+        ``validate_schema()``. ``IS UNIQUE`` / ``IS NODE KEY`` over the identity
+        field is rejected for the same reason, under any spelling that resolves
+        to it (``id`` itself or the node type's own id column): ``id`` is a
+        structural field rather than a stored property, so the unique secondary
+        index never sees the write. Declare ``primary_key`` through
+        :meth:`define_schema` instead — it probes the per-type id index on every
+        write path. ``IS NOT NULL`` on ``id`` **is** accepted, since it is
+        present by construction. ``SHOW CONSTRAINTS`` and ``SHOW INDEXES`` are
+        reads and work on a read-only graph. See the "Cypher constraint DDL"
+        section of ``CYPHER.md``.
 
         Direct mutation calls execute in place: if a later clause, timeout, or
         row-budget check fails, earlier mutations may remain visible. Use

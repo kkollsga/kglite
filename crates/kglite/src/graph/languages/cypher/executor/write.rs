@@ -56,12 +56,13 @@ pub(crate) fn clause_is_mutation(clause: &Clause) -> bool {
         // matching Neo4j. A degenerate empty-body FOREACH is then a
         // harmless no-op there rather than erroring on the read path.
         Clause::Foreach { .. } => true,
-        // Schema is graph state, so `CREATE INDEX` / `DROP INDEX` (and the
-        // constraint commands) are mutations: that is what puts them behind the
-        // read-only-graph guard, the read-only-transaction guard, and the
-        // rollback checkpoint. `SHOW INDEXES` is a read and stays on the read
-        // engine.
-        Clause::Schema(SchemaCommand::ShowIndexes) => false,
+        // Schema is graph state, so `CREATE`/`DROP INDEX` and
+        // `CREATE`/`DROP CONSTRAINT` are mutations: that is what puts them
+        // behind the read-only-graph guard, the read-only-transaction guard, and
+        // the rollback checkpoint. The two `SHOW` forms are reads and stay on
+        // the read engine.
+        Clause::Schema(SchemaCommand::ShowIndexes)
+        | Clause::Schema(SchemaCommand::Constraint(ConstraintCommand::Show)) => false,
         Clause::Schema(_) => true,
         _ => false,
     }

@@ -314,30 +314,43 @@ NEO4J_SCHEMA_SCRIPT: list[tuple[str, str | None]] = [
     ),
     ("CREATE LOOKUP INDEX node_labels IF NOT EXISTS FOR (n) ON EACH labels(n)", "LOOKUP INDEX"),
     ("CREATE INDEX knows_since IF NOT EXISTS FOR ()-[r:KNOWS]-() ON (r.since)", "KNOWS"),
+    # Constraint DDL is served as of Sprint 4b: uniqueness, presence, and node
+    # keys all route to real enforcement. `person_id` is unique across the
+    # fixture and `name` is present on every row, so each declaration holds.
+    # `person_id` is this fixture's unique_id_field, so it resolves to the
+    # structural `id`. Uniqueness DDL over `id` is refused and points at the
+    # primary-key route, rather than declaring a constraint that would admit
+    # duplicates while reporting success.
     (
         "CREATE CONSTRAINT person_id_u IF NOT EXISTS FOR (p:Person) REQUIRE p.person_id IS UNIQUE",
-        "IS UNIQUE is not supported yet",
+        "primary_key",
+    ),
+    (
+        "CREATE CONSTRAINT person_city_u IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        None,
     ),
     (
         "CREATE CONSTRAINT person_name_e IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS NOT NULL",
-        "IS NOT NULL is not supported yet",
+        None,
     ),
     (
-        "CREATE CONSTRAINT person_key IF NOT EXISTS FOR (p:Person) REQUIRE (p.person_id, p.name) IS NODE KEY",
-        "IS NODE KEY is not supported yet",
+        "CREATE CONSTRAINT person_key IF NOT EXISTS FOR (p:Person) REQUIRE (p.name, p.age) IS NODE KEY",
+        None,
     ),
+    # Property-type constraints have no write-time enforcement route, so they are
+    # rejected rather than accepted-and-ignored.
     (
         "CREATE CONSTRAINT person_typed IF NOT EXISTS FOR (p:Person) REQUIRE p.age IS :: INTEGER",
-        "not supported yet",
+        "is not supported",
     ),
-    # Neo4j 4 spelled REQUIRE as ASSERT; a 4.x-era script must also reach the
-    # feature message rather than a parse error.
+    # Neo4j 4 spelled REQUIRE as ASSERT; a 4.x-era script must reach the same
+    # enforcement rather than a parse error.
     (
-        "CREATE CONSTRAINT person_id_u4 IF NOT EXISTS FOR (p:Person) ASSERT p.person_id IS UNIQUE",
-        "IS UNIQUE is not supported yet",
+        "CREATE CONSTRAINT person_id_u4 IF NOT EXISTS FOR (p:Person) ASSERT p.name IS UNIQUE",
+        None,
     ),
-    ("SHOW CONSTRAINTS", "not supported yet"),
-    ("DROP CONSTRAINT person_id_u IF EXISTS", "not supported yet"),
+    ("SHOW CONSTRAINTS", None),
+    ("DROP CONSTRAINT person_id_u IF EXISTS", None),
     ("DROP INDEX Person.city IF EXISTS", None),
     ("DROP INDEX FOR (p:Person) ON (p.city, p.age)", None),
 ]

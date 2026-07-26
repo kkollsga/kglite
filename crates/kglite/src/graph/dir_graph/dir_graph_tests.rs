@@ -350,3 +350,131 @@ mod constraint_snapshot_tests {
         );
     }
 }
+
+/// Index freshness after the two *property-overwrite* paths.
+///
+/// Sibling of `bulk_index_freshness_tests` above, which covers the bulk
+/// *append*. The failure mode here is strictly worse: appending behind a stale
+/// index hides rows, whereas overwriting a value behind one makes
+/// `MATCH (n:T {prop: <old value>})` return a node that no longer holds the old
+/// value. A wrong answer, not a missing one.
+#[cfg(test)]
+mod overwrite_index_freshness_tests {
+    use super::*;
+    use crate::datatypes::values::{DataFrame, Value};
+    use crate::graph::mutation::maintain::{add_nodes, update_node_properties};
+
+    fn people(rows: Vec<(&str, &str)>) -> DataFrame {
+        DataFrame::from_cypher_rows(
+            vec!["id".to_string(), "city".to_string()],
+            rows.into_iter()
+                .map(|(id, city)| {
+                    vec![
+                        Value::String(id.to_string()),
+                        Value::String(city.to_string()),
+                    ]
+                })
+                .collect(),
+        )
+        .expect("dataframe")
+    }
+
+    /// `update_node_properties` writes through the batch path, which skips the
+    /// per-write index maintenance the Cypher SET path performs. Before the fix
+    /// the equality index kept the pre-update value, so a lookup for the *old*
+    /// value still returned the node.
+    #[test]
+    fn update_node_properties_keeps_the_property_index_fresh() {
+        let mut g = DirGraph::new();
+        add_nodes(
+            &mut g,
+            people(vec![("p1", "Oslo")]),
+            "Person".to_string(),
+            "id".to_string(),
+            None,
+            None,
+        )
+        .expect("load");
+
+        assert_eq!(g.create_index("Person", "city"), 1);
+        let node = g
+            .type_indices
+            .get("Person")
+            .and_then(|nodes| nodes.iter().next())
+            .expect("the loaded Person node");
+
+        update_node_properties(
+            &mut g,
+            &[(Some(node), Value::String("Bergen".to_string()))],
+            "city",
+        )
+        .expect("update");
+
+        let stale = g
+            .lookup_by_index("Person", "city", &Value::String("Oslo".to_string()))
+            .unwrap_or_default();
+        assert!(
+            stale.is_empty(),
+            "the index still resolves the overwritten value 'Oslo' to {stale:?} — \
+             MATCH (n:Person {{city: 'Oslo'}}) would return a node whose city is 'Bergen'"
+        );
+
+        let fresh = g
+            .lookup_by_index("Person", "city", &Value::String("Bergen".to_string()))
+            .unwrap_or_default();
+        assert_eq!(fresh, vec![node], "the new value is not indexed");
+    }
+
+    /// The range and composite structures share the same refresh, so they must
+    /// forget the overwritten value too.
+    #[test]
+    fn update_node_properties_keeps_range_and_composite_indexes_fresh() {
+        let mut g = DirGraph::new();
+        add_nodes(
+            &mut g,
+            people(vec![("p1", "Oslo")]),
+            "Person".to_string(),
+            "id".to_string(),
+            None,
+            None,
+        )
+        .expect("load");
+
+        g.create_range_index("Person", "city");
+        g.create_composite_index("Person", &["city"]);
+        let node = g
+            .type_indices
+            .get("Person")
+            .and_then(|nodes| nodes.iter().next())
+            .expect("the loaded Person node");
+
+        update_node_properties(
+            &mut g,
+            &[(Some(node), Value::String("Bergen".to_string()))],
+            "city",
+        )
+        .expect("update");
+
+        let oslo = Value::String("Oslo".to_string());
+        let ranged = g
+            .lookup_range(
+                "Person",
+                "city",
+                std::ops::Bound::Included(&oslo),
+                std::ops::Bound::Included(&oslo),
+            )
+            .unwrap_or_default();
+        assert!(
+            ranged.is_empty(),
+            "the range index still resolves the overwritten value: {ranged:?}"
+        );
+
+        let composite = g
+            .lookup_by_composite_index("Person", &["city".to_string()], &[oslo])
+            .unwrap_or_default();
+        assert!(
+            composite.is_empty(),
+            "the composite index still resolves the overwritten value: {composite:?}"
+        );
+    }
+}

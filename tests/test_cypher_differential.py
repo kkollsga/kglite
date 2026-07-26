@@ -1916,6 +1916,12 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     # writing DDL statements live in MUTATION_QUERIES, which builds a fresh
     # graph per mode.
     ("show_indexes_ddl", "small_graph", "SHOW INDEXES", None),
+    # `SHOW CONSTRAINTS` is the constraint counterpart, and a read for the same
+    # reason: it inspects schema state rather than changing it. The shared
+    # fixtures declare no constraints, so the row set is empty — what this pins
+    # is that no pass rewrites or drops the clause and that it stays off the
+    # mutation engine, where it would be rejected.
+    ("show_constraints_ddl", "small_graph", "SHOW CONSTRAINTS", None),
 ]
 
 
@@ -1992,6 +1998,24 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
     ("create_composite_index_ddl", "CREATE INDEX FOR (p:Person) ON (p.city, p.age)"),
     ("create_range_index_ddl", "CREATE RANGE INDEX person_age FOR (p:Person) ON (p.age)"),
     ("drop_index_ddl_missing_if_exists", "DROP INDEX Person.name IF EXISTS"),
+    # Constraint DDL. Declaring a constraint rebuilds an enforcement structure
+    # from live data, so a pass that reordered or duplicated the statement would
+    # change post-statement graph state — which this harness compares. The
+    # fixture's `name` and `age` are both distinct across all three rows, so each
+    # declaration is satisfiable. `person_id` is deliberately avoided: it is the
+    # fixture's id field, and uniqueness DDL over `id` is refused.
+    ("create_constraint_unique_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE"),
+    (
+        "create_constraint_unique_ddl_if_not_exists",
+        "CREATE CONSTRAINT person_name_u IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS UNIQUE",
+    ),
+    (
+        "create_constraint_composite_unique_ddl",
+        "CREATE CONSTRAINT FOR (p:Person) REQUIRE (p.name, p.age) IS UNIQUE",
+    ),
+    ("create_constraint_not_null_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL"),
+    ("create_constraint_node_key_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NODE KEY"),
+    ("drop_constraint_ddl_missing_if_exists", "DROP CONSTRAINT person_name_u IF EXISTS"),
 ]
 
 

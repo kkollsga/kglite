@@ -5,7 +5,7 @@
 //! embedding stores, connection-type metadata, and schema definitions.
 
 use crate::datatypes::values::Value;
-use crate::graph::constraints::UniqueConstraintKey;
+use crate::graph::constraints::{NamedConstraint, UniqueConstraintKey};
 use crate::graph::schema::{
     CompositeIndexKey, CompositeValue, ConnectionTypeInfo, ConnectivityTriple, EdgeData,
     EmbeddingStore, GraphBackend, IndexKey, InternedKey, NodeData, PropertyStorage, SaveMetadata,
@@ -99,6 +99,15 @@ pub struct DirGraph {
     /// list, i.e. no constraints, which is the pre-existing behaviour.
     #[serde(default)]
     pub(crate) unique_constraint_keys: Vec<UniqueConstraintKey>,
+    /// User-supplied constraint names → the declaration each one names, so
+    /// `DROP CONSTRAINT <name>` resolves. KGLite's enforcement structures are
+    /// keyed by `(node_type, properties)`, so a Neo4j-style constraint name has
+    /// nowhere else to live; this registry is a lookup aid and never the source
+    /// of truth (see `NamedConstraint` and `prune_constraint_names`). Additive
+    /// serde field — older `.kgl` files load with an empty map, which only means
+    /// their constraints must be dropped by descriptor.
+    #[serde(default)]
+    pub(crate) constraint_names: HashMap<String, NamedConstraint>,
     /// Fast O(1) lookup by node ID: node_type -> TypeIdIndex
     /// Lazily built on first use for each node type, skipped during serialization.
     /// Uses compact u32 HashMap when all IDs are UniqueId (e.g., Wikidata mapped mode).
@@ -388,6 +397,7 @@ impl DirGraph {
             range_index_keys: Vec::new(),
             unique_indices: HashMap::new(),
             unique_constraint_keys: Vec::new(),
+            constraint_names: HashMap::new(),
             id_indices: IdIndexStore::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: HashMap::new(),
@@ -441,6 +451,7 @@ impl DirGraph {
             range_index_keys: Vec::new(),
             unique_indices: HashMap::new(),
             unique_constraint_keys: Vec::new(),
+            constraint_names: HashMap::new(),
             id_indices: IdIndexStore::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: HashMap::new(),
@@ -936,6 +947,11 @@ impl DirGraph {
             self.unique_indices.keys().cloned().collect();
         unique_keys.sort_unstable();
         self.unique_constraint_keys = unique_keys;
+        // Constraint *names* cannot be re-derived from the enforcement
+        // structures, so unlike the lists above they are maintained live. Prune
+        // instead: a name whose declaration is gone must not be saved, or
+        // `DROP CONSTRAINT <name>` would resurrect it after a reload.
+        self.prune_constraint_names();
     }
 
     /// Rebuild property and composite indexes from the persisted key lists.
