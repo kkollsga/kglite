@@ -1785,6 +1785,9 @@ pub kglite::api::KgError::PropertyNotFound::property: alloc::string::String
 pub kglite::api::KgError::Schema
 pub kglite::api::KgError::Schema::kind: kglite::error::SchemaErrorKindRepr
 pub kglite::api::KgError::Schema::message: alloc::string::String
+pub kglite::api::KgError::TransactionConflict
+pub kglite::api::KgError::TransactionConflict::base_version: u64
+pub kglite::api::KgError::TransactionConflict::current_version: u64
 pub kglite::api::KgError::Validation(kglite::api::ValidationError)
 impl kglite::error::KgError
 pub fn kglite::error::KgError::code(&self) -> kglite::error::KgErrorCode
@@ -1822,6 +1825,7 @@ pub kglite::api::KgErrorCode::MissingArgument
 pub kglite::api::KgErrorCode::NodeNotFound
 pub kglite::api::KgErrorCode::PropertyNotFound
 pub kglite::api::KgErrorCode::Schema
+pub kglite::api::KgErrorCode::TransactionConflict
 pub kglite::api::KgErrorCode::Validation
 impl kglite::error::KgErrorCode
 pub fn kglite::error::KgErrorCode::as_str(&self) -> &'static str
@@ -2092,6 +2096,7 @@ pub fn kglite::api::DirGraph::reindex(&mut self)
 pub fn kglite::api::DirGraph::resolve_alias<'a>(&'a self, node_type: &str, property: &'a str) -> &'a str
 pub fn kglite::api::DirGraph::set_type_connectivity(&self, triples: alloc::vec::Vec<kglite::graph::schema::ConnectivityTriple>)
 pub fn kglite::api::DirGraph::set_version(&mut self, v: u64)
+pub fn kglite::api::DirGraph::take_constraint_error(&mut self, message: &str) -> core::option::Option<kglite::error::KgError>
 pub fn kglite::api::DirGraph::upsert_connection_type_metadata(&mut self, conn_type: &str, source_type: &str, target_type: &str, prop_types: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>)
 pub fn kglite::api::DirGraph::upsert_node_type_metadata(&mut self, node_type: &str, props: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>)
 pub fn kglite::api::DirGraph::vacuum(&mut self) -> std::collections::hash::map::HashMap<petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex>
@@ -3058,6 +3063,9 @@ pub kglite::error::KgError::PropertyNotFound::property: alloc::string::String
 pub kglite::error::KgError::Schema
 pub kglite::error::KgError::Schema::kind: kglite::error::SchemaErrorKindRepr
 pub kglite::error::KgError::Schema::message: alloc::string::String
+pub kglite::error::KgError::TransactionConflict
+pub kglite::error::KgError::TransactionConflict::base_version: u64
+pub kglite::error::KgError::TransactionConflict::current_version: u64
 pub kglite::error::KgError::Validation(kglite::api::ValidationError)
 impl kglite::error::KgError
 pub fn kglite::error::KgError::code(&self) -> kglite::error::KgErrorCode
@@ -3095,6 +3103,7 @@ pub kglite::error::KgErrorCode::MissingArgument
 pub kglite::error::KgErrorCode::NodeNotFound
 pub kglite::error::KgErrorCode::PropertyNotFound
 pub kglite::error::KgErrorCode::Schema
+pub kglite::error::KgErrorCode::TransactionConflict
 pub kglite::error::KgErrorCode::Validation
 impl kglite::error::KgErrorCode
 pub fn kglite::error::KgErrorCode::as_str(&self) -> &'static str
