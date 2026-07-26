@@ -547,6 +547,10 @@ pub fn save_subset_streaming_disk(
     dest.id_field_aliases = source.id_field_aliases.clone();
     dest.title_field_aliases = source.title_field_aliases.clone();
     dest.parent_types = source.parent_types.clone();
+    // A subset of a graph at user-schema version N is still at version N — the
+    // data model didn't change, only which rows came along. Carrying it means a
+    // migration runner pointed at the subset doesn't re-run migrations 1..=N.
+    dest.user_schema_version = source.user_schema_version;
 
     // Bulk-loader contract: defer CSR build until save_disk so add_edge
     // appends to the file-backed pending_edges instead of going through

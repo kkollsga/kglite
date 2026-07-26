@@ -128,6 +128,20 @@ pub struct DirGraph {
     /// a trivial v2 without changing the format. Additive — absent in old files.
     #[serde(default)]
     pub graph_instructions: HashMap<String, String>,
+    /// **User**-schema version — the caller's own data-model revision, bumped by
+    /// their migrations. Entirely distinct from the two engine version stamps:
+    /// `save_metadata.format_version` / the `.kgl` magic describe *our* on-disk
+    /// layout, and the engine never reads or interprets this number. It exists
+    /// so a migration runner can ask "which of my ordered migration scripts has
+    /// this graph already had applied?" and refuse to re-apply or skip.
+    ///
+    /// `0` = unversioned (baseline, no migrations applied) — which is also what
+    /// every `.kgl` file written before this field existed loads as, via the
+    /// serde default. Read/written directly as a field; there is no invariant
+    /// to guard, so accessors would be sugar. Costs nothing per write: it is
+    /// touched only by an explicit assignment and by save/load.
+    #[serde(default)]
+    pub user_schema_version: u32,
     /// Auto-vacuum threshold: if Some(t), vacuum() is triggered automatically after
     /// DELETE operations when fragmentation_ratio exceeds t and tombstones > 100.
     /// Default: Some(0.3). Set to None to disable.
@@ -380,6 +394,7 @@ impl DirGraph {
             title_field_aliases: FxHashMap::default(),
             parent_types: HashMap::new(),
             graph_instructions: HashMap::new(),
+            user_schema_version: 0,
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -431,6 +446,7 @@ impl DirGraph {
             title_field_aliases: FxHashMap::default(),
             parent_types: HashMap::new(),
             graph_instructions: HashMap::new(),
+            user_schema_version: 0,
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
