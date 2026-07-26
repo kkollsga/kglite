@@ -225,12 +225,12 @@ building saves a lot of argument later.
   API, a directory, a repo) and the graph is a rebuildable projection you query.
   This is what most kglite deployments are, and it is the cheapest correct
   answer. **→ [Derived index guide](https://kglite.readthedocs.io/en/latest/python/guides/derived-index.html).**
-- **Primary store** — the graph *is* the authoritative copy. Statements are
-  atomic, crash safety is available via `open(..., durable=True)`, readers get
-  snapshot isolation, and for in-memory graphs the cost of a write scales with
-  the size of the change rather than the size of the graph — with three named
-  exceptions. One process owns the writes; the scope statement lists the rest of
-  the limits rather than softening them.
+- **Primary store** — the graph *is* the authoritative copy. `open()` is
+  crash-safe by default, statements are atomic, readers get snapshot isolation,
+  UNIQUE / NOT NULL / node-key constraints are enforced on every write path
+  including the bulk loaders, and for in-memory graphs the cost of a write scales
+  with the size of the change rather than the size of the graph. One process owns
+  the writes; the scope statement lists the limits rather than softening them.
   **→ [Primary store: scope and limits](https://kglite.readthedocs.io/en/latest/python/guides/primary-store.html).**
 
 ## Quick Start
