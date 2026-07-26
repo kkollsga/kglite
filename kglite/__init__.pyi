@@ -3,7 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Optional, Protocol, Union, overload, runtime_checkable
+from typing import (
+    Any,
+    Callable,
+    Literal,
+    Optional,
+    Protocol,
+    Union,
+    overload,
+    runtime_checkable,
+)
 
 import pandas as pd
 
@@ -727,7 +736,7 @@ def open(
     path: str,
     *,
     storage: str | None = None,
-    durable: bool | None = None,
+    durable: bool | Literal["full", "normal", "off"] | None = None,
     lock: bool = True,
 ) -> KnowledgeGraph:
     """Open a graph at ``path`` — load it if it exists, create a fresh one if
@@ -749,21 +758,42 @@ def open(
             ``"disk"``); ignored when opening an existing file, which keeps the
             mode it was saved in.
         durable: Write-ahead logging — **on by default**. Each committed
-            mutation is appended to a ``<path>-wal`` sidecar and ``fsync``'d
-            before the call returns, and on open any WAL frames are replayed
-            onto the loaded checkpoint to recover work committed since the last
-            ``save()``. ``save()`` writes a full checkpoint and truncates the
-            log.
+            mutation is appended to a ``<path>-wal`` sidecar, and on open any
+            WAL frames are replayed onto the loaded checkpoint to recover work
+            committed since the last ``save()``. ``save()`` writes a full
+            checkpoint and truncates the log.
 
-            - ``None`` (default) — enabled wherever it is supported, i.e. for
-              the in-memory default and ``storage="mapped"``. A
-              ``storage="disk"`` graph opens **non-durable** rather than
-              raising, since its commit boundary is a generation publish, not a
-              logical log.
-            - ``True`` — required. ``storage="disk"`` raises ``ValueError``
-              rather than quietly returning a graph without the crash safety
-              you asked for.
-            - ``False`` — opt out. See the performance note below.
+            The level names **what a committed mutation survives**, using
+            SQLite's ``synchronous`` vocabulary. These are guarantees, not
+            syscalls — the syscall differs by platform, the guarantee does not:
+
+            - ``"full"`` (also spelled ``True``, and the default) — survives
+              **power loss**. One barrier per commit. On macOS that barrier is
+              ``F_FULLFSYNC``, a stronger guarantee than SQLite's own default
+              provides.
+            - ``"normal"`` — survives the **process** dying: ``SIGKILL``, an
+              unhandled panic, an OOM-kill. The frame is in the kernel's page
+              cache before the call returns, and the page cache outlives the
+              process. An OS crash or power loss loses commits made since the
+              last ``save()``. No barrier per commit. Call :meth:`sync
+              <KnowledgeGraph.sync>` to take an explicit power-safe point
+              without republishing the whole graph.
+            - ``"off"`` (also spelled ``False``) — no log. The graph still
+              remembers ``path`` for ``save()``; a crash loses everything since
+              the last checkpoint.
+            - ``None`` (default) — ``"full"``, except on ``storage="disk"``
+              where it resolves to ``"off"`` rather than raising.
+
+            **The levels are not uniform across storage modes:**
+            ``storage="disk"`` supports only ``"off"``, and both ``"full"`` and
+            ``"normal"`` raise ``ValueError`` there. A disk graph commits by
+            publishing an immutable generation rather than by logging a write,
+            so the blocker is structural, not a matter of barrier strength.
+
+            Which to pick: ``"full"`` when losing an acknowledged write is
+            unacceptable; ``"normal"`` when you want a crash-safe application
+            and treat power loss as a restore-from-backup event; ``"off"`` for
+            bulk loading and graphs rebuildable from source data.
         lock: Single-writer guard — **on by default**. Opening takes an
             exclusive advisory lock on a ``<path>.lock`` sidecar and holds it
             until ``close()`` / ``with``-block exit, so a second process that
@@ -805,20 +835,27 @@ def open(
         lock, and does nothing useful for a dead one.
 
     Note:
-        **What durability costs.** Crash safety is bought with one ``fsync``
-        per committed mutation, so a write returns only once the log entry is
-        on physical storage. That makes each individual write substantially
-        more expensive than an unlogged one — the cost is dominated by device
-        latency, not by graph size, so it is most visible in loops of many
-        small writes and least visible for a few large ones. Reads are
-        completely unaffected: the capture layer forwards them with no
-        overhead.
+        **What durability costs.** Under ``"full"``, crash safety is bought
+        with one barrier per committed mutation, so a write returns only once
+        the log entry is on physical storage. That makes each individual write
+        substantially more expensive than an unlogged one — the cost is
+        dominated by device latency, not by graph size, so it is most visible
+        in loops of many small writes and least visible for a few large ones.
+        Reads are completely unaffected: the capture layer forwards them with
+        no overhead.
 
-        Prefer ``durable=False`` for bulk loading and for graphs that are
+        ``"normal"`` is where that cost goes away while the log stays: it
+        writes the same frame and skips only the barrier, so a write costs
+        roughly what an unlogged write costs, and a process crash still loses
+        nothing. That is the level to reach for when the failure you are
+        actually defending against is a crashing process rather than a power
+        cut.
+
+        Otherwise: prefer ``durable=False`` for bulk loading and for graphs
         rebuildable from source data, then ``save()`` once at the end; batch
         many small mutations into one statement (or one ``begin()``
         transaction, which commits as a single log entry) when you need both
-        throughput and crash safety.
+        throughput and the strongest guarantee.
 
     Note:
         **A ``with`` block is not a transaction.** Each mutation commits as it
@@ -3476,6 +3513,38 @@ class KnowledgeGraph:
                 flush happens anyway): the save is the checkpoint that truncates
                 the fsync'd write-ahead log, so skipping the flush could lose
                 both the checkpoint and the log on a crash.
+        """
+        ...
+
+    def sync(self) -> None:
+        """Flush every commit made so far to stable storage.
+
+        This is the barrier ``durable="full"`` performs on *every* commit,
+        taken on demand — and it is what makes ``durable="normal"`` adoptable
+        rather than merely fast. Without it, a ``"normal"`` graph's only route
+        to power-safety is a full :meth:`save`, which republishes the entire
+        graph: the wrong granularity for "flush at the end of a request" or
+        "flush before shutdown"::
+
+            g = kglite.open("app.kgl", durable="normal")
+            handle_request(g)      # commits survive the process dying
+            g.sync()               # …and now survive power loss too
+
+        Behaviour by level:
+
+        - ``"normal"`` — the real work. Everything committed before this call
+          now survives power loss, not just process death.
+        - ``"full"`` — returns immediately; every commit was already
+          barriered, so the guarantee is already met.
+        - ``"off"`` or a graph opened without a log — raises ``ValueError``.
+          There is nothing to flush, and silently doing nothing would leave a
+          caller believing they had bought power-safety.
+
+        Pending mutations are folded into the log first, so this is also the
+        safe way to force a commit boundary before an external snapshot.
+
+        Unlike :meth:`save`, this writes **no checkpoint** and does not
+        truncate the log — it only makes the existing log durable.
         """
         ...
 

@@ -23,6 +23,13 @@ The ``del`` is the handover, not a formality.
 Every crash test runs for each storage mode that supports durability
 (:data:`DURABLE_STORAGE_MODES`). ``storage="disk"`` is deliberately excluded
 and its refusal is asserted in ``test_durable_rejects_disk_mode``.
+
+Tests below the "durability levels" heading run for each level that keeps a
+log (:data:`LOGGING_LEVELS`). Note what a ``SIGKILL`` can and cannot show:
+it kills the *process*, which is precisely ``durable="normal"``'s guarantee,
+but it cannot evict the kernel page cache, so nothing here tests — or
+claims to test — the OS-crash and power-loss cases that separate
+``"normal"`` from ``"full"``.
 """
 
 import os
@@ -54,29 +61,31 @@ requires_sigkill = pytest.mark.skipif(
 )
 
 
-def _open_kwargs(storage: str) -> str:
+def _open_kwargs(storage: str, durable: object = True) -> str:
     """``kglite.open`` kwargs, as source text for a child script."""
-    if storage == "memory":
-        return "durable=True"
-    return f"storage={storage!r}, durable=True"
+    parts = [f"durable={durable!r}"]
+    if storage != "memory":
+        parts.insert(0, f"storage={storage!r}")
+    return ", ".join(parts)
 
 
-def _open(path, storage: str = "memory"):
-    """Open *path* durably in *storage* mode (parent-side counterpart)."""
-    kwargs = {"durable": True}
+def _open(path, storage: str = "memory", durable: object = True):
+    """Open *path* in *storage* mode at durability level *durable*
+    (parent-side counterpart)."""
+    kwargs = {"durable": durable}
     if storage != "memory":
         kwargs["storage"] = storage
     return kglite.open(str(path), **kwargs)
 
 
-def _child_script(tmp_path, body: str, storage: str, ending: str) -> str:
+def _child_script(tmp_path, body: str, storage: str, ending: str, durable: object = True) -> str:
     return textwrap.dedent(
         f"""
         import kglite, os, signal
         path = {str(tmp_path / "app.kgl")!r}
 
         def open_durable():
-            return kglite.open(path, {_open_kwargs(storage)})
+            return kglite.open(path, {_open_kwargs(storage, durable)})
 
         {textwrap.indent(textwrap.dedent(body), "        ").strip()}
         {ending}
@@ -84,16 +93,16 @@ def _child_script(tmp_path, body: str, storage: str, ending: str) -> str:
     )
 
 
-def _crash_child(tmp_path, body: str, storage: str = "memory") -> None:
+def _crash_child(tmp_path, body: str, storage: str = "memory", durable: object = True) -> None:
     """Run *body* in a child that hard-exits (``os._exit``) at the end — no
     atexit, no Python finalizers, no clean close. Models a power loss
     mid-session."""
-    script = _child_script(tmp_path, body, storage, "os._exit(0)")
+    script = _child_script(tmp_path, body, storage, "os._exit(0)", durable)
     # Child must import the same built extension.
     subprocess.run([PYBIN, "-c", script], check=True, env=dict(os.environ))
 
 
-def _sigkill_child(tmp_path, body: str, storage: str = "memory") -> None:
+def _sigkill_child(tmp_path, body: str, storage: str = "memory", durable: object = True) -> None:
     """Run *body* in a child that then ``SIGKILL``s itself.
 
     Stronger than ``_crash_child``: ``SIGKILL`` cannot be caught, blocked, or
@@ -102,7 +111,7 @@ def _sigkill_child(tmp_path, body: str, storage: str = "memory") -> None:
     that exited any other way would mean the test had stopped being a crash
     test.
     """
-    script = _child_script(tmp_path, body, storage, "os.kill(os.getpid(), signal.SIGKILL)")
+    script = _child_script(tmp_path, body, storage, "os.kill(os.getpid(), signal.SIGKILL)", durable)
     done = subprocess.run([PYBIN, "-c", script], env=dict(os.environ), capture_output=True)
     assert done.returncode == -signal.SIGKILL, (
         f"child must die on SIGKILL, got returncode {done.returncode}; stderr={done.stderr.decode(errors='replace')}"
@@ -556,3 +565,285 @@ def test_non_durable_open_writes_no_wal(tmp_path):
     g.save()
     # Non-durable mode never creates a WAL sidecar.
     assert not (tmp_path / "app.kgl-wal").exists()
+
+
+# ── durability levels ────────────────────────────────────────────────
+#
+# ``durable="normal"`` logs every commit but skips the per-commit barrier.
+# Its guarantee is: **a mutation that has returned survives the process
+# dying; an OS crash or power loss loses commits since the last save().**
+#
+# The first half is exactly what ``_sigkill_child`` models, so it is tested
+# here as rigorously as ``"full"`` is. The second half is deliberately NOT
+# tested: killing a process cannot evict the kernel page cache, so a test
+# claiming to simulate power loss would be theatre. What is asserted instead
+# is the honest boundary — ``"normal"`` writes a log, and recovery of that
+# log is level-independent.
+
+#: Levels that keep a write-ahead log. ``"off"`` is excluded: it has no log,
+#: so none of the recovery contracts below apply to it.
+LOGGING_LEVELS = ("full", "normal")
+
+
+@requires_sigkill
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+@pytest.mark.parametrize("level", LOGGING_LEVELS)
+def test_logging_levels_survive_sigkill(tmp_path, storage, level):
+    """**The claim the "normal" rung exists to make.** A committed mutation
+    that has returned must survive an uncatchable ``SIGKILL`` — no interpreter
+    teardown, no ``Drop``, no flush of any kind. ``"normal"`` must be
+    indistinguishable from ``"full"`` here; that is the whole point, and the
+    only thing separating them is a failure mode this test cannot produce.
+    """
+    _sigkill_child(
+        tmp_path,
+        """
+        g = open_durable()
+        g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
+        g.cypher("CREATE (:Person:Staff {id: 2, name: 'Bob'})")
+        g.cypher("MATCH (a:Person {id:1}),(b:Person {id:2}) CREATE (a)-[:KNOWS]->(b)")
+        """,
+        storage,
+        durable=level,
+    )
+    # Never saved, so only the log can account for the data.
+    assert not (tmp_path / "app.kgl").exists()
+    assert (tmp_path / "app.kgl-wal").exists()
+
+    g = _open(tmp_path / "app.kgl", storage, durable=level)
+    names = sorted(r["n"] for r in g.cypher("MATCH (p:Person) RETURN p.name AS n"))
+    assert names == ["Alice", "Bob"]
+    assert g.cypher("MATCH (:Person)-[r:KNOWS]->(:Person) RETURN count(r) AS c").scalar() == 1
+    assert g.cypher("MATCH (p:Person {id:2}) RETURN labels(p) AS l").scalar() == [
+        "Person",
+        "Staff",
+    ]
+
+
+@requires_sigkill
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_normal_and_full_recover_identical_state(tmp_path, storage):
+    """Same workload, same crash, two levels — the recovered graphs must be
+    byte-for-byte equivalent in content. A divergence would mean the levels
+    differ in *what they log*, not merely in when they barrier."""
+    recovered = {}
+    for level in LOGGING_LEVELS:
+        run = tmp_path / level
+        run.mkdir()
+        _sigkill_child(
+            run,
+            """
+            g = open_durable()
+            for i in range(25):
+                g.cypher("CREATE (:Item {id: $i, tag: $t})", params={"i": i, "t": f"t{i}"})
+            g.cypher("MATCH (n:Item {id: 7}) SET n.tag = 'edited'")
+            g.cypher("MATCH (n:Item {id: 9}) DELETE n")
+            """,
+            storage,
+            durable=level,
+        )
+        g = _open(run / "app.kgl", storage, durable=level)
+        recovered[level] = sorted((r["i"], r["t"]) for r in g.cypher("MATCH (n:Item) RETURN n.id AS i, n.tag AS t"))
+
+    assert recovered["normal"] == recovered["full"]
+    # And the workload actually exercised all three op shapes.
+    assert len(recovered["full"]) == 24, "one node was deleted"
+    assert (7, "edited") in recovered["full"]
+
+
+@requires_sigkill
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_normal_log_is_recoverable_by_a_full_reopen(tmp_path, storage):
+    """The log format carries no level — it is a property of the *session*
+    that wrote it, not of the file. A graph crashed under ``"normal"`` must
+    recover completely when reopened under ``"full"`` (and the reverse), or
+    the level would have silently become an on-disk format variant."""
+    _sigkill_child(
+        tmp_path,
+        """
+        g = open_durable()
+        g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
+        """,
+        storage,
+        durable="normal",
+    )
+    g = _open(tmp_path / "app.kgl", storage, durable="full")
+    assert g.cypher("MATCH (p:Person) RETURN p.name AS n").scalar() == "Alice"
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_normal_checkpoint_truncates_then_recovers_post_checkpoint(tmp_path, storage):
+    """The checkpoint/log interaction at ``"normal"``, which is where the
+    level's one genuine hazard lives.
+
+    ``save()`` folds the log into a checkpoint and truncates it. Under
+    ``"normal"`` the frames it folds in may still be in the page cache, so
+    ``save()`` barriers the log *before* writing the checkpoint — otherwise a
+    crash in the window between the checkpoint and the truncation could leave
+    a stale prefix of the log, and replaying that prefix over a newer
+    checkpoint would roll committed properties backwards.
+
+    What this test pins is the observable end of that contract: data from
+    before the checkpoint and after it must both survive a crash, and neither
+    may revert the other.
+    """
+    _crash_child(
+        tmp_path,
+        """
+        g = open_durable()
+        g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
+        g.cypher("MATCH (p:Person {id: 1}) SET p.name = 'Alice2'")
+        g.save()                       # checkpoint: folds + truncates the log
+        g.cypher("CREATE (:Person {id: 2, name: 'Bob'})")
+        g.cypher("MATCH (p:Person {id: 1}) SET p.name = 'Alice3'")
+        """,
+        storage,
+        durable="normal",
+    )
+    assert (tmp_path / "app.kgl").exists(), "the checkpoint was written"
+
+    g = _open(tmp_path / "app.kgl", storage, durable="normal")
+    names = sorted(r["n"] for r in g.cypher("MATCH (p:Person) RETURN p.name AS n"))
+    # 'Alice3' — NOT 'Alice2'. A reverted value here is the stale-prefix
+    # replay hazard the pre-checkpoint barrier exists to prevent.
+    assert names == ["Alice3", "Bob"]
+
+
+# ── level spellings and validation ───────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("flag", "name"),
+    [(True, "full"), (False, "off")],
+)
+def test_bool_spellings_match_their_named_levels(tmp_path, flag, name):
+    """``True``/``False`` are accepted spellings of ``"full"``/``"off"``, not a
+    second code path. Equivalence is observable through whether a log exists."""
+    by_flag = tmp_path / "flag"
+    by_name = tmp_path / "name"
+    by_flag.mkdir()
+    by_name.mkdir()
+    for target, level in ((by_flag, flag), (by_name, name)):
+        g = kglite.open(str(target / "app.kgl"), durable=level)
+        g.cypher("CREATE (:Person {id: 1})")
+    assert (by_flag / "app.kgl-wal").exists() == (by_name / "app.kgl-wal").exists()
+    assert (by_flag / "app.kgl-wal").exists() == (name == "full")
+
+
+def test_normal_writes_a_wal_sidecar(tmp_path):
+    """``"normal"`` logs — it is the barrier it skips, not the log."""
+    g = kglite.open(str(tmp_path / "app.kgl"), durable="normal")
+    g.cypher("CREATE (:Person {id: 1})")
+    assert (tmp_path / "app.kgl-wal").exists()
+
+
+def test_unknown_level_is_refused_with_the_valid_set(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        kglite.open(str(tmp_path / "app.kgl"), durable="fsync")
+    message = str(excinfo.value)
+    assert "fsync" in message, "must echo what was asked for"
+    for level in ("full", "normal", "off"):
+        assert level in message, "must list the valid levels"
+
+
+def test_non_string_non_bool_level_is_a_type_error(tmp_path):
+    with pytest.raises(TypeError):
+        kglite.open(str(tmp_path / "app.kgl"), durable=2)
+
+
+@pytest.mark.parametrize("level", LOGGING_LEVELS)
+def test_disk_mode_refuses_every_logging_level(tmp_path, level):
+    """**The levels are not uniform across storage modes.** A disk graph keeps
+    no log at *any* level — the blocker is the generation-publish commit
+    boundary, not barrier strength — so ``"normal"`` must be refused exactly as
+    ``"full"`` is. Accepting it would hand back a graph with none of the
+    crash safety the level name promises."""
+    with pytest.raises(ValueError) as excinfo:
+        kglite.open(str(tmp_path / "g"), storage="disk", durable=level)
+    message = str(excinfo.value)
+    assert level in message, "must name the level that was asked for"
+    assert "storage='disk'" in message
+    assert "'off'" in message, "must name the level disk does support"
+    assert "mapped" in message, "must name the modes that do support logging"
+
+
+@pytest.mark.parametrize("level", [False, "off", None])
+def test_disk_mode_accepts_the_non_logging_levels(tmp_path, level):
+    """The counterpart: ``off`` is fine on disk, and the tri-state default
+    still resolves to it rather than raising."""
+    # `tmp_path` is unique per parametrised case, so a fixed name is safe and
+    # keeps the level out of the filename (``"off"`` would carry quotes).
+    g = kglite.open(str(tmp_path / "g"), storage="disk", durable=level)
+    g.cypher("CREATE (:Person {id: 1})")
+    assert not (tmp_path / "g-wal").exists()
+
+
+# ── sync(): the on-demand barrier ────────────────────────────────────
+
+
+def test_sync_raises_without_a_log(tmp_path):
+    """A caller who believes they bought power-safety and silently got nothing
+    is the failure direction that costs data, so this raises rather than
+    no-ops. The message must point at the levels that do support it."""
+    g = kglite.open(str(tmp_path / "app.kgl"), durable="off")
+    g.cypher("CREATE (:Person {id: 1})")
+    with pytest.raises(ValueError) as excinfo:
+        g.sync()
+    message = str(excinfo.value)
+    assert "save()" in message, "must name the alternative for a log-less graph"
+    assert "normal" in message, "must name the level that makes sync() useful"
+
+
+@pytest.mark.parametrize("level", LOGGING_LEVELS)
+def test_sync_is_a_no_op_for_the_data(tmp_path, level):
+    """``sync()`` writes no checkpoint and truncates nothing — it only makes
+    the existing log durable. Content and the log's existence are unchanged."""
+    g = kglite.open(str(tmp_path / "app.kgl"), durable=level)
+    g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
+    g.sync()
+    g.sync()  # idempotent
+    assert g.cypher("MATCH (p:Person) RETURN count(*) AS c").scalar() == 1
+    assert (tmp_path / "app.kgl-wal").exists()
+    assert not (tmp_path / "app.kgl").exists(), "sync() is not a checkpoint"
+
+
+@requires_sigkill
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_sync_then_crash_recovers_everything(tmp_path, storage):
+    """``sync()`` must not disturb the log: commits before *and* after it are
+    still recovered. A barrier that truncated or reordered would show up here.
+    """
+    _sigkill_child(
+        tmp_path,
+        """
+        g = open_durable()
+        g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
+        g.sync()
+        g.cypher("CREATE (:Person {id: 2, name: 'Bob'})")
+        """,
+        storage,
+        durable="normal",
+    )
+    g = _open(tmp_path / "app.kgl", storage, durable="normal")
+    names = sorted(r["n"] for r in g.cypher("MATCH (p:Person) RETURN p.name AS n"))
+    assert names == ["Alice", "Bob"]
+
+
+@requires_sigkill
+def test_sync_flushes_pending_ops_into_the_log(tmp_path):
+    """``sync()`` folds anything still buffered in the capture layer into a
+    frame before barriering, so it can never report success over ops that
+    never reached the log. Regression guard for the shape of bug that an
+    internal-only barrier with a single caller previously allowed."""
+    _sigkill_child(
+        tmp_path,
+        """
+        g = open_durable()
+        g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
+        g.sync()
+        """,
+        "memory",
+        durable="normal",
+    )
+    g = _open(tmp_path / "app.kgl", "memory", durable="normal")
+    assert g.cypher("MATCH (p:Person) RETURN p.name AS n").scalar() == "Alice"

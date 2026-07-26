@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`save()` now barriers the write-ahead log before writing its
+  checkpoint.** A checkpoint truncates the log, and recovery folds the
+  surviving frames into net per-entity state. Previously the log was
+  guaranteed to be on disk at that point only because every commit had
+  already barriered; with a level that skips the per-commit barrier, a crash
+  in the window between writing the checkpoint and truncating the log could
+  leave a *prefix* of the frames, and replaying that prefix over the newer
+  checkpoint would roll committed properties backwards — losing data that had
+  already been durably saved. The checkpoint path now flushes the log first,
+  restoring the invariant that the on-disk log is complete whenever a
+  checkpoint supersedes it.
+
+- **WAL recovery now rejects a zero-length frame explicitly.** A run of zero
+  bytes — the shape an OS crash leaves when a file's length was extended but
+  its data block never reached the platter — declares a zero-length payload,
+  and `crc32` of an empty payload is zero, so such a prefix passed the
+  integrity check as a "valid" empty frame and was stopped only by the
+  decoder failing further down. Recovery now stops at it by intent. No
+  correct WAL can contain one.
+
 - **`kglite.open()` now enforces one writer per graph, instead of silently
   losing one.** Two processes that opened the same path both built a complete
   snapshot in memory and both wrote it at `save()`, so whichever saved last
@@ -105,6 +125,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retried, and the final conflict is re-raised unchanged. Conflicts are ordinary
   rather than rare here, because OCC compares a whole-graph version counter (see
   the documentation fix below).
+
+- **`kglite.open(..., durable="normal")` — a middle durability level.** Until
+  now `durable` offered only "barrier on every commit" or "no log at all",
+  and the gap between them is where most applications actually live.
+  `durable` now takes SQLite's `synchronous` vocabulary, naming **what a
+  committed mutation survives** rather than which syscall runs:
+
+  - `"full"` (also spelled `True`, and still the default) — survives **power
+    loss**. One barrier per commit.
+  - `"normal"` — survives the **process** dying: `SIGKILL`, an unhandled
+    panic, an OOM-kill. The log frame is in the kernel's page cache before
+    the call returns, and the page cache outlives the process. An OS crash or
+    power loss loses commits made since the last `save()`. No barrier per
+    commit.
+  - `"off"` (also spelled `False`) — no log; `save()` is the only durability
+    point.
+
+  `True`/`False` are accepted spellings rather than a second code path, so
+  existing calls are unaffected and **the default is unchanged**. The levels
+  are stated as guarantees because the syscall behind them differs by
+  platform while the guarantee does not — which is also why there is no
+  separate "plain `fsync`" level: `fsync` is the power-loss barrier on Linux
+  but not on macOS, so it could not be given one honest description.
+
+  **The levels are deliberately not uniform across storage modes.**
+  `storage="disk"` supports only `"off"`; both `"full"` and `"normal"` raise
+  `ValueError` there, because a disk graph commits by publishing an immutable
+  generation rather than by logging a write. The refusal now names the level
+  that was requested and the modes that do support logging.
+
+- **`KnowledgeGraph.sync()` — the on-demand barrier.** Flushes every commit
+  made so far to stable storage: the barrier `durable="full"` performs on
+  every commit, taken when the caller wants it. This is what makes
+  `"normal"` adoptable rather than merely fast — without it, a `"normal"`
+  graph's only route to power-safety is a full `save()`, which republishes
+  the entire graph and is the wrong granularity for "flush at the end of a
+  request" or "flush before shutdown". Returns immediately under `"full"`
+  (the guarantee already holds) and raises `ValueError` on a graph with no
+  log, rather than silently doing nothing. Pending mutations are folded into
+  the log first, so it cannot report success over ops that never reached it.
+
 - `kglite-bolt-server --neo4j-compat` (or `KGLITE_BOLT_NEO4J_COMPAT=1`) makes the
   server present a Neo4j-compatible agent in the Bolt handshake, so official
   drivers that refuse to connect to a non-Neo4j server will talk to it. The
@@ -355,6 +416,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole-graph write checkpoint.
 
 ### Changed
+
+- **A WAL frame is written with a single `write` call** instead of three (one
+  each for the length prefix, the CRC, and the payload). Besides removing two
+  syscalls from the per-commit path, this closes the window in which a
+  process death could leave a frame torn between its prefix and its payload:
+  a `write(2)` cannot be interrupted partway by a signal. The length/CRC
+  torn-tail check remains the authority, since a short write is still
+  possible in principle.
 
 - Documented what a crash actually costs a `storage="disk"` graph, and stopped
   steering growing apps toward it. Disk mode has no write-ahead log, which read

@@ -31,14 +31,47 @@
 //!
 //! ## Crash safety of the format
 //!
-//! A frame is `[len: u32 LE][crc32: u32 LE][payload: codec(WalFrame)]`.
+//! A frame is `[len: u32 LE][crc32: u32 LE][payload: codec(WalFrame)]`,
+//! emitted by a **single** `write_all` (see [`append_frame`]).
 //! The v2/v3 file headers select Postcard for every frame. Older headers
 //! are rejected before any payload or torn-tail handling.
 //! A crash mid-append leaves a torn trailing frame; [`read_frames`] stops
 //! at the first short read or CRC mismatch and returns every frame up to
 //! it. A torn frame is therefore *discarded*, never half-applied — the
-//! atomic unit of durability is the whole frame, committed by the `fsync`
-//! that follows its append.
+//! atomic unit of durability is the whole frame.
+//!
+//! Torn-tail handling does **not** depend on `fsync`. `fsync` controls
+//! *when* bytes reach stable storage, not whether a write is atomic, so a
+//! torn frame has always been possible and has always been discarded. That
+//! is what lets the barrier become a per-level choice below without
+//! touching recovery.
+//!
+//! ## Durability levels
+//!
+//! [`DurabilityLevel`] names what a committed mutation survives; the WAL
+//! itself only cares about the derived [`SyncMode`]:
+//!
+//! - [`DurabilityLevel::Full`] → [`SyncMode::Barrier`]. Every frame is
+//!   flushed to stable storage before [`Wal::append`] returns, so an
+//!   acknowledged commit survives **power loss**.
+//! - [`DurabilityLevel::Normal`] → [`SyncMode::PageCache`]. The frame is
+//!   handed to the OS with `write(2)` and no barrier. The page cache
+//!   belongs to the kernel, not the process, so an acknowledged commit
+//!   survives the **process** dying (`SIGKILL`, panic, OOM-kill) but not an
+//!   OS crash or power loss.
+//! - [`DurabilityLevel::Off`] → no WAL at all; durability is whatever the
+//!   caller's `save()` checkpoints provide.
+//!
+//! Under `Normal` an OS crash can lose an arbitrary suffix of the log, but
+//! never a *hole*: [`read_frames`] stops at the first frame it cannot
+//! verify, so recovery always yields a **prefix**. Frames are per-commit
+//! and replay is idempotent, so a prefix is a valid earlier state rather
+//! than a corrupt one.
+//!
+//! One invariant this places on the *caller*: a checkpoint must not
+//! truncate frames that are still only in the page cache, or replaying the
+//! surviving prefix could revert data the checkpoint already holds. Call
+//! [`Wal::sync`] before checkpointing — see its docs.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
@@ -80,6 +113,95 @@ pub const WAL_FORMAT_VERSION: u8 = 3;
 pub const MIN_READABLE_WAL_FORMAT_VERSION: u8 = 2;
 
 const MAX_WAL_FRAME_BYTES: u64 = u32::MAX as u64;
+
+/// What a committed mutation is guaranteed to survive — the durability
+/// vocabulary a binding exposes to its users. Deliberately mirrors SQLite's
+/// `synchronous` levels (`FULL` / `NORMAL` / `OFF`), because the audience for
+/// an embedded database already knows that vocabulary and the guarantees line
+/// up.
+///
+/// The levels are stated in terms of *what survives*, not in terms of which
+/// syscall runs, because the syscall differs by platform while the guarantee
+/// does not. That is also why there is no separate "plain `fsync`" level: on
+/// Linux `fsync` is the power-loss barrier, while on macOS it is not (only
+/// `F_FULLFSYNC` flushes the drive cache), so such a level could not be given
+/// one honest description.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DurabilityLevel {
+    /// No write-ahead log. Nothing survives beyond the caller's most recent
+    /// `save()` checkpoint.
+    Off,
+    /// Log every commit, but do not barrier. An acknowledged mutation
+    /// survives the **process** dying — `SIGKILL`, an unhandled panic, an
+    /// OOM-kill — because the frame is already in the kernel's page cache.
+    /// An OS crash or power loss loses commits made since the last `save()`.
+    Normal,
+    /// Log every commit and barrier before returning. An acknowledged
+    /// mutation survives **power loss**. The default, and the strongest
+    /// guarantee the platform offers.
+    #[default]
+    Full,
+}
+
+impl DurabilityLevel {
+    /// Whether this level writes a WAL at all. `false` only for
+    /// [`DurabilityLevel::Off`].
+    #[inline]
+    pub fn logs(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// How the WAL should make each frame durable, or `None` when this level
+    /// keeps no log. Total by construction, so a new level cannot be added
+    /// without deciding its sync behaviour.
+    #[inline]
+    pub fn sync_mode(self) -> Option<SyncMode> {
+        match self {
+            Self::Off => None,
+            Self::Normal => Some(SyncMode::PageCache),
+            Self::Full => Some(SyncMode::Barrier),
+        }
+    }
+
+    /// The level named by a binding-facing string (`"full"` / `"normal"` /
+    /// `"off"`), or `None` if unrecognised. Shared by every binding so the
+    /// vocabulary cannot drift between them; the caller owns the error type
+    /// and message.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "full" => Some(Self::Full),
+            "normal" => Some(Self::Normal),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// The canonical name of this level, the inverse of [`Self::from_name`].
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Normal => "normal",
+            Self::Full => "full",
+        }
+    }
+
+    /// Every accepted level name, for error messages that need to list them.
+    pub const NAMES: [&'static str; 3] = ["full", "normal", "off"];
+}
+
+/// How [`Wal::append`] makes a frame durable. Derived from a
+/// [`DurabilityLevel`] via [`DurabilityLevel::sync_mode`]; separate from it so
+/// that "no log at all" is unrepresentable on an open WAL file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMode {
+    /// Barrier after every frame — `append` returns only once the bytes are
+    /// on stable storage. On Apple targets this is `fcntl(F_FULLFSYNC)`;
+    /// elsewhere it is `fdatasync`/`fsync`.
+    Barrier,
+    /// Hand the frame to the OS and return. Bytes are in the kernel page
+    /// cache, which outlives the process but not the kernel.
+    PageCache,
+}
 
 /// One logical, identity-keyed mutation. See the module docs for why
 /// the state-changing shapes are idempotent upserts.
@@ -214,6 +336,16 @@ fn write_header_version(w: &mut impl Write, version: u8) -> io::Result<()> {
 /// for `fsync`/`flush` after the append to make it durable — this fn
 /// only writes the bytes (so a batch of frames can share one fsync if
 /// the caller wants).
+///
+/// The prefix and payload are assembled into one buffer and emitted with a
+/// **single** `write_all`, rather than three. That removes two syscalls from
+/// the per-commit path, and — more importantly for
+/// [`DurabilityLevel::Normal`] — it shrinks the window in which a process
+/// death can leave a torn frame: a `write(2)` cannot be interrupted partway
+/// by `SIGKILL`, so a frame that fits in one write is either wholly in the
+/// page cache or wholly absent. A short write is still possible in
+/// principle, which is why the length/CRC torn-tail check remains the
+/// authority rather than an optimisation.
 pub fn append_frame(w: &mut impl Write, frame: &WalFrame) -> io::Result<()> {
     append_frame_with_codec(w, frame, crate::serde_codec::CURRENT_CODEC)
 }
@@ -228,9 +360,11 @@ fn append_frame_with_codec(
     let len = u32::try_from(payload.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "WAL frame exceeds 4 GiB"))?;
     let crc = crc32(&payload);
-    w.write_all(&len.to_le_bytes())?;
-    w.write_all(&crc.to_le_bytes())?;
-    w.write_all(&payload)?;
+    let mut framed = Vec::with_capacity(8 + payload.len());
+    framed.extend_from_slice(&len.to_le_bytes());
+    framed.extend_from_slice(&crc.to_le_bytes());
+    framed.extend_from_slice(&payload);
+    w.write_all(&framed)?;
     Ok(())
 }
 
@@ -308,6 +442,18 @@ pub fn read_frames(mut r: impl Read, stream_len: u64) -> io::Result<Vec<WalFrame
         let len = u32::from_le_bytes(len_buf) as u64;
         let expected_crc = u32::from_le_bytes(crc_buf);
 
+        if len == 0 {
+            // A run of zero bytes — the shape an OS crash leaves when a
+            // file's length was extended but its data block never reached
+            // the platter, which `DurabilityLevel::Normal` makes reachable.
+            // `crc32(b"") == 0`, so a zero prefix would otherwise pass the
+            // CRC check as a "valid" empty frame and reach the decoder.
+            // `append_frame` can never emit one (the smallest real payload
+            // is a two-byte Postcard `lsn` + `ops` pair), so treat it as the
+            // torn tail it is — by intent, rather than relying on the
+            // decoder to reject it.
+            break Some(frame_start);
+        }
         if len > stream_len.saturating_sub(consumed) {
             // Declared length exceeds the bytes that exist — torn or
             // corrupt prefix. Stop WITHOUT allocating `len` bytes.
@@ -499,12 +645,21 @@ fn prepare_wal_file(path: &Path) -> io::Result<()> {
 /// An open, append-only WAL file. Session-scoped (one per open graph
 /// file) — it owns a `File` handle, so it lives *outside* the CoW-cloned
 /// `DirGraph` (which must stay `Clone`). Each [`append`](Self::append)
-/// writes a frame and `fsync`s, making the committed mutation durable
-/// before the call returns.
+/// writes a frame, and under [`SyncMode::Barrier`] also flushes it to
+/// stable storage, making the committed mutation durable before the call
+/// returns.
+///
+/// The handle is deliberately **unbuffered** — `file` is a bare [`File`],
+/// never a `BufWriter`. That is what makes [`SyncMode::PageCache`] mean
+/// anything: the bytes are in the kernel's page cache by the time `append`
+/// returns, so they outlive the process even without a barrier. Wrapping
+/// this in a userspace buffer would silently downgrade
+/// [`DurabilityLevel::Normal`] to "survives nothing".
 #[derive(Debug)]
 pub struct Wal {
     file: File,
     path: PathBuf,
+    sync: SyncMode,
 }
 
 impl Wal {
@@ -523,22 +678,63 @@ impl Wal {
     /// [`WAL_FORMAT_VERSION`]) is rejected before a single frame is
     /// appended; a *readable* older version is upgraded in place, since the
     /// frames already present parse under the current schema unchanged.
-    pub fn open(path: PathBuf) -> io::Result<Self> {
+    ///
+    /// `sync` fixes the per-append durability behaviour for the life of the
+    /// handle; see [`SyncMode`]. Header maintenance always barriers
+    /// regardless of the level — a WAL whose header might not exist after a
+    /// crash could not be recovered at all, and it is paid once per open
+    /// rather than once per commit.
+    pub fn open(path: PathBuf, sync: SyncMode) -> io::Result<Self> {
         // Create/validate/repair the header first, on an ordinary handle. By
         // the time the append handle below exists the file is well-formed, so
         // that handle only ever has to do what append handles can portably do.
         prepare_wal_file(&path)?;
         let file = OpenOptions::new().read(true).append(true).open(&path)?;
-        Ok(Self { file, path })
+        Ok(Self { file, path, sync })
     }
 
-    /// Append one frame and `fsync` — the durability point. Returns only
-    /// after the bytes are on stable storage.
+    /// Append one frame — the commit point.
+    ///
+    /// Under [`SyncMode::Barrier`] this returns only after the bytes are on
+    /// stable storage. Under [`SyncMode::PageCache`] it returns once the
+    /// kernel has the bytes, which is the whole of
+    /// [`DurabilityLevel::Normal`]'s guarantee: the page cache is the
+    /// kernel's, so it survives this process dying but not the kernel
+    /// dying.
     pub fn append(&mut self, frame: &WalFrame) -> io::Result<()> {
         append_frame(&mut self.file, frame)?;
         self.file.flush()?;
-        self.file.sync_data()?;
+        if self.sync == SyncMode::Barrier {
+            self.file.sync_data()?;
+        }
         Ok(())
+    }
+
+    /// Flush every frame appended so far to stable storage — the barrier
+    /// that [`SyncMode::Barrier`] performs on every commit, on demand.
+    ///
+    /// Two callers, and both matter:
+    ///
+    /// 1. **Before a checkpoint.** A checkpoint truncates the log, so the
+    ///    frames it folds in must already be on disk. If they are not, an OS
+    ///    crash in the window between writing the checkpoint and truncating
+    ///    the log can leave a *prefix* of the frames, and replaying that
+    ///    prefix over the newer checkpoint would revert data the checkpoint
+    ///    already holds. Under [`SyncMode::Barrier`] the frames are on disk
+    ///    already and this is the no-op it looks like; under
+    ///    [`SyncMode::PageCache`] it is load-bearing.
+    /// 2. **On user demand.** It is the only way a `Normal` graph can reach
+    ///    power-safety at a granularity finer than a whole checkpoint —
+    ///    "flush at end of request", "flush before shutdown".
+    pub fn sync(&mut self) -> io::Result<()> {
+        self.file.flush()?;
+        self.file.sync_data()
+    }
+
+    /// How this WAL makes each frame durable.
+    #[inline]
+    pub fn sync_mode(&self) -> SyncMode {
+        self.sync
     }
 
     /// Reset to an empty WAL (header only), `fsync`ing the truncation.
@@ -620,6 +816,14 @@ mod tests {
     fn read_frames_all(bytes: Vec<u8>) -> io::Result<Vec<WalFrame>> {
         let len = bytes.len() as u64;
         read_frames(Cursor::new(bytes), len)
+    }
+
+    /// Open a WAL at the full barrier — the default level, and the one every
+    /// pre-existing test in this module was written against. Tests that care
+    /// about the no-barrier rung call [`Wal::open`] directly with
+    /// [`SyncMode::PageCache`].
+    fn open_wal(path: PathBuf) -> io::Result<Wal> {
+        Wal::open(path, SyncMode::Barrier)
     }
 
     #[test]
@@ -861,7 +1065,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut wal = Wal::open(p.clone()).unwrap();
+        let mut wal = open_wal(p.clone()).unwrap();
         wal.append(&WalFrame {
             lsn: 2,
             ops: vec![MutationOp::SetNodeLabels {
@@ -895,7 +1099,7 @@ mod tests {
         header.push(WAL_FORMAT_VERSION + 1);
         std::fs::write(&p, &header).unwrap();
         for message in [
-            Wal::open(p.clone()).unwrap_err().to_string(),
+            open_wal(p.clone()).unwrap_err().to_string(),
             recover(&p).unwrap_err().to_string(),
         ] {
             assert!(
@@ -920,13 +1124,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("g.kgl-wal");
         {
-            let mut wal = Wal::open(p.clone()).unwrap();
+            let mut wal = open_wal(p.clone()).unwrap();
             wal.append(&frame(1)).unwrap();
             wal.append(&frame(2)).unwrap();
         } // drop closes the file
           // Reopen for append (must NOT clobber existing frames)...
         {
-            let mut wal = Wal::open(p.clone()).unwrap();
+            let mut wal = open_wal(p.clone()).unwrap();
             wal.append(&frame(3)).unwrap();
         }
         let frames = recover(&p).unwrap();
@@ -939,7 +1143,7 @@ mod tests {
         let p = dir.path().join("g.kgl-wal");
         std::fs::write(&p, b"KWAL\x01").unwrap();
 
-        let error = Wal::open(p).unwrap_err();
+        let error = open_wal(p).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
@@ -947,7 +1151,7 @@ mod tests {
     fn reset_truncates_to_header_only() {
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("g.kgl-wal");
-        let mut wal = Wal::open(p.clone()).unwrap();
+        let mut wal = open_wal(p.clone()).unwrap();
         wal.append(&frame(1)).unwrap();
         wal.append(&frame(2)).unwrap();
         wal.reset().unwrap();
@@ -992,7 +1196,7 @@ mod tests {
             std::fs::write(&p, &WAL_MAGIC[..torn_len.min(4)]).unwrap();
             // For torn_len == 4 the magic is complete but the version
             // byte is missing — still shorter than a full header.
-            let mut wal = Wal::open(p.clone()).unwrap();
+            let mut wal = open_wal(p.clone()).unwrap();
             wal.append(&frame(1)).unwrap();
             drop(wal);
             let frames = recover(&p).unwrap();
@@ -1011,7 +1215,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("g.kgl-wal");
         std::fs::write(&p, b"XXXXX").unwrap();
-        let mut wal = Wal::open(p.clone()).unwrap();
+        let mut wal = open_wal(p.clone()).unwrap();
         wal.append(&frame(7)).unwrap();
         drop(wal);
         assert_eq!(recover(&p).unwrap().len(), 1);
@@ -1024,7 +1228,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("g.kgl-wal");
         std::fs::write(&p, b"not a wal file at all").unwrap();
-        let err = Wal::open(p.clone()).unwrap_err();
+        let err = open_wal(p.clone()).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         // The file is untouched.
         assert_eq!(std::fs::read(&p).unwrap(), b"not a wal file at all");
@@ -1072,7 +1276,147 @@ mod tests {
     fn open_fresh_file_is_immediately_recoverable() {
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("g.kgl-wal");
-        let _wal = Wal::open(p.clone()).unwrap();
+        let _wal = open_wal(p.clone()).unwrap();
         assert!(recover(&p).unwrap().is_empty());
+    }
+
+    // ── durability levels ────────────────────────────────────────────
+
+    /// The level → sync-mode mapping is the whole of the feature, so pin it
+    /// rather than trusting the match arms to stay put.
+    #[test]
+    fn level_maps_to_sync_mode_and_round_trips_by_name() {
+        assert_eq!(DurabilityLevel::Off.sync_mode(), None);
+        assert_eq!(
+            DurabilityLevel::Normal.sync_mode(),
+            Some(SyncMode::PageCache)
+        );
+        assert_eq!(DurabilityLevel::Full.sync_mode(), Some(SyncMode::Barrier));
+
+        assert!(!DurabilityLevel::Off.logs());
+        assert!(DurabilityLevel::Normal.logs());
+        assert!(DurabilityLevel::Full.logs());
+
+        // The default must stay `Full`: weakening it is a maintainer
+        // decision, never a side effect of editing this enum.
+        assert_eq!(DurabilityLevel::default(), DurabilityLevel::Full);
+
+        for name in DurabilityLevel::NAMES {
+            let level = DurabilityLevel::from_name(name).expect("listed name must parse");
+            assert_eq!(level.name(), name);
+        }
+        assert_eq!(DurabilityLevel::from_name("fsync"), None);
+        assert_eq!(DurabilityLevel::from_name("FULL"), None);
+    }
+
+    /// The `Normal` rung's core claim at the format level: a frame appended
+    /// without a barrier is still a complete, recoverable frame. (This test
+    /// cannot observe the *absence* of the fsync — that is what the
+    /// process-crash tests in `tests/test_durability.py` are for. What it
+    /// pins is that skipping the barrier does not corrupt or truncate.)
+    #[test]
+    fn page_cache_appends_are_recoverable() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("g.kgl-wal");
+        {
+            let mut wal = Wal::open(p.clone(), SyncMode::PageCache).unwrap();
+            assert_eq!(wal.sync_mode(), SyncMode::PageCache);
+            wal.append(&frame(1)).unwrap();
+            wal.append(&frame(2)).unwrap();
+        }
+        let got = recover(&p).unwrap();
+        assert_eq!(got.iter().map(|f| f.lsn).collect::<Vec<_>>(), [1, 2]);
+    }
+
+    /// `sync()` is callable at every mode and leaves the log intact — under
+    /// `Barrier` it is redundant, under `PageCache` it is the user-facing
+    /// route to power-safety without a full checkpoint.
+    #[test]
+    fn explicit_sync_preserves_frames_at_every_mode() {
+        for mode in [SyncMode::Barrier, SyncMode::PageCache] {
+            let dir = TempDir::new().unwrap();
+            let p = dir.path().join("g.kgl-wal");
+            let mut wal = Wal::open(p.clone(), mode).unwrap();
+            wal.append(&frame(1)).unwrap();
+            wal.sync().unwrap();
+            wal.append(&frame(2)).unwrap();
+            wal.sync().unwrap();
+            drop(wal);
+            assert_eq!(
+                recover(&p)
+                    .unwrap()
+                    .iter()
+                    .map(|f| f.lsn)
+                    .collect::<Vec<_>>(),
+                [1, 2],
+                "sync() must not disturb the log at {mode:?}"
+            );
+        }
+    }
+
+    /// A zero-filled run is what an OS crash leaves when a file's length was
+    /// extended but its data block never landed — reachable only once the
+    /// per-commit barrier is optional. `crc32(b"") == 0`, so without the
+    /// explicit guard a zero prefix passes the CRC check as a "valid" empty
+    /// frame, and only the decoder's failure stops recovery. Stop by intent.
+    #[test]
+    fn zero_filled_hole_is_treated_as_a_torn_tail() {
+        let good = vec![frame(1), frame(2)];
+        let mut bytes = write_wal(&good);
+        // A zero-length/zero-CRC prefix: self-consistent, and not a frame.
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        // A perfectly valid frame after the hole must stay unreachable — a
+        // frame boundary cannot be trusted past a gap.
+        append_frame(&mut bytes, &frame(3)).unwrap();
+
+        let got = read_frames_all(bytes).unwrap();
+        assert_eq!(got.iter().map(|f| f.lsn).collect::<Vec<_>>(), [1, 2]);
+    }
+
+    /// A whole page of zeros — the realistic shape of the hazard above.
+    #[test]
+    fn zero_page_after_frames_recovers_the_prefix() {
+        let mut bytes = write_wal(&[frame(1)]);
+        bytes.extend_from_slice(&[0u8; 4096]);
+        let got = read_frames_all(bytes).unwrap();
+        assert_eq!(got, vec![frame(1)]);
+    }
+
+    /// Counts `write` calls so the single-syscall property is asserted, not
+    /// assumed. `write_all` issues exactly one `write` per full acceptance.
+    struct CountingWriter {
+        inner: Vec<u8>,
+        writes: usize,
+    }
+
+    impl Write for CountingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            self.inner.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// One frame is one write. Beyond saving two syscalls per commit, this
+    /// is what keeps a `SIGKILL` from landing *between* a frame's length
+    /// prefix and its payload: a `write(2)` is not interruptible partway.
+    #[test]
+    fn frame_is_emitted_in_a_single_write() {
+        let mut w = CountingWriter {
+            inner: Vec::new(),
+            writes: 0,
+        };
+        append_frame(&mut w, &frame(1)).unwrap();
+        assert_eq!(w.writes, 1, "a frame must not be split across writes");
+
+        // …and the bytes are still exactly what the reader expects.
+        let mut bytes = Vec::new();
+        write_header(&mut bytes).unwrap();
+        bytes.extend_from_slice(&w.inner);
+        assert_eq!(read_frames_all(bytes).unwrap(), vec![frame(1)]);
     }
 }

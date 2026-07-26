@@ -252,6 +252,11 @@ pub(crate) struct DurableState {
     pub(crate) wal: kglite_core::api::durable::Wal,
     /// Monotonic log-sequence number stamped on the next WAL frame.
     pub(crate) next_lsn: u64,
+    /// The level the caller asked for. Never `Off` — an `Off` graph has no
+    /// `DurableState` at all. The WAL's own `SyncMode` is derived from this
+    /// at open; this field is kept because it is the *user's* vocabulary,
+    /// which error messages and `sync()` echo back.
+    pub(crate) level: kglite_core::api::durable::DurabilityLevel,
 }
 
 impl std::fmt::Debug for DurableState {
@@ -259,6 +264,7 @@ impl std::fmt::Debug for DurableState {
         f.debug_struct("DurableState")
             .field("wal", &self.wal.path())
             .field("next_lsn", &self.next_lsn)
+            .field("level", &self.level.name())
             .finish()
     }
 }

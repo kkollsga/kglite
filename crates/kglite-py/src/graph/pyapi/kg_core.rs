@@ -611,6 +611,28 @@ impl KnowledgeGraph {
         self.lifecycle.source_path = Some(std::path::PathBuf::from(&effective));
         let path: &str = &effective;
 
+        // Force any WAL frames that are still only in the OS page cache onto
+        // stable storage BEFORE the checkpoint that supersedes them.
+        //
+        // **This is load-bearing for `durable="normal"`, not belt-and-braces.**
+        // The checkpoint below truncates the log, and replay folds whatever
+        // frames survive into net per-entity state. Under `full` every frame
+        // is already on disk at this point, so a crash in the write→truncate
+        // window leaves the *complete* frame set and replaying it reproduces
+        // exactly the checkpointed state — harmless, as the comment further
+        // down says. Under `normal` the tail may still be in the page cache,
+        // so the same crash can leave a *prefix*; folding that prefix over a
+        // newer checkpoint would roll properties back to their values as of
+        // an earlier commit, destroying data that was already durably saved.
+        // Syncing here restores the `full`-mode invariant — at checkpoint
+        // time the on-disk log is complete — and costs one barrier per
+        // save(), against a full serialize-and-fsync that is already running.
+        if let Some(ds) = self.lifecycle.durable.as_mut() {
+            ds.wal
+                .sync()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+        }
+
         // Mode-aware durable save lives in core (`save_graph_with`): disk dir
         // vs in-memory `.kgl`, columnar consolidation (v3 requires columnar;
         // handles fresh / mixed / mapped), atomic temp+rename, and file +
@@ -640,6 +662,57 @@ impl KnowledgeGraph {
             }
         }
         Ok(())
+    }
+
+    /// Flush every commit made so far to stable storage — the barrier that
+    /// `durable="full"` performs on *every* commit, taken on demand.
+    ///
+    /// This is what makes `durable="normal"` adoptable rather than merely
+    /// fast. Without it, a `normal` graph's only route to power-safety is a
+    /// full `save()`, which republishes the entire graph — the wrong
+    /// granularity for "flush at the end of a request" or "flush before
+    /// shutdown".
+    ///
+    /// Behaviour by level:
+    ///
+    /// - `"normal"` — the real work: takes the barrier `normal` skips per
+    ///   commit, so everything committed before this call now survives power
+    ///   loss too.
+    /// - `"full"` — returns immediately. Every commit was already barriered,
+    ///   so the guarantee this call promises already holds.
+    /// - `"off"` / a non-durable graph — raises `ValueError`. There is no log
+    ///   to flush, so the call cannot deliver what its name promises, and a
+    ///   caller who believes they bought power-safety and silently got
+    ///   nothing is the failure direction that actually costs data.
+    ///
+    /// Pending mutations are folded into the log first, so this is also the
+    /// safe way to force a commit boundary before an external snapshot.
+    fn sync(&mut self, py: Python<'_>) -> PyResult<()> {
+        use kglite_core::api::durable::DurabilityLevel;
+
+        if self.lifecycle.durable.is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "sync() needs a graph opened with a write-ahead log. This graph \
+                 has none (durable='off'), so there is nothing to flush and no \
+                 power-safe point to take — call save() to write a checkpoint \
+                 instead, or reopen with kglite.open(path, durable='normal') if \
+                 you want per-commit logging with on-demand barriers.",
+            ));
+        }
+        // Drain anything still buffered in the capture layer into a frame
+        // before barriering, so `sync()` cannot report success over ops that
+        // never reached the log.
+        self.commit_wal()?;
+        let ds = self
+            .lifecycle
+            .durable
+            .as_mut()
+            .expect("durable checked Some above; commit_wal does not clear it");
+        if ds.level == DurabilityLevel::Full {
+            return Ok(());
+        }
+        py.detach(|| ds.wal.sync())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
     }
 
     /// Serialize the in-memory graph to a `.kgl` byte buffer (the same

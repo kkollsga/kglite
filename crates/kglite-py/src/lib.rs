@@ -264,26 +264,78 @@ fn from_bytes(py: Python<'_>, data: &[u8]) -> PyResult<KnowledgeGraph> {
 /// `storage` (`"mapped"` / `"disk"`) applies only when *creating* a new
 /// graph; opening an existing file uses whatever mode it was saved in.
 ///
+/// The `durable=` argument: a level name, a bool, or `None`.
+///
+/// `True`/`False` are accepted *spellings* of `"full"`/`"off"`, not a second
+/// code path — every form normalises to one [`DurabilityLevel`] here, at the
+/// single point where Python vocabulary becomes engine vocabulary, and
+/// nothing downstream knows which spelling was used.
+/// Normalise the `durable=` argument into one [`DurabilityLevel`].
+///
+/// A plain function rather than a `FromPyObject` impl: the trait's shape has
+/// moved across PyO3 releases, and nothing here needs to participate in
+/// generic extraction — `open` is the only caller, and it wants to own the
+/// error messages anyway.
+fn durable_level_from_arg(
+    ob: &Bound<'_, PyAny>,
+) -> PyResult<kglite_core::api::durable::DurabilityLevel> {
+    use kglite_core::api::durable::DurabilityLevel;
+    // `bool` extraction is strict in PyO3 (it requires an actual `PyBool`),
+    // so this cannot swallow `1` or a string.
+    if let Ok(flag) = ob.extract::<bool>() {
+        return Ok(if flag {
+            DurabilityLevel::Full
+        } else {
+            DurabilityLevel::Off
+        });
+    }
+    let name: String = ob.extract().map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "durable must be a bool or one of {:?} (True is 'full', False is 'off')",
+            DurabilityLevel::NAMES,
+        ))
+    })?;
+    DurabilityLevel::from_name(&name).ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "unknown durability level {name:?}. Valid levels are {:?}: \
+             'full' survives power loss (one barrier per commit), \
+             'normal' survives the process dying but not an OS crash or \
+             power loss, 'off' keeps no log and relies on save().",
+            DurabilityLevel::NAMES,
+        ))
+    })
+}
+
 /// Durability is **on by default**: each committed mutation is `fsync`'d to a
 /// `<path>-wal` sidecar before the call returns, and on open any WAL frames are
 /// replayed onto the loaded checkpoint to recover work committed since the last
 /// `save()`. This is the point of an embedded database — without it a hard
 /// crash loses everything since the last explicit save.
 ///
-/// `durable` is tri-state so that the default can mean "wherever it is
-/// supported" without turning an unsupported mode into an error:
+/// `durable` names **what a committed mutation survives**, using SQLite's
+/// `synchronous` vocabulary. Guarantees, not syscalls — the syscall differs by
+/// platform, the guarantee does not:
 ///
-/// - `None` (the default) — enable it unless the graph is `storage="disk"`,
-///   whose commit boundary is a generation publish rather than a logical log.
-///   A disk graph therefore opens non-durable instead of raising, exactly as it
-///   did before durability had a default.
-/// - `True` — require it. `storage="disk"` raises `ValueError`, because
-///   silently handing back a non-durable graph to a caller who explicitly asked
-///   for crash safety is the one outcome worse than an error.
-/// - `False` — opt out. The graph still remembers `path` for `save()`; it just
-///   keeps no log, which is measurably faster for write-heavy bulk loading (no
-///   `fsync` per commit) and is the right choice when the graph is rebuildable
-///   from source data.
+/// - `"full"` (also spelled `True`) — survives **power loss**. One barrier per
+///   commit; on macOS that is `F_FULLFSYNC`, which is a stronger guarantee than
+///   SQLite's own default gives.
+/// - `"normal"` — survives the **process** dying (`SIGKILL`, an unhandled
+///   panic, an OOM-kill), because the frame is in the kernel's page cache
+///   before the call returns. An OS crash or power loss loses commits made
+///   since the last `save()`. No barrier per commit, so it costs
+///   essentially nothing beyond the write itself. Call `sync()` to take an
+///   explicit power-safe point without a full checkpoint.
+/// - `"off"` (also spelled `False`) — no log at all. The graph still remembers
+///   `path` for `save()`, which is measurably faster for write-heavy bulk
+///   loading and is the right choice when the graph is rebuildable from source
+///   data.
+/// - `None` (the default) — `"full"`, except on `storage="disk"` where it
+///   resolves to `"off"` (see below) rather than raising.
+///
+/// **The rungs are not uniform across storage modes: `storage="disk"` supports
+/// only `"off"`, and any explicit request to log raises `ValueError`** — a disk
+/// graph commits by publishing an immutable generation rather than by logging a
+/// write, so the blocker is structural and not a matter of barrier strength.
 ///
 /// `lock` (default `true`) takes the cross-process single-writer lease for the
 /// life of the returned graph. It is on by default because the alternative is
@@ -297,9 +349,10 @@ fn open(
     py: Python<'_>,
     path: String,
     storage: Option<&str>,
-    durable: Option<bool>,
+    durable: Option<Bound<'_, PyAny>>,
     lock: bool,
 ) -> PyResult<KnowledgeGraph> {
+    use kglite_core::api::durable::DurabilityLevel;
     use kglite_core::api::GraphRead;
 
     // Take write ownership *before* reading a byte. The window that loses a
@@ -352,9 +405,16 @@ fn open(
     kg.lifecycle.writer_lease = writer_lease;
     // Resolved after the graph exists, because the mode of an *existing* path
     // comes from the file, not from the `storage` argument.
-    let wanted = durable.unwrap_or(!kg.inner.graph.is_disk());
-    if wanted {
-        setup_durable(&mut kg, &path)?;
+    let level = match durable.as_ref() {
+        Some(ob) => durable_level_from_arg(ob)?,
+        // Default stays the strongest level the mode supports. Disk keeps no
+        // log at any level, so it resolves to `off` instead of raising —
+        // unchanged from when `durable` was a plain tri-state bool.
+        None if kg.inner.graph.is_disk() => DurabilityLevel::Off,
+        None => DurabilityLevel::Full,
+    };
+    if level.logs() {
+        setup_durable(&mut kg, &path, level)?;
     }
     Ok(kg)
 }
@@ -367,24 +427,46 @@ fn open(
 /// `GraphBackend` enum rather than a concrete backend, and both memory and
 /// mapped graphs mutate the same heap `StableDiGraph` underneath, so one
 /// capture path covers both. Disk is refused — see the error below.
-fn setup_durable(kg: &mut KnowledgeGraph, path: &str) -> PyResult<()> {
+fn setup_durable(
+    kg: &mut KnowledgeGraph,
+    path: &str,
+    level: kglite_core::api::durable::DurabilityLevel,
+) -> PyResult<()> {
     use kglite_core::api::GraphRead;
     // `wal` stays a below-api reach (durable-transaction internals) —
     // deferred to a high-level durable-transaction api lift (roadmap Piece 2).
     use kglite_core::api::durable as wal;
 
     if kg.inner.graph.is_disk() {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "durable=True is not supported for storage='disk'. A disk graph \
-             commits by publishing an immutable generation, so its durability \
-             boundary is the generation publish, not a logical write-ahead log: \
-             a replayed WAL frame and a published generation can each describe \
-             the same commit, and reconciling them needs a generation-aware log \
-             this release does not have. Use save() checkpoints for disk graphs, \
-             or storage='mapped' / the in-memory default if you need per-commit \
-             crash safety.",
-        ));
+        // `ValueError`, not one of the typed `kglite.*Error` classes, and that
+        // is deliberate: `error_py`'s taxonomy reserves the typed hierarchy for
+        // *engine* failures and keeps "argument-shape" rejections in their
+        // built-in family. An unsupported `durable` + `storage` combination is
+        // rejected at the Python API boundary before any engine work starts,
+        // so it belongs in the built-in family — as the pre-existing
+        // `test_durable_rejects_disk_mode` contract already fixed.
+        //
+        // Every logging level is refused here, not just `full`. The blocker is
+        // structural rather than a matter of barrier strength: there is no WAL
+        // for disk mode at any level, so `normal` would be exactly as
+        // unimplementable as `full`. Naming the requested level keeps the
+        // message honest for a caller who reasonably assumed the rungs were
+        // uniform across storage modes.
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "durable={:?} is not supported for storage='disk' (only 'off' is). \
+             A disk graph commits by publishing an immutable generation, so its \
+             durability boundary is the generation publish, not a logical \
+             write-ahead log: a replayed WAL frame and a published generation \
+             can each describe the same commit, and reconciling them needs a \
+             generation-aware log this release does not have. Use save() \
+             checkpoints for disk graphs, or storage='mapped' / the in-memory \
+             default if you need per-commit crash safety.",
+            level.name(),
+        )));
     }
+    let sync = level
+        .sync_mode()
+        .expect("caller checks level.logs() before setup_durable");
 
     let wpath = wal::wal_path(std::path::Path::new(path));
     // Read (do not truncate) any frames committed since the last checkpoint.
@@ -399,11 +481,12 @@ fn setup_durable(kg: &mut KnowledgeGraph, path: &str) -> PyResult<()> {
         .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
     KnowledgeGraph::wrap_backend_for_durability(dir);
 
-    let walh = wal::Wal::open(wpath)
+    let walh = wal::Wal::open(wpath, sync)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
     kg.lifecycle.durable = Some(crate::graph::DurableState {
         wal: walh,
         next_lsn: max_lsn + 1,
+        level,
     });
     Ok(())
 }
