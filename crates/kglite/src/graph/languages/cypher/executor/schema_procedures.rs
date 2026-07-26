@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 
-use super::call_clause::{compute_property_stats, indexes_to_rows, names_to_rows};
+use super::call_clause::{
+    compute_property_stats, constraints_to_rows, indexes_to_rows, names_to_rows,
+};
 use super::helpers::call_param_string;
 use super::{CypherExecutor, ResultRow};
 use crate::datatypes::values::Value;
@@ -33,6 +35,13 @@ pub(super) fn execute_schema_procedure(
                 executor.graph,
             );
             Ok(indexes_to_rows(&indexes, yield_items))
+        }
+        "db.constraints" => {
+            let constraints =
+                crate::graph::introspection::schema_overview::collect_constraints_structured(
+                    executor.graph,
+                );
+            Ok(constraints_to_rows(&constraints, yield_items))
         }
         "db.propertykeys" => {
             let keys =

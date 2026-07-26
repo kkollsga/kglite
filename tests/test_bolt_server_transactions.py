@@ -175,6 +175,13 @@ def test_two_concurrent_commits_second_conflicts(bolt_server):
                 with pytest.raises(neo4j.exceptions.ClientError) as excinfo:
                     tx_b.commit()
                 assert "conflict" in str(excinfo.value).lower()
+                # The status code is the documented contract (README +
+                # docs/python/migrations/neo4j-to-kglite.md) and the only
+                # thing a ported retry loop can branch on. It used to be
+                # `Neo.ClientError.Transaction.TransactionStartFailed`,
+                # which was wrong twice over — the transaction started
+                # fine — so this assertion exists to keep it pinned.
+                assert excinfo.value.code == "Neo.ClientError.Transaction.ConflictDetected"
             # Only A's CREATE survives.
             assert _count_people(session_a, "n.title = 'FromA'") == 1
             assert _count_people(session_a, "n.title = 'FromB'") == 0

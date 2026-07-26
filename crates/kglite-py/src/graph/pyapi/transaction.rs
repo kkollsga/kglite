@@ -6,6 +6,7 @@ use crate::datatypes::py_in;
 use crate::datatypes::values::Value;
 use crate::graph::languages::cypher;
 use crate::graph::KnowledgeGraph;
+use kglite_core::api::session::CsvImportPolicy;
 use kglite_core::api::session::Transaction as CoreTransaction;
 use kglite_core::api::CowSelection;
 use pyo3::prelude::*;
@@ -214,6 +215,7 @@ impl Transaction {
             write_scope: write_scope_set.as_ref(),
             git_sha: git_sha.as_deref(),
             modified_by: modified_by.as_deref(),
+            csv_import: CsvImportPolicy::LocalFilesystem,
         };
 
         let result = if is_mut {
@@ -292,7 +294,15 @@ impl Transaction {
             working.set_version(current_version + 1);
             kg.inner = Arc::new(working);
             kg.cursor.selection = CowSelection::new();
-        });
+            // Durability: one WAL frame for the whole transaction, appended
+            // here and nowhere earlier. `Transaction::cypher` must not log —
+            // its writes are uncommitted and `rollback()` must leave no trace
+            // of them. `take_working` *moves* the working copy, so every op
+            // buffered during the transaction arrives on `kg.inner` intact and
+            // this single flush emits them together, which is exactly the
+            // atomicity the caller asked for.
+            kg.commit_wal()
+        })?;
         Ok(())
     }
 

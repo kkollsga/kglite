@@ -26,7 +26,8 @@ def test_factory_escape_is_called(tmp_path) -> None:
         "    def embed(self, texts):\n"
         "        return [[0.0, 0.0, 0.0] for _ in texts]\n"
         "def build(model):\n"
-        "    s = _Stub(); s.model = model; return s\n"
+        "    s = _Stub(); s.model = model; return s\n",
+        encoding="utf-8",
     )
     sys.path.insert(0, str(tmp_path))
     try:

@@ -266,19 +266,36 @@ fn from_bytes(py: Python<'_>, data: &[u8]) -> PyResult<KnowledgeGraph> {
 /// `storage` (`"mapped"` / `"disk"`) applies only when *creating* a new
 /// graph; opening an existing file uses whatever mode it was saved in.
 ///
-/// `durable=True` opens the graph in write-ahead-log mode: each committed
-/// Cypher mutation is `fsync`'d to a `<path>-wal` sidecar before returning,
-/// and on open any WAL frames are replayed onto the loaded checkpoint to
-/// recover work committed since the last `save()`. In-memory graphs only in
-/// this release.
+/// Durability is **on by default**: each committed mutation is `fsync`'d to a
+/// `<path>-wal` sidecar before the call returns, and on open any WAL frames are
+/// replayed onto the loaded checkpoint to recover work committed since the last
+/// `save()`. This is the point of an embedded database — without it a hard
+/// crash loses everything since the last explicit save.
+///
+/// `durable` is tri-state so that the default can mean "wherever it is
+/// supported" without turning an unsupported mode into an error:
+///
+/// - `None` (the default) — enable it unless the graph is `storage="disk"`,
+///   whose commit boundary is a generation publish rather than a logical log.
+///   A disk graph therefore opens non-durable instead of raising, exactly as it
+///   did before durability had a default.
+/// - `True` — require it. `storage="disk"` raises `ValueError`, because
+///   silently handing back a non-durable graph to a caller who explicitly asked
+///   for crash safety is the one outcome worse than an error.
+/// - `False` — opt out. The graph still remembers `path` for `save()`; it just
+///   keeps no log, which is measurably faster for write-heavy bulk loading (no
+///   `fsync` per commit) and is the right choice when the graph is rebuildable
+///   from source data.
 #[pyfunction]
-#[pyo3(signature = (path, *, storage=None, durable=false))]
+#[pyo3(signature = (path, *, storage=None, durable=None))]
 fn open(
     py: Python<'_>,
     path: String,
     storage: Option<&str>,
-    durable: bool,
+    durable: Option<bool>,
 ) -> PyResult<KnowledgeGraph> {
+    use kglite_core::api::GraphRead;
+
     let mut kg = if std::path::Path::new(&path).exists() {
         py.detach(|| load_file(&path))
             .map(KnowledgeGraph::from_arc)
@@ -287,7 +304,10 @@ fn open(
         KnowledgeGraph::construct(storage, Some(&path))?
     };
     kg.lifecycle.source_path = Some(std::path::PathBuf::from(&path));
-    if durable {
+    // Resolved after the graph exists, because the mode of an *existing* path
+    // comes from the file, not from the `storage` argument.
+    let wanted = durable.unwrap_or(!kg.inner.graph.is_disk());
+    if wanted {
         setup_durable(&mut kg, &path)?;
     }
     Ok(kg)
@@ -295,18 +315,28 @@ fn open(
 
 /// Turn `kg` into a durable graph: replay any WAL frames committed since
 /// the last checkpoint onto the loaded graph, wrap its backend in the
-/// write-capture layer, and open the WAL for append. In-memory only.
+/// write-capture layer, and open the WAL for append.
+///
+/// Storage-mode-agnostic by construction: the capture wrapper wraps the
+/// `GraphBackend` enum rather than a concrete backend, and both memory and
+/// mapped graphs mutate the same heap `StableDiGraph` underneath, so one
+/// capture path covers both. Disk is refused — see the error below.
 fn setup_durable(kg: &mut KnowledgeGraph, path: &str) -> PyResult<()> {
     use kglite_core::api::GraphRead;
     // `wal` stays a below-api reach (durable-transaction internals) —
     // deferred to a high-level durable-transaction api lift (roadmap Piece 2).
     use kglite_core::api::durable as wal;
 
-    if kg.inner.graph.is_mapped() || kg.inner.graph.is_disk() {
+    if kg.inner.graph.is_disk() {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "durable=True is supported only for in-memory graphs in this release \
-             (not storage='mapped'/'disk'). The WAL captures the in-memory mutation \
-             path; for the columnar disk modes, use save() checkpoints.",
+            "durable=True is not supported for storage='disk'. A disk graph \
+             commits by publishing an immutable generation, so its durability \
+             boundary is the generation publish, not a logical write-ahead log: \
+             a replayed WAL frame and a published generation can each describe \
+             the same commit, and reconciling them needs a generation-aware log \
+             this release does not have. Use save() checkpoints for disk graphs, \
+             or storage='mapped' / the in-memory default if you need per-commit \
+             crash safety.",
         ));
     }
 

@@ -86,6 +86,27 @@ def test_var_length_parse_error_carries_position(chain):
 
 BUDGET = 512  # keep in sync with MAX_EXPRESSION_DEPTH in parser/mod.rs
 
+# Linux caps a *single* argv entry at MAX_ARG_STRLEN — 32 pages, 128 KiB — and
+# no ulimit raises it; exceeding it fails the spawn with E2BIG before the child
+# starts. macOS allows roughly 1 MB, so a crash-shape test that interpolates a
+# pathological query into `python -c` passes locally and dies on every CI
+# interpreter. Pathological payloads therefore go through a file, and
+# `_run_child` enforces that portably so the next such test fails here rather
+# than only on Linux.
+_MAX_ARG_STRLEN = 32 * 4096
+
+
+def _run_child(code: str, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run `python -c code args…`, asserting no argv entry risks E2BIG."""
+    argv = [sys.executable, "-c", code, *args]
+    for entry in argv:
+        assert len(entry.encode()) < _MAX_ARG_STRLEN, (
+            f"argv entry is {len(entry.encode())} bytes, over Linux's "
+            f"{_MAX_ARG_STRLEN}-byte MAX_ARG_STRLEN — pass large payloads "
+            f"through a file or stdin, not the command line"
+        )
+    return subprocess.run(argv, capture_output=True, text=True, timeout=120)
+
 
 def test_deep_nesting_within_budget_parses_and_executes():
     g = KnowledgeGraph()
@@ -117,6 +138,93 @@ def test_not_chain_past_budget_is_a_clean_syntax_error():
         g.cypher("RETURN " + "NOT " * 600 + "false AS x")
 
 
+# The left-associative operator chains are parsed *iteratively*, so the
+# parser's own call depth stays flat while the tree it returns grows one level
+# per term. The budget has to charge those levels too: the planner walkers, the
+# executor's predicate evaluator, and the AST's drop glue all recurse per
+# level, and on a server worker thread (tokio default: 2 MiB) that recursion
+# used to overflow — aborting the whole process, not just failing the query.
+# `n` is the number of nesting levels the shape produces.
+_CHAIN_SHAPES = {
+    "or": lambda n: "RETURN " + " OR ".join(["false"] * (n + 1)) + " AS x",
+    "xor": lambda n: "RETURN " + " XOR ".join(["false"] * (n + 1)) + " AS x",
+    "and": lambda n: "RETURN " + " AND ".join(["true"] * (n + 1)) + " AS x",
+    "add": lambda n: "RETURN " + " + ".join(["1"] * (n + 1)) + " AS x",
+    "subtract": lambda n: "RETURN 0" + " - 0" * n + " AS x",
+    "multiply": lambda n: "RETURN " + " * ".join(["1"] * (n + 1)) + " AS x",
+    "divide": lambda n: "RETURN 1" + " / 1" * n + " AS x",
+    "modulo": lambda n: "RETURN 3" + " % 5" * n + " AS x",
+    "concat": lambda n: "RETURN " + " || ".join(["'a'"] * (n + 1)) + " AS x",
+    "subscript": lambda n: "RETURN [1]" + "[0]" * n + " AS x",
+    "label_chain": lambda n: "MATCH (h:Hop) WHERE h" + ":Hop" * n + " RETURN count(h) AS x",
+}
+
+_CHAIN_EXPECTED_WITHIN_BUDGET = {
+    "or": False,
+    "xor": False,
+    "and": True,
+    "add": 400,
+    "subtract": 0,
+    "multiply": 1,
+    "divide": 1,
+    "modulo": 3,
+    "concat": "a" * 400,
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_CHAIN_EXPECTED_WITHIN_BUDGET))
+def test_operator_chain_within_budget_parses_and_executes(shape):
+    # 399 levels — comfortably inside the budget, so charging chain levels
+    # must not reject ordinary (if long) queries.
+    g = KnowledgeGraph()
+    got = g.cypher(_CHAIN_SHAPES[shape](399)).scalar()
+    assert got == _CHAIN_EXPECTED_WITHIN_BUDGET[shape]
+
+
+def test_label_chain_within_budget_parses_and_executes(chain):
+    assert chain.cypher(_CHAIN_SHAPES["label_chain"](399)).scalar() == 13
+
+
+@pytest.mark.parametrize("shape", sorted(_CHAIN_SHAPES))
+def test_operator_chain_past_budget_is_a_clean_syntax_error(shape, chain):
+    # Every iteratively-parsed chain must hit the same budget as the
+    # recursively-parsed shapes rather than running off the stack.
+    with pytest.raises(kglite.CypherSyntaxError, match=f"nesting exceeds {BUDGET} levels"):
+        chain.cypher(_CHAIN_SHAPES[shape](BUDGET + 100))
+
+
+@pytest.mark.parametrize("shape", sorted(_CHAIN_SHAPES))
+def test_pathological_operator_chain_cannot_kill_the_process(shape, tmp_path):
+    # Subprocess for the same reason as the nesting crash-shape test below:
+    # on regression this aborts the interpreter, which would otherwise take
+    # the whole test run with it. 20k levels is far past any stack.
+    #
+    # The query travels via a *file*, never argv. At 20k levels the widest
+    # shapes reach ~200 KB, and Linux caps a single argument at
+    # MAX_ARG_STRLEN (32 pages = 128 KiB) — a hard kernel limit no ulimit
+    # raises — so embedding it in `-c` made `and`/`or`/`xor`/`concat` die with
+    # E2BIG ("Argument list too long") before the interpreter ever started.
+    # macOS allows ~1 MB per argument, which is why that only ever failed in
+    # CI. The child reads the file, so payload size is now irrelevant.
+    query_file = tmp_path / "query.cypher"
+    query_file.write_text(_CHAIN_SHAPES[shape](20_000), encoding="utf-8")
+    code = (
+        "import pathlib, sys\n"
+        "import kglite\n"
+        "g = kglite.KnowledgeGraph()\n"
+        "g.cypher('CREATE (:Hop {id: 0})')\n"
+        "q = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')\n"
+        "try:\n"
+        "    g.cypher(q)\n"
+        "    print('UNEXPECTED-SUCCESS')\n"
+        "except kglite.CypherSyntaxError:\n"
+        "    print('CLEAN-ERROR')\n"
+    )
+    proc = _run_child(code, str(query_file))
+    assert proc.returncode == 0, f"process died (rc={proc.returncode}): {proc.stderr[-300:]}"
+    assert proc.stdout.strip() == "CLEAN-ERROR", proc.stdout
+
+
 @pytest.mark.parametrize("opener,closer", [("(", ")"), ("[", "]")], ids=["parens", "lists"])
 def test_pathological_nesting_cannot_kill_the_process(opener, closer):
     # Run in a subprocess: before the recursion budget existed this shape
@@ -132,7 +240,7 @@ def test_pathological_nesting_cannot_kill_the_process(opener, closer):
         "except kglite.CypherSyntaxError as e:\n"
         "    print('CLEAN-ERROR')\n"
     )
-    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    proc = _run_child(code)
     assert proc.returncode == 0, f"process died (rc={proc.returncode}): {proc.stderr[-300:]}"
     assert proc.stdout.strip() == "CLEAN-ERROR", proc.stdout
 

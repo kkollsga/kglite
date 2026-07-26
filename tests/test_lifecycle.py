@@ -2,6 +2,8 @@
 save(), and the context-manager auto-save-on-close (Stage 0 of the durability
 work — ergonomics, not crash safety)."""
 
+import os
+
 import pytest
 
 import kglite
@@ -76,15 +78,47 @@ def test_context_manager_binds_graph(tmp_path):
 
 
 def test_context_manager_skips_save_on_exception(tmp_path):
+    """An exception still skips the checkpoint — but a *committed* mutation is
+    durable regardless, because ``open()`` is crash-safe by default.
+
+    A ``with`` block is not a transaction. Each ``cypher()`` mutation commits
+    and is ``fsync``'d before it returns, so an exception later in the block
+    cannot un-commit it; recovering it on reopen is the write-ahead log doing
+    its job. What ``__exit__`` controls is whether a *checkpoint* is written,
+    and on an exception it still declines to write one.
+
+    Use ``g.begin()`` when you want discard-on-error, or ``durable=False`` for
+    the old snapshot-only behaviour (asserted below).
+    """
     p = str(tmp_path / "app.kgl")
     with kglite.open(p) as g:
         g.cypher("CREATE (:Person {id: 1})")
-    # Now mutate inside a failing block — the failed exit must NOT persist.
+    checkpoint_size = os.path.getsize(p)
+
     with pytest.raises(RuntimeError):
         with kglite.open(p) as g:
             g.cypher("CREATE (:Person {id: 2})")
             raise RuntimeError("boom")
-    assert kglite.open(p).cypher("MATCH (p) RETURN count(*) AS c").scalar() == 1
+
+    # No checkpoint was written by the failed exit — the .kgl is untouched.
+    assert os.path.getsize(p) == checkpoint_size
+    # But the committed statement survives, recovered from the log.
+    assert kglite.open(p).cypher("MATCH (p) RETURN count(*) AS c").scalar() == 2
+
+
+def test_non_durable_context_manager_discards_on_exception(tmp_path):
+    """``durable=False`` keeps the pre-durability contract exactly: nothing is
+    persisted unless the block exits cleanly."""
+    p = str(tmp_path / "app.kgl")
+    with kglite.open(p, durable=False) as g:
+        g.cypher("CREATE (:Person {id: 1})")
+
+    with pytest.raises(RuntimeError):
+        with kglite.open(p, durable=False) as g:
+            g.cypher("CREATE (:Person {id: 2})")
+            raise RuntimeError("boom")
+
+    assert kglite.open(p, durable=False).cypher("MATCH (p) RETURN count(*) AS c").scalar() == 1
 
 
 def test_context_manager_does_not_suppress_exception(tmp_path):

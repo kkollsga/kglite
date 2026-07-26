@@ -18,7 +18,7 @@ def _write_csv(path, df):
 
 def _write_blueprint(path, bp):
     """Write a blueprint dict as JSON."""
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(bp, f)
 
 
@@ -189,7 +189,7 @@ class TestWarningCapture:
             py_warnings.setLevel(prior_level)
             py_warnings.propagate = prior_capture
 
-        log_content = log_path.read_text()
+        log_content = log_path.read_text(encoding="utf-8")
         # The Rust-emitted UserWarning should appear in the log.
         assert "create_connections" in log_content, (
             f"py.warnings logger didn't capture the Rust UserWarning. Log: {log_content!r}"
@@ -495,7 +495,7 @@ class TestSaveOutput:
         bp_path = _minimal_blueprint(tmp_path)
 
         # Add output to blueprint
-        with open(bp_path) as f:
+        with open(bp_path, encoding="utf-8") as f:
             bp = json.load(f)
         bp["settings"]["output"] = "output/graph.kgl"
         _write_blueprint(bp_path, bp)
@@ -510,7 +510,7 @@ class TestSaveOutput:
 
     def test_no_save_when_disabled(self, tmp_path):
         bp_path = _minimal_blueprint(tmp_path)
-        with open(bp_path) as f:
+        with open(bp_path, encoding="utf-8") as f:
             bp = json.load(f)
         bp["settings"]["output"] = "output/graph.kgl"
         _write_blueprint(bp_path, bp)

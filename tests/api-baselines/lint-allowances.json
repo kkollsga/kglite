@@ -237,6 +237,10 @@
       "classification": "test"
     },
     {
+      "identity": "crates/kglite/src/graph/dir_graph/schema_ops.rs::fn:set_schema:pub fn set_schema(&mut self, schema: SchemaDefinition) -> Result<(), KgError>::clippy::result_large_err",
+      "classification": "api-shape"
+    },
+    {
       "identity": "crates/kglite/src/graph/features/spatial.rs::fn:near_point:pub fn near_point( graph: &DirGraph, selection: &CurrentSelection, lat_field: &str, lon_field: &str, center_lat: f64, center_lon: f64, max_distance: f64, geom_fallback: Option<&str>, ) -> Result<Vec<NodeIndex>, String>::clippy::too_many_arguments",
       "classification": "transitional"
     },
@@ -289,7 +293,7 @@
       "classification": "transitional"
     },
     {
-      "identity": "crates/kglite/src/graph/languages/cypher/executor/tests.rs::module::clippy::approx_constant",
+      "identity": "crates/kglite/src/graph/languages/cypher/executor/tests/mod.rs::module::clippy::approx_constant",
       "classification": "test"
     },
     {
@@ -337,11 +341,11 @@
       "classification": "test"
     },
     {
-      "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:add_connections:pub fn add_connections( graph: &mut DirGraph, df_data: DataFrame, connection_type: String, source_type: String, source_id_field: String, target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>, conflict_handling: Option<String>, ) -> Resul::clippy::too_many_arguments",
+      "identity": "crates/kglite/src/graph/mutation/add_properties.rs::fn:add_properties_aggregate:fn add_properties_aggregate( graph: &mut DirGraph, selection: &CurrentSelection, property_spec: &HashMap<String, PropertySpec>, type_to_level: &HashMap<String, usize>, parent_maps: &[HashMap<NodeIndex, NodeIndex>], target_level: usize, ) -> Result<AddPropertiesReport, String>::clippy::too_many_arguments",
       "classification": "transitional"
     },
     {
-      "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:add_properties_aggregate:fn add_properties_aggregate( graph: &mut DirGraph, selection: &CurrentSelection, property_spec: &HashMap<String, PropertySpec>, type_to_level: &HashMap<String, usize>, parent_maps: &[HashMap<NodeIndex, NodeIndex>], target_level: usize, ) -> Result<AddPropertiesReport, String>::clippy::too_many_arguments",
+      "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:add_connections:pub fn add_connections( graph: &mut DirGraph, df_data: DataFrame, connection_type: String, source_type: String, source_id_field: String, target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>, conflict_handling: Option<String>, ) -> Resul::clippy::too_many_arguments",
       "classification": "transitional"
     },
     {
@@ -476,10 +480,6 @@
     },
     {
       "identity": "crates/kglite/src/graph/languages/cypher/planner/schema_check.rs::fn:fmt:fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/storage/backend.rs::fn:new:pub fn new() -> Self::dead_code",
       "classification": "dead-code"
     },
     {

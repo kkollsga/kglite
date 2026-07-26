@@ -45,8 +45,8 @@ def test_parallel_bz2_is_explicitly_implementation_only():
 def test_each_individual_public_surface_is_present_with_all_features():
     manifest = rust_api_profiles.load_manifest()
     profiles = {profile["name"]: profile for profile in manifest["profiles"]}
-    all_surface = set((ROOT / profiles["all-features"]["baseline"]).read_text().splitlines())
+    all_surface = set((ROOT / profiles["all-features"]["baseline"]).read_text(encoding="utf-8").splitlines())
     for feature, classification in manifest["feature_classifications"].items():
         if classification == "public-api":
-            feature_surface = set((ROOT / profiles[feature]["baseline"]).read_text().splitlines())
+            feature_surface = set((ROOT / profiles[feature]["baseline"]).read_text(encoding="utf-8").splitlines())
             assert feature_surface <= all_surface

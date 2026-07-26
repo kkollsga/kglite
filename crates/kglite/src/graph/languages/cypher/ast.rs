@@ -56,6 +56,11 @@ pub enum Clause {
     Skip(SkipClause),
     Limit(LimitClause),
     Unwind(UnwindClause),
+    /// `LOAD CSV … AS row` — an external row source. Legal only as the leading
+    /// clause; the executor drives the rest of the pipeline over bounded row
+    /// batches rather than materializing the file (see
+    /// `executor/load_csv.rs`).
+    LoadCsv(LoadCsvClause),
     Union(UnionClause),
     Create(CreateClause),
     Set(SetClause),
@@ -75,6 +80,10 @@ pub enum Clause {
         body: Vec<Clause>,
     },
     Call(CallClause),
+    /// Schema DDL — `CREATE INDEX` / `DROP INDEX` / `SHOW INDEXES` and the
+    /// constraint counterparts. Always the *sole* clause of its query (the
+    /// parser enforces that); see [`SchemaCommand`].
+    Schema(SchemaCommand),
     /// `CALL { ... }` subquery: a nested sub-pipeline evaluated once per outer
     /// row (correlated) or exactly once (uncorrelated). `import` holds the
     /// outer variable names lifted from a leading bare importing `WITH`
@@ -674,6 +683,31 @@ pub struct UnwindClause {
     pub alias: String,
 }
 
+/// `LOAD CSV [WITH HEADERS] FROM <source> AS <variable> [FIELDTERMINATOR <sep>]`
+///
+/// A row **source**: unlike every other clause it originates rows from outside
+/// the graph rather than transforming an upstream row set, so it is only legal
+/// as the leading clause (enforced in
+/// [`super::parser::CypherParser::parse_clause_sequence`]).
+///
+/// `source` stays an [`Expression`] rather than a resolved path because the
+/// parsed AST is plan-cached and replayed across executions: a literal path is
+/// the common form, but `FROM $path` must re-evaluate per call, and the file is
+/// only ever opened at execute time.
+#[derive(Debug, Clone)]
+pub struct LoadCsvClause {
+    /// `WITH HEADERS` present — bind each row as a map keyed by the header
+    /// row. Without it, rows bind as a zero-indexed list.
+    pub with_headers: bool,
+    /// The CSV location. Evaluated per execution; `file://` URLs and bare
+    /// filesystem paths resolve, other URL schemes are rejected.
+    pub source: Expression,
+    /// The variable each row binds to (`AS row`).
+    pub variable: String,
+    /// `FIELDTERMINATOR ';'` — a single-byte delimiter. `None` means comma.
+    pub field_terminator: Option<u8>,
+}
+
 /// Set-operator kind: UNION, INTERSECT, EXCEPT.
 ///
 /// All three combine two result sets but differ in row-set semantics:
@@ -820,6 +854,200 @@ pub struct CallClause {
 pub struct YieldItem {
     pub name: String,
     pub alias: Option<String>,
+}
+
+// ============================================================================
+// Schema DDL (Neo4j 5 `CREATE INDEX` / `DROP INDEX` / `SHOW INDEXES`, and the
+// constraint counterparts)
+// ============================================================================
+
+/// A schema-definition statement.
+///
+/// A schema command is a *whole statement*, not a pipeline stage: the parser
+/// rejects it whenever another clause appears in the same query, so a
+/// `Clause::Schema` is always the sole element of `CypherQuery::clauses`. It
+/// rides inside `Clause` anyway so the existing parse → plan → execute
+/// pipeline (parse cache, plan cache, EXPLAIN, mutation routing) needs no
+/// parallel statement type.
+///
+/// Routing: `CreateIndex` / `DropIndex` / `Constraint` are mutations (schema
+/// is graph state) and run in `executor/write.rs`; `ShowIndexes` is a read and
+/// runs in `executor/mod.rs`. See `executor::write::clause_is_mutation`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SchemaCommand {
+    CreateIndex(CreateIndex),
+    /// `CREATE <TYPE> INDEX …` for an index type KGLite has no equivalent of
+    /// (`TEXT`, `POINT`, `FULLTEXT`, `VECTOR`, `LOOKUP`). The remainder of the
+    /// statement is scanned to its end without structural validation: it is
+    /// rejected wholesale at execution, and those forms carry grammar the
+    /// supported ones don't (`ON EACH [...]`, `ON EACH labels(n)`, provider
+    /// `OPTIONS`) that would buy nothing to model.
+    UnsupportedIndexType {
+        index_type: DdlIndexType,
+        name: Option<String>,
+    },
+    DropIndex(DropIndex),
+    /// `SHOW INDEXES` — a read. Rows come from the same collector that backs
+    /// `CALL db.indexes()`.
+    ShowIndexes,
+    /// Constraint DDL. Parsed into a typed command so a ported Neo4j schema
+    /// script gets a specific unsupported-feature error at *execution* rather
+    /// than a syntax error. Sprint 4b replaces that error with enforcement —
+    /// the parser does not change.
+    Constraint(ConstraintCommand),
+}
+
+/// Index-type word in `CREATE <TYPE> INDEX` (Neo4j 5).
+///
+/// KGLite implements `Unspecified` and `Range`; the remaining words parse and
+/// are rejected at execution with a per-kind message (see
+/// `executor::schema_ddl`). Carrying them in the AST — rather than failing in
+/// the parser — is what makes a ported script report "feature unsupported"
+/// instead of "syntax error".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DdlIndexType {
+    /// No type word. Neo4j 5 defaults this to RANGE; KGLite maps it to a hash
+    /// equality index (one property) or a composite index (two or more).
+    Unspecified,
+    Range,
+    Text,
+    Point,
+    Fulltext,
+    Vector,
+    Lookup,
+}
+
+impl DdlIndexType {
+    /// The Cypher keyword this variant was parsed from, for error messages.
+    /// `Unspecified` has no keyword and reports as `INDEX`.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            DdlIndexType::Unspecified => "INDEX",
+            DdlIndexType::Range => "RANGE",
+            DdlIndexType::Text => "TEXT",
+            DdlIndexType::Point => "POINT",
+            DdlIndexType::Fulltext => "FULLTEXT",
+            DdlIndexType::Vector => "VECTOR",
+            DdlIndexType::Lookup => "LOOKUP",
+        }
+    }
+}
+
+/// The entity a DDL `FOR` clause targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DdlTarget {
+    /// `FOR (n:Label)` — `variable` is the pattern variable, used to validate
+    /// that the `ON (…)` property references bind to it.
+    Node {
+        variable: Option<String>,
+        label: String,
+    },
+    /// `FOR ()-[r:TYPE]-()` — relationship indexes/constraints. Parsed so the
+    /// executor can reject them by name; KGLite has no relationship-property
+    /// index.
+    Relationship {
+        variable: Option<String>,
+        rel_type: String,
+    },
+}
+
+impl DdlTarget {
+    /// Pattern variable bound by the `FOR` clause, when one was written.
+    pub fn variable(&self) -> Option<&str> {
+        match self {
+            DdlTarget::Node { variable, .. } | DdlTarget::Relationship { variable, .. } => {
+                variable.as_deref()
+            }
+        }
+    }
+}
+
+/// `CREATE [<type>] INDEX [<name>] [IF NOT EXISTS] FOR <target> ON (<props>)
+/// [OPTIONS { … }]`
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateIndex {
+    /// Name from `CREATE INDEX <name> FOR …`. Accepted for Neo4j-script
+    /// portability, but **not persisted**: KGLite derives its own canonical
+    /// index name (`Label.property`) and `SHOW INDEXES` / `DROP INDEX` speak
+    /// that name. Documented in CYPHER.md.
+    pub name: Option<String>,
+    pub index_type: DdlIndexType,
+    pub if_not_exists: bool,
+    pub target: DdlTarget,
+    /// Properties from `ON (n.p1, n.p2, …)`, in declaration order.
+    pub properties: Vec<String>,
+    /// True when the statement carried an `OPTIONS { … }` block. KGLite has no
+    /// index providers or per-index configuration, so the executor rejects it
+    /// rather than dropping it on the floor.
+    pub has_options: bool,
+}
+
+/// `DROP INDEX <selector> [IF EXISTS]`
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropIndex {
+    pub selector: DropIndexSelector,
+    pub if_exists: bool,
+}
+
+/// How a `DROP INDEX` statement names its index.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DropIndexSelector {
+    /// `DROP INDEX <name>` — the only Neo4j 5 form. Resolved against KGLite's
+    /// canonical index names.
+    Name(String),
+    /// `DROP INDEX FOR (n:Label) ON (n.prop, …)` — a KGLite extension. Names
+    /// the index by its descriptor so a script never has to know the
+    /// canonical-name spelling.
+    Descriptor {
+        target: DdlTarget,
+        properties: Vec<String>,
+    },
+}
+
+/// Constraint DDL. Sprint 4a parses these; the executor rejects them with a
+/// specific message. Sprint 4b routes them to enforcement.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstraintCommand {
+    Create(CreateConstraint),
+    Drop { name: String, if_exists: bool },
+    Show,
+}
+
+/// `CREATE CONSTRAINT [<name>] [IF NOT EXISTS] FOR <target>
+/// {REQUIRE|ASSERT} <requirement>`
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateConstraint {
+    pub name: Option<String>,
+    pub if_not_exists: bool,
+    pub target: DdlTarget,
+    /// Properties the requirement applies to, in declaration order.
+    pub properties: Vec<String>,
+    pub requirement: ConstraintRequirement,
+}
+
+/// The predicate half of `CREATE CONSTRAINT … REQUIRE <props> <requirement>`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstraintRequirement {
+    /// `IS UNIQUE`, `IS NODE UNIQUE`, `IS RELATIONSHIP UNIQUE`
+    Unique,
+    /// `IS NOT NULL`
+    NotNull,
+    /// `IS KEY`, `IS NODE KEY`, `IS RELATIONSHIP KEY`
+    Key,
+    /// `IS :: <TYPE>` / `IS TYPED <TYPE>` — the type word verbatim.
+    PropertyType(String),
+}
+
+impl ConstraintRequirement {
+    /// Canonical Cypher spelling, for error messages.
+    pub fn keyword(&self) -> &str {
+        match self {
+            ConstraintRequirement::Unique => "IS UNIQUE",
+            ConstraintRequirement::NotNull => "IS NOT NULL",
+            ConstraintRequirement::Key => "IS NODE KEY",
+            ConstraintRequirement::PropertyType(ty) => ty,
+        }
+    }
 }
 
 // ============================================================================

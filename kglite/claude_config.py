@@ -118,7 +118,12 @@ def _resolve(client: str | None, path: str | Path | None) -> tuple[_ClientSpec, 
 def _load(p: Path) -> dict[str, Any]:
     if not p.exists():
         return {}
-    text = p.read_text()
+    # Always UTF-8: these files are written by Claude Desktop / Claude Code as
+    # UTF-8 regardless of the platform's locale codepage. Relying on the
+    # locale default silently mis-decodes non-ASCII on a cp1252 console (and
+    # raises on cp932/936/949); `json.dump` would then bake the mojibake back
+    # in and `os.replace` would commit it over every unrelated MCP entry.
+    text = p.read_text(encoding="utf-8")
     if not text.strip():
         return {}
     return json.loads(text)
@@ -128,8 +133,11 @@ def _save_atomic(p: Path, data: dict[str, Any]) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=p.name + ".", dir=str(p.parent))
     try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
+        # UTF-8 + LF to match what Claude Desktop writes, and
+        # ensure_ascii=False so non-ASCII text in unrelated entries survives
+        # byte-for-byte instead of being re-escaped as \uXXXX on every edit.
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
             f.write("\n")
         os.replace(tmp_name, p)
     except Exception:

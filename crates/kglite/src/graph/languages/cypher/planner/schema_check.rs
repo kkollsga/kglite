@@ -132,6 +132,26 @@ fn bind_create_pattern(pattern: &CreatePattern, scope: &mut HashSet<String>) {
     }
 }
 
+/// Validate a row source's own expression against the scope it sees, then
+/// declare the variable it binds.
+///
+/// `UNWIND` and `LOAD CSV` are the only clauses that originate rows and bind
+/// exactly one variable, and the rule is identical for both, so it lives here
+/// rather than twice in [`validate_scope`]. For `LOAD CSV` the incoming scope is
+/// always empty (it is leading-position only), which is what lets `FROM $path`
+/// through while rejecting `FROM n.path`.
+fn bind_row_source(clause: &Clause, scope: &mut HashSet<String>) -> Result<(), SchemaError> {
+    let (source, variable) = match clause {
+        Clause::Unwind(unwind) => (&unwind.expression, &unwind.alias),
+        Clause::LoadCsv(load) => (&load.source, &load.variable),
+        // Unreachable: the caller matches exactly these two variants.
+        _ => return Ok(()),
+    };
+    validate_expression_scope(source, scope)?;
+    scope.insert(variable.clone());
+    Ok(())
+}
+
 fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), SchemaError> {
     let mut scope = initial.clone();
     for clause in &query.clauses {
@@ -193,10 +213,9 @@ fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), 
             }
             Clause::Skip(skip) => validate_expression_scope(&skip.count, &scope)?,
             Clause::Limit(limit) => validate_expression_scope(&limit.count, &scope)?,
-            Clause::Unwind(unwind) => {
-                validate_expression_scope(&unwind.expression, &scope)?;
-                scope.insert(unwind.alias.clone());
-            }
+            // The two row sources: validate the source expression, then declare
+            // the single variable it binds. See `bind_row_source`.
+            Clause::Unwind(_) | Clause::LoadCsv(_) => bind_row_source(clause, &mut scope)?,
             Clause::Union(union) => validate_scope(&union.query, initial)?,
             Clause::Create(create) => {
                 for pattern in &create.patterns {
@@ -863,7 +882,9 @@ fn validate_clause(
             }
             validate_query(body, graph, &mut inner_vars)?;
         }
-        Clause::Return(_) | Clause::OrderBy(_) | Clause::Unwind(_) => {}
+        // LOAD CSV binds an untyped map/list, so there is no node type to
+        // validate properties against — same as UNWIND.
+        Clause::Return(_) | Clause::OrderBy(_) | Clause::Unwind(_) | Clause::LoadCsv(_) => {}
         Clause::Create(c) => {
             for pattern in &c.patterns {
                 validate_create_pattern(pattern, graph, var_types)?;

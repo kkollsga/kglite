@@ -76,7 +76,7 @@ def main() -> int:
     args = parser.parse_args()
     rendered = json.dumps(capture_python_api(), indent=2, sort_keys=True) + "\n"
     if args.write:
-        PYTHON_BASELINE.write_text(rendered)
+        PYTHON_BASELINE.write_text(rendered, encoding="utf-8", newline="\n")
         print(f"wrote {PYTHON_BASELINE.relative_to(ROOT)}")
     else:
         print(rendered, end="")

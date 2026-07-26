@@ -52,24 +52,24 @@ with kglite.open("app.kgl") as g:
 - The context manager **skips the save if the block raised** — the on-disk file
   keeps its last good state. `close()` persists explicitly.
 
-> **Not crash safety (by default).** Plain `open()` auto-save-on-close is a
-> *clean-exit* checkpoint — a hard crash (`kill -9`, power loss) mid-session
-> writes nothing. For crash safety, use `durable=True` below.
+> **Auto-save-on-close is not what makes this crash-safe.** The clean-exit
+> checkpoint writes nothing on a hard crash (`kill -9`, power loss). Crash
+> safety comes from the write-ahead log, which is on by default — see below.
 
-### `durable=True` — crash-safe writes (write-ahead log)
+### Crash-safe writes (write-ahead log, on by default)
 
-Open with `durable=True` to make every committed Cypher mutation survive a hard
-crash. Each mutation is appended to a `<path>-wal` sidecar and `fsync`'d **before
-the call returns**; on open, any WAL frames are replayed onto the loaded
-checkpoint to recover work committed since the last `save()`.
+`open()` makes every committed mutation survive a hard crash. Each mutation is
+appended to a `<path>-wal` sidecar and `fsync`'d **before the call returns**; on
+open, any WAL frames are replayed onto the loaded checkpoint to recover work
+committed since the last `save()`.
 
 ```python
-with kglite.open("app.kgl", durable=True) as g:
+with kglite.open("app.kgl") as g:
     g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
     # committed + fsync'd to app.kgl-wal here — survives kill -9
 
 # A later run recovers automatically, even after a crash with no save():
-g = kglite.open("app.kgl", durable=True)
+g = kglite.open("app.kgl")
 g.cypher("MATCH (p:Person) RETURN p.name")   # -> Alice
 ```
 
@@ -77,10 +77,12 @@ g.cypher("MATCH (p:Person) RETURN p.name")   # -> Alice
   graph that was *never* saved still recovers entirely from its WAL.
 - The log is idempotent (identity-keyed upsert/remove ops, per-frame CRC), so a
   torn trailing frame from a crash mid-append is discarded and recovery is safe.
-- **In-memory graphs only** in this release — `storage="mapped"/"disk"` raise
-  `ValueError` (the columnar disk modes use explicit-`save()` checkpoints).
-- Non-durable graphs pay nothing: the capture path is entered only under
-  `durable=True`.
+- Supported for the in-memory default and `storage="mapped"`.
+  `storage="disk"` opens non-durable (its commit boundary is a generation
+  publish, not a log) and uses explicit-`save()` checkpoints.
+- **`durable=False` opts out** and skips the per-commit `fsync` entirely —
+  the right choice for bulk loading and for graphs rebuildable from source
+  data. Reads never pay for the capture path either way.
 
 ## Export Formats
 
@@ -89,9 +91,91 @@ graph.export('my_graph.graphml', format='graphml')  # Gephi, yEd
 graph.export('my_graph.gexf', format='gexf')        # Gephi native
 graph.export('my_graph.json', format='d3')           # D3.js
 graph.export('my_graph.csv', format='csv')           # creates _nodes.csv + _edges.csv
+graph.export('my_graph.sql', format='sqlite')        # SQLite SQL script
 
 graphml_string = graph.export_string(format='graphml')
 ```
+
+The format is inferred from the extension when you omit it, so
+`graph.export('out.sql')` is enough.
+
+## Export to SQLite — the no-lock-in exit
+
+Your data should never be trapped in KGLite. `format='sqlite'` writes a
+**SQLite-dialect SQL script** that the stock `sqlite3` CLI turns into a real,
+queryable relational database:
+
+```python
+graph.export('dump.sql')
+```
+
+```bash
+sqlite3 mygraph.db < dump.sql
+sqlite3 mygraph.db "SELECT count(*) FROM Person"
+```
+
+Or straight from the command line, no Python involved:
+
+```bash
+kglite export-sqlite mygraph.kgl dump.sql
+kglite export-sqlite mygraph.kgl | sqlite3 mygraph.db   # or pipe it
+```
+
+**The mapping.** Each node type becomes a table with `id`, `title`, and one
+column per property the type uses. Each connection type becomes a link table
+with `source_type`, `source_id`, `target_type`, `target_id`, and one column per
+edge property. So the graph is queryable as ordinary SQL joins:
+
+```sql
+SELECT p.title, c.title, w.since
+FROM WORKS_AT w
+JOIN Person  p ON p.id = w.source_id
+JOIN Company c ON c.id = w.target_id;
+```
+
+**Why a script and not a `.db` file.** Writing a `.db` directly would mean
+linking a SQLite C library into KGLite. A text dump reaches the same
+destination with **zero added dependencies**, and it is also diffable,
+greppable, and ingestible by Postgres/DuckDB/MySQL after minor edits. Keeping
+the dependency out is worth one extra `sqlite3` invocation.
+
+**What to expect from the translation.** Graphs and relational tables do not
+model everything the same way, so a few choices are worth knowing:
+
+| Aspect | Behaviour | Why |
+|---|---|---|
+| `id` columns | Indexed, **not** `PRIMARY KEY` | KGLite warns about duplicate ids rather than rejecting them, so a graph may legitimately hold two nodes of a type sharing an id. A primary key would abort the ingest halfway. |
+| Link tables | No foreign keys | They reference `(type, id)` pairs across several node tables, which SQL foreign keys cannot express. |
+| Endpoint types | Stored as columns | One connection type can join several type pairs, so the endpoint type is data, not schema. |
+| Booleans | `INTEGER` 0/1 | SQLite has no boolean type. |
+| Missing properties | `NULL` | Distinguishable from a genuine empty string. |
+| Floats | Full round-trip precision | Non-finite values (`NaN`, `±Inf`) become `NULL`, which SQLite cannot represent. |
+| Mixed-type columns | `TEXT` | Column affinity is inferred from the values present; `INTEGER` widens to `REAL`, anything mixed collapses to `TEXT`. |
+| Points, durations, lists, maps | JSON text | No relational counterpart; JSON keeps them readable rather than pretending they are native columns. |
+| `updated_at` / `git_sha` / `modified_by` | Omitted | Engine write-provenance metadata, not your data. |
+
+Output is deterministic — the same graph always produces byte-identical SQL —
+so a dump can be committed and diffed.
+
+### Parquet
+
+KGLite does **not** export Parquet directly, and this is a deliberate scope
+decision rather than a gap. Doing it in Rust means taking on the
+`arrow` + `parquet` dependency tree, which is large; an earlier review of
+columnar/Arrow export reached the same conclusion and dropped it. KGLite has
+been steadily *shedding* dependencies, and re-adding a heavy one for a format
+already one line away would cut against that.
+
+If you want Parquet, go through the DataFrame you already have — the
+dependency then lives in your environment, where you control it:
+
+```python
+graph.cypher("MATCH (p:Person) RETURN p.id, p.title, p.age").to_df().to_parquet('people.parquet')
+```
+
+For a whole-graph dump, {meth}`~kglite.KnowledgeGraph.export_csv` writes one
+CSV per node and connection type plus a `blueprint.json` for re-import, and
+SQLite (above) covers the "give me a real database" case.
 
 ## Back up before upgrading
 
@@ -395,4 +479,4 @@ if info['fragmentation_ratio'] > 0.3:
 - **Flat vs. grouped results.** After traversal with multiple parents, `titles()` and `collect()` return grouped dicts.
 - **Persistence is explicit unless lifecycle helpers are used.** `save()` is
   manual on a plain graph; `open()` remembers a path and clean context-manager
-  exit saves, while `open(..., durable=True)` adds an in-memory WAL.
+  exit saves, while `open()` is write-ahead logged by default.

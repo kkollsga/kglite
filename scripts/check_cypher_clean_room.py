@@ -60,13 +60,13 @@ def validate() -> list[str]:
     for path in files:
         if path.suffix.lower() in FORBIDDEN_SUFFIXES:
             errors.append(f"forbidden external-suite artifact type: {path.relative_to(ROOT)}")
-        text = path.read_text(errors="replace")
+        text = path.read_text(errors="replace", encoding="utf-8")
         for marker in FORBIDDEN_TEXT:
             if marker in text:
                 errors.append(f"forbidden external-suite marker {marker!r}: {path.relative_to(ROOT)}")
 
     manifest_path = CONTRACT_ROOT / "cases.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     authorship = manifest.get("authorship", {})
     if manifest.get("license") != "MIT":
         errors.append("contract manifest must be MIT licensed")
@@ -84,7 +84,7 @@ def validate() -> list[str]:
             if field not in case:
                 errors.append(f"contract case {index} is missing {field!r}")
 
-    tree = ast.parse(RUNNER.read_text(), filename=str(RUNNER))
+    tree = ast.parse(RUNNER.read_text(encoding="utf-8"), filename=str(RUNNER))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             imported = {alias.name.split(".", 1)[0] for alias in node.names}

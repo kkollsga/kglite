@@ -9,8 +9,8 @@ except ModuleNotFoundError:  # Python 3.10 support; installed via coverage[toml]
     import tomli as tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-PYPROJECT = tomllib.loads((ROOT / "pyproject.toml").read_text())
-CI_TEXT = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+PYPROJECT = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+CI_TEXT = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
 
 def test_python_coverage_scope_is_production_code_with_branches() -> None:
@@ -27,7 +27,7 @@ def test_coverage_tool_versions_are_exactly_pinned() -> None:
     duplicated here — a hard-coded copy turned every Dependabot coverage bump
     into a guaranteed CI failure (the requirements file is the single owner
     of the pin; this test owns the *shape*)."""
-    requirements = (ROOT / "requirements" / "coverage.txt").read_text().splitlines()
+    requirements = (ROOT / "requirements" / "coverage.txt").read_text(encoding="utf-8").splitlines()
     pins = sorted(line for line in requirements if line and not line.startswith("#"))
     assert [pin.split("==")[0] for pin in pins] == ["coverage[toml]", "pytest-cov"]
     for pin in pins:
@@ -52,7 +52,7 @@ def test_rust_coverage_is_component_scoped_and_report_only() -> None:
         "--lcov --output-path rust-core-coverage.lcov"
     )
     assert command in CI_TEXT
-    assert command in (ROOT / "Makefile").read_text()
+    assert command in (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "flags: rust-core" in CI_TEXT
     assert "name: rust-core" in CI_TEXT
     assert "--fail-under" not in CI_TEXT

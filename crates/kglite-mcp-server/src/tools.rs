@@ -1067,8 +1067,10 @@ fn run_cypher_inner(
         kglite::api::cypher::parse_with_mutation_check(query).map_err(|e| e.to_string())?;
     if is_mutation {
         return Err(
-            "mutation Cypher (CREATE/SET/DELETE/REMOVE/MERGE) is not allowed through \
-             the MCP cypher_query tool. Use the kglite CLI for graph edits."
+            "mutation Cypher (CREATE/SET/DELETE/REMOVE/MERGE, and schema DDL such as \
+             CREATE INDEX / DROP INDEX / CREATE CONSTRAINT / DROP CONSTRAINT) is not \
+             allowed through the MCP cypher_query tool. Use the kglite CLI for graph \
+             edits. SHOW INDEXES and SHOW CONSTRAINTS are reads and are accepted."
                 .to_string(),
         );
     }

@@ -9,6 +9,7 @@
   "file_exceptions": {},
   "enum_match_whitelist": {
     "dir_graph/mod.rs": "DirGraph index maintenance (petgraph-only fast paths)",
+    "dir_graph/indexes.rs": "DirGraph secondary-index build/drop dispatch (petgraph fast paths vs persistent disk index)",
     "dir_graph/disk_persistence.rs": "DirGraph disk lifecycle and durable-save dispatch",
     "introspection/connectivity.rs": "disk-mode Rayon connectivity fast path",
     "io/file.rs": "persisted-graph construction and disk sidecar restoration boundary",
@@ -69,21 +70,14 @@
     {
       "path": "crates/kglite-py/src/graph/pyapi/kg_core.rs",
       "qualified_name": "crate::KnowledgeGraph::cypher",
-      "lines": 349,
-      "branches": 35,
+      "lines": 334,
+      "branches": 33,
       "nesting": 4
-    },
-    {
-      "path": "crates/kglite-py/src/graph/pyapi/kg_core.rs",
-      "qualified_name": "crate::KnowledgeGraph::define_schema",
-      "lines": 163,
-      "branches": 56,
-      "nesting": 6
     },
     {
       "path": "crates/kglite-py/src/graph/pyapi/kg_mutation.rs",
       "qualified_name": "crate::write_connections",
-      "lines": 230,
+      "lines": 226,
       "branches": 18,
       "nesting": 4
     },
@@ -195,9 +189,9 @@
     {
       "path": "crates/kglite/src/graph/introspection/describe.rs",
       "qualified_name": "crate::write_type_detail",
-      "lines": 406,
-      "branches": 47,
-      "nesting": 6
+      "lines": 364,
+      "branches": 40,
+      "nesting": 5
     },
     {
       "path": "crates/kglite/src/graph/io/export.rs",
@@ -265,8 +259,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/call_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_call",
-      "lines": 787,
-      "branches": 132,
+      "lines": 704,
+      "branches": 100,
       "nesting": 5
     },
     {
@@ -328,9 +322,9 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/mod.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_single_clause",
-      "lines": 323,
-      "branches": 46,
-      "nesting": 3
+      "lines": 308,
+      "branches": 45,
+      "nesting": 2
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/return_clause.rs",
@@ -418,16 +412,9 @@
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
-      "qualified_name": "crate::execute_mutable_bounded",
-      "lines": 204,
-      "branches": 30,
-      "nesting": 3
-    },
-    {
-      "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
       "qualified_name": "crate::execute_set",
-      "lines": 551,
-      "branches": 79,
+      "lines": 536,
+      "branches": 75,
       "nesting": 8
     },
     {
@@ -489,7 +476,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/planner/schema_check.rs",
       "qualified_name": "crate::validate_scope",
-      "lines": 202,
+      "lines": 201,
       "branches": 79,
       "nesting": 6
     },
@@ -529,13 +516,6 @@
       "nesting": 6
     },
     {
-      "path": "crates/kglite/src/graph/mutation/batch.rs",
-      "qualified_name": "crate::BatchProcessor::flush_chunk",
-      "lines": 352,
-      "branches": 53,
-      "nesting": 6
-    },
-    {
       "path": "crates/kglite/src/graph/mutation/extend.rs",
       "qualified_name": "crate::extend_graph",
       "lines": 218,
@@ -552,15 +532,15 @@
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::add_nodes",
-      "lines": 282,
-      "branches": 39,
+      "lines": 275,
+      "branches": 32,
       "nesting": 4
     },
     {
-      "path": "crates/kglite/src/graph/mutation/maintain.rs",
+      "path": "crates/kglite/src/graph/mutation/add_properties.rs",
       "qualified_name": "crate::add_properties_aggregate",
-      "lines": 187,
-      "branches": 39,
+      "lines": 165,
+      "branches": 36,
       "nesting": 10
     },
     {
@@ -573,7 +553,7 @@
     {
       "path": "crates/kglite/src/graph/mutation/subgraph_streaming.rs",
       "qualified_name": "crate::save_subset_streaming_disk",
-      "lines": 545,
+      "lines": 538,
       "branches": 61,
       "nesting": 5
     },

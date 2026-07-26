@@ -82,6 +82,10 @@ pub fn stats_to_py<'py>(
     stats_dict.set_item("nodes_deleted", stats.nodes_deleted)?;
     stats_dict.set_item("relationships_deleted", stats.relationships_deleted)?;
     stats_dict.set_item("properties_removed", stats.properties_removed)?;
+    stats_dict.set_item("indexes_added", stats.indexes_added)?;
+    stats_dict.set_item("indexes_removed", stats.indexes_removed)?;
+    stats_dict.set_item("constraints_added", stats.constraints_added)?;
+    stats_dict.set_item("constraints_removed", stats.constraints_removed)?;
     Ok(stats_dict)
 }
 

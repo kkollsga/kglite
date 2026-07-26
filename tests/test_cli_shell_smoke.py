@@ -173,7 +173,7 @@ def test_concurrent_write_save_serializes(tmp_path):
     assert rows == [{"id": "a"}, {"id": "b"}]
     # The sibling file persists so every contender locks the same inode; only
     # the OS advisory lock is released. Its text is diagnostic, not liveness.
-    assert (tmp_path / "shared.kgl.lock").read_text().startswith("pid=")
+    assert (tmp_path / "shared.kgl.lock").read_text(encoding="utf-8").startswith("pid=")
 
 
 def test_ready_set_subcommand(tmp_path):
@@ -410,7 +410,7 @@ def test_import_csv_loads_nodes(tmp_path):
     """`.import file.csv Type` loads rows as nodes with type inference; `id`
     becomes the node identity."""
     csv = tmp_path / "people.csv"
-    csv.write_text("id,name,age\n1,Alice,30\n2,Bob,25\n")
+    csv.write_text("id,name,age\n1,Alice,30\n2,Bob,25\n", encoding="utf-8")
     out = _run(
         f".import {csv} Person\n"
         "MATCH (p:Person) RETURN count(p) AS c;\n"
@@ -431,14 +431,14 @@ def test_timing_reports_walltime():
 
 def test_import_rejects_bad_node_type(tmp_path):
     csv = tmp_path / "x.csv"
-    csv.write_text("id\n1\n")
+    csv.write_text("id\n1\n", encoding="utf-8")
     out = _run(f".import {csv} 9bad\n.quit\n")
     assert "not a valid node type" in out
 
 
 def test_read_runs_a_cypher_file(tmp_path):
     script = tmp_path / "seed.cypher"
-    script.write_text("CREATE (:Person {name: 'Alice'});\nCREATE (:Person {name: 'Bob'});\n")
+    script.write_text("CREATE (:Person {name: 'Alice'});\nCREATE (:Person {name: 'Bob'});\n", encoding="utf-8")
     out = _run(f".read {script}\nMATCH (p:Person) RETURN count(p) AS n;\n.quit\n")
     assert "(1 row)" in out
     assert "2" in out  # the count after seeding

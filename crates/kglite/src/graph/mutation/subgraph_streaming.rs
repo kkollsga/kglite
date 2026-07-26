@@ -473,6 +473,26 @@ pub fn save_subset(
     }
 }
 
+/// Copy the graph-level metadata a subset needs to be self-contained on
+/// reload: the interner and type schemas the rows are encoded against, the
+/// alias/tier maps `describe()` and property resolution read, and the caller's
+/// user-schema version.
+///
+/// The version carries because a subset of a graph at user-schema version N is
+/// still at version N — the data model didn't change, only which rows came
+/// along — so a migration runner pointed at the subset must not re-run
+/// migrations `1..=N`.
+fn clone_subset_metadata(dest: &mut DirGraph, source: &DirGraph) {
+    dest.interner = source.interner.clone();
+    dest.type_schemas = source.type_schemas.clone();
+    dest.node_type_metadata = source.node_type_metadata.clone();
+    dest.connection_type_metadata = source.connection_type_metadata.clone();
+    dest.id_field_aliases = source.id_field_aliases.clone();
+    dest.title_field_aliases = source.title_field_aliases.clone();
+    dest.parent_types = source.parent_types.clone();
+    dest.user_schema_version = source.user_schema_version;
+}
+
 /// Streaming disk-to-disk subgraph filter.
 ///
 /// `kept_per_type` maps each kept node type to its sorted source node ids
@@ -539,14 +559,7 @@ pub fn save_subset_streaming_disk(
         .map_err(|e| format!("save_subset_streaming_disk: DiskGraph::new_at_path: {}", e))?;
     let mut dest = DirGraph::from_graph(GraphBackend::Disk(Box::new(dest_disk)));
 
-    // Clone source metadata so the dest is fully self-contained on reload.
-    dest.interner = source.interner.clone();
-    dest.type_schemas = source.type_schemas.clone();
-    dest.node_type_metadata = source.node_type_metadata.clone();
-    dest.connection_type_metadata = source.connection_type_metadata.clone();
-    dest.id_field_aliases = source.id_field_aliases.clone();
-    dest.title_field_aliases = source.title_field_aliases.clone();
-    dest.parent_types = source.parent_types.clone();
+    clone_subset_metadata(&mut dest, source);
 
     // Bulk-loader contract: defer CSR build until save_disk so add_edge
     // appends to the file-backed pending_edges instead of going through

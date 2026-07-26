@@ -542,7 +542,7 @@ def main():
 
     # Write CSV
     if results:
-        with open(CSV_OUT, "w", newline="") as f:
+        with open(CSV_OUT, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=["name", "category", "graph", "median_ms", "min_ms", "max_ms"])
             writer.writeheader()
             writer.writerows(results)

@@ -19,6 +19,7 @@
 // guidance; their payloads are never decoded by the current reader.
 
 use crate::datatypes::values::Value;
+use crate::graph::constraints::{NamedConstraint, UniqueConstraintKey};
 use crate::graph::features::timeseries::{NodeTimeseries, TimeseriesConfig};
 use crate::graph::schema::{
     CompositeIndexKey, ConnectionTypeInfo, ConnectivityTriple, DirGraph, EmbeddingStore, IndexKey,
@@ -114,6 +115,23 @@ pub(crate) struct FileMetadata {
     /// Range index keys to rebuild after load.
     #[serde(default)]
     range_index_keys: Vec<IndexKey>,
+    /// Declared UNIQUE constraints to reinstall after load. Additive — a file
+    /// written before constraints existed deserializes to an empty list, i.e.
+    /// no constraints, which is exactly its original behaviour.
+    ///
+    /// Skipped when empty so a graph that declares no constraint writes
+    /// byte-identical output to one produced before the field existed. Without
+    /// that, the field emits `"unique_constraint_keys":[]` into *every* `.kgl`
+    /// and gratuitously shifts the format for the overwhelming majority of
+    /// graphs, which carry no constraints at all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    unique_constraint_keys: Vec<UniqueConstraintKey>,
+    /// User-supplied constraint names → the declaration each names, so
+    /// `DROP CONSTRAINT <name>` survives save/load. Additive, and skipped when
+    /// empty so a graph that declares no *named* constraint writes byte-identical
+    /// output to one produced before the field existed.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    constraint_names: HashMap<String, NamedConstraint>,
     /// Node type metadata: node_type → { property_name → type_string }
     #[serde(default)]
     node_type_metadata: HashMap<String, HashMap<String, String>>,
@@ -137,6 +155,18 @@ pub(crate) struct FileMetadata {
     /// describe()). Additive — old files default to empty.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     graph_instructions: HashMap<String, String>,
+    /// The caller's own data-model revision (see `DirGraph::user_schema_version`),
+    /// carried across save/load so a migration runner can tell which of its
+    /// ordered scripts a graph has already had applied. Not an engine version:
+    /// `core_data_version` above and the `.kgl` magic own the format lifecycle.
+    ///
+    /// Additive and *invisible when unset*: `skip_serializing_if` omits the key
+    /// entirely at the baseline value, so a graph that never stamps a schema
+    /// version serializes byte-for-byte as it did before this field existed —
+    /// which is what keeps the `test_phase4_parity` golden digest stable. Older
+    /// files simply lack the key and default to 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    user_schema_version: u32,
     /// Spatial configuration per node type.
     #[serde(default)]
     spatial_configs: HashMap<String, SpatialConfig>,
@@ -191,6 +221,12 @@ fn default_ts_data_version() -> u32 {
     2
 }
 
+/// `skip_serializing_if` predicate for the additive `user_schema_version` key:
+/// omitting it at the baseline keeps saves byte-identical to pre-field ones.
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 // ─── Metadata transfer helpers ───────────────────────────────────────────────
 
 impl FileMetadata {
@@ -204,6 +240,8 @@ impl FileMetadata {
             property_index_keys: graph.property_index_keys.clone(),
             composite_index_keys: graph.composite_index_keys.clone(),
             range_index_keys: graph.range_index_keys.clone(),
+            unique_constraint_keys: graph.unique_constraint_keys.clone(),
+            constraint_names: graph.constraint_names.clone(),
             node_type_metadata: graph.node_type_metadata.clone(),
             connection_type_metadata: graph.connection_type_metadata.clone(),
             id_field_aliases: graph.id_field_aliases.clone(),
@@ -211,6 +249,7 @@ impl FileMetadata {
             auto_vacuum_threshold: graph.auto_vacuum_threshold,
             parent_types: graph.parent_types.clone(),
             graph_instructions: graph.graph_instructions.clone(),
+            user_schema_version: graph.user_schema_version,
             spatial_configs: graph.spatial_configs.clone(),
             timeseries_configs: graph.timeseries_configs.clone(),
             temporal_node_configs: graph.temporal_node_configs.clone(),
@@ -258,6 +297,8 @@ impl FileMetadata {
         graph.property_index_keys = self.property_index_keys;
         graph.composite_index_keys = self.composite_index_keys;
         graph.range_index_keys = self.range_index_keys;
+        graph.unique_constraint_keys = self.unique_constraint_keys;
+        graph.constraint_names = self.constraint_names;
         graph.node_type_metadata = self.node_type_metadata;
         graph.connection_type_metadata = self.connection_type_metadata;
         graph.id_field_aliases = self.id_field_aliases;
@@ -265,6 +306,7 @@ impl FileMetadata {
         graph.auto_vacuum_threshold = self.auto_vacuum_threshold;
         graph.parent_types = self.parent_types;
         graph.graph_instructions = self.graph_instructions;
+        graph.user_schema_version = self.user_schema_version;
         graph.spatial_configs = self.spatial_configs;
         graph.timeseries_configs = self.timeseries_configs;
         graph.temporal_node_configs = self.temporal_node_configs;

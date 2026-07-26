@@ -1,0 +1,333 @@
+# KGLite as a primary store: scope and limits
+
+Most KGLite graphs are a {doc}`derived index <derived-index>` over data owned
+somewhere else. This page is about the other case: the graph *is* the
+authoritative copy, and losing it means losing the data.
+
+That is a much stronger promise, so this page is deliberately conservative. It
+states what holds, what the defaults are, and what KGLite does not do — with
+enough detail that you can decide without running an experiment first. Where a
+limit exists, it is named rather than softened.
+
+## What holds
+
+**A mutating statement is all-or-nothing.** A Cypher statement that fails after
+its first write leaves the graph exactly as it found it — node and relationship
+identity, properties, labels, index ordering, schema metadata, and the version
+counter. Rollback replays a statement-scoped journal of inverse operations
+backwards.
+
+**The cost of a write scales with the change, not with the graph.** Because the
+journal records only what the statement touched, a single `SET` on a
+million-node graph costs about what it costs on a thousand-node graph. This is
+the property that separates a store you can write to continuously from an index
+you rebuild. It is measured, not assumed:
+`tests/benchmarks/test_bench_write_scaling.py` runs the same statements at 1 k,
+100 k, and 1 M nodes, and a reading that grows with size is a regression.
+
+Three cases keep the older whole-graph checkpoint, and there the write cost is
+still proportional to graph size:
+
+- the `mapped` and `disk` backends,
+- columnar mode, whose `SET` writes a shared column store the journal cannot
+  observe,
+- graphs carrying user-created property, range, or composite indexes, whose
+  delete path needs per-bucket position undo the journal does not record yet.
+
+That third case is easy to walk into now that indexes are a Cypher surface:
+`CREATE INDEX`, like the `create_index` API, builds exactly those structures, so
+indexing a graph moves its writes back onto the whole-graph checkpoint.
+Uniqueness constraints are backed by a different structure whose cost interaction
+is not yet characterised. If your workload writes continuously *and* indexes or
+constrains, measure it rather than assuming flat cost.
+
+**Crash safety is the default.** `kglite.open(path)` opens in write-ahead-log
+mode wherever the storage mode supports it — the default in-memory backend and
+`storage="mapped"`. Each committed mutation appends one frame to a `<path>-wal`
+sidecar and `fsync`s it before the call returns; on open, the engine loads the
+`.kgl` checkpoint and replays every frame newer than it. A frame carries a
+CRC32, and a crash mid-append leaves a torn trailing frame that replay discards
+rather than half-applying. Every way of changing a graph is logged, not only
+Cypher — `add_nodes`, `add_connections`, label changes, and committed
+transactions included. `save()` is separately atomic and `fsync`ed, so a reader
+never observes a torn file.
+
+`storage="disk"` is the exception, and not because it was overlooked: a disk
+graph commits by publishing an immutable generation, so a logical write-ahead
+log is not its durability boundary. A disk graph opens non-durable and takes
+`save()` checkpoints instead. Asking for `durable=True` there raises
+`ValueError` explaining that; the *default* does not raise, so disk callers are
+unaffected by the default being on elsewhere.
+
+**Not everything is logged.** State the log cannot express is *checkpoint-only*
+and is persisted by `save()` rather than by the log: schema and config metadata,
+user-created indexes, embeddings, and timeseries. If those matter to you, a
+`save()` is still part of your durability story, not an optimisation.
+
+Three consequences worth internalising before you rely on this:
+
+- **It costs one `fsync` per committed mutation.** Writes now wait on physical
+  storage, so the cost is device latency rather than graph size — most visible
+  in loops of many small writes, negligible for a few large ones. Reads are
+  unaffected. `durable=False` remains fully supported and is the right choice
+  for bulk loading and for graphs you can rebuild from source. Batching writes
+  into one statement, or one `begin()` transaction, buys throughput *and* crash
+  safety.
+- **A `with` block is not a transaction.** Mutations commit as they run, so an
+  exception inside the block does not discard them — they are recovered on the
+  next `open()`. What the clean or failed exit controls is whether a *checkpoint*
+  is written. Use `begin()` when you want discard-on-error.
+- **`Session` refuses write queries on a durable graph.** Its writes land on a
+  working copy that neither the log nor `save()` can reach, so rather than
+  silently losing them it raises. Use `cypher()` or `begin()`. Because durable is
+  now the default, code that used `Session.execute()` for writes against an
+  `open()`ed graph has to change — or pass `durable=False`.
+
+Two smaller sharp edges: `save(fsync=False)` is ignored on a durable graph and
+warns, because the checkpoint truncates the log and so must itself reach disk;
+and a log written by this version is refused by older builds with a clear message
+rather than silently truncated.
+
+**Readers see a consistent graph.** `freeze()` hands out an immutable, lock-free
+snapshot; a `session()` serializes writers, begins each from the last committed
+state, and publishes with a pointer swap only on success — though note the
+durable-graph restriction on `Session` writes below. Explicit transactions
+are optimistically concurrent: independent work proceeds, and a commit against a
+state that moved underneath returns a conflict rather than winning silently.
+{doc}`/concepts/concurrency` is the full model, and worth reading before you rely
+on any of it.
+
+**Failures are typed.** Errors arrive as a `KgError` hierarchy with stable
+codes, not as strings to match on — see {doc}`/python/error-handling`.
+
+**Integrity constraints are enforced on every write path.** Declared through
+`define_schema`, and checked on Cypher `CREATE` / `MERGE` / `SET` / `REMOVE` and
+on the bulk loaders alike — `add_nodes`, and therefore blueprints,
+`from_records`, OKF ingestion, WAL replay, and `extend_graph`:
+
+```python
+graph.define_schema({"nodes": {"Person": {
+    "primary_key": "email",            # unique *and* present (NODE KEY)
+    "unique": [["first", "last"]],     # composite UNIQUE
+    "required": ["email"],             # NOT NULL, at write time
+}}})
+```
+
+Three things make this real rather than advisory. `primary_key` may name any
+property, not just `id` — a key on `id` routes through the O(1) identity index,
+any other key is backed by a unique secondary index that persists and rebuilds on
+load. `required` is enforced at write time, so a `CREATE` that omits the
+property, a `SET` that nulls it, and a `REMOVE` that drops it all raise, rather
+than surfacing later in `validate_schema()`. And declaring a constraint the
+stored data already violates is refused outright, so you cannot install a
+constraint that quietly lies about the rows already present.
+
+A composite `unique` tuple constrains only nodes carrying *every* property in it,
+and NULL is exempt throughout — a node sits outside a uniqueness constraint
+unless every property in the tuple is present and non-null, so many nodes may
+share "no email" while `email` is `UNIQUE`.
+
+Two gaps to know, because both are the kind that look like guarantees until they
+are not. **A large bulk load is not all-or-nothing.** `add_nodes` gates each row
+before queueing it, so a violation aborts the call — but rows are flushed to the
+graph in chunks of 1000, so on an input larger than that, chunks already flushed
+stay written. Detection is unaffected; the atomicity is what is chunk-bounded.
+Treat a failed large load as needing cleanup, not as a no-op. **And two write
+paths bypass enforcement entirely:** the RDF and N-Triples loaders, and the
+embedding-carry path. A graph filled through those can hold data that violates a
+declared constraint; `verify_unique_constraints()` exists to audit exactly that
+case.
+
+Two things about the error surface are worth knowing before you write `except`
+clauses. A declaration that cannot be installed raises `ConstraintCreationError`,
+and a violation from the bulk writers raises `ConstraintViolationError`; both
+subclass `ConstraintError`, so `except ConstraintError` catches either. Note that
+`define_schema` *can* now fail this way, because installing a schema installs the
+constraints it declares — nothing is changed when it does, so you can fix the data
+and retry. A violation raised through **Cypher**, however, arrives as
+`CypherExecutionError` rather than the typed exception: the executor's internal
+error channel is a string, so the structured violation is rendered to text before
+any binding sees it. The message is stable and names the constraint, the property,
+and the offending value — match on that. Enforcement is identical either way; only
+the exception type differs.
+
+## Defaults, and how to change them
+
+| | Default | To change |
+|---|---|---|
+| Crash safety | **On** for in-memory and `mapped`; `disk` opens non-durable | `durable=False` to opt out |
+| Schema | No schema; any property on any node | `define_schema(...)` |
+| UNIQUE / NOT NULL / node key | Permissive — a type declaring none keeps the old behaviour | `unique` / `required` / `primary_key` in `define_schema` |
+| Freshness stamps | Off, so writes stay deterministic | `auto_timestamp: True` per type |
+
+All of the constraint machinery is opt-in, and older graphs load unchanged.
+{doc}`durable-apps` covers the `open()` lifecycle and the per-commit `fsync`
+cost in more detail.
+
+## What KGLite does not do
+
+**One process writes.** There is no shared live multi-process transaction
+handle and no replication protocol. Disk mode publishes immutable generations
+behind a cross-process writer lease, which stops two processes from publishing
+at once — that is stable-reader/single-writer publication, not concurrent
+multi-process write access. When several processes need to read and write one
+graph, the answer is to run `kglite-bolt-server` and let that one process own
+the graph while clients connect over the Bolt protocol. The official Python,
+JavaScript, and Java drivers are regression-tested in CI — session and
+explicit-transaction lifecycle, managed retry, PackStream type round-trips,
+`Neo.*` error codes, and OCC conflict detection. Read that as a 22-check
+conformance suite per driver rather than a full protocol sweep, and note that
+every *other* driver — Go, .NET — remains untested: those clients may connect but
+can rely on features outside the documented wire and Cypher contracts.
+
+**Constraints cover uniqueness and presence, not arbitrary rules.** There is no
+`CHECK` constraint, and no standing referential-integrity constraint between node
+types: a relationship to an unknown endpoint auto-vivifies a provisional stub
+rather than being rejected. Stubs are *deferred*, not exempt — the `add_nodes`
+upsert that promotes one is a normal, fully-enforced write, an unpromoted stub
+stays reportable via `validate_schema()`, and `purge_provisional()` sweeps them.
+Individual loads can also be strict up front with
+`from_records(..., on_missing_endpoint="error")`, which validates the whole input
+and fails atomically. If your correctness argument needs a rule that is not
+uniqueness or presence, it still belongs in your application.
+
+**Schema setup is expressible in Cypher, with two asymmetries to know.**
+`CREATE [RANGE] INDEX` / `DROP INDEX` / `SHOW INDEXES` and
+`CREATE CONSTRAINT` / `DROP CONSTRAINT` / `SHOW CONSTRAINTS` both work, so schema
+setup no longer has to happen in Python or Rust. What to watch:
+
+- **Bare `CREATE INDEX` is equality-only.** One property builds a hash equality
+  index; two or more build a composite index. `CREATE RANGE INDEX` builds *two*
+  structures — the equality index **and** a B-tree range index — and reports
+  `indexes_added` of 2. The bare form stays equality-only deliberately, since
+  building both for every statement in a ported script would double index memory.
+  Add `RANGE` when you need range scans; a multi-property `RANGE` index is
+  rejected, because the B-tree is single-property.
+- **Index names are not persisted; constraint names are.** An index name is
+  accepted for portability and then discarded — index names here are canonical
+  and derived (`Label.property`, `Label.(a,b)`). So `DROP INDEX` wants that dotted
+  canonical name, or the descriptor form `DROP INDEX FOR (n:Label) ON (n.prop)`.
+  **The trap:** dropping by a name you chose fails, and adding `IF EXISTS` to that
+  same statement turns the failure into a silent no-op that leaves your index in
+  place. `SHOW INDEXES` prints the canonical name, and its output pastes straight
+  in. Constraint names, by contrast, persist across save/load and are unique per
+  graph, so `CREATE CONSTRAINT person_email_unique …` followed by
+  `DROP CONSTRAINT person_email_unique` works as written.
+- **Uniqueness on the identity field is refused, not silently accepted.** A
+  `REQUIRE … IS UNIQUE` (or `IS NODE KEY`) that resolves to the structural `id` —
+  including the node type's own id column name — is rejected, because a unique
+  secondary index would never observe those writes and the constraint would admit
+  duplicates while reporting success. Declare identity uniqueness as
+  `primary_key` in `define_schema` instead, which probes the per-type id index on
+  every write path, or use `MERGE` as the idempotent alternative to `CREATE`.
+  `IS NOT NULL` on the id field *is* accepted, since it is present by
+  construction.
+
+Forms KGLite cannot serve — `TEXT`, `POINT`, `FULLTEXT`, `VECTOR`, `LOOKUP`,
+relationship indexes, `OPTIONS { … }`, and `IS :: TYPE` constraints — fail with a
+specific unsupported-feature error naming the construct and the route that does
+work. That is the deliberate choice: a type constraint accepted and silently
+unenforced would be worse than an error, since it is exactly the kind of promise
+data-integrity assumptions get built on. Full grammar in
+{doc}`/reference/cypher-reference`.
+
+**`LOAD CSV` works, and file access is a capability you grant.** `LOAD CSV [WITH
+HEADERS] FROM <source> AS row [FIELDTERMINATOR <sep>]` runs for local files and
+`file://` URLs, and must lead the query. Fields stay strings — CSV carries no
+types, and inferring them would corrupt leading-zero identifiers — so conversion
+is explicit (`toInteger(row.id)`). `http(s)://` is refused, naming the
+network-free design: the engine ships no HTTP client.
+
+The security model deserves stating plainly, because it is default-deny:
+
+- **In-process callers** — the Python API, the Rust library, the CLI — get
+  **unrestricted** read access to any path the process can read. That is
+  deliberate, on the grounds that they already have the host process's
+  filesystem access, but it is not a sandbox and should not be read as one.
+- **A Bolt client gets nothing** unless an operator passes
+  `--allow-csv-import <DIR>` to `kglite-bolt-server` — a single directory, not a
+  repeatable flag. Imports are then confined to that directory *after* symlink
+  and `..` resolution, and a relative path resolves against the import root
+  rather than the server's working directory. Without the gate, anyone who could
+  open a Bolt connection could read `file:///etc/passwd`.
+- **The MCP server never grants the capability**, so an agent cannot use
+  `LOAD CSV` to read the filesystem. Note this holds by construction — the MCP
+  server simply never sets the field, inheriting the deny default — rather than
+  by an explicit test.
+
+Loading streams: the executor reads 1000 rows at a time, so peak memory does not
+track file size for row-local pipelines. A downstream clause that must see the
+whole result — an aggregate, `ORDER BY`, `DISTINCT`, `UNION`, `CALL` — cannot be
+batched without changing the answer, so those queries take a single capped pass
+and fail at 1,000,000 rows naming the clause that forced it, rather than
+exhausting memory. `add_nodes` / `add_connections`, {doc}`blueprints`, and the
+CLI's `.import` remain the higher-throughput routes.
+
+**Migrations are a convention plus a CLI verb, not a framework.** There is a
+user-schema version stamp — your own data-model revision, persisted with the
+graph, distinct from the engine's `.kgl` format version and never interpreted by
+the engine. Read or set it via `graph.schema_version` / `set_schema_version(n)`,
+`graph_info()['user_schema_version']`, or `kglite schema-version <graph>
+[--set N]`, and `describe()` reports it once set, so an agent opening a graph cold
+sees which generation it holds.
+
+`kglite migrate <graph> <dir>` applies ordered `<version>_<name>.cypher` files —
+ascending by parsed integer, so `010` runs after `002`, and gaps are fine — and
+advances the stamp. `--dry-run` prints the plan without applying or saving.
+Re-running is a no-op. Everything executes against an in-memory copy and the
+`.kgl` is written **once**, at the end, only if every statement succeeded: the run
+is all-or-nothing, so a failure at migration 3 of 5 saves nothing at all, not even
+1 and 2. Version `0` is reserved for the unversioned baseline. A stamp the
+migration set cannot explain, a duplicate version, and a `.cypher` file with no
+version prefix are all refused rather than guessed at.
+
+Three things it deliberately does not do. **No downgrades** — reversing a
+migration means writing the inverse as a new one, since inferring the inverse of
+arbitrary Cypher would be a guess. **No detection of an edited migration** —
+change one after it has been applied and nothing notices, so treat applied
+migrations as immutable and append. **No per-migration ledger** — the stamp is a
+high-water mark, so a migration inserted *behind* it is treated as already
+applied. Always append with a higher number.
+
+And a node's primary type is still immutable, so a type change means recreating
+the node: create the replacement, copy the properties, re-wire the edges, delete
+the original. Watch out for `SET n:NewType`, which *appears* to work — it adds a
+**secondary label**, leaves `n.type` unchanged, and still matches
+`MATCH (n:NewType)`, so a migration written that way looks successful while every
+node keeps its original type. See {doc}`import-export` for the round-trip paths a
+rebuild would use.
+
+**The large-graph modes are still the weaker ones.** `mapped` now gets the same
+per-commit crash safety as in-memory — the kill-9 suites are parametrised over
+both — but `disk` does not: its durability boundary is the generation publish, so
+it relies on `save()` checkpoints, and its crash survival is untested and
+unsupported by design. Both keep the whole-graph write checkpoint described above.
+In-memory is the product; the disk modes are for exploring graphs too big for it,
+and that is the trade-off you are accepting.
+
+**There is no JVM or .NET binding.** Python and Rust are first-class. Everything
+else goes through the C ABI in `crates/kglite-c` — a supported boundary with a
+generated header, but you are writing the binding. See {doc}`/rust/c-abi`.
+
+## Deciding
+
+Reach for KGLite as a primary store when a single process owns the writes, the
+data fits the storage mode you picked, and uniqueness and presence cover the
+invariants you need the store itself to hold. That describes a large class of
+real applications: desktop and CLI tools, single-node services, agent state,
+embedded analytics.
+
+Look elsewhere when you need several processes writing concurrently without a
+server in front, integrity rules beyond uniqueness and presence enforced by the
+store, or a migration tool with a downgrade path. And if the data's real home is
+another system, the {doc}`derived-index` pattern is both cheaper and better
+tested.
+
+## See also
+
+- {doc}`durable-apps` — `open()` lifecycle, checkpoints, and `durable=True`.
+- {doc}`derived-index` — the pattern to prefer when the graph is a projection.
+- {doc}`/concepts/concurrency` — the three concurrency models, stated precisely.
+- {doc}`/python/transactions` — `begin()` / `commit()` / `rollback()`, snapshot
+  isolation, and OCC conflicts.
+- {doc}`/python/error-handling` — the typed exception hierarchy and error codes.

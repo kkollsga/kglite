@@ -126,7 +126,7 @@ def _build_columns_bin_graph(tmp_path) -> str:
             f"<http://www.wikidata.org/prop/direct/P31> "
             f"<http://www.wikidata.org/entity/Q5> ."
         )
-    nt_path.write_text("\n".join(lines) + "\n")
+    nt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     path = str(tmp_path / "dg_nt")
     g = kglite.KnowledgeGraph(storage="disk", path=path)
     g.load_ntriples(str(nt_path), languages=["en"], verbose=False)

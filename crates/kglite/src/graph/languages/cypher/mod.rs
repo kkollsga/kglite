@@ -30,7 +30,10 @@ mod window;
 // through the cache. The raw uncached parser lives at
 // `parser::parse_cypher`; only the cache implementation itself and a
 // handful of planner-internal unit tests bypass the cache.
-pub use executor::{execute_mutable, is_mutation_query, CypherExecutor};
+// `execute_mutable` is re-exported by `api::cypher` straight from
+// `executor::write`; the session layer reaches for
+// `execute_mutable_with_csv`, which carries the LOAD CSV capability.
+pub use executor::{is_mutation_query, CypherExecutor};
 pub use parse_cache::parse_cypher_cached as parse_cypher;
 pub use planner::mark_lazy_eligibility;
 pub use planner::optimize;

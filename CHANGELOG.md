@@ -7,6 +7,493 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `kglite-bolt-server --neo4j-compat` (or `KGLITE_BOLT_NEO4J_COMPAT=1`) makes the
+  server present a Neo4j-compatible agent in the Bolt handshake, so official
+  drivers that refuse to connect to a non-Neo4j server will talk to it. The
+  official **Java** driver is the one that does this: it requires the handshake
+  agent to start with `Neo4j/` and otherwise aborts with
+  `UntrustedServerException: Server does not identify as a genuine Neo4j
+  instance` before running a query, which left kglite unreachable from the JVM.
+  With the mode on, the agent becomes
+  `Neo4j/5.26.0 (kglite-bolt-server/<version>)` — the prefix the driver checks
+  for, with the real product kept in the string, so the server stays
+  identifiable in logs, in driver errors, and through `ServerInfo.agent()`. Only
+  the handshake's `server` field changes; `bolt_agent` still reports kglite. The
+  environment variable takes `1`/`true`/`yes`/`on` for containers and unit files,
+  and the flag wins if both are set. This is the `--neo4j-compat` flag the 0.10.1
+  notes reserved for exactly this situation.
+
+  It is **off by default**: presenting as a different product is the operator's
+  decision, and the official Python and JavaScript drivers never needed it —
+  neither inspects the agent. When a client whose driver enforces the check
+  connects while the mode is off, the server logs a warning naming both ways to
+  switch it on, so the fix is discoverable from the server's own log instead of
+  only from a client stack trace. The identity is never switched automatically on
+  the strength of a client-supplied string.
+- Cypher index DDL, in the Neo4j 5 grammar, so a schema-setup script ports
+  unedited: `CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:Label) ON
+  (n.prop, ...)`, `DROP INDEX <name> [IF EXISTS]`, and `SHOW [ALL] INDEX[ES]`.
+  Statements are standalone and route to the existing index machinery — one
+  property builds a hash equality index, two or more build a composite index,
+  and the `RANGE` keyword additionally builds the B-tree range index, so the
+  pair covers what Neo4j's single `RANGE` index serves. The bare form stays
+  equality-only on purpose (building both for every ported statement would
+  double index memory); `CYPHER.md` documents the full mapping under "Cypher
+  index DDL".
+- `DROP INDEX FOR (n:Label) ON (n.prop)` — a KGLite descriptor form, since
+  index names here are canonical and derived (`Label.property`,
+  `Label.(a,b)`) rather than user-assigned. A name supplied to `CREATE INDEX`
+  is accepted for portability but not persisted, and `DROP INDEX` accepts the
+  dotted canonical name without backticks so `SHOW INDEXES` output pastes
+  straight in.
+- `SHOW INDEXES` returns the same rows and columns as `CALL db.indexes()`
+  (`name`, `type`, `entityType`, `labelsOrTypes`, `properties`, `state`).
+  Neo4j's `id`, `populationPercent`, `indexProvider`, `owningConstraint`,
+  `lastRead`, and `readCount` are omitted — KGLite holds no equivalent state —
+  and `YIELD` / `WHERE` modifiers are rejected in favour of `CALL db.indexes()`
+  rather than silently ignored.
+- `indexes_added` and `indexes_removed` in `graph.last_mutation_stats`,
+  mirroring Neo4j's `indexesAdded` / `indexesRemoved` summary counters.
+- Index and constraint DDL that KGLite cannot serve — `TEXT`, `POINT`,
+  `FULLTEXT`, `VECTOR`, `LOOKUP`, relationship indexes, `OPTIONS { ... }`, and
+  every `CREATE`/`DROP`/`SHOW CONSTRAINT` form (including the Neo4j 4 `ASSERT`
+  spelling) — now parses and fails with a specific unsupported-feature error
+  naming the construct and the route that works today, instead of a syntax
+  error or a silent no-op.
+- Real integrity constraints, enforced on **every** write path — Cypher
+  `CREATE` / `MERGE` / `SET` / `REMOVE` *and* the bulk loader (`add_nodes`, and
+  therefore blueprints, `from_records`, OKF, WAL replay and `extend_graph`).
+  Declared through the existing `define_schema`:
+
+      graph.define_schema({"nodes": {"Person": {
+          "unique": [["email"], ["first", "last"]],
+          "required": ["email"],
+          "primary_key": "email",
+      }}})
+
+  `unique` takes a property name, a list of names, or a list of property tuples,
+  so single-property and composite constraints share one surface. A tuple only
+  constrains nodes carrying *every* property in it, matching Neo4j, where
+  uniqueness does not apply to nodes missing the property.
+- `required` (NOT NULL) is now enforced at **write time**, not only by
+  `validate_schema()`. A `CREATE` that omits the property, a `SET` that nulls
+  it, and a `REMOVE` that drops it are all rejected. Auto-vivified edge stubs
+  are *deferred*, not exempt: vivification may create an incomplete placeholder,
+  but the later `add_nodes` upsert that promotes it is a normal, fully-enforced
+  write, and an unpromoted stub stays reportable via `validate_schema()` and
+  removable via `purge_provisional()`.
+- `primary_key` accepts any property, not just `id`, and now means unique **and
+  present** (NODE KEY semantics). A key on `id` still routes through the O(1)
+  per-type id index; any other key is backed by a unique secondary index that
+  persists and rebuilds on load like every other index. Older `.kgl` files load
+  unchanged — both `unique` and the generalization are additive.
+- Declaring a constraint that the stored data already violates is rejected, and
+  changes nothing, rather than installing a constraint that silently lies about
+  the rows already present.
+- Typed constraint errors: `ConstraintViolationError` (a write broke a
+  constraint) and `ConstraintCreationError` (a declaration cannot be installed),
+  both under a new `ConstraintError` base class, so `except ConstraintError`
+  catches either. Over Bolt they carry
+  `Neo.ClientError.Schema.ConstraintValidationFailed` and
+  `Neo.ClientError.Schema.ConstraintCreationFailed`; the C ABI gains
+  `ConstraintViolation = 18` and `ConstraintCreationFailed = 19`, appended so
+  existing discriminants stay stable.
+- Index DDL that KGLite cannot serve — `TEXT`, `POINT`, `FULLTEXT`, `VECTOR`,
+  `LOOKUP`, relationship indexes and `OPTIONS { ... }` — now parses and fails
+  with a specific unsupported-feature error naming the construct and the route
+  that works today, instead of a syntax error or a silent no-op.
+- Cypher **constraint** DDL, in the Neo4j 5 grammar, routing to the per-write
+  enforcement above: `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label)
+  REQUIRE n.prop IS UNIQUE | IS NOT NULL | IS NODE KEY`, `DROP CONSTRAINT
+  <name> [IF EXISTS]`, and `SHOW CONSTRAINTS`. Composite tuples
+  (`REQUIRE (n.a, n.b) IS UNIQUE`) constrain the combination rather than each
+  property; the Neo4j 4 `ASSERT` spelling and the optional `NODE` /
+  `RELATIONSHIP` scope word are accepted, so a 4.x-era script ports unedited.
+  A declaration is not documentation — once it succeeds, a violating write is
+  rejected on every path including the bulk loader.
+- `IS NODE KEY` is served as uniqueness **and** presence, installed atomically:
+  if the presence half cannot be declared the uniqueness half is rolled back, so
+  a statement that reported failure has changed nothing. `DROP CONSTRAINT` on a
+  node key withdraws both halves, and a tuple that is unique and fully required
+  now reports itself as `NODE KEY` rather than as plain `UNIQUE`.
+- `CREATE CONSTRAINT ... IS :: TYPE` / `IS TYPED TYPE` is **rejected**, not
+  accepted-and-ignored. KGLite has no write-time property-type constraint —
+  `field_types` is read only by the offline `validate_schema()`, and a locked
+  schema type-checks against the node type's recorded property types — so
+  accepting the statement would report success while enforcing nothing, which is
+  worse than an error for a promise users build data-integrity assumptions on.
+  The message names both routes that do enforce.
+- Constraint **names are persisted**, deliberately unlike index names, so the
+  dominant ported-script shape works: `CREATE CONSTRAINT person_email_unique
+  ...` followed by `DROP CONSTRAINT person_email_unique`. A constraint declared
+  without a name is addressable by its canonical descriptor
+  (`Label.property`, `Label.(a, b)`), which is also what `SHOW CONSTRAINTS`
+  prints for it, so that output pastes straight into `DROP CONSTRAINT`. Names
+  are unique per graph, survive save/load, and a name whose constraint has been
+  dropped is discarded at save time so it cannot resurrect. The registry is a
+  lookup aid rather than the source of truth, so a lost name can cost
+  addressability but never enforcement. Additive JSON metadata, skipped when
+  empty — older `.kgl` files load unchanged and files without named constraints
+  are byte-identical.
+- `SHOW CONSTRAINTS` is a **read**, like `SHOW INDEXES`: it works on a read-only
+  graph and is unaffected by a write scope. Returns `name`, `type`
+  (`UNIQUENESS` / `NODE_KEY` / `NODE_PROPERTY_EXISTENCE`), `entityType`,
+  `labelsOrTypes`, `properties`. Neo4j's `id`, `ownedIndex`, and `propertyType`
+  are omitted — KGLite holds no equivalent state — and a node key is one row
+  rather than a uniqueness row plus an existence row.
+- `CALL db.constraints()` returns the same rows from the same collector, so the
+  two surfaces cannot drift. `SHOW CONSTRAINTS YIELD ...` now points at it
+  rather than at `CALL db.indexes()`, which listed the wrong objects.
+- `constraints_added` and `constraints_removed` in `graph.last_mutation_stats`,
+  mirroring Neo4j's `constraintsAdded` / `constraintsRemoved`. They count
+  constraints rather than the structures behind them, so `IS NODE KEY` reports 1.
+- `describe()` annotates a property with `constraint="unique" | "not_null" |
+  "node_key"` when one is declared on it, so an agent can see a write will be
+  rejected before attempting it.
+- `LOAD CSV [WITH HEADERS] FROM <source> AS row [FIELDTERMINATOR <sep>]`, in
+  the spelling other Cypher databases use, so a ported import script runs
+  unedited. `WITH HEADERS`
+  binds each record as a map keyed by the header row; without it, records bind
+  as zero-indexed lists. Fields stay strings — CSV carries no types, and
+  inferring them would corrupt leading-zero identifiers — so conversion is
+  explicit (`toInteger(row.id)`); an empty field is `null`, and a short row
+  nulls its missing columns instead of failing the load. `FROM $path` works.
+  The clause must lead the query; anywhere else it is rejected with the
+  positional rule rather than a confusing pattern error. `CYPHER.md` documents
+  the full mapping under "LOAD CSV".
+- `LOAD CSV` **streams**: the executor reads 1000 rows at a time and runs the
+  following clauses once per batch, so peak memory does not scale with file
+  size — a 5 MB and a 109 MB input both cost about 20 MB resident on a
+  row-local pipeline. Batching applies to the clauses it is equivalent for
+  (`MATCH`, `WHERE`, `UNWIND`, `CREATE`, `MERGE`, `SET`, `DELETE`, `REMOVE`,
+  `FOREACH`, non-aggregating `WITH`/`RETURN`) — the ingest shape, which streams
+  at any file size. A downstream clause that reasons over the whole result
+  (aggregate, `ORDER BY`, `SKIP`/`LIMIT`, `DISTINCT`, `UNION`, `CALL`) cannot be
+  batched without changing the answer, so those queries take a single capped
+  pass and fail at 1,000,000 rows naming the clause that forced it, rather than
+  exhausting memory.
+- `LOAD CSV FROM 'http://…'` is rejected with a message naming the
+  network-free design and the local-file route, never a parse error: the engine
+  ships no HTTP client (network dependencies were removed in 0.14.x), so there
+  is nothing to fetch a URL with. Other URL schemes name the supported set.
+  The `CALL { ... } IN TRANSACTIONS` batching modifier (and the older
+  `USING PERIODIC COMMIT` spelling) remains unsupported — batching here is
+  automatic, so there is no commit interval to declare.
+- `--allow-csv-import <DIR>` on `kglite-bolt-server`, and a `csv_import` field
+  on `kglite::api::session::ExecuteOptions`. Reading local files through
+  `LOAD CSV` is a capability the caller is granted, defaulting to **denied**:
+  in-process callers (the Python API, the Rust library, the CLI) are allowed
+  because they already have the host process's filesystem access, while a Bolt
+  client is remote and gets nothing unless an operator names an import
+  directory. Imports are then confined to that directory after symlink
+  resolution, so `..` segments and symlinks cannot escape it. Without the gate,
+  anyone able to open a Bolt connection could run
+  `LOAD CSV FROM 'file:///etc/passwd'`.
+- Dotted property access on a map-valued parameter — `$row.name`, and nested
+  chains like `$cfg.a.b`. The bracket form (`$row['name']`) and the
+  via-variable form (`WITH $row AS r RETURN r.name`) already worked, so the
+  dotted form raising a syntax error was an inconsistency rather than a
+  decision; other Cypher implementations accept it, and a ported query passing
+  a map parameter hits it immediately. Absent keys yield `null`, as elsewhere.
+- Conformance suites for the official **JavaScript** and **Java** Bolt drivers
+  (`neo4j-driver`, `neo4j-java-driver`) under `tests/conformance/`, run in CI by
+  the new `bolt-driver-conformance` job. Each covers the same 22 checks — session
+  and explicit-transaction lifecycle, managed `executeWrite`, PackStream type
+  round-trips, Node/Relationship/Path values, `Neo.*` error codes, OCC conflict
+  detection, and the `LOAD CSV` capability refusal — and a source-level parity
+  test fails if the two drift apart. Previously only the official Python driver
+  was regression-tested; the other drivers "may connect", which nobody had
+  checked.
+- The migration guide (`docs/python/migrations/neo4j-to-kglite.md`) now
+  documents three data-transfer routes rather than one — driver+pandas,
+  export-to-CSV plus `LOAD CSV` (the route for consumers with no pandas), and
+  pandas-in-between — with the four `LOAD CSV` behaviour differences a ported
+  import script will meet spelled out.
+- `kglite.open(path, storage="mapped", durable=True)` now works — write-ahead
+  logging is no longer restricted to in-memory graphs. A mapped graph mutates
+  the same in-memory structure as the default backend and differs only in its
+  file-backed property columns, so it gets the same per-commit crash safety
+  with no change to the log format.
+
+  `storage="disk"` still raises `ValueError`, now explaining why and what to
+  use instead: a disk graph commits by publishing an immutable generation, so
+  a logical write-ahead log is not its durability boundary. Use `save()`
+  checkpoints for disk graphs.
+- Export a graph to SQLite as a dependency-free exit path. `graph.export(
+  'dump.sql')` / `export_string('sqlite')` and `kglite export-sqlite <graph>
+  [output]` emit a deterministic SQLite-dialect SQL script — node types become
+  tables, connection types become link tables — which `sqlite3 out.db <
+  dump.sql` turns into a real relational database. No SQLite library is linked
+  into KGLite; emitting a script rather than a `.db` file adds **zero
+  dependencies**. Parquet is deliberately out of scope: it would mean taking on
+  the `arrow`/`parquet` tree, and `to_df().to_parquet(...)` already covers it
+  with the dependency in your environment rather than ours.
+- A **user-schema version** stamp persisted with the graph — your own
+  data-model revision, distinct from the engine-owned `.kgl` format version and
+  never interpreted by the engine. Read/write it via `graph.schema_version` /
+  `set_schema_version(n)`, `graph_info()['user_schema_version']`, or
+  `kglite schema-version <graph> [--set N]`. Additive: `.kgl` files written
+  before this field existed load at the unversioned baseline, and a graph that
+  never sets one saves byte-for-byte as before. `describe()` reports it once
+  set, so an agent opening a graph cold sees which schema generation it holds.
+- `kglite migrate <graph> <dir>` applies ordered `<version>_<name>.cypher`
+  migrations and advances that stamp. Re-running is a no-op; statements run
+  against an in-memory copy so a failure part-way leaves the `.kgl`
+  byte-identical; and a stamp the migration set cannot explain, a duplicate
+  version, or an unversioned filename are all refused rather than guessed at.
+  New guide: *Schema Migrations*, which documents the recreate-the-node pattern
+  for type changes — including that `SET n:NewType` adds a secondary label and
+  does **not** change a node's primary type.
+- Two documentation guides covering the two ways a kglite graph gets used.
+  `Derived index over another system of record` documents the rebuild-and-swap
+  pattern — incremental refresh and its delete caveat, carrying embeddings
+  across a rebuild, freshness stamps, managed/runtime ownership layers.
+  `KGLite as a primary store: scope and limits` states what holds when the
+  graph is the authoritative copy, what the defaults are, and where the edges
+  are: crash-safe `open()` and the state the log cannot express, constraint
+  enforcement and the paths that bypass it, index and constraint DDL with their
+  naming and equality-vs-range asymmetries, `LOAD CSV`'s default-deny file
+  capability, forward-only migrations, and the storage modes that keep the
+  whole-graph write checkpoint.
+
+### Changed
+
+- Index DDL is classified as a mutation, since schema is graph state: it is
+  blocked on a read-only graph and in a read-only transaction, rolls back with
+  a failed statement, and is rejected on a schema-locked graph when the
+  property is undeclared. `write_scope=[...]` covers it too, since an index
+  belongs to one node type. `SHOW INDEXES` is a read: it works on a read-only
+  graph and is unaffected by a write scope, which restricts mutations rather
+  than visibility.
+- Lifted the backend routing behind `create_index` into the core as
+  `DirGraph::create_property_index_routed`, so Cypher `CREATE INDEX` makes the
+  same decision the Python API does: on a `storage='disk'` graph it builds the
+  persistent mmap-backed index rather than the in-memory HashMap. On disk,
+  a `CREATE INDEX` that indexes no values on a populated node type is now
+  rejected with the reason (persistent property indexes cover string columns)
+  instead of reporting success for an empty index.
+- `KnowledgeGraph.define_schema` can now fail: installing a schema installs the
+  UNIQUE constraints it declares, so it raises `ConstraintCreationError` when
+  existing data already violates one. Nothing is changed in that case, so the
+  data can be fixed and the call retried.
+- Constraint DDL is classified as a mutation for the same reason index DDL is —
+  schema is graph state — so `CREATE`/`DROP CONSTRAINT` are blocked on a
+  read-only graph and in a read-only transaction, roll back with a failed
+  statement, respect `write_scope=[...]`, and are rejected on a schema-locked
+  graph when the property is undeclared. `SHOW CONSTRAINTS` is a read.
+- Mutating Cypher statements no longer deep-copy the graph to stay atomic. A
+  statement-scoped undo journal records the inverse of each write, so the cost
+  of a write now scales with the number of changes instead of with the size of
+  the graph — a single `SET` takes the same time on a thousand-node graph as on
+  a million-node one. Rollback fidelity is unchanged: a failed statement
+  restores node and relationship identity, properties, labels, index ordering,
+  schema metadata, and the version counter exactly.
+
+  Graphs in columnar mode, graphs with user-created property/range/composite
+  indexes, and the `mapped`/`disk` backends keep the previous whole-graph
+  checkpoint, so their write cost is unchanged.
+- The Bolt and MCP servers now give their tokio worker threads an 8 MiB stack
+  (`kglite::api::session::QUERY_THREAD_STACK_SIZE`) instead of tokio's 2 MiB
+  default, matching the headroom the CLI and Python wheel already get on the
+  main thread. Bindings that dispatch queries onto their own threads should
+  size them with this constant.
+
+### Changed — behaviour
+
+- **`kglite.open()` is now crash-safe by default.** `durable` defaults to on, so
+  every committed mutation is `fsync`'d to the `<path>-wal` sidecar before the
+  call returns and is replayed on the next `open()`. Previously a graph opened
+  without `durable=True` lost every write since the last explicit `save()`
+  whenever the process died — the docstring said as much, but it was the
+  default.
+
+  Three things to know when upgrading:
+
+  - **It costs one `fsync` per committed mutation.** Writes now wait for
+    physical storage, which is dominated by device latency rather than graph
+    size — most visible in loops of many small writes, negligible for a few
+    large ones. Reads are unaffected. Pass `durable=False` to opt out; it
+    remains fully supported and is the right choice for bulk loading and for
+    graphs rebuildable from source data. Batching mutations into one statement,
+    or one `begin()` transaction, gives throughput *and* crash safety.
+  - **A `with` block is not a transaction.** Mutations commit as they run, so an
+    exception inside the block no longer discards them — they are recovered on
+    the next `open()`. The failed exit still declines to write a checkpoint. Use
+    `begin()` for discard-on-error, or `durable=False` for the old
+    snapshot-only behaviour.
+  - **`storage="disk"` is unaffected** — it opens non-durable, as before, rather
+    than raising. Only an explicit `durable=True` raises there. `durable` is now
+    tri-state (`None`/`True`/`False`) precisely so the new default cannot break
+    disk callers.
+
+  The MCP server, CLI, and Bolt server open graphs through the shared
+  engine-level helper rather than this function, so none of them changes
+  behaviour.
+
+### Fixed
+
+- `claude_config` now reads and writes Claude MCP config files as UTF-8. On a
+  non-UTF-8 Windows codepage the read mis-decoded the file and the atomic write
+  committed the damage over every unrelated MCP server entry; non-ASCII text in
+  other entries is now preserved byte-for-byte.
+- `print()` of a Cypher result no longer raises `UnicodeEncodeError` when stdout
+  cannot encode box-drawing characters (redirected output, CI logs, captured
+  subprocesses). Such output falls back to an ASCII table; set
+  `KGLITE_ASCII_TABLE=1`/`0` to force either style.
+- `repr()` of a result containing a string longer than 30 characters no longer
+  panics when the truncation point falls inside a multi-byte character, and
+  non-ASCII cells no longer skew column alignment.
+- `LOAD CSV FROM 'file:///C:/data.csv'` now resolves on Windows instead of
+  producing the unreachable `/C:/data.csv`.
+- Declaring a UNIQUE or NODE KEY constraint no longer reintroduces a
+  graph-sized copy on every mutating statement. The unique-occupancy map holds
+  one entry per node of the constrained type, and it was being deep-cloned into
+  each statement's rollback checkpoint, so a constrained type gave back the
+  saving the undo journal delivers. It is now parked like the other graph-sized
+  structures and recomputed only for the node types a *failed* statement
+  touched, moving the cost to the rare rollback path. Rollback fidelity is
+  unchanged in both directions: a claim the failed statement added is released
+  again (so the value stays insertable rather than being rejected forever by a
+  phantom occupant), and a claim it released is restored (so a real duplicate is
+  still refused).
+- Cypher `CREATE` no longer discards a node type's cached `id` index on every
+  insert. Incremental id-index maintenance was gated on the type having a
+  declared primary key, so an undeclared type invalidated the whole index per
+  created node and the next `MATCH (n {id: ...})` or `MERGE` paid an O(n)
+  rebuild. The gate protected nothing about uniqueness — a rebuild and an
+  incremental insert collapse a duplicate id identically; it existed only
+  because `id` had already been moved into the insert and no clone was
+  available. Maintenance is now driven purely by whether the index is already
+  cached (and therefore complete), replacing the per-`CREATE` O(n) rebuild with
+  one `id` clone.
+- Deleting nodes now evicts them from the B-tree range index.
+  `detach_delete_nodes` cleaned the type, id, property, composite, and
+  secondary-label indexes but skipped `range_indices`, so `WHERE n.prop > x` on
+  an indexed property kept returning tombstoned nodes as candidates.
+- Bulk loading no longer silently hides rows from an indexed `MATCH`.
+  `add_nodes` (and the blueprint builder and edge stub vivification, which
+  funnel into it) appends through the batch path, which skips the per-write
+  index maintenance the Cypher executor runs — but the matcher trusts a
+  property index unconditionally rather than falling back to a scan. So after
+  `create_index('Person', 'city')`, a subsequent `add_nodes` left
+  `MATCH (n:Person {city: 'Oslo'})` returning only the pre-load nodes. The
+  bulk path now rebuilds the equality, range, and composite indexes covering
+  the loaded type once per call (no-op when the type carries none), the same
+  order of work as the `id` index rebuild it already did.
+- Overwriting an indexed property through a fluent write no longer returns the
+  node under its *old* value. `add_properties(...)` writes the property map
+  directly and the `store_as=` paths (`unique_values`, `collect_children`,
+  `calculate`) write through the batch path, so neither refreshed the secondary
+  indexes — and the matcher trusts a property index unconditionally rather than
+  falling back to a scan. After `create_index('Child', 'tag')`, an
+  `add_properties` that changed `tag` left `MATCH (c:Child {tag: <old value>})`
+  returning the node whose `tag` was already the *new* value: a wrong answer
+  rather than a missing row. Both paths now refresh the indexes covering every
+  written node type, the same remedy as the bulk-append fix above. The two
+  `add_properties` write loops (copy and aggregate) were duplicated tails, which
+  is how one of them lost the maintenance; they now share one helper.
+- `add_properties` bumps the graph version, so version-keyed caches and
+  freshness checks observe the write.
+- Declaring UNIQUE constraints no longer shifts the `.kgl` format for graphs
+  that have none. The persisted `unique_constraint_keys` list emitted
+  `"unique_constraint_keys":[]` into *every* file, changing the bytes of the
+  overwhelming majority of graphs — which carry no constraints — and tripping the
+  format-drift gate. It is now skipped when empty, so a constraint-free graph
+  writes byte-identical output to one produced before constraints existed.
+- The persisted constraint list is sorted at save time. It was snapshotted
+  straight from `HashMap::keys()`, so any graph carrying a constraint saved in
+  nondeterministic byte order.
+- OCC commit conflicts over Bolt now report
+  `Neo.ClientError.Transaction.ConflictDetected`, the code the Bolt server's
+  README and the migration guide have always documented. They previously
+  reported `Neo.ClientError.Transaction.TransactionStartFailed` — wrong twice
+  over, since the transaction started fine — so a ported client branching on
+  the status code (the normal way to write a retry loop) was misled. Writing
+  the Java/JS driver suites is what surfaced it: the Python tests matched on
+  message text and could not see the code.
+- `labels(n)` now returns a node's secondary labels in a stable order (sorted
+  by name, primary label first). They were previously returned in hash-map
+  iteration order, so two graphs holding identical data could report a node's
+  labels in different orders, and the order could change between processes.
+  Any caller that compared, displayed, or serialized `labels(n)` could see
+  irreproducible results.
+- **Mutations other than `cypher()` are now crash-safe on a `durable=True`
+  graph.** Only Cypher statements were written to the write-ahead log. Every
+  other way of changing a graph — `add_nodes`, `add_connections`,
+  `replace_connections`, `add_nodes_bulk`, `add_connections_bulk`,
+  `add_connections_from_source`, `extend`, `add_label`, `remove_label`,
+  `create_connections`, `add_properties`, `purge_provisional`, and a committed
+  transaction — applied the change and left it out of the log, so a crash lost
+  it with no error. A committed transaction is logged as a single entry, and a
+  rolled-back one still leaves nothing behind.
+- `load_ntriples()` no longer raises `PanicException` on a graph opened with
+  `durable=True`. The RDF loader's type-resolution pass treated a durable graph
+  as impossible and aborted.
+- A `Session` now refuses write queries against a `durable=True` graph instead
+  of applying them somewhere they can never be persisted. Session writes land
+  on a working copy visible only through that session — never on the graph that
+  owns the log or the save path — so they were unreachable by both. Reads are
+  unaffected; run mutations with `g.cypher(...)` or `with g.begin() as tx`.
+- **A `vacuum()` no longer switches off write-ahead logging.** Compacting a
+  graph rebuilt it into a plain in-memory backend, which discarded whatever the
+  triggering statement had written *and* silently ended crash-safety for the
+  rest of the session — every later mutation went unlogged, with no error. A
+  durable graph with auto-vacuum enabled could therefore lose all work since
+  its last `save()`. Vacuuming now keeps the graph durable, and the log is
+  flushed before the rebuild so no write is left describing a stale position.
+
+  The same rebuild also silently downgraded a `storage="mapped"` graph to plain
+  in-memory storage, so a graph stopped using its file-backed columns after the
+  first vacuum. Mapped graphs now stay mapped. `vacuum()` on a `storage="disk"`
+  graph is now a documented no-op rather than converting it to an in-memory
+  graph — disk reclaims space by writing a new generation, and rebuilding meant
+  loading the whole graph into RAM.
+- **Secondary labels are no longer lost on crash recovery in `durable=True`
+  mode.** A node's `:Label`s live in an index above the storage layer, so the
+  write-ahead log never captured them: after a crash, a recovered node kept
+  every property but came back with only its primary label, and
+  `MATCH (n:Label)` no longer found it. Labels are now logged as their own
+  entry and restored in `labels(n)` order, including removals
+  (`REMOVE n:Label`). Data written by an earlier version replays unchanged —
+  the log's older format is read exactly, not rejected. A log written by *this*
+  version is refused by older builds with a clear message instead of being
+  silently truncated.
+- `graph.export(...)` no longer writes an empty file when the current selection
+  exists but matched nothing. It decided whether to use the selection from
+  "does a selection level exist" rather than "does the selection hold nodes",
+  so a fluent call that matched nothing made `export('out.graphml')` silently
+  emit an empty graph while `export_string('graphml')` was correct. All three
+  export entry points now share one selection-resolution helper.
+- The Cypher script splitter behind the REPL's `.read` (and now `migrate`) is
+  quote-aware: a `;` inside a string literal is data, so
+  `CREATE (:Note {body: 'a;b'})` is no longer torn into two invalid fragments.
+- `n:A:B` label chains, subscript chains, and long arithmetic/boolean operator
+  chains past the nesting budget now report the documented
+  "nesting exceeds 512 levels" syntax error instead of aborting the process
+  (all frontends, including in-process Python).
+
+### Security
+
+- Fixed a denial of service in the Bolt and MCP servers: a single deeply
+  nested query from any client could overflow a server worker thread's stack,
+  and because a Rust stack overflow aborts rather than unwinds, the whole
+  server process died — disconnecting every other connected session. The
+  query is now rejected with a `Neo.ClientError.Statement.SyntaxError`
+  ("Expression nesting exceeds 512 levels; simplify the query") and the server
+  keeps serving.
+
+  The parser's 512-level nesting budget previously counted only *recursively*
+  parsed nesting (parentheses, lists, `NOT`, unary minus). The
+  left-associative operator chains — `OR` / `XOR` / `AND`, `+` / `-` / `||`,
+  `*` / `/` / `%`, subscripting, and `n:A:B` label chains — are parsed
+  iteratively, so the parser stayed shallow while the tree it returned grew
+  one level per term. The planner's expression walkers, the executor's
+  predicate evaluator, and the AST's drop glue all recurse per level, so an
+  unbounded chain walked off the end of the stack. Those chains now charge the
+  same budget, making it a bound on AST depth rather than on parser call depth.
+
 ## [0.14.5] - 2026-07-22
 
 ### Changed

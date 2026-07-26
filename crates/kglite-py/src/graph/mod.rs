@@ -331,6 +331,53 @@ impl KnowledgeGraph {
         dir.graph = GraphBackend::Recording(Box::new(RecordingGraph::new(inner)));
     }
 
+    /// Post-mutation bookkeeping for a Cypher write: make it durable, then
+    /// run the pyapi-specific auto-vacuum and stats housekeeping.
+    ///
+    /// **The order is a correctness requirement, not a preference.** Captured
+    /// WAL ops are keyed by `NodeIndex` and resolved against current graph
+    /// state, while a vacuum rebuilds the graph with contiguous indices — ops
+    /// resolved after a remap describe the wrong nodes, or none at all. The
+    /// flush therefore has to come first, which is exactly the trap that made
+    /// this worth naming instead of leaving inline in `cypher`.
+    pub(crate) fn after_mutation(
+        &mut self,
+        stats: Option<&kglite_core::api::cypher::MutationStats>,
+    ) -> PyResult<()> {
+        self.commit_wal()?;
+        let graph = crate::graph::get_graph_mut(&mut self.inner);
+        if let Some(stats) = stats {
+            if (stats.nodes_deleted > 0 || stats.relationships_deleted > 0)
+                && graph.check_auto_vacuum()
+            {
+                self.cursor.selection = kglite_core::api::CowSelection::new();
+            }
+            self.cursor.last_mutation_stats = Some(stats.clone());
+        }
+        Ok(())
+    }
+
+    /// [`flush_wal`](Self::flush_wal) mapped into `PyResult` — the form every
+    /// `#[pymethods]` mutation site uses.
+    ///
+    /// **Every method that commits a change to graph content must call this
+    /// before returning to Python.** There is no choke point that can do it
+    /// automatically: `get_graph_mut` has no access to the durability state
+    /// (which lives on the binding, not the `DirGraph`), and it runs *before*
+    /// the mutation rather than after. A mutator that forgets leaves its ops
+    /// buffered, where they are invisible to the log and are discarded by the
+    /// next `save()` — i.e. it silently is not crash-safe.
+    ///
+    /// Not every `&mut self` method needs it. Ops only exist for changes the
+    /// log can express — nodes, edges, and labels. Schema/config metadata,
+    /// user indexes, embeddings, and timeseries have no `MutationOp`, so they
+    /// are checkpoint-only by construction and calling this would be a no-op.
+    #[inline]
+    pub(crate) fn commit_wal(&mut self) -> PyResult<()> {
+        self.flush_wal()
+            .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(e)))
+    }
+
     /// Drain the capture buffer, resolve it to logical ops, and append a
     /// durably-`fsync`'d WAL frame. No-op for a non-durable graph or when
     /// no ops are pending. Called after each mutation on a durable graph;
@@ -353,7 +400,11 @@ impl KnowledgeGraph {
             if raw.is_empty() {
                 return Ok(());
             }
-            kglite_core::api::durable::resolve_ops(&raw, &dir.graph, &dir.interner)
+            // Secondary labels are read back through `dir` because they are
+            // not backend state — see `resolve_ops`.
+            kglite_core::api::durable::resolve_ops(&raw, &dir.graph, &dir.interner, |idx| {
+                dir.secondary_label_names(idx)
+            })
         };
         let ds = self
             .lifecycle
@@ -762,6 +813,41 @@ pub(crate) fn parse_inline_timeseries(
 /// renamed in the lift; this `use` alias keeps the wheel's existing
 /// `get_graph_mut` callers compiling unchanged.
 pub(crate) use kglite_core::api::make_dir_graph_mut as get_graph_mut;
+
+/// Resolve the `selection_only` argument shared by every export entry point
+/// into the selection the exporter should actually use.
+///
+/// **The subtlety this centralises.** A fluent call leaves a selection *level*
+/// on the cursor even when that level matched nothing, so "does a selection
+/// exist" (`get_level_count() > 0`) is not the same question as "is there
+/// anything selected". Keying off the former means a graph whose last fluent
+/// call selected zero nodes exports an empty file — which `export_string` got
+/// right and `export` did not, until both were routed through here.
+///
+/// - `Some(true)`  — force the selection, even if it is empty.
+/// - `Some(false)` — force the whole graph.
+/// - `None`        — use the selection only if it actually holds nodes.
+pub(crate) fn resolve_export_selection(
+    kg: &KnowledgeGraph,
+    selection_only: Option<bool>,
+) -> Option<&kglite_core::api::CurrentSelection> {
+    let use_selection = selection_only.unwrap_or_else(|| selection_has_nodes(kg));
+    // Deref coercion: &CowSelection -> &CurrentSelection.
+    use_selection.then_some(&kg.cursor.selection)
+}
+
+/// Whether the cursor's newest selection level holds at least one node.
+fn selection_has_nodes(kg: &KnowledgeGraph) -> bool {
+    let levels = kg.cursor.selection.get_level_count();
+    if levels == 0 {
+        return false;
+    }
+    kg.cursor
+        .selection
+        .get_level(levels.saturating_sub(1))
+        .map(|level| level.node_count() > 0)
+        .unwrap_or(false)
+}
 
 /// Lightweight centrality result conversion: returns {title: score} dict.
 /// Creates ONE Python dict instead of N dicts — returns {title: score} format.

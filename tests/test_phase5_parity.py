@@ -220,7 +220,12 @@ def test_binary_size_regression():
         pytest.fail("kglite-py release cdylib is missing — run `maturin build --release`")
 
     size = bin_path.stat().st_size
-    platform_key = sys.platform if sys.platform in BINARY_SIZE_BASELINES else "linux"
+    # Never fall back to another platform's number: the Linux baseline is
+    # itself an unverified estimate, so comparing e.g. a Windows MSVC DLL
+    # against it would report a meaningless pass or failure.
+    if sys.platform not in BINARY_SIZE_BASELINES:
+        pytest.skip(f"no measured binary-size baseline for {sys.platform}; capture one before gating it")
+    platform_key = sys.platform
     baseline = BINARY_SIZE_BASELINES[platform_key]
     gate = int(baseline * 1.10)
     assert size <= gate, (

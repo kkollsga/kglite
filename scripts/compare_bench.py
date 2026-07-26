@@ -40,7 +40,7 @@ def _load(path: Path) -> dict[str, float]:
     """Load a pytest-benchmark JSON and return `{name: stats}` per the
     `--metric` chosen later. We return the full stats dict for each
     benchmark so the caller picks the metric without re-reading."""
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     return {b["name"]: b["stats"] for b in data["benchmarks"]}
 
 
@@ -103,7 +103,7 @@ def main() -> int:
         print(f"  {'benchmark':<{name_w}}  {'baseline':>14}  {'current':>14}  {'delta':>8}")
         print(f"  {'-' * name_w}  {'-' * 14}  {'-' * 14}  {'-' * 8}")
         for name, b, c, delta in rows:
-            flag = " ←" if delta > args.threshold else ""
+            flag = " <<" if delta > args.threshold else ""
             print(f"  {name:<{name_w}}  {b:>14.3e}  {c:>14.3e}  {delta:>+7.1f}%{flag}")
 
     unbaselined = only_current if args.require_exact_set else []

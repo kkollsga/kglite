@@ -9,6 +9,7 @@
 
 pub mod algorithms;
 pub mod blueprint;
+pub mod constraints;
 pub mod core;
 pub mod dir_graph;
 pub mod embedder;

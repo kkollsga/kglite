@@ -150,11 +150,15 @@ pub mod api {
         pub use crate::graph::introspection::reporting::{
             ConnectionOperationReport, NodeOperationReport, OperationReport, OperationReports,
         };
+        pub use crate::graph::mutation::add_properties::{add_properties, PropertySpec};
         pub use crate::graph::mutation::extend::{extend_graph, ExtendReport};
+        // `AddPropertiesReport` is deliberately not re-exported: it was not part
+        // of the public surface before this module was split out, and the API
+        // baseline pins that surface.
         pub use crate::graph::mutation::maintain::{
-            add_connections, add_edges_from_specs, add_nodes, add_properties, create_connections,
+            add_connections, add_edges_from_specs, add_nodes, create_connections,
             purge_provisional_nodes, replace_connections, update_node_properties, EdgeSpec,
-            EdgeSpecReport, PropertySpec,
+            EdgeSpecReport,
         };
         /// Validate a graph against a `SchemaDefinition` (Piece 3 cleanup).
         pub use crate::graph::mutation::validation::validate_graph;
@@ -306,6 +310,10 @@ pub mod api {
         pub use crate::graph::io::export::{
             to_csv, to_csv_dir, to_d3_json, to_gexf, to_graphml, to_text,
         };
+        /// Dependency-free relational exit: a deterministic SQLite-dialect SQL
+        /// script (`sqlite3 out.db < dump.sql`). Node types become tables,
+        /// connection types become link tables.
+        pub use crate::graph::io::export_sql::to_sqlite_dump;
         /// Embedding-vector file export / import.
         pub use crate::graph::io::file::{
             export_embeddings_to_file, import_embeddings_from_file, EmbeddingExportFilter,
@@ -438,9 +446,12 @@ pub mod api {
     /// truth for the Cypher pipeline + snapshot/working CoW
     /// transaction model. See `docs/rust/session.md`.
     pub mod session {
+        /// `LOAD CSV` filesystem capability. Every binding decides what its
+        /// callers get; see `ExecuteOptions::csv_import`.
+        pub use crate::graph::languages::cypher::executor::load_csv::CsvImportPolicy;
         pub use crate::graph::session::{
             execute_mut, execute_read, resolve_noderefs, CommitOutcome, ExecuteOptions,
-            ExecuteOutcome, Session, Transaction,
+            ExecuteOutcome, Session, Transaction, QUERY_THREAD_STACK_SIZE,
         };
     }
 }

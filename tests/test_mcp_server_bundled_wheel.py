@@ -60,7 +60,7 @@ def test_entry_point_is_bundled() -> None:
 
 def test_bundled_server_boots_and_lists_tools(tmp_path: Path) -> None:
     manifest = tmp_path / "bare_mcp.yaml"
-    manifest.write_text("name: Bundled Wheel Smoke\n")
+    manifest.write_text("name: Bundled Wheel Smoke\n", encoding="utf-8")
     client = _spawn_wheel(["--mcp-config", str(manifest)])
     try:
         names = {t["name"] for t in client.list_tools()}
@@ -96,7 +96,8 @@ def test_python_library_embedder_powers_text_score(tmp_path: Path) -> None:
         "class StubEmbedder:\n"
         "    dimension = 8\n"
         "    def embed(self, texts):\n"
-        "        return [[float(b) for b in hashlib.sha256(t.encode()).digest()[:8]] for t in texts]\n"
+        "        return [[float(b) for b in hashlib.sha256(t.encode()).digest()[:8]] for t in texts]\n",
+        encoding="utf-8",
     )
     sys.path.insert(0, str(tmp_path))
     try:
@@ -117,7 +118,8 @@ def test_python_library_embedder_powers_text_score(tmp_path: Path) -> None:
     manifest = tmp_path / "docs_mcp.yaml"
     # `library: stub` (anything but fastembed-rs) routes to the Python factory.
     manifest.write_text(
-        "name: stub\ntrust:\n  allow_embedder: true\nextensions:\n  embedder:\n    library: stub\n    model: stub\n"
+        "name: stub\ntrust:\n  allow_embedder: true\nextensions:\n  embedder:\n    library: stub\n    model: stub\n",
+        encoding="utf-8",
     )
 
     # Launch the bundled server with the same stub via the factory arg — the
@@ -128,7 +130,8 @@ def test_python_library_embedder_powers_text_score(tmp_path: Path) -> None:
         "import sys\n"
         f"sys.path.insert(0, {str(tmp_path)!r})\n"
         "import kglite, stub_embed\n"
-        "kglite._run_mcp_server(sys.argv[1:], embedder_factory=lambda cfg: stub_embed.StubEmbedder())\n"
+        "kglite._run_mcp_server(sys.argv[1:], embedder_factory=lambda cfg: stub_embed.StubEmbedder())\n",
+        encoding="utf-8",
     )
     proc = subprocess.Popen(
         [sys.executable, str(launcher), "--graph", str(kgl), "--mcp-config", str(manifest)],
@@ -227,13 +230,15 @@ def _write_wide_local_workspace(tmp_path: Path, n_files: int = 400) -> tuple[Pat
         pkg.mkdir(parents=True, exist_ok=True)
         for f in range(20):
             (pkg / f"m{f}.py").write_text(
-                f"class C{f}:\n    def meth(self, x): return x + {f}\ndef fn{f}(a): return a\n"
+                f"class C{f}:\n    def meth(self, x): return x + {f}\ndef fn{f}(a): return a\n", encoding="utf-8"
             )
     small = root / "sub_small"
     small.mkdir(parents=True, exist_ok=True)
-    (small / "a.py").write_text("def g(x):\n    return x\nclass W:\n    def r(self): return 1\n")
+    (small / "a.py").write_text("def g(x):\n    return x\nclass W:\n    def r(self): return 1\n", encoding="utf-8")
     manifest = tmp_path / "wide_mcp.yaml"
-    manifest.write_text(f"name: Wide Root Selftest\nworkspace: {{ kind: local, root: {root}, watch: true }}\n")
+    manifest.write_text(
+        f"name: Wide Root Selftest\nworkspace: {{ kind: local, root: {root}, watch: true }}\n", encoding="utf-8"
+    )
     return manifest, root, small
 
 

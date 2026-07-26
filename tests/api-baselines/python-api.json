@@ -32,6 +32,9 @@
     "SchemaError",
     "ValidationError",
     "ExprError",
+    "ConstraintError",
+    "ConstraintViolationError",
+    "ConstraintCreationError",
     "NodeNotFoundError",
     "ConnectionNotFoundError",
     "PropertyNotFoundError",
@@ -101,6 +104,36 @@
     "ConnectionNotFoundError": {
       "bases": [
         "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "ConstraintCreationError": {
+      "bases": [
+        "ConstraintError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "ConstraintError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "ConstraintViolationError": {
+      "bases": [
+        "ConstraintError"
       ],
       "constructible": true,
       "constructor": null,
@@ -817,6 +850,10 @@
           "kind": "method",
           "signature": "(self, /)"
         },
+        "schema_version": {
+          "kind": "attribute",
+          "type": "getset_descriptor"
+        },
         "search": {
           "kind": "method",
           "signature": "(self, /, text, *, property='title', limit=10)"
@@ -868,6 +905,10 @@
         "set_parent_type": {
           "kind": "method",
           "signature": "(self, /, node_type, parent_type)"
+        },
+        "set_schema_version": {
+          "kind": "method",
+          "signature": "(self, /, version)"
         },
         "set_spatial": {
           "kind": "method",
@@ -1339,7 +1380,7 @@
     },
     "open": {
       "kind": "function",
-      "signature": "(path, *, storage=None, durable=False)"
+      "signature": "(path, *, storage=None, durable=None)"
     },
     "open_session": {
       "kind": "function",

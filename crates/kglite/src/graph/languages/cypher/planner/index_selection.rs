@@ -192,6 +192,9 @@ fn collect_prior_scalar_vars(prior_clauses: &[Clause]) -> HashSet<String> {
             Clause::Unwind(u) => {
                 out.insert(u.alias.clone());
             }
+            Clause::LoadCsv(l) => {
+                out.insert(l.variable.clone());
+            }
             _ => {}
         }
     }

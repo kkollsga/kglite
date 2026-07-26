@@ -92,7 +92,7 @@ def _build_perf_graph(size: int) -> kglite.KnowledgeGraph:
 def collect() -> dict:
     out: dict = {"timestamp": time.time()}
 
-    # ── Tier 1: begin() clone cost vs graph size ────────────────────
+    # -- Tier 1: begin() clone cost vs graph size --------------------
     sz_results = {}
     for size in (1_000, 10_000, 100_000):
         g = _build_perf_graph(size)
@@ -103,7 +103,7 @@ def collect() -> dict:
         )
     out["begin_clone_scaling"] = sz_results
 
-    # ── Tier 2: per-call cypher() cost (parse + execute baseline) ──
+    # -- Tier 2: per-call cypher() cost (parse + execute baseline) --
     g = _build_perf_graph(1_000)
     out["cypher_calls"] = {
         "return_1": bench(lambda: g.cypher("RETURN 1 AS n")),
@@ -132,7 +132,7 @@ def collect() -> dict:
         ),
     }
 
-    # ── Tier 2: parse cache effectiveness ──────────────────────────
+    # -- Tier 2: parse cache effectiveness --------------------------
     queries_unique = [f"MATCH (p:Person {{id: {i}}}) RETURN p.title" for i in range(100)]
     counter = [0]
 
@@ -146,7 +146,7 @@ def collect() -> dict:
         "unique_query_each": bench(unique_query),
     }
 
-    # ── Tier 2: Concurrent read scaling ────────────────────────────
+    # -- Tier 2: Concurrent read scaling ----------------------------
     big = _build_perf_graph(5_000)
     QUERY = "MATCH (p:Person) WHERE p.city = 'Oslo' AND p.age > 30 RETURN count(p)"
 
@@ -182,7 +182,7 @@ def collect() -> dict:
     for t in (1, 2, 4, 8, 16, 32):
         out["concurrent_scaling"][f"threads_{t}"] = measure_threads(t)
 
-    # ── Tier 3: result serialization ───────────────────────────────
+    # -- Tier 3: result serialization -------------------------------
     g100k = _build_perf_graph(100_000)
     ser = {}
     for n_rows in (1, 10, 100, 1000, 10000):
@@ -190,14 +190,14 @@ def collect() -> dict:
         ser[f"limit_{n_rows}"] = bench(lambda q=q: g100k.cypher(q), n=50, warmup=5)
     out["result_serialization"] = ser
 
-    # ── Tier 3: full-scan throughput ───────────────────────────────
+    # -- Tier 3: full-scan throughput -------------------------------
     out["full_scan_100k"] = bench(
         lambda: g100k.cypher("MATCH (p:Person) WHERE p.salary > 5000000 RETURN count(p)"),
         n=20,
         warmup=3,
     )
 
-    # ── Tier 3: columnar_enable ────────────────────────────────────
+    # -- Tier 3: columnar_enable ------------------------------------
     g_col = _build_perf_graph(1_000)
     # Warmup
     for _ in range(5):
@@ -266,7 +266,7 @@ def diff(before: dict, after: dict) -> None:
     rows: list = []
     walk("", before, after, rows)
 
-    print(f"{'Metric':<55} {'before':>12} {'after':>12} {'Δ min':>8} {'Δ med':>8}")
+    print(f"{'Metric':<55} {'before':>12} {'after':>12} {'delta  min':>8} {'delta  med':>8}")
     print("-" * 105)
     for name, b_min, a_min, b_med, a_med in rows:
         if b_min is None or a_min is None or b_min == 0:
@@ -279,9 +279,9 @@ def diff(before: dict, after: dict) -> None:
             d_med_str = "—"
         flag = ""
         if d_min < -20:
-            flag = "  🟢"
+            flag = "  FASTER"
         elif d_min > 20:
-            flag = "  🔴"
+            flag = "  SLOWER"
         print(f"{name:<55} {fmt(b_min):>12} {fmt(a_min):>12} {d_min:+7.1f}% {d_med_str:>8}{flag}")
 
 
@@ -296,11 +296,11 @@ def main() -> None:
         if not before_path.exists() or not after_path.exists():
             print("Missing .perf_audit_before.json or .perf_audit_after.json", file=sys.stderr)
             sys.exit(1)
-        diff(json.loads(before_path.read_text()), json.loads(after_path.read_text()))
+        diff(json.loads(before_path.read_text(encoding="utf-8")), json.loads(after_path.read_text(encoding="utf-8")))
     else:
         data = collect()
-        Path(f".perf_audit_{args.mode}.json").write_text(json.dumps(data, indent=2))
-        print(f"Captured {args.mode} → .perf_audit_{args.mode}.json")
+        Path(f".perf_audit_{args.mode}.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
+        print(f"Captured {args.mode} -> .perf_audit_{args.mode}.json")
 
 
 if __name__ == "__main__":

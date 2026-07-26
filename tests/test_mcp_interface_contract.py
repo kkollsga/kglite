@@ -45,9 +45,11 @@ def capture_mcp_contract(base: Path) -> dict[str, list[dict]]:
 
     local_root = base / "local-root"
     local_root.mkdir()
-    (local_root / "demo.py").write_text("print('hello')\n")
+    (local_root / "demo.py").write_text("print('hello')\n", encoding="utf-8")
     local_manifest = base / "local_mcp.yaml"
-    local_manifest.write_text(f"name: Local Contract\nworkspace:\n  kind: local\n  root: {local_root}\n")
+    local_manifest.write_text(
+        f"name: Local Contract\nworkspace:\n  kind: local\n  root: {local_root}\n", encoding="utf-8"
+    )
 
     custom_manifest = base / "custom_mcp.yaml"
     custom_manifest.write_text(
@@ -60,7 +62,8 @@ def capture_mcp_contract(base: Path) -> dict[str, list[dict]]:
         "      city:\n"
         "        type: string\n"
         "        description: Exact city name.\n"
-        "        required: true\n"
+        "        required: true\n",
+        encoding="utf-8",
     )
 
     return {
@@ -77,7 +80,7 @@ def mcp_contract(tmp_path_factory):
 
 
 def test_mcp_tools_list_matches_reviewed_mode_schemas(mcp_contract):
-    expected = json.loads(BASELINE.read_text())
+    expected = json.loads(BASELINE.read_text(encoding="utf-8"))
     assert mcp_contract == expected, (
         "MCP tool names/descriptions/input schemas drifted; review and refresh mcp-tools.json"
     )

@@ -20,6 +20,9 @@ COMMANDS = {
     "session": ("session",),
     "export-text": ("export-text",),
     "diff": ("diff",),
+    "export-sqlite": ("export-sqlite",),
+    "migrate": ("migrate",),
+    "schema-version": ("schema-version",),
     "skill": ("skill",),
     "skill-install": ("skill", "install"),
     "skill-uninstall": ("skill", "uninstall"),
@@ -53,7 +56,7 @@ def capture_cli_contract() -> dict:
 
 
 def test_cli_help_and_error_contract_matches_baseline():
-    assert capture_cli_contract() == json.loads(BASELINE.read_text())
+    assert capture_cli_contract() == json.loads(BASELINE.read_text(encoding="utf-8"))
 
 
 def test_cli_version_tracks_workspace_version():

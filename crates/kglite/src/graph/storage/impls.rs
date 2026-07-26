@@ -33,9 +33,10 @@ use std::time::Instant;
 //
 // `MemoryGraph` and `MappedGraph` wrap identical `StableDiGraph` today but
 // carry distinct type identity for per-backend divergence. The
-// `impl_heap_graph_read!` and `impl_heap_graph_write!` macros emit the
-// shared trait bodies for both. Any Memory-or-Mapped-specific override
-// lives next to the macro call.
+// `impl_heap_graph_read!` macro emits the shared read body. The write side is
+// written out per backend: `MappedGraph` maintains its own lazy indexes and
+// `MemoryGraph` carries the statement-scoped undo journal, so the two have
+// nothing left in common to share.
 // ──────────────────────────────────────────────────────────────────────────
 
 macro_rules! impl_heap_graph_read {
@@ -269,50 +270,140 @@ macro_rules! impl_heap_graph_read {
     };
 }
 
-macro_rules! impl_heap_graph_write {
-    ($ty:ty) => {
-        impl GraphWrite for $ty {
-            #[inline]
-            fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
-                self.inner_mut().node_weight_mut(idx)
-            }
+impl_heap_graph_read!(MemoryGraph, is_memory = true, is_mapped = false);
 
-            #[inline]
-            fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
-                self.invalidate_peer_counts();
-                self.inner_mut().edge_weight_mut(idx)
-            }
+// ──────────────────────────────────────────────────────────────────────────
+// MemoryGraph — GraphWrite, and the statement-scoped undo capture seam.
+//
+// Written out rather than macro-generated: `MappedGraph` has its own
+// hand-written `GraphWrite` (below) and only `MemoryGraph` carries an undo
+// journal, so a shared macro had exactly one user and no longer earned the
+// indirection.
+//
+// Every method follows the same shape: capture the inverse of the edit into
+// the journal *if one is installed*, then perform the edit. With no journal
+// (the steady state, and every read path) the added cost is one `Option`
+// discriminant check; the clone-the-pre-image work lives in `#[cold]`
+// helpers so it never bloats the inlined hot path.
+//
+// See `storage/undo.rs` for the replay contract and
+// `dir_graph/rollback.rs` for the restore half.
+// ──────────────────────────────────────────────────────────────────────────
 
-            #[inline]
-            fn add_node(&mut self, data: NodeData) -> NodeIndex {
-                self.inner_mut().add_node(data)
-            }
-
-            #[inline]
-            fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData> {
-                self.invalidate_peer_counts();
-                self.inner_mut().remove_node(idx)
-            }
-
-            #[inline]
-            fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
-                self.invalidate_peer_counts();
-                self.inner_mut().add_edge(a, b, data)
-            }
-
-            #[inline]
-            fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData> {
-                self.invalidate_peer_counts();
-                self.inner_mut().remove_edge(idx)
-            }
-
-            // update_row_id — trait default no-op (disk-only).
+impl MemoryGraph {
+    /// Clone `idx`'s current weight into the journal as its pre-statement
+    /// state, unless this statement already captured it.
+    #[cold]
+    fn capture_node_weight(&mut self, idx: NodeIndex) {
+        let inner = &self.inner;
+        if let Some(journal) = self.undo.as_deref_mut() {
+            journal.note_node_weight(idx, || inner.node_weight(idx).cloned());
         }
-    };
+    }
+
+    /// Edge counterpart of [`Self::capture_node_weight`].
+    #[cold]
+    fn capture_edge_weight(&mut self, idx: EdgeIndex) {
+        let inner = &self.inner;
+        if let Some(journal) = self.undo.as_deref_mut() {
+            journal.note_edge_weight(idx, || inner.edge_weight(idx).cloned());
+        }
+    }
+
+    /// Any edge incident to `idx`, in either direction.
+    fn first_incident_edge(&self, idx: NodeIndex) -> Option<EdgeIndex> {
+        self.inner
+            .edges_directed(idx, Direction::Outgoing)
+            .next()
+            .or_else(|| self.inner.edges_directed(idx, Direction::Incoming).next())
+            .map(|edge| edge.id())
+    }
+
+    /// Detach `idx`'s edges one at a time, through the recorded
+    /// [`GraphWrite::remove_edge`], so each gets its own journal entry.
+    ///
+    /// petgraph's `remove_node` drops incident edges in one internal sweep
+    /// whose order we neither observe nor control, which would leave reverse
+    /// replay unable to hand each edge back its own free-list slot. Doing the
+    /// detach ourselves makes the removal order the recorded order. The end
+    /// state is identical either way; the Cypher delete path already detaches
+    /// explicitly (`mutation::maintain::detach_delete_nodes`), so in practice
+    /// this loop finds nothing to do and exists for every *other* caller of
+    /// `remove_node`.
+    #[cold]
+    fn detach_for_journal(&mut self, idx: NodeIndex) {
+        while let Some(edge) = self.first_incident_edge(idx) {
+            GraphWrite::remove_edge(self, edge);
+        }
+    }
 }
 
-impl_heap_graph_read!(MemoryGraph, is_memory = true, is_mapped = false);
-impl_heap_graph_write!(MemoryGraph);
+impl GraphWrite for MemoryGraph {
+    #[inline]
+    fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
+        if self.undo.is_some() {
+            self.capture_node_weight(idx);
+        }
+        self.inner.node_weight_mut(idx)
+    }
+
+    #[inline]
+    fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
+        self.invalidate_peer_counts();
+        if self.undo.is_some() {
+            self.capture_edge_weight(idx);
+        }
+        self.inner.edge_weight_mut(idx)
+    }
+
+    #[inline]
+    fn add_node(&mut self, data: NodeData) -> NodeIndex {
+        let node_type = data.node_type;
+        let idx = self.inner.add_node(data);
+        if let Some(journal) = self.undo.as_deref_mut() {
+            journal.note_node_added(idx, node_type);
+        }
+        idx
+    }
+
+    #[inline]
+    fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData> {
+        self.invalidate_peer_counts();
+        if self.undo.is_some() {
+            self.detach_for_journal(idx);
+        }
+        let removed = self.inner.remove_node(idx)?;
+        if let Some(journal) = self.undo.as_deref_mut() {
+            journal.note_node_removed(idx, removed.clone());
+        }
+        Some(removed)
+    }
+
+    #[inline]
+    fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
+        self.invalidate_peer_counts();
+        let idx = self.inner.add_edge(a, b, data);
+        if let Some(journal) = self.undo.as_deref_mut() {
+            journal.note_edge_added(idx);
+        }
+        idx
+    }
+
+    #[inline]
+    fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData> {
+        self.invalidate_peer_counts();
+        let endpoints = self.undo.is_some().then(|| self.inner.edge_endpoints(idx));
+        let removed = self.inner.remove_edge(idx)?;
+        if let Some(journal) = self.undo.as_deref_mut() {
+            if let Some(Some((src, tgt))) = endpoints {
+                journal.note_edge_removed(idx, src, tgt, removed.clone());
+            }
+        }
+        Some(removed)
+    }
+
+    // update_row_id — trait default no-op (disk-only).
+}
 
 // ──────────────────────────────────────────────────────────────────────────
 // MappedGraph — hand-written GraphRead impl with a lazy per-conn-type

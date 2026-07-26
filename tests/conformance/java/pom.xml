@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Official Neo4j Java driver conformance suite for kglite-bolt-server.
+
+  The JVM has no in-process route to a kglite graph, so the Bolt server is the
+  whole integration surface for JVM consumers. That only works if the official
+  Java driver actually agrees with what this server sends, which is what the
+  suite in src/test/java asserts.
+
+  Driven by tests/test_bolt_driver_conformance.py, which builds the server,
+  starts it on an ephemeral port, and passes the URI in as -Dkglite.bolt.uri.
+  Run standalone with:
+
+      mvn -B test -Dkglite.bolt.uri=bolt://127.0.0.1:7687
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>dev.kglite</groupId>
+  <artifactId>bolt-java-conformance</artifactId>
+  <version>0.0.0</version>
+  <packaging>jar</packaging>
+  <name>kglite Bolt Java driver conformance</name>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.release>17</maven.compiler.release>
+    <!-- Overridden on the command line by the pytest wrapper. -->
+    <kglite.bolt.uri>bolt://127.0.0.1:7687</kglite.bolt.uri>
+    <neo4j.driver.version>5.28.5</neo4j.driver.version>
+    <junit.version>5.11.4</junit.version>
+    <surefire.version>3.5.2</surefire.version>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.neo4j.driver</groupId>
+      <artifactId>neo4j-java-driver</artifactId>
+      <version>${neo4j.driver.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>${surefire.version}</version>
+        <configuration>
+          <!-- Surefire forks a JVM, so a command-line -D does not reach the
+               tests unless it is forwarded explicitly. -->
+          <systemPropertyVariables>
+            <kglite.bolt.uri>${kglite.bolt.uri}</kglite.bolt.uri>
+          </systemPropertyVariables>
+          <trimStackTrace>false</trimStackTrace>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

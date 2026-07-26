@@ -150,6 +150,57 @@ fn emit(sink: Option<&dyn ProgressSink>, event: ProgressEvent<'_>) -> Result<(),
     Ok(())
 }
 
+/// Rewrite every node's `node_type` key according to `rename_map`, in one
+/// sequential pass — O(nodes), not O(renames × nodes). Used after Q-code type
+/// resolution promotes placeholder types to their resolved names.
+///
+/// Recurses through the `Recording` write-capture wrapper rather than treating
+/// it as impossible. It used to `unreachable!()` there on the grounds that the
+/// wrapper was test-only, which stopped being true when `durable=True` shipped:
+/// `load_ntriples` on a durable graph panicked outright.
+///
+/// The rename deliberately reaches the wrapped backend directly, so it is not
+/// captured as a logical mutation. Retyping here is the tail end of resolving
+/// names the loader itself invented — the nodes' final types are what the
+/// load's own captured writes will resolve to at flush, so logging a second
+/// per-node op would be redundant.
+fn apply_type_renames(
+    backend: &mut crate::graph::schema::GraphBackend,
+    rename_map: &HashMap<u64, u64>,
+) {
+    use crate::graph::schema::GraphBackend;
+    match backend {
+        GraphBackend::Disk(dg) => {
+            for i in 0..dg.node_slot_len() {
+                let slot = dg.node_slot(i);
+                if slot.is_alive() {
+                    if let Some(&new_type) = rename_map.get(&slot.node_type) {
+                        let mut new_slot = slot;
+                        new_slot.node_type = new_type;
+                        dg.set_node_slot(i, new_slot);
+                    }
+                }
+            }
+        }
+        GraphBackend::Memory(g) => retype_heap_nodes(g, rename_map),
+        GraphBackend::Mapped(g) => retype_heap_nodes(g, rename_map),
+        GraphBackend::Recording(rg) => apply_type_renames(rg.inner_mut(), rename_map),
+    }
+}
+
+/// The heap half of [`apply_type_renames`], shared by the memory and mapped
+/// backends (identical loops before this was factored out).
+fn retype_heap_nodes(g: &mut impl GraphWrite, rename_map: &HashMap<u64, u64>) {
+    for i in 0..g.node_bound() {
+        let idx = petgraph::graph::NodeIndex::new(i);
+        if let Some(node) = g.node_weight_mut(idx) {
+            if let Some(&new_key) = rename_map.get(&node.node_type.as_u64()) {
+                node.node_type = InternedKey::from_u64(new_key);
+            }
+        }
+    }
+}
+
 fn open_ntriples_reader(path: &Path, display_path: &str) -> Result<Box<dyn Read + Send>, String> {
     if display_path.ends_with(".bz2") {
         // The parallel reader falls back to MultiBzDecoder for a single stream.
@@ -838,47 +889,7 @@ fn resolve_type_labels(
                 .iter()
                 .map(|(old, new)| (old.as_u64(), new.as_u64()))
                 .collect();
-            match &mut graph.graph {
-                crate::graph::schema::GraphBackend::Disk(ref mut dg) => {
-                    let n = dg.node_slot_len();
-                    for i in 0..n {
-                        let slot = dg.node_slot(i);
-                        if slot.is_alive() {
-                            if let Some(&new_type) = rename_map.get(&slot.node_type) {
-                                let mut new_slot = slot;
-                                new_slot.node_type = new_type;
-                                dg.set_node_slot(i, new_slot);
-                            }
-                        }
-                    }
-                }
-                crate::graph::schema::GraphBackend::Memory(ref mut g) => {
-                    for i in 0..g.node_bound() {
-                        let idx = petgraph::graph::NodeIndex::new(i);
-                        if let Some(node) = g.node_weight_mut(idx) {
-                            if let Some(&new_key) = rename_map.get(&node.node_type.as_u64()) {
-                                node.node_type = InternedKey::from_u64(new_key);
-                            }
-                        }
-                    }
-                }
-                crate::graph::schema::GraphBackend::Mapped(ref mut g) => {
-                    for i in 0..g.node_bound() {
-                        let idx = petgraph::graph::NodeIndex::new(i);
-                        if let Some(node) = g.node_weight_mut(idx) {
-                            if let Some(&new_key) = rename_map.get(&node.node_type.as_u64()) {
-                                node.node_type = InternedKey::from_u64(new_key);
-                            }
-                        }
-                    }
-                }
-                // RecordingGraph is a Phase 6 validation wrapper only
-                // constructed in Rust tests; the ntriples loader never
-                // sees it in practice.
-                crate::graph::schema::GraphBackend::Recording(_) => {
-                    unreachable!("ntriples loader does not run on a Recording-wrapped graph");
-                }
-            }
+            apply_type_renames(&mut graph.graph, &rename_map);
             if build_debug() {
                 eplog!(
                     "  Resolved {} Q-code types ({})",

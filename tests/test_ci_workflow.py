@@ -12,7 +12,7 @@ import re
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-CI_TEXT = CI_PATH.read_text()
+CI_TEXT = CI_PATH.read_text(encoding="utf-8")
 
 REQUIRED_JOBS = {
     "docs",
@@ -26,6 +26,7 @@ REQUIRED_JOBS = {
     "address-sanitizer",
     "dependency-maintenance",
     "scheduled-concurrency-stress",
+    "bolt-driver-conformance",
 }
 
 
@@ -124,7 +125,7 @@ def test_heavy_thread_sanitizer_is_scheduled_only() -> None:
 
 
 def test_live_github_smoke_requires_explicit_opt_in() -> None:
-    smoke = (REPO_ROOT / "tests" / "test_mcp_server_smoke.py").read_text()
+    smoke = (REPO_ROOT / "tests" / "test_mcp_server_smoke.py").read_text(encoding="utf-8")
     assert 'os.environ.get("KGLITE_GITHUB_INTEGRATION") == "1"' in smoke
     assert "and GITHUB_TOKEN is not None" in smoke
     assert smoke.count("not _github_live_enabled()") == 2
@@ -134,7 +135,7 @@ def test_docs_job_checks_generated_facts_and_warnings() -> None:
     docs = _job_block("docs")
     assert "python scripts/render_docs_facts.py --check" in docs
     assert "sphinx-build -W --keep-going -b html docs docs/_build/html" in docs
-    assert "myst.xref_missing" not in (REPO_ROOT / "docs" / "conf.py").read_text()
+    assert "myst.xref_missing" not in (REPO_ROOT / "docs" / "conf.py").read_text(encoding="utf-8")
 
 
 def test_source_quality_runs_once_in_its_own_required_job() -> None:
@@ -166,7 +167,7 @@ def test_every_ci_job_has_a_wall_clock_timeout() -> None:
 
 
 def test_scheduled_dependency_maintenance_is_report_first() -> None:
-    dependabot = (REPO_ROOT / ".github" / "dependabot.yml").read_text()
+    dependabot = (REPO_ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
     assert 'package-ecosystem: "cargo"' in dependabot
     cargo_policy = dependabot.split('package-ecosystem: "cargo"', maxsplit=1)[1]
     assert 'update-types: ["minor", "patch"]' in cargo_policy
@@ -186,5 +187,19 @@ def test_scheduled_stress_is_bounded_and_excludes_large_runner_case() -> None:
     assert "tests/test_session_stress.py -m stress" in stress
     assert "tests/test_bolt_server_concurrency.py -m bolt_stress" in stress
     assert "tests/test_stress.py" not in stress
-    large = (REPO_ROOT / "tests" / "test_stress.py").read_text()
+    large = (REPO_ROOT / "tests" / "test_stress.py").read_text(encoding="utf-8")
     assert "manual/large-runner" in large
+
+
+def test_bolt_driver_conformance_installs_both_toolchains() -> None:
+    """The suites skip when their toolchain is missing, which is right locally
+    and useless in CI — a runner without a JDK would report green while never
+    executing the Java driver at all. So CI must install both, and `-rs` must
+    stay on so any skip is visible in the log rather than silent."""
+    job = _job_block("bolt-driver-conformance")
+    assert "actions/setup-java@v4" in job
+    assert "distribution: temurin" in job
+    assert "actions/setup-node@v4" in job
+    assert "cargo build --release -p kglite-bolt-server" in job
+    assert "pytest tests/test_bolt_driver_conformance.py -m bolt" in job
+    assert "-rs" in job

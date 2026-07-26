@@ -172,6 +172,10 @@ impl KnowledgeGraph {
     ///         print(f"Reclaimed {result['tombstones_removed']} slots")
     ///     ```
     fn vacuum(&mut self) -> PyResult<Py<PyAny>> {
+        // Before the rebuild, not after: captured ops are keyed by
+        // `NodeIndex` and a vacuum remaps every index, so ops resolved
+        // afterwards would describe the wrong nodes.
+        self.commit_wal()?;
         let graph = get_graph_mut(&mut self.inner);
 
         let tombstones_before = graph.graph.node_bound() - graph.graph.node_count();
@@ -211,6 +215,7 @@ impl KnowledgeGraph {
         if nodes_purged > 0 {
             self.cursor.selection = CowSelection::new();
         }
+        self.commit_wal()?;
         Python::attach(|py| {
             let result = PyDict::new(py);
             result.set_item("nodes_purged", nodes_purged)?;
@@ -255,6 +260,7 @@ impl KnowledgeGraph {
             dict.set_item("composite_index_count", info.composite_index_count)?;
             dict.set_item("format_version", self.inner.save_metadata.format_version)?;
             dict.set_item("library_version", &self.inner.save_metadata.library_version)?;
+            dict.set_item("user_schema_version", self.inner.user_schema_version)?;
             // Columnar memory info
             let heap_bytes: usize = self
                 .inner
@@ -394,6 +400,41 @@ impl KnowledgeGraph {
     #[getter]
     fn schema_locked(&self) -> bool {
         self.inner.schema_locked
+    }
+
+    /// Your own data-model revision, persisted with the graph.
+    ///
+    /// This is *your* number, not kglite's: the engine stores and returns it
+    /// but never interprets it. It exists so a migration script can ask how far
+    /// this graph has been migrated. `0` means unversioned, which is also what
+    /// a graph saved before this field existed reports.
+    ///
+    /// Distinct from `graph_info()['format_version']`, which is the `.kgl`
+    /// on-disk layout version and belongs to the engine.
+    #[getter]
+    fn schema_version(&self) -> u32 {
+        self.inner.user_schema_version
+    }
+
+    /// Stamp your data-model revision on the graph. Persisted on the next
+    /// `save()`.
+    ///
+    /// Args:
+    ///     version: The revision number. `0` marks the graph unversioned.
+    ///
+    /// Returns:
+    ///     Self for method chaining.
+    ///
+    /// Example::
+    ///
+    /// ```text
+    /// graph.cypher("MATCH (p:Person) SET p.email = 'unknown'")
+    /// graph.set_schema_version(1).save("graph.kgl")
+    /// ```
+    #[pyo3(signature = (version))]
+    fn set_schema_version(&mut self, version: u32) -> Self {
+        get_graph_mut(&mut self.inner).user_schema_version = version;
+        self.clone()
     }
 
     /// Returns a dict of {node_type: count} using the type index (O(type_count)).
@@ -921,6 +962,7 @@ impl KnowledgeGraph {
         .map_err(|e: String| -> PyErr {
             crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
         })?;
+        self.commit_wal()?;
 
         let mut new_kg = KnowledgeGraph {
             inner: self.inner.clone(),
@@ -1000,6 +1042,7 @@ impl KnowledgeGraph {
                 crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
             },
         )?;
+        self.commit_wal()?;
 
         let mut new_kg = KnowledgeGraph {
             inner: self.inner.clone(),

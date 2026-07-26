@@ -198,10 +198,10 @@ def main():
     print(f"Peak RSS after load:     {fmt_bytes(result['rss_bytes_after_load']):>15}")
     print(f"Peak RSS after save:     {fmt_bytes(result['rss_bytes_after_save']):>15}")
     delta = result["rss_bytes_after_save"] - result["rss_bytes_after_load"]
-    print(f"  Δ during save_subset:  {fmt_bytes(delta):>15}")
+    print(f"  delta  during save_subset:  {fmt_bytes(delta):>15}")
     print()
     print("Decision gate:")
-    print("- If 'Δ during save_subset' fits comfortably in your RAM budget:")
+    print("- If 'delta  during save_subset' fits comfortably in your RAM budget:")
     print("    in-memory baseline is sufficient; no streaming swap needed.")
     print("- If it does not fit (or OOMs):")
     print("    swap to streaming via Pass A + RankIndex + kept_edges.tmp")

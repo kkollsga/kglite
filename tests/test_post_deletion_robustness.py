@@ -412,7 +412,7 @@ class TestExportAfterDelete:
             filtered = chain_with_deletion.select("Person")
             filtered.export(path, format="graphml")
             assert os.path.exists(path)
-            content = open(path).read()
+            content = open(path, encoding="utf-8").read()
             assert "Alice" in content
             assert "Charlie" not in content  # Deleted node should not appear
         finally:
@@ -425,7 +425,7 @@ class TestExportAfterDelete:
         try:
             filtered = chain_with_deletion.select("Person")
             filtered.export(path, format="d3")
-            with open(path) as fh:
+            with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
             node_names = [n.get("title", n.get("name", "")) for n in data["nodes"]]
             assert "Charlie" not in node_names

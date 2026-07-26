@@ -43,6 +43,14 @@ pub enum KgliteStatusCode {
     /// declaration position) to keep the existing discriminants stable
     /// across this ABI major version.
     Cancelled = 17,
+    /// A write violated a declared integrity constraint (UNIQUE / NOT
+    /// NULL / NODE KEY). The write was rejected before touching
+    /// storage, so the graph is unchanged. Appended to keep the
+    /// existing discriminants stable across this ABI major version.
+    ConstraintViolation = 18,
+    /// Declaring a constraint failed because the stored data already
+    /// violates it. Deduplicate the node type, then re-declare.
+    ConstraintCreationFailed = 19,
 
     // 100+: C-ABI-only errors.
     /// A string argument failed UTF-8 validation. The C-side
@@ -78,6 +86,8 @@ impl KgliteStatusCode {
             KgErrorCode::MissingArgument => Self::MissingArgument,
             KgErrorCode::Internal => Self::Internal,
             KgErrorCode::Cancelled => Self::Cancelled,
+            KgErrorCode::ConstraintViolation => Self::ConstraintViolation,
+            KgErrorCode::ConstraintCreationFailed => Self::ConstraintCreationFailed,
         }
     }
 
@@ -93,6 +103,8 @@ impl KgliteStatusCode {
             Self::CypherExecution => KgErrorCode::CypherExecution,
             Self::CypherTypeMismatch => KgErrorCode::CypherTypeMismatch,
             Self::Schema => KgErrorCode::Schema,
+            Self::ConstraintViolation => KgErrorCode::ConstraintViolation,
+            Self::ConstraintCreationFailed => KgErrorCode::ConstraintCreationFailed,
             Self::Validation => KgErrorCode::Validation,
             Self::Expr => KgErrorCode::Expr,
             Self::NodeNotFound => KgErrorCode::NodeNotFound,

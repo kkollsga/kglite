@@ -3,7 +3,7 @@
 
 use super::super::ast::*;
 use super::super::result::*;
-use super::{clause_display_name, CypherExecutor};
+use super::{clause_display_name, schema_ddl, CypherExecutor};
 use crate::datatypes::values::Value;
 use crate::graph::algorithms::Interrupt;
 use crate::graph::schema::{DirGraph, EdgeData, InternedKey};
@@ -56,6 +56,14 @@ pub(crate) fn clause_is_mutation(clause: &Clause) -> bool {
         // matching Neo4j. A degenerate empty-body FOREACH is then a
         // harmless no-op there rather than erroring on the read path.
         Clause::Foreach { .. } => true,
+        // Schema is graph state, so `CREATE`/`DROP INDEX` and
+        // `CREATE`/`DROP CONSTRAINT` are mutations: that is what puts them
+        // behind the read-only-graph guard, the read-only-transaction guard, and
+        // the rollback checkpoint. The two `SHOW` forms are reads and stay on
+        // the read engine.
+        Clause::Schema(SchemaCommand::ShowIndexes)
+        | Clause::Schema(SchemaCommand::Constraint(ConstraintCommand::Show)) => false,
+        Clause::Schema(_) => true,
         _ => false,
     }
 }
@@ -69,6 +77,48 @@ pub fn execute_mutable(
     interrupt: Interrupt,
 ) -> Result<CypherResult, String> {
     execute_mutable_bounded(graph, query, params, interrupt, None)
+}
+
+/// Invariant context for one mutation run — everything the clause loop reads
+/// but never changes. Bundled so [`run_clause_pipeline`] can be called once
+/// per `LOAD CSV` batch without a ten-argument signature.
+pub(super) struct MutationCtx<'a> {
+    pub params: &'a HashMap<String, Value>,
+    pub interrupt: &'a Interrupt,
+    pub budget: &'a super::budget::ExecutionBudget,
+    pub profiling: bool,
+    /// Whether `LOAD CSV` may read local files in this execution.
+    pub csv_import: &'a super::load_csv::CsvImportPolicy,
+    /// Clauses that precede the pipeline being run — non-empty only for the
+    /// `LOAD CSV` suffix, where the stripped `LOAD CSV … AS row` still
+    /// declares `row` for correlated-subquery import validation.
+    pub leading: &'a [Clause],
+}
+
+/// The owned half of the mutation context: everything
+/// [`finalize_mutation`] needs to build the executor for a trailing `RETURN`.
+///
+/// Grouped for the same reason [`MutationCtx`] groups the *borrowed* pipeline
+/// state — these three always travel together and are only ever consumed to
+/// construct one `CypherExecutor`. Passing them individually pushed
+/// `finalize_mutation` to nine parameters as successive sprints added
+/// interrupt, budget, and profiling plumbing; grouping keeps the seam readable
+/// instead of registering a `too_many_arguments` allowance for it.
+struct FinalizeCtx {
+    params: HashMap<String, Value>,
+    interrupt: Interrupt,
+    budget: super::budget::ExecutionBudget,
+}
+
+impl MutationCtx<'_> {
+    /// Variables declared by everything before `clauses[i]`, including the
+    /// stripped leading clauses.
+    fn declared_before(&self, clauses: &[Clause], i: usize) -> std::collections::HashSet<String> {
+        use crate::graph::languages::cypher::planner::simplification::declared_variables;
+        let mut declared = declared_variables(self.leading);
+        declared.extend(declared_variables(&clauses[..i]));
+        declared
+    }
 }
 
 #[inline]
@@ -89,6 +139,28 @@ pub(crate) fn execute_mutable_bounded(
     interrupt: Interrupt,
     max_rows: Option<usize>,
 ) -> Result<CypherResult, String> {
+    execute_mutable_with_csv(
+        graph,
+        query,
+        params,
+        interrupt,
+        max_rows,
+        &super::load_csv::CsvImportPolicy::Denied,
+    )
+}
+
+/// Mutable execution with an explicit `LOAD CSV` filesystem capability.
+///
+/// The capability defaults to denied in every other entry point, so granting
+/// it is always visible at the call site.
+pub(crate) fn execute_mutable_with_csv(
+    graph: &mut DirGraph,
+    query: &CypherQuery,
+    params: HashMap<String, Value>,
+    interrupt: Interrupt,
+    max_rows: Option<usize>,
+    csv_import: &super::load_csv::CsvImportPolicy,
+) -> Result<CypherResult, String> {
     // Arena guard for the whole mutation: begin_query performs the same
     // idle-arena reclamation reset_arenas did, then holds the count so every
     // materializing read (`get_node` → `node_weight`) inside mutation clauses
@@ -97,12 +169,107 @@ pub(crate) fn execute_mutable_bounded(
 
     let budget = super::budget::ExecutionBudget::new(max_rows);
 
-    let mut result_set = ResultSet::new();
     let mut stats = MutationStats::default();
     let profiling = query.profile;
     let mut profile_stats: Vec<ClauseStats> = Vec::new();
 
-    for (i, clause) in query.clauses.iter().enumerate() {
+    // `LOAD CSV` drives the rest of the pipeline over bounded row batches
+    // instead of being executed as a clause — the whole point is that peak
+    // memory must not scale with file size. See `executor/load_csv.rs`.
+    let result_set = if let Some(Clause::LoadCsv(load)) = query.clauses.first() {
+        let suffix = &query.clauses[1..];
+        let ctx = MutationCtx {
+            params: &params,
+            interrupt: &interrupt,
+            budget: &budget,
+            profiling,
+            csv_import,
+            leading: &query.clauses[..1],
+        };
+        let source = {
+            let executor = CypherExecutor::with_params(graph, &params, interrupt.deadline)
+                .with_cancel(interrupt.cancel)
+                .with_budget(budget.clone());
+            executor.evaluate_expression(&load.source, &ResultRow::new())?
+        };
+        let barrier = super::load_csv::batching_barrier(suffix);
+        super::load_csv::drive(load, &source, csv_import, barrier.as_deref(), |seed| {
+            let mut batch_profile = Vec::new();
+            let out =
+                run_clause_pipeline(graph, suffix, seed, &ctx, &mut stats, &mut batch_profile)?;
+            merge_profile(&mut profile_stats, batch_profile);
+            Ok(out)
+        })?
+    } else {
+        let ctx = MutationCtx {
+            params: &params,
+            interrupt: &interrupt,
+            budget: &budget,
+            profiling,
+            csv_import,
+            leading: &[],
+        };
+        run_clause_pipeline(
+            graph,
+            &query.clauses,
+            ResultSet::new(),
+            &ctx,
+            &mut stats,
+            &mut profile_stats,
+        )?
+    };
+
+    finalize_mutation(
+        graph,
+        query,
+        FinalizeCtx {
+            params,
+            interrupt,
+            budget,
+        },
+        result_set,
+        stats,
+        profiling.then_some(profile_stats),
+    )
+}
+
+/// Sum one batch's PROFILE rows into the accumulator.
+///
+/// Every batch runs the identical clause list, so entries align by index and
+/// the merged row reads as the clause's total across the whole file.
+pub(super) fn merge_profile(acc: &mut Vec<ClauseStats>, batch: Vec<ClauseStats>) {
+    for (index, entry) in batch.into_iter().enumerate() {
+        match acc.get_mut(index) {
+            Some(existing) => {
+                existing.rows_in += entry.rows_in;
+                existing.rows_out += entry.rows_out;
+                existing.elapsed_us += entry.elapsed_us;
+            }
+            None => acc.push(entry),
+        }
+    }
+}
+
+/// Run `clauses` against `graph`, starting from `seed`.
+///
+/// Extracted from `execute_mutable_with_csv` so the `LOAD CSV` driver can call
+/// it once per row batch. `seed` is empty for an ordinary query and holds one
+/// batch of CSV rows otherwise.
+fn run_clause_pipeline(
+    graph: &mut DirGraph,
+    clauses: &[Clause],
+    seed: ResultSet,
+    ctx: &MutationCtx<'_>,
+    stats: &mut MutationStats,
+    profile_stats: &mut Vec<ClauseStats>,
+) -> Result<ResultSet, String> {
+    let params = ctx.params;
+    let interrupt = ctx.interrupt;
+    let budget = ctx.budget;
+    let profiling = ctx.profiling;
+    let mut result_set = seed;
+
+    for (i, clause) in clauses.iter().enumerate() {
         if interrupt.exceeded() {
             // Deadline passed or the caller flipped the cancel flag (Ctrl-C).
             // The mutation is atomic: aborting here discards the in-flight
@@ -144,11 +311,10 @@ pub(crate) fn execute_mutable_bounded(
         match clause {
             // Write clauses: mutate graph directly
             Clause::Create(create) => {
-                result_set =
-                    execute_create(graph, create, result_set, &params, &mut stats, &interrupt)?;
+                result_set = execute_create(graph, create, result_set, params, stats, interrupt)?;
             }
             Clause::Set(set) => {
-                execute_set(graph, set, &result_set, &params, &mut stats, &interrupt)?;
+                execute_set(graph, set, &result_set, params, stats, interrupt)?;
                 // Flush staged writes so any subsequent clause's reads
                 // (including a trailing RETURN's property projection)
                 // observe the SET. SET routes through node_weight_mut →
@@ -166,18 +332,17 @@ pub(crate) fn execute_mutable_bounded(
                 graph.sync_column_stores_from_disk();
             }
             Clause::Delete(del) => {
-                execute_delete(graph, del, &result_set, &mut stats, &interrupt)?;
+                execute_delete(graph, del, &result_set, stats, interrupt)?;
             }
             Clause::Remove(rem) => {
-                execute_remove(graph, rem, &result_set, &mut stats, &interrupt)?;
+                execute_remove(graph, rem, &result_set, stats, interrupt)?;
                 // Same rationale as SET — REMOVE goes through
                 // node_weight_mut on disk.
                 GraphWrite::flush_pending_writes(&mut graph.graph);
                 graph.sync_column_stores_from_disk();
             }
             Clause::Merge(merge) => {
-                result_set =
-                    execute_merge(graph, merge, result_set, &params, &mut stats, &interrupt)?;
+                result_set = execute_merge(graph, merge, result_set, params, stats, interrupt)?;
                 // MERGE may invoke ON MATCH SET / ON CREATE SET via
                 // `execute_set`; flush so any following clause sees the
                 // mutations.
@@ -198,10 +363,10 @@ pub(crate) fn execute_mutable_bounded(
                     list,
                     body,
                     &result_set,
-                    &params,
-                    &mut stats,
-                    &interrupt,
-                    &budget,
+                    params,
+                    stats,
+                    interrupt,
+                    budget,
                 )?;
                 GraphWrite::flush_pending_writes(&mut graph.graph);
                 graph.sync_column_stores_from_disk();
@@ -210,20 +375,26 @@ pub(crate) fn execute_mutable_bounded(
             // scope (variables bound by clauses 0..i), distinct from the
             // bindings present in any single row.
             Clause::CallSubquery { import, body } => {
-                let executor = CypherExecutor::with_params(graph, &params, interrupt.deadline)
+                let executor = CypherExecutor::with_params(graph, params, interrupt.deadline)
                     .with_cancel(interrupt.cancel)
-                    .with_budget(budget.clone());
-                let declared =
-                    crate::graph::languages::cypher::planner::simplification::declared_variables(
-                        &query.clauses[..i],
-                    );
+                    .with_budget(budget.clone())
+                    .with_csv_import(ctx.csv_import.clone());
+                let declared = ctx.declared_before(clauses, i);
                 result_set = executor.execute_call_subquery(import, body, result_set, &declared)?;
+            }
+            // Schema DDL. Runs here — not on the read engine — because schema
+            // is graph state, so it must sit behind the same read-only /
+            // rollback guards as a data mutation. `SHOW INDEXES` classifies as
+            // a read and never reaches this arm.
+            Clause::Schema(command) => {
+                schema_ddl::execute_schema_mutation(graph, command, stats)?;
             }
             // Read clauses: create temporary immutable executor
             _ => {
-                let executor = CypherExecutor::with_params(graph, &params, interrupt.deadline)
+                let executor = CypherExecutor::with_params(graph, params, interrupt.deadline)
                     .with_cancel(interrupt.cancel)
-                    .with_budget(budget.clone());
+                    .with_budget(budget.clone())
+                    .with_csv_import(ctx.csv_import.clone());
                 result_set = executor.execute_single_clause(clause, result_set)?;
             }
         }
@@ -249,6 +420,22 @@ pub(crate) fn execute_mutable_bounded(
         }
     }
 
+    Ok(result_set)
+}
+
+/// Flush staged writes and project the pipeline's rows into a `CypherResult`.
+///
+/// Split out of `execute_mutable_with_csv` alongside [`run_clause_pipeline`]:
+/// the flush and the projection happen exactly once per query, even when the
+/// `LOAD CSV` driver ran the pipeline many times.
+fn finalize_mutation(
+    graph: &mut DirGraph,
+    query: &CypherQuery,
+    ctx: FinalizeCtx,
+    result_set: ResultSet,
+    stats: MutationStats,
+    profile: Option<Vec<ClauseStats>>,
+) -> Result<CypherResult, String> {
     // Flush any pending mutation state into the steady-state stores so
     // (a) the trailing RETURN's reads observe the writes from this same
     // query, and (b) any subsequent read-only query started by the user
@@ -264,9 +451,13 @@ pub(crate) fn execute_mutable_bounded(
 
     // Finalize: if RETURN was in the query, finalize with column projection
     let has_return = query.clauses.iter().any(|c| matches!(c, Clause::Return(_)));
-    let profile = if profiling { Some(profile_stats) } else { None };
 
     if has_return || !result_set.columns.is_empty() {
+        let FinalizeCtx {
+            params,
+            interrupt,
+            budget,
+        } = ctx;
         let executor = CypherExecutor::with_params(graph, &params, interrupt.deadline)
             .with_cancel(interrupt.cancel)
             .with_budget(budget);
@@ -429,11 +620,11 @@ fn apply_foreach_body_clause(
 
 /// Execute a CREATE clause, creating nodes and edges in the graph.
 /// Enforce the graph's transient role-scoped write whitelist. When
-/// `active_write_scope` is `Some(set)`, a `CREATE`/`SET` touching a node type
-/// not in `set` is rejected. `None` = unrestricted (the common case; this is a
-/// single `Option` check with no allocation). See
+/// `active_write_scope` is `Some(set)`, a `CREATE`/`SET`/schema-DDL statement
+/// touching a node type not in `set` is rejected. `None` = unrestricted (the
+/// common case; this is a single `Option` check with no allocation). See
 /// [`crate::graph::DirGraph::active_write_scope`].
-fn enforce_write_scope(graph: &DirGraph, node_type: &str) -> Result<(), String> {
+pub(super) fn enforce_write_scope(graph: &DirGraph, node_type: &str) -> Result<(), String> {
     if let Some(scope) = &graph.active_write_scope {
         if !scope.contains(node_type) {
             return Err(format!(
@@ -692,17 +883,51 @@ fn create_node(
     // amortised and behaves identically across memory/mapped/disk. Undeclared
     // types skip the probe entirely, leaving the permissive default (and the
     // dense-int hot path) untouched.
-    let pk_declared = graph.primary_key_for(&label).is_some();
-    if pk_declared && graph.lookup_by_id_readonly(&label, &id).is_some() {
+    // The `id` case keeps its dedicated path: `id` is the node's identity, not
+    // an entry in the property map, and the per-type id-index answers the probe
+    // in O(1) amortised across every backend. A primary key on any *other*
+    // property is enforced by the unique-constraint index instead, installed
+    // when the schema declares it (`DirGraph::set_schema`).
+    if graph.primary_key_for(&label) == Some("id")
+        && graph.lookup_by_id_readonly(&label, &id).is_some()
+    {
         return Err(format!(
             "duplicate primary key: node type '{label}' declares a primary key and a \
              node with id {id} already exists. Use MERGE to upsert instead of CREATE, \
              or remove the duplicate."
         ));
     }
+
+    // Declared UNIQUE / NOT NULL constraints. Both gates read through one
+    // closure over the values this CREATE is about to write: `id` and `title`
+    // are the identity fields, everything else comes from the evaluated property
+    // map. Skipped entirely for a type that declares nothing.
+    let constraint_read = |property: &str| -> Option<Value> {
+        match property {
+            "id" => (!matches!(id, Value::Null)).then(|| id.clone()),
+            "title" => (!matches!(title, Value::Null)).then(|| title.clone()),
+            other => match properties.get(other) {
+                Some(Value::Null) | None => None,
+                Some(value) => Some(value.clone()),
+            },
+        }
+    };
+    graph
+        .check_required_fields(&label, constraint_read)
+        .map_err(|violation| violation.to_string())?;
+    let unique_claims = graph.unique_claims(&label, constraint_read);
+    graph
+        .check_unique_claims(&unique_claims, None)
+        .map_err(|violation| violation.to_string())?;
+
     // Clone the id for incremental index maintenance below (it is moved into
-    // insert_node_routed). Only needed for declared-PK types.
-    let pk_id = if pk_declared { Some(id.clone()) } else { None };
+    // insert_node_routed). The id-index is maintained incrementally whenever it
+    // is already cached, regardless of whether a primary key is declared:
+    // inserting into a complete index keeps it complete, whereas dropping it
+    // forces the next id lookup to rebuild the whole type. The `contains_key`
+    // guard at the maintenance site is what prevents building a *partial* index
+    // that `build_id_index` would later trust as complete.
+    let pk_id = Some(id.clone());
 
     // Role-scoped write guard (integrity): reject CREATE of a node type
     // outside the active write whitelist, before any storage mutation.
@@ -724,18 +949,37 @@ fn create_node(
     // per-clause disk read-side sync happens once in execute_create, not here.
     let node_idx = graph.insert_node_routed(id, title, &label, properties);
 
-    // Update type_indices
+    // Update type_indices. `bucket_was_new` feeds statement rollback: undoing
+    // the append is not enough if this CREATE also *introduced* the type —
+    // an emptied-but-present bucket still shows up in `describe()` as a
+    // zero-count type.
+    let bucket_was_new = !graph.type_indices.contains_key(&label);
     graph
         .type_indices
         .entry_or_default(label.clone())
         .push(node_idx);
+    if let Some(journal) = graph.graph.undo_journal_mut() {
+        journal.note_bucket_appended(
+            crate::graph::storage::undo::BucketId::NodeType(label.clone()),
+            node_idx,
+            bucket_was_new,
+        );
+    }
 
-    // Keep the id-index consistent. A declared-PK type maintains it
-    // incrementally — the readonly probe above already built it, so a
-    // sequential CREATE (e.g. UNWIND … CREATE) stays O(1)/node instead of
-    // O(n) rebuild-per-node. Other types invalidate for lazy rebuild (the
-    // established behaviour). The `contains_key` guard means we never insert
-    // into a partial index: if it isn't cached, fall back to invalidation.
+    // Keep the id-index consistent. Whenever the index is already cached — and
+    // therefore complete — insert into it, so a sequential CREATE (e.g.
+    // UNWIND … CREATE) stays O(1)/node instead of paying an O(n)
+    // rebuild-per-node. When it isn't cached, invalidate for lazy rebuild: the
+    // `contains_key` guard is what stops us building a *partial* entry that
+    // `build_id_index` would later short-circuit on and trust as complete.
+    //
+    // This is deliberately independent of whether a primary key is declared.
+    // The declaration governs *uniqueness enforcement*, not index freshness;
+    // gating maintenance on it meant an undeclared type dropped its entire
+    // cached id index on every single CREATE, and the only reason it did so was
+    // that `id` had already been moved into `insert_node_routed` and no clone
+    // was available. Nothing about duplicate ids is protected by invalidating:
+    // a rebuild and an incremental insert collapse a duplicate identically.
     match pk_id {
         Some(idv) if graph.id_indices.contains_key(&label) => {
             graph
@@ -750,6 +994,8 @@ fn create_node(
 
     // Update property and composite indices for the new node
     graph.update_property_indices_for_add(&label, node_idx);
+    // Claim the unique tuples validated above, now that the node exists.
+    graph.commit_unique_claims(&unique_claims, node_idx);
 
     // Ensure type metadata exists for this type (consistent with Python add_nodes API)
     ensure_type_metadata(graph, &label, node_idx);
@@ -860,6 +1106,63 @@ fn is_null_write_target(row: &ResultRow, variable: &str) -> bool {
 }
 
 /// Execute a SET clause, modifying node properties in the graph.
+/// A single-property node `SET` that has already landed in storage, as the
+/// post-write bookkeeping needs to see it.
+struct LandedPropertyWrite<'a> {
+    node_idx: NodeIndex,
+    node_type: &'a str,
+    property: &'a str,
+    old_value: Option<&'a Value>,
+    value: &'a Value,
+    constraint_plan: &'a crate::graph::dir_graph::constraints::PropertyWritePlan,
+}
+
+/// The bookkeeping a single-property node `SET` owes once the value has landed.
+///
+/// Split out of `execute_set` because none of it is about *writing* the value:
+/// it registers the property key on the type's `TypeSchema`, moves the node
+/// between index buckets, redeems the constraint plan (handing the vacated
+/// unique tuples back and taking the new ones), keeps `node_type_metadata`
+/// accurate so `schema()` reports the property's type, and notes the node for
+/// the post-loop `updated_at` bump.
+///
+/// Order is load-bearing and matches the sequence this replaced: the index move
+/// needs the old value, so it runs before the constraint plan is redeemed. The
+/// `updated_at` bump is skipped when the write *is* to `updated_at`, which would
+/// otherwise recurse. A `title` write touches only the title field, not a
+/// property map, so it skips both the schema key and the index move.
+fn finish_node_property_write(
+    graph: &mut DirGraph,
+    write: LandedPropertyWrite<'_>,
+    nodes_to_stamp: &mut std::collections::HashMap<NodeIndex, String>,
+) {
+    if write.property != "title" {
+        let ik = InternedKey::from_str(write.property);
+        if let Some(schema_arc) = graph.type_schemas.get_mut(write.node_type) {
+            if schema_arc.slot(ik).is_none() {
+                Arc::make_mut(schema_arc).add_key(ik);
+            }
+        }
+        graph.update_property_indices_for_set(
+            write.node_type,
+            write.node_idx,
+            write.property,
+            write.old_value,
+            write.value,
+        );
+    }
+
+    graph.apply_property_write_plan(write.constraint_plan, write.node_idx);
+
+    let mut prop_type = HashMap::new();
+    prop_type.insert(write.property.to_string(), value_type_name(write.value));
+    graph.upsert_node_type_metadata(write.node_type, prop_type);
+
+    if write.property != "updated_at" && graph.auto_timestamp_for(write.node_type) {
+        nodes_to_stamp.insert(write.node_idx, write.node_type.to_string());
+    }
+}
+
 fn execute_set(
     graph: &mut DirGraph,
     set: &SetClause,
@@ -1022,6 +1325,13 @@ fn execute_set(
                         )?;
                     }
 
+                    // Declared UNIQUE / NOT NULL gates. Planned before the write
+                    // so a violation returns without mutating storage; the
+                    // returned plan is redeemed after the value lands.
+                    let constraint_plan = graph
+                        .plan_property_write(&node_type_str, *node_idx, property, Some(&value))
+                        .map_err(|violation| violation.to_string())?;
+
                     // Clone value before it may be consumed by the mutation
                     let value_for_index = value.clone();
 
@@ -1117,40 +1427,18 @@ fn execute_set(
                         }
                     }
 
-                    // Ensure the DirGraph-level TypeSchema includes this property key
-                    if property != "title" {
-                        let ik = InternedKey::from_str(property);
-                        if let Some(schema_arc) = graph.type_schemas.get_mut(&node_type_str) {
-                            if schema_arc.slot(ik).is_none() {
-                                Arc::make_mut(schema_arc).add_key(ik);
-                            }
-                        }
-                    }
-
-                    // Update property/composite indices (no active borrows)
-                    // "title" only changes the title field, not a HashMap property
-                    if property != "title" {
-                        graph.update_property_indices_for_set(
-                            &node_type_str,
-                            *node_idx,
+                    finish_node_property_write(
+                        graph,
+                        LandedPropertyWrite {
+                            node_idx: *node_idx,
+                            node_type: &node_type_str,
                             property,
-                            old_value.as_ref(),
-                            &value_for_index,
-                        );
-                    }
-
-                    // Keep node_type_metadata in sync so schema() is accurate
-                    {
-                        let mut prop_type = HashMap::new();
-                        prop_type.insert(property.clone(), value_type_name(&value_for_index));
-                        graph.upsert_node_type_metadata(&node_type_str, prop_type);
-                    }
-
-                    // Record this node for a post-loop `updated_at` bump (don't
-                    // recurse on a write to the reserved key itself).
-                    if property != "updated_at" && graph.auto_timestamp_for(&node_type_str) {
-                        nodes_to_stamp.insert(*node_idx, node_type_str.clone());
-                    }
+                            old_value: old_value.as_ref(),
+                            value: &value_for_index,
+                            constraint_plan: &constraint_plan,
+                        },
+                        &mut nodes_to_stamp,
+                    );
                 }
                 SetItem::Map {
                     variable,
@@ -1602,6 +1890,14 @@ fn execute_remove(
                         .map(|n| n.get_node_type_ref(&graph.interner).to_string())
                         .unwrap_or_default();
 
+                    // Declared NOT NULL / UNIQUE gates. Removing a required
+                    // property is a violation; removing part of a unique tuple
+                    // just vacates it. Planned before the write so a rejection
+                    // leaves storage untouched.
+                    let constraint_plan = graph
+                        .plan_property_write(&node_type_str, *node_idx, property, None)
+                        .map_err(|violation| violation.to_string())?;
+
                     // Remove property (mutable borrow, returns old value).
                     //
                     // On disk-backed graphs, the staged-write flush only
@@ -1636,6 +1932,7 @@ fn execute_remove(
                             &old_val,
                         );
                     }
+                    graph.apply_property_write_plan(&constraint_plan, *node_idx);
                 }
                 RemoveItem::Label { variable, label } => {
                     let Some(&node_idx) = row.node_bindings.get(variable) else {

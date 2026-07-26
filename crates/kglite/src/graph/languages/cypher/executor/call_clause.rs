@@ -299,98 +299,7 @@ impl<'a> CypherExecutor<'a> {
             .to_string();
 
         // Validate YIELD columns
-        let valid_yields: &[&str] = match proc_name.as_str() {
-            "pagerank"
-            | "betweenness"
-            | "betweenness_centrality"
-            | "degree"
-            | "degree_centrality"
-            | "closeness"
-            | "closeness_centrality" => &["node", "score"],
-            "louvain"
-            | "louvain_communities"
-            | "leiden"
-            | "leiden_communities"
-            | "label_propagation" => &["node", "community", "level"],
-            "connected_components" | "weakly_connected_components" => &["node", "component"],
-            "k_core" | "coreness" => &["node", "coreness"],
-            "ready_set" | "dependency_frontier" => &["node", "dependency_count"],
-            "clustering_coefficient" | "local_clustering_coefficient" => &["node", "coefficient"],
-            "triangle_count" | "transitivity" => &["triangles", "transitivity"],
-            "eccentricity" => &["node", "eccentricity"],
-            "diameter" => &["diameter"],
-            "cluster" => &["node", "cluster"],
-            "list_procedures" => &["name", "description", "yield_columns"],
-            "orphan_node"
-            | "self_loop"
-            | "missing_required_edge"
-            | "missing_inbound_edge"
-            | "duplicate_title"
-            | "duplicate_id"
-            | "null_property" => &["node"],
-            "outline" => &["node", "depth", "parent_id"],
-            "cycle_2step" => &["node_a", "node_b"],
-            "inverse_violation" => &["a", "b"],
-            "transitivity_violation" => &["a", "b", "c"],
-            "cardinality_violation" => &["node", "count"],
-            "type_domain_violation" | "type_range_violation" => &["source", "target"],
-            "parallel_edges" => &["a", "b", "count"],
-            "kg_knn" => &["node", "distance_m"],
-            "affected_tests" => &["test_file", "depth"],
-            "rev_diff" => &["bucket", "type", "qualified_name", "name", "file", "line"],
-            "dead_code" => &["node"],
-            "refresh_stats" => &["src_type", "edge_type", "tgt_type", "count"],
-            // Phase A.3 / Phase F (#7) — Neo4j-compatible schema
-            // introspection procedures. Yield column names match
-            // Neo4j's: db.labels() yields `label`, db.relationshipTypes()
-            // yields `relationshipType`. (Pre-Phase-F both yielded
-            // `name`; aliasing in the test fixtures was the workaround.)
-            "db.labels" => &["label"],
-            "db.relationshiptypes" => &["relationshipType"],
-            "db.indexes" => &[
-                "name",
-                "type",
-                "entityType",
-                "labelsOrTypes",
-                "properties",
-                "state",
-            ],
-            // 2026-05-25 broad-scan, Batch 6 — schema introspection
-            // procedures. graph_stats: per-graph summary; property_*:
-            // per-(label, property) statistics. Use case: an agent
-            // running `graph_overview` wants to know "how many nodes
-            // total, how big is each label" before crafting a query.
-            "db.graph_stats" => &[
-                "node_count",
-                "edge_count",
-                "label_count",
-                "relationship_type_count",
-            ],
-            "db.property_stats" => &["value_count", "null_count", "distinct_count"],
-            "db.property_uniqueness" => &["is_unique", "violation_count", "distinct_count"],
-            // Neo4j-compatible: db.propertyKeys() yields `propertyKey` (one row
-            // per declared property name); db.schema() yields one row per node
-            // type with its property-name list, the in-language counterpart of
-            // the Python `describe()` schema. Makes property keys + per-type
-            // schema reachable from a Cypher/Bolt client, not just describe().
-            "db.propertykeys" => &["propertyKey"],
-            "db.schema" => &["nodeType", "properties"],
-            _ => {
-                return Err(format!(
-                    "Unknown procedure '{}'. Available: pagerank, betweenness, degree, \
-                     closeness, louvain, label_propagation, connected_components, \
-                     k_core, clustering_coefficient, \
-                     cluster, list_procedures, orphan_node, self_loop, cycle_2step, \
-                     missing_required_edge, missing_inbound_edge, duplicate_title, \
-                     duplicate_id, null_property, outline, inverse_violation, transitivity_violation, \
-                     cardinality_violation, type_domain_violation, \
-                     type_range_violation, parallel_edges, \
-                     db.labels, db.relationshipTypes, db.indexes, \
-                     db.propertyKeys, db.schema",
-                    clause.procedure_name
-                ));
-            }
-        };
+        let valid_yields = valid_yield_columns(proc_name.as_str(), &clause.procedure_name)?;
 
         for item in &clause.yield_items {
             if !valid_yields.contains(&item.name.as_str()) {
@@ -947,6 +856,11 @@ impl<'a> CypherExecutor<'a> {
                         "name, type, entityType, labelsOrTypes, properties, state",
                     ),
                     (
+                        "db.constraints",
+                        "All declared constraints (UNIQUENESS, NODE_KEY, NODE_PROPERTY_EXISTENCE), sorted by name",
+                        "name, type, entityType, labelsOrTypes, properties",
+                    ),
+                    (
                         "db.propertyKeys",
                         "All property keys declared in the graph (node + relationship), sorted",
                         "propertyKey",
@@ -998,7 +912,10 @@ impl<'a> CypherExecutor<'a> {
                 &params,
                 &clause.yield_items,
             )?,
-            "db.indexes" => super::schema_procedures::execute_schema_procedure(
+            // db.constraints() lists every declared constraint, sharing its
+            // collector with `SHOW CONSTRAINTS` the way db.indexes() shares one
+            // with `SHOW INDEXES`. Identical dispatch, so one arm serves both.
+            "db.indexes" | "db.constraints" => super::schema_procedures::execute_schema_procedure(
                 self,
                 &proc_name,
                 &params,
@@ -1703,6 +1620,111 @@ pub(super) fn names_to_rows(names: &[String], yield_items: &[YieldItem]) -> Vec<
     }
     rows
 }
+/// The YIELD columns a procedure exposes, or an unknown-procedure error.
+///
+/// Extracted from `execute_call`, which was far past the size a single
+/// function should carry: this table is ~40 independent arms that have nothing
+/// to do with the call's execution, and every new procedure grew the caller.
+/// `display_name` is the user's spelling, for the error message.
+fn valid_yield_columns(
+    proc_name: &str,
+    display_name: &str,
+) -> Result<&'static [&'static str], String> {
+    let columns: &[&str] = match proc_name {
+        "pagerank"
+        | "betweenness"
+        | "betweenness_centrality"
+        | "degree"
+        | "degree_centrality"
+        | "closeness"
+        | "closeness_centrality" => &["node", "score"],
+        "louvain"
+        | "louvain_communities"
+        | "leiden"
+        | "leiden_communities"
+        | "label_propagation" => &["node", "community", "level"],
+        "connected_components" | "weakly_connected_components" => &["node", "component"],
+        "k_core" | "coreness" => &["node", "coreness"],
+        "ready_set" | "dependency_frontier" => &["node", "dependency_count"],
+        "clustering_coefficient" | "local_clustering_coefficient" => &["node", "coefficient"],
+        "triangle_count" | "transitivity" => &["triangles", "transitivity"],
+        "eccentricity" => &["node", "eccentricity"],
+        "diameter" => &["diameter"],
+        "cluster" => &["node", "cluster"],
+        "list_procedures" => &["name", "description", "yield_columns"],
+        "orphan_node"
+        | "self_loop"
+        | "missing_required_edge"
+        | "missing_inbound_edge"
+        | "duplicate_title"
+        | "duplicate_id"
+        | "null_property" => &["node"],
+        "outline" => &["node", "depth", "parent_id"],
+        "cycle_2step" => &["node_a", "node_b"],
+        "inverse_violation" => &["a", "b"],
+        "transitivity_violation" => &["a", "b", "c"],
+        "cardinality_violation" => &["node", "count"],
+        "type_domain_violation" | "type_range_violation" => &["source", "target"],
+        "parallel_edges" => &["a", "b", "count"],
+        "kg_knn" => &["node", "distance_m"],
+        "affected_tests" => &["test_file", "depth"],
+        "rev_diff" => &["bucket", "type", "qualified_name", "name", "file", "line"],
+        "dead_code" => &["node"],
+        "refresh_stats" => &["src_type", "edge_type", "tgt_type", "count"],
+        // Phase A.3 / Phase F (#7) — Neo4j-compatible schema
+        // introspection procedures. Yield column names match
+        // Neo4j's: db.labels() yields `label`, db.relationshipTypes()
+        // yields `relationshipType`. (Pre-Phase-F both yielded
+        // `name`; aliasing in the test fixtures was the workaround.)
+        "db.labels" => &["label"],
+        "db.relationshiptypes" => &["relationshipType"],
+        "db.indexes" => &[
+            "name",
+            "type",
+            "entityType",
+            "labelsOrTypes",
+            "properties",
+            "state",
+        ],
+        "db.constraints" => &["name", "type", "entityType", "labelsOrTypes", "properties"],
+        // 2026-05-25 broad-scan, Batch 6 — schema introspection
+        // procedures. graph_stats: per-graph summary; property_*:
+        // per-(label, property) statistics. Use case: an agent
+        // running `graph_overview` wants to know "how many nodes
+        // total, how big is each label" before crafting a query.
+        "db.graph_stats" => &[
+            "node_count",
+            "edge_count",
+            "label_count",
+            "relationship_type_count",
+        ],
+        "db.property_stats" => &["value_count", "null_count", "distinct_count"],
+        "db.property_uniqueness" => &["is_unique", "violation_count", "distinct_count"],
+        // Neo4j-compatible: db.propertyKeys() yields `propertyKey` (one row
+        // per declared property name); db.schema() yields one row per node
+        // type with its property-name list, the in-language counterpart of
+        // the Python `describe()` schema. Makes property keys + per-type
+        // schema reachable from a Cypher/Bolt client, not just describe().
+        "db.propertykeys" => &["propertyKey"],
+        "db.schema" => &["nodeType", "properties"],
+        _ => {
+            return Err(format!(
+                "Unknown procedure '{}'. Available: pagerank, betweenness, degree, \
+                 closeness, louvain, label_propagation, connected_components, \
+                 k_core, clustering_coefficient, \
+                 cluster, list_procedures, orphan_node, self_loop, cycle_2step, \
+                 missing_required_edge, missing_inbound_edge, duplicate_title, \
+                 duplicate_id, null_property, outline, inverse_violation, transitivity_violation, \
+                 cardinality_violation, type_domain_violation, \
+                 type_range_violation, parallel_edges, \
+                 db.labels, db.relationshipTypes, db.indexes, \
+                 db.propertyKeys, db.schema",
+                display_name
+            ));
+        }
+    };
+    Ok(columns)
+}
 
 /// Build `ResultRow`s for `db.indexes()` from structured `IndexInfo`.
 ///
@@ -1734,6 +1756,40 @@ pub(super) fn indexes_to_rows(
                     Value::List(info.properties.iter().cloned().map(Value::String).collect())
                 }
                 "state" => Value::String(info.state.to_string()),
+                _ => continue, // unreachable in practice (validator gate)
+            };
+            row.projected.insert(alias.to_string(), val);
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+/// Project `ConstraintInfo` rows for `db.constraints()`. Sibling of
+/// [`indexes_to_rows`], sharing the collector that backs `SHOW CONSTRAINTS`.
+pub(super) fn constraints_to_rows(
+    infos: &[crate::graph::introspection::schema_overview::ConstraintInfo],
+    yield_items: &[YieldItem],
+) -> Vec<ResultRow> {
+    let mut rows = Vec::with_capacity(infos.len());
+    for info in infos {
+        let mut row = ResultRow::new();
+        for item in yield_items {
+            let alias = item.alias.as_deref().unwrap_or(&item.name);
+            let val = match item.name.as_str() {
+                "name" => Value::String(info.name.clone()),
+                "type" => Value::String(info.neo4j_type().to_string()),
+                "entityType" => Value::String(info.entity_type.to_string()),
+                "labelsOrTypes" => Value::List(
+                    info.labels_or_types
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+                "properties" => {
+                    Value::List(info.properties.iter().cloned().map(Value::String).collect())
+                }
                 _ => continue, // unreachable in practice (validator gate)
             };
             row.projected.insert(alias.to_string(), val);

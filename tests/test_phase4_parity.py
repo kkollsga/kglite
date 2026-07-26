@@ -34,7 +34,6 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 import random
-import resource
 import sys
 import tempfile
 
@@ -43,6 +42,7 @@ import pytest
 
 import kglite
 from kglite import KnowledgeGraph
+from tests.conftest import requires_getrusage
 
 pytestmark = pytest.mark.parity
 
@@ -485,14 +485,22 @@ def test_save_incremental_v0_7_6(tmp_path: Path):
 # ─── Test 4: Save-time RSS ceiling ──────────────────────────────────────────
 
 
+# This ceiling needs *peak* RSS, which only `getrusage` reports, so it cannot
+# use the portable psutil helper in conftest (that one reports current RSS and
+# would miss a spike that is freed before the measurement). `resource` does not
+# exist on Windows; `requires_getrusage` gates the one test rather than the
+# whole module, so the digest and round-trip parity checks still collect there.
 def _rss_mb() -> float:
     # ru_maxrss is bytes on macOS (darwin), KB on Linux. The previous
     # threshold-based detection returned 1000× too-large readings for
     # sub-GB processes on macOS.
+    import resource
+
     ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return ru / (1024 * 1024) if sys.platform == "darwin" else ru / 1024
 
 
+@requires_getrusage
 def test_save_rss_ceiling(tmp_path: Path):
     """Peak RSS during save() must stay within a loose multiplier of pre-save RSS.
 

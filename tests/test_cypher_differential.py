@@ -1908,6 +1908,30 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN a.name AS an, b.name AS bn ORDER BY an, bn",
         None,
     ),
+    # ── schema DDL ──
+    # `SHOW INDEXES` is the one schema command that classifies as a read, so it
+    # is the one that travels the optimizer pipeline. The shared fixtures carry
+    # no indexes, so the row set is empty — what this pins is that no pass
+    # rewrites or drops the clause, and that it stays on the read engine. The
+    # writing DDL statements live in MUTATION_QUERIES, which builds a fresh
+    # graph per mode.
+    ("show_indexes_ddl", "small_graph", "SHOW INDEXES", None),
+    # `SHOW CONSTRAINTS` is the constraint counterpart, and a read for the same
+    # reason: it inspects schema state rather than changing it. The shared
+    # fixtures declare no constraints, so the row set is empty — what this pins
+    # is that no pass rewrites or drops the clause and that it stays off the
+    # mutation engine, where it would be rejected.
+    ("show_constraints_ddl", "small_graph", "SHOW CONSTRAINTS", None),
+    # Dotted access on a map-valued parameter. Pins that no pass mangles
+    # the `ExprPropertyAccess` chain the parser now builds over a
+    # `Parameter` node (the bracket form was always accepted; the dotted
+    # form used to be a syntax error).
+    (
+        "parameter_map_property_access",
+        "small_graph",
+        "MATCH (p:Person) WHERE p.city = $filter.city RETURN p.name AS name ORDER BY name",
+        {"filter": {"city": "Oslo"}},
+    ),
 ]
 
 
@@ -1930,6 +1954,24 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
     ("set_with_filter", "MATCH (p:Person) WHERE p.age > 30 SET p.bucket = 'old' RETURN count(p) AS n"),
     ("detach_delete", "MATCH (p:Person {person_id: 3}) DETACH DELETE p"),
     ("remove_property", "MATCH (p:Person {person_id: 1}) REMOVE p.name RETURN p.person_id AS pid"),
+    # Constraint-enforcement write shapes. The planner must not reorder or fuse
+    # these into a form that skips the pre-write constraint gate, and the gate
+    # itself must not change a *conforming* write's result. Each shape here is
+    # one the gate inspects: a CREATE whose properties it reads, a SET that
+    # vacates and re-claims a unique tuple, and a REMOVE of an unconstrained
+    # property on a type that carries a constraint.
+    (
+        "create_node_under_unique_constraint",
+        "CREATE (p:Person {person_id: 101, name: 'Fresh', age: 20}) RETURN p.person_id AS pid, p.name AS name",
+    ),
+    (
+        "set_moves_value_then_frees_it",
+        "MATCH (p:Person {person_id: 1}) SET p.name = 'Moved' RETURN p.name AS name",
+    ),
+    (
+        "remove_unconstrained_property_on_constrained_type",
+        "MATCH (p:Person {person_id: 2}) REMOVE p.age RETURN p.person_id AS pid",
+    ),
     (
         "merge_create",
         "MERGE (p:Person {person_id: 100}) ON CREATE SET p.age = 1 RETURN p.person_id AS pid, p.age AS age",
@@ -1955,6 +1997,100 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
     (
         "remove_rel_property",
         "MATCH (p:Person)-[r:KNOWS]->(q:Person) REMOVE r.since RETURN count(r) AS n",
+    ),
+    # Schema DDL: schema is graph state, so these route to the mutable engine
+    # like any other write. The harness compares the returned rows AND the
+    # post-statement node/edge counts across optimized and naive runs, so a
+    # pass that mangled a schema clause into a data mutation would show up as a
+    # count divergence.
+    ("create_index_ddl", "CREATE INDEX FOR (p:Person) ON (p.name)"),
+    ("create_index_ddl_if_not_exists", "CREATE INDEX IF NOT EXISTS FOR (p:Person) ON (p.name)"),
+    ("create_composite_index_ddl", "CREATE INDEX FOR (p:Person) ON (p.city, p.age)"),
+    ("create_range_index_ddl", "CREATE RANGE INDEX person_age FOR (p:Person) ON (p.age)"),
+    ("drop_index_ddl_missing_if_exists", "DROP INDEX Person.name IF EXISTS"),
+    # Constraint DDL. Declaring a constraint rebuilds an enforcement structure
+    # from live data, so a pass that reordered or duplicated the statement would
+    # change post-statement graph state — which this harness compares. The
+    # fixture's `name` and `age` are both distinct across all three rows, so each
+    # declaration is satisfiable. `person_id` is deliberately avoided: it is the
+    # fixture's id field, and uniqueness DDL over `id` is refused.
+    ("create_constraint_unique_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE"),
+    (
+        "create_constraint_unique_ddl_if_not_exists",
+        "CREATE CONSTRAINT person_name_u IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS UNIQUE",
+    ),
+    (
+        "create_constraint_composite_unique_ddl",
+        "CREATE CONSTRAINT FOR (p:Person) REQUIRE (p.name, p.age) IS UNIQUE",
+    ),
+    ("create_constraint_not_null_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL"),
+    ("create_constraint_node_key_ddl", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NODE KEY"),
+    ("drop_constraint_ddl_missing_if_exists", "DROP CONSTRAINT person_name_u IF EXISTS"),
+    # ── Shapes whose rollback checkpoint is an undo journal ──────────────
+    #
+    # Statement atomicity is bought with an inverse-op journal rather than a
+    # whole-graph clone, and the journal captures at two seams: the storage
+    # backend, and the DirGraph-level choke points for secondary labels and
+    # node deletion. The shapes below are the ones that reach the second seam
+    # or that mix several seams in one statement, so a capture gap shows up
+    # here as a diverging result.
+    (
+        "create_with_secondary_labels",
+        "CREATE (p:Person:Employee:Remote {person_id: 400, name: 'L', age: 33}) RETURN labels(p) AS ls",
+    ),
+    (
+        "set_label",
+        "MATCH (p:Person {person_id: 1}) SET p:Employee RETURN labels(p) AS ls",
+    ),
+    (
+        "remove_label",
+        "MATCH (p:Person {person_id: 1}) SET p:Employee WITH p REMOVE p:Employee RETURN labels(p) AS ls",
+    ),
+    (
+        "delete_edge_only",
+        "MATCH (p:Person)-[r:KNOWS]->(q:Person) DELETE r "
+        "WITH 1 AS done MATCH (:Person)-[r2:KNOWS]->(:Person) RETURN count(r2) AS n",
+    ),
+    (
+        "foreach_create",
+        "FOREACH (i IN [500, 501, 502] | CREATE (:Person {person_id: i, age: 1})) "
+        "WITH 1 AS done MATCH (p:Person) RETURN count(p) AS n",
+    ),
+    (
+        # Three seams in one statement: a property write, a node create, and a
+        # detach-delete — the journal must interleave their inverses.
+        "multi_clause_set_create_delete",
+        "MATCH (p:Person {person_id: 1}) SET p.age = 77 "
+        "CREATE (n:Person {person_id: 600, name: 'N', age: 2}) "
+        "WITH n MATCH (d:Person {person_id: 2}) DETACH DELETE d "
+        "WITH 1 AS done MATCH (p:Person) RETURN count(p) AS n",
+    ),
+    (
+        # Delete then re-create the same identity in one statement: the
+        # journal's structural entries must replay in order for the freed slot
+        # to be handed back correctly.
+        "delete_then_recreate_same_id",
+        "MATCH (p:Person {person_id: 3}) DETACH DELETE p "
+        "CREATE (q:Person {person_id: 3, name: 'again', age: 44}) "
+        "RETURN q.name AS name",
+    ),
+    (
+        # Labels and properties are independent state captured at *different*
+        # seams — labels at the DirGraph choke point, properties at the
+        # storage backend — and the WAL folds them into separate net maps.
+        # Interleaving them in one statement is the shape where a fold that
+        # let a property write clobber a label set (or vice versa) diverges.
+        "interleaved_label_and_property_writes",
+        "MATCH (p:Person {person_id: 1}) SET p:Employee SET p.age = 55 "
+        "SET p:Remote SET p.bucket = 'x' WITH p REMOVE p:Employee "
+        "RETURN labels(p) AS ls, p.age AS age, p.bucket AS bucket",
+    ),
+    (
+        # Several label writes on one node collapse to a single whole-set WAL
+        # op resolved against final state; the same collapse must not lose an
+        # intermediate add that survives to the end.
+        "many_labels_one_node",
+        "MATCH (p:Person {person_id: 2}) SET p:A SET p:B SET p:C WITH p REMOVE p:B RETURN labels(p) AS ls",
     ),
 ]
 
@@ -2231,3 +2367,105 @@ def test_mutation_optimized_matches_naive(name: str, query: str) -> None:
     assert rows_opt == rows_naive, f"Mutation `{name}` rows: opt={rows_opt}, naive={rows_naive}"
     assert nodes_opt == nodes_naive, f"Mutation `{name}` post-state node count: opt={nodes_opt}, naive={nodes_naive}"
     assert edges_opt == edges_naive, f"Mutation `{name}` post-state edge count: opt={edges_opt}, naive={edges_naive}"
+
+
+# ---------------------------------------------------------------------------
+# LOAD CSV
+# ---------------------------------------------------------------------------
+#
+# A third corpus, separate from the two above for one mechanical reason: every
+# LOAD CSV query needs a real file, so the query text carries a `{csv}`
+# placeholder the runner substitutes with a per-test `tmp_path` file. It cannot
+# live in DIFFERENTIAL_QUERIES because that list is also consumed verbatim by
+# `scripts/bolt_conformance.py`, where LOAD CSV is denied by design (a Bolt
+# client is a remote caller — see `executor/load_csv.rs`).
+#
+# What these pin: LOAD CSV is an opaque barrier to every optimizer pass, and
+# the batch driver produces the same answer as the naive plan. Row counts
+# straddle the 1000-row batch size on purpose, so a pass that reordered or
+# fused across the clause would diverge rather than merely run slower.
+LOAD_CSV_QUERIES: list[tuple[str, str]] = [
+    (
+        "load_csv_headers_return",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row RETURN row.name AS name",
+    ),
+    (
+        "load_csv_no_headers_index",
+        "LOAD CSV FROM '{csv}' AS row RETURN row[0] AS id",
+    ),
+    (
+        "load_csv_where_filter",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row WITH row WHERE toInteger(row.id) % 7 = 0 RETURN row.id AS id",
+    ),
+    (
+        "load_csv_aggregate_barrier",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row RETURN count(*) AS n",
+    ),
+    (
+        "load_csv_group_aggregate",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row RETURN row.city AS city, count(*) AS n ORDER BY city",
+    ),
+    (
+        "load_csv_order_by_limit",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row RETURN row.name AS name ORDER BY name DESC LIMIT 5",
+    ),
+    (
+        "load_csv_distinct",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row RETURN DISTINCT row.city AS city ORDER BY city",
+    ),
+    (
+        "load_csv_create_ingest",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row CREATE (:Imported {id: toInteger(row.id), name: row.name})",
+    ),
+    (
+        "load_csv_merge_dedupe",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row MERGE (:City {id: row.city})",
+    ),
+    (
+        "load_csv_match_join",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row "
+        "WITH toInteger(row.id) AS pid MATCH (p:Person {person_id: pid}) "
+        "RETURN p.name AS name ORDER BY name",
+    ),
+    (
+        "load_csv_unwind_after",
+        "LOAD CSV WITH HEADERS FROM '{csv}' AS row UNWIND [row.city, row.name] AS token RETURN count(token) AS n",
+    ),
+]
+
+# Straddles the engine's 1000-row batch size so batch-boundary bugs surface.
+_LOAD_CSV_ROWS = 1000 * 2 + 3
+
+
+def _write_differential_csv(path) -> str:
+    import csv as csv_module
+
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv_module.writer(fh)
+        writer.writerow(["id", "name", "city"])
+        for i in range(_LOAD_CSV_ROWS):
+            writer.writerow([i + 1, f"Name{i:05d}", f"City{i % 4}"])
+    return str(path)
+
+
+@pytest.mark.differential
+@pytest.mark.parametrize("name,query", LOAD_CSV_QUERIES, ids=[entry[0] for entry in LOAD_CSV_QUERIES])
+def test_load_csv_optimized_matches_naive(name: str, query: str, tmp_path) -> None:
+    """Optimized and naive plans must agree on rows and on post-state, with the
+    CSV batch driver in play on both sides."""
+    csv_path = _write_differential_csv(tmp_path / "differential.csv")
+    resolved = query.replace("{csv}", csv_path)
+
+    g_opt = _build_mutation_graph()
+    rows_opt = _normalize(g_opt.cypher(resolved).to_list())
+    nodes_opt = g_opt.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"]
+    edges_opt = g_opt.cypher("MATCH ()-[r]->() RETURN count(r) AS c").to_list()[0]["c"]
+
+    g_naive = _build_mutation_graph()
+    rows_naive = _normalize(g_naive.cypher(resolved, disable_optimizer=True).to_list())
+    nodes_naive = g_naive.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"]
+    edges_naive = g_naive.cypher("MATCH ()-[r]->() RETURN count(r) AS c").to_list()[0]["c"]
+
+    assert rows_opt == rows_naive, f"LOAD CSV `{name}` rows: opt={rows_opt}, naive={rows_naive}"
+    assert nodes_opt == nodes_naive, f"LOAD CSV `{name}` node count: opt={nodes_opt}, naive={nodes_naive}"
+    assert edges_opt == edges_naive, f"LOAD CSV `{name}` edge count: opt={edges_opt}, naive={edges_naive}"

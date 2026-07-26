@@ -1,6 +1,6 @@
 //! Executor support types for specialized filters, spatial caches, and profiling labels.
 
-use super::super::ast::Clause;
+use super::super::ast::{Clause, ConstraintCommand, SchemaCommand};
 use crate::graph::core::pattern_matching::PatternElement;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -186,6 +186,13 @@ pub fn clause_display_name(clause: &Clause) -> String {
         Clause::Skip(_) => "Skip".into(),
         Clause::Limit(_) => "Limit".into(),
         Clause::Unwind(_) => "Unwind".into(),
+        Clause::LoadCsv(l) => {
+            if l.with_headers {
+                "LoadCsv (with headers)".into()
+            } else {
+                "LoadCsv".into()
+            }
+        }
         Clause::Union(_) => "Union".into(),
         Clause::Create(_) => "Create".into(),
         Clause::Set(_) => "Set".into(),
@@ -194,6 +201,17 @@ pub fn clause_display_name(clause: &Clause) -> String {
         Clause::Merge(_) => "Merge".into(),
         Clause::Foreach { .. } => "Foreach".into(),
         Clause::Call(_) => "Call".into(),
+        Clause::Schema(command) => match command {
+            SchemaCommand::CreateIndex(_) => "CreateIndex".into(),
+            SchemaCommand::UnsupportedIndexType { index_type, .. } => {
+                format!("CreateIndex ({})", index_type.keyword())
+            }
+            SchemaCommand::DropIndex(_) => "DropIndex".into(),
+            SchemaCommand::ShowIndexes => "ShowIndexes".into(),
+            SchemaCommand::Constraint(ConstraintCommand::Create(_)) => "CreateConstraint".into(),
+            SchemaCommand::Constraint(ConstraintCommand::Drop { .. }) => "DropConstraint".into(),
+            SchemaCommand::Constraint(ConstraintCommand::Show) => "ShowConstraints".into(),
+        },
         Clause::CallSubquery { .. } => "CallSubquery".into(),
         Clause::FusedOptionalMatchAggregate { .. } => "FusedOptionalMatchAggregate".into(),
         Clause::FusedVectorScoreTopK { .. } => "FusedVectorScoreTopK".into(),

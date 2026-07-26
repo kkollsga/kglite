@@ -49,11 +49,11 @@ NEGATION_WINDOW = 60
 
 
 def _manifest() -> dict:
-    return json.loads(MANIFEST_PATH.read_text())
+    return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 
 
 def _corpus_case_ids() -> set[str]:
-    return {case["id"] for case in json.loads(CASES_PATH.read_text())["cases"]}
+    return {case["id"] for case in json.loads(CASES_PATH.read_text(encoding="utf-8"))["cases"]}
 
 
 def _referenced_case_ids(manifest: dict) -> set[str]:
@@ -154,7 +154,7 @@ def test_provenance_guard_boundary_matches_reality():
 
 
 def test_reference_links_the_machine_readable_contract_and_names_every_extension():
-    document = DOC_PATH.read_text()
+    document = DOC_PATH.read_text(encoding="utf-8")
     manifest = _manifest()
     assert "tests/api-baselines/cypher-dialect.json" in document
     assert "not a complete openCypher or Neo4j implementation" in document
@@ -177,10 +177,10 @@ def _overclaims(text: str) -> list[str]:
 
 def test_public_claim_surfaces_do_not_promise_complete_or_drop_in_compatibility():
     for path in CLAIM_SURFACES:
-        overclaims = _overclaims(path.read_text())
+        overclaims = _overclaims(path.read_text(encoding="utf-8"))
         assert not overclaims, f"{path}: over-claiming phrases {overclaims}"
 
-    migration = (ROOT / "docs" / "python" / "migrations" / "neo4j-to-kglite.md").read_text()
+    migration = (ROOT / "docs" / "python" / "migrations" / "neo4j-to-kglite.md").read_text(encoding="utf-8")
     assert "`FOREACH (x IN list \\| ...)` | Supported" in migration
 
 

@@ -5,6 +5,7 @@
 //! storage primitives live under `storage::disk`.
 
 pub mod export;
+pub mod export_sql;
 pub mod file;
 pub mod load_timing;
 pub mod ntriples;

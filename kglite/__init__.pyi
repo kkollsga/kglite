@@ -93,6 +93,29 @@ class InternerCollisionError(KgError):
 class InternalError(KgError):
     """Invariant violation — kglite-internal bug. Reports the source location."""
 
+class ConstraintError(KgError):
+    """Base class for declared-integrity-constraint failures.
+
+    Catch this to handle any constraint problem — a violated write or an
+    uninstallable declaration — without distinguishing the two.
+    """
+
+class ConstraintViolationError(ConstraintError):
+    """A write violated a declared UNIQUE / NOT NULL / NODE KEY constraint.
+
+    The write was rejected before touching storage, so the graph is unchanged.
+    Raised by ``cypher()`` for ``CREATE`` / ``MERGE`` / ``SET`` / ``REMOVE`` and
+    by the bulk writers (``add_nodes`` and everything funnelling through it).
+    """
+
+class ConstraintCreationError(ConstraintError):
+    """Declaring a constraint failed because the stored data already violates it.
+
+    Raised by :meth:`KnowledgeGraph.define_schema` when the schema declares a
+    ``unique`` tuple or ``primary_key`` that existing nodes already duplicate.
+    Nothing is changed, so deduplicate the node type and call it again.
+    """
+
 @runtime_checkable
 class EmbeddingModel(Protocol):
     """Protocol for embedding models passed to ``embed_texts`` / ``search_text``.
@@ -604,7 +627,7 @@ def graphgen(
     """
     ...
 
-def open(path: str, *, storage: str | None = None, durable: bool = False) -> KnowledgeGraph:
+def open(path: str, *, storage: str | None = None, durable: bool | None = None) -> KnowledgeGraph:
     """Open a graph at ``path`` — load it if it exists, create a fresh one if
     it doesn't (load-or-create). The embedded-database lifecycle entry point.
 
@@ -623,24 +646,57 @@ def open(path: str, *, storage: str | None = None, durable: bool = False) -> Kno
         storage: Storage mode for a *newly created* graph (``"mapped"`` /
             ``"disk"``); ignored when opening an existing file, which keeps the
             mode it was saved in.
-        durable: If ``True``, open in write-ahead-log mode. Each committed
-            Cypher mutation is appended to a ``<path>-wal`` sidecar and
-            ``fsync``'d before the call returns, and on open any WAL frames are
-            replayed onto the loaded checkpoint to recover work committed since
-            the last ``save()``. ``save()`` writes a full checkpoint and
-            truncates the WAL. In-memory graphs only in this release
-            (``storage="mapped"/"disk"`` raise ``ValueError``).
+        durable: Write-ahead logging — **on by default**. Each committed
+            mutation is appended to a ``<path>-wal`` sidecar and ``fsync``'d
+            before the call returns, and on open any WAL frames are replayed
+            onto the loaded checkpoint to recover work committed since the last
+            ``save()``. ``save()`` writes a full checkpoint and truncates the
+            log.
+
+            - ``None`` (default) — enabled wherever it is supported, i.e. for
+              the in-memory default and ``storage="mapped"``. A
+              ``storage="disk"`` graph opens **non-durable** rather than
+              raising, since its commit boundary is a generation publish, not a
+              logical log.
+            - ``True`` — required. ``storage="disk"`` raises ``ValueError``
+              rather than quietly returning a graph without the crash safety
+              you asked for.
+            - ``False`` — opt out. See the performance note below.
 
     Returns:
         A KnowledgeGraph bound to ``path``.
 
     Note:
-        Without ``durable=True``, ``open()`` gives "feels like a database"
-        ergonomics (open, mutate, close → persisted on clean exit) but is
-        **not** crash-safe — an auto-saved snapshot is written only on a clean
-        close, not on a hard crash mid-session. ``durable=True`` adds the
-        crash-safety: a committed Cypher mutation survives a hard crash
-        (``kill -9`` / power loss) via the WAL.
+        **What durability costs.** Crash safety is bought with one ``fsync``
+        per committed mutation, so a write returns only once the log entry is
+        on physical storage. That makes each individual write substantially
+        more expensive than an unlogged one — the cost is dominated by device
+        latency, not by graph size, so it is most visible in loops of many
+        small writes and least visible for a few large ones. Reads are
+        completely unaffected: the capture layer forwards them with no
+        overhead.
+
+        Prefer ``durable=False`` for bulk loading and for graphs that are
+        rebuildable from source data, then ``save()`` once at the end; batch
+        many small mutations into one statement (or one ``begin()``
+        transaction, which commits as a single log entry) when you need both
+        throughput and crash safety.
+
+    Note:
+        **A ``with`` block is not a transaction.** Each mutation commits as it
+        runs, so an exception inside the block does not undo mutations that
+        already returned — they are recovered on the next ``open()``. What the
+        clean/failed exit controls is whether a *checkpoint* is written. Use
+        ``begin()`` when you want discard-on-error, or ``durable=False`` for
+        snapshot-only semantics.
+
+    Note:
+        Mutations that the log cannot express are **checkpoint-only**, and are
+        persisted by ``save()`` rather than by the log: schema and config
+        metadata, user-created indexes, embeddings, and timeseries. A
+        ``Session`` also refuses write queries on a durable graph, because its
+        writes land on a working copy that neither the log nor ``save()`` can
+        reach — use ``cypher()`` or ``begin()``.
     """
     ...
 
@@ -1068,7 +1124,20 @@ class KnowledgeGraph:
 
         Returns ``None`` if no mutation has been executed yet.
         Keys: ``nodes_created``, ``relationships_created``, ``properties_set``,
-        ``nodes_deleted``, ``relationships_deleted``, ``properties_removed``.
+        ``nodes_deleted``, ``relationships_deleted``, ``properties_removed``,
+        ``indexes_added``, ``indexes_removed``, ``constraints_added``,
+        ``constraints_removed``.
+
+        ``indexes_added`` / ``indexes_removed`` count KGLite index
+        *structures*, mirroring Neo4j's ``indexesAdded`` / ``indexesRemoved``
+        counters. ``CREATE RANGE INDEX`` reports 2 — a hash equality index
+        plus a B-tree range index, which together serve what Neo4j's single
+        RANGE index does.
+
+        ``constraints_added`` / ``constraints_removed`` count *constraints*
+        rather than the structures behind them, mirroring Neo4j's
+        ``constraintsAdded`` / ``constraintsRemoved``. ``IS NODE KEY`` reports
+        1 even though KGLite serves it as uniqueness plus presence.
         """
         ...
 
@@ -2153,6 +2222,40 @@ class KnowledgeGraph:
         """Whether the schema is currently locked."""
         ...
 
+    @property
+    def schema_version(self) -> int:
+        """Your own data-model revision, persisted with the graph.
+
+        This is *your* number, not kglite's: the engine stores and returns it
+        but never interprets it. It exists so a migration script can ask how
+        far this graph has been migrated. ``0`` means unversioned, which is
+        also what a graph saved before this field existed reports.
+
+        Distinct from ``graph_info()['format_version']``, which is the ``.kgl``
+        on-disk layout version and belongs to the engine.
+
+        See the :doc:`migrations guide </python/guides/schema-migrations>`.
+        """
+        ...
+
+    def set_schema_version(self, version: int) -> KnowledgeGraph:
+        """Stamp your data-model revision on the graph.
+
+        Persisted on the next :meth:`save`.
+
+        Args:
+            version: The revision number. ``0`` marks the graph unversioned.
+
+        Returns:
+            Self for method chaining.
+
+        Example::
+
+            graph.cypher("MATCH (p:Person) SET p.email = 'unknown'")
+            graph.set_schema_version(1).save("graph.kgl")
+        """
+        ...
+
     def graph_info(self) -> dict[str, Any]:
         """Get diagnostic information about graph storage health.
 
@@ -2169,6 +2272,10 @@ class KnowledgeGraph:
                 - ``type_count``: Number of distinct node types
                 - ``property_index_count``: Number of single-property indexes
                 - ``composite_index_count``: Number of composite indexes
+                - ``format_version``: ``.kgl`` on-disk layout version (engine-owned)
+                - ``library_version``: kglite version that last saved the graph
+                - ``user_schema_version``: your data-model revision (see
+                  :attr:`schema_version`); ``0`` when unversioned
                 - ``columnar_heap_bytes``: Heap-resident bytes in columnar stores
                 - ``columnar_is_mapped``: Whether any columnar data is file-backed
                 - ``memory_limit``: Configured memory limit (None if unset)
@@ -3407,17 +3514,42 @@ class KnowledgeGraph:
 
         Args:
             schema_dict: Schema definition with ``nodes`` and ``connections`` keys.
-                Each node entry may set ``required``/``optional``/``types`` and,
-                optionally, ``primary_key`` to declare an enforced PRIMARY KEY::
+                Each node entry may set ``required``/``optional``/``types``, and
+                optionally ``primary_key`` and ``unique`` to declare enforced
+                integrity constraints::
 
-                    g.define_schema({"nodes": {"Person": {"primary_key": "id"}}})
+                    g.define_schema({"nodes": {"Person": {
+                        "primary_key": "email",
+                        "unique": [["first", "last"]],
+                        "required": ["email"],
+                    }}})
 
-                Declaring ``primary_key`` makes the write path enforce uniqueness
-                on that key — a ``CREATE`` that would duplicate it is rejected
-                (use ``MERGE`` to upsert). It is opt-in: types without a declared
-                ``primary_key`` keep the permissive default. For now the key must
-                be ``"id"`` (the identity field); an enforced PK on an arbitrary
-                property is not yet supported.
+                ``primary_key`` may name **any** property and means unique *and*
+                present (NODE KEY): a ``CREATE`` that duplicates or omits it is
+                rejected — use ``MERGE`` to upsert. A key on ``"id"`` is enforced
+                through the O(1) identity index; any other key is backed by a
+                unique secondary index that persists and rebuilds on load.
+
+                ``unique`` declares additional UNIQUE constraints and accepts a
+                property name, a list of names, or a list of property tuples, so
+                ``"email"``, ``["email"]`` and ``[["first", "last"]]`` are all
+                valid — the last being a composite constraint. A tuple only
+                constrains nodes carrying *every* property in it, matching Neo4j,
+                where uniqueness does not apply to nodes missing the property.
+
+                ``required`` is enforced at **write time**, not only by
+                :meth:`validate_schema`: a ``CREATE`` that omits the property, a
+                ``SET`` that nulls it, and a ``REMOVE`` that drops it all raise.
+                ``id``/``title``/``type`` are structural and always present, so
+                requiring them is a no-op. Auto-vivified edge stubs are deferred
+                rather than exempt — vivification may create an incomplete
+                placeholder, but the ``add_nodes`` upsert that promotes it is a
+                normal enforced write, and an unpromoted stub stays reportable via
+                :meth:`validate_schema` and removable via ``purge_provisional()``.
+
+                All constraints are enforced on every write path, including the
+                bulk loaders. All are opt-in: a type declaring none keeps the
+                permissive default, and older graphs load unchanged.
 
                 A node entry may also set ``layer`` to ``'managed'`` (rebuilt
                 from source by a batch writer) or ``'runtime'`` (owned/mutated
@@ -3439,6 +3571,11 @@ class KnowledgeGraph:
                 deterministic) and independent of ``layer`` / ``lock_schema``::
 
                     g.define_schema({"nodes": {"Task": {"auto_timestamp": True}}})
+
+        Raises:
+            ConstraintCreationError: A declared ``unique`` tuple or
+                ``primary_key`` is already duplicated by existing nodes. Nothing
+                is changed — deduplicate the node type and call again.
 
         Returns:
             Self with schema defined.
@@ -3887,8 +4024,20 @@ class KnowledgeGraph:
     ) -> None:
         """Export the graph to a file.
 
-        Supported formats: ``graphml``, ``gexf``, ``d3``/``json``, ``csv``.
-        Format is inferred from the file extension if not specified.
+        Supported formats: ``graphml``, ``gexf``, ``d3``/``json``, ``csv``,
+        ``sqlite``. Format is inferred from the file extension if not
+        specified (``.sql`` → ``sqlite``).
+
+        ``sqlite`` writes a SQLite-dialect SQL script — node types become
+        tables, connection types become link tables — which you ingest with the
+        stock CLI::
+
+            graph.export("dump.sql")
+            # then: sqlite3 out.db < dump.sql
+
+        A script rather than a ``.db`` file keeps kglite dependency-free while
+        still handing you a real, queryable database. See the
+        :doc:`migrations guide </python/guides/schema-migrations>`.
 
         Args:
             path: Output file path.
@@ -3969,7 +4118,7 @@ class KnowledgeGraph:
     ) -> str:
         """Export the graph to a string.
 
-        Supported formats: ``graphml``, ``gexf``, ``d3``/``json``.
+        Supported formats: ``graphml``, ``gexf``, ``d3``/``json``, ``sqlite``.
 
         Args:
             format: Export format.
@@ -4223,10 +4372,44 @@ class KnowledgeGraph:
         with ``OVER (PARTITION BY ... ORDER BY ...)``), and date arithmetic
         (``date + N``, ``date - date``, ``date_diff(d1, d2)``).
 
-        Mutation queries (CREATE, SET, DELETE, REMOVE, MERGE) store
-        statistics on ``graph.last_mutation_stats`` with keys
+        Mutation queries (CREATE, SET, DELETE, REMOVE, MERGE, and the schema
+        DDL below) store statistics on ``graph.last_mutation_stats`` with keys
         ``nodes_created``, ``relationships_created``, ``properties_set``,
-        ``nodes_deleted``, ``relationships_deleted``, ``properties_removed``.
+        ``nodes_deleted``, ``relationships_deleted``, ``properties_removed``,
+        ``indexes_added``, ``indexes_removed``, ``constraints_added``,
+        ``constraints_removed``.
+
+        Schema DDL — ``CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:L)
+        ON (n.p, ...)``, ``DROP INDEX <name> [IF EXISTS]``, and ``SHOW
+        INDEXES`` — runs as a standalone statement. What each form builds
+        differs from Neo4j (KGLite has separate equality, composite, and
+        B-tree range structures) and index names are canonical rather than
+        user-assigned; see the "Cypher index DDL" section of ``CYPHER.md``.
+        Index DDL counts as a mutation, so it is blocked on a read-only graph.
+
+        Constraint DDL — ``CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:L)
+        REQUIRE n.p IS UNIQUE | IS NOT NULL | IS NODE KEY``,
+        ``DROP CONSTRAINT <name> [IF EXISTS]``, and ``SHOW CONSTRAINTS`` —
+        declares constraints that are enforced on every write path, including
+        the bulk loader. ``REQUIRE (n.a, n.b) IS UNIQUE`` constrains the tuple;
+        ``IS NODE KEY`` is uniqueness *and* presence, installed atomically.
+        Declaring a constraint the existing data already violates is rejected
+        and changes nothing. Unlike index names, constraint names **are**
+        stored, so ``DROP CONSTRAINT <name>`` works; a constraint declared
+        without a name is addressable by its canonical descriptor
+        (``Label.property``). ``IS :: TYPE`` / ``IS TYPED TYPE`` is rejected —
+        there is no write-time property-type enforcement, so accepting it would
+        report success while enforcing nothing; use ``lock_schema()`` or
+        ``validate_schema()``. ``IS UNIQUE`` / ``IS NODE KEY`` over the identity
+        field is rejected for the same reason, under any spelling that resolves
+        to it (``id`` itself or the node type's own id column): ``id`` is a
+        structural field rather than a stored property, so the unique secondary
+        index never sees the write. Declare ``primary_key`` through
+        :meth:`define_schema` instead — it probes the per-type id index on every
+        write path. ``IS NOT NULL`` on ``id`` **is** accepted, since it is
+        present by construction. ``SHOW CONSTRAINTS`` and ``SHOW INDEXES`` are
+        reads and work on a read-only graph. See the "Cypher constraint DDL"
+        section of ``CYPHER.md``.
 
         Direct mutation calls execute in place: if a later clause, timeout, or
         row-budget check fails, earlier mutations may remain visible. Use

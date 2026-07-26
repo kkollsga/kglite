@@ -63,7 +63,7 @@ def _gate(mode, delta):
 
 
 def load(path: Path):
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -169,7 +169,7 @@ def main():
 
     out = "\n".join(lines) + "\n"
     if args.out:
-        args.out.write_text(out)
+        args.out.write_text(out, encoding="utf-8")
         print(f"wrote {args.out}", file=sys.stderr)
     else:
         sys.stdout.write(out)

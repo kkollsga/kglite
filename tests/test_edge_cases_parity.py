@@ -15,13 +15,14 @@ Run: pytest -m parity tests/test_edge_cases_parity.py
 from __future__ import annotations
 
 import math
-import os
+import sys
 
 import pandas as pd
 import pytest
 
 from kglite import KnowledgeGraph
 from kglite import load as kglite_load
+from tests.conftest import requires_getrusage
 
 pytestmark = pytest.mark.parity
 
@@ -289,6 +290,7 @@ def test_null_nan_empty_string_properties(mode, tmp_path):
 # ─── 7. Large-result cypher (100k rows) ─────────────────────────────────────
 
 
+@requires_getrusage
 @pytest.mark.parametrize("mode", STORAGE_MODES)
 def test_large_cypher_result_100k_rows(mode, tmp_path):
     """100k rows materialise cleanly across all backends; RSS bounded."""
@@ -316,7 +318,8 @@ def test_large_cypher_result_100k_rows(mode, tmp_path):
     rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     rss_delta_bytes = rss_after - rss_before
     # macOS reports bytes; Linux reports KiB. Probe measured ≤175 MB on memory.
-    if os.uname().sysname == "Darwin":
+    # `sys.platform` rather than `os.uname()`, which does not exist on Windows.
+    if sys.platform == "darwin":
         rss_delta_mb = rss_delta_bytes / (1024 * 1024)
     else:
         rss_delta_mb = rss_delta_bytes / 1024

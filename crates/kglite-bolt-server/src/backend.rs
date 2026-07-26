@@ -22,10 +22,83 @@ use boltr::server::{
 };
 use boltr::types::{BoltDict, BoltValue};
 
+use kglite::api::session::CsvImportPolicy;
 use kglite::api::{cypher, DirGraph, Value};
 
 use crate::error_map::kg_to_bolt;
 use crate::value_adapter;
+
+/// The Neo4j server version reported by [`ServerIdentity::Neo4jCompatible`].
+///
+/// 5.26 is the Neo4j LTS line whose Bolt 5.x surface this server targets. The
+/// number is a compatibility claim about the *wire protocol*, not an assertion
+/// that this process is Neo4j — which is exactly why the real product stays in
+/// the string alongside it.
+const NEO4J_COMPAT_VERSION: &str = "5.26.0";
+
+/// Driver families known to reject a server whose agent lacks a `Neo4j/`
+/// prefix, matched against the client's HELLO `user_agent`.
+///
+/// Only families whose enforcement has been *verified* belong here. The Java
+/// driver's gate is `MetadataExtractor.extractServer`
+/// (neo4j-bolt-connection-netty 2.0.0, used by neo4j-java-driver 5.28.x); its
+/// default user agent is `neo4j-java/<version>`. The official Python (6.2.0)
+/// and JavaScript (5.28) drivers do not inspect the agent at all, so listing
+/// them would warn on every ordinary connection.
+///
+/// **The trailing slash is load-bearing.** The JavaScript driver identifies as
+/// `neo4j-javascript/<version>`, which contains `neo4j-java` as a prefix —
+/// matching without the slash warns JS users about a check their driver never
+/// performs. Keep the separator on any marker added here.
+const AGENT_GATED_DRIVER_MARKERS: &[&str] = &["neo4j-java/"];
+
+/// Which product identifier the server reports in the Bolt handshake's
+/// `server` field.
+///
+/// Honest by default, compatible on request. The default tells the truth, and
+/// the truth is enough for the official Python and JavaScript drivers. The
+/// Java driver refuses to speak to a server whose agent does not start with
+/// `Neo4j/`, failing at HELLO with `UntrustedServerException` before a single
+/// query runs — so the compatible spelling exists, but an operator has to ask
+/// for it. Detection never flips this automatically; see
+/// `KgliteBackend::warn_if_driver_gates_on_agent`.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum ServerIdentity {
+    /// `kglite-bolt-server/<version>` — what this server actually is.
+    #[default]
+    Kglite,
+    /// `Neo4j/<compat> (kglite-bolt-server/<version>)`.
+    ///
+    /// The prefix is the only part any driver gates on; the parenthetical keeps
+    /// the real product visible in server logs, driver error messages, and
+    /// `ServerInfo.agent()`, so a compatible server is still an identifiable
+    /// one.
+    Neo4jCompatible,
+}
+
+impl ServerIdentity {
+    /// The `server` string for HELLO's SUCCESS metadata. Also logged at
+    /// startup so an operator can see the configured identity without
+    /// connecting a client.
+    pub(crate) fn product_string(self, version: &str) -> String {
+        match self {
+            Self::Kglite => format!("kglite-bolt-server/{version}"),
+            // The suffix is safe: the Java driver's check is a bare
+            // `serverAgent.startsWith("Neo4j/")` with no regex, no version
+            // parse, and no constraint on trailing content, and nothing else in
+            // the driver parses the agent (feature detection keys off the Bolt
+            // protocol version instead).
+            Self::Neo4jCompatible => {
+                format!("Neo4j/{NEO4J_COMPAT_VERSION} (kglite-bolt-server/{version})")
+            }
+        }
+    }
+
+    /// Whether a client gating on a `Neo4j/` prefix would reject this identity.
+    fn is_rejected_by_agent_gate(self) -> bool {
+        matches!(self, Self::Kglite)
+    }
+}
 
 /// Bolt backend wrapping a loaded kglite graph.
 ///
@@ -85,6 +158,17 @@ pub struct KgliteBackend {
     /// but can differ when running behind a reverse proxy
     /// (`--advertise-addr` flag on `main.rs`).
     advertised_addr: String,
+    /// LOAD CSV filesystem capability for every query on this server.
+    ///
+    /// Server-wide rather than per-session because a Bolt client's identity
+    /// carries no filesystem authority here: `--auth basic` is a single shared
+    /// credential, not a user directory, so there is nothing to scope an import
+    /// grant to beyond "this server allows imports from this directory".
+    /// Default `Denied` — see the `--allow-csv-import` flag.
+    csv_import: CsvImportPolicy,
+    /// Product identifier reported in the Bolt handshake. Server-wide: the
+    /// handshake happens before any per-session policy could apply.
+    identity: ServerIdentity,
 }
 
 /// Per-Bolt-transaction state. Wraps the canonical
@@ -187,7 +271,13 @@ impl KgliteBackend {
     /// so it must be reachable from the client's network. Usually
     /// this matches the bind address but should differ when bound
     /// to `0.0.0.0` behind a hostname or reverse proxy.
-    pub fn new(graph: DirGraph, readonly: bool, advertised_addr: String) -> Self {
+    pub fn new(
+        graph: DirGraph,
+        readonly: bool,
+        advertised_addr: String,
+        csv_import: CsvImportPolicy,
+        identity: ServerIdentity,
+    ) -> Self {
         Self {
             session: Arc::new(kglite::api::session::Session::new(graph)),
             readonly,
@@ -195,7 +285,43 @@ impl KgliteBackend {
             session_counter: AtomicU64::new(0),
             tx_counter: AtomicU64::new(0),
             advertised_addr,
+            csv_import,
+            identity,
         }
+    }
+
+    /// Warn when a client whose driver gates on the agent prefix connects while
+    /// compatibility mode is off.
+    ///
+    /// A hint, never an action: the identity is *not* switched, because
+    /// identifying honestly is the default and silently impersonating Neo4j on
+    /// the strength of a client-supplied string would undo that decision. The
+    /// point is that an operator learns the fix from their own server log
+    /// instead of from a client stack trace.
+    ///
+    /// Fires per affected connection rather than once per process. That is not
+    /// log spam: every such connection is failing, so the message tracks a real
+    /// error, and an operator who retries sees it again next to the failure.
+    fn warn_if_driver_gates_on_agent(&self, user_agent: &str) {
+        if !self.identity.is_rejected_by_agent_gate() {
+            return;
+        }
+        let lowered = user_agent.to_ascii_lowercase();
+        if !AGENT_GATED_DRIVER_MARKERS
+            .iter()
+            .any(|marker| lowered.contains(marker))
+        {
+            return;
+        }
+        tracing::warn!(
+            user_agent = %user_agent,
+            server_agent = %self.identity.product_string(env!("CARGO_PKG_VERSION")),
+            "this client's driver rejects any server whose agent does not start with \
+             `Neo4j/` and will fail with UntrustedServerException before running a query. \
+             Enable Neo4j compatibility mode to serve it: pass --neo4j-compat, or set \
+             KGLITE_BOLT_NEO4J_COMPAT=1 in the environment. The identity is deliberately \
+             NOT switched automatically — honest identification is the default."
+        );
     }
 }
 
@@ -212,6 +338,7 @@ impl BoltBackend for KgliteBackend {
             database = ?config.database,
             "create_session"
         );
+        self.warn_if_driver_gates_on_agent(&config.user_agent);
         Ok(handle)
     }
 
@@ -517,7 +644,8 @@ impl BoltBackend for KgliteBackend {
         // Delegate to session::Session::commit which handles OCC +
         // Arc swap atomically. Phase E.4 wires OCC (was deferred in
         // C.5); concurrent writers now get
-        // ConflictDetected → BoltError::Transaction.
+        // ConflictDetected -> BoltError::Query carrying the documented
+        // `Neo.ClientError.Transaction.ConflictDetected` status code.
         let Some(tx) = state.inner.take() else {
             // Defensive fallthrough — was already consumed.
             return Ok(BoltDict::new());
@@ -549,11 +677,25 @@ impl BoltBackend for KgliteBackend {
                     base_version,
                     "commit conflict — another writer committed first"
                 );
-                return Err(BoltError::Transaction(format!(
-                    "Transaction conflict: graph was modified by another committer \
-                     since this transaction's BEGIN (base version {base_version}, \
-                     current version {current_version}). Retry the transaction."
-                )));
+                // `BoltError::Query` rather than `BoltError::Transaction`:
+                // boltr maps the latter to
+                // `Neo.ClientError.Transaction.TransactionStartFailed`, which
+                // is wrong twice over — the transaction started fine, and it
+                // contradicted the documented contract in this crate's README
+                // and the migration guide, both of which promise
+                // `ConflictDetected`. A ported client that branches on the
+                // status code (the normal way to write an OCC retry loop) was
+                // therefore told the wrong thing, and the Python tests could
+                // only match on the message text. `Query` lets us set the
+                // documented code directly.
+                return Err(BoltError::Query {
+                    code: "Neo.ClientError.Transaction.ConflictDetected".into(),
+                    message: format!(
+                        "Transaction conflict: graph was modified by another committer \
+                         since this transaction's BEGIN (base version {base_version}, \
+                         current version {current_version}). Retry the transaction."
+                    ),
+                });
             }
         }
 
@@ -630,9 +772,15 @@ impl BoltBackend for KgliteBackend {
 
     async fn get_server_info(&self) -> Result<BoltDict, BoltError> {
         let version = env!("CARGO_PKG_VERSION");
-        let product = format!("kglite-bolt-server/{version}");
+        let product = self.identity.product_string(version);
+        // `bolt_agent` stays honest even in compatibility mode: no driver gates
+        // on it (the Java check reads only `server`), so there is no reason to
+        // extend the compatibility claim any further than it has to go.
         let bolt_agent = BoltDict::from([
-            ("product".to_string(), BoltValue::String(product.clone())),
+            (
+                "product".to_string(),
+                BoltValue::String(format!("kglite-bolt-server/{version}")),
+            ),
             (
                 "version".to_string(),
                 BoltValue::String(version.to_string()),
@@ -750,6 +898,10 @@ impl KgliteBackend {
         opts.write_scope = meta.write_scope.as_ref();
         opts.git_sha = meta.git_sha.as_deref();
         opts.modified_by = meta.modified_by.as_deref();
+        // Every query reaching this backend came in over the wire, so the
+        // remote-caller policy applies unconditionally. `execute_opts` is the
+        // single chokepoint for both the auto-commit and in-transaction paths.
+        opts.csv_import = self.csv_import.clone();
         opts
     }
 
@@ -908,7 +1060,13 @@ mod tests {
         let path = unique_disk_path();
         let graph = new_dir_graph_in_mode(StorageMode::Disk, Some(&path))
             .expect("create disk-backed graph");
-        let backend = KgliteBackend::new(graph, false, "127.0.0.1:0".into());
+        let backend = KgliteBackend::new(
+            graph,
+            false,
+            "127.0.0.1:0".into(),
+            CsvImportPolicy::Denied,
+            ServerIdentity::default(),
+        );
         let session = SessionHandle("disk-session".into());
 
         mutate_and_finish(&backend, &session, "CREATE (:Person {id: 1})", true).await;
@@ -942,7 +1100,13 @@ mod tests {
 
     fn memory_backend() -> KgliteBackend {
         let graph = new_dir_graph_in_mode(StorageMode::Memory, None).expect("create memory graph");
-        KgliteBackend::new(graph, false, "127.0.0.1:0".into())
+        KgliteBackend::new(
+            graph,
+            false,
+            "127.0.0.1:0".into(),
+            CsvImportPolicy::Denied,
+            ServerIdentity::default(),
+        )
     }
 
     #[tokio::test]
@@ -1116,5 +1280,77 @@ mod tests {
         assert!(TxMeta::from_extra(&extra).is_err());
         let extra = BoltDict::from([("tx_metadata".to_string(), BoltValue::Integer(1))]);
         assert!(TxMeta::from_extra(&extra).is_err());
+    }
+
+    // ---- Handshake identity -------------------------------------------------
+
+    /// The default identity says what this server is.
+    #[test]
+    fn default_identity_is_honest() {
+        assert_eq!(ServerIdentity::default(), ServerIdentity::Kglite);
+        assert_eq!(
+            ServerIdentity::Kglite.product_string("1.2.3"),
+            "kglite-bolt-server/1.2.3"
+        );
+    }
+
+    /// The compatibility identity has to satisfy the official Java driver's
+    /// gate, which is a bare `serverAgent.startsWith("Neo4j/")` in
+    /// `MetadataExtractor.extractServer`. Asserting the prefix directly pins the
+    /// one property the whole feature exists to provide.
+    #[test]
+    fn compat_identity_satisfies_the_java_driver_gate() {
+        let agent = ServerIdentity::Neo4jCompatible.product_string("1.2.3");
+        assert!(
+            agent.starts_with("Neo4j/"),
+            "the Java driver rejects any agent without this prefix: {agent}"
+        );
+    }
+
+    /// Compatibility is not anonymity: the real product stays in the string, so
+    /// a compatible server is still identifiable from a driver's
+    /// `ServerInfo.agent()` and from its own logs.
+    #[test]
+    fn compat_identity_keeps_attribution() {
+        let agent = ServerIdentity::Neo4jCompatible.product_string("1.2.3");
+        assert!(agent.contains("kglite-bolt-server/1.2.3"), "{agent}");
+        assert_eq!(agent, "Neo4j/5.26.0 (kglite-bolt-server/1.2.3)");
+    }
+
+    /// Only the honest identity can be rejected by an agent gate; compatibility
+    /// mode is what makes the hint unnecessary.
+    #[test]
+    fn only_the_honest_identity_trips_the_gate() {
+        assert!(ServerIdentity::Kglite.is_rejected_by_agent_gate());
+        assert!(!ServerIdentity::Neo4jCompatible.is_rejected_by_agent_gate());
+    }
+
+    /// The Java driver is matched; the JavaScript driver must NOT be.
+    ///
+    /// `neo4j-javascript/5.28.0` contains `neo4j-java` as a prefix, so a marker
+    /// without the trailing separator warns JS users about a check their driver
+    /// never performs. This is the regression guard for that collision.
+    #[test]
+    fn agent_gate_markers_match_java_but_not_javascript() {
+        let matches = |ua: &str| {
+            let lowered = ua.to_ascii_lowercase();
+            AGENT_GATED_DRIVER_MARKERS
+                .iter()
+                .any(|marker| lowered.contains(marker))
+        };
+        assert!(
+            matches("neo4j-java/5.28.5"),
+            "the Java driver must be matched"
+        );
+        assert!(
+            matches("MyApp (neo4j-java/5.28.5)"),
+            "case/wrapping tolerated"
+        );
+        assert!(
+            !matches("neo4j-javascript/5.28.0"),
+            "the JavaScript driver does not gate on the agent and must not warn"
+        );
+        assert!(!matches("neo4j-python/6.2.0"));
+        assert!(!matches(""));
     }
 }

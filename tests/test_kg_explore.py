@@ -137,7 +137,8 @@ def test_explore_include_source_emits_code(tmp_path):
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     (pkg / "auth.py").write_text(
-        "def authenticate(user, password):\n    '''Verify credentials.'''\n    return password == 'secret'\n"
+        "def authenticate(user, password):\n    '''Verify credentials.'''\n    return password == 'secret'\n",
+        encoding="utf-8",
     )
     g = _build(
         [

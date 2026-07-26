@@ -420,7 +420,7 @@ def main() -> int:
         "wall_clock_seconds": wall,
         "cells": cells,
     }
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2, default=str)
     print(f"\nwrote {out_path} (wall_clock={wall:.1f}s, cells={len(cells)})")
     return 0

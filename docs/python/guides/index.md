@@ -26,7 +26,9 @@ Domain-specific surfaces — pull them in when your data has the shape:
 
 | Guide | Read this if… |
 |---|---|
-| {doc}`durable-apps` | …the graph is long-lived state your app reopens across runs. `open()` load-or-create lifecycle, checkpoint-on-close, and crash-safe `durable=True` write-ahead-log writes. |
+| {doc}`durable-apps` | …the graph is long-lived state your app reopens across runs. `open()` load-or-create lifecycle, crash-safe write-ahead-log writes by default, checkpoint-on-close, and when to opt out with `durable=False`. |
+| {doc}`derived-index` | …the authoritative copy of your data lives elsewhere — a warehouse, an API, a directory — and the graph is a rebuildable projection you query. Rebuild-and-swap, incremental refresh, carrying embeddings across a rebuild. |
+| {doc}`primary-store` | …the graph *is* the authoritative copy. What holds (statement atomicity, WAL crash safety, snapshot isolation), what is opt-in, and the limits stated plainly. |
 | {doc}`okf` | …your "data" is a markdown knowledge base — an OKF bundle, a Claude memory dir, a skills folder, an Obsidian vault. Frontmatter → nodes, links → typed edges. |
 | {doc}`spatial` | …your nodes have coordinates. R-tree indexing, distance-based filters, GeoJSON I/O. |
 | {doc}`timeseries` | …property values change over time. Snapshot history, valid_at / valid_during temporal filters. |
@@ -40,7 +42,8 @@ Domain-specific surfaces — pull them in when your data has the shape:
 |---|---|
 | {doc}`querying` | The fluent-API alternative to Cypher (`select` / `where` / `traverse` / `collect`). Useful for programmatic graph construction. |
 | {doc}`blueprints` | Declarative graph schemas — nodes/edges defined once in a CSV-driven config. Best for repeated builds of the same shape. |
-| {doc}`import-export` | Round-trip with Neo4j, JSON, N-Triples; CSV bulk export. |
+| {doc}`import-export` | Round-trip with Neo4j, JSON, N-Triples; CSV bulk export; SQLite export as the no-lock-in exit. |
+| {doc}`schema-migrations` | Your graph is long-lived state whose shape changes over time. The user-schema version stamp, ordered Cypher migration scripts + `kglite migrate`, and the recreate-the-node pattern for type changes. |
 | {doc}`ai-agents` | `describe()` XML schema for system prompts. Read this if you're building agent stacks beyond MCP. |
 | {doc}`recipes` | Short snippets for "how do I do X" patterns that span multiple guides. |
 

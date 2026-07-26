@@ -10,9 +10,11 @@
 KGLite is an embedded, Cypher-queryable knowledge graph for Python and Rust,
 built so the same graph can serve an application, an analyst, or an LLM agent.
 The Python wheel has no required Python runtime dependencies; the graph engine
-runs in-process without an external database service. The distribution also
-includes a CLI and MCP server, prompt-shaped `describe()` introspection, and
-structural validators that compose with Cypher.
+runs in-process without an external database service. Every crate in the
+workspace ships under MIT — if you are embedding a graph engine in something you
+distribute, see **[Licensing and embedded distribution](#licensing-and-embedded-distribution)**.
+The distribution also includes a CLI and MCP server, prompt-shaped `describe()`
+introspection, and structural validators that compose with Cypher.
 
 ## Start here
 
@@ -194,6 +196,42 @@ the in-process driver for tests.
 filter/aggregate, traversal, pathfinding, algorithms, mutations) against
 other embedded graph engines, NetworkX, rustworkx, igraph, and DuckDB on
 one shared synthetic graph. Reproduce with `python benchmarks/benchmark.py`.
+
+## Licensing and embedded distribution
+
+If the graph engine ships *inside* something you distribute, the licence is a
+design constraint rather than a line item.
+
+**kglite is MIT-licensed throughout — every crate in the workspace ships under
+MIT.** There is no separate commercial tier, no distinction between development
+and production use, and no copyleft obligation attached to shipping it: if you
+can use kglite, you can distribute it inside your own product.
+
+One honest qualification, because it is a statement about the *default* build:
+the optional `fastembed` embedding backend is itself Apache-2.0 and is off by
+default in every crate that can enable it, so neither the published wheel nor
+the default MCP-server binary contains it. A build that opts into
+`--features fastembed` pulls one transitive MPL-2.0 crate (`option-ext`, four
+dependencies down); MPL-2.0 is file-level weak copyleft and kglite does not
+modify it. The reviewed dependency-licence policy is documented in
+[dependency licences](https://kglite.readthedocs.io/en/latest/explanation/dependency-licenses.html).
+
+## Primary store, or derived index?
+
+Two shapes, both supported, with different guarantees. Knowing which one you are
+building saves a lot of argument later.
+
+- **Derived index** — the authoritative copy lives elsewhere (a warehouse, an
+  API, a directory, a repo) and the graph is a rebuildable projection you query.
+  This is what most kglite deployments are, and it is the cheapest correct
+  answer. **→ [Derived index guide](https://kglite.readthedocs.io/en/latest/python/guides/derived-index.html).**
+- **Primary store** — the graph *is* the authoritative copy. `open()` is
+  crash-safe by default, statements are atomic, readers get snapshot isolation,
+  UNIQUE / NOT NULL / node-key constraints are enforced on every write path
+  including the bulk loaders, and for in-memory graphs the cost of a write scales
+  with the size of the change rather than the size of the graph. One process owns
+  the writes; the scope statement lists the limits rather than softening them.
+  **→ [Primary store: scope and limits](https://kglite.readthedocs.io/en/latest/python/guides/primary-store.html).**
 
 ## Quick Start
 
@@ -549,6 +587,8 @@ Full docs at **[kglite.readthedocs.io](https://kglite.readthedocs.io)**
 - [Data Loading](https://kglite.readthedocs.io/en/latest/python/guides/data-loading.html) — DataFrames in, DataFrames out
 - [Graph algorithms](https://kglite.readthedocs.io/en/latest/python/guides/graph-algorithms.html) — shortest path, PageRank, community detection
 - [Semantic Search](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html) — embeddings, vector search, hybrid retrieval
+- [Derived index](https://kglite.readthedocs.io/en/latest/python/guides/derived-index.html) — rebuildable graph over a system of record you don't own
+- [Primary store](https://kglite.readthedocs.io/en/latest/python/guides/primary-store.html) — scope and limits when the graph is the authoritative copy
 - [OKF ingestion](https://kglite.readthedocs.io/en/latest/python/guides/okf.html) — `okf.build`, markdown knowledge bases & agent memory
 - [MCP server config](https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html) — manifests, skills, extensions
 - [Spatial](https://kglite.readthedocs.io/en/latest/python/guides/spatial.html) · [Timeseries](https://kglite.readthedocs.io/en/latest/python/guides/timeseries.html) · [Blueprints](https://kglite.readthedocs.io/en/latest/python/guides/blueprints.html) · [Import/Export](https://kglite.readthedocs.io/en/latest/python/guides/import-export.html) · [Traversal & hierarchy](https://kglite.readthedocs.io/en/latest/python/guides/traversal-hierarchy.html) · [AI Agents](https://kglite.readthedocs.io/en/latest/python/guides/ai-agents.html)
@@ -594,3 +634,6 @@ Storage parity and differential Cypher oracles run on every change.
 ## License
 
 MIT — see [LICENSE](https://github.com/kkollsga/kglite/blob/main/LICENSE) for details.
+Every crate in the workspace ships under MIT;
+[Licensing and embedded distribution](#licensing-and-embedded-distribution)
+covers what that means when kglite ships inside a product you distribute.

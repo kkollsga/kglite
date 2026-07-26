@@ -1,7 +1,28 @@
-//! The routed node-insert chokepoint, split out of `mod.rs` to keep it under
-//! the god-file ceiling. `insert_node_routed` is the single create path for
-//! Cypher CREATE / `add_nodes` / MERGE-create across all storage backends, so
-//! it's also where freshness provenance (`auto_timestamp`) is stamped.
+//! The routed node-insert path for Cypher writes, split out of `mod.rs` to keep
+//! it under the god-file ceiling.
+//!
+//! # This is NOT the graph's only create path
+//!
+//! `insert_node_routed` is the create path for **Cypher** `CREATE` and
+//! `MERGE`-create, across all storage backends. Node creation has three funnels,
+//! and anything that must hold for *every* new node has to be installed in all
+//! three:
+//!
+//! 1. **`insert_node_routed`** (here) — Cypher `CREATE` / `MERGE`-create, via
+//!    `languages/cypher/executor/write.rs::create_node`.
+//! 2. **`mutation::batch::BatchProcessor::flush_chunk`** — every DataFrame-shaped
+//!    ingest path: `add_nodes`, the blueprint builder, `from_records`, OKF, WAL
+//!    replay, `extend_graph`, and edge stub vivification. It calls
+//!    `GraphWrite::add_node` directly and never reaches this function.
+//! 3. **Direct `GraphWrite::add_node`** in the RDF and N-Triples loaders
+//!    (`io/rdf/loader.rs`, `io/ntriples/loader.rs`) and in `embedding_carry`.
+//!
+//! An earlier version of this comment claimed funnel 1 covered `add_nodes` too.
+//! It does not, and believing it does is how a write-time guarantee ends up
+//! enforced on Cypher only while the bulk path walks past it.
+//!
+//! Freshness provenance (`auto_timestamp`) is stamped here for funnel 1;
+//! `mutation::maintain::add_nodes` stamps it independently for funnel 2.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -5,6 +5,7 @@
 //! embedding stores, connection-type metadata, and schema definitions.
 
 use crate::datatypes::values::Value;
+use crate::graph::constraints::{NamedConstraint, UniqueConstraintKey};
 use crate::graph::schema::{
     CompositeIndexKey, CompositeValue, ConnectionTypeInfo, ConnectivityTriple, EdgeData,
     EmbeddingStore, GraphBackend, IndexKey, InternedKey, NodeData, PropertyStorage, SaveMetadata,
@@ -12,12 +13,11 @@ use crate::graph::schema::{
 };
 use crate::graph::storage::disk::id_index::IdIndexStore;
 use crate::graph::storage::disk::type_index::TypeIndexStore;
-use crate::graph::storage::{GraphRead, GraphWrite, MemoryGraph};
+use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
@@ -42,9 +42,13 @@ fn next_graph_id() -> u64 {
 // connectivity, per-(type,property) NDV) live in a child module so the
 // file stays under the god-file ceiling; child = retains private access.
 mod caches;
+pub mod constraints;
 mod disk_persistence;
 mod independent_copy;
+mod indexes;
+mod labels;
 mod node_write;
+pub(crate) mod rollback;
 mod schema_ops;
 
 /// Version-keyed cache of per-`(type, property)` distinct-value counts (NDV)
@@ -84,6 +88,28 @@ pub struct DirGraph {
     /// Persisted list of range index keys so indexes can be rebuilt on load
     #[serde(default)]
     pub range_index_keys: Vec<IndexKey>,
+    /// Declared UNIQUE constraints, as the enforcement structure itself:
+    /// (node_type, [properties]) -> tuple value -> the one node occupying it.
+    /// A single-occupant map (rather than the `Vec<NodeIndex>` the other index
+    /// kinds carry) *is* the constraint: an occupied slot is the violation.
+    /// Skipped during serialization — rebuilt from `unique_constraint_keys` on
+    /// load, which re-verifies the constraint as a side effect.
+    #[serde(skip)]
+    pub(crate) unique_indices: HashMap<UniqueConstraintKey, HashMap<CompositeValue, NodeIndex>>,
+    /// Persisted list of declared unique constraints so they survive
+    /// save/load. Additive serde field — older `.kgl` files load with an empty
+    /// list, i.e. no constraints, which is the pre-existing behaviour.
+    #[serde(default)]
+    pub(crate) unique_constraint_keys: Vec<UniqueConstraintKey>,
+    /// User-supplied constraint names → the declaration each one names, so
+    /// `DROP CONSTRAINT <name>` resolves. KGLite's enforcement structures are
+    /// keyed by `(node_type, properties)`, so a Neo4j-style constraint name has
+    /// nowhere else to live; this registry is a lookup aid and never the source
+    /// of truth (see `NamedConstraint` and `prune_constraint_names`). Additive
+    /// serde field — older `.kgl` files load with an empty map, which only means
+    /// their constraints must be dropped by descriptor.
+    #[serde(default)]
+    pub(crate) constraint_names: HashMap<String, NamedConstraint>,
     /// Fast O(1) lookup by node ID: node_type -> TypeIdIndex
     /// Lazily built on first use for each node type, skipped during serialization.
     /// Uses compact u32 HashMap when all IDs are UniqueId (e.g., Wikidata mapped mode).
@@ -128,6 +154,14 @@ pub struct DirGraph {
     /// a trivial v2 without changing the format. Additive — absent in old files.
     #[serde(default)]
     pub graph_instructions: HashMap<String, String>,
+    /// **User**-schema version — the caller's own data-model revision, bumped by
+    /// their migrations. Distinct from the engine's format stamps
+    /// (`save_metadata.format_version`, the `.kgl` magic), which the engine owns
+    /// and this never touches. `0` = unversioned, which is also what a `.kgl`
+    /// written before this field existed loads as (additive, absent in old
+    /// files). Docs: `docs/python/guides/schema-migrations.md`.
+    #[serde(default)]
+    pub user_schema_version: u32,
     /// Auto-vacuum threshold: if Some(t), vacuum() is triggered automatically after
     /// DELETE operations when fragmentation_ratio exceeds t and tombstones > 100.
     /// Default: Some(0.3). Set to None to disable.
@@ -252,11 +286,22 @@ pub struct DirGraph {
     /// `#[serde(skip)]` — rebuilt by `rebuild_type_indices`.
     #[serde(skip)]
     pub has_secondary_labels: bool,
-    /// O(1) secondary-label index: label_key → [NodeIndex].
-    /// Populated by the choke-point label mutation API
-    /// (`DirGraph::add_node_label` / `remove_node_label`) and on load by
-    /// `rebuild_type_indices`. `#[serde(skip)]` — rebuilt from
-    /// `NodeData.extra_labels` on load.
+    /// O(1) secondary-label index: label_key → [NodeIndex]. **The
+    /// canonical store** — `NodeData` carries no labels of its own, so this
+    /// map is the only record that a node has any secondary label.
+    ///
+    /// Written exclusively by the choke-point label mutation API
+    /// (`DirGraph::add_node_label` / `remove_node_label`), which is also
+    /// where rollback and WAL capture hook in for the same reason: the map
+    /// sits above the storage backend, so no `GraphWrite` call can carry a
+    /// label change.
+    ///
+    /// `#[serde(skip)]` — it cannot be derived from node payloads, so it is
+    /// persisted out-of-band and restored by the load path: the `.kgl`
+    /// `secondary_labels` section for in-memory graphs, the
+    /// `secondary_labels.bin.zst` sidecar for disk ones, and
+    /// `MutationOp::SetNodeLabels` frames for post-checkpoint WAL replay.
+    /// `rebuild_type_indices` deliberately leaves it alone.
     #[serde(skip)]
     pub secondary_label_index: HashMap<InternedKey, Vec<NodeIndex>>,
 }
@@ -371,6 +416,9 @@ impl DirGraph {
             composite_index_keys: Vec::new(),
             range_indices: HashMap::new(),
             range_index_keys: Vec::new(),
+            unique_indices: HashMap::new(),
+            unique_constraint_keys: Vec::new(),
+            constraint_names: HashMap::new(),
             id_indices: IdIndexStore::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: HashMap::new(),
@@ -380,6 +428,7 @@ impl DirGraph {
             title_field_aliases: FxHashMap::default(),
             parent_types: HashMap::new(),
             graph_instructions: HashMap::new(),
+            user_schema_version: 0,
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -422,6 +471,9 @@ impl DirGraph {
             composite_index_keys: Vec::new(),
             range_indices: HashMap::new(),
             range_index_keys: Vec::new(),
+            unique_indices: HashMap::new(),
+            unique_constraint_keys: Vec::new(),
+            constraint_names: HashMap::new(),
             id_indices: IdIndexStore::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: HashMap::new(),
@@ -431,6 +483,7 @@ impl DirGraph {
             title_field_aliases: FxHashMap::default(),
             parent_types: HashMap::new(),
             graph_instructions: HashMap::new(),
+            user_schema_version: 0,
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -891,555 +944,6 @@ impl DirGraph {
     }
 
     // ========================================================================
-    // Index Management Methods
-    // ========================================================================
-
-    /// Create an index on a property for a specific node type.
-    /// Returns the number of entries indexed.
-    ///
-    /// The id-alias / title-alias fields (e.g. `add_nodes(df, "Star",
-    /// "starId", "title")` makes `starId` the alias for the canonical
-    /// id) are intentionally NOT special-cased here: their indices
-    /// would build as empty (id/title live off the properties map).
-    /// Lookups against id-alias names route through `lookup_by_id_readonly`
-    /// in the matcher (`try_index_lookup`), which uses the auto-
-    /// maintained per-type `id_index` — no separate `create_index` call
-    /// required, and SET-on-id always stays in sync because id mutation
-    /// updates the id_index directly.
-    pub fn create_index(&mut self, node_type: &str, property: &str) -> usize {
-        // Store key uses the user's `property` name verbatim — the
-        // matcher's `try_index_lookup` indexes into `property_indices`
-        // by the unresolved user-facing key (matcher.rs:850), so the
-        // auto-maintenance path keeps things in sync only when the
-        // storage key matches.
-        let store_key = (node_type.to_string(), property.to_string());
-
-        // Mirror the matcher's property-READ path
-        // (`core/pattern_matching/matcher.rs::
-        // node_matches_properties_columnar`) so the index covers the
-        // same value-space MATCH consults. Three concerns the read
-        // path handles that `node.get_property()` did not:
-        //
-        // 1. **Alias resolution.** `starId` may be an id-alias for
-        //    `id`; same for title-aliases. Without resolving, we'd
-        //    look up "starId" in PropertyStorage and miss the data
-        //    (stored under "id").
-        // 2. **`id` / `title` are special.** Their values live in
-        //    `node_slots` (disk) / dedicated NodeData fields, NOT in
-        //    `properties`. The matcher reads them via `get_node_id`
-        //    / `get_node_title`; we do the same.
-        // 3. **Column-aware reads.** For mapped/disk graphs loaded
-        //    from .kgl, the actual values live in a `ColumnStore`,
-        //    not in the node's `PropertyStorage::Map`/`Compact`
-        //    snapshot. The backend's `get_node_property` knows how
-        //    to read from each storage type; `NodeData::get_property`
-        //    only reads the in-memory snapshot and silently returns
-        //    None for column-stored values.
-        let read_key = self.resolve_alias(node_type, property).to_string();
-        let interned_key = self.interner.get_or_intern(&read_key);
-        let mut index: HashMap<Value, Vec<NodeIndex>> = HashMap::new();
-
-        if let Some(node_indices) = self.type_indices.get(node_type) {
-            for idx in node_indices.iter() {
-                let value = if read_key == "id" {
-                    self.graph.get_node_id(idx)
-                } else if read_key == "title" {
-                    self.graph.get_node_title(idx)
-                } else {
-                    self.graph.get_node_property(idx, interned_key)
-                };
-                if let Some(value) = value {
-                    index.entry(value).or_default().push(idx);
-                }
-            }
-        }
-
-        let count = index.len();
-        self.property_indices.insert(store_key, index);
-        count
-    }
-
-    /// Drop an index on a property for a specific node type.
-    /// Returns true if the index existed and was removed.
-    pub fn drop_index(&mut self, node_type: &str, property: &str) -> Result<bool, String> {
-        if let GraphBackend::Disk(disk) = &mut self.graph {
-            return disk
-                .drop_property_index(node_type, property)
-                .map_err(|error| format!("persistent index removal failed: {error}"));
-        }
-        let key = (node_type.to_string(), property.to_string());
-        Ok(self.property_indices.remove(&key).is_some())
-    }
-
-    /// Check if an index exists for a given node type and property.
-    pub fn has_index(&self, node_type: &str, property: &str) -> bool {
-        let key = (node_type.to_string(), property.to_string());
-        self.property_indices.contains_key(&key)
-    }
-
-    /// Check if **any** index exists for `(node_type, property)` — the
-    /// in-memory `property_indices` HashMap *or* a persistent
-    /// disk-backed `PropertyIndex`. Used by `describe()` to annotate
-    /// schema output with `indexed=…` attributes so agents can tell
-    /// which properties hit an O(log N) path.
-    pub fn has_any_index(&self, node_type: &str, property: &str) -> bool {
-        if self.has_index(node_type, property) {
-            return true;
-        }
-        if let crate::graph::storage::backend::GraphBackend::Disk(dg) = &self.graph {
-            return dg.has_property_index(node_type, property);
-        }
-        false
-    }
-
-    /// Get all existing indexes as a list of (node_type, property) tuples.
-    pub fn list_indexes(&self) -> Vec<(String, String)> {
-        self.property_indices.keys().cloned().collect()
-    }
-
-    /// Look up nodes by property value using an index.
-    /// Returns None if no index exists, otherwise returns matching node indices.
-    pub fn lookup_by_index(
-        &self,
-        node_type: &str,
-        property: &str,
-        value: &Value,
-    ) -> Option<Vec<NodeIndex>> {
-        let key = (node_type.to_string(), property.to_string());
-        self.property_indices
-            .get(&key)
-            .and_then(|idx| idx.get(value))
-            .cloned()
-    }
-
-    /// Get statistics about an index.
-    pub fn get_index_stats(&self, node_type: &str, property: &str) -> Option<IndexStats> {
-        let key = (node_type.to_string(), property.to_string());
-        self.property_indices.get(&key).map(|idx| {
-            let total_entries: usize = idx.values().map(|v| v.len()).sum();
-            IndexStats {
-                unique_values: idx.len(),
-                total_entries,
-                avg_entries_per_value: if idx.is_empty() {
-                    0.0
-                } else {
-                    total_entries as f64 / idx.len() as f64
-                },
-            }
-        })
-    }
-
-    // ========================================================================
-    // Range Index Methods (B-Tree)
-    // ========================================================================
-
-    /// Create a range index (B-Tree) on a property for a specific node type.
-    /// Enables efficient range queries (>, >=, <, <=, BETWEEN).
-    /// Returns the number of unique values indexed.
-    pub fn create_range_index(&mut self, node_type: &str, property: &str) -> usize {
-        let key = (node_type.to_string(), property.to_string());
-        // Same alias-resolution + column-aware property read as
-        // `create_index` — see the comment there for the full
-        // rationale on why we don't use `node.get_property`.
-        let resolved = self.resolve_alias(node_type, property).to_string();
-        let interned_key = self.interner.get_or_intern(&resolved);
-        let mut index: std::collections::BTreeMap<Value, Vec<NodeIndex>> =
-            std::collections::BTreeMap::new();
-
-        if let Some(node_indices) = self.type_indices.get(node_type) {
-            for idx in node_indices.iter() {
-                let value = if resolved == "id" {
-                    self.graph.get_node_id(idx)
-                } else if resolved == "title" {
-                    self.graph.get_node_title(idx)
-                } else {
-                    self.graph.get_node_property(idx, interned_key)
-                };
-                if let Some(value) = value {
-                    index.entry(value).or_default().push(idx);
-                }
-            }
-        }
-
-        let count = index.len();
-        self.range_indices.insert(key, index);
-        count
-    }
-
-    /// Drop a range index. Returns true if it existed.
-    pub fn drop_range_index(&mut self, node_type: &str, property: &str) -> bool {
-        let key = (node_type.to_string(), property.to_string());
-        self.range_indices.remove(&key).is_some()
-    }
-
-    /// Range lookup: returns node indices where property value falls in the given range.
-    pub fn lookup_range(
-        &self,
-        node_type: &str,
-        property: &str,
-        lower: std::ops::Bound<&Value>,
-        upper: std::ops::Bound<&Value>,
-    ) -> Option<Vec<NodeIndex>> {
-        let key = (node_type.to_string(), property.to_string());
-        self.range_indices.get(&key).map(|btree| {
-            btree
-                .range((lower, upper))
-                .flat_map(|(_, indices)| indices.iter().copied())
-                .collect()
-        })
-    }
-
-    // ========================================================================
-    // Composite Index Methods
-    // ========================================================================
-
-    /// Create a composite index on multiple properties for a specific node type.
-    /// Composite indexes enable efficient lookups on multiple fields at once.
-    ///
-    /// Returns the number of unique value combinations indexed.
-    ///
-    /// Example: create_composite_index("Person", &["city", "age"]) allows efficient
-    /// queries like filter({'city': 'Oslo', 'age': 30}).
-    pub fn create_composite_index(&mut self, node_type: &str, properties: &[&str]) -> usize {
-        let key = (
-            node_type.to_string(),
-            properties.iter().map(|s| s.to_string()).collect(),
-        );
-
-        // Pre-resolve each property name (alias → canonical "id" /
-        // "title" when applicable) and pre-intern so the per-node
-        // loop is HashMap-only. Mirrors the matcher's read path —
-        // see `create_index`'s comment for the full rationale.
-        let resolved: Vec<String> = properties
-            .iter()
-            .map(|p| self.resolve_alias(node_type, p).to_string())
-            .collect();
-        let interned_keys: Vec<InternedKey> = resolved
-            .iter()
-            .map(|r| self.interner.get_or_intern(r))
-            .collect();
-
-        let mut index: HashMap<CompositeValue, Vec<NodeIndex>> = HashMap::new();
-
-        if let Some(node_indices) = self.type_indices.get(node_type) {
-            for idx in node_indices.iter() {
-                let values: Vec<Value> = resolved
-                    .iter()
-                    .zip(interned_keys.iter())
-                    .map(|(r, k)| {
-                        let v = if r == "id" {
-                            self.graph.get_node_id(idx)
-                        } else if r == "title" {
-                            self.graph.get_node_title(idx)
-                        } else {
-                            self.graph.get_node_property(idx, *k)
-                        };
-                        v.unwrap_or(Value::Null)
-                    })
-                    .collect();
-
-                // Only index if at least one value is non-null
-                if values.iter().any(|v| !matches!(v, Value::Null)) {
-                    index.entry(CompositeValue(values)).or_default().push(idx);
-                }
-            }
-        }
-
-        let count = index.len();
-        self.composite_indices.insert(key, index);
-        count
-    }
-
-    /// Drop a composite index.
-    /// Returns true if the index existed and was removed.
-    pub fn drop_composite_index(&mut self, node_type: &str, properties: &[String]) -> bool {
-        let key = (node_type.to_string(), properties.to_vec());
-        self.composite_indices.remove(&key).is_some()
-    }
-
-    /// Check if a composite index exists.
-    pub fn has_composite_index(&self, node_type: &str, properties: &[String]) -> bool {
-        let key = (node_type.to_string(), properties.to_vec());
-        self.composite_indices.contains_key(&key)
-    }
-
-    /// Get all existing composite indexes.
-    pub fn list_composite_indexes(&self) -> Vec<(String, Vec<String>)> {
-        self.composite_indices.keys().cloned().collect()
-    }
-
-    /// Look up nodes by composite values using a composite index.
-    /// Properties must match the order used when creating the index.
-    pub fn lookup_by_composite_index(
-        &self,
-        node_type: &str,
-        properties: &[String],
-        values: &[Value],
-    ) -> Option<Vec<NodeIndex>> {
-        let key = (node_type.to_string(), properties.to_vec());
-        let composite_value = CompositeValue(values.to_vec());
-
-        self.composite_indices
-            .get(&key)
-            .and_then(|idx| idx.get(&composite_value))
-            .cloned()
-    }
-
-    /// Get statistics about a composite index.
-    pub fn get_composite_index_stats(
-        &self,
-        node_type: &str,
-        properties: &[String],
-    ) -> Option<IndexStats> {
-        let key = (node_type.to_string(), properties.to_vec());
-        self.composite_indices.get(&key).map(|idx| {
-            let total_entries: usize = idx.values().map(|v| v.len()).sum();
-            IndexStats {
-                unique_values: idx.len(),
-                total_entries,
-                avg_entries_per_value: if idx.is_empty() {
-                    0.0
-                } else {
-                    total_entries as f64 / idx.len() as f64
-                },
-            }
-        })
-    }
-
-    /// Find a composite index that can be used for a given set of filter properties.
-    /// Returns the index key and whether all filter properties are covered.
-    pub fn find_matching_composite_index(
-        &self,
-        node_type: &str,
-        filter_properties: &[String],
-    ) -> Option<(CompositeIndexKey, bool)> {
-        // Sort filter properties for comparison
-        let mut sorted_filter: Vec<String> = filter_properties.to_vec();
-        sorted_filter.sort();
-
-        for key in self.composite_indices.keys() {
-            if key.0 == node_type {
-                let mut sorted_index: Vec<String> = key.1.clone();
-                sorted_index.sort();
-
-                // Check if index properties are a subset of or equal to filter properties
-                // For exact match, the index must cover exactly the filter fields
-                if sorted_index == sorted_filter {
-                    return Some((key.clone(), true)); // Exact match
-                }
-
-                // Check if index is a prefix of filter (can be used for partial filtering)
-                if sorted_filter.starts_with(&sorted_index)
-                    || sorted_index.iter().all(|p| sorted_filter.contains(p))
-                {
-                    return Some((key.clone(), false)); // Partial match
-                }
-            }
-        }
-        None
-    }
-
-    // ========================================================================
-    // Incremental Index Maintenance (called by Cypher mutations)
-    // ========================================================================
-
-    /// Update property, composite, and range indices after a new node is added.
-    /// Only updates indices that already exist for this node_type.
-    pub fn update_property_indices_for_add(&mut self, node_type: &str, node_idx: NodeIndex) {
-        // Collect single-property index updates (immutable borrow of self.graph)
-        let prop_updates: Vec<(IndexKey, Value)> = {
-            // Disk backend: node_weight materializes into the query arena,
-            // which must run under a DiskQueryGuard (arena protocol in
-            // disk/graph.rs). No-op on memory/mapped backends.
-            let _guard = self.graph.begin_query();
-            let node = match self.graph.node_weight(node_idx) {
-                Some(n) => n,
-                None => return,
-            };
-            self.property_indices
-                .keys()
-                .chain(self.range_indices.keys())
-                .filter(|(nt, _)| nt == node_type)
-                .filter_map(|key| {
-                    node.get_property(&key.1)
-                        .map(|v| (key.clone(), v.into_owned()))
-                })
-                .collect()
-        };
-        for (key, value) in &prop_updates {
-            if let Some(value_map) = self.property_indices.get_mut(key) {
-                value_map.entry(value.clone()).or_default().push(node_idx);
-            }
-            if let Some(btree) = self.range_indices.get_mut(key) {
-                btree.entry(value.clone()).or_default().push(node_idx);
-            }
-        }
-
-        // Collect composite index updates
-        let comp_updates: Vec<(CompositeIndexKey, CompositeValue)> = {
-            // Arena guard: see prop_updates block above.
-            let _guard = self.graph.begin_query();
-            let node = match self.graph.node_weight(node_idx) {
-                Some(n) => n,
-                None => return,
-            };
-            self.composite_indices
-                .keys()
-                .filter(|(nt, _)| nt == node_type)
-                .filter_map(|key| {
-                    let vals: Vec<Value> = key
-                        .1
-                        .iter()
-                        .map(|p| {
-                            node.get_property(p)
-                                .map(Cow::into_owned)
-                                .unwrap_or(Value::Null)
-                        })
-                        .collect();
-                    if vals.iter().any(|v| !matches!(v, Value::Null)) {
-                        Some((key.clone(), CompositeValue(vals)))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-        for (key, comp_val) in comp_updates {
-            if let Some(comp_map) = self.composite_indices.get_mut(&key) {
-                comp_map.entry(comp_val).or_default().push(node_idx);
-            }
-        }
-    }
-
-    /// Update property, range, and composite indices after a property value is changed.
-    /// Removes node from the old value bucket and adds to the new value bucket.
-    pub fn update_property_indices_for_set(
-        &mut self,
-        node_type: &str,
-        node_idx: NodeIndex,
-        property: &str,
-        old_value: Option<&Value>,
-        new_value: &Value,
-    ) {
-        let key = (node_type.to_string(), property.to_string());
-        // Update hash index
-        if let Some(value_map) = self.property_indices.get_mut(&key) {
-            if let Some(old_val) = old_value {
-                if let Some(indices) = value_map.get_mut(old_val) {
-                    indices.retain(|&idx| idx != node_idx);
-                    if indices.is_empty() {
-                        value_map.remove(old_val);
-                    }
-                }
-            }
-            value_map
-                .entry(new_value.clone())
-                .or_default()
-                .push(node_idx);
-        }
-        // Update range index
-        if let Some(btree) = self.range_indices.get_mut(&key) {
-            if let Some(old_val) = old_value {
-                if let Some(indices) = btree.get_mut(old_val) {
-                    indices.retain(|&idx| idx != node_idx);
-                    if indices.is_empty() {
-                        btree.remove(old_val);
-                    }
-                }
-            }
-            btree.entry(new_value.clone()).or_default().push(node_idx);
-        }
-
-        // Update any composite indices that include this property
-        self.update_composite_indices_for_property_change(node_type, node_idx, property);
-    }
-
-    /// Update property, range, and composite indices after a property is removed.
-    pub fn update_property_indices_for_remove(
-        &mut self,
-        node_type: &str,
-        node_idx: NodeIndex,
-        property: &str,
-        old_value: &Value,
-    ) {
-        let key = (node_type.to_string(), property.to_string());
-        if let Some(value_map) = self.property_indices.get_mut(&key) {
-            if let Some(indices) = value_map.get_mut(old_value) {
-                indices.retain(|&idx| idx != node_idx);
-                if indices.is_empty() {
-                    value_map.remove(old_value);
-                }
-            }
-        }
-        if let Some(btree) = self.range_indices.get_mut(&key) {
-            if let Some(indices) = btree.get_mut(old_value) {
-                indices.retain(|&idx| idx != node_idx);
-                if indices.is_empty() {
-                    btree.remove(old_value);
-                }
-            }
-        }
-
-        // Update any composite indices that include this property
-        self.update_composite_indices_for_property_change(node_type, node_idx, property);
-    }
-
-    /// Re-index a single node in all composite indices that include the changed property.
-    /// Reads current node properties to build the new composite value.
-    fn update_composite_indices_for_property_change(
-        &mut self,
-        node_type: &str,
-        node_idx: NodeIndex,
-        changed_property: &str,
-    ) {
-        let comp_keys: Vec<CompositeIndexKey> = self
-            .composite_indices
-            .keys()
-            .filter(|(nt, props)| nt == node_type && props.contains(&changed_property.to_string()))
-            .cloned()
-            .collect();
-
-        if comp_keys.is_empty() {
-            return;
-        }
-
-        // Read current node properties once. Arena guard: disk-backend
-        // node_weight materializes into the query arena (protocol in
-        // disk/graph.rs); no-op on memory/mapped backends.
-        let current_props: HashMap<String, Value> = {
-            let _guard = self.graph.begin_query();
-            match self.graph.node_weight(node_idx) {
-                Some(node) => node.properties_cloned(&self.interner),
-                None => return,
-            }
-        };
-
-        for key in comp_keys {
-            if let Some(comp_map) = self.composite_indices.get_mut(&key) {
-                // Remove node from all existing composite buckets
-                for indices in comp_map.values_mut() {
-                    indices.retain(|&idx| idx != node_idx);
-                }
-                // Remove empty buckets
-                comp_map.retain(|_, v| !v.is_empty());
-
-                // Build new composite value from current properties
-                let new_values: Vec<Value> = key
-                    .1
-                    .iter()
-                    .map(|p| current_props.get(p).cloned().unwrap_or(Value::Null))
-                    .collect();
-                if new_values.iter().any(|v| !matches!(v, Value::Null)) {
-                    comp_map
-                        .entry(CompositeValue(new_values))
-                        .or_default()
-                        .push(node_idx);
-                }
-            }
-        }
-    }
-
-    // ========================================================================
     // Serialization helpers
     // ========================================================================
 
@@ -1452,10 +956,34 @@ impl DirGraph {
         self.property_index_keys = self.property_indices.keys().cloned().collect();
         self.composite_index_keys = self.composite_indices.keys().cloned().collect();
         self.range_index_keys = self.range_indices.keys().cloned().collect();
+        // Declared UNIQUE constraints persist the same way. `unique_indices`
+        // keys *are* the declaration list, so snapshotting them keeps the two
+        // from drifting when a constraint is dropped.
+        //
+        // Sorted, unlike the index-key lists above: `unique_indices` is a
+        // `HashMap`, so its iteration order is reseeded per process and two
+        // saves of the same graph would otherwise disagree byte for byte. The
+        // order carries no meaning — `rebuild_unique_indices_from_keys` reads
+        // the list as a set — so imposing one costs nothing and makes a saved
+        // graph reproducible.
+        let mut unique_keys: Vec<UniqueConstraintKey> =
+            self.unique_indices.keys().cloned().collect();
+        unique_keys.sort_unstable();
+        self.unique_constraint_keys = unique_keys;
+        // Constraint *names* cannot be re-derived from the enforcement
+        // structures, so unlike the lists above they are maintained live. Prune
+        // instead: a name whose declaration is gone must not be saved, or
+        // `DROP CONSTRAINT <name>` would resurrect it after a reload.
+        self.prune_constraint_names();
     }
 
     /// Rebuild property and composite indexes from the persisted key lists.
     /// Called automatically after load.
+    ///
+    /// Unique constraints are rebuilt too. Any violation the loaded data already
+    /// contains is discarded here rather than failing the load — see
+    /// [`Self::rebuild_unique_indices_from_keys`] for why a `.kgl` must always
+    /// open, and use [`Self::verify_unique_constraints`] to audit on demand.
     pub fn rebuild_indices_from_keys(&mut self) {
         let prop_keys: Vec<IndexKey> = std::mem::take(&mut self.property_index_keys);
         for (node_type, property) in &prop_keys {
@@ -1475,6 +1003,8 @@ impl DirGraph {
             self.create_range_index(node_type, property);
         }
         self.range_index_keys = range_keys;
+
+        let _preexisting_violations = self.rebuild_unique_indices_from_keys();
     }
 
     // ========================================================================
@@ -1516,143 +1046,6 @@ impl DirGraph {
         // the canonical store, populated either by the choke-point API
         // during the session or by the load path (the disk sidecar /
         // the in-memory .kgl section).
-    }
-
-    /// Add a secondary label to a node. Choke-point API for label
-    /// mutations — every mutation site routes through here so the
-    /// `secondary_label_index` stays canonical across all three
-    /// backends. NodeData itself never carries extra labels; the
-    /// inverted index is the single source of truth.
-    ///
-    /// Returns `true` if the label was added, `false` if it was already
-    /// present (idempotent) or equal to the primary type.
-    pub fn add_node_label(&mut self, idx: NodeIndex, label: InternedKey) -> bool {
-        use crate::graph::storage::GraphRead;
-        let primary = match GraphRead::node_type_of(&self.graph, idx) {
-            Some(k) => k,
-            None => return false,
-        };
-        if primary == label {
-            return false;
-        }
-        let bucket = self.secondary_label_index.entry(label).or_default();
-        if bucket.contains(&idx) {
-            return false;
-        }
-        bucket.push(idx);
-        self.has_secondary_labels = true;
-        true
-    }
-
-    /// Remove a secondary label from a node. Choke-point API for label
-    /// mutations.
-    ///
-    /// Returns `Ok(true)` if removed, `Ok(false)` if the node never had
-    /// the label, `Err(...)` if `label` is the primary type (use
-    /// `SET n.type = ...` to retype instead).
-    pub fn remove_node_label(
-        &mut self,
-        idx: NodeIndex,
-        label: InternedKey,
-    ) -> Result<bool, String> {
-        use crate::graph::storage::GraphRead;
-        let Some(primary) = GraphRead::node_type_of(&self.graph, idx) else {
-            return Ok(false);
-        };
-        if primary == label {
-            return Err(
-                "Cannot remove a node's primary label via REMOVE n:Label; use \
-                 SET n.type = 'NewType' to retype."
-                    .to_string(),
-            );
-        }
-        let Some(bucket) = self.secondary_label_index.get_mut(&label) else {
-            return Ok(false);
-        };
-        let before = bucket.len();
-        bucket.retain(|&i| i != idx);
-        let removed = bucket.len() < before;
-        if removed && bucket.is_empty() {
-            self.secondary_label_index.remove(&label);
-        }
-        if self.secondary_label_index.is_empty() {
-            self.has_secondary_labels = false;
-        }
-        Ok(removed)
-    }
-
-    /// Return a node's labels as `[primary, ...extras]`. Returns an
-    /// empty Vec if the node is missing. Consumers that only need the
-    /// primary type should keep using `GraphRead::node_type_of` (one
-    /// InternedKey lookup, no allocation).
-    ///
-    /// Reads secondaries from `secondary_label_index` (the canonical
-    /// source maintained by the choke-point API) rather than from
-    /// `NodeData.extra_labels`. This works uniformly across backends:
-    /// in-memory + mapped have both in sync; on disk, `NodeData` is
-    /// materialised from a transient arena that doesn't carry the
-    /// extras, but the inverted index does.
-    pub fn node_labels(&self, idx: NodeIndex) -> Vec<InternedKey> {
-        use crate::graph::storage::GraphRead;
-        let Some(primary) = GraphRead::node_type_of(&self.graph, idx) else {
-            return Vec::new();
-        };
-        if !self.has_secondary_labels {
-            return vec![primary];
-        }
-        let mut labels = vec![primary];
-        for (&key, bucket) in &self.secondary_label_index {
-            if bucket.contains(&idx) {
-                labels.push(key);
-            }
-        }
-        labels
-    }
-
-    /// All nodes carrying `label` as EITHER their primary type or a
-    /// secondary label — the canonical "candidates for `MATCH (n:label)`"
-    /// set. This is the single source of truth that every label-based
-    /// candidate-selection site should route through, mirroring
-    /// `PatternExecutor::find_matching_nodes`'s `needs_secondary_path`.
-    ///
-    /// Single-label fast path: when no node anywhere carries a secondary
-    /// label, this returns exactly `type_indices[label].to_vec()` — byte
-    /// for byte what every primary-only call site produced before
-    /// multi-label existed, so single-label performance is unchanged.
-    ///
-    /// The choke-point API (`add_node_label`) forbids a node holding the
-    /// same key as both primary and secondary, so the union is
-    /// duplicate-free.
-    pub fn nodes_with_label(&self, label: &str) -> Vec<NodeIndex> {
-        let mut out = self
-            .type_indices
-            .get(label)
-            .map(|v| v.to_vec())
-            .unwrap_or_default();
-        if self.has_secondary_labels {
-            if let Some(secondary) = self
-                .secondary_label_index
-                .get(&InternedKey::from_str(label))
-            {
-                out.extend(secondary.iter().copied());
-            }
-        }
-        out
-    }
-
-    /// True if `idx` carries `key` as its primary type or a secondary
-    /// label. Membership test companion to `nodes_with_label` for sites
-    /// that filter an existing candidate set rather than enumerate one.
-    pub fn node_has_label(&self, idx: NodeIndex, key: InternedKey) -> bool {
-        use crate::graph::storage::GraphRead;
-        if GraphRead::node_type_of(&self.graph, idx) == Some(key) {
-            return true;
-        }
-        self.has_secondary_labels
-            && self
-                .secondary_label_index
-                .get(&key)
-                .is_some_and(|bucket| bucket.contains(&idx))
     }
 
     /// Convert all node properties from PropertyStorage::Map to PropertyStorage::Compact.
@@ -2312,10 +1705,25 @@ impl DirGraph {
     /// vacuum() rebuilds the graph with contiguous indices, then rebuilds all indexes.
     ///
     /// Returns a mapping from old NodeIndex → new NodeIndex so callers can
-    /// update any external references (e.g., selections).
+    /// update any external references (e.g., selections). An empty map means
+    /// nothing was remapped.
     ///
-    /// No-op if there are no tombstones (node_count == node_bound).
+    /// No-op if there are no tombstones (node_count == node_bound), and a
+    /// no-op on the **disk** backend: its CSR arrays are frozen mmap, not a
+    /// `StableDiGraph`, so there is no petgraph tombstone to compact — disk
+    /// reclaims space by publishing a fresh generation (`compact_disk`), not
+    /// by rebuilding in place. Rebuilding would also have to materialise the
+    /// whole graph on the heap, which is the one thing the disk backend
+    /// exists to avoid.
+    ///
+    /// The rebuild preserves the backend variant and any write-capture
+    /// wrapper. **Callers on a durable graph must flush the write-ahead log
+    /// first**: buffered ops are keyed by `NodeIndex` and every index moves
+    /// here.
     pub fn vacuum(&mut self) -> HashMap<NodeIndex, NodeIndex> {
+        if self.graph.is_disk() {
+            return HashMap::new();
+        }
         let old_node_count = self.graph.node_count();
         let old_node_bound = self.graph.node_bound();
 
@@ -2356,8 +1764,14 @@ impl DirGraph {
             }
         }
 
-        // Replace graph storage
-        self.graph = GraphBackend::Memory(MemoryGraph::from_graph(new_graph));
+        // Replace graph storage, keeping the backend variant and any
+        // write-capture wrapper — see `GraphBackend::replace_heap_graph` for
+        // what assigning `Memory(..)` here used to break.
+        if !self.graph.replace_heap_graph(new_graph) {
+            // Disk: nothing was replaced, so nothing downstream may treat the
+            // indices as remapped.
+            return HashMap::new();
+        }
 
         // Remap embedding stores to use new node indices (see embedding_carry.rs).
         self.remap_embedding_slots(&old_to_new);
@@ -2488,3 +1902,6 @@ pub struct GraphInfo {
 #[cfg(test)]
 #[path = "dir_graph_tests.rs"]
 mod dir_graph_tests;
+
+#[cfg(test)]
+mod rollback_tests;

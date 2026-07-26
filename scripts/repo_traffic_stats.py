@@ -40,12 +40,12 @@ def upsert_timeseries(path: Path, rows: list[dict], fields: list[str]) -> dict[s
     """Merge `rows` (keyed by 'date') into the CSV — upsert by date, new wins."""
     existing: dict[str, dict] = {}
     if path.exists():
-        with path.open(newline="") as f:
+        with path.open(newline="", encoding="utf-8") as f:
             for r in csv.DictReader(f):
                 existing[r["date"]] = r
     for r in rows:
         existing[r["date"]] = {k: str(r[k]) for k in fields}
-    with path.open("w", newline="") as f:
+    with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         for key in sorted(existing):
@@ -59,9 +59,9 @@ def append_snapshot(path: Path, rows: list[dict], fields: list[str]) -> None:
     today = rows[0]["captured"] if rows else None
     kept: list[dict] = []
     if path.exists():
-        with path.open(newline="") as f:
+        with path.open(newline="", encoding="utf-8") as f:
             kept = [r for r in csv.DictReader(f) if r.get("captured") != today]
-    with path.open("w", newline="") as f:
+    with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         for r in kept:
@@ -73,11 +73,11 @@ def append_snapshot(path: Path, rows: list[dict], fields: list[str]) -> None:
 def read_csv(path: Path) -> list[dict]:
     if not path.exists():
         return []
-    with path.open(newline="") as f:
+    with path.open(newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
-# ── PDF rendering (dark mode) ────────────────────────────────────────────────
+# -- PDF rendering (dark mode) ------------------------------------------------
 
 
 def _set_split_ylim(ax_primary, ax_secondary, primary_vals, secondary_vals) -> None:
@@ -109,7 +109,7 @@ def _plot_timeseries(ax, data: dict, total_key: str, label: str) -> None:
     ax2.tick_params(axis="y", labelcolor="#FFB74D")
     _set_split_ylim(ax, ax2, uniq, total)
     ax.set_title(
-        f"{label}: {sum(total)} total / {sum(uniq)} unique  ({xs[0]:%Y-%m-%d} → {xs[-1]:%Y-%m-%d})",
+        f"{label}: {sum(total)} total / {sum(uniq)} unique  ({xs[0]:%Y-%m-%d} -> {xs[-1]:%Y-%m-%d})",
         fontsize=10,
     )
     ax.legend(handles=[l_uniq, l_total], fontsize=8, loc="upper left")
@@ -261,7 +261,7 @@ def main() -> None:
         append_snapshot(out / "paths.csv", path_rows, ["captured", "path", "title", "count", "unique"])
 
     render_pdf(out, args.repo, views, clones)
-    print(f"OK: views={len(views)}d clones={len(clones)}d referrers={len(ref_rows)} paths={len(path_rows)} → {out}/")
+    print(f"OK: views={len(views)}d clones={len(clones)}d referrers={len(ref_rows)} paths={len(path_rows)} -> {out}/")
 
 
 if __name__ == "__main__":

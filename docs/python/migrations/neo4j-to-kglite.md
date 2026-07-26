@@ -49,12 +49,36 @@ For positioning detail see
 [Bolt v5 wire protocol](https://neo4j.com/docs/bolt/current/). Any
 Neo4j-aware client — the official Python/JS/Java/Go drivers, Cypher
 Shell, Neo4j Browser, LangChain's `Neo4jGraph` — connects with **no
-consumer-side code changes** beyond the connection URL. See the
+consumer-side code changes** beyond the connection URL. Clients on the Java
+driver additionally need the server started with `--neo4j-compat` (see the note
+below); the change is server-side, so their code is still untouched. See the
 [Bolt server operator guide](../../operators/bolt-server.md).
 
 ```bash
 cargo install kglite-bolt-server
 kglite-bolt-server --graph my-graph.kgl --bind 127.0.0.1 --port 7687
+```
+
+```{note}
+**JVM clients need `--neo4j-compat`.** The official Java driver refuses to talk
+to a server whose handshake agent does not begin with `Neo4j/`, and fails at
+connect time with `UntrustedServerException: Server does not identify as a
+genuine Neo4j instance` — before any query runs. The Python and JavaScript
+drivers do not perform this check, so they work against the default identity.
+
+Start the server with compatibility mode (or set
+`KGLITE_BOLT_NEO4J_COMPAT=1`) and the agent becomes
+`Neo4j/5.26.0 (kglite-bolt-server/<version>)`, which the driver accepts while
+still naming the real product:
+
+```bash
+kglite-bolt-server --graph my-graph.kgl --neo4j-compat
+```
+
+It is opt-in because presenting as another product is the operator's decision.
+Connect a driver that enforces the check with compatibility off and the server
+log tells you exactly this, naming both activation routes. See “Driver identity” in the
+[Bolt server operator guide](../../operators/bolt-server.md).
 ```
 
 Your driver code stays almost identical — just re-point the URI:
@@ -79,10 +103,13 @@ with driver.session() as session:
 
 The query path is the *same* Cypher engine the Python API uses;
 differential tests confirm row-for-row equivalence
-(`tests/test_bolt_server_differential.py`). The Python driver is the
-only client with automated regression coverage — other drivers use
-the same Bolt v5 protocol and should work, but exercise them manually
-first.
+(`tests/test_bolt_server_differential.py`). The official **Python,
+JavaScript, and Java** drivers all have automated regression coverage in
+CI — session and explicit-transaction lifecycle, managed `executeWrite`
+retry, PackStream type round-trips, `Node`/`Relationship`/`Path` values,
+`Neo.*` error codes, and OCC conflict detection
+(`tests/conformance/`). Go and .NET use the same Bolt v5 protocol and
+should work, but are untested — exercise them yourself first.
 
 #### What carries over, and what does not
 
@@ -136,7 +163,11 @@ Note the parameter syntax difference: the driver takes `**kwargs`
 
 ## Getting data out of Neo4j into KGLite
 
-The practical recipe: query Neo4j with the driver, pull rows into a
+There are three routes; pick by what you already have.
+
+### Route 1 — query the source database directly, bulk-load via pandas
+
+Query the source database with the `neo4j` driver, pull rows into a
 pandas DataFrame, and bulk-load with `add_nodes` / `add_connections`.
 
 ```python
@@ -174,11 +205,70 @@ and supports a `column_types=` override for spatial/temporal columns;
 `add_connections` can take a Cypher `query=` instead of a DataFrame.
 See the [data-loading guide](../guides/data-loading.md).
 
-**Alternate route — APOC CSV export.** For large graphs, export from
-Neo4j with `apoc.export.csv.all('graph.csv', {})` (or per-label
-queries), then `pd.read_csv` → `add_nodes` / `add_connections`. KGLite
-has no `LOAD CSV` — by design, pandas/`csv` give you better control
-over typing and cleanup.
+### Route 2 — dump to CSV, then `LOAD CSV` (no pandas needed)
+
+KGLite runs `LOAD CSV`, so the standard export/import pair ports
+unedited. Export with APOC (`apoc.export.csv.all('graph.csv', {})`, or
+per-label queries for a clean node/edge split), then load with the same
+Cypher you already have:
+
+```python
+import kglite
+
+graph = kglite.KnowledgeGraph()
+
+# Nodes. Fields arrive as strings — CSV carries no types — so convert
+# explicitly, as the source script already does.
+graph.cypher(
+    "LOAD CSV WITH HEADERS FROM 'file:///export/people.csv' AS row "
+    "CREATE (:Person {id: toInteger(row.id), name: row.name})"
+)
+
+# Relationships, by endpoint id. Pattern properties take variables
+# rather than function calls, so convert in a WITH first.
+graph.cypher(
+    "LOAD CSV WITH HEADERS FROM 'file:///export/knows.csv' AS row "
+    "WITH toInteger(row.src) AS src, toInteger(row.dst) AS dst "
+    "MATCH (a:Person {id: src}), (b:Person {id: dst}) "
+    "CREATE (a)-[:KNOWS]->(b)"
+)
+
+graph.save("my-graph.kgl")
+```
+
+Prefer this route if you have no pandas (a Bolt client, a Rust or JVM
+consumer) or if you already have import scripts you would rather not
+rewrite. Four differences are worth knowing before you run it:
+
+| | KGLite | Neo4j |
+|---|---|---|
+| Sources | `file://` URLs and plain local paths | `file://` plus `http(s)://` |
+| Batching | Automatic — 1000 rows at a time for row-local pipelines, so file size does not drive memory | `CALL { … } IN TRANSACTIONS` (formerly `USING PERIODIC COMMIT`), which you declare |
+| Whole-result clauses | An aggregate, `ORDER BY`, `SKIP`/`LIMIT`, `DISTINCT`, `UNION`, or `CALL` after `LOAD CSV` cannot be batched, so the file is read in one capped pass and fails past 1,000,000 rows naming the clause responsible | Same memory characteristic, no explicit ceiling |
+| Position | Must be the first clause | Anywhere in the pipeline |
+
+`http(s)://` is rejected with a message rather than a syntax error: the
+engine carries no HTTP client at all (network dependencies were removed
+in 0.14.x), so there is nothing to fetch a URL with. Download the file
+first, or fetch it in your own code and pass the rows in as a
+parameter.
+
+**Over Bolt, `LOAD CSV` is off by default.** `file://` means the
+*server's* filesystem, and a Bolt client is a remote caller, so serving
+it ungated would publish an arbitrary-file-read primitive. In-process
+callers (this Python API, the Rust library, the CLI) are allowed because
+they already have the host process's filesystem access; a Bolt client
+gets nothing unless the server was started with `--allow-csv-import
+<DIR>`, which confines imports to `DIR` after symlink resolution — the
+same shape as the import-directory setting you will have configured on
+the server side already. See
+[CYPHER.md → LOAD CSV](https://github.com/kkollsga/kglite/blob/main/CYPHER.md#load-csv).
+
+### Route 3 — pandas between export and load
+
+Still the best fit when you want typing control, column renaming, or
+cleanup in between: `pd.read_csv` → `add_nodes` / `add_connections`,
+using the same calls as Route 1.
 
 ## Cypher dialect divergence
 
@@ -232,10 +322,12 @@ Verified absent against 0.10.14:
 | Pattern comprehensions `[(n)-->(m) \| m]` | Not supported | `MATCH`/`OPTIONAL MATCH` + `collect()` |
 | Quantified path patterns `((a)-->(b))+` | Not supported | Variable-length paths `-[:R*1..3]->` (supported) |
 | `allShortestPaths(...)` | Not supported | `shortestPath(...)` (supported) returns one path |
-| `LOAD CSV` | Not supported (by design) | pandas / `csv` → `add_nodes` |
+| `LOAD CSV` | Supported — `file://` and local paths, leading position only | `http(s)://` needs a prior download; off by default for Bolt clients (see above) |
 | `exists(n.prop)` (property existence) | Not supported | `WHERE n.prop IS NOT NULL` / `IS NULL` |
 | `exists((pattern))` in `RETURN` | Not supported as a `RETURN` expression | `EXISTS { pattern }` / inline pattern predicate in `WHERE` |
-| `CREATE INDEX FOR (n:L) ON ...` (DDL) | Not supported | Python `graph.create_index(type, prop)` / `create_range_index(...)` |
+| `CREATE TEXT / FULLTEXT / POINT / VECTOR / LOOKUP INDEX` | Not supported — rejected with the route that applies | `CONTAINS`/`STARTS WITH` need no text index; `create_vector_index(...)` for ranked retrieval; label lookup is automatic |
+| `CREATE CONSTRAINT ... IS :: TYPE` / `IS TYPED TYPE` | Parses, then rejected — there is no write-time property-type constraint, so accepting it would report success while enforcing nothing | `lock_schema()` rejects writes disagreeing with the recorded property type; `validate_schema()` audits existing data. (`IS UNIQUE` / `IS NOT NULL` / `IS NODE KEY` **are** supported — see below) |
+| `CREATE CONSTRAINT ... FOR ()-[r:T]-() ...` | Not supported | KGLite constrains node properties only |
 
 ### Constructs that DO work (worth confirming)
 
@@ -328,7 +420,8 @@ Every `cypher()` call also attaches lightweight `result.diagnostics`
 | Backup | `neo4j-admin dump` / online backup | Copy the `.kgl` file (or `save_subset(path)` for a slice) |
 | Concurrency | Server-managed sessions, ACID | Reads parallelize (GIL released via `py.detach()`); mutations serialize via copy-on-write; OCC on transactions |
 | Cross-process access | Native (server) | Embedded — use the Bolt server as the coordination point for multi-process |
-| Schema DDL | `CREATE INDEX` / `CREATE CONSTRAINT` Cypher | No DDL Cypher. Programmatic only: `create_index(type, prop)`, `create_range_index(...)`, `list_indexes()`, `drop_index(...)`. Type indices are automatic. |
+| Schema DDL | `CREATE INDEX` / `CREATE CONSTRAINT` Cypher | Index DDL is supported — `CREATE [RANGE] INDEX`, `DROP INDEX`, `SHOW INDEXES`. What each statement builds differs from Neo4j (KGLite has separate equality, composite, and range structures) and index names are canonical, not user-assigned: see [CYPHER.md → Cypher index DDL](https://github.com/kkollsga/kglite/blob/main/CYPHER.md#cypher-index-ddl). The equivalent APIs remain — `create_index(type, prop)`, `create_range_index(...)`, `list_indexes()`, `drop_index(...)`. Type indices are automatic. |
+| Constraint DDL | `CREATE CONSTRAINT ... IS UNIQUE / IS NOT NULL / IS NODE KEY` | Supported and enforced on every write path, including the bulk loader. Composite tuples (`REQUIRE (n.a, n.b) IS UNIQUE`) work; `IS NODE KEY` is uniqueness plus presence, installed atomically. Unlike index names, **constraint names are stored**, so `DROP CONSTRAINT <name>` works as written in a Neo4j script; unnamed constraints are addressable by their canonical descriptor. Declaring a constraint the existing data already violates is rejected and changes nothing. `IS :: TYPE` is refused (see above). See [CYPHER.md → Cypher constraint DDL](https://github.com/kkollsga/kglite/blob/main/CYPHER.md#cypher-constraint-ddl). `define_schema({"nodes": {...}})` declares the same constraints from Python. |
 | Migrations | Versioned migration tools | None — you own schema evolution in Python load code |
 
 Indexes are maintained automatically across Cypher mutations

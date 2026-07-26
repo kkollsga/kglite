@@ -7,6 +7,8 @@
 //! - [`expression`] — expressions (arithmetic, function calls, CASE, list ops)
 //! - [`clauses`] — RETURN / WITH / ORDER BY / LIMIT / SKIP / UNWIND / UNION /
 //!   CREATE / SET / DELETE / REMOVE / MERGE / CALL
+//! - [`schema_ddl`] — CREATE/DROP/SHOW INDEX and CONSTRAINT (Neo4j 5 DDL)
+//! - [`load_csv`] — LOAD CSV (leading-position external row source)
 //!
 //! Each submodule adds another `impl CypherParser` block; PyO3-style,
 //! Rust merges them at codegen.
@@ -19,8 +21,10 @@ use crate::error::KgError;
 
 pub mod clauses;
 pub mod expression;
+pub mod load_csv;
 pub mod match_pattern;
 pub mod predicate;
+pub mod schema_ddl;
 
 /// Tokenizes and parses Cypher query strings into a `CypherQuery` AST.
 ///
@@ -30,10 +34,12 @@ pub mod predicate;
 pub struct CypherParser {
     tokens: Vec<CypherToken>,
     pos: usize,
-    /// Current recursion depth of the expression/predicate parser. Guarded by
-    /// [`Self::descend`] so pathologically nested input (thousands of nested
-    /// parens/lists/`NOT`s) returns a parse error instead of overflowing the
-    /// stack and aborting the process.
+    /// Nesting depth of the expression/predicate AST currently under
+    /// construction. Charged by [`Self::descend`] for *recursive* nesting
+    /// (parens/lists/`NOT`) and by [`Self::deepen`] for the *iteratively*
+    /// built left-associative operator chains, so pathologically nested
+    /// input returns a parse error instead of overflowing the stack and
+    /// aborting the process.
     depth: usize,
     /// Verbatim source lexeme per keyword-token index (see
     /// [`super::tokenizer::TokenizedCypher::keyword_lexemes`]). Keyword
@@ -45,23 +51,41 @@ pub struct CypherParser {
     keyword_lexemes: std::collections::HashMap<usize, String>,
 }
 
-/// Maximum expression-nesting depth accepted by the parser.
+/// Maximum expression/predicate AST nesting depth accepted by the parser.
 ///
 /// The recursive-descent expression parser, the planner's expression walkers,
-/// and the executor's `evaluate_expression` all recurse once per nesting
-/// level, so this budget bounds stack use across the whole pipeline (parse →
-/// plan → execute → drop). 512 levels is far beyond any legitimate query.
-/// Debug-profile frames are several times larger than release frames — deep
-/// nesting within this budget can exhaust a default thread stack before the
-/// guard fires — so [`CypherParser::descend`] also grows the stack on demand
-/// via `stacker`; the budget is the semantic contract, not the overflow
-/// protection.
+/// the executor's `evaluate_expression` and the AST's `Drop` all recurse once
+/// per nesting level, so this budget bounds the *depth* every one of them
+/// walks. 512 levels is far beyond any legitimate query.
+///
+/// It does not, however, bound their *stack use* equally. Only
+/// [`CypherParser::descend`] grows the stack on demand (via `stacker`); the
+/// planner, executor and `Drop` walkers recurse on whatever stack their
+/// thread already has. Debug-profile frames are several times larger than
+/// release frames, so the guarantee those stages actually carry is "at most
+/// 512 levels", not "cannot overflow" — a thread with a small stack (Windows
+/// defaults to 1 MB) has not been measured against a 512-level AST. Extending
+/// the `stacker` guard past the parser is deliberately deferred until that
+/// measurement exists.
+///
+/// The budget bounds **AST depth, not parser call depth**, and those differ:
+/// the left-associative operator chains (`OR`/`XOR`/`AND`, `+`/`-`/`||`,
+/// `*`/`/`/`%`, subscripting, `n:A:B` label chains) are parsed *iteratively*,
+/// so the parser itself stays shallow while each iteration adds one level to
+/// the tree it returns. Those levels are charged via [`CypherParser::deepen`]
+/// inside a [`CypherParser::chain`] scope; recursive nesting is charged by
+/// [`CypherParser::descend`]. Charging both is what makes the budget an
+/// actual bound on what the downstream walkers recurse through — the
+/// walkers themselves have neither a depth guard nor stack growth, and they
+/// run on server worker threads whose stacks are far smaller than the main
+/// thread's.
 const MAX_EXPRESSION_DEPTH: usize = 512;
 
 /// Remaining-stack threshold below which [`CypherParser::descend`] allocates
 /// a fresh segment, and the size of that segment. The red zone must cover the
-/// deepest frame chain one nesting level can add across parse/plan/execute
-/// walkers (~10 frames in debug).
+/// deepest frame chain one nesting level can add *while parsing* (~10 frames
+/// in debug); the plan/execute/drop walkers are not covered, since
+/// `maybe_grow` is only called from the parser.
 const STACK_RED_ZONE: usize = 128 * 1024;
 const STACK_GROW_SIZE: usize = 4 * 1024 * 1024;
 
@@ -97,6 +121,21 @@ impl CypherParser {
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.deepen()?;
+        let result = stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || f(self));
+        self.depth -= 1;
+        result
+    }
+
+    /// Charge one level of AST nesting against [`MAX_EXPRESSION_DEPTH`],
+    /// failing with a clean parse error once the budget is exhausted.
+    ///
+    /// Call this — inside a [`Self::chain`] scope — once per iteration of an
+    /// iteratively-parsed operator chain, because each iteration wraps the
+    /// accumulated operand in one more AST node. Unlike [`Self::descend`]
+    /// the charge is *not* released when the current call returns; `chain`
+    /// releases the whole run at once.
+    pub(super) fn deepen(&mut self) -> Result<(), String> {
         if self.depth >= MAX_EXPRESSION_DEPTH {
             return Err(format!(
                 "Expression nesting exceeds {} levels; simplify the query",
@@ -104,8 +143,25 @@ impl CypherParser {
             ));
         }
         self.depth += 1;
-        let result = stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || f(self));
-        self.depth -= 1;
+        Ok(())
+    }
+
+    /// Run `f` as an iteratively-built operator chain, releasing every level
+    /// it charged via [`Self::deepen`] once the chain is complete.
+    ///
+    /// Releasing on exit is what makes the budget track AST *depth* rather
+    /// than total node count: two sibling chains each 400 levels deep form a
+    /// tree only 401 levels deep, so the second must not inherit the first's
+    /// charges. A chain nested inside another chain's operand is still parsed
+    /// while the outer chain holds its charges, so genuine nesting keeps
+    /// accumulating — the bound stays conservative in the safe direction.
+    pub(super) fn chain<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let entry_depth = self.depth;
+        let result = f(self);
+        self.depth = entry_depth;
         result
     }
 
@@ -147,6 +203,53 @@ impl CypherParser {
     /// Check if current position matches a keyword
     pub(super) fn check(&self, token: &CypherToken) -> bool {
         self.peek() == Some(token)
+    }
+
+    // ========================================================================
+    // Soft-keyword helpers
+    // ========================================================================
+    //
+    // Several Cypher constructs are spelled with words the tokenizer
+    // deliberately does *not* reserve — `INDEX`, `CONSTRAINT`, `FOR`,
+    // `OPTIONS` (schema DDL) and `LOAD`, `CSV`, `HEADERS`, `FROM`,
+    // `FIELDTERMINATOR` (`LOAD CSV`). Reserving them would break every graph
+    // that stores a property or label of the same name, so they arrive as
+    // [`CypherToken::Identifier`] and are matched case-insensitively here.
+    // Shared by `schema_ddl` and `load_csv`.
+
+    /// The identifier lexeme `offset` tokens ahead, if that token is one.
+    pub(super) fn soft_word_at(&self, offset: usize) -> Option<&str> {
+        match self.peek_at(offset) {
+            Some(CypherToken::Identifier(word)) => Some(word.as_str()),
+            _ => None,
+        }
+    }
+
+    /// True when the next token is the soft keyword `word`.
+    pub(super) fn peek_soft_word(&self, word: &str) -> bool {
+        self.soft_word_at(0).is_some_and(|w| soft_word_eq(w, word))
+    }
+
+    /// Consume the soft keyword `word` if it is next; report whether it was.
+    pub(super) fn eat_soft_word(&mut self, word: &str) -> bool {
+        if self.peek_soft_word(word) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Consume the soft keyword `word`, or fail naming `context`.
+    pub(super) fn expect_soft_word(&mut self, word: &str, context: &str) -> Result<(), String> {
+        if self.eat_soft_word(word) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Expected {word} in {context}, got {:?}",
+                self.peek()
+            ))
+        }
     }
 
     /// Consume the next token as an alias name (after AS).
@@ -223,6 +326,14 @@ impl CypherParser {
                 self.peek_at(1) == Some(&CypherToken::By)
             }
             None => true,
+            // `LOAD CSV` is spelled with soft keywords, so it arrives as an
+            // identifier and would otherwise be swallowed by the preceding
+            // clause's expression/pattern parser — `MATCH (n) LOAD CSV FROM …`
+            // died on the `AS` with a pattern-property error instead of the
+            // positional rule. Stopping here hands the token back to the
+            // clause loop, which reports
+            // `CypherParser::misplaced_load_csv_error`.
+            Some(CypherToken::Identifier(_)) => self.identifier_opens_load_csv(),
             _ => false,
         }
     }
@@ -241,6 +352,20 @@ impl CypherParser {
         } else if self.check(&CypherToken::Profile) {
             self.advance();
             profile = true;
+        }
+
+        // Schema DDL is a whole statement, not a pipeline stage, so it is
+        // recognised here rather than inside the clause loop: one check per
+        // query instead of one per clause, and `parse_clause_sequence` keeps
+        // its shape. A DDL statement consumes the entire token stream.
+        if let Some(clause) = self.try_parse_schema_ddl_statement()? {
+            return Ok(CypherQuery {
+                clauses: vec![clause],
+                explain,
+                profile,
+                output_format: OutputFormat::Default,
+                optimizer_tags: Vec::new(),
+            });
         }
 
         let (clauses, output_format) = self.parse_clause_sequence(false)?;
@@ -272,6 +397,37 @@ impl CypherParser {
     /// Returns the parsed clauses plus the trailing `OutputFormat` (only a
     /// top-level `FORMAT CSV` sets it to `Csv`; subquery bodies reject
     /// `FORMAT`).
+    /// Parse a leading `LOAD CSV`, or report the positional rule.
+    ///
+    /// Recognised even when misplaced, so a user who put it after a `MATCH`
+    /// gets the rule instead of `Unexpected token at start of clause:
+    /// Identifier("LOAD")`.
+    fn parse_leading_load_csv(&mut self, first: bool, in_subquery: bool) -> Result<Clause, String> {
+        if !first || in_subquery {
+            return Err(Self::misplaced_load_csv_error());
+        }
+        self.parse_load_csv_clause()
+    }
+
+    /// Parse the trailing `FORMAT <name>` marker. `FORMAT CSV` is the only
+    /// supported spelling, and it is rejected inside a `CALL { }` body.
+    fn parse_format_tail(&mut self, in_subquery: bool) -> Result<OutputFormat, String> {
+        if in_subquery {
+            return Err("FORMAT is not allowed inside a CALL { } subquery body".to_string());
+        }
+        self.advance(); // consume FORMAT
+        match self.peek() {
+            Some(CypherToken::Identifier(fmt)) if fmt.eq_ignore_ascii_case("CSV") => {
+                self.advance(); // consume CSV
+                Ok(OutputFormat::Csv)
+            }
+            other => Err(format!(
+                "Expected format name after FORMAT (supported: CSV), got {:?}",
+                other
+            )),
+        }
+    }
+
     pub(super) fn parse_clause_sequence(
         &mut self,
         end_at_rbrace: bool,
@@ -370,26 +526,16 @@ impl CypherParser {
                 Some(CypherToken::Foreach) => {
                     clauses.push(self.parse_foreach_clause()?);
                 }
+                // The two soft-keyword clause heads. Both arrive as
+                // `Identifier` (neither word is reserved), and both own a
+                // positional rule, so each parses in its own method rather
+                // than inline — see `parse_leading_load_csv` and
+                // `parse_format_tail`.
+                Some(CypherToken::Identifier(_)) if self.identifier_opens_load_csv() => {
+                    clauses.push(self.parse_leading_load_csv(clauses.is_empty(), end_at_rbrace)?)
+                }
                 Some(CypherToken::Identifier(s)) if s.eq_ignore_ascii_case("FORMAT") => {
-                    if end_at_rbrace {
-                        return Err(
-                            "FORMAT is not allowed inside a CALL { } subquery body".to_string()
-                        );
-                    }
-                    // FORMAT CSV — must be last clause
-                    self.advance(); // consume FORMAT
-                    match self.peek() {
-                        Some(CypherToken::Identifier(fmt)) if fmt.eq_ignore_ascii_case("CSV") => {
-                            self.advance(); // consume CSV
-                            return Ok((clauses, OutputFormat::Csv));
-                        }
-                        other => {
-                            return Err(format!(
-                                "Expected format name after FORMAT (supported: CSV), got {:?}",
-                                other
-                            ));
-                        }
-                    }
+                    return Ok((clauses, self.parse_format_tail(end_at_rbrace)?))
                 }
                 Some(t) => {
                     return Err(format!("Unexpected token at start of clause: {:?}", t));
@@ -400,6 +546,12 @@ impl CypherParser {
 
         Ok((clauses, OutputFormat::Default))
     }
+}
+
+/// Case-insensitive comparison of an identifier lexeme against a canonical
+/// soft keyword. Shared by the `schema_ddl` and `load_csv` clause parsers.
+pub(super) fn soft_word_eq(candidate: &str, canonical: &str) -> bool {
+    candidate.eq_ignore_ascii_case(canonical)
 }
 
 // ============================================================================

@@ -4,10 +4,14 @@
 [![License: MIT](https://img.shields.io/crates/l/kglite-bolt-server)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
 
 **Bolt v5.x protocol server for [kglite](https://crates.io/crates/kglite)
-knowledge graphs.** A pure-Rust single binary speaking the Neo4j wire protocol.
-The official Python driver is regression-tested; other Bolt v5 clients may
-connect but can rely on features outside KGLite's documented wire and Cypher
-contracts.
+knowledge graphs.** A pure-Rust single binary speaking the Bolt wire protocol.
+The official **Python, JavaScript, and Java** drivers are regression-tested in
+CI — session and explicit-transaction lifecycle, managed `executeWrite` retry,
+PackStream type round-trips, Node/Relationship/Path values, `Neo.*` error
+codes, and OCC conflict detection (`tests/conformance/js`,
+`tests/conformance/java`, driven by
+`tests/test_bolt_driver_conformance.py`). Other Bolt v5 clients may connect but
+can rely on features outside KGLite's documented wire and Cypher contracts.
 
 ```bash
 cargo install kglite-bolt-server
@@ -70,6 +74,7 @@ Options:
   --bind <ADDR>                Bind address [default: 127.0.0.1]
   --port <PORT>                Port [default: 7687]
   --readonly                   Reject mutations
+  --neo4j-compat               Report a Neo4j-compatible agent in the handshake
   --auth <USER:PASS>           Basic auth credentials
   --idle-timeout <SECS>        Per-session idle timeout
   --max-sessions <N>           Max concurrent sessions
@@ -77,6 +82,54 @@ Options:
   --tls-cert <PATH>            PEM-encoded TLS certificate chain
   --tls-key <PATH>             PEM-encoded TLS private key
 ```
+
+## Driver identity and `--neo4j-compat`
+
+By default the server identifies honestly in the Bolt handshake:
+
+```
+kglite-bolt-server/0.14.5
+```
+
+The official **Python** and **JavaScript** drivers accept this — they do not
+inspect the server agent. The official **Java** driver does: it requires the
+agent to begin with `Neo4j/` and otherwise aborts the connection before running
+a single query.
+
+```
+UntrustedServerException: Server does not identify as a genuine Neo4j
+instance: 'kglite-bolt-server/0.14.5'
+```
+
+Compatibility mode makes the server present an agent that satisfies that check,
+while keeping the real product in the string:
+
+```
+Neo4j/5.26.0 (kglite-bolt-server/0.14.5)
+```
+
+Two equivalent ways to turn it on — the flag wins if both are set:
+
+```bash
+kglite-bolt-server --graph graph.kgl --neo4j-compat
+
+KGLITE_BOLT_NEO4J_COMPAT=1 kglite-bolt-server --graph graph.kgl
+```
+
+The environment variable accepts `1`, `true`, `yes` or `on` (any case), for
+Docker, systemd and CI where editing an argv is awkward.
+
+**Why it is off by default.** Claiming to be Neo4j is a claim about a different
+product, so it is the operator's decision, not the server's. When a client whose
+driver enforces the check connects while compatibility mode is off, the server
+logs a warning naming both activation routes — so the fix is discoverable from
+your own log rather than only from a client stack trace. Detection is a hint
+only: the identity is never switched automatically on the strength of a
+client-supplied string.
+
+Compatibility mode changes only the handshake's `server` field. The `bolt_agent`
+metadata keeps reporting `kglite-bolt-server/<version>` either way, because no
+driver gates on it and the claim should not travel further than it must.
 
 ## Documentation
 

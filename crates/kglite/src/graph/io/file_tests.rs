@@ -486,4 +486,93 @@ mod atomic_save_tests {
         // The original file is byte-for-byte unchanged.
         assert_eq!(std::fs::read(&good).unwrap(), before);
     }
+
+    // ── user-schema version stamp ───────────────────────────────────────────
+    //
+    // The stamp is the caller's data-model revision, not an engine version.
+    // Two properties matter and are asserted below: it survives save/load, and
+    // it is *completely absent* from the byte stream at the baseline value — so
+    // a `.kgl` written before the field existed loads without error, and every
+    // pre-existing save stays byte-identical (the golden-digest invariant).
+
+    /// Rewrite a v5 buffer's metadata as raw JSON, so a test can delete a key
+    /// outright. `rewrite_metadata` above round-trips through the typed struct
+    /// and would re-add any key it knows about; this simulates a file written
+    /// by a build whose `FileMetadata` never had the field at all.
+    fn rewrite_metadata_json(buf: &[u8], mutate: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+        assert_eq!(&buf[..4], &V5_MAGIC);
+        let old_len = u32::from_le_bytes(buf[9..13].try_into().unwrap()) as usize;
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&buf[13..13 + old_len]).expect("metadata is JSON");
+        mutate(&mut raw);
+        let encoded = serde_json::to_vec(&raw).unwrap();
+        let mut out = Vec::with_capacity(buf.len() - old_len + encoded.len());
+        out.extend_from_slice(&buf[..9]);
+        out.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+        out.extend_from_slice(&encoded);
+        out.extend_from_slice(&buf[13 + old_len..]);
+        out
+    }
+
+    #[test]
+    fn user_schema_version_survives_save_and_load() {
+        let mut graph = tiny_graph(3);
+        Arc::make_mut(&mut graph).user_schema_version = 7;
+        let mut bytes = Vec::new();
+        write_kgl_to(&graph, &mut bytes).unwrap();
+
+        let loaded = load_kgl_bytes(&bytes).unwrap();
+        assert_eq!(
+            loaded.user_schema_version, 7,
+            "the caller's schema revision must round-trip through .kgl"
+        );
+    }
+
+    #[test]
+    fn unstamped_graph_writes_no_user_schema_version_key() {
+        // The baseline value must leave no trace in the metadata JSON: that is
+        // what makes the field additive for readers AND byte-neutral for the
+        // save-determinism digest.
+        let graph = tiny_graph(3);
+        assert_eq!(graph.user_schema_version, 0, "fresh graphs are unversioned");
+        let mut bytes = Vec::new();
+        write_kgl_to(&graph, &mut bytes).unwrap();
+
+        let len = u32::from_le_bytes(bytes[9..13].try_into().unwrap()) as usize;
+        let raw: serde_json::Value = serde_json::from_slice(&bytes[13..13 + len]).unwrap();
+        assert!(
+            raw.get("user_schema_version").is_none(),
+            "an unstamped graph must not emit the key at all, got {raw}"
+        );
+    }
+
+    #[test]
+    fn file_without_user_schema_version_loads_as_unversioned() {
+        // Simulates a `.kgl` written by a build predating the field: the key is
+        // simply not there. It must load cleanly at the baseline — never an
+        // error, and never a value read out of some neighbouring field.
+        let mut graph = tiny_graph(3);
+        Arc::make_mut(&mut graph).user_schema_version = 11;
+        let mut bytes = Vec::new();
+        write_kgl_to(&graph, &mut bytes).unwrap();
+
+        let stripped = rewrite_metadata_json(&bytes, |raw| {
+            let object = raw.as_object_mut().expect("metadata is a JSON object");
+            assert!(
+                object.remove("user_schema_version").is_some(),
+                "the stamped graph should have written the key"
+            );
+        });
+
+        let loaded = load_kgl_bytes(&stripped).expect("an older .kgl must still load");
+        assert_eq!(
+            loaded.user_schema_version, 0,
+            "a missing stamp means unversioned, not an error and not garbage"
+        );
+        assert_eq!(
+            loaded.graph.node_count(),
+            3,
+            "the rest of the graph must be unaffected"
+        );
+    }
 }

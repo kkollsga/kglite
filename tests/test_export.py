@@ -36,7 +36,7 @@ class TestExportToFile:
         try:
             small_graph.export(path, format="d3")
             assert os.path.exists(path)
-            with open(path) as fh:
+            with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
             assert "nodes" in data
             assert "links" in data

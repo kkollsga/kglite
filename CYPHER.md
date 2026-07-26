@@ -27,6 +27,8 @@ surface at a glance — most of what you'd reach for is here, in-process:
 | **Reading** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY` / `SKIP` / `LIMIT`, `UNWIND`, `UNION` |
 | **Writing** | `CREATE`, `MERGE` (+ `ON CREATE` / `ON MATCH SET`), `SET`, `DELETE` / `DETACH DELETE`, `REMOVE`, `FOREACH (x IN list \| …)` |
 | **Subqueries** | `CALL { … }` (correlated + uncorrelated), `EXISTS { … }`, `COUNT { … }` |
+| **Schema DDL** | `CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:L) ON (n.p, …)`, `DROP INDEX … [IF EXISTS]`, `SHOW INDEXES` — see [Cypher index DDL](#cypher-index-ddl) for the taxonomy mapping |
+| **Constraint DDL** | `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:L) REQUIRE n.p IS UNIQUE \| IS NOT NULL \| IS NODE KEY`, `DROP CONSTRAINT … [IF EXISTS]`, `SHOW CONSTRAINTS` — enforced on every write path, see [Cypher constraint DDL](#cypher-constraint-ddl) |
 | **Path finding** | variable-length `-[*1..n]->`, `shortestPath(…)`, `allShortestPaths(…)`, weighted shortest path (`CALL`) |
 | **Predicates** | `=, <>, <, >, <=, >=`, `AND` / `OR` / `NOT`, `IS [NOT] NULL`, `IN`, `CONTAINS` / `STARTS WITH` / `ENDS WITH`, regex `=~` |
 | **Expressions** | list comprehension `[x IN xs WHERE … \| …]`, `reduce(…)`, `CASE`, list/map literals, parameters `$p` |
@@ -39,11 +41,11 @@ surface at a glance — most of what you'd reach for is here, in-process:
 | **Transactions** | multi-statement with snapshot isolation + rollback (`Session` / `Transaction`) |
 | **Storage** | identical Cypher across in-memory, mmap, and on-disk modes (1B+ edges) |
 
-Deliberately **not** supported (by design, not gaps): per-write
-`UNIQUE` / `NOT NULL` / PRIMARY KEY constraints — uniqueness is a
-load-time concern, handled by `MERGE`, the duplicate-id warning, and the
-`duplicate_title` validator (see the data-integrity recipes), so it never
-costs the in-memory write path.
+Per-write `UNIQUE` / `NOT NULL` / NODE KEY constraints **are** supported and
+enforced on every write path, including the bulk loader — declare them with
+[constraint DDL](#cypher-constraint-ddl) or `define_schema`. A graph that
+declares no constraint pays one `HashMap::is_empty` check per write, so the
+in-memory write path is untouched by the feature existing.
 
 ### Node identity — use `id` as your primary key
 
@@ -61,9 +63,16 @@ on `id` is O(1) in every storage mode; an arbitrary property (`mid`, `key`, …)
 **not indexed**, so `MATCH (n {mid: $k})` is a full label scan (linear in node
 count). Two semantics to keep in mind:
 
-- **No uniqueness constraint** (see above): `CREATE` does not reject a duplicate
-  `id` — two `CREATE (:T {id: 'k'})` make two nodes. For primary-keyed writes use
-  **`MERGE`, not `CREATE`** — `MERGE (:T {id: $k})` is idempotent.
+- **Uniqueness is opt-in**: with no constraint declared, `CREATE` does not reject
+  a duplicate `id` — two `CREATE (:T {id: 'k'})` make two nodes. Either declare
+  the node type's primary key
+  (`define_schema({'nodes': {'T': {'primary_key': 'id'}}})`, after which the
+  second `CREATE` is rejected), or use **`MERGE`, not `CREATE`** —
+  `MERGE (:T {id: $k})` is idempotent either way. Constraint DDL is deliberately
+  *not* the route here: `REQUIRE t.id IS UNIQUE` is refused, because `id` is a
+  structural field rather than a stored property and the unique secondary index
+  would never see the write — see
+  [Cypher constraint DDL](#cypher-constraint-ddl).
 - **Matching is type-exact**: `'42'` ≠ `42`. Keep id types consistent across
   writes and reads.
 - **Property typos pass silently by default** (open schema): an unknown property
@@ -948,6 +957,75 @@ Expand a list into rows:
 graph.cypher("UNWIND [1, 2, 3] AS x RETURN x, x * 2 AS doubled")
 ```
 
+## LOAD CSV
+
+Read a delimited file and pipe its rows through the rest of the query, in the
+spelling other Cypher databases use, so a ported load script runs unedited.
+
+```
+LOAD CSV [WITH HEADERS] FROM <source> AS <variable> [FIELDTERMINATOR <sep>]
+```
+
+```python
+graph.cypher("""
+    LOAD CSV WITH HEADERS FROM 'file:///data/people.csv' AS row
+    CREATE (:Person {id: toInteger(row.id), name: row.name})
+""")
+```
+
+**Row binding.** `WITH HEADERS` binds each record as a **map** keyed by the
+header row (`row.name`); without it, each record binds as a zero-indexed
+**list** (`row[0]`) and the first line is data, not a header. Fields are always
+**strings** — CSV carries no types, and inferring them would corrupt
+leading-zero identifiers, so convert explicitly with `toInteger(row.n)` /
+`toFloat(row.x)`. An **empty field is `null`**, and a short row nulls its
+missing columns rather than failing the load.
+
+**Position.** `LOAD CSV` must be the **first clause**. It is a row source, not
+a transform, and the executor drives everything after it (see below).
+
+**Sources.** `file://` URLs and plain local filesystem paths. `http(s)://` is
+**rejected with a message, never a syntax error** — the engine ships no HTTP
+client (network dependencies were removed in 0.14.x). Fetch the file first, or
+download and parse it in your own code and pass the rows in as a parameter.
+`FROM $path` works, so the location can be a parameter.
+
+**Reading local files is a capability the caller is granted, not a given:**
+
+| Caller | Default | Override |
+|---|---|---|
+| Python API, Rust library, CLI (in-process) | Allowed — the caller already has the host process's filesystem access | — |
+| `kglite-bolt-server` (remote clients) | **Denied** | `--allow-csv-import <DIR>` confines imports to `DIR` after symlink resolution, so `..` segments and symlinks cannot escape it |
+| `kglite-mcp-server` | **Denied** | none |
+
+Without this gate, any client that could open a Bolt connection could run
+`LOAD CSV FROM 'file:///etc/passwd'`. Server-mode graph databases generally
+gate CSV import the same way — an allowed import directory, off by default.
+
+### Memory: what streams and what does not
+
+`LOAD CSV` reads the file in **1000-row batches** and runs the clauses that
+follow once per batch, so peak memory does not scale with file size. Measured
+on a row-local pipeline, a 5 MB and a 109 MB input both cost ~20 MB of resident
+memory.
+
+Batching is only equivalent to a single whole-file pass when every following
+clause is **row-local** — `MATCH`, `WHERE`, `UNWIND`, `CREATE`, `MERGE`, `SET`,
+`DELETE`, `REMOVE`, `FOREACH`, and non-aggregating `WITH`/`RETURN`. That covers
+the ingest shape the clause exists for, and it streams at any file size.
+
+A clause that reasons over the **whole result** — any aggregate, `ORDER BY`,
+`SKIP`, `LIMIT`, `DISTINCT`, `UNION`, or `CALL` — cannot be batched without
+changing the answer (`RETURN count(*)` would report one count per batch). Those
+queries read the file into a single pass instead, capped at **1,000,000 rows**:
+past that the query fails naming the clause that forced it, rather than
+exhausting memory. Restructure to a row-local pipeline, or aggregate outside
+the query.
+
+**Not supported:** `CALL { ... } IN TRANSACTIONS` (and the older
+`USING PERIODIC COMMIT`). Batching here is automatic and internal, so there is
+no commit-interval to declare; a whole `LOAD CSV` statement commits once.
+
 ## UNION / INTERSECT / EXCEPT
 
 Set operators combine two queries with matching column shapes.
@@ -1213,7 +1291,8 @@ autocomplete, and surface index advisors.
 |-----------|---------------|---------|
 | `CALL db.labels()` | `label` | One row per node-type ("label") in the graph, sorted alphabetically |
 | `CALL db.relationshipTypes()` | `relationshipType` | One row per connection-type ("relationship type") in the graph, sorted alphabetically |
-| `CALL db.indexes()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties`, `state` | One row per index installed on the graph, sorted by `name` |
+| `CALL db.indexes()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties`, `state` | One row per index installed on the graph, sorted by `name`. `SHOW INDEXES` returns the same rows — see [Cypher index DDL](#cypher-index-ddl) |
+| `CALL db.constraints()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties` | One row per declared constraint, sorted by `name`. `SHOW CONSTRAINTS` returns the same rows — see [Cypher constraint DDL](#cypher-constraint-ddl) |
 | `CALL db.propertyKeys()` | `propertyKey` | One row per declared property name (node + relationship), sorted alphabetically |
 | `CALL db.schema()` | `nodeType`, `properties` | One row per node-type with its sorted list of property names — the in-language counterpart of Python `describe()` |
 
@@ -1672,6 +1751,289 @@ graph.cypher("MATCH (n:Country) WHERE n.label STARTS WITH 'O' RETURN n.nid")
 # O(log N + k) where k is the number of matches
 ```
 
+### Cypher index DDL
+
+Neo4j 5 index DDL runs against KGLite, so a schema-setup script ports
+unedited. What it *builds* is not the same thing, because the two engines have
+different indexes — read this table before assuming a statement did what it
+does in Neo4j.
+
+```cypher
+CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:Label) ON (n.prop [, n.prop2 ...])
+DROP INDEX <name> [IF EXISTS]
+DROP INDEX FOR (n:Label) ON (n.prop [, ...])        -- KGLite extension
+SHOW [ALL] INDEX[ES]
+```
+
+#### What each statement builds
+
+KGLite has three index structures, each serving a different predicate shape.
+Neo4j has one `RANGE` index that serves all of them.
+
+| KGLite structure | Serves | Equivalent API call |
+|---|---|---|
+| hash equality (`property_indices`) | `=`, `IN` | `create_index(label, prop)` |
+| composite hash (`composite_indices`) | conjunctive `=` on all its properties | `create_composite_index(label, [p1, p2])` |
+| B-tree range (`range_indices`) | `<`, `<=`, `>`, `>=`, ordering | `create_range_index(label, prop)` |
+
+| Statement | Builds | `indexes_added` |
+|---|---|---|
+| `CREATE INDEX FOR (n:L) ON (n.p)` | one hash equality index | 1 |
+| `CREATE INDEX FOR (n:L) ON (n.a, n.b)` | one composite index | 1 |
+| `CREATE RANGE INDEX FOR (n:L) ON (n.p)` | a hash equality index **and** a B-tree range index | 2 |
+
+The `RANGE` form builds two structures because that is what Neo4j's single
+`RANGE` index serves. The bare form deliberately builds only the equality
+index, which is where Neo4j 5 (for which bare and `RANGE` are identical) and
+KGLite part ways: doing both for every `CREATE INDEX` in a ported script would
+silently double index memory, and in-memory footprint is this engine's
+product. The divergence costs performance, never correctness — if you need
+range acceleration, write `CREATE RANGE INDEX`.
+
+#### Index names are canonical, not yours
+
+KGLite derives index names from what they index — `Label.property`, or
+`Label.(a,b)` for a composite. A name in `CREATE INDEX <name> FOR …` is
+**accepted but not stored**: the persisted `.kgl` index state is a list of
+`(label, property)` key tuples, so there is nowhere to keep it.
+
+```cypher
+CREATE INDEX person_email FOR (p:Person) ON (p.email);   -- index is created
+SHOW INDEXES;                                            -- name is 'Person.email'
+DROP INDEX person_email;                                 -- error, explains this
+DROP INDEX Person.email;                                 -- works
+DROP INDEX FOR (p:Person) ON (p.email);                   -- also works
+```
+
+`DROP INDEX` accepts the dotted canonical name unquoted, so `SHOW INDEXES`
+output pastes straight in. `DROP INDEX <unknown name> IF EXISTS` is a no-op —
+truthfully, since no index carries that name — while the bare form errors and
+spells the naming rule out, because "person_email doesn't exist" is baffling to
+someone who just created it under that name. The descriptor form
+(`DROP INDEX FOR …`) is a KGLite extension that sidesteps naming entirely.
+
+One canonical name can cover two structures: a property carrying both a hash
+and a B-tree index shows two `SHOW INDEXES` rows sharing a `name`,
+distinguished by `type` (`PROPERTY` vs `RANGE`). `DROP INDEX <name>` removes
+every structure under that name.
+
+#### `SHOW INDEXES`
+
+A read, so it works on a read-only graph. Returns the same rows and columns as
+`CALL db.indexes()`:
+
+| Column | Value |
+|---|---|
+| `name` | canonical name — `Label.property` or `Label.(a,b)` |
+| `type` | `PROPERTY` (hash equality or composite) or `RANGE` (B-tree) |
+| `entityType` | always `NODE` |
+| `labelsOrTypes` | single-element list holding the node type |
+| `properties` | indexed property names in declaration order |
+| `state` | always `ONLINE` — KGLite builds indexes atomically |
+
+Neo4j 5 also returns `id`, `populationPercent`, `indexProvider`,
+`owningConstraint`, `lastRead`, and `readCount`. KGLite has no equivalent
+state for any of them, so they are **omitted** rather than filled with invented
+values. For filtering and projection use `CALL db.indexes() YIELD …` — `SHOW
+INDEXES` rejects `YIELD` / `WHERE` / `BRIEF` / `VERBOSE` rather than accepting
+a filter it would ignore.
+
+#### Forms that are rejected
+
+Each fails with a `CypherExecutionError` naming the construct and the route
+that works — never a syntax error, and never a no-op that reports success.
+
+| Statement | Why, and what to use |
+|---|---|
+| `CREATE TEXT INDEX` | No text index. `CONTAINS` / `STARTS WITH` / `ENDS WITH` work unindexed (a string index already gives prefix pushdown — see above) |
+| `CREATE FULLTEXT INDEX` | No full-text index. Use `create_vector_index` + `vector_score()` for ranked text retrieval |
+| `CREATE POINT INDEX` | No point index. Spatial predicates and the spatial-join optimiser work on geometry properties without one |
+| `CREATE VECTOR INDEX` | Vector indexes exist, but need an embedder and HNSW build parameters, so they are created through `create_vector_index(...)` |
+| `CREATE LOOKUP INDEX` | Label and relationship-type lookup is always indexed automatically (`type_indices`) |
+| `CREATE INDEX FOR ()-[r:T]-() ON (r.p)` | KGLite indexes node properties only. Relationship properties are queryable, just scanned |
+| `... OPTIONS { ... }` | No index providers or per-index configuration to apply |
+| `CREATE RANGE INDEX ... ON (n.a, n.b)` | The B-tree is single-property. Use a composite equality index, or one `CREATE RANGE INDEX` per property |
+
+#### On disk-backed graphs
+
+`CREATE INDEX` on a `storage='disk'` graph builds the **persistent** mmap-backed
+index — the same one `create_index(...)` builds there, not the in-memory
+HashMap (which would need multiple GB of heap for a large type and be rebuilt on
+every load). Two consequences:
+
+- Persistent property indexes cover **string columns**. A statement that indexes
+  nothing on a populated node type is **rejected** rather than reported as
+  succeeding, so a numeric property gets an error naming the reason. Use an
+  in-memory or mapped graph if you need to index a non-string property.
+- `SHOW INDEXES` and `CALL db.indexes()` list the in-memory index structures,
+  so a disk graph's persistent indexes do **not** appear there yet. The index is
+  real and the planner consults it; only this listing is incomplete. Re-running
+  `create_index(...)` reports `created=False` for an installed persistent index.
+
+`CREATE RANGE INDEX` and composite `CREATE INDEX` build in-memory structures in
+every storage mode.
+
+#### Guards
+
+Schema is graph state, so index DDL is a **mutation**: it is blocked on a
+read-only graph (`read_only(True)`), blocked in a read-only transaction, and
+rolled back with the rest of a failed statement. On a schema-locked graph,
+indexing an undeclared property is rejected — the same typo-guard writes get.
+A schema command is a standalone statement: it cannot follow another clause or
+appear inside a `CALL { }` body. An index belongs to one node type, so
+`write_scope=[...]` applies: `CREATE INDEX` / `DROP INDEX` on a type outside the
+whitelist is a scope violation. `SHOW INDEXES` is unaffected — a write scope
+restricts mutations, not visibility.
+
+`indexes_added` and `indexes_removed` join `graph.last_mutation_stats`,
+mirroring Neo4j's `indexesAdded` / `indexesRemoved` summary counters.
+
+### Cypher constraint DDL
+
+Neo4j 5 constraint DDL runs against KGLite and routes to **real per-write
+enforcement** — Cypher `CREATE` / `MERGE` / `SET` / `REMOVE` *and* the bulk
+loader (`add_nodes`, blueprints, `from_records`, WAL replay). A declaration is
+not documentation: once it succeeds, a violating write is rejected.
+
+```cypher
+CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE n.prop IS UNIQUE
+CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE (n.a, n.b) IS UNIQUE
+CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE n.prop IS NOT NULL
+CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE n.prop IS NODE KEY
+DROP CONSTRAINT <name> [IF EXISTS]
+SHOW CONSTRAINTS
+```
+
+The Neo4j 4 `ASSERT` spelling is accepted in place of `REQUIRE`, and the optional
+`NODE` / `RELATIONSHIP` scope word before `UNIQUE` / `KEY` is tolerated, so a
+4.x-era script ports without edits.
+
+#### What each form enforces
+
+| Statement | Enforces | Backed by |
+|---|---|---|
+| `REQUIRE n.p IS UNIQUE` | no two nodes of the type share `p` | a single-occupant unique index |
+| `REQUIRE (n.a, n.b) IS UNIQUE` | no two nodes share the *tuple* | one composite unique index |
+| `REQUIRE n.p IS NOT NULL` | every node of the type has a non-null `p` | the node type's required-field list |
+| `REQUIRE n.p IS NODE KEY` | both of the above, at once | a unique index **plus** a required field |
+
+A constraint declared over several properties constrains the **combination**, not
+each property — `REQUIRE (n.city, n.age) IS UNIQUE` permits many nodes in the
+same city as long as no `(city, age)` pair repeats.
+
+**NULL is exempt**, matching Neo4j: a node is outside a uniqueness constraint
+unless *every* property in the tuple is present and non-null. So many nodes may
+share "no email" while `email` is `UNIQUE`.
+
+`IS NODE KEY` is served as the conjunction of uniqueness and presence, and the
+two halves are installed **atomically** — if the presence half cannot be declared,
+the uniqueness half is rolled back, so a statement that reported failure has
+changed nothing. `DROP CONSTRAINT` on a node key likewise withdraws both halves.
+
+#### Declaring against dirty data fails
+
+A constraint the stored data already violates is **rejected**, and nothing is
+installed — a constraint that silently exempts the rows already present would be
+worse than no constraint at all. The error names an offending value:
+
+```
+cannot declare a UNIQUE constraint on Person.email: the existing data already has
+2 duplicate values (for example 'email' = 'a@b.c'). Deduplicate the node type
+before declaring the constraint.
+```
+
+Deduplicate (or populate, for `IS NOT NULL`) and retry.
+
+#### Constraint names *are* stored
+
+This is the opposite of [index names](#index-names-are-canonical-not-yours), and
+deliberately so: a ported schema script almost always names its constraints and
+drops them by name, and there is no descriptor form to fall back on.
+
+```cypher
+CREATE CONSTRAINT person_email_unique FOR (p:Person) REQUIRE p.email IS UNIQUE;
+SHOW CONSTRAINTS;                        -- name is 'person_email_unique'
+DROP CONSTRAINT person_email_unique;      -- works
+```
+
+A constraint declared **without** a name gets the canonical descriptor
+`Label.property` (or `Label.(a, b)`), and `DROP CONSTRAINT` accepts that spelling
+too, so `SHOW CONSTRAINTS` output pastes straight in. Names are unique per graph:
+reusing one for a different constraint is an error rather than a silent
+re-pointing. Names persist in the `.kgl` file and survive save/load; a name whose
+constraint has been dropped is discarded at save time, so it cannot resurrect.
+
+The registry is a lookup aid, never the source of truth — the constraint lives in
+the enforcement structure — so a missing name can cost addressability but never
+enforcement.
+
+#### `SHOW CONSTRAINTS`
+
+A read, so it works on a read-only graph and is unaffected by a write scope.
+Returns the same rows and columns as `CALL db.constraints()`:
+
+| Column | Value |
+|---|---|
+| `name` | the declared name, or the canonical descriptor when unnamed |
+| `type` | `UNIQUENESS`, `NODE_KEY`, or `NODE_PROPERTY_EXISTENCE` |
+| `entityType` | always `NODE` |
+| `labelsOrTypes` | single-element list holding the node type |
+| `properties` | constrained property names, in declaration order |
+
+A node key is **one** row (`NODE_KEY`), not a uniqueness row plus an existence
+row. Neo4j 5 also returns `id`, `ownedIndex`, and `propertyType`; KGLite has no
+equivalent state — a unique constraint *is* its index rather than owning a
+separate one, and property-type constraints are rejected outright — so they are
+**omitted** rather than filled with invented values. For filtering and projection
+use `CALL db.constraints() YIELD …`; `SHOW CONSTRAINTS` rejects `YIELD` / `WHERE`
+/ `BRIEF` / `VERBOSE` rather than accepting a filter it would ignore.
+
+#### Forms that are rejected
+
+Each fails with a `CypherExecutionError` naming the construct and the route that
+works — never a syntax error, and **never a success that enforces nothing**.
+
+| Statement | Why, and what to use |
+|---|---|
+| `REQUIRE n.p IS :: INTEGER` | No write-time property-type constraint exists. Accepting it would report success while enforcing nothing, so it is refused. `lock_schema()` rejects a write whose value disagrees with the node type's recorded property type; `validate_schema()` audits existing data against `define_schema`'s `field_types` |
+| `REQUIRE n.p IS TYPED STRING` | The same thing, spelled the Neo4j 5 way |
+| `REQUIRE n.id IS UNIQUE` / `IS NODE KEY` | Uniqueness over the identity field — under **any** spelling that resolves to it, `id` itself or the node type's own id column (`person_id`) — is refused. `id` is a `NodeData` field, not an entry in the property map, so the write-path claim is never produced and the constraint would admit duplicates while reporting success. Declare the node type's primary key instead: `define_schema({'nodes': {'Person': {'primary_key': 'id'}}})` probes the per-type id index on every write path, and `MERGE` is the idempotent alternative to `CREATE`. Only `id` is affected — `title`, a column aliased to `title`, and ordinary properties all enforce correctly. `IS NOT NULL` on `id` **is** accepted: it is present by construction, so the requirement is genuinely satisfied |
+| `FOR ()-[r:T]-() REQUIRE r.p IS UNIQUE` | KGLite constrains node properties only |
+| `REQUIRE …` with no properties | Nothing to constrain |
+| `CREATE CONSTRAINT <name> …` reusing a live name | Names are unique per graph; drop the existing one or choose another name |
+
+`IS :: TYPE` being refused rather than accepted is the single most important
+decision in this surface. A `CREATE CONSTRAINT` that returns cleanly is a promise
+users build data-integrity assumptions on; keeping that promise honest is worth
+an error.
+
+#### Guards
+
+Schema is graph state, so `CREATE CONSTRAINT` / `DROP CONSTRAINT` are
+**mutations**: blocked on a read-only graph (`read_only(True)`), blocked in a
+read-only transaction, and rolled back with the rest of a failed statement. On a
+schema-locked graph, constraining an undeclared property is rejected — the same
+typo-guard writes get. A constraint belongs to one node type, so
+`write_scope=[...]` applies. A schema command is a standalone statement: it
+cannot follow another clause or appear inside a `CALL { }` body.
+
+`SHOW CONSTRAINTS` is unaffected by all of the above except the standalone rule —
+a write scope restricts mutations, not visibility.
+
+`constraints_added` and `constraints_removed` join `graph.last_mutation_stats`,
+mirroring Neo4j's `constraintsAdded` / `constraintsRemoved` summary counters.
+They count *constraints*, not the structures behind them, so `IS NODE KEY`
+reports 1.
+
+#### One caveat on error types
+
+A constraint violation raised through Cypher arrives as `CypherExecutionError`,
+not as the typed `ConstraintViolationError` that `define_schema` raises. The
+Cypher executor's internal error channel is a string, so the structured violation
+is rendered to text before any binding sees it. The *message* is stable and names
+the constraint, the property, and the offending value — match on that. Enforcement
+is identical either way.
+
 ## Timeseries Functions
 
 Query time-indexed numeric data attached to nodes. All date arguments are strings (`'2020'`, `'2020-2'`, `'2020-2-15'`), and precision is validated against the data's resolution.
@@ -1870,6 +2232,7 @@ below; do not infer absence from this shorter list.
 | Category | Supported |
 |----------|-----------|
 | **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CALL { ... }` (read subqueries — uncorrelated + correlated), `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN`, `PROFILE` |
+| **Schema DDL** | `CREATE INDEX`, `CREATE RANGE INDEX`, `DROP INDEX`, `SHOW INDEXES`, `CREATE CONSTRAINT`, `DROP CONSTRAINT`, `SHOW CONSTRAINTS` — standalone statements; the two `SHOW` forms are reads |
 | **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, abbreviated `-->` / `--` / `<--`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val, key: $param, key: var}`, `p = shortestPath(...)` |
 | **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern WHERE ... }`, `EXISTS(( pattern ))`, inline pattern predicates, `any/all/none/single(x IN list WHERE ...)` |
 | **RETURN** | `n.prop`, `r.prop`, `AS` aliases, `DISTINCT`, arithmetic `+`/`-`/`*`/`/`, string concat `\|\|`, map projections `n {.prop}`, map literals `{k: expr}`, list slicing `[i..j]` |
@@ -1924,7 +2287,7 @@ claimed openCypher-compatible subset.
 | `CALL ... YIELD` | Extension | Namespaced KGLite procedures plus `db.*` discovery procedures |
 | `CALL { ... }` subqueries | Partial | Uncorrelated + correlated (importing `WITH`) read subqueries. v1 excludes writes in the body, unit (no-`RETURN`) subqueries, `UNION` inside the body, and `IN TRANSACTIONS`. See the `CALL { ... }` Subqueries section. |
 | `FOREACH` | Covered | Updating bodies, including nested `FOREACH` |
-| `LOAD CSV` | Unsupported | Use Python, Rust, or blueprint ingestion APIs |
+| `LOAD CSV` | Partial | `LOAD CSV [WITH HEADERS] FROM <source> AS row [FIELDTERMINATOR <sep>]` over `file://` URLs and local paths, leading position only. Streams in batches for row-local pipelines; `http(s)://` and `IN TRANSACTIONS` are not supported. See [LOAD CSV](#load-csv) |
 
 ### Expressions & Operators
 
@@ -2000,5 +2363,8 @@ compatible subset.
 | `SET n:Label` | Supported (adds a secondary label) | Supported | Primary type is immutable; changing it requires node migration/recreation |
 | Storage | In-memory, mmap-backed, or disk CSR | Disk-based | One Cypher engine spans all three embedded storage modes |
 | Transactions | Snapshot isolation + OCC through `Session` / `Transaction` | Full ACID | Native session coordination is binding-independent; direct graph writes are in-place |
-| Indexing | Type, equality, range, composite, and vector indexes through APIs | Schema indexes | Cypher `CREATE INDEX` syntax is unsupported; use Python/Rust APIs |
-| `LOAD CSV` | Not supported | Supported | Python ecosystem (pandas) preferred for data loading |
+| Indexing | Three separate structures — hash equality, composite, B-tree range — plus automatic type indexes and vector indexes | One general `RANGE` index serving equality, range, and ordering | An equality index cannot serve a range predicate, so KGLite exposes the distinction that Neo4j collapses. `CREATE INDEX` / `DROP INDEX` / `SHOW INDEXES` are supported — see [Cypher index DDL](#cypher-index-ddl) for exactly what each statement builds |
+| Index names | Canonical and derived: `Label.property`, `Label.(a,b)` | User-assigned, unique | A name in `CREATE INDEX <name> …` is accepted for script portability but not stored; the persisted `.kgl` index state is a list of `(label, property)` keys |
+| Constraint DDL | `IS UNIQUE`, `IS NOT NULL`, `IS NODE KEY` — enforced on every write path. `IS :: TYPE` rejected | `CREATE CONSTRAINT … IS UNIQUE / IS NOT NULL / IS NODE KEY / IS :: TYPE` | KGLite has no write-time property-type constraint, so `IS :: TYPE` is rejected rather than accepted-and-ignored; use `lock_schema()` or `validate_schema()`. See [Cypher constraint DDL](#cypher-constraint-ddl) |
+| Constraint names | Stored, so `DROP CONSTRAINT <name>` works | User-assigned, unique per database | The opposite decision to index names above: a ported schema script almost always drops constraints by name, and the `.kgl` metadata section is JSON, so the field was free. A constraint declared without a name is addressable by its canonical descriptor |
+| `LOAD CSV` source | Local files only — `file://` URLs and filesystem paths, gated by a per-caller capability | `file://` plus `http(s)://`, gated by an import-directory setting | The engine ships no HTTP client (network dependencies were removed in 0.14.x), so there is nothing to fetch a URL with. Filesystem access is granted per caller: on for in-process use, off for Bolt clients unless the server was started with `--allow-csv-import <DIR>` |

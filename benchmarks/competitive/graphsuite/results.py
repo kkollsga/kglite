@@ -87,7 +87,7 @@ def capture_context(*, origin: str, base_repeats: int) -> dict[str, Any]:
 
 def load(path: Path = RESULTS_PATH) -> dict[str, Any]:
     if path.exists():
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             return json.load(fh)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -102,7 +102,7 @@ def save(data: dict[str, Any], path: Path = RESULTS_PATH) -> None:
     data["schema_version"] = SCHEMA_VERSION
     data["harness"] = {"name": "graphsuite", "version": HARNESS_VERSION}
     data["groups"] = [[g[0], g[1]] for g in GROUPS]
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
 
 
