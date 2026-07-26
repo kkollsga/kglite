@@ -228,6 +228,87 @@ mod maintenance_tests {
         assert_eq!(g.graph_info().node_tombstones, 0);
     }
 
+    /// A vacuum must not change *which backend* the graph has.
+    ///
+    /// It used to assign `GraphBackend::Memory(..)` unconditionally, which
+    /// silently downgraded a mapped graph to heap storage — the user asked for
+    /// mmap-backed columns and quietly stopped getting them after the first
+    /// auto-vacuum.
+    #[test]
+    fn test_vacuum_preserves_the_mapped_backend() {
+        use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+        let mut g = new_dir_graph_in_mode(StorageMode::Mapped, None).unwrap();
+        for i in 0..5 {
+            let data = NodeData::new(
+                Value::Int64(i),
+                Value::String(format!("n{i}")),
+                "Person".to_string(),
+                HashMap::new(),
+                &mut g.interner,
+            );
+            g.graph.add_node(data);
+        }
+        g.graph.remove_node(NodeIndex::new(2));
+        assert!(g.graph.is_mapped());
+
+        let mapping = g.vacuum();
+
+        assert_eq!(mapping.len(), 4, "the rebuild must actually have happened");
+        assert!(g.graph.is_mapped(), "vacuum must not downgrade the backend");
+        assert_eq!(g.graph.node_count(), 4);
+        assert_eq!(g.graph_info().node_tombstones, 0);
+    }
+
+    /// The severe half of the same bug: a vacuum dropped the `Recording`
+    /// wrapper, so a durable graph stopped write-ahead logging for the rest of
+    /// the session — silently, with no error and no way for the caller to
+    /// notice until a crash lost everything since the last checkpoint.
+    #[test]
+    fn test_vacuum_preserves_the_write_capture_wrapper() {
+        use crate::graph::storage::recording::RecordingGraph;
+        let mut g = make_test_graph(5, true);
+        let inner = std::mem::replace(&mut g.graph, GraphBackend::new());
+        g.graph = GraphBackend::Recording(Box::new(RecordingGraph::new(inner)));
+        g.graph.remove_node(NodeIndex::new(2));
+
+        let mapping = g.vacuum();
+        assert_eq!(mapping.len(), 4, "the rebuild must actually have happened");
+        assert!(
+            matches!(g.graph, GraphBackend::Recording(_)),
+            "vacuum must not drop the WAL capture wrapper"
+        );
+
+        // And the wrapper must still be capturing afterwards.
+        let before = g.graph.recorded_ops_len();
+        let data = NodeData::new(
+            Value::Int64(99),
+            Value::String("after".to_string()),
+            "Person".to_string(),
+            HashMap::new(),
+            &mut g.interner,
+        );
+        g.graph.add_node(data);
+        assert!(
+            g.graph.recorded_ops_len() > before,
+            "writes after a vacuum must still be captured"
+        );
+    }
+
+    /// Disk keeps its data in frozen CSR mmap, not a `StableDiGraph`. A
+    /// petgraph-style rebuild there would both lose the disk root and
+    /// materialise the entire graph on the heap — the one thing the backend
+    /// exists to avoid. Disk reclaims space by publishing a new generation.
+    #[test]
+    fn test_vacuum_is_a_noop_on_disk() {
+        use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+        let dir = tempfile::tempdir().unwrap();
+        let mut g = new_dir_graph_in_mode(StorageMode::Disk, Some(dir.path())).unwrap();
+        assert!(g.graph.is_disk());
+
+        assert!(g.vacuum().is_empty());
+        assert!(g.graph.is_disk(), "vacuum must not convert disk to heap");
+    }
+
     #[test]
     fn test_vacuum_compacts_after_deletion() {
         let mut g = make_test_graph(5, true);

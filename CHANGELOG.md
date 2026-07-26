@@ -36,6 +36,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `vacuum()` no longer switches off write-ahead logging.** Compacting a
+  graph rebuilt it into a plain in-memory backend, which discarded whatever the
+  triggering statement had written *and* silently ended crash-safety for the
+  rest of the session — every later mutation went unlogged, with no error. A
+  durable graph with auto-vacuum enabled could therefore lose all work since
+  its last `save()`. Vacuuming now keeps the graph durable, and the log is
+  flushed before the rebuild so no write is left describing a stale position.
+
+  The same rebuild also silently downgraded a `storage="mapped"` graph to plain
+  in-memory storage, so a graph stopped using its file-backed columns after the
+  first vacuum. Mapped graphs now stay mapped. `vacuum()` on a `storage="disk"`
+  graph is now a documented no-op rather than converting it to an in-memory
+  graph — disk reclaims space by writing a new generation, and rebuilding meant
+  loading the whole graph into RAM.
+
 - **Secondary labels are no longer lost on crash recovery in `durable=True`
   mode.** A node's `:Label`s live in an index above the storage layer, so the
   write-ahead log never captured them: after a crash, a recovered node kept

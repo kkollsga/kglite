@@ -230,6 +230,37 @@ impl GraphBackend {
         }
     }
 
+    /// Swap in a rebuilt heap petgraph, **preserving this backend's variant
+    /// and any write-capture wrapper around it**. Returns `false` for `Disk`,
+    /// whose CSR arrays are not a `StableDiGraph` and cannot be replaced this
+    /// way; the caller must treat that as "not rebuilt".
+    ///
+    /// Exists because `DirGraph::vacuum` rebuilds the graph with contiguous
+    /// indices and used to assign `GraphBackend::Memory(...)` unconditionally.
+    /// That silently did two damaging things: it downgraded a `Mapped` graph
+    /// to heap storage, and — worse — it *dropped the `Recording` wrapper*, so
+    /// a durable graph stopped write-ahead logging for the rest of the
+    /// session with no error. Rebuilding through this method keeps both
+    /// properties.
+    ///
+    /// Note the wrapper is preserved but its op buffer is not meaningful
+    /// across a rebuild: buffered ops are keyed by `NodeIndex`, and a vacuum
+    /// remaps every index. Callers must flush the log *before* vacuuming.
+    pub(crate) fn replace_heap_graph(&mut self, new: StableDiGraph<NodeData, EdgeData>) -> bool {
+        match self {
+            GraphBackend::Memory(g) => {
+                *g = MemoryGraph::from_graph(new);
+                true
+            }
+            GraphBackend::Mapped(g) => {
+                *g = MappedGraph::from_graph(new);
+                true
+            }
+            GraphBackend::Recording(rg) => rg.inner_mut().replace_heap_graph(new),
+            GraphBackend::Disk(_) => false,
+        }
+    }
+
     /// Borrow the inner heap `StableDiGraph` for petgraph algorithms
     /// (e.g. `kosaraju_scc`) that require concrete petgraph types.
     /// Disk panics — callers must gate on [`GraphRead::is_disk`].

@@ -304,6 +304,53 @@ def test_labels_survive_checkpoint_then_crash(tmp_path, storage):
     ]
 
 
+# ── vacuum interaction ───────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_durability_survives_an_auto_vacuum(tmp_path, storage):
+    """A vacuum rebuilds the graph with contiguous node indices. It used to
+    replace the backend outright, which dropped the write-capture wrapper: the
+    triggering statement's writes were discarded *and* the graph silently
+    stopped logging for the rest of the session, so everything after it was
+    lost on a crash with no error anywhere.
+
+    The statement below deletes 400 nodes (crossing the auto-vacuum threshold)
+    and creates one, so a buffered index-keyed op coexists with the remap —
+    the exact shape that broke.
+    """
+    p = tmp_path / "app.kgl"
+    g = _open(p, storage)
+    for i in range(400):
+        g.cypher(f"CREATE (:Doomed {{id: {i}}})")
+    g.save()  # checkpoint, so recovery depends only on the WAL below
+    g.set_auto_vacuum(0.3)
+
+    _crash_child(
+        tmp_path,
+        """
+        g = open_durable()
+        g.set_auto_vacuum(0.3)
+        g.cypher(
+            "MATCH (p:Doomed) DETACH DELETE p WITH count(*) AS n "
+            "CREATE (:Survivor {id: 999, name: 'NewOne'}) RETURN n"
+        )
+        # Logging must still be alive after the vacuum, so this is recoverable too.
+        g.cypher("CREATE (:Person {id: 1, name: 'Later'})")
+        """,
+        storage,
+    )
+
+    g = _open(p, storage)
+    assert g.cypher("MATCH (d:Doomed) RETURN count(*) AS c").scalar() == 0, (
+        "the deletions that triggered the vacuum must be recovered"
+    )
+    assert g.cypher("MATCH (s:Survivor) RETURN s.name AS n").scalar() == "NewOne"
+    assert g.cypher("MATCH (p:Person) RETURN p.name AS n").scalar() == "Later", (
+        "the graph must still be logging after a vacuum"
+    )
+
+
 # ── mode gating ──────────────────────────────────────────────────────
 
 

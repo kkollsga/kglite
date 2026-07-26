@@ -1645,8 +1645,21 @@ impl KnowledgeGraph {
                 return Py::new(py, view).map(|v| v.into_any());
             }
 
+            // Durability: append + fsync this mutation's WAL frame. No-op for
+            // non-durable graphs. (The `graph` borrow above has ended;
+            // flush_wal re-borrows self.inner.)
+            //
+            // **Before** the auto-vacuum below, not after: captured ops are
+            // keyed by `NodeIndex` and resolved against current graph state,
+            // and a vacuum rebuilds the graph with contiguous indices. Ops
+            // resolved after a remap describe the wrong nodes or none at all,
+            // so this ordering is a correctness requirement, not a preference.
+            this.flush_wal()
+                .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(e)))?;
+
             // Auto-vacuum + last-mutation stats — pyapi-specific
             // post-mutation bookkeeping.
+            let graph = crate::graph::get_graph_mut(&mut this.inner);
             if let Some(ref stats) = result.stats {
                 if (stats.nodes_deleted > 0 || stats.relationships_deleted > 0)
                     && graph.check_auto_vacuum()
@@ -1655,12 +1668,6 @@ impl KnowledgeGraph {
                 }
                 this.cursor.last_mutation_stats = Some(stats.clone());
             }
-
-            // Durability: append + fsync this mutation's WAL frame before
-            // returning. No-op for non-durable graphs. (The `graph` borrow
-            // above has ended; flush_wal re-borrows self.inner.)
-            this.flush_wal()
-                .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(e)))?;
 
             // Resolve NodeRef values to node titles before Python conversion.
             resolve_noderefs(&this.inner.graph, &mut result.rows);

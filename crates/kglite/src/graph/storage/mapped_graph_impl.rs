@@ -25,6 +25,24 @@ impl MappedGraph {
         }
     }
 
+    /// Wrap an existing petgraph, with every derived index empty.
+    ///
+    /// Safe precisely because all three indexes are *lazy caches* rebuilt on
+    /// first query — the mirror of [`invalidate_type_index`] +
+    /// [`invalidate_property_index`], which is what a mutation does. Used by
+    /// `DirGraph::vacuum`, which rebuilds the petgraph with contiguous
+    /// indices and must land the result back in a `Mapped` backend rather
+    /// than silently downgrading the graph to heap storage.
+    #[inline]
+    pub(crate) fn from_graph(inner: StableDiGraph<NodeData, EdgeData>) -> Self {
+        Self {
+            inner,
+            type_index: RwLock::new(HashMap::new()),
+            property_index: RwLock::new(HashMap::new()),
+            global_property_index: RwLock::new(HashMap::new()),
+        }
+    }
+
     /// Borrow the inner `StableDiGraph`. Shared with [`MemoryGraph`]
     /// for match arms that need the heap backend's petgraph view.
     #[inline]
