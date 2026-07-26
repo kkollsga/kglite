@@ -27,6 +27,8 @@ Domain-specific surfaces — pull them in when your data has the shape:
 | Guide | Read this if… |
 |---|---|
 | {doc}`durable-apps` | …the graph is long-lived state your app reopens across runs. `open()` load-or-create lifecycle, checkpoint-on-close, and crash-safe `durable=True` write-ahead-log writes. |
+| {doc}`derived-index` | …the authoritative copy of your data lives elsewhere — a warehouse, an API, a directory — and the graph is a rebuildable projection you query. Rebuild-and-swap, incremental refresh, carrying embeddings across a rebuild. |
+| {doc}`primary-store` | …the graph *is* the authoritative copy. What holds (statement atomicity, WAL crash safety, snapshot isolation), what is opt-in, and the limits stated plainly. |
 | {doc}`okf` | …your "data" is a markdown knowledge base — an OKF bundle, a Claude memory dir, a skills folder, an Obsidian vault. Frontmatter → nodes, links → typed edges. |
 | {doc}`spatial` | …your nodes have coordinates. R-tree indexing, distance-based filters, GeoJSON I/O. |
 | {doc}`timeseries` | …property values change over time. Snapshot history, valid_at / valid_during temporal filters. |

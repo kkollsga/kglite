@@ -36,6 +36,8 @@ guides/cypher
 guides/mcp-servers
 guides/mcp-skills
 guides/durable-apps
+guides/derived-index
+guides/primary-store
 guides/blueprints
 guides/querying
 guides/traversal-hierarchy

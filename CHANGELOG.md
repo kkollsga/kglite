@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Two documentation guides covering the two ways a kglite graph gets used.
+  `Derived index over another system of record` documents the rebuild-and-swap
+  pattern — incremental refresh and its delete caveat, carrying embeddings
+  across a rebuild, freshness stamps, managed/runtime ownership layers.
+  `KGLite as a primary store: scope and limits` states what holds when the
+  graph is the authoritative copy, what is opt-in, and the limits:
+  single-writer, `primary_key` restricted to `id`, no Cypher DDL, no
+  `LOAD CSV`, no migration framework, and the storage modes that keep the
+  whole-graph write checkpoint.
+
 ### Changed
 
 - Mutating Cypher statements no longer deep-copy the graph to stay atomic. A
