@@ -13,6 +13,7 @@ signal lands deterministically — no timing-dependent skip.
 
 import os
 import signal
+import sys
 import threading
 import time
 
@@ -27,6 +28,19 @@ SCAN_QUERY = "MATCH (a:N) WHERE a.id % 999983 = 1 AND a.id * 2 > 900000000000000
 # Betweenness over a modest connected graph is O(V·E) — reliably seconds, so a
 # SIGINT fired a fraction of a second in always lands mid-run.
 BETWEENNESS_QUERY = "CALL betweenness() YIELD node, score RETURN count(*) AS c"
+
+# `hasattr(signal, "SIGINT")` is NOT a usable guard here: SIGINT *does* exist on
+# Windows, but `os.kill` there honours only CTRL_C_EVENT/CTRL_BREAK_EVENT and
+# calls TerminateProcess for anything else — so the "self-signal" below would
+# kill the pytest process outright, with no failure report. The feature is
+# POSIX-only anyway: `crates/kglite-py/src/util.rs` gates the scoped SIGINT
+# handler on `#[cfg(unix)]` and its `#[cfg(not(unix))]` twin returns no cancel
+# flag at all.
+requires_posix_sigint = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="cooperative Ctrl-C cancellation is #[cfg(unix)]-only "
+    "(crates/kglite-py/src/util.rs); os.kill(SIGINT) would terminate the runner",
+)
 
 
 def _scan_graph(n=3_000_000):
@@ -60,7 +74,7 @@ def test_algorithm_deadline_still_raises():
         g.cypher(BETWEENNESS_QUERY, timeout_ms=1)
 
 
-@pytest.mark.skipif(not hasattr(signal, "SIGINT"), reason="POSIX SIGINT only")
+@requires_posix_sigint
 def test_session_mutation_cancel_is_atomic():
     """A `Session.execute` mutation interrupted by Ctrl-C is atomic: the
     transactional working copy is discarded on abort, so the graph is either
@@ -91,7 +105,7 @@ def test_session_mutation_cancel_is_atomic():
     assert flagged == 0, f"cancelled mutation left partial state: {flagged}/{total} flagged"
 
 
-@pytest.mark.skipif(not hasattr(signal, "SIGINT"), reason="POSIX SIGINT only")
+@requires_posix_sigint
 def test_ctrl_c_interrupts_algorithm():
     """A SIGINT during a long CALL algorithm raises KeyboardInterrupt, and the
     previous (Python) SIGINT handler is restored afterwards."""

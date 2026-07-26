@@ -35,6 +35,18 @@ PYBIN = sys.executable
 #: are refused rather than silently non-durable.
 DURABLE_STORAGE_MODES = ("memory", "mapped")
 
+#: ``signal.SIGKILL`` does not exist on Windows, so both the child script's
+#: ``os.kill(os.getpid(), signal.SIGKILL)`` and the parent's
+#: ``returncode == -signal.SIGKILL`` raise ``AttributeError`` at call time.
+#: Skip rather than substitute a catchable signal: these tests are the
+#: load-bearing evidence for the durability guarantee, and one that degrades
+#: into a graceful-shutdown test is worse than one that does not run.
+requires_sigkill = pytest.mark.skipif(
+    not hasattr(signal, "SIGKILL"),
+    reason="SIGKILL is POSIX-only; this is a crash test and must not degrade "
+    "into a graceful-shutdown test on Windows",
+)
+
 
 def _open_kwargs(storage: str) -> str:
     """``kglite.open`` kwargs, as source text for a child script."""
@@ -119,6 +131,7 @@ def test_durable_create_survives_hard_crash(tmp_path, storage):
     assert names == ["Alice", "Bob"]
 
 
+@requires_sigkill
 @pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
 def test_durable_create_survives_sigkill(tmp_path, storage):
     """The same recovery guarantee under a real, uncatchable ``SIGKILL``."""
@@ -142,6 +155,7 @@ def test_durable_create_survives_sigkill(tmp_path, storage):
     ]
 
 
+@requires_sigkill
 @pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
 def test_rolled_back_statement_is_absent_after_crash(tmp_path, storage):
     """The other half of the contract: recovery must not invent state.
