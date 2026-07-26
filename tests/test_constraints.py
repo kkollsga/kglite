@@ -26,6 +26,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+import kglite
 from kglite import KnowledgeGraph
 
 MODES = ("memory", "mapped", "disk")
@@ -230,9 +231,9 @@ def test_unique_constraint_survives_save_and_load(tmp_path):
     kg = KnowledgeGraph()
     kg.define_schema({"nodes": {"Person": {"unique": [["email"]]}}})
     kg.cypher("CREATE (:Person {id: 1, email: 'a@b.c'})")
-    kg.save_graph(path)
+    kg.save(path)
 
-    reloaded = KnowledgeGraph.load_file(path)
+    reloaded = kglite.load(path)
     with pytest.raises(Exception, match=UNIQUE_ERROR):
         reloaded.cypher("CREATE (:Person {id: 2, email: 'a@b.c'})")
     assert _count(reloaded, "Person") == 1
@@ -245,9 +246,9 @@ def test_old_graph_without_constraints_still_loads(tmp_path):
     kg = KnowledgeGraph()
     kg.cypher("CREATE (:Person {id: 1, email: 'a@b.c'})")
     kg.cypher("CREATE (:Person {id: 2, email: 'a@b.c'})")
-    kg.save_graph(path)
+    kg.save(path)
 
-    reloaded = KnowledgeGraph.load_file(path)
+    reloaded = kglite.load(path)
     assert _count(reloaded, "Person") == 2
 
 
@@ -338,7 +339,7 @@ def test_edge_vivification_may_create_an_incomplete_stub(mode, tmp_path):
     kg.define_schema({"nodes": {"Person": {"required": ["email"]}}})
     kg.add_nodes(pd.DataFrame({"id": [1], "email": ["a@b.c"]}), "Person", "id")
     edges = pd.DataFrame({"src": [1], "dst": [99]})
-    kg.add_connections(edges, "Person", "src", "Person", "dst", "KNOWS")
+    kg.add_connections(edges, "KNOWS", "Person", "src", "Person", "dst")
     # id 99 was vivified as a stub despite lacking the required property.
     assert _count(kg, "Person") == 2
 
@@ -350,7 +351,7 @@ def test_promoting_a_stub_without_the_required_property_is_rejected(mode, tmp_pa
     kg = _fresh(mode, tmp_path)
     kg.define_schema({"nodes": {"Person": {"required": ["email"]}}})
     kg.add_nodes(pd.DataFrame({"id": [1], "email": ["a@b.c"]}), "Person", "id")
-    kg.add_connections(pd.DataFrame({"src": [1], "dst": [99]}), "Person", "src", "Person", "dst", "KNOWS")
+    kg.add_connections(pd.DataFrame({"src": [1], "dst": [99]}), "KNOWS", "Person", "src", "Person", "dst")
     with pytest.raises(Exception, match=NOT_NULL_ERROR):
         kg.add_nodes(pd.DataFrame({"id": [99], "name": ["late"]}), "Person", "id")
 
@@ -360,7 +361,7 @@ def test_promoting_a_stub_with_the_required_property_succeeds(mode, tmp_path):
     kg = _fresh(mode, tmp_path)
     kg.define_schema({"nodes": {"Person": {"required": ["email"]}}})
     kg.add_nodes(pd.DataFrame({"id": [1], "email": ["a@b.c"]}), "Person", "id")
-    kg.add_connections(pd.DataFrame({"src": [1], "dst": [99]}), "Person", "src", "Person", "dst", "KNOWS")
+    kg.add_connections(pd.DataFrame({"src": [1], "dst": [99]}), "KNOWS", "Person", "src", "Person", "dst")
     kg.add_nodes(pd.DataFrame({"id": [99], "email": ["late@b.c"]}), "Person", "id")
     assert _count(kg, "Person") == 2
 

@@ -1938,6 +1938,24 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
     ("set_with_filter", "MATCH (p:Person) WHERE p.age > 30 SET p.bucket = 'old' RETURN count(p) AS n"),
     ("detach_delete", "MATCH (p:Person {person_id: 3}) DETACH DELETE p"),
     ("remove_property", "MATCH (p:Person {person_id: 1}) REMOVE p.name RETURN p.person_id AS pid"),
+    # Constraint-enforcement write shapes. The planner must not reorder or fuse
+    # these into a form that skips the pre-write constraint gate, and the gate
+    # itself must not change a *conforming* write's result. Each shape here is
+    # one the gate inspects: a CREATE whose properties it reads, a SET that
+    # vacates and re-claims a unique tuple, and a REMOVE of an unconstrained
+    # property on a type that carries a constraint.
+    (
+        "create_node_under_unique_constraint",
+        "CREATE (p:Person {person_id: 101, name: 'Fresh', age: 20}) RETURN p.person_id AS pid, p.name AS name",
+    ),
+    (
+        "set_moves_value_then_frees_it",
+        "MATCH (p:Person {person_id: 1}) SET p.name = 'Moved' RETURN p.name AS name",
+    ),
+    (
+        "remove_unconstrained_property_on_constrained_type",
+        "MATCH (p:Person {person_id: 2}) REMOVE p.age RETURN p.person_id AS pid",
+    ),
     (
         "merge_create",
         "MERGE (p:Person {person_id: 100}) ON CREATE SET p.age = 1 RETURN p.person_id AS pid, p.age AS age",

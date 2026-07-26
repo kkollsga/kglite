@@ -449,7 +449,11 @@ impl DirGraph {
                 }
             }
         }
-        names.extend(self.required_fields_for(node_type).iter().cloned());
+        names.extend(
+            self.required_property_names(node_type)
+                .into_iter()
+                .map(str::to_string),
+        );
         // The provisional marker decides whether NOT NULL applies at all, so it
         // has to be readable by the same composed map.
         if !names.is_empty() {
@@ -498,11 +502,37 @@ impl DirGraph {
             .unwrap_or(&[])
     }
 
-    /// Whether `node_type` declares any required field. The write-path fast-out:
-    /// two `Option` hops and a length check, no allocation.
+    /// Whether `node_type` requires any property to be present. The write-path
+    /// fast-out: a few `Option` hops, no allocation.
+    ///
+    /// True for a declared `primary_key` as well as for `required_fields`, since
+    /// a primary key is unique **and** present (NODE KEY). A key on `id` does not
+    /// count: `id` is a `NodeData` field that always exists.
     #[inline]
     pub fn has_required_fields(&self, node_type: &str) -> bool {
-        !self.required_fields_for(node_type).is_empty()
+        if !self.required_fields_for(node_type).is_empty() {
+            return true;
+        }
+        matches!(self.primary_key_for(node_type), Some(pk) if pk != "id")
+    }
+
+    /// Every property `node_type` requires to be present: the declared
+    /// `required_fields` plus a non-`id` primary key. Borrow-free so the caller
+    /// can hold `&self` while reading values.
+    fn required_property_names(&self, node_type: &str) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .required_fields_for(node_type)
+            .iter()
+            .map(String::as_str)
+            .collect();
+        // A primary key is required by definition. Skip `id` — it is a
+        // `NodeData` field, present by construction.
+        if let Some(pk) = self.primary_key_for(node_type) {
+            if pk != "id" && !names.contains(&pk) {
+                names.push(pk);
+            }
+        }
+        names
     }
 
     /// Reject a write that leaves a declared-required property absent or null.
@@ -553,7 +583,7 @@ impl DirGraph {
     where
         F: Fn(&str) -> Option<Value>,
     {
-        let required = self.required_fields_for(node_type);
+        let required = self.required_property_names(node_type);
         if required.is_empty() {
             return Ok(());
         }
@@ -561,7 +591,7 @@ impl DirGraph {
             return Ok(());
         }
         for property in required {
-            if matches!(property.as_str(), "id" | "title" | "type") {
+            if matches!(property, "id" | "title" | "type") {
                 continue;
             }
             match read(property) {
