@@ -11,7 +11,6 @@ Usage (standalone — not part of normal test suite):
 
 import argparse
 import os
-import resource
 import shutil
 import sys
 import tempfile
@@ -22,17 +21,9 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import kglite  # noqa: E402
+from tests.conftest import rss_mb  # noqa: E402
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-
-def rss_mb():
-    """Current RSS in MB (macOS / Linux)."""
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    # ru_maxrss is in bytes on macOS, KB on Linux
-    if sys.platform == "darwin":
-        return usage.ru_maxrss / (1024 * 1024)
-    return usage.ru_maxrss / 1024
 
 
 def fmt_time(seconds):

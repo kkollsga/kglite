@@ -38,22 +38,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import kglite  # noqa: E402
 
-try:
-    import psutil
-
-    _proc = psutil.Process()
-
-    def rss_mb():
-        return _proc.memory_info().rss / (1024 * 1024)
-except ImportError:
-    import resource
-
-    def rss_mb():
-        # macOS: ru_maxrss in bytes; Linux: KB.
-        usage = resource.getrusage(resource.RUSAGE_SELF)
-        if sys.platform == "darwin":
-            return usage.ru_maxrss / (1024 * 1024)
-        return usage.ru_maxrss / 1024
+from tests.conftest import rss_mb  # noqa: E402
 
 
 def fmt_time(s):

@@ -1,8 +1,10 @@
 """Shared fixtures for kglite test suite."""
 
+import importlib.util
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import time
 
 import pandas as pd
@@ -45,13 +47,41 @@ def workspace_binary(name: str) -> Path:
     Falls back to the (non-existent) release path when neither profile has
     been built, so callers can keep using `.exists()` and print a canonical
     location in skip messages.
+
+    `name` is the bare crate name; the platform executable suffix is appended
+    here. Without it every `.exists()` is False on Windows and `binary_skip_reason`
+    reports "not built" immediately after a successful build, silently skipping
+    every binary-backed suite.
     """
-    release = _REPO_ROOT / "target" / "release" / name
-    debug = _REPO_ROOT / "target" / "debug" / name
+    exe = name + (".exe" if sys.platform == "win32" else "")
+    release = _REPO_ROOT / "target" / "release" / exe
+    debug = _REPO_ROOT / "target" / "debug" / exe
     candidates = [path for path in (release, debug) if path.exists()]
     if not candidates:
         return release
     return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def rss_mb() -> float:
+    """Current resident set size of this process, in MB.
+
+    `psutil` is the portable route and reports *current* RSS directly. The
+    `resource.getrusage` fallback exists only for environments without psutil:
+    it is POSIX-only (there is no `resource` module on Windows) and reports
+    *peak* RSS, in bytes on macOS but kilobytes on Linux. Tests that
+    specifically need the peak must call `getrusage` themselves and gate on
+    the platform — see `tests/test_phase4_parity.py`.
+    """
+    if importlib.util.find_spec("psutil") is not None:
+        import psutil
+
+        return psutil.Process().memory_info().rss / (1024 * 1024)
+    if importlib.util.find_spec("resource") is None:
+        raise RuntimeError("RSS measurement needs psutil on this platform (no `resource` module)")
+    import resource
+
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    return usage.ru_maxrss / (1024 * 1024) if sys.platform == "darwin" else usage.ru_maxrss / 1024
 
 
 def binary_skip_reason(name: str, binary: Path, build_hint: str) -> str | None:
