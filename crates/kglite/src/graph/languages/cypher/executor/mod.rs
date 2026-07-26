@@ -773,6 +773,9 @@ impl<'a> CypherExecutor<'a> {
             Clause::Schema(SchemaCommand::ShowIndexes) => {
                 Ok(schema_ddl::show_indexes_result_set(self.graph))
             }
+            Clause::Schema(SchemaCommand::Constraint(ConstraintCommand::Show)) => {
+                Ok(schema_ddl::show_constraints_result_set(self.graph))
+            }
             Clause::Create(_)
             | Clause::Set(_)
             | Clause::Delete(_)

@@ -209,7 +209,7 @@ impl DirGraph {
     /// there is only one primary-key slot per type, so a node key declared
     /// through DDL is not the primary key and would otherwise report as a plain
     /// `UNIQUE` violation.
-    fn unique_kind_for(&self, node_type: &str, properties: &[String]) -> ConstraintKind {
+    pub(crate) fn unique_kind_for(&self, node_type: &str, properties: &[String]) -> ConstraintKind {
         if matches!(self.primary_key_for(node_type), Some(pk) if properties.len() == 1 && properties[0] == pk)
         {
             return ConstraintKind::NodeKey;

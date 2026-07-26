@@ -271,10 +271,23 @@ impl CypherParser {
         // silently ignoring the filter and returning every row — keeps the
         // failure honest, and `CALL db.indexes()` already accepts YIELD.
         if self.has_tokens() && !self.check(&CypherToken::Semicolon) {
+            // Point at the procedure that lists the *same* objects. Naming
+            // `db.indexes()` for `SHOW CONSTRAINTS` would send the reader to a
+            // listing of the wrong thing.
+            let (procedure, columns) = if noun.starts_with("INDEX") {
+                (
+                    "db.indexes()",
+                    "name, type, entityType, labelsOrTypes, properties, state",
+                )
+            } else {
+                (
+                    "db.constraints()",
+                    "name, type, entityType, labelsOrTypes, properties",
+                )
+            };
             return Err(format!(
                 "SHOW {noun} does not support YIELD / WHERE / BRIEF / VERBOSE modifiers; \
-                 use `CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, \
-                 properties, state` for filtering and projection"
+                 use `CALL {procedure} YIELD {columns}` for filtering and projection"
             ));
         }
         Ok(Clause::Schema(command))
@@ -920,6 +933,16 @@ mod tests {
     fn show_indexes_modifiers_point_at_db_indexes() {
         let err = parse_error("SHOW INDEXES YIELD name");
         assert!(err.contains("db.indexes()"), "got: {err}");
+    }
+
+    /// The rejection must name the procedure that lists the *same* objects.
+    /// Pointing a `SHOW CONSTRAINTS` user at `db.indexes()` sends them to a
+    /// listing of the wrong thing.
+    #[test]
+    fn show_constraints_modifiers_point_at_db_constraints() {
+        let err = parse_error("SHOW CONSTRAINTS YIELD name");
+        assert!(err.contains("db.constraints()"), "got: {err}");
+        assert!(!err.contains("db.indexes()"), "got: {err}");
     }
 
     #[test]

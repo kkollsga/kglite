@@ -1922,6 +1922,8 @@ impl KnowledgeGraph {
                 dict.set_item("properties_removed", stats.properties_removed)?;
                 dict.set_item("indexes_added", stats.indexes_added)?;
                 dict.set_item("indexes_removed", stats.indexes_removed)?;
+                dict.set_item("constraints_added", stats.constraints_added)?;
+                dict.set_item("constraints_removed", stats.constraints_removed)?;
                 Ok(dict.into())
             }
             None => Ok(py.None()),

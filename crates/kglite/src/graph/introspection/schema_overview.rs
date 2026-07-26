@@ -1,6 +1,7 @@
 //! Schema / property / neighbors / sample / join-candidate computation.
 
 use crate::datatypes::values::Value;
+use crate::graph::constraints::ConstraintKind;
 use crate::graph::schema::{DirGraph, InternedKey, NodeData};
 use crate::graph::storage::GraphRead;
 use petgraph::Direction;
@@ -488,6 +489,102 @@ pub(crate) fn collect_indexes_structured(graph: &DirGraph) -> Vec<IndexInfo> {
             .then_with(|| (a.kind as u8).cmp(&(b.kind as u8)))
     });
     out
+}
+
+/// One constraint entry surfaced by `SHOW CONSTRAINTS` / `CALL db.constraints()`.
+///
+/// Field shape mirrors Neo4j's `SHOW CONSTRAINTS` minimal subset:
+/// `name, type, entityType, labelsOrTypes, properties`. Neo4j also returns
+/// `id`, `ownedIndex`, and `propertyType`; KGLite has no equivalent state (a
+/// unique constraint *is* its index rather than owning a separate one, and
+/// property-type constraints are not served at all), so they are omitted rather
+/// than filled with invented values. Documented in CYPHER.md.
+#[derive(Debug, Clone)]
+pub(crate) struct ConstraintInfo {
+    /// The name its author gave it, or the canonical `Label.property` /
+    /// `Label.(a, b)` descriptor when it was declared without one.
+    pub name: String,
+    pub kind: ConstraintKind,
+    /// Always `"NODE"` — KGLite constrains node properties only.
+    pub entity_type: &'static str,
+    pub labels_or_types: Vec<String>,
+    /// Constrained property names, in declaration order.
+    pub properties: Vec<String>,
+}
+
+impl ConstraintInfo {
+    /// Neo4j-compatible `type` column value, using Neo4j 5's `ConstraintType`
+    /// spellings so a ported script's result handling reads unchanged.
+    pub(crate) fn neo4j_type(&self) -> &'static str {
+        match self.kind {
+            ConstraintKind::Unique => "UNIQUENESS",
+            ConstraintKind::NodeKey => "NODE_KEY",
+            ConstraintKind::NotNull => "NODE_PROPERTY_EXISTENCE",
+        }
+    }
+}
+
+/// Every declared constraint on the graph, in deterministic order.
+///
+/// Single source of truth for `SHOW CONSTRAINTS` and `CALL db.constraints()`,
+/// the same one-collector/two-surfaces arrangement
+/// [`collect_indexes_structured`] gives the index listings.
+///
+/// A unique constraint reports as `NODE_KEY` when every property in its tuple is
+/// also required — that is what a node key is — and the presence half is then
+/// *not* listed again as a separate `NODE_PROPERTY_EXISTENCE` row, matching
+/// Neo4j, where a node key is one constraint rather than two.
+pub(crate) fn collect_constraints_structured(graph: &DirGraph) -> Vec<ConstraintInfo> {
+    let mut out: Vec<ConstraintInfo> = Vec::new();
+    // Properties already accounted for by a NODE_KEY row, so the presence pass
+    // below does not report them twice.
+    let mut covered: HashSet<(String, String)> = HashSet::new();
+
+    for (node_type, properties) in graph.list_unique_constraints() {
+        let kind = graph.unique_kind_for(&node_type, &properties);
+        if kind == ConstraintKind::NodeKey {
+            for property in &properties {
+                covered.insert((node_type.clone(), property.clone()));
+            }
+        }
+        out.push(ConstraintInfo {
+            name: constraint_name(graph, &node_type, &properties),
+            kind,
+            entity_type: "NODE",
+            labels_or_types: vec![node_type.clone()],
+            properties,
+        });
+    }
+
+    for (node_type, property) in graph.list_not_null_constraints() {
+        if covered.contains(&(node_type.clone(), property.clone())) {
+            continue;
+        }
+        let properties = vec![property];
+        out.push(ConstraintInfo {
+            name: constraint_name(graph, &node_type, &properties),
+            kind: ConstraintKind::NotNull,
+            entity_type: "NODE",
+            labels_or_types: vec![node_type.clone()],
+            properties,
+        });
+    }
+
+    out.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.neo4j_type().cmp(b.neo4j_type()))
+    });
+    out
+}
+
+/// The author's name for a constraint when one was registered, else the
+/// canonical descriptor — the same fallback rule index names use.
+fn constraint_name(graph: &DirGraph, node_type: &str, properties: &[String]) -> String {
+    graph
+        .name_for_constraint(node_type, properties)
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::graph::constraints::descriptor(node_type, properties))
 }
 
 /// All connection-type names (Neo4j "relationship types"), sorted alphabetically.

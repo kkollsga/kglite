@@ -355,6 +355,7 @@ impl<'a> CypherExecutor<'a> {
                 "properties",
                 "state",
             ],
+            "db.constraints" => &["name", "type", "entityType", "labelsOrTypes", "properties"],
             // 2026-05-25 broad-scan, Batch 6 — schema introspection
             // procedures. graph_stats: per-graph summary; property_*:
             // per-(label, property) statistics. Use case: an agent
@@ -947,6 +948,11 @@ impl<'a> CypherExecutor<'a> {
                         "name, type, entityType, labelsOrTypes, properties, state",
                     ),
                     (
+                        "db.constraints",
+                        "All declared constraints (UNIQUENESS, NODE_KEY, NODE_PROPERTY_EXISTENCE), sorted by name",
+                        "name, type, entityType, labelsOrTypes, properties",
+                    ),
+                    (
                         "db.propertyKeys",
                         "All property keys declared in the graph (node + relationship), sorted",
                         "propertyKey",
@@ -999,6 +1005,14 @@ impl<'a> CypherExecutor<'a> {
                 &clause.yield_items,
             )?,
             "db.indexes" => super::schema_procedures::execute_schema_procedure(
+                self,
+                &proc_name,
+                &params,
+                &clause.yield_items,
+            )?,
+            // db.constraints() — every declared constraint, one row each. Shares
+            // its collector with `SHOW CONSTRAINTS`.
+            "db.constraints" => super::schema_procedures::execute_schema_procedure(
                 self,
                 &proc_name,
                 &params,
@@ -1734,6 +1748,40 @@ pub(super) fn indexes_to_rows(
                     Value::List(info.properties.iter().cloned().map(Value::String).collect())
                 }
                 "state" => Value::String(info.state.to_string()),
+                _ => continue, // unreachable in practice (validator gate)
+            };
+            row.projected.insert(alias.to_string(), val);
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+/// Project `ConstraintInfo` rows for `db.constraints()`. Sibling of
+/// [`indexes_to_rows`], sharing the collector that backs `SHOW CONSTRAINTS`.
+pub(super) fn constraints_to_rows(
+    infos: &[crate::graph::introspection::schema_overview::ConstraintInfo],
+    yield_items: &[YieldItem],
+) -> Vec<ResultRow> {
+    let mut rows = Vec::with_capacity(infos.len());
+    for info in infos {
+        let mut row = ResultRow::new();
+        for item in yield_items {
+            let alias = item.alias.as_deref().unwrap_or(&item.name);
+            let val = match item.name.as_str() {
+                "name" => Value::String(info.name.clone()),
+                "type" => Value::String(info.neo4j_type().to_string()),
+                "entityType" => Value::String(info.entity_type.to_string()),
+                "labelsOrTypes" => Value::List(
+                    info.labels_or_types
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+                "properties" => {
+                    Value::List(info.properties.iter().cloned().map(Value::String).collect())
+                }
                 _ => continue, // unreachable in practice (validator gate)
             };
             row.projected.insert(alias.to_string(), val);

@@ -1,4 +1,5 @@
-//! Schema DDL execution — `CREATE INDEX`, `DROP INDEX`, `SHOW INDEXES`.
+//! Schema DDL execution — `CREATE`/`DROP INDEX`, `SHOW INDEXES`,
+//! `CREATE`/`DROP CONSTRAINT`, `SHOW CONSTRAINTS`.
 //!
 //! # Taxonomy mapping (the honest version)
 //!
@@ -39,12 +40,44 @@
 //! format. `SHOW INDEXES` therefore reports canonical names, and `DROP INDEX`
 //! expects one. `DROP INDEX FOR (n:L) ON (n.p)` is the KGLite extension that
 //! sidesteps the naming question entirely.
+//!
+//! # Constraint names *are* stored — a deliberate divergence from index names
+//!
+//! Constraints take the opposite decision to indexes above, for two reasons.
+//!
+//! First, the usage pattern differs. A ported Neo4j schema script almost always
+//! names its constraints and drops them by name (`CREATE CONSTRAINT
+//! person_email_unique …; DROP CONSTRAINT person_email_unique`), whereas index
+//! DDL has the `DROP INDEX FOR (n:L) ON (n.p)` descriptor form as a natural
+//! escape hatch. Refusing `DROP CONSTRAINT <name>` would break the dominant
+//! shape, and silently no-opping it would be worse still.
+//!
+//! Second, the cost turned out to be nil. The `.kgl` metadata section is
+//! **JSON**, not postcard (`io/file.rs` writes it with `serde_json`), so a new
+//! `#[serde(default, skip_serializing_if = …)]` field is forward- and
+//! backward-compatible and, being skipped when empty, leaves the golden-digest
+//! fixture byte-identical.
+//!
+//! So `DirGraph::constraint_names` persists `name -> declaration`, and
+//! `SHOW CONSTRAINTS` reports the author's name when there is one, falling back
+//! to the canonical descriptor otherwise. `DROP CONSTRAINT` accepts either
+//! spelling. The registry is never the source of truth — the constraint lives in
+//! the enforcement structure, and `prune_constraint_names` drops any name whose
+//! declaration has gone — so a lost name can degrade addressability but never
+//! enforcement. Bringing index names into line is a possible follow-up now that
+//! the format cost is known; it would change `SHOW INDEXES` output, so it is not
+//! folded in here.
 
 use super::super::ast::*;
 use super::super::result::{MutationStats, ResultRow, ResultSet};
 use crate::datatypes::values::Value;
+use crate::graph::constraints::{
+    descriptor, normalize_properties, ConstraintKind, NamedConstraint,
+};
 use crate::graph::dir_graph::DirGraph;
-use crate::graph::introspection::schema_overview::{collect_indexes_structured, IndexInfo};
+use crate::graph::introspection::schema_overview::{
+    collect_constraints_structured, collect_indexes_structured, ConstraintInfo, IndexInfo,
+};
 
 /// Columns `SHOW INDEXES` projects, in order. Identical to `CALL db.indexes()`
 /// — one collector, one row shape.
@@ -123,6 +156,8 @@ pub(crate) fn execute_schema_mutation(
     let ddl_stats = dispatch_schema_mutation(graph, command)?;
     stats.indexes_added += ddl_stats.indexes_added;
     stats.indexes_removed += ddl_stats.indexes_removed;
+    stats.constraints_added += ddl_stats.constraints_added;
+    stats.constraints_removed += ddl_stats.constraints_removed;
     Ok(())
 }
 
@@ -136,9 +171,16 @@ fn dispatch_schema_mutation(
             Err(unsupported_index_type_message(*index_type))
         }
         SchemaCommand::DropIndex(drop) => execute_drop_index(graph, drop),
-        SchemaCommand::Constraint(command) => Err(unsupported_constraint_message(command)),
-        SchemaCommand::ShowIndexes => Err(
-            "internal: SHOW INDEXES is a read and must not reach the mutation engine".to_string(),
+        SchemaCommand::Constraint(ConstraintCommand::Create(create)) => {
+            execute_create_constraint(graph, create)
+        }
+        SchemaCommand::Constraint(ConstraintCommand::Drop { name, if_exists }) => {
+            execute_drop_constraint(graph, name, *if_exists)
+        }
+        SchemaCommand::ShowIndexes | SchemaCommand::Constraint(ConstraintCommand::Show) => Err(
+            "internal: SHOW INDEXES / SHOW CONSTRAINTS are reads and must not reach the \
+             mutation engine"
+                .to_string(),
         ),
     }
 }
@@ -169,7 +211,7 @@ fn execute_create_index(
     // flag). Indexing an undeclared property would install an index the schema
     // says cannot exist, so the same guard applies here.
     if graph.schema_locked {
-        validate_indexed_properties_declared(graph, &label, &create.properties)?;
+        validate_ddl_properties_declared(graph, &label, &create.properties, DdlPurpose::Index)?;
     }
 
     match create.properties.as_slice() {
@@ -278,18 +320,45 @@ fn reject_empty_disk_index(
     ))
 }
 
-/// A schema-locked graph declares its properties up front; indexing an
-/// undeclared one would contradict the declaration. Mirrors the typo-guard the
-/// planner applies to CREATE properties.
-fn validate_indexed_properties_declared(
+/// Which DDL statement a schema-lock rejection is talking about, so one guard
+/// serves both without either message describing the wrong operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DdlPurpose {
+    Index,
+    Constrain,
+}
+
+impl DdlPurpose {
+    /// What cannot be done to the *type*, and to a *property*, respectively.
+    fn on_type(self) -> &'static str {
+        match self {
+            DdlPurpose::Index => "no index can be created on it",
+            DdlPurpose::Constrain => "no constraint can be declared on it",
+        }
+    }
+
+    fn on_property(self) -> &'static str {
+        match self {
+            DdlPurpose::Index => "it cannot be indexed",
+            DdlPurpose::Constrain => "it cannot be constrained",
+        }
+    }
+}
+
+/// A schema-locked graph declares its properties up front; indexing or
+/// constraining an undeclared one would contradict the declaration. Mirrors the
+/// typo-guard the planner applies to CREATE properties.
+fn validate_ddl_properties_declared(
     graph: &DirGraph,
     label: &str,
     properties: &[String],
+    purpose: DdlPurpose,
 ) -> Result<(), String> {
     let Some(declared) = graph.node_type_metadata.get(label) else {
         return Err(format!(
-            "schema is locked and node type '{label}' is not declared, so no index can be \
-             created on it. Unlock the schema, or declare the type first."
+            "schema is locked and node type '{label}' is not declared, so {}. Unlock the \
+             schema, or declare the type first.",
+            purpose.on_type()
         ));
     };
     for property in properties {
@@ -301,8 +370,8 @@ fn validate_indexed_properties_declared(
         }
         return Err(format!(
             "schema is locked and property '{property}' is not declared on node type \
-             '{label}', so it cannot be indexed. Unlock the schema, or declare the property \
-             first."
+             '{label}', so {}. Unlock the schema, or declare the property first.",
+            purpose.on_property()
         ));
     }
     Ok(())
@@ -486,42 +555,402 @@ fn unsupported_index_type_message(index_type: DdlIndexType) -> String {
     )
 }
 
-/// Constraint DDL is Sprint 4b. Until enforcement lands, every constraint
-/// statement fails with the route that *does* enforce today, so a ported
-/// schema script gets an actionable answer rather than a silent no-op.
-fn unsupported_constraint_message(command: &ConstraintCommand) -> String {
-    match command {
-        ConstraintCommand::Create(create) => {
-            let requirement = create.requirement.keyword();
-            let route = match create.requirement {
-                ConstraintRequirement::Unique | ConstraintRequirement::Key => {
-                    "Uniqueness is enforced today by declaring the property as a node type's \
-                     primary key when the type is created (`add_nodes(df, 'Label', 'id_column')`), \
-                     which rejects duplicates on insert."
-                }
-                ConstraintRequirement::NotNull => {
-                    "Presence is enforced today by locking the schema (`kg.lock_schema()`), which \
-                     validates writes against the declared node-type properties."
-                }
-                ConstraintRequirement::PropertyType(_) => {
-                    "Property types are enforced today by locking the schema \
-                     (`kg.lock_schema()`), which validates written values against the declared \
-                     node-type property types."
-                }
-            };
-            format!("CREATE CONSTRAINT ... {requirement} is not supported yet. {route}")
+// ============================================================================
+// CREATE CONSTRAINT
+// ============================================================================
+
+/// What KGLite will actually install for a parsed `REQUIRE … IS …`.
+///
+/// Deciding this up front — before anything is written — is what keeps the
+/// unsupported forms from partially applying, and keeps the per-requirement
+/// logic in small named strategy functions rather than one branching monolith.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConstraintPlan {
+    /// Uniqueness only, via `DirGraph::create_unique_constraint`.
+    Unique,
+    /// Presence only, via `DirGraph::create_not_null_constraint`.
+    NotNull,
+    /// Both — which is what a node key is.
+    NodeKey,
+}
+
+impl ConstraintPlan {
+    /// The `ConstraintKind` this plan registers under, so a name resolves back
+    /// to the same shape it was declared as.
+    fn kind(self) -> ConstraintKind {
+        match self {
+            ConstraintPlan::Unique => ConstraintKind::Unique,
+            ConstraintPlan::NotNull => ConstraintKind::NotNull,
+            ConstraintPlan::NodeKey => ConstraintKind::NodeKey,
         }
-        ConstraintCommand::Drop { name, .. } => format!(
-            "DROP CONSTRAINT is not supported yet, so there is no constraint '{name}' to drop. \
-             KGLite has no Cypher-managed constraints; see `describe()` for the primary keys and \
-             schema lock currently in force."
+    }
+}
+
+fn execute_create_constraint(
+    graph: &mut DirGraph,
+    create: &CreateConstraint,
+) -> Result<MutationStats, String> {
+    let label = node_label(&create.target, "CREATE CONSTRAINT")?;
+    // A constraint is schema state for one node type, so a session restricted to
+    // a write whitelist may not constrain a type outside it — the same rule
+    // index DDL follows.
+    super::write::enforce_write_scope(graph, &label)?;
+
+    if create.properties.is_empty() {
+        return Err("CREATE CONSTRAINT requires at least one property".to_string());
+    }
+
+    // Reject what cannot be served *before* touching any declaration, so an
+    // unsupported statement is a clean no-op rather than a partial apply.
+    let plan = match &create.requirement {
+        ConstraintRequirement::Unique => ConstraintPlan::Unique,
+        ConstraintRequirement::NotNull => ConstraintPlan::NotNull,
+        ConstraintRequirement::Key => ConstraintPlan::NodeKey,
+        ConstraintRequirement::PropertyType(declared) => {
+            return Err(unsupported_property_type_message(
+                &label,
+                &create.properties,
+                declared,
+            ))
+        }
+    };
+
+    // Schema-locked graphs accept mutations only against the declared schema, so
+    // constraining an undeclared property would install a constraint the schema
+    // says cannot exist. Same guard index DDL applies.
+    if graph.schema_locked {
+        validate_ddl_properties_declared(graph, &label, &create.properties, DdlPurpose::Constrain)?;
+    }
+
+    if let Some(name) = &create.name {
+        reject_name_collision(graph, name, &label, &create.properties)?;
+    }
+
+    if constraint_is_declared(graph, plan, &label, &create.properties) {
+        if create.if_not_exists {
+            return Ok(MutationStats::default());
+        }
+        return Err(format!(
+            "a {} constraint on {} already exists. Add IF NOT EXISTS to make this statement a \
+             no-op, or DROP it first.",
+            plan.kind().keyword(),
+            descriptor(&label, &create.properties)
+        ));
+    }
+
+    install_constraint(graph, plan, &label, &create.properties)?;
+
+    if let Some(name) = &create.name {
+        graph.register_constraint_name(
+            name,
+            NamedConstraint {
+                kind: plan.kind(),
+                node_type: label.clone(),
+                properties: create.properties.clone(),
+            },
+        );
+    }
+    Ok(constraints_added(1))
+}
+
+/// Install `plan` for `(label, properties)`, undoing a partial application if a
+/// later half fails.
+///
+/// A NODE KEY is uniqueness *and* presence: installing one half and reporting
+/// the statement as failed would leave the graph carrying a constraint the user
+/// believes was rejected, so the rollback is part of the contract rather than
+/// tidiness.
+fn install_constraint(
+    graph: &mut DirGraph,
+    plan: ConstraintPlan,
+    label: &str,
+    properties: &[String],
+) -> Result<(), String> {
+    match plan {
+        ConstraintPlan::Unique => declare_unique(graph, label, properties),
+        ConstraintPlan::NotNull => declare_not_null(graph, label, properties, &mut Vec::new()),
+        ConstraintPlan::NodeKey => {
+            declare_unique(graph, label, properties)?;
+            let mut installed: Vec<&String> = Vec::new();
+            if let Err(error) = declare_not_null(graph, label, properties, &mut installed) {
+                for property in installed {
+                    graph.drop_not_null_constraint(label, property);
+                }
+                graph.drop_unique_constraint(label, properties);
+                return Err(error);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn declare_unique(graph: &mut DirGraph, label: &str, properties: &[String]) -> Result<(), String> {
+    let refs: Vec<&str> = properties.iter().map(String::as_str).collect();
+    graph
+        .create_unique_constraint(label, &refs)
+        .map(|_| ())
+        .map_err(|violation| violation.to_string())
+}
+
+/// Declare every property NOT NULL, recording which ones landed so a failed
+/// composite can be unwound.
+///
+/// Neo4j has no composite existence constraint, so `REQUIRE (n.a, n.b) IS NOT
+/// NULL` cannot appear in a ported script; KGLite accepts the spelling and reads
+/// it as "each of these is NOT NULL", which is unambiguous and fully enforced.
+fn declare_not_null<'p>(
+    graph: &mut DirGraph,
+    label: &str,
+    properties: &'p [String],
+    installed: &mut Vec<&'p String>,
+) -> Result<(), String> {
+    for property in properties {
+        graph
+            .create_not_null_constraint(label, property)
+            .map_err(|violation| violation.to_string())?;
+        installed.push(property);
+    }
+    Ok(())
+}
+
+/// Whether the graph already carries everything `plan` would install.
+fn constraint_is_declared(
+    graph: &DirGraph,
+    plan: ConstraintPlan,
+    label: &str,
+    properties: &[String],
+) -> bool {
+    let unique = graph.has_unique_constraint(label, properties);
+    let present = properties
+        .iter()
+        .all(|property| graph.has_not_null_constraint(label, property));
+    match plan {
+        ConstraintPlan::Unique => unique,
+        ConstraintPlan::NotNull => present,
+        ConstraintPlan::NodeKey => unique && present,
+    }
+}
+
+/// Reject reusing a name for a different constraint.
+///
+/// Neo4j requires constraint names to be unique within a database, and silently
+/// re-pointing a name would make `DROP CONSTRAINT <name>` drop something other
+/// than what the reader expects. Re-declaring the *same* constraint under the
+/// same name is fine — that is the idempotent replay case.
+fn reject_name_collision(
+    graph: &DirGraph,
+    name: &str,
+    label: &str,
+    properties: &[String],
+) -> Result<(), String> {
+    let Some(existing) = graph.constraint_by_name(name) else {
+        return Ok(());
+    };
+    let same = existing.node_type == label
+        && normalize_properties(&existing.properties) == normalize_properties(properties);
+    if same {
+        return Ok(());
+    }
+    Err(format!(
+        "a constraint named '{name}' already exists on {}. Constraint names are unique per \
+         graph: drop it first, or choose another name.",
+        descriptor(&existing.node_type, &existing.properties)
+    ))
+}
+
+/// `IS :: <TYPE>` / `IS TYPED <TYPE>`.
+///
+/// KGLite has no write-time property-type constraint to route this to. The
+/// `field_types` map a `define_schema` call accepts is checked only by the
+/// offline `validate_schema()`, and the write-time check a locked schema
+/// performs reads `node_type_metadata` — the observed per-type property types —
+/// not `field_types`. Declaring one here would therefore report success while
+/// enforcing nothing on the next write, which is the one outcome worse than an
+/// error: users build data-integrity assumptions on a constraint that reported
+/// success.
+fn unsupported_property_type_message(label: &str, properties: &[String], declared: &str) -> String {
+    format!(
+        "CREATE CONSTRAINT ... IS :: {declared} is not supported: KGLite has no write-time \
+         property-type constraint, so accepting this would report success while enforcing \
+         nothing. Two routes do enforce types: `kg.lock_schema()` rejects a write whose value \
+         disagrees with the node type's recorded property type, and \
+         `kg.define_schema({{'nodes': {{'{label}': {{'field_types': {{'{}': '{}'}}}}}}}})` plus \
+         `kg.validate_schema()` reports every existing violation. Use \
+         `REQUIRE {}{} IS NOT NULL` if presence, rather than type, is what you need.",
+        properties.first().map(String::as_str).unwrap_or("prop"),
+        declared.to_lowercase(),
+        if properties.len() == 1 { "n." } else { "(n." },
+        if properties.len() == 1 {
+            properties.join("")
+        } else {
+            format!("{})", properties.join(", n."))
+        },
+    )
+}
+
+// ============================================================================
+// DROP CONSTRAINT
+// ============================================================================
+
+/// `DROP CONSTRAINT <name> [IF EXISTS]`.
+///
+/// Resolves `<name>` through the persisted name registry first, then falls back
+/// to the canonical `Label.property` descriptor, so both the author's name and
+/// the spelling `SHOW CONSTRAINTS` prints for an unnamed constraint work.
+fn execute_drop_constraint(
+    graph: &mut DirGraph,
+    name: &str,
+    if_exists: bool,
+) -> Result<MutationStats, String> {
+    let Some((kind, label, properties)) = resolve_constraint_name(graph, name) else {
+        if if_exists {
+            return Ok(MutationStats::default());
+        }
+        return Err(unknown_constraint_message(graph, name));
+    };
+
+    super::write::enforce_write_scope(graph, &label)?;
+
+    // Withdraw exactly what the declaration installed, so dropping a NODE KEY
+    // does not leave its presence half quietly enforced.
+    let mut dropped = false;
+    if matches!(kind, ConstraintKind::Unique | ConstraintKind::NodeKey) {
+        dropped |= graph.drop_unique_constraint(&label, &properties);
+    }
+    if matches!(kind, ConstraintKind::NotNull | ConstraintKind::NodeKey) {
+        for property in &properties {
+            dropped |= graph.drop_not_null_constraint(&label, property);
+        }
+    }
+    graph.forget_constraint_name(name);
+
+    if !dropped && !if_exists {
+        return Err(unknown_constraint_message(graph, name));
+    }
+    Ok(constraints_removed(usize::from(dropped)))
+}
+
+/// Map a `DROP CONSTRAINT` name onto the declaration it identifies.
+///
+/// Two spellings resolve, in order: a name registered by
+/// `CREATE CONSTRAINT <name> …`, then the canonical descriptor
+/// `SHOW CONSTRAINTS` reports for a constraint declared without one. Matching
+/// against the collector keeps name spelling owned by
+/// `collect_constraints_structured` rather than re-derived here.
+fn resolve_constraint_name(
+    graph: &DirGraph,
+    name: &str,
+) -> Option<(ConstraintKind, String, Vec<String>)> {
+    if let Some(declared) = graph.constraint_by_name(name) {
+        return Some((
+            declared.kind,
+            declared.node_type.clone(),
+            declared.properties.clone(),
+        ));
+    }
+    collect_constraints_structured(graph)
+        .into_iter()
+        .find(|info| info.name == name)
+        .map(|info| {
+            (
+                info.kind,
+                info.labels_or_types
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| info.name.clone()),
+                info.properties,
+            )
+        })
+}
+
+fn unknown_constraint_message(graph: &DirGraph, name: &str) -> String {
+    let declared: Vec<String> = collect_constraints_structured(graph)
+        .iter()
+        .map(|info| info.name.clone())
+        .collect();
+    let available = if declared.is_empty() {
+        "no constraints are declared".to_string()
+    } else {
+        format!("declared: {}", declared.join(", "))
+    };
+    format!(
+        "no constraint named '{name}' exists. A constraint is addressable by the name given to \
+         CREATE CONSTRAINT, or — when it was declared without one — by its canonical descriptor \
+         ('Label.property', 'Label.(a, b)'); {available}. Run `SHOW CONSTRAINTS` to list them."
+    )
+}
+
+// ============================================================================
+// SHOW CONSTRAINTS
+// ============================================================================
+
+/// Columns `SHOW CONSTRAINTS` projects, in order. Identical to
+/// `CALL db.constraints()` — one collector, one row shape.
+///
+/// Neo4j 5's `SHOW CONSTRAINTS` also returns `id`, `ownedIndex`, and
+/// `propertyType`. KGLite has no equivalent state for any of them — a unique
+/// constraint *is* its index rather than owning a separate one, and
+/// property-type constraints are rejected outright — so they are omitted rather
+/// than filled with invented values. Documented in CYPHER.md.
+pub(crate) const SHOW_CONSTRAINTS_COLUMNS: &[&str] =
+    &["name", "type", "entityType", "labelsOrTypes", "properties"];
+
+/// `SHOW CONSTRAINTS` — a read, exactly as `SHOW INDEXES` is. Rows come from the
+/// same collector that backs `CALL db.constraints()`, so the two surfaces can
+/// never drift.
+pub(crate) fn show_constraints_result_set(graph: &DirGraph) -> ResultSet {
+    let mut out = ResultSet::new();
+    out.rows = collect_constraints_structured(graph)
+        .iter()
+        .map(constraint_info_to_row)
+        .collect();
+    out.columns = SHOW_CONSTRAINTS_COLUMNS
+        .iter()
+        .map(|c| c.to_string())
+        .collect();
+    out
+}
+
+fn constraint_info_to_row(info: &ConstraintInfo) -> ResultRow {
+    let mut row = ResultRow::new();
+    row.projected
+        .insert("name".to_string(), Value::String(info.name.clone()));
+    row.projected.insert(
+        "type".to_string(),
+        Value::String(info.neo4j_type().to_string()),
+    );
+    row.projected.insert(
+        "entityType".to_string(),
+        Value::String(info.entity_type.to_string()),
+    );
+    row.projected.insert(
+        "labelsOrTypes".to_string(),
+        Value::List(
+            info.labels_or_types
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
         ),
-        ConstraintCommand::Show => {
-            "SHOW CONSTRAINTS is not supported yet. KGLite has no Cypher-managed constraints; \
-             the enforcement in force today — node-type primary keys and the schema lock — is \
-             reported by `describe()`."
-                .to_string()
-        }
+    );
+    row.projected.insert(
+        "properties".to_string(),
+        Value::List(info.properties.iter().cloned().map(Value::String).collect()),
+    );
+    row
+}
+
+fn constraints_added(count: usize) -> MutationStats {
+    MutationStats {
+        constraints_added: count,
+        ..MutationStats::default()
+    }
+}
+
+fn constraints_removed(count: usize) -> MutationStats {
+    MutationStats {
+        constraints_removed: count,
+        ..MutationStats::default()
     }
 }
 
@@ -781,36 +1210,410 @@ mod tests {
     }
 
     #[test]
-    fn constraint_ddl_points_at_the_enforcement_that_exists_today() {
-        let mut graph = person_graph();
-        for (query, needle) in [
-            (
-                "CREATE CONSTRAINT c FOR (p:Person) REQUIRE p.email IS UNIQUE",
-                "primary key",
-            ),
-            (
-                "CREATE CONSTRAINT c FOR (p:Person) REQUIRE p.email IS NOT NULL",
-                "lock_schema",
-            ),
-            ("DROP CONSTRAINT c", "no Cypher-managed constraints"),
-            ("SHOW CONSTRAINTS", "describe()"),
-        ] {
-            let err = run_err(&mut graph, query);
-            assert!(err.contains("not supported yet"), "for `{query}`: {err}");
-            assert!(err.contains(needle), "for `{query}`: {err}");
-        }
-    }
-
-    #[test]
     fn index_ddl_classifies_as_a_mutation() {
         for query in [
             "CREATE INDEX FOR (n:Person) ON (n.age)",
             "DROP INDEX `Person.age`",
             "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE",
+            "DROP CONSTRAINT person_email",
         ] {
             let parsed = parse_cypher(query).unwrap();
             assert!(is_mutation_query(&parsed), "`{query}` must be a mutation");
         }
+    }
+
+    // ── CREATE CONSTRAINT ────────────────────────────────────────────────
+
+    #[test]
+    fn unique_constraint_ddl_routes_to_the_enforcement_api() {
+        let mut graph = person_graph();
+        let stats = run(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        )
+        .unwrap();
+        assert_eq!(stats.constraints_added, 1);
+        assert!(graph.has_unique_constraint("Person", &["name".to_string()]));
+
+        // A duplicate write is now rejected by the constraint, which is the
+        // whole point of routing the statement here.
+        let err = run_err(
+            &mut graph,
+            "CREATE (p:Person {id: 3, name: 'Alice', age: 1})",
+        );
+        assert!(err.contains("already exists"), "got: {err}");
+    }
+
+    #[test]
+    fn composite_unique_constraint_ddl_declares_one_tuple() {
+        let mut graph = person_graph();
+        let stats = run(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE (p.name, p.age) IS UNIQUE",
+        )
+        .unwrap();
+        assert_eq!(stats.constraints_added, 1);
+        assert!(graph.has_unique_constraint("Person", &["name".to_string(), "age".to_string()]));
+    }
+
+    #[test]
+    fn not_null_constraint_ddl_routes_to_required_fields() {
+        let mut graph = person_graph();
+        let stats = run(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL",
+        )
+        .unwrap();
+        assert_eq!(stats.constraints_added, 1);
+        assert!(graph.has_not_null_constraint("Person", "name"));
+
+        let err = run_err(
+            &mut graph,
+            "MATCH (p:Person) WHERE p.age = 30 REMOVE p.name",
+        );
+        assert!(err.contains("must have the property 'name'"), "got: {err}");
+    }
+
+    /// `IS NODE KEY` is uniqueness *and* presence. Both halves must land, or the
+    /// statement would report success for a weaker constraint than it declared.
+    #[test]
+    fn node_key_ddl_installs_uniqueness_and_presence() {
+        let mut graph = person_graph();
+        let stats = run(
+            &mut graph,
+            "CREATE CONSTRAINT person_key FOR (p:Person) REQUIRE p.name IS NODE KEY",
+        )
+        .unwrap();
+        assert_eq!(stats.constraints_added, 1);
+        assert!(graph.has_unique_constraint("Person", &["name".to_string()]));
+        assert!(graph.has_not_null_constraint("Person", "name"));
+        // And it reports itself as a node key rather than as plain uniqueness.
+        assert_eq!(
+            graph.unique_kind_for("Person", &["name".to_string()]),
+            ConstraintKind::NodeKey
+        );
+    }
+
+    /// A node key whose presence half cannot be installed must leave *nothing*
+    /// behind — a half-applied constraint the user believes was rejected is the
+    /// worst outcome.
+    #[test]
+    fn a_failed_node_key_rolls_back_its_uniqueness_half() {
+        let mut graph = person_graph();
+        // `nickname` is absent from both nodes, so presence cannot be declared,
+        // but uniqueness can (an incomplete tuple is exempt).
+        let err = run_err(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.nickname IS NODE KEY",
+        );
+        assert!(err.contains("cannot declare"), "got: {err}");
+        assert!(
+            !graph.has_unique_constraint("Person", &["nickname".to_string()]),
+            "the uniqueness half must be rolled back"
+        );
+        assert!(!graph.has_not_null_constraint("Person", "nickname"));
+    }
+
+    #[test]
+    fn declaring_a_constraint_the_data_violates_names_the_offending_value() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE (p:Person {id: 3, name: 'Alice', age: 9})",
+        )
+        .unwrap();
+
+        let err = run_err(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        );
+        assert!(err.contains("cannot declare"), "got: {err}");
+        assert!(err.contains("'Alice'"), "got: {err}");
+        assert!(err.contains("Deduplicate"), "got: {err}");
+        assert!(
+            !graph.has_unique_constraint("Person", &["name".to_string()]),
+            "a rejected declaration must install nothing"
+        );
+    }
+
+    #[test]
+    fn duplicate_create_constraint_errors_unless_if_not_exists() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        )
+        .unwrap();
+
+        let err = run_err(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        );
+        assert!(err.contains("already exists"), "got: {err}");
+        assert!(err.contains("IF NOT EXISTS"), "got: {err}");
+
+        let stats = run(
+            &mut graph,
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        )
+        .unwrap();
+        assert_eq!(stats.constraints_added, 0);
+    }
+
+    /// Neo4j requires constraint names to be unique per database, and silently
+    /// re-pointing one would make `DROP CONSTRAINT <name>` drop the wrong thing.
+    #[test]
+    fn reusing_a_name_for_a_different_constraint_is_rejected() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT dup FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        )
+        .unwrap();
+        let err = run_err(
+            &mut graph,
+            "CREATE CONSTRAINT dup FOR (p:Person) REQUIRE p.age IS UNIQUE",
+        );
+        assert!(err.contains("already exists"), "got: {err}");
+        assert!(err.contains("unique per"), "got: {err}");
+        assert!(!graph.has_unique_constraint("Person", &["age".to_string()]));
+    }
+
+    /// `IS :: T` has no write-time enforcement route, so accepting it would
+    /// report success while enforcing nothing.
+    #[test]
+    fn property_type_constraints_are_rejected_with_the_routes_that_do_enforce() {
+        let mut graph = person_graph();
+        for query in [
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS TYPED INTEGER",
+        ] {
+            let err = run_err(&mut graph, query);
+            assert!(err.contains("is not supported"), "for `{query}`: {err}");
+            assert!(err.contains("lock_schema"), "for `{query}`: {err}");
+            assert!(err.contains("validate_schema"), "for `{query}`: {err}");
+            assert!(
+                graph.get_schema().is_none(),
+                "a rejected statement must declare nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn relationship_constraint_is_rejected_by_name() {
+        let mut graph = person_graph();
+        let err = run_err(
+            &mut graph,
+            "CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE",
+        );
+        assert!(err.contains("KNOWS"), "got: {err}");
+    }
+
+    #[test]
+    fn schema_lock_rejects_constraining_an_undeclared_property() {
+        let mut graph = person_graph();
+        graph.node_type_metadata.insert(
+            "Person".to_string(),
+            HashMap::from([("age".to_string(), "int".to_string())]),
+        );
+        graph.schema_locked = true;
+
+        let err = run_err(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.nickname IS UNIQUE",
+        );
+        assert!(err.contains("schema is locked"), "got: {err}");
+        assert!(err.contains("cannot be constrained"), "got: {err}");
+
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS UNIQUE",
+        )
+        .unwrap();
+        assert!(graph.has_unique_constraint("Person", &["age".to_string()]));
+    }
+
+    // ── DROP CONSTRAINT ──────────────────────────────────────────────────
+
+    /// The dominant ported-script shape: declare under a name, drop by it.
+    #[test]
+    fn drop_constraint_by_its_declared_name() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT person_name_unique FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        )
+        .unwrap();
+
+        let stats = run(&mut graph, "DROP CONSTRAINT person_name_unique").unwrap();
+        assert_eq!(stats.constraints_removed, 1);
+        assert!(!graph.has_unique_constraint("Person", &["name".to_string()]));
+        assert!(graph.constraint_by_name("person_name_unique").is_none());
+    }
+
+    /// A constraint declared without a name is addressable by the descriptor
+    /// `SHOW CONSTRAINTS` prints for it.
+    #[test]
+    fn drop_constraint_by_canonical_descriptor() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        )
+        .unwrap();
+        let stats = run(&mut graph, "DROP CONSTRAINT `Person.name`").unwrap();
+        assert_eq!(stats.constraints_removed, 1);
+        assert!(!graph.has_unique_constraint("Person", &["name".to_string()]));
+    }
+
+    /// Dropping a node key must withdraw *both* halves, or its presence half
+    /// would stay quietly enforced after the user dropped the constraint.
+    #[test]
+    fn dropping_a_node_key_withdraws_both_halves() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT person_key FOR (p:Person) REQUIRE p.name IS NODE KEY",
+        )
+        .unwrap();
+        run(&mut graph, "DROP CONSTRAINT person_key").unwrap();
+
+        assert!(!graph.has_unique_constraint("Person", &["name".to_string()]));
+        assert!(!graph.has_not_null_constraint("Person", "name"));
+    }
+
+    #[test]
+    fn dropping_an_unknown_constraint_lists_what_exists() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        )
+        .unwrap();
+
+        let err = run_err(&mut graph, "DROP CONSTRAINT nope");
+        assert!(err.contains("no constraint named 'nope'"), "got: {err}");
+        assert!(err.contains("Person.name"), "got: {err}");
+        assert!(err.contains("SHOW CONSTRAINTS"), "got: {err}");
+
+        let stats = run(&mut graph, "DROP CONSTRAINT nope IF EXISTS").unwrap();
+        assert_eq!(stats.constraints_removed, 0);
+        assert!(graph.has_unique_constraint("Person", &["name".to_string()]));
+    }
+
+    // ── SHOW CONSTRAINTS ─────────────────────────────────────────────────
+
+    #[test]
+    fn show_constraints_is_a_read_and_projects_the_neo4j_columns() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT person_name_unique FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        )
+        .unwrap();
+
+        let parsed = parse_cypher("SHOW CONSTRAINTS").unwrap();
+        assert!(
+            !is_mutation_query(&parsed),
+            "SHOW CONSTRAINTS must be a read"
+        );
+        let params = HashMap::new();
+        let executor = super::super::CypherExecutor::with_params(&graph, &params, None);
+        let result = executor.execute(&parsed).unwrap();
+        assert_eq!(result.columns, SHOW_CONSTRAINTS_COLUMNS);
+        assert_eq!(result.rows.len(), 1);
+        let cell = |column: &str| {
+            let idx = result.columns.iter().position(|c| c == column).unwrap();
+            result.rows[0][idx].clone()
+        };
+        // A named constraint reports under the author's name.
+        assert_eq!(
+            cell("name"),
+            Value::String("person_name_unique".to_string())
+        );
+        assert_eq!(cell("type"), Value::String("UNIQUENESS".to_string()));
+        assert_eq!(cell("entityType"), Value::String("NODE".to_string()));
+        assert_eq!(
+            cell("labelsOrTypes"),
+            Value::List(vec![Value::String("Person".to_string())])
+        );
+        assert_eq!(
+            cell("properties"),
+            Value::List(vec![Value::String("name".to_string())])
+        );
+    }
+
+    #[test]
+    fn show_constraints_reports_each_kind_under_its_neo4j_type() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT u FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        )
+        .unwrap();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT e FOR (p:Person) REQUIRE p.age IS NOT NULL",
+        )
+        .unwrap();
+
+        let rows = show_constraints_result_set(&graph);
+        let types: Vec<String> = rows
+            .rows
+            .iter()
+            .map(|row| match row.projected.get("type") {
+                Some(Value::String(t)) => t.clone(),
+                other => panic!("unexpected type cell: {other:?}"),
+            })
+            .collect();
+        assert!(types.contains(&"UNIQUENESS".to_string()), "got: {types:?}");
+        assert!(
+            types.contains(&"NODE_PROPERTY_EXISTENCE".to_string()),
+            "got: {types:?}"
+        );
+    }
+
+    /// A node key is *one* constraint, so its presence half must not also appear
+    /// as a separate existence row.
+    #[test]
+    fn a_node_key_is_one_row_not_two() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT person_key FOR (p:Person) REQUIRE p.name IS NODE KEY",
+        )
+        .unwrap();
+
+        let rows = show_constraints_result_set(&graph);
+        assert_eq!(rows.rows.len(), 1, "expected one row, got {:?}", rows.rows);
+        assert_eq!(
+            rows.rows[0].projected.get("type"),
+            Some(&Value::String("NODE_KEY".to_string()))
+        );
+    }
+
+    /// Declared constraints reach the persisted lists the same way indexes do,
+    /// and a named one keeps its name across a save.
+    #[test]
+    fn cypher_declared_constraints_reach_the_persisted_state() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT person_name_unique FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        )
+        .unwrap();
+        graph.populate_index_keys();
+
+        assert_eq!(
+            graph.unique_constraint_keys,
+            vec![("Person".to_string(), vec!["name".to_string()])]
+        );
+        assert_eq!(
+            graph
+                .constraint_by_name("person_name_unique")
+                .map(|c| c.node_type.clone()),
+            Some("Person".to_string())
+        );
     }
 
     /// Index keys are snapshotted at save time from the live stores, so a

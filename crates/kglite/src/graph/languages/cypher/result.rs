@@ -232,6 +232,13 @@ pub struct MutationStats {
     pub indexes_added: usize,
     /// Indexes removed by `DROP INDEX`, counted the same way.
     pub indexes_removed: usize,
+    /// Constraints declared by `CREATE CONSTRAINT`. Counts *constraints*, not
+    /// the structures behind them, so `IS NODE KEY` reports 1 even though
+    /// KGLite serves it as uniqueness plus presence. Named after Neo4j's
+    /// `constraintsAdded` summary counter.
+    pub constraints_added: usize,
+    /// Constraints withdrawn by `DROP CONSTRAINT`, counted the same way.
+    pub constraints_removed: usize,
 }
 
 /// Lightweight diagnostics attached to every `CypherResult` — gives
