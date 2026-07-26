@@ -570,7 +570,7 @@ impl BoltBackend for KgliteBackend {
                 // `Neo.ClientError.Transaction.TransactionStartFailed`, which
                 // is wrong twice over — the transaction started fine, and it
                 // contradicted the documented contract in this crate's README
-                // and the Neo4j migration guide, both of which promise
+                // and the migration guide, both of which promise
                 // `ConflictDetected`. A ported client that branches on the
                 // status code (the normal way to write an OCC retry loop) was
                 // therefore told the wrong thing, and the Python tests could
@@ -942,7 +942,8 @@ mod tests {
         let path = unique_disk_path();
         let graph = new_dir_graph_in_mode(StorageMode::Disk, Some(&path))
             .expect("create disk-backed graph");
-        let backend = KgliteBackend::new(graph, false, "127.0.0.1:0".into());
+        let backend =
+            KgliteBackend::new(graph, false, "127.0.0.1:0".into(), CsvImportPolicy::Denied);
         let session = SessionHandle("disk-session".into());
 
         mutate_and_finish(&backend, &session, "CREATE (:Person {id: 1})", true).await;
@@ -976,7 +977,7 @@ mod tests {
 
     fn memory_backend() -> KgliteBackend {
         let graph = new_dir_graph_in_mode(StorageMode::Memory, None).expect("create memory graph");
-        KgliteBackend::new(graph, false, "127.0.0.1:0".into())
+        KgliteBackend::new(graph, false, "127.0.0.1:0".into(), CsvImportPolicy::Denied)
     }
 
     #[tokio::test]

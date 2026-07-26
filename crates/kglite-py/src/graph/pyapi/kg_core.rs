@@ -1620,8 +1620,7 @@ impl KnowledgeGraph {
                 lazy_eligible: streaming,
                 disabled_passes: disabled_owned.as_ref(),
                 embedder: embedder_for_opts,
-                // value_codecs are an MCP-manifest feature; the Python API
-                // doesn't configure them (the engine path uses native types).
+                // value_codecs are an MCP-manifest feature, unused on this path.
                 value_codecs: None,
                 // Cancellation is deliberately NOT wired on the live-KG path:
                 // it mutates the single-owner graph *in place* (no working-copy
@@ -1702,8 +1701,7 @@ impl KnowledgeGraph {
                 lazy_eligible: streaming,
                 disabled_passes: disabled_owned.as_ref(),
                 embedder: embedder_for_opts,
-                // value_codecs are an MCP-manifest feature; the Python API
-                // doesn't configure them (the engine path uses native types).
+                // value_codecs are an MCP-manifest feature, unused on this path.
                 value_codecs: None,
                 // Overridden with the live cancel flag inside enter_kg below.
                 cancel: None,

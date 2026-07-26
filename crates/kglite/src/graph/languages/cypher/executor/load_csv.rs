@@ -6,9 +6,9 @@
 //! in [`super::CypherExecutor::execute`] / [`super::write::execute_mutable`]
 //! materialize a `Vec<ResultRow>` at each clause boundary. If `LOAD CSV` were
 //! an ordinary clause it would have to return the *whole file* as one
-//! `ResultSet` — and a multi-gigabyte CSV is exactly the input Neo4j users
-//! bring. Peak memory would scale with file size, which the bounded-memory
-//! rule forbids.
+//! `ResultSet` — and a multi-gigabyte CSV is exactly the input a bulk import
+//! arrives with. Peak memory would scale with file size, which the
+//! bounded-memory rule forbids.
 //!
 //! So `LOAD CSV` instead **drives** the clauses that follow it: read a bounded
 //! batch of rows, run the rest of the pipeline over that batch, concatenate
@@ -60,6 +60,15 @@ pub const BATCH_ROWS: usize = 1_000;
 /// diagnosable error.
 pub const MAX_MATERIALIZED_ROWS: usize = 1_000_000;
 
+/// Reported if `LOAD CSV` ever reaches the ordinary clause dispatcher.
+///
+/// It cannot: the parser accepts it only in leading position, and both engines
+/// strip it before their clause loop and run [`drive`] instead. The constant
+/// exists so the dispatcher's guard arm stays one line.
+pub const MISDISPATCHED: &str =
+    "internal error: LOAD CSV reached the clause dispatcher instead of its batch driver. \
+     Please report this query.";
+
 /// Who may read local files through `LOAD CSV`.
 ///
 /// Default is [`Self::Denied`] so a new binding, or an execution path whose
@@ -93,9 +102,9 @@ impl CsvImportPolicy {
 
 /// Resolve a `LOAD CSV FROM` operand to a readable local path under `policy`.
 ///
-/// Accepts `file://` URLs (the Neo4j spelling) and bare filesystem paths (what
-/// people actually type). Every other scheme is rejected by name — never as a
-/// parse error, since the statement was understood perfectly well.
+/// Accepts `file://` URLs (the conventional spelling) and bare filesystem paths
+/// (what people actually type). Every other scheme is rejected by name — never
+/// as a parse error, since the statement was understood perfectly well.
 pub fn resolve_csv_source(raw: &str, policy: &CsvImportPolicy) -> Result<PathBuf, String> {
     if let Some(rest) = strip_scheme(raw, "http://").or_else(|| strip_scheme(raw, "https://")) {
         let _ = rest;
@@ -303,8 +312,8 @@ impl RowReader {
             // Headers are consumed explicitly below so the `WITH HEADERS`
             // decision lives in one place.
             .has_headers(false)
-            // A short row is a data problem, not a parse error: Neo4j binds
-            // the missing fields as null rather than aborting the load.
+            // A short row is a data problem, not a parse error: the missing
+            // fields bind as null rather than aborting the whole load.
             .flexible(true);
         if let Some(delimiter) = clause.field_terminator {
             builder.delimiter(delimiter);
@@ -364,18 +373,17 @@ impl RowReader {
 
     /// Convert one CSV record into the value bound to the row variable.
     ///
-    /// Fields stay strings, exactly as Neo4j does: CSV carries no types, and
-    /// guessing them would silently corrupt zip codes, phone numbers, and
-    /// leading-zero identifiers. Callers convert explicitly with
-    /// `toInteger(row.n)` / `toFloat(row.x)`.
+    /// Fields stay strings: CSV carries no types, and guessing them would
+    /// silently corrupt zip codes, phone numbers, and leading-zero identifiers.
+    /// Callers convert explicitly with `toInteger(row.n)` / `toFloat(row.x)`.
     fn bind(&self, record: &csv::StringRecord) -> Value {
         match &self.headers {
             Some(names) => {
                 let mut map = BTreeMap::new();
                 for (index, name) in names.iter().enumerate() {
                     let value = match record.get(index) {
-                        // An empty field is null, matching Neo4j — otherwise
-                        // every optional column needs a `= ''` guard.
+                        // An empty field is null — otherwise every optional
+                        // column needs a `= ''` guard.
                         Some("") | None => Value::Null,
                         Some(text) => Value::String(text.to_string()),
                     };

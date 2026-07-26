@@ -291,6 +291,28 @@ impl CypherParser {
         self.parse_postfix(expr)
     }
 
+    /// Parse a `.field` chain hanging off a parameter reference — `$row.name`,
+    /// `$cfg.a.b`. Precondition: the `$name` token is already consumed.
+    ///
+    /// The bracket form (`$row['name']`) and the via-variable form
+    /// (`WITH $row AS r RETURN r.name`) always worked, so the dotted form being
+    /// a syntax error was an inconsistency rather than a decision: other Cypher
+    /// implementations accept it, and a ported query passing a map parameter
+    /// meets it immediately. Strictly additive — a `$param` followed by `.` had
+    /// no valid reading before.
+    fn parse_parameter_property_chain(&mut self, name: String) -> Result<Expression, String> {
+        let mut expr = Expression::Parameter(name);
+        while self.check(&CypherToken::Dot) {
+            self.advance();
+            let property = self.expect_name("property name after '.'")?;
+            expr = Expression::ExprPropertyAccess {
+                expr: Box::new(expr),
+                property,
+            };
+        }
+        Ok(expr)
+    }
+
     /// Parse postfix operators: expr[index] or expr[start..end]
     pub(super) fn parse_postfix(&mut self, mut expr: Expression) -> Result<Expression, String> {
         while self.check(&CypherToken::LBracket) {
@@ -429,27 +451,10 @@ impl CypherParser {
                 self.parse_case_expression()
             }
 
-            // Parameter: $name, optionally followed by a `.field` chain when
-            // the parameter holds a map — `$row.name`, `$cfg.a.b`.
-            //
-            // The bracket form (`$row['name']`) and the via-variable form
-            // (`WITH $row AS r RETURN r.name`) already worked, so the dotted
-            // form being a syntax error was an inconsistency rather than a
-            // decision: Neo4j accepts it, and a ported query that passes a map
-            // parameter hits it immediately. Strictly additive — a `$param`
-            // followed by `.` had no valid reading before.
+            // Parameter: $name, with an optional `.field` chain.
             Some(CypherToken::Parameter(name)) => {
                 self.advance();
-                let mut expr = Expression::Parameter(name);
-                while self.check(&CypherToken::Dot) {
-                    self.advance();
-                    let property = self.expect_name("property name after '.'")?;
-                    expr = Expression::ExprPropertyAccess {
-                        expr: Box::new(expr),
-                        property,
-                    };
-                }
-                Ok(expr)
+                self.parse_parameter_property_chain(name)
             }
 
             // Identifier: could be variable, property access, function call, or list quantifier

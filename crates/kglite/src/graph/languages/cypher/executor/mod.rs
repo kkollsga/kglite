@@ -537,6 +537,40 @@ impl<'a> CypherExecutor<'a> {
     }
 
     /// Execute a single clause, transforming the result set.
+    /// One row per node type: `(type, count)`. Fused form of
+    /// `MATCH (n) RETURN labels(n), count(*)` and its `n.type` spellings.
+    ///
+    /// `type_as_list` selects the projection shape: `labels(n)` yields a
+    /// single-element list (Phase A.1 / C6 native-list format), while
+    /// `n.type` / `n.node_type` / `n.label` yield the scalar type string —
+    /// each matching its own un-fused output.
+    fn execute_fused_count_by_type(
+        &self,
+        type_alias: &str,
+        count_alias: &str,
+        type_as_list: bool,
+    ) -> Result<ResultSet, String> {
+        self.budget
+            .check_work(self.graph.graph.node_count(), "fused count by node type")?;
+        let mut result_rows = Vec::with_capacity(self.graph.type_indices.len());
+        for (node_type, indices) in self.graph.type_indices.iter() {
+            let mut projected = Bindings::with_capacity(2);
+            let type_value = if type_as_list {
+                Value::List(vec![Value::String(node_type.to_string())])
+            } else {
+                Value::String(node_type.to_string())
+            };
+            projected.insert(type_alias.to_string(), type_value);
+            projected.insert(count_alias.to_string(), Value::Int64(indices.len() as i64));
+            result_rows.push(ResultRow::from_projected(projected));
+        }
+        Ok(ResultSet {
+            rows: result_rows,
+            columns: vec![type_alias.to_string(), count_alias.to_string()],
+            lazy_return_items: None,
+        })
+    }
+
     /// Public so execute_mutable can call it for read clauses.
     pub fn execute_single_clause(
         &self,
@@ -553,16 +587,9 @@ impl<'a> CypherExecutor<'a> {
             Clause::Limit(l) => self.execute_limit(l, result_set),
             Clause::Skip(s) => self.execute_skip(s, result_set),
             Clause::Unwind(u) => self.execute_unwind(u, result_set),
-            // `LOAD CSV` is a driver, not a clause — both engines strip it
-            // before entering their clause loop (see
-            // `execute_load_csv_pipeline` and `execute_mutable_with_csv`), and
-            // the parser refuses it in any non-leading position. Reaching
-            // here means one of those guarantees broke.
-            Clause::LoadCsv(_) => Err(
-                "internal error: LOAD CSV reached the clause dispatcher instead of its batch \
-                 driver. Please report this query."
-                    .to_string(),
-            ),
+            // A driver, not a clause: both engines strip it before their
+            // clause loop and the parser refuses it elsewhere.
+            Clause::LoadCsv(_) => Err(load_csv::MISDISPATCHED.to_string()),
             Clause::Union(u) => self.execute_union(u, result_set),
             Clause::FusedOptionalMatchAggregate {
                 match_clause,
@@ -667,31 +694,7 @@ impl<'a> CypherExecutor<'a> {
                 type_alias,
                 count_alias,
                 type_as_list,
-            } => {
-                self.budget
-                    .check_work(self.graph.graph.node_count(), "fused count by node type")?;
-                let mut result_rows = Vec::with_capacity(self.graph.type_indices.len());
-                for (node_type, indices) in self.graph.type_indices.iter() {
-                    let mut projected = Bindings::with_capacity(2);
-                    // `labels(n)` projects a single-element list (Phase A.1 / C6
-                    // native-list format); `n.type` / `n.node_type` / `n.label`
-                    // project the scalar type string — matching each accessor's
-                    // un-fused output shape.
-                    let type_value = if *type_as_list {
-                        Value::List(vec![Value::String(node_type.to_string())])
-                    } else {
-                        Value::String(node_type.to_string())
-                    };
-                    projected.insert(type_alias.clone(), type_value);
-                    projected.insert(count_alias.clone(), Value::Int64(indices.len() as i64));
-                    result_rows.push(ResultRow::from_projected(projected));
-                }
-                Ok(ResultSet {
-                    rows: result_rows,
-                    columns: vec![type_alias.clone(), count_alias.clone()],
-                    lazy_return_items: None,
-                })
-            }
+            } => self.execute_fused_count_by_type(type_alias, count_alias, *type_as_list),
             Clause::FusedCountEdgesByType {
                 type_alias,
                 count_alias,

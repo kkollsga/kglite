@@ -329,9 +329,9 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/mod.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_single_clause",
-      "lines": 329,
-      "branches": 47,
-      "nesting": 3
+      "lines": 308,
+      "branches": 45,
+      "nesting": 2
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/return_clause.rs",
@@ -419,13 +419,6 @@
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
-      "qualified_name": "crate::execute_mutable_bounded",
-      "lines": 211,
-      "branches": 32,
-      "nesting": 3
-    },
-    {
-      "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
       "qualified_name": "crate::execute_set",
       "lines": 551,
       "branches": 79,
@@ -490,7 +483,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/planner/schema_check.rs",
       "qualified_name": "crate::validate_scope",
-      "lines": 202,
+      "lines": 201,
       "branches": 79,
       "nesting": 6
     },
