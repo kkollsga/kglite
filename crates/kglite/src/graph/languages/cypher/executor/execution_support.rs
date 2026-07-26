@@ -1,6 +1,6 @@
 //! Executor support types for specialized filters, spatial caches, and profiling labels.
 
-use super::super::ast::Clause;
+use super::super::ast::{Clause, SchemaCommand};
 use crate::graph::core::pattern_matching::PatternElement;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -194,6 +194,15 @@ pub fn clause_display_name(clause: &Clause) -> String {
         Clause::Merge(_) => "Merge".into(),
         Clause::Foreach { .. } => "Foreach".into(),
         Clause::Call(_) => "Call".into(),
+        Clause::Schema(command) => match command {
+            SchemaCommand::CreateIndex(_) => "CreateIndex".into(),
+            SchemaCommand::UnsupportedIndexType { index_type, .. } => {
+                format!("CreateIndex ({})", index_type.keyword())
+            }
+            SchemaCommand::DropIndex(_) => "DropIndex".into(),
+            SchemaCommand::ShowIndexes => "ShowIndexes".into(),
+            SchemaCommand::Constraint(_) => "Constraint".into(),
+        },
         Clause::CallSubquery { .. } => "CallSubquery".into(),
         Clause::FusedOptionalMatchAggregate { .. } => "FusedOptionalMatchAggregate".into(),
         Clause::FusedVectorScoreTopK { .. } => "FusedVectorScoreTopK".into(),

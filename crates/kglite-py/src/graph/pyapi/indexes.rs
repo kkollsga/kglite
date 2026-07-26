@@ -52,34 +52,21 @@ impl KnowledgeGraph {
         // already present (checked before the rebuild below mutates it),
         // so callers can distinguish "I made it" from "it was already there".
         let already_existed = graph.has_any_index(node_type, property);
-        // In-memory backends use the existing HashMap-based property_indices.
-        // On the Disk backend that HashMap would silently OOM on large types
-        // (~13M rows × String × Vec = multiple GB of heap rebuilt every load);
-        // route there to the persistent mmap-backed PropertyIndex instead.
-        let mut persistent_disk = false;
-        let mut disk_count = 0usize;
-        if let kglite_core::api::storage::GraphBackend::Disk(dg) = &mut graph.graph {
-            match dg.build_property_index(node_type, property) {
-                Ok(n) => {
-                    persistent_disk = true;
-                    disk_count = n;
-                }
-                Err(e) => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
-                        "Failed to build persistent property index for {}.{}: {}",
-                        node_type, property, e
-                    )));
-                }
-            }
-        }
-        let unique_values = if persistent_disk {
-            // Skip the in-memory HashMap build on disk graphs — the
-            // persistent index takes its place. Return disk_count (nodes
-            // indexed) as the `unique_values` field for API parity.
-            disk_count
-        } else {
-            graph.create_index(node_type, property)
-        };
+        // Backend routing lives in the core (`create_property_index_routed`)
+        // because the Cypher `CREATE INDEX` executor needs the identical
+        // decision: in-memory backends build the HashMap-based
+        // property_indices, while on Disk that HashMap would silently OOM on
+        // large types (~13M rows × String × Vec = multiple GB of heap rebuilt
+        // every load), so the persistent mmap-backed PropertyIndex takes its
+        // place. On disk `unique_values` reports nodes indexed, for API parity.
+        let (unique_values, persistent_disk) = graph
+            .create_property_index_routed(node_type, property)
+            .map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
+                    "Failed to build persistent property index for {}.{}: {}",
+                    node_type, property, e
+                ))
+            })?;
 
         let result_dict = PyDict::new(py);
         result_dict.set_item("node_type", node_type)?;

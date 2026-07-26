@@ -7,6 +7,7 @@
 //! - [`expression`] — expressions (arithmetic, function calls, CASE, list ops)
 //! - [`clauses`] — RETURN / WITH / ORDER BY / LIMIT / SKIP / UNWIND / UNION /
 //!   CREATE / SET / DELETE / REMOVE / MERGE / CALL
+//! - [`schema_ddl`] — CREATE/DROP/SHOW INDEX and CONSTRAINT (Neo4j 5 DDL)
 //!
 //! Each submodule adds another `impl CypherParser` block; PyO3-style,
 //! Rust merges them at codegen.
@@ -21,6 +22,7 @@ pub mod clauses;
 pub mod expression;
 pub mod match_pattern;
 pub mod predicate;
+pub mod schema_ddl;
 
 /// Tokenizes and parses Cypher query strings into a `CypherQuery` AST.
 ///
@@ -241,6 +243,20 @@ impl CypherParser {
         } else if self.check(&CypherToken::Profile) {
             self.advance();
             profile = true;
+        }
+
+        // Schema DDL is a whole statement, not a pipeline stage, so it is
+        // recognised here rather than inside the clause loop: one check per
+        // query instead of one per clause, and `parse_clause_sequence` keeps
+        // its shape. A DDL statement consumes the entire token stream.
+        if let Some(clause) = self.try_parse_schema_ddl_statement()? {
+            return Ok(CypherQuery {
+                clauses: vec![clause],
+                explain,
+                profile,
+                output_format: OutputFormat::Default,
+                optimizer_tags: Vec::new(),
+            });
         }
 
         let (clauses, output_format) = self.parse_clause_sequence(false)?;

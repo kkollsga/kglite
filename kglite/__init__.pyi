@@ -1068,7 +1068,14 @@ class KnowledgeGraph:
 
         Returns ``None`` if no mutation has been executed yet.
         Keys: ``nodes_created``, ``relationships_created``, ``properties_set``,
-        ``nodes_deleted``, ``relationships_deleted``, ``properties_removed``.
+        ``nodes_deleted``, ``relationships_deleted``, ``properties_removed``,
+        ``indexes_added``, ``indexes_removed``.
+
+        ``indexes_added`` / ``indexes_removed`` count KGLite index
+        *structures*, mirroring Neo4j's ``indexesAdded`` / ``indexesRemoved``
+        counters. ``CREATE RANGE INDEX`` reports 2 — a hash equality index
+        plus a B-tree range index, which together serve what Neo4j's single
+        RANGE index does.
         """
         ...
 
@@ -4223,10 +4230,21 @@ class KnowledgeGraph:
         with ``OVER (PARTITION BY ... ORDER BY ...)``), and date arithmetic
         (``date + N``, ``date - date``, ``date_diff(d1, d2)``).
 
-        Mutation queries (CREATE, SET, DELETE, REMOVE, MERGE) store
-        statistics on ``graph.last_mutation_stats`` with keys
+        Mutation queries (CREATE, SET, DELETE, REMOVE, MERGE, and the schema
+        DDL below) store statistics on ``graph.last_mutation_stats`` with keys
         ``nodes_created``, ``relationships_created``, ``properties_set``,
-        ``nodes_deleted``, ``relationships_deleted``, ``properties_removed``.
+        ``nodes_deleted``, ``relationships_deleted``, ``properties_removed``,
+        ``indexes_added``, ``indexes_removed``.
+
+        Schema DDL — ``CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:L)
+        ON (n.p, ...)``, ``DROP INDEX <name> [IF EXISTS]``, and ``SHOW
+        INDEXES`` — runs as a standalone statement. What each form builds
+        differs from Neo4j (KGLite has separate equality, composite, and
+        B-tree range structures) and index names are canonical rather than
+        user-assigned; see the "Cypher index DDL" section of ``CYPHER.md``.
+        Index DDL counts as a mutation, so it is blocked on a read-only graph.
+        Constraint DDL is not supported and is rejected with the enforcement
+        route that applies (primary keys, ``lock_schema()``).
 
         Direct mutation calls execute in place: if a later clause, timeout, or
         row-budget check fails, earlier mutations may remain visible. Use

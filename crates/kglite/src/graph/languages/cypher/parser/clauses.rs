@@ -236,6 +236,13 @@ impl CypherParser {
     // ========================================================================
 
     pub(super) fn parse_create_clause(&mut self) -> Result<Clause, String> {
+        // Reaching here with `CREATE INDEX` / `CREATE CONSTRAINT` means the
+        // statement-position DDL parser already declined it, i.e. it follows
+        // another clause or sits in a CALL { } body. Name that, rather than
+        // failing on the missing node pattern.
+        if self.create_opens_schema_ddl() {
+            return Err(Self::misplaced_schema_statement_error());
+        }
         self.expect(&CypherToken::Create)?;
         let mut patterns = Vec::new();
 

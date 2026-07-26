@@ -1908,6 +1908,14 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN a.name AS an, b.name AS bn ORDER BY an, bn",
         None,
     ),
+    # ── schema DDL ──
+    # `SHOW INDEXES` is the one schema command that classifies as a read, so it
+    # is the one that travels the optimizer pipeline. The shared fixtures carry
+    # no indexes, so the row set is empty — what this pins is that no pass
+    # rewrites or drops the clause, and that it stays on the read engine. The
+    # writing DDL statements live in MUTATION_QUERIES, which builds a fresh
+    # graph per mode.
+    ("show_indexes_ddl", "small_graph", "SHOW INDEXES", None),
 ]
 
 
@@ -1956,6 +1964,16 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
         "remove_rel_property",
         "MATCH (p:Person)-[r:KNOWS]->(q:Person) REMOVE r.since RETURN count(r) AS n",
     ),
+    # Schema DDL: schema is graph state, so these route to the mutable engine
+    # like any other write. The harness compares the returned rows AND the
+    # post-statement node/edge counts across optimized and naive runs, so a
+    # pass that mangled a schema clause into a data mutation would show up as a
+    # count divergence.
+    ("create_index_ddl", "CREATE INDEX FOR (p:Person) ON (p.name)"),
+    ("create_index_ddl_if_not_exists", "CREATE INDEX IF NOT EXISTS FOR (p:Person) ON (p.name)"),
+    ("create_composite_index_ddl", "CREATE INDEX FOR (p:Person) ON (p.city, p.age)"),
+    ("create_range_index_ddl", "CREATE RANGE INDEX person_age FOR (p:Person) ON (p.age)"),
+    ("drop_index_ddl_missing_if_exists", "DROP INDEX Person.name IF EXISTS"),
 ]
 
 

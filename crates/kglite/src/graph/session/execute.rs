@@ -218,8 +218,8 @@ pub fn execute_read(
 
     if is_mutation {
         return Err(KgError::Argument(
-            "execute_read called with a mutation query (CREATE/SET/DELETE/REMOVE/MERGE) \
-             — use execute_mut against a mutable graph view"
+            "execute_read called with a mutation query (CREATE/SET/DELETE/REMOVE/MERGE, \
+             CREATE INDEX/DROP INDEX) — use execute_mut against a mutable graph view"
                 .to_string(),
         ));
     }

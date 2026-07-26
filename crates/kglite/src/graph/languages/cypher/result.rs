@@ -225,6 +225,13 @@ pub struct MutationStats {
     pub nodes_deleted: usize,
     pub relationships_deleted: usize,
     pub properties_removed: usize,
+    /// Indexes installed by `CREATE INDEX`. Counts KGLite index *structures*,
+    /// so `CREATE RANGE INDEX` reports 2 — a hash equality index plus a B-tree
+    /// range index, which together provide what Neo4j's single RANGE index
+    /// does. Named after Neo4j's `indexesAdded` summary counter.
+    pub indexes_added: usize,
+    /// Indexes removed by `DROP INDEX`, counted the same way.
+    pub indexes_removed: usize,
 }
 
 /// Lightweight diagnostics attached to every `CypherResult` — gives

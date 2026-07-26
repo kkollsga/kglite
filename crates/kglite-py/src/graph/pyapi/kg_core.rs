@@ -1587,9 +1587,9 @@ impl KnowledgeGraph {
             if this.inner.read_only {
                 return Err(crate::error_py::kg_to_pyerr(
                     crate::error::KgError::CypherExecution {
-                        message: "Graph is in read-only mode — CREATE, SET, DELETE, REMOVE, and \
-                                  MERGE are disabled. Use kg.read_only(False) to re-enable \
-                                  mutations."
+                        message: "Graph is in read-only mode — CREATE, SET, DELETE, REMOVE, \
+                                  MERGE, and schema DDL (CREATE INDEX / DROP INDEX) are \
+                                  disabled. Use kg.read_only(False) to re-enable mutations."
                             .to_string(),
                         position: None,
                     },
@@ -1882,6 +1882,8 @@ impl KnowledgeGraph {
                 dict.set_item("nodes_deleted", stats.nodes_deleted)?;
                 dict.set_item("relationships_deleted", stats.relationships_deleted)?;
                 dict.set_item("properties_removed", stats.properties_removed)?;
+                dict.set_item("indexes_added", stats.indexes_added)?;
+                dict.set_item("indexes_removed", stats.indexes_removed)?;
                 Ok(dict.into())
             }
             None => Ok(py.None()),
