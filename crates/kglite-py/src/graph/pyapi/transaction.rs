@@ -294,7 +294,15 @@ impl Transaction {
             working.set_version(current_version + 1);
             kg.inner = Arc::new(working);
             kg.cursor.selection = CowSelection::new();
-        });
+            // Durability: one WAL frame for the whole transaction, appended
+            // here and nowhere earlier. `Transaction::cypher` must not log —
+            // its writes are uncommitted and `rollback()` must leave no trace
+            // of them. `take_working` *moves* the working copy, so every op
+            // buffered during the transaction arrives on `kg.inner` intact and
+            // this single flush emits them together, which is exactly the
+            // atomicity the caller asked for.
+            kg.commit_wal()
+        })?;
         Ok(())
     }
 

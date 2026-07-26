@@ -627,7 +627,7 @@ def graphgen(
     """
     ...
 
-def open(path: str, *, storage: str | None = None, durable: bool = False) -> KnowledgeGraph:
+def open(path: str, *, storage: str | None = None, durable: bool | None = None) -> KnowledgeGraph:
     """Open a graph at ``path`` — load it if it exists, create a fresh one if
     it doesn't (load-or-create). The embedded-database lifecycle entry point.
 
@@ -646,24 +646,57 @@ def open(path: str, *, storage: str | None = None, durable: bool = False) -> Kno
         storage: Storage mode for a *newly created* graph (``"mapped"`` /
             ``"disk"``); ignored when opening an existing file, which keeps the
             mode it was saved in.
-        durable: If ``True``, open in write-ahead-log mode. Each committed
-            Cypher mutation is appended to a ``<path>-wal`` sidecar and
-            ``fsync``'d before the call returns, and on open any WAL frames are
-            replayed onto the loaded checkpoint to recover work committed since
-            the last ``save()``. ``save()`` writes a full checkpoint and
-            truncates the WAL. In-memory graphs only in this release
-            (``storage="mapped"/"disk"`` raise ``ValueError``).
+        durable: Write-ahead logging — **on by default**. Each committed
+            mutation is appended to a ``<path>-wal`` sidecar and ``fsync``'d
+            before the call returns, and on open any WAL frames are replayed
+            onto the loaded checkpoint to recover work committed since the last
+            ``save()``. ``save()`` writes a full checkpoint and truncates the
+            log.
+
+            - ``None`` (default) — enabled wherever it is supported, i.e. for
+              the in-memory default and ``storage="mapped"``. A
+              ``storage="disk"`` graph opens **non-durable** rather than
+              raising, since its commit boundary is a generation publish, not a
+              logical log.
+            - ``True`` — required. ``storage="disk"`` raises ``ValueError``
+              rather than quietly returning a graph without the crash safety
+              you asked for.
+            - ``False`` — opt out. See the performance note below.
 
     Returns:
         A KnowledgeGraph bound to ``path``.
 
     Note:
-        Without ``durable=True``, ``open()`` gives "feels like a database"
-        ergonomics (open, mutate, close → persisted on clean exit) but is
-        **not** crash-safe — an auto-saved snapshot is written only on a clean
-        close, not on a hard crash mid-session. ``durable=True`` adds the
-        crash-safety: a committed Cypher mutation survives a hard crash
-        (``kill -9`` / power loss) via the WAL.
+        **What durability costs.** Crash safety is bought with one ``fsync``
+        per committed mutation, so a write returns only once the log entry is
+        on physical storage. That makes each individual write substantially
+        more expensive than an unlogged one — the cost is dominated by device
+        latency, not by graph size, so it is most visible in loops of many
+        small writes and least visible for a few large ones. Reads are
+        completely unaffected: the capture layer forwards them with no
+        overhead.
+
+        Prefer ``durable=False`` for bulk loading and for graphs that are
+        rebuildable from source data, then ``save()`` once at the end; batch
+        many small mutations into one statement (or one ``begin()``
+        transaction, which commits as a single log entry) when you need both
+        throughput and crash safety.
+
+    Note:
+        **A ``with`` block is not a transaction.** Each mutation commits as it
+        runs, so an exception inside the block does not undo mutations that
+        already returned — they are recovered on the next ``open()``. What the
+        clean/failed exit controls is whether a *checkpoint* is written. Use
+        ``begin()`` when you want discard-on-error, or ``durable=False`` for
+        snapshot-only semantics.
+
+    Note:
+        Mutations that the log cannot express are **checkpoint-only**, and are
+        persisted by ``save()`` rather than by the log: schema and config
+        metadata, user-created indexes, embeddings, and timeseries. A
+        ``Session`` also refuses write queries on a durable graph, because its
+        writes land on a working copy that neither the log nor ``save()`` can
+        reach — use ``cypher()`` or ``begin()``.
     """
     ...
 

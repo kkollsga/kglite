@@ -53,36 +53,41 @@ with kglite.open("app.kgl") as g:
     print(g.cypher("MATCH (p:Person) RETURN count(p) AS n").scalar())  # 2
 ```
 
-## The default: "feels like a database", checkpoint on close
+## The default: crash-safe
 
-Plain `open()` (without `durable=True`) gives you ergonomic persistence: open,
-mutate, close → your work is on disk. This is the right default for the common
-case where an app does a batch of work and exits cleanly.
-
-```python
-g = kglite.open("kb.kgl")
-g.cypher("MERGE (:Topic {id: 'graphs', label: 'Graph theory'})")
-g.save()          # explicit checkpoint, back to kb.kgl
-# ... more work ...
-g.close()         # final checkpoint
-```
-
-What this is **not**: crash-safe. A snapshot is written only when *you* call
-`save()`/`close()` or the context manager exits cleanly. If the process is
-killed mid-session (`kill -9`, power loss, an unhandled crash before the next
-`save()`), the work since the last checkpoint is gone. For many apps that's
-fine — checkpoint often, accept losing the current batch on a crash.
-
-When losing the in-flight batch is *not* acceptable, use durable mode.
-
-## Crash-safe writes: `durable=True`
+`open()` is durable by default. Every committed mutation is `fsync`'d before the
+call returns, so a mutation that has returned survives a hard crash.
 
 ```python
-g = kglite.open("app.kgl", durable=True)
+g = kglite.open("app.kgl")
 g.cypher("CREATE (:Order {id: 1001, total: 49.90})")   # fsync'd before this returns
 ```
 
-With `durable=True`, every committed Cypher mutation is appended to a
+You get this without asking for it because it is what makes an embedded database
+trustworthy: the alternative default silently loses every write since the last
+explicit `save()` whenever a process dies.
+
+## Opting out: `durable=False`
+
+Durability costs one `fsync` per commit. When the graph is rebuildable from
+source data — a bulk load, a derived index, a scratch analysis — that cost buys
+nothing, and `durable=False` gives you the older snapshot-on-close behaviour:
+
+```python
+g = kglite.open("kb.kgl", durable=False)
+g.add_nodes(df, node_type="Topic", unique_id_field="id")   # no fsync per write
+g.save()          # one explicit checkpoint at the end
+g.close()
+```
+
+What that is **not**: crash-safe. A snapshot is written only when *you* call
+`save()`/`close()` or the context manager exits cleanly. If the process is
+killed mid-session (`kill -9`, power loss, an unhandled crash before the next
+`save()`), the work since the last checkpoint is gone.
+
+## How durability works
+
+With durability on, every committed mutation is appended to a
 `<path>-wal` sidecar file and `fsync`'d to stable storage **before the call
 returns**. A mutation that has returned is guaranteed to survive a hard crash.
 
@@ -93,7 +98,7 @@ How it fits together:
   speed (see "Cost and tuning" below).
 - **`save()`** → writes a full checkpoint (`.kgl`) and **truncates the WAL**.
   The checkpoint is the new baseline; the WAL starts empty again.
-- **`open(..., durable=True)`** → loads the last checkpoint, then **replays**
+- **`open(...)`** → loads the last checkpoint, then **replays**
   any WAL frames written since it, reconstructing the exact committed state —
   including work that was never checkpointed because the process crashed.
 
@@ -127,12 +132,12 @@ optimising for:
 
 | You want… | Use | Trade-off |
 |---|---|---|
-| Fast, all-in-RAM; lose the current batch on a crash is acceptable | `open(path)` (non-durable) | No `fsync` per write; crash loses work since the last checkpoint. |
-| Every committed write to survive a hard crash | `open(path, durable=True)` | One `fsync` per commit; reopen is O(graph) (loads the whole graph). |
+| Every committed write to survive a hard crash | `open(path)` (the default) | One `fsync` per commit; reopen is O(graph) (loads the whole graph). |
+| Maximum write throughput on rebuildable data | `open(path, durable=False)` | No `fsync` per write; a crash loses work since the last checkpoint. |
 | Graphs larger than RAM, cheap reopen | `open(path, storage="disk")` | Paged mmap, lazy load; not a crash-safe-per-write WAL mode. |
 
 The first two are **in-memory** — the whole graph lives in RAM, which is what
-makes traversal and multi-hop queries fast. `durable=True` adds crash-safety on
+makes traversal and multi-hop queries fast. Durability adds crash-safety on
 top of that model without changing the in-memory read path. `storage="disk"`
 (see {doc}`/python/core-concepts`) is the separate answer for *larger-than-RAM*
 graphs and cheap cold-open; it is not combined with the WAL.
@@ -154,20 +159,25 @@ snapshot.cypher("MATCH (o:Order) RETURN count(o)")
 
 **Durability and shared concurrent writes don't combine in one handle.** A
 `Session` (`graph.session()` / `kglite.open_session(...)`) serves shared reads
-and serialized writes, but its `execute()` writes land on an in-memory fork and
-are **not** WAL-logged — so a `Session` is *not* durable. For a durable app,
-keep writes on the single durable `KnowledgeGraph` (there they're serialized and
-`fsync`'d), and use `freeze()` snapshots for concurrent reads. Reach for
-`Session` when you need shared concurrent writes but **not** durability. See
-{doc}`/concepts/concurrency` for the full model.
+and serialized writes, but its `execute()` writes land on a working copy visible
+only through that session — reachable by neither the log nor the owning graph's
+`save()`. A `Session` write against a durable graph therefore **raises**, rather
+than applying a mutation nothing can persist; reads are unaffected. For a
+durable app, keep writes on the durable `KnowledgeGraph` itself (there they are
+serialized and `fsync`'d) and use `freeze()` snapshots for concurrent reads.
+Reach for `Session` writes with `durable=False`, when you need shared concurrent
+writes but **not** durability. See {doc}`/concepts/concurrency` for the full
+model.
 
 ## Cost and tuning
 
-- **`durable=True` is `fsync`-bound, not engine-bound.** A workload of many
+- **Durability is `fsync`-bound, not engine-bound.** A workload of many
   small committed transactions spends its time waiting on the disk to confirm
-  each `fsync`, not in KGLite. The non-durable mode does the same logical work
+  each `fsync`, not in KGLite. `durable=False` does the same logical work
   far faster precisely because it skips the per-commit `fsync`. This is the
-  price of crash-safety and is inherent to any WAL database.
+  price of crash-safety and is inherent to any WAL database. The cost scales
+  with the *number* of commits and with device latency, not with graph size,
+  and reads pay nothing at all.
 - **Batch where you can.** One `cypher()` that creates 1,000 nodes is one
   `fsync`; 1,000 separate `cypher()` calls are 1,000 `fsync`s. Group related
   mutations into a single statement (or a transaction — see
@@ -179,14 +189,23 @@ keep writes on the single durable `KnowledgeGraph` (there they're serialized and
 
 ## Limitations
 
-- **In-memory only this release.** `durable=True` with `storage="mapped"` or
-  `storage="disk"` raises `ValueError`. Crash-safe durable writes apply to the
-  in-memory model; use `storage="disk"` for the larger-than-RAM case (without
-  per-write WAL durability).
-- **Durability records successful mutations.** Direct `cypher()` writes execute
-  in place, so use `Session.execute()` or a transaction when an error or
-  timeout must roll back the complete mutation. Commit related statements once
-  ({doc}`/python/transactions`).
+- **Not available for `storage="disk"`.** A disk graph commits by publishing an
+  immutable generation, so its durability boundary is that publish rather than a
+  logical log; reconciling a replayed frame against a published generation needs
+  a generation-aware log this release does not have. `open(path,
+  storage="disk")` therefore opens **non-durable**, and passing an explicit
+  `durable=True` raises `ValueError` rather than pretending. Use `save()`
+  checkpoints there. The in-memory default and `storage="mapped"` are both
+  fully durable.
+- **Some state is checkpoint-only.** The log describes nodes, edges, and
+  labels. Schema and config metadata, user-created indexes, embeddings, and
+  timeseries have no log entry, so they are persisted by `save()` rather than
+  recovered by replay. Call `save()` after changing them if a crash must not
+  lose them.
+- **A `with` block is not a transaction.** Each mutation commits as it runs, so
+  an exception inside the block does not undo mutations that already returned —
+  they are recovered on the next `open()`. Use `begin()` when you want
+  discard-on-error ({doc}`/python/transactions`).
 
 ## See also
 

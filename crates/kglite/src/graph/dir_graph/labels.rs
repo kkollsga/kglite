@@ -53,6 +53,9 @@ impl DirGraph {
                 bucket_was_new,
             );
         }
+        // WAL capture, for the same reason: no `GraphWrite` call describes a
+        // label change, so a durable graph would otherwise lose it on replay.
+        self.graph.note_recorded_node_labels(idx);
         true
     }
 
@@ -102,6 +105,9 @@ impl DirGraph {
                     pos,
                 );
             }
+            // WAL capture — see `add_node_label`. The op carries the whole
+            // remaining set, so a removal replays as correctly as an add.
+            self.graph.note_recorded_node_labels(idx);
         }
         Ok(position.is_some())
     }
@@ -131,8 +137,20 @@ impl DirGraph {
         let Some(primary) = GraphRead::node_type_of(&self.graph, idx) else {
             return Vec::new();
         };
+        let extras = self.secondary_labels(idx);
+        let mut labels = Vec::with_capacity(extras.len() + 1);
+        labels.push(primary);
+        labels.extend(extras);
+        labels
+    }
+
+    /// A node's **secondary** labels alone, sorted by label name — the
+    /// ordering half of [`node_labels`](Self::node_labels), factored out so
+    /// the primary-first-then-name-sorted guarantee has exactly one
+    /// implementation. Empty when the node has none (or does not exist).
+    pub fn secondary_labels(&self, idx: NodeIndex) -> Vec<InternedKey> {
         if !self.has_secondary_labels {
-            return vec![primary];
+            return Vec::new();
         }
         let mut extras: Vec<InternedKey> = self
             .secondary_label_index
@@ -141,10 +159,18 @@ impl DirGraph {
             .map(|(&key, _)| key)
             .collect();
         extras.sort_unstable_by(|a, b| self.interner.resolve(*a).cmp(self.interner.resolve(*b)));
-        let mut labels = Vec::with_capacity(extras.len() + 1);
-        labels.push(primary);
-        labels.extend(extras);
-        labels
+        extras
+    }
+
+    /// [`secondary_labels`](Self::secondary_labels) resolved to owned
+    /// names. This is what the WAL persists — a log outlives the interner
+    /// that produced its keys, so labels cross the durability boundary as
+    /// strings, in the same order the live graph reports them.
+    pub fn secondary_label_names(&self, idx: NodeIndex) -> Vec<String> {
+        self.secondary_labels(idx)
+            .into_iter()
+            .map(|key| self.interner.resolve(key).to_string())
+            .collect()
     }
 
     /// All nodes carrying `label` as EITHER their primary type or a

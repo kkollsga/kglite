@@ -182,6 +182,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Neo.ClientError.Schema.ConstraintCreationFailed`; the C ABI gains
   `ConstraintViolation = 18` and `ConstraintCreationFailed = 19`, appended so
   existing discriminants stay stable.
+- `kglite.open(path, storage="mapped", durable=True)` now works — write-ahead
+  logging is no longer restricted to in-memory graphs. A mapped graph mutates
+  the same in-memory structure as the default backend and differs only in its
+  file-backed property columns, so it gets the same per-commit crash safety
+  with no change to the log format.
+
+  `storage="disk"` still raises `ValueError`, now explaining why and what to
+  use instead: a disk graph commits by publishing an immutable generation, so
+  a logical write-ahead log is not its durability boundary. Use `save()`
+  checkpoints for disk graphs.
+
+### Changed — behaviour
+
+- **`kglite.open()` is now crash-safe by default.** `durable` defaults to on, so
+  every committed mutation is `fsync`'d to the `<path>-wal` sidecar before the
+  call returns and is replayed on the next `open()`. Previously a graph opened
+  without `durable=True` lost every write since the last explicit `save()`
+  whenever the process died — the docstring said as much, but it was the
+  default.
+
+  Three things to know when upgrading:
+
+  - **It costs one `fsync` per committed mutation.** Writes now wait for
+    physical storage, which is dominated by device latency rather than graph
+    size — most visible in loops of many small writes, negligible for a few
+    large ones. Reads are unaffected. Pass `durable=False` to opt out; it
+    remains fully supported and is the right choice for bulk loading and for
+    graphs rebuildable from source data. Batching mutations into one statement,
+    or one `begin()` transaction, gives throughput *and* crash safety.
+  - **A `with` block is not a transaction.** Mutations commit as they run, so an
+    exception inside the block no longer discards them — they are recovered on
+    the next `open()`. The failed exit still declines to write a checkpoint. Use
+    `begin()` for discard-on-error, or `durable=False` for the old
+    snapshot-only behaviour.
+  - **`storage="disk"` is unaffected** — it opens non-durable, as before, rather
+    than raising. Only an explicit `durable=True` raises there. `durable` is now
+    tri-state (`None`/`True`/`False`) precisely so the new default cannot break
+    disk callers.
+
+  The MCP server, CLI, and Bolt server open graphs through the shared
+  engine-level helper rather than this function, so none of them changes
+  behaviour.
 
 ### Changed
 
@@ -222,61 +264,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- OCC commit conflicts over Bolt now report
-  `Neo.ClientError.Transaction.ConflictDetected`, the code the Bolt server's
-  README and the migration guide have always documented. They previously
-  reported `Neo.ClientError.Transaction.TransactionStartFailed` — wrong twice
-  over, since the transaction started fine — so a ported client branching on
-  the status code (the normal way to write a retry loop) was misled. Writing
-  the Java/JS driver suites is what surfaced it: the Python tests matched on
-  message text and could not see the code.
-- Cypher `CREATE` no longer discards a node type's cached `id` index on every
-  insert. Incremental id-index maintenance was gated on the type having a
-  declared primary key, so an undeclared type invalidated the whole index per
-  created node and the next `MATCH (n {id: ...})` or `MERGE` paid an O(n)
-  rebuild. The gate protected nothing about uniqueness — a rebuild and an
-  incremental insert collapse a duplicate id identically; it existed only
-  because `id` had already been moved into the insert and no clone was
-  available. Maintenance is now driven purely by whether the index is already
-  cached (and therefore complete), replacing the per-`CREATE` O(n) rebuild with
-  one `id` clone.
-- Deleting nodes now evicts them from the B-tree range index.
-  `detach_delete_nodes` cleaned the type, id, property, composite, and
-  secondary-label indexes but skipped `range_indices`, so `WHERE n.prop > x` on
-  an indexed property kept returning tombstoned nodes as candidates.
-- Bulk loading no longer silently hides rows from an indexed `MATCH`.
-  `add_nodes` (and the blueprint builder and edge stub vivification, which
-  funnel into it) appends through the batch path, which skips the per-write
-  index maintenance the Cypher executor runs — but the matcher trusts a
-  property index unconditionally rather than falling back to a scan. So after
-  `create_index('Person', 'city')`, a subsequent `add_nodes` left
-  `MATCH (n:Person {city: 'Oslo'})` returning only the pre-load nodes. The
-  bulk path now rebuilds the equality, range, and composite indexes covering
-  the loaded type once per call (no-op when the type carries none), the same
-  order of work as the `id` index rebuild it already did.
-- Overwriting an indexed property through a fluent write no longer returns the
-  node under its *old* value. `add_properties(...)` writes the property map
-  directly and the `store_as=` paths (`unique_values`, `collect_children`,
-  `calculate`) write through the batch path, so neither refreshed the secondary
-  indexes — and the matcher trusts a property index unconditionally rather than
-  falling back to a scan. After `create_index('Child', 'tag')`, an
-  `add_properties` that changed `tag` left `MATCH (c:Child {tag: <old value>})`
-  returning the node whose `tag` was already the *new* value: a wrong answer
-  rather than a missing row. Both paths now refresh the indexes covering every
-  written node type, the same remedy as the bulk-append fix above. The two
-  `add_properties` write loops (copy and aggregate) were duplicated tails, which
-  is how one of them lost the maintenance; they now share one helper.
-- `add_properties` bumps the graph version, so version-keyed caches and
-  freshness checks observe the write.
-- Declaring UNIQUE constraints no longer shifts the `.kgl` format for graphs
-  that have none. The persisted `unique_constraint_keys` list emitted
-  `"unique_constraint_keys":[]` into *every* file, changing the bytes of the
-  overwhelming majority of graphs — which carry no constraints — and tripping the
-  format-drift gate. It is now skipped when empty, so a constraint-free graph
-  writes byte-identical output to one produced before constraints existed.
-- The persisted constraint list is sorted at save time. It was snapshotted
-  straight from `HashMap::keys()`, so any graph carrying a constraint saved in
-  nondeterministic byte order.
 - `labels(n)` now returns a node's secondary labels in a stable order (sorted
   by name, primary label first). They were previously returned in hash-map
   iteration order, so two graphs holding identical data could report a node's

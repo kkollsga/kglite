@@ -1618,22 +1618,7 @@ impl KnowledgeGraph {
                 return Py::new(py, view).map(|v| v.into_any());
             }
 
-            // Auto-vacuum + last-mutation stats — pyapi-specific
-            // post-mutation bookkeeping.
-            if let Some(ref stats) = result.stats {
-                if (stats.nodes_deleted > 0 || stats.relationships_deleted > 0)
-                    && graph.check_auto_vacuum()
-                {
-                    this.cursor.selection = kglite_core::api::CowSelection::new();
-                }
-                this.cursor.last_mutation_stats = Some(stats.clone());
-            }
-
-            // Durability: append + fsync this mutation's WAL frame before
-            // returning. No-op for non-durable graphs. (The `graph` borrow
-            // above has ended; flush_wal re-borrows self.inner.)
-            this.flush_wal()
-                .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(e)))?;
+            this.after_mutation(result.stats.as_ref())?;
 
             // Resolve NodeRef values to node titles before Python conversion.
             resolve_noderefs(&this.inner.graph, &mut result.rows);

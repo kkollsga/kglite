@@ -13,7 +13,7 @@ use crate::graph::schema::{
 };
 use crate::graph::storage::disk::id_index::IdIndexStore;
 use crate::graph::storage::disk::type_index::TypeIndexStore;
-use crate::graph::storage::{GraphRead, GraphWrite, MemoryGraph};
+use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
 use rustc_hash::FxHashMap;
@@ -278,11 +278,22 @@ pub struct DirGraph {
     /// `#[serde(skip)]` — rebuilt by `rebuild_type_indices`.
     #[serde(skip)]
     pub has_secondary_labels: bool,
-    /// O(1) secondary-label index: label_key → [NodeIndex].
-    /// Populated by the choke-point label mutation API
-    /// (`DirGraph::add_node_label` / `remove_node_label`) and on load by
-    /// `rebuild_type_indices`. `#[serde(skip)]` — rebuilt from
-    /// `NodeData.extra_labels` on load.
+    /// O(1) secondary-label index: label_key → [NodeIndex]. **The
+    /// canonical store** — `NodeData` carries no labels of its own, so this
+    /// map is the only record that a node has any secondary label.
+    ///
+    /// Written exclusively by the choke-point label mutation API
+    /// (`DirGraph::add_node_label` / `remove_node_label`), which is also
+    /// where rollback and WAL capture hook in for the same reason: the map
+    /// sits above the storage backend, so no `GraphWrite` call can carry a
+    /// label change.
+    ///
+    /// `#[serde(skip)]` — it cannot be derived from node payloads, so it is
+    /// persisted out-of-band and restored by the load path: the `.kgl`
+    /// `secondary_labels` section for in-memory graphs, the
+    /// `secondary_labels.bin.zst` sidecar for disk ones, and
+    /// `MutationOp::SetNodeLabels` frames for post-checkpoint WAL replay.
+    /// `rebuild_type_indices` deliberately leaves it alone.
     #[serde(skip)]
     pub secondary_label_index: HashMap<InternedKey, Vec<NodeIndex>>,
 }
@@ -1684,10 +1695,25 @@ impl DirGraph {
     /// vacuum() rebuilds the graph with contiguous indices, then rebuilds all indexes.
     ///
     /// Returns a mapping from old NodeIndex → new NodeIndex so callers can
-    /// update any external references (e.g., selections).
+    /// update any external references (e.g., selections). An empty map means
+    /// nothing was remapped.
     ///
-    /// No-op if there are no tombstones (node_count == node_bound).
+    /// No-op if there are no tombstones (node_count == node_bound), and a
+    /// no-op on the **disk** backend: its CSR arrays are frozen mmap, not a
+    /// `StableDiGraph`, so there is no petgraph tombstone to compact — disk
+    /// reclaims space by publishing a fresh generation (`compact_disk`), not
+    /// by rebuilding in place. Rebuilding would also have to materialise the
+    /// whole graph on the heap, which is the one thing the disk backend
+    /// exists to avoid.
+    ///
+    /// The rebuild preserves the backend variant and any write-capture
+    /// wrapper. **Callers on a durable graph must flush the write-ahead log
+    /// first**: buffered ops are keyed by `NodeIndex` and every index moves
+    /// here.
     pub fn vacuum(&mut self) -> HashMap<NodeIndex, NodeIndex> {
+        if self.graph.is_disk() {
+            return HashMap::new();
+        }
         let old_node_count = self.graph.node_count();
         let old_node_bound = self.graph.node_bound();
 
@@ -1728,8 +1754,14 @@ impl DirGraph {
             }
         }
 
-        // Replace graph storage
-        self.graph = GraphBackend::Memory(MemoryGraph::from_graph(new_graph));
+        // Replace graph storage, keeping the backend variant and any
+        // write-capture wrapper — see `GraphBackend::replace_heap_graph` for
+        // what assigning `Memory(..)` here used to break.
+        if !self.graph.replace_heap_graph(new_graph) {
+            // Disk: nothing was replaced, so nothing downstream may treat the
+            // indices as remapped.
+            return HashMap::new();
+        }
 
         // Remap embedding stores to use new node indices (see embedding_carry.rs).
         self.remap_embedding_slots(&old_to_new);

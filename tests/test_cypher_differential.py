@@ -2074,6 +2074,24 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
         "CREATE (q:Person {person_id: 3, name: 'again', age: 44}) "
         "RETURN q.name AS name",
     ),
+    (
+        # Labels and properties are independent state captured at *different*
+        # seams — labels at the DirGraph choke point, properties at the
+        # storage backend — and the WAL folds them into separate net maps.
+        # Interleaving them in one statement is the shape where a fold that
+        # let a property write clobber a label set (or vice versa) diverges.
+        "interleaved_label_and_property_writes",
+        "MATCH (p:Person {person_id: 1}) SET p:Employee SET p.age = 55 "
+        "SET p:Remote SET p.bucket = 'x' WITH p REMOVE p:Employee "
+        "RETURN labels(p) AS ls, p.age AS age, p.bucket AS bucket",
+    ),
+    (
+        # Several label writes on one node collapse to a single whole-set WAL
+        # op resolved against final state; the same collapse must not lose an
+        # intermediate add that survives to the end.
+        "many_labels_one_node",
+        "MATCH (p:Person {person_id: 2}) SET p:A SET p:B SET p:C WITH p REMOVE p:B RETURN labels(p) AS ls",
+    ),
 ]
 
 

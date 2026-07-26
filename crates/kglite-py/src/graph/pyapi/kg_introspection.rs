@@ -172,6 +172,10 @@ impl KnowledgeGraph {
     ///         print(f"Reclaimed {result['tombstones_removed']} slots")
     ///     ```
     fn vacuum(&mut self) -> PyResult<Py<PyAny>> {
+        // Before the rebuild, not after: captured ops are keyed by
+        // `NodeIndex` and a vacuum remaps every index, so ops resolved
+        // afterwards would describe the wrong nodes.
+        self.commit_wal()?;
         let graph = get_graph_mut(&mut self.inner);
 
         let tombstones_before = graph.graph.node_bound() - graph.graph.node_count();
@@ -211,6 +215,7 @@ impl KnowledgeGraph {
         if nodes_purged > 0 {
             self.cursor.selection = CowSelection::new();
         }
+        self.commit_wal()?;
         Python::attach(|py| {
             let result = PyDict::new(py);
             result.set_item("nodes_purged", nodes_purged)?;
@@ -921,6 +926,7 @@ impl KnowledgeGraph {
         .map_err(|e: String| -> PyErr {
             crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
         })?;
+        self.commit_wal()?;
 
         let mut new_kg = KnowledgeGraph {
             inner: self.inner.clone(),
@@ -1000,6 +1006,7 @@ impl KnowledgeGraph {
                 crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
             },
         )?;
+        self.commit_wal()?;
 
         let mut new_kg = KnowledgeGraph {
             inner: self.inner.clone(),

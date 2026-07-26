@@ -144,13 +144,16 @@ pub trait GraphRead {
     /// Node type key for a given index. `None` if the node has been removed.
     fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey>;
 
-    /// All labels for a node: `[primary, ...secondaries]`. Defaults to a
-    /// 1-element Vec wrapping `node_type_of` for backends that don't
-    /// surface secondary labels (e.g. disk). The in-memory + mapped
-    /// backends override to include `NodeData.extra_labels`.
+    /// All labels for a node that *this backend* can see, which is the
+    /// primary type alone: secondary labels are not backend state at all —
+    /// they live in `DirGraph::secondary_label_index`, one layer up, and
+    /// `NodeData` carries none. No backend overrides this today, and one
+    /// that did would still be missing the secondaries.
     ///
-    /// Consumers that only need the primary type should keep using
-    /// `node_type_of` (no allocation).
+    /// **Callers wanting a node's real label set want
+    /// `DirGraph::node_labels`**, which consults that index and returns
+    /// `[primary, ...secondaries sorted by name]`. Consumers that only need
+    /// the primary type should keep using `node_type_of` (no allocation).
     fn node_labels_of(&self, idx: NodeIndex) -> Vec<InternedKey> {
         match self.node_type_of(idx) {
             Some(key) => vec![key],

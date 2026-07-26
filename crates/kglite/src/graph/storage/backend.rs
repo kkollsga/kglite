@@ -67,14 +67,14 @@ pub enum GraphBackend {
     Memory(MemoryGraph),
     Mapped(MappedGraph),
     Disk(Box<DiskGraph>),
-    // Phase 6 validation wrapper. Constructed only from Rust
-    // `#[cfg(test)]` modules in `storage/recording.rs`; no Python
-    // constructor reaches this arm. The variant exists so the enum
-    // dispatcher exercises a 4th backend through the same match arms
-    // as the production three, proving open/closed at the trait
-    // surface. `dead_code` in release builds sees no constructor,
-    // hence the allow.
-    #[allow(dead_code)]
+    // Write-capture wrapper for the WAL. Introduced as a Phase 6
+    // test-only validation wrapper, now the production backend of every
+    // graph opened with `durable=True`: the binding wraps the loaded
+    // backend via `wrap_backend_for_durability`, so each mutation that
+    // passes the `GraphWrite` seam is buffered as a `RawOp` and flushed
+    // to the log. Because it wraps the enum itself, it is
+    // storage-agnostic — the capture layer is identical for a memory,
+    // mapped, or disk graph underneath.
     Recording(Box<RecordingGraph<GraphBackend>>),
 }
 
@@ -102,9 +102,10 @@ impl GraphBackend {
     /// Only the heap backend can. `Mapped` maintains lazy mmap-columnar
     /// indexes and `Disk` mutates through generation overlays whose inverse is
     /// not expressible as a petgraph edit, so both keep the clone checkpoint
-    /// (see `dir_graph/rollback.rs`). `Recording` forwards: a durable graph is
-    /// `Recording(Memory)` and every write still lands on the heap backend
-    /// underneath, so it participates.
+    /// (see `dir_graph/rollback.rs`). `Recording` forwards to whatever it
+    /// wraps, so a durable graph participates exactly when its underlying
+    /// backend would: `Recording(Memory)` journals, `Recording(Mapped)` keeps
+    /// the clone. Durability and rollback strategy are independent concerns.
     #[inline]
     pub(crate) fn supports_undo_journal(&self) -> bool {
         match self {
@@ -209,6 +210,54 @@ impl GraphBackend {
     pub fn note_recorded_node_upsert(&mut self, idx: NodeIndex) {
         if let GraphBackend::Recording(rg) = self {
             rg.note_node_upsert(idx);
+        }
+    }
+
+    /// Record that node `idx`'s secondary labels changed, for the WAL
+    /// capture wrapper. No-op unless this is the
+    /// [`GraphBackend::Recording`] backend.
+    ///
+    /// Secondary labels live in `DirGraph::secondary_label_index`, above
+    /// this backend — `NodeData` carries none — so *no* `GraphWrite` call
+    /// describes a label change and the recorded seam cannot infer one.
+    /// `DirGraph`'s label choke points call this instead; without it a
+    /// durable graph silently lost every `CREATE (n:A:B)` / `SET n:B` on
+    /// WAL replay while keeping the node's properties.
+    #[inline]
+    pub fn note_recorded_node_labels(&mut self, idx: NodeIndex) {
+        if let GraphBackend::Recording(rg) = self {
+            rg.note_node_labels(idx);
+        }
+    }
+
+    /// Swap in a rebuilt heap petgraph, **preserving this backend's variant
+    /// and any write-capture wrapper around it**. Returns `false` for `Disk`,
+    /// whose CSR arrays are not a `StableDiGraph` and cannot be replaced this
+    /// way; the caller must treat that as "not rebuilt".
+    ///
+    /// Exists because `DirGraph::vacuum` rebuilds the graph with contiguous
+    /// indices and used to assign `GraphBackend::Memory(...)` unconditionally.
+    /// That silently did two damaging things: it downgraded a `Mapped` graph
+    /// to heap storage, and — worse — it *dropped the `Recording` wrapper*, so
+    /// a durable graph stopped write-ahead logging for the rest of the
+    /// session with no error. Rebuilding through this method keeps both
+    /// properties.
+    ///
+    /// Note the wrapper is preserved but its op buffer is not meaningful
+    /// across a rebuild: buffered ops are keyed by `NodeIndex`, and a vacuum
+    /// remaps every index. Callers must flush the log *before* vacuuming.
+    pub(crate) fn replace_heap_graph(&mut self, new: StableDiGraph<NodeData, EdgeData>) -> bool {
+        match self {
+            GraphBackend::Memory(g) => {
+                *g = MemoryGraph::from_graph(new);
+                true
+            }
+            GraphBackend::Mapped(g) => {
+                *g = MappedGraph::from_graph(new);
+                true
+            }
+            GraphBackend::Recording(rg) => rg.inner_mut().replace_heap_graph(new),
+            GraphBackend::Disk(_) => false,
         }
     }
 

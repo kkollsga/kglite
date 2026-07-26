@@ -14,8 +14,10 @@ properties and optional secondary labels. Duplicate ids are possible; use
 **Atomicity.** Direct `graph.cypher()` mutations execute in place; if a later
 clause, timeout, or row-budget check fails, earlier work may remain visible.
 Use `graph.session().execute()` or `graph.begin()` when failure must roll back.
-`save()` publishes a snapshot atomically; `open(..., durable=True)` additionally
-provides an in-memory WAL and context-managed graphs can auto-save on close.
+`save()` publishes a snapshot atomically, and `open()` is write-ahead logged by
+default so each committed mutation survives a hard crash; context-managed graphs
+also auto-save on clean exit. A `with` block is not a transaction — use
+`begin()` when failure must discard the work.
 
 **Single-owner.** A `KnowledgeGraph` is owned by one thread at a time: concurrent reads are fine, but a read overlapping a mutation on the same instance raises a clear `RuntimeError`. For multi-threaded use: give each worker its own `copy()`, share a read-only `graph.freeze()` snapshot for lock-free reads, or — when threads need shared reads **and** writes — `graph.session()` (lock-free reads + serialized composing writes). See {doc}`/concepts/concurrency`.
 
@@ -27,9 +29,9 @@ KGLite stores nodes and relationships in a Rust graph structure ([petgraph](http
   a `ResultView`; eligible projections keep a lazy descriptor while ordinary
   results are already materialized in Rust (Python values convert on access)
 - **Fluent API** chains build a *selection* (a set of node indices) — no data is copied until you call `collect()`, `to_df()`, etc.
-- **Persistence** uses `save()`/`load()` snapshots; `open(..., durable=True)`
-  enables a WAL for in-memory graphs and context-managed `open()` persists on
-  clean exit
+- **Persistence** uses `save()`/`load()` snapshots; `open()` is crash-safe by
+  default via a write-ahead log (`durable=False` opts out), and
+  context-managed `open()` also persists on clean exit
 
 ## Storage Modes
 
