@@ -966,8 +966,7 @@ fn initialize_spills(graph: &mut DirGraph, config: &NTriplesConfig) -> Result<Lo
             // Windows, which refuses to delete a file with a mapped view.
             if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
                 let stale = dg.active_write_dir().join("_pending_edges.bin");
-                let mapped_live =
-                    dg.pending_edges.get_mut().file_path() == Some(stale.as_path());
+                let mapped_live = dg.pending_edges.get_mut().file_path() == Some(stale.as_path());
                 if stale.exists() && !mapped_live {
                     let _ = std::fs::remove_file(&stale);
                 }
