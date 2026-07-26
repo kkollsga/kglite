@@ -121,7 +121,7 @@ pub fn resolve_csv_source(raw: &str, policy: &CsvImportPolicy) -> Result<PathBuf
         // `file:///abs/path` leaves a leading `/`; `file://host/path` is a
         // remote UNC reference we deliberately do not resolve.
         if let Some(after_host) = rest.strip_prefix('/') {
-            format!("/{after_host}")
+            file_url_path(after_host, cfg!(windows))
         } else {
             return Err(format!(
                 "LOAD CSV does not support host-qualified file URLs: {raw}. Use a local path — \
@@ -195,6 +195,35 @@ fn strip_scheme(raw: &str, prefix: &str) -> Option<String> {
         Some(raw[prefix.len()..].to_string())
     } else {
         None
+    }
+}
+
+/// Whether `s` starts with a Windows drive qualifier (`C:\` or `C:/`).
+fn is_drive_qualified(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.next() == Some(':')
+        && matches!(chars.next(), Some('/') | Some('\\'))
+}
+
+/// Convert the part of a `file://` URL after the (empty) host into a path.
+///
+/// The conventional spelling of a Windows path in a `file://` URL is
+/// `file:///C:/data.csv`, which leaves `C:/data.csv` after the host. Restoring
+/// the leading slash there yields `/C:/data.csv`, which no Windows API
+/// resolves — and under a `Directory` import root it is not absolute either,
+/// so `PathBuf::push` produces `C:\C:\data.csv`. The engine's own error
+/// messages point users at `file:///absolute/path.csv`, so this spelling is
+/// the one they are told to use.
+///
+/// `windows` is threaded in rather than read from `cfg!` here so both branches
+/// are testable from any host. It matters that this is platform-gated: on Unix
+/// `/C:/data.csv` is a perfectly legal path and must keep resolving as one.
+fn file_url_path(after_host: &str, windows: bool) -> String {
+    if windows && is_drive_qualified(after_host) {
+        after_host.to_string()
+    } else {
+        format!("/{after_host}")
     }
 }
 
@@ -552,8 +581,65 @@ mod tests {
         let err = resolve_csv_source(outside.path().to_str().unwrap(), &policy).unwrap_err();
         assert!(err.contains("resolves outside it"), "{err}");
 
-        let escape = format!("{}/../{}", root.path().display(), "etc");
-        assert!(resolve_csv_source(&escape, &policy).is_err());
+        // A `..` traversal to a file that really exists outside the root. The
+        // previous probe pointed at a non-existent path, so it was rejected by
+        // the existence check and never exercised containment at all.
+        let outer = tempfile::tempdir().unwrap();
+        let contained = outer.path().join("root");
+        std::fs::create_dir(&contained).unwrap();
+        let sibling = outer.path().join("sibling.csv");
+        std::fs::write(&sibling, "a,b\n1,2\n").unwrap();
+        let nested_policy = CsvImportPolicy::Directory(contained.clone());
+        let escape = format!("{}/../sibling.csv", contained.display());
+        let err = resolve_csv_source(&escape, &nested_policy).unwrap_err();
+        assert!(err.contains("resolves outside it"), "{err}");
+    }
+
+    #[test]
+    fn file_url_keeps_a_windows_drive_letter_addressable() {
+        // `file:///C:/data.csv` is the spelling the engine's own error messages
+        // steer users toward. Restoring the leading slash there produced
+        // `/C:/data.csv`, which resolves nowhere on Windows.
+        assert_eq!(file_url_path("C:/data.csv", true), "C:/data.csv");
+        assert_eq!(
+            file_url_path("c:\\data\\rows.csv", true),
+            "c:\\data\\rows.csv"
+        );
+        // Unchanged on Unix, where `/C:/data.csv` is a legal path.
+        assert_eq!(file_url_path("C:/data.csv", false), "/C:/data.csv");
+        // Ordinary absolute paths keep their leading slash on both platforms.
+        assert_eq!(file_url_path("tmp/x.csv", true), "/tmp/x.csv");
+        assert_eq!(file_url_path("tmp/x.csv", false), "/tmp/x.csv");
+    }
+
+    #[test]
+    fn drive_qualifier_needs_a_letter_colon_and_separator() {
+        assert!(is_drive_qualified("C:/x"));
+        assert!(is_drive_qualified("z:\\x"));
+        // A bare `C:` is drive-relative, not drive-absolute; a scheme-like
+        // prefix is not a drive.
+        assert!(!is_drive_qualified("C:"));
+        assert!(!is_drive_qualified("http://x"));
+        assert!(!is_drive_qualified("1:/x"));
+        assert!(!is_drive_qualified("/tmp/x"));
+    }
+
+    #[test]
+    fn drive_lettered_file_url_reaches_the_policy_check() {
+        // Whatever the platform, the resolved path must no longer be the
+        // unresolvable `/C:/...`. On Unix that is still what a drive-lettered
+        // URL means, so assert through the error text rather than the path.
+        let err = resolve_csv_source(
+            "file:///C:/nope/data.csv",
+            &CsvImportPolicy::LocalFilesystem,
+        )
+        .unwrap_err();
+        let expected = if cfg!(windows) {
+            "C:"
+        } else {
+            "/C:/nope/data.csv"
+        };
+        assert!(err.contains(expected), "{err}");
     }
 
     #[test]
