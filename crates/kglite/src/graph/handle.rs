@@ -389,6 +389,31 @@ pub fn infer_selection_node_type(
         .map(|n| n.node_type_str(&dir.interner).to_string())
 }
 
+/// Column names a row-oriented exporter emits from a node's **canonical
+/// identity** rather than from its property bag.
+///
+/// A node's `id`, `title`, and structural `type` are virtuals: every table
+/// exporter writes them as leading columns straight from the node header. A
+/// node may *also* carry a stored property under one of these names — Cypher
+/// `CREATE (:T {title: 'a'})` sets `title` both ways — and an exporter that
+/// naively appends every discovered property key then emits that column
+/// twice. See [`is_canonical_node_column`].
+pub const CANONICAL_NODE_COLUMNS: [&str; 3] = ["id", "title", "type"];
+
+/// Whether `key` names a column a row-oriented exporter already emits from
+/// the node's canonical identity.
+///
+/// Property keys that collide with a canonical column are dropped from the
+/// discovered property set: the canonical value wins. This is the rule the
+/// SQL-dump, d3/JSON, and `to_text` exporters have always applied, and the
+/// only rule that keeps a header unique. Emitting the column twice is not a
+/// lossless alternative — a name-keyed column map silently overwrites the
+/// canonical value with the property, so the duplicate *destroys* the
+/// identity it appears to preserve.
+pub fn is_canonical_node_column(key: &str) -> bool {
+    CANONICAL_NODE_COLUMNS.contains(&key)
+}
+
 /// Discover all unique property keys across a slice of typed nodes.
 /// Returns sorted, de-duplicated key names — useful for any
 /// row-oriented exporter (CSV, Parquet, DataFrame, JSON-lines) that
@@ -396,14 +421,36 @@ pub fn infer_selection_node_type(
 /// schema. The function takes only core types (`NodeData`,
 /// `StringInterner`) so every binding's table-export path can call
 /// it directly.
+///
+/// Keys naming a canonical identity column ([`CANONICAL_NODE_COLUMNS`]) are
+/// excluded, so appending the result to the exporter's leading identity
+/// columns always yields a header with unique names.
 pub fn discover_property_keys_from_data(
     nodes: &[(&str, &crate::graph::schema::NodeData)],
     interner: &crate::graph::schema::StringInterner,
+) -> Vec<String> {
+    discover_property_keys_excluding(nodes, interner, &CANONICAL_NODE_COLUMNS)
+}
+
+/// [`discover_property_keys_from_data`] with an explicit exclusion set.
+///
+/// For an exporter that emits only *some* canonical columns — the fluent
+/// `to_df(include_type=False)` drops the structural `type` column — pass the
+/// names actually emitted. A canonical name that is *not* emitted carries no
+/// collision, so a stored property under that name is real user data and must
+/// survive.
+pub fn discover_property_keys_excluding(
+    nodes: &[(&str, &crate::graph::schema::NodeData)],
+    interner: &crate::graph::schema::StringInterner,
+    excluded: &[&str],
 ) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut keys = Vec::new();
     for (_, node) in nodes {
         for key in node.property_keys(interner) {
+            if excluded.contains(&key) {
+                continue;
+            }
             if seen.insert(key.to_string()) {
                 keys.push(key.to_string());
             }
@@ -673,5 +720,70 @@ mod boundary_lift_tests {
             code_entity_context(&graph, "missing", None, 1),
             CodeContextLookup::NotFound
         ));
+    }
+
+    /// A graph whose nodes store `title` (and one storing `type`) in the
+    /// property bag as well as in the canonical header — what Cypher `CREATE`
+    /// produces for any ordinary graph.
+    fn collision_graph() -> Arc<DirGraph> {
+        let mut graph = DirGraph::new();
+        let params = HashMap::new();
+        execute_mut(
+            &mut graph,
+            "CREATE (:T {id:1, title:'a', v:2}), (:T {id:2, title:'b', type:'USER', w:3})",
+            &ExecuteOptions::eager(&params),
+        )
+        .expect("fixture nodes");
+        Arc::new(graph)
+    }
+
+    fn nodes_of(graph: &DirGraph) -> Vec<(&str, &crate::graph::schema::NodeData)> {
+        graph
+            .graph
+            .node_indices()
+            .filter_map(|idx| {
+                graph
+                    .get_node(idx)
+                    .map(|n| (n.node_type_str(&graph.interner), n))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn discovered_property_keys_exclude_canonical_columns() {
+        // Every row exporter emits id/title/type from the node header, so a
+        // stored property of the same name must not become a second column.
+        let graph = collision_graph();
+        let keys = discover_property_keys_from_data(&nodes_of(&graph), &graph.interner);
+        assert_eq!(keys, vec!["v".to_string(), "w".to_string()]);
+        for canonical in CANONICAL_NODE_COLUMNS {
+            assert!(
+                !keys.contains(&canonical.to_string()),
+                "canonical column {canonical} leaked into the property key set"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unemitted_canonical_column_keeps_its_stored_property() {
+        // `to_df(include_type=False)` emits no `type` column, so there is no
+        // collision and the stored `type` property is real user data.
+        let graph = collision_graph();
+        let keys =
+            discover_property_keys_excluding(&nodes_of(&graph), &graph.interner, &["id", "title"]);
+        assert_eq!(
+            keys,
+            vec!["type".to_string(), "v".to_string(), "w".to_string()]
+        );
+    }
+
+    #[test]
+    fn is_canonical_node_column_covers_exactly_the_identity_names() {
+        assert!(is_canonical_node_column("id"));
+        assert!(is_canonical_node_column("title"));
+        assert!(is_canonical_node_column("type"));
+        assert!(!is_canonical_node_column("titles"));
+        assert!(!is_canonical_node_column("node_type"));
+        assert!(!is_canonical_node_column("Title"));
     }
 }

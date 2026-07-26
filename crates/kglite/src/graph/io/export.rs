@@ -554,6 +554,49 @@ pub struct ExportSummary {
     pub log_lines: Vec<String>,
 }
 
+/// The property columns one node type contributes to its CSV, and the
+/// blueprint type name inferred for each.
+///
+/// Returns `(sorted column names, column -> type name)`. Keys naming a
+/// canonical identity column (`id`/`title`/`type`) are excluded: those are
+/// written from the node header, and repeating one would both duplicate the
+/// CSV column and — for any name-keyed reader such as `pandas.read_csv` —
+/// shadow the identity value behind a phantom `title.1`. Each column's type is
+/// taken from its first non-null value.
+fn node_property_columns(
+    graph: &DirGraph,
+    indices: &[petgraph::graph::NodeIndex],
+) -> (Vec<String>, BTreeMap<String, String>) {
+    let mut prop_names: BTreeSet<String> = BTreeSet::new();
+    for &idx in indices {
+        if let Some(node) = graph.graph.node_weight(idx) {
+            for key in node.property_keys(&graph.interner) {
+                if crate::graph::handle::is_canonical_node_column(key) {
+                    continue;
+                }
+                prop_names.insert(key.to_string());
+            }
+        }
+    }
+    let prop_cols: Vec<String> = prop_names.into_iter().collect();
+
+    let mut prop_types: BTreeMap<String, String> = BTreeMap::new();
+    for col in &prop_cols {
+        for &idx in indices {
+            if let Some(node) = graph.graph.node_weight(idx) {
+                if let Some(val) = node.get_property(col) {
+                    if !matches!(*val, Value::Null) {
+                        prop_types.insert(col.clone(), value_type_name(&val));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    (prop_cols, prop_types)
+}
+
 /// Export the graph (or selection) to an organized CSV directory tree.
 ///
 /// Creates:
@@ -650,31 +693,7 @@ pub fn to_csv_dir(
     let mut node_type_prop_types: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
     for (node_type, indices) in &nodes_by_type {
-        // First pass: collect the union of all property names
-        let mut prop_names: BTreeSet<String> = BTreeSet::new();
-        for &idx in indices {
-            if let Some(node) = graph.graph.node_weight(idx) {
-                for key in node.property_keys(&graph.interner) {
-                    prop_names.insert(key.to_string());
-                }
-            }
-        }
-        let prop_cols: Vec<String> = prop_names.into_iter().collect();
-
-        // Infer property types from first non-null value of each property
-        let mut prop_types: BTreeMap<String, String> = BTreeMap::new();
-        for col in &prop_cols {
-            for &idx in indices {
-                if let Some(node) = graph.graph.node_weight(idx) {
-                    if let Some(val) = node.get_property(col) {
-                        if !matches!(*val, Value::Null) {
-                            prop_types.insert(col.clone(), value_type_name(&val));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        let (prop_cols, prop_types) = node_property_columns(graph, indices);
 
         // Build CSV
         let mut csv = String::with_capacity(4096);

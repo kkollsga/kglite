@@ -1864,12 +1864,22 @@ class KnowledgeGraph:
         Each node becomes a row with columns for title, type, id, and all
         properties. Missing properties across different node types become None.
 
+        ``id``, ``title`` and ``type`` come from the node's canonical identity.
+        A node may also *store* a property under one of those names —
+        ``CREATE (:T {title: 'a'})`` sets ``title`` both ways — in which case
+        the canonical value wins and the property is not repeated as a second
+        column. Opt a canonical column out to read the stored property
+        instead: with ``include_type=False`` there is no ``type`` column to
+        collide with, so a stored ``type`` property is returned as itself.
+
         Args:
             include_type: Include ``type`` column. Default ``True``.
             include_id: Include ``id`` column. Default ``True``.
 
         Returns:
-            DataFrame with one row per selected node.
+            DataFrame with one row per selected node. Column names are unique,
+            so the frame is directly writable with ``to_parquet()`` /
+            ``to_csv()``.
         """
         ...
 

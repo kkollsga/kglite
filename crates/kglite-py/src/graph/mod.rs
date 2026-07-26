@@ -540,15 +540,6 @@ impl KnowledgeGraph {
         })
     }
 
-    /// Thin delegate to `kglite_core::graph::handle::discover_property_keys_from_data`.
-    /// Engine logic lifted to core in 0.10.1.
-    pub(crate) fn discover_property_keys_from_data(
-        nodes: &[(&str, &kglite_core::api::NodeData)],
-        interner: &kglite_core::api::StringInterner,
-    ) -> Vec<String> {
-        kglite_core::api::discover_property_keys_from_data(nodes, interner)
-    }
-
     /// Thin delegate to `kglite_core::api::infer_selection_node_type`.
     /// Engine logic lifted to core in 0.10.1.
     pub(crate) fn infer_selection_node_type(&self) -> Option<String> {

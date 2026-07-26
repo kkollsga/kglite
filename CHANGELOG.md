@@ -334,6 +334,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A property named `id`, `title` or `type` no longer duplicates its column in
+  the table exports. Those three columns come from a node's canonical identity,
+  but a node can also *store* a property under one of those names — Cypher
+  `CREATE (:T {title: 'a'})` sets `title` both ways, so this hit almost every
+  Cypher-built graph. The affected surfaces were `select(...).to_df()`,
+  `collect()`, `sample()`, and `export_csv()`; the SQL-dump, d3/JSON and
+  `to_text()` exporters already dropped the colliding key and are unchanged.
+
+  The duplicate was not cosmetic. The column map backing a DataFrame is keyed
+  by name, so the second write **overwrote the canonical value** — a graph
+  built with `add_nodes(df, 'T', 'id', 'name')` plus a separate `title` column
+  silently lost the canonical title. `DataFrame.to_parquet()` rejects a
+  non-unique header outright, so the documented
+  `to_df().to_parquet(...)` recipe failed with `ValueError: Duplicate column
+  names found`; `pandas.read_csv` and DuckDB silently renamed the second column
+  to `title.1`/`title_1`, inventing a phantom column in what `export_csv`
+  documents as the portable **backup** format.
+
+  A property colliding with an emitted canonical column is now dropped and the
+  canonical value wins. A canonical column the caller opted out of is not
+  emitted and so cannot collide — `to_df(include_type=False)` still returns a
+  stored `type` property as itself.
+
 - `claude_config` now reads and writes Claude MCP config files as UTF-8. On a
   non-UTF-8 Windows codepage the read mis-decoded the file and the atomic write
   committed the damage over every unrelated MCP server entry; non-ASCII text in

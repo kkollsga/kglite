@@ -769,7 +769,29 @@ impl KnowledgeGraph {
             }
         }
 
+        // Columns emitted below straight from the node's canonical identity.
+        // A stored property of the same name must be dropped from the property
+        // set: the dict backing the DataFrame is keyed by column name, so a
+        // duplicate does not preserve both values — it overwrites the
+        // canonical one and yields a non-unique header that `to_parquet`
+        // rejects outright. A canonical column the caller opted *out* of is
+        // absent from this list, so a property under that name still survives.
+        let mut emitted_identity: Vec<&str> = vec!["title"];
+        if include_type {
+            emitted_identity.push("type");
+        }
+        if include_id {
+            emitted_identity.push("id");
+        }
+
         // Fast path: use TypeSchema for key discovery when all nodes share a type
+        let discover = |nodes: &Vec<(&str, &kglite_core::api::NodeData)>| {
+            kglite_core::api::discover_property_keys_excluding(
+                nodes,
+                &self.inner.interner,
+                &emitted_identity,
+            )
+        };
         let prop_keys: Vec<String> = if nodes_data.len() > 50 {
             let first_type = nodes_data[0].0;
             let all_same = nodes_data.iter().all(|(nt, _)| *nt == first_type);
@@ -778,19 +800,23 @@ impl KnowledgeGraph {
                     let mut keys: Vec<String> = schema
                         .iter()
                         .filter_map(|(_, ik)| {
-                            self.inner.interner.try_resolve(ik).map(|s| s.to_string())
+                            self.inner
+                                .interner
+                                .try_resolve(ik)
+                                .filter(|s| !emitted_identity.contains(s))
+                                .map(|s| s.to_string())
                         })
                         .collect();
                     keys.sort();
                     keys
                 } else {
-                    Self::discover_property_keys_from_data(&nodes_data, &self.inner.interner)
+                    discover(&nodes_data)
                 }
             } else {
-                Self::discover_property_keys_from_data(&nodes_data, &self.inner.interner)
+                discover(&nodes_data)
             }
         } else {
-            Self::discover_property_keys_from_data(&nodes_data, &self.inner.interner)
+            discover(&nodes_data)
         };
 
         // Build columnar dict-of-lists
