@@ -335,7 +335,7 @@ _DEEP_QUERY_SHAPES = {
 
 
 @pytest.mark.parametrize("shape", sorted(_DEEP_QUERY_SHAPES))
-def test_deep_query_errors_without_killing_server(tmp_path, shape):
+def test_deep_query_errors_without_killing_server(tmp_path, shape, bolt_binary_path):
     """A pathologically deep query must fail *that one query* — not abort
     the server process.
 
@@ -349,6 +349,8 @@ def test_deep_query_errors_without_killing_server(tmp_path, shape):
     afterwards — never restarted, PID unchanged; (3) a fresh session still
     executes queries; (4) stderr shows no stack-overflow abort.
     """
+    if not bolt_binary_path.exists():
+        pytest.skip("bolt-server binary not built")
     from tests.conftest import (
         _build_bolt_fixture_graph,
         _spawn_bolt_server,
