@@ -137,8 +137,18 @@ impl CypherParser {
     /// releases the whole run at once.
     pub(super) fn deepen(&mut self) -> Result<(), String> {
         if self.depth >= MAX_EXPRESSION_DEPTH {
+            // Name the rewrite. The overwhelmingly common way to reach this
+            // limit is generated code — a filter/facet builder emitting one
+            // `OR` term per selected value — and each term costs a nesting
+            // level while the equivalent `IN [...]` costs one level no matter
+            // how many values it holds. "Simplify the query" alone leaves the
+            // author guessing at a limit they did not know existed.
             return Err(format!(
-                "Expression nesting exceeds {} levels; simplify the query",
+                "Expression nesting exceeds {} levels; simplify the query. \
+                 Long chains of OR'd equality tests are the usual cause and \
+                 nest one level per term — rewrite `x = a OR x = b OR ...` as \
+                 `x IN [a, b, ...]`, which nests one level however many \
+                 values the list holds.",
                 MAX_EXPRESSION_DEPTH
             ));
         }

@@ -7,6 +7,26 @@ use crate::graph::core::pattern_matching::{Pattern, PatternElement, PropertyMatc
 use crate::graph::schema::DirGraph;
 use std::collections::{HashMap, HashSet};
 
+/// Fold OR chains of equalities on the same `variable.property` into a
+/// single IN predicate.
+///
+/// Example: `WHERE n.name = 'A' OR n.name = 'B' OR n.name = 'C'`
+/// becomes:  `WHERE n.name IN ['A', 'B', 'C']`
+///
+/// This enables predicate pushdown into MATCH patterns and index
+/// acceleration, which is why a second `push_where_into_match` pass is
+/// registered immediately after this one — the first runs before it and
+/// cannot see the IN predicates this creates.
+///
+/// It only folds equalities on one and the same property, with a literal or
+/// parameter on the other side. A chain across *different* properties is left
+/// alone and reaches the executor as a genuine one-level-per-term predicate
+/// tree, which is the shape that costs the most stack (see
+/// `super::super::stack_probe`).
+///
+/// Note this is a *planner* pass, so it cannot rescue a chain long enough to
+/// exhaust the parser's nesting budget: the parse fails first. The budget
+/// error names the `IN [...]` rewrite for exactly that reason.
 pub(super) fn fold_or_to_in(query: &mut CypherQuery) {
     for clause in &mut query.clauses {
         if let Clause::Where(ref mut w) = clause {

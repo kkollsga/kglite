@@ -260,6 +260,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The expression-nesting limit now names the fix instead of only the problem.
+  The overwhelmingly common way to reach 512 levels is generated code — a
+  filter or facet builder emitting one `OR` term per selected value — and each
+  term costs a nesting level, so an app that worked with 400 selections breaks
+  at 600 with nothing to go on but "simplify the query". The error now points
+  at the rewrite that actually works: `x = a OR x = b OR ...` becomes
+  `x IN [a, b, ...]`, which costs one nesting level however many values the
+  list holds (and is faster, since it can be pushed into the MATCH and use an
+  index). `CYPHER.md` documents the ceiling and the habit alongside the WHERE
+  clause. Note the planner already folds single-property `OR` chains into `IN`
+  automatically, but only once the query has parsed, so it cannot rescue a
+  chain that is already over the limit.
+
 - Index DDL is classified as a mutation, since schema is graph state: it is
   blocked on a read-only graph and in a read-only transaction, rolls back with
   a failed statement, and is rejected on a schema-locked graph when the
