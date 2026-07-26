@@ -77,6 +77,13 @@ struct Fingerprint {
     /// store while the master keeps the fork (or the reverse) is the failure
     /// mode this pins, and it is invisible to a values-only comparison.
     columnar_handles: Vec<(usize, bool)>,
+    /// Every user-index bucket as `(index, value, members in bucket order)`.
+    /// Order matters: `lookup_by_index` hands the bucket `Vec` straight to the
+    /// matcher, so bucket order is the row order an indexed `MATCH` without
+    /// `ORDER BY` returns. A rollback that restored membership but appended
+    /// the node instead of putting it back where it was would be a visible
+    /// reordering, and this is what catches it.
+    user_indexes: Vec<(String, String, Vec<usize>)>,
 }
 
 fn sorted_props(props: &HashMap<String, Value>) -> Vec<(String, String)> {
@@ -233,6 +240,36 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
     }
     columnar_handles.sort();
 
+    let mut user_indexes: Vec<(String, String, Vec<usize>)> = Vec::new();
+    for ((node_type, property), value_map) in &graph.property_indices {
+        for (value, members) in value_map {
+            user_indexes.push((
+                format!("property {node_type}.{property}"),
+                format!("{value:?}"),
+                members.iter().map(|idx| idx.index()).collect(),
+            ));
+        }
+    }
+    for ((node_type, property), btree) in &graph.range_indices {
+        for (value, members) in btree {
+            user_indexes.push((
+                format!("range {node_type}.{property}"),
+                format!("{value:?}"),
+                members.iter().map(|idx| idx.index()).collect(),
+            ));
+        }
+    }
+    for ((node_type, properties), comp_map) in &graph.composite_indices {
+        for (value, members) in comp_map {
+            user_indexes.push((
+                format!("composite {node_type}.{}", properties.join("+")),
+                format!("{value:?}"),
+                members.iter().map(|idx| idx.index()).collect(),
+            ));
+        }
+    }
+    user_indexes.sort();
+
     Fingerprint {
         version: graph.version,
         node_count: graph.graph.node_count(),
@@ -247,6 +284,7 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
         id_lookup,
         column_masters,
         columnar_handles,
+        user_indexes,
     }
 }
 
@@ -346,6 +384,38 @@ fn seeded_columnar() -> DirGraph {
     graph
 }
 
+/// `seeded()` plus one index of each user-created family over `Item`.
+///
+/// The indexed shape is not exotic: an application indexes the property it
+/// looks rows up by, and cannot opt out to get a faster write — dropping the
+/// index turns the lookup into a label scan. So this is the configuration a
+/// primary store actually runs in, and every shape has to hold in it.
+///
+/// `qty` is indexed twice on purpose (equality *and* range), because
+/// `CREATE RANGE INDEX` in Cypher installs both and the two are maintained by
+/// separate code.
+fn seeded_indexed() -> DirGraph {
+    let mut graph = seeded();
+    graph.create_index("Item", "name");
+    graph.create_index("Item", "qty");
+    graph.create_range_index("Item", "qty");
+    graph.create_composite_index("Item", &["name", "qty"]);
+    assert!(
+        !graph.property_indices.is_empty()
+            && !graph.range_indices.is_empty()
+            && !graph.composite_indices.is_empty(),
+        "all three index families must be live, or the indexed arms are vacuous"
+    );
+    assert!(
+        graph
+            .property_indices
+            .values()
+            .any(|value_map| value_map.values().any(|members| !members.is_empty())),
+        "the indexes must have been populated from the seeded nodes"
+    );
+    graph
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Per-shape rollback fidelity
 // ─────────────────────────────────────────────────────────────────────
@@ -381,6 +451,13 @@ macro_rules! rollback_shapes {
                 #[test]
                 fn columnar() {
                     assert_rolls_back(&mut seeded_columnar(), $query, $scope);
+                }
+
+                /// The indexed shape — one user index of each family, whose
+                /// buckets the statement's writes maintain incrementally.
+                #[test]
+                fn indexed() {
+                    assert_rolls_back(&mut seeded_indexed(), $query, $scope);
                 }
             }
         )*
@@ -585,19 +662,71 @@ fn journalled_rollback_copies_zero_nodes() {
     assert_eq!(backend_clone_nodes(), 0);
 }
 
-/// A graph with a user-created property index falls back to the clone
-/// checkpoint. The observable contract is the same, and this test exists so
-/// the fallback stays exercised rather than becoming dead code.
+/// An indexed graph rolls back through the journal, not through a whole-graph
+/// clone. The fidelity half is covered by the `indexed` arm of every shape
+/// above; what this pins is the *cost* half — that a user index no longer
+/// downgrades the checkpoint for the rest of the session.
 #[test]
-fn indexed_graph_still_rolls_back_via_the_clone_path() {
-    let mut graph = seeded();
-    graph.create_index("Item", "name");
-    assert!(!graph.property_indices.is_empty(), "index must be live");
+fn indexed_graph_rolls_back_without_copying_the_graph() {
+    use crate::graph::storage::backend::{backend_clone_nodes, reset_backend_clone_count};
+
+    let mut graph = seeded_indexed();
+    reset_backend_clone_count();
     assert_rolls_back(
         &mut graph,
         "MATCH (n:Item) SET n.name = 'touched', n.bad = duration({months: 2147483648})",
         None,
     );
+    assert_eq!(
+        backend_clone_nodes(),
+        0,
+        "an indexed graph must take the journal path, not the clone checkpoint"
+    );
+}
+
+/// The bucket-order case the position journal exists for.
+///
+/// `Item` 1 and 3 share a `qty` after the setup write, so that bucket holds
+/// two members in a known order. A statement that moves the *first* member out
+/// and then fails must put it back at the front — a rollback that merely
+/// restored membership would append it, silently reordering the rows an
+/// indexed `MATCH` returns.
+#[test]
+fn rollback_restores_index_bucket_order_not_just_membership() {
+    let mut graph = seeded_indexed();
+    run(&mut graph, "MATCH (n:Item {id: 3}) SET n.qty = 10");
+    let bucket_before = index_bucket(&graph, "qty", Value::Int64(10));
+    assert_eq!(
+        bucket_before.len(),
+        2,
+        "the fixture needs a bucket with two members to have an order at all"
+    );
+
+    let before = fingerprint(&mut graph);
+    let error = expect_failure(
+        &mut graph,
+        "MATCH (n:Item {id: 1}) SET n.qty = 999 \
+         WITH n MATCH (m:Item {id: 2}) SET m.bad = duration({months: 2147483648})",
+        None,
+    );
+    let after = fingerprint(&mut graph);
+
+    assert_eq!(before, after, "statement must roll back.\nerror: {error}");
+    assert_eq!(
+        index_bucket(&graph, "qty", Value::Int64(10)),
+        bucket_before,
+        "the evicted member must come back at its original position"
+    );
+}
+
+/// One `Item` property-index bucket's members, in bucket order.
+fn index_bucket(graph: &DirGraph, property: &str, value: Value) -> Vec<usize> {
+    graph
+        .property_indices
+        .get(&("Item".to_string(), property.to_string()))
+        .and_then(|value_map| value_map.get(&value))
+        .map(|members| members.iter().map(|idx| idx.index()).collect())
+        .unwrap_or_default()
 }
 
 // ─────────────────────────────────────────────────────────────────────

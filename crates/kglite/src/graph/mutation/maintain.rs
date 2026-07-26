@@ -1011,6 +1011,91 @@ fn vivify_stubs(graph: &mut DirGraph, node_type: &str, ids: &[Value]) -> Result<
     Ok(report.nodes_created)
 }
 
+/// Journal every inverted-index eviction this delete is about to perform,
+/// with the *position* each doomed member occupies.
+///
+/// Position and not merely membership, because bucket order is the scan order
+/// an un-`ORDER BY`'d `MATCH` returns: `type_indices` drives a label scan and
+/// the user-index buckets are handed straight to the matcher. Must be called
+/// while the doomed indices are still in their buckets. One `Option` check
+/// when no checkpoint is open, which is every non-mutating call.
+fn journal_bucket_evictions(
+    graph: &mut DirGraph,
+    affected_types: &HashSet<String>,
+    nodes_to_delete: &HashSet<NodeIndex>,
+) {
+    if graph.graph.undo_journal_mut().is_none() {
+        return;
+    }
+    let mut evictions: Vec<(BucketId, Vec<NodeIndex>)> = Vec::new();
+    for node_type in affected_types {
+        if let Some(members) = graph.type_indices.get(node_type) {
+            evictions.push((BucketId::NodeType(node_type.clone()), members.to_vec()));
+        }
+        // User-created indexes, same treatment. Only buckets that actually
+        // hold a doomed node are captured, so the cost tracks the deletion
+        // rather than the size of the index.
+        for (key, value_map) in &graph.property_indices {
+            if &key.0 != node_type {
+                continue;
+            }
+            for (value, members) in value_map {
+                if members.iter().any(|idx| nodes_to_delete.contains(idx)) {
+                    evictions.push((
+                        BucketId::PropertyValue {
+                            key: key.clone(),
+                            value: value.clone(),
+                        },
+                        members.clone(),
+                    ));
+                }
+            }
+        }
+        for (key, btree) in &graph.range_indices {
+            if &key.0 != node_type {
+                continue;
+            }
+            for (value, members) in btree {
+                if members.iter().any(|idx| nodes_to_delete.contains(idx)) {
+                    evictions.push((
+                        BucketId::RangeValue {
+                            key: key.clone(),
+                            value: value.clone(),
+                        },
+                        members.clone(),
+                    ));
+                }
+            }
+        }
+        for (key, comp_map) in &graph.composite_indices {
+            if &key.0 != node_type {
+                continue;
+            }
+            for (value, members) in comp_map {
+                if members.iter().any(|idx| nodes_to_delete.contains(idx)) {
+                    evictions.push((
+                        BucketId::CompositeTuple {
+                            key: key.clone(),
+                            value: value.clone(),
+                        },
+                        members.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    if graph.has_secondary_labels {
+        for (label, members) in &graph.secondary_label_index {
+            evictions.push((BucketId::SecondaryLabel(*label), members.clone()));
+        }
+    }
+    if let Some(journal) = graph.graph.undo_journal_mut() {
+        for (bucket, members) in &evictions {
+            journal.note_bucket_retain(bucket, members.iter().copied(), nodes_to_delete);
+        }
+    }
+}
+
 /// DETACH-delete a set of nodes: remove every incident edge, then the
 /// nodes, then clean the type / id / property / composite / secondary-label
 /// indexes. Shared by the Cypher DETACH DELETE executor and
@@ -1085,29 +1170,9 @@ pub(crate) fn detach_delete_nodes(
         }
     }
 
-    // Statement-rollback capture: record every inverted-index eviction with
-    // its *position*, so a failed statement restores bucket order and not
-    // merely membership — bucket order is the scan order an un-`ORDER BY`'d
-    // `MATCH` returns. Read before the `retain` sweeps below, while the doomed
-    // indices are still present. One `Option` check when no checkpoint is open.
-    if graph.graph.undo_journal_mut().is_some() {
-        let mut evictions: Vec<(BucketId, Vec<NodeIndex>)> = Vec::new();
-        for node_type in &affected_types {
-            if let Some(members) = graph.type_indices.get(node_type) {
-                evictions.push((BucketId::NodeType(node_type.clone()), members.to_vec()));
-            }
-        }
-        if graph.has_secondary_labels {
-            for (label, members) in &graph.secondary_label_index {
-                evictions.push((BucketId::SecondaryLabel(*label), members.clone()));
-            }
-        }
-        if let Some(journal) = graph.graph.undo_journal_mut() {
-            for (bucket, members) in &evictions {
-                journal.note_bucket_retain(bucket, members.iter().copied(), nodes_to_delete);
-            }
-        }
-    }
+    // Statement-rollback capture, before the `retain` sweeps below strip the
+    // doomed members out of the buckets.
+    journal_bucket_evictions(graph, &affected_types, nodes_to_delete);
 
     // Index cleanup — StableDiGraph keeps surviving indices stable.
     for node_type in &affected_types {

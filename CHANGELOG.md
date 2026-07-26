@@ -29,6 +29,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fidelity suite now runs every statement shape against a saved-graph fixture
   as well as a fresh one.
 
+- **…and to graphs with user-created indexes.** The same fast path was
+  excluded for any graph holding a property, range, or composite index, for
+  the same reason and with the same permanence: one `create_index` moved every
+  later statement onto the whole-graph clone. That exclusion was the more
+  expensive of the two, and unlike columnar mode there was no way to
+  configure around it — dropping the index to buy back write speed turns the
+  lookup it served into a label scan.
+
+  Index maintenance is now journalled per bucket edit, with the position each
+  edit touched, so a failed statement restores bucket *order* and not merely
+  membership. Bucket order is the row order an indexed `MATCH` without
+  `ORDER BY` returns, so anything less would have made a rolled-back statement
+  observable. This uses the same `BucketAppended` / `BucketRemoved` entries
+  that already covered the built-in type and label indexes.
+
+  One behaviour change falls out of it: composite-index maintenance no longer
+  opportunistically drops buckets that were already empty before the write. It
+  only drops the ones the write itself emptied.
+
 ### Fixed
 
 - **`kglite.open()` now enforces one writer per graph, instead of silently

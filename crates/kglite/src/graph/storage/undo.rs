@@ -26,9 +26,10 @@
 //!   [`crate::graph::storage::recording::RecordingGraph`] hooks, and the one
 //!   every Cypher write path funnels through;
 //! - **`DirGraph`'s inverted indexes** (`type_indices`,
-//!   `secondary_label_index`) and `timeseries_store`, captured at their
-//!   documented choke-point APIs, because those structures sit *above*
-//!   storage and a backend cannot see them.
+//!   `secondary_label_index`, and the user-created `property_indices` /
+//!   `range_indices` / `composite_indices`) and `timeseries_store`, captured
+//!   at their documented choke-point APIs, because those structures sit
+//!   *above* storage and a backend cannot see them.
 //!
 //! Everything else a statement can touch is O(schema)-sized and is restored
 //! verbatim from a cheap shell clone — see
@@ -58,8 +59,11 @@ use std::collections::HashSet;
 
 use petgraph::graph::{EdgeIndex, NodeIndex};
 
+use crate::datatypes::Value;
 use crate::graph::features::timeseries::NodeTimeseries;
-use crate::graph::schema::{EdgeData, InternedKey, NodeData};
+use crate::graph::schema::{
+    CompositeIndexKey, CompositeValue, EdgeData, IndexKey, InternedKey, NodeData,
+};
 
 /// A `Vec<NodeIndex>` bucket in one of `DirGraph`'s inverted indexes.
 /// Bucket edits are journalled with a *position* so a rollback restores the
@@ -72,6 +76,20 @@ pub enum BucketId {
     NodeType(String),
     /// `DirGraph::secondary_label_index`, keyed by interned label.
     SecondaryLabel(InternedKey),
+    /// One value bucket of a user-created single-property index
+    /// (`DirGraph::property_indices`).
+    PropertyValue { key: IndexKey, value: Value },
+    /// One value bucket of a user-created range index
+    /// (`DirGraph::range_indices`). Same key shape as
+    /// [`PropertyValue`](Self::PropertyValue); the bucket lives in a B-tree,
+    /// which orders the *values* but not the node indices inside a bucket.
+    RangeValue { key: IndexKey, value: Value },
+    /// One tuple bucket of a user-created composite index
+    /// (`DirGraph::composite_indices`).
+    CompositeTuple {
+        key: CompositeIndexKey,
+        value: CompositeValue,
+    },
 }
 
 /// One reversible edit. See the module docs for the replay contract.

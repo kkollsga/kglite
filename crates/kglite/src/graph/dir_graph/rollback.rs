@@ -106,6 +106,8 @@
 
 use std::collections::HashSet;
 
+use petgraph::graph::NodeIndex;
+
 use super::DirGraph;
 use crate::graph::storage::undo::{BucketId, UndoEntry, UndoJournal};
 use crate::graph::storage::{GraphRead, GraphWrite};
@@ -121,6 +123,14 @@ fn swap_data_scale(a: &mut DirGraph, b: &mut DirGraph) {
     std::mem::swap(&mut a.graph, &mut b.graph);
     std::mem::swap(&mut a.type_indices, &mut b.type_indices);
     std::mem::swap(&mut a.id_indices, &mut b.id_indices);
+    // The three user-index families are journalled per *bucket edit* — the
+    // incremental maintenance a statement's writes drive. Whole-index DDL
+    // (`create_index` / `drop_index`, which replace a map wholesale) is not,
+    // so a `CREATE INDEX` that failed after installing its map would leave the
+    // map behind while the shell restored the `*_index_keys` list without it.
+    // That is unreachable rather than handled: on the journal-capable backend
+    // index DDL performs no fallible step after it mutates. A new fallible
+    // step there needs an undo entry for the whole index, or an explicit veto.
     std::mem::swap(&mut a.property_indices, &mut b.property_indices);
     std::mem::swap(&mut a.composite_indices, &mut b.composite_indices);
     std::mem::swap(&mut a.range_indices, &mut b.range_indices);
@@ -143,33 +153,48 @@ fn swap_data_scale(a: &mut DirGraph, b: &mut DirGraph) {
     std::mem::swap(&mut a.unique_indices, &mut b.unique_indices);
 }
 
+/// Reverse one bucket append: drop the *last* copy of `idx`, which is the one
+/// the append pushed.
+///
+/// `retain`-style removal would be wrong here — it also drops an occurrence
+/// that pre-dated the statement, and a bucket can legitimately be appended to
+/// twice within one statement.
+fn undo_bucket_append(members: Option<&mut Vec<NodeIndex>>, idx: NodeIndex) {
+    if let Some(members) = members {
+        if let Some(pos) = members.iter().rposition(|member| *member == idx) {
+            members.remove(pos);
+        }
+    }
+}
+
 /// Whether the undo journal can reverse everything this graph's mutations can
 /// change. Conservative by construction — every `false` arm falls back to the
 /// clone checkpoint, so a shape that is merely *unproven* is still safe.
+///
+/// Only the backend is a gate now. Three graph-state vetoes that used to sit
+/// here are gone, and the reasoning for each is worth keeping, because
+/// re-adding one is cheap to type and expensive to run — a veto here is not a
+/// local slowdown but a permanent, whole-graph downgrade to an O(V+E) clone
+/// per statement, for every shape, for the rest of the session.
+///
+/// - **`column_stores`** guarded the columnar-`SET` master side channel, but
+///   fired on every graph that had ever been saved. Covered instead by the
+///   unparked shell restore plus journalled handle refresh; see the module
+///   doc.
+/// - **`property_indices` / `range_indices` / `composite_indices`** guarded
+///   the absence of position undo for user-index buckets. That undo now
+///   exists, recorded at the incremental-maintenance choke points in
+///   [`crate::graph::dir_graph::indexes`] and
+///   [`crate::graph::mutation::maintain`] with the same `BucketAppended` /
+///   `BucketRemoved` entries `type_indices` already used. Whole-index DDL is
+///   still not journalled — see the note on [`swap_data_scale`].
+/// - **`unique_indices`** was never gated: it reads as doctrine-consistent,
+///   but routing every constrained graph to `fork_transaction()` is strictly
+///   worse than the journal plus a per-touched-type unique rebuild, which is
+///   that field's undo story.
 fn journal_covers(graph: &DirGraph) -> bool {
     // Only the heap backend can express an inverse petgraph edit.
     graph.graph.supports_undo_journal()
-        // Deliberately *not* gated on `column_stores.is_empty()`. That read as
-        // a narrow guard on the columnar-`SET` master side channel, but it
-        // vetoed every statement shape on every saved graph — `save()` calls
-        // `enable_columnar`, and nothing on a mutation path ever empties the
-        // map again. The side channel is covered instead: the master store is
-        // restored verbatim from the unparked shell (`Arc::make_mut` cannot
-        // touch the shell's handle) and the per-node handles come back through
-        // the journal. See the module doc for the full argument.
-        //
-        // User-created indexes need per-bucket position undo on the delete
-        // path, which the journal does not record yet. Empty in the default
-        // graph — `create_index` opts in. Follow-up, tracked in the sprint
-        // report.
-        && graph.property_indices.is_empty()
-        && graph.composite_indices.is_empty()
-        && graph.range_indices.is_empty()
-    // Deliberately *not* gated on `unique_indices.is_empty()`. It reads as
-    // doctrine-consistent but is a pessimisation: it would route every
-    // constrained graph to `fork_transaction()`, an O(V+E) clone of everything,
-    // which is strictly worse than the journal plus a per-touched-type unique
-    // rebuild. The rebuild is that field's undo story.
 }
 
 /// An open rollback checkpoint for exactly one mutating statement.
@@ -409,6 +434,35 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
                     }
                 }
             }
+            // The three user-index families share one shape: undo the push,
+            // then drop the bucket only if this statement created it. An
+            // emptied-but-pre-existing bucket is left in place because the
+            // maintenance paths leave one there too, and restoring the
+            // pre-statement graph means restoring that as well.
+            BucketId::PropertyValue { key, value } => {
+                if let Some(value_map) = graph.property_indices.get_mut(&key) {
+                    undo_bucket_append(value_map.get_mut(&value), idx);
+                    if bucket_was_new {
+                        value_map.remove(&value);
+                    }
+                }
+            }
+            BucketId::RangeValue { key, value } => {
+                if let Some(btree) = graph.range_indices.get_mut(&key) {
+                    undo_bucket_append(btree.get_mut(&value), idx);
+                    if bucket_was_new {
+                        btree.remove(&value);
+                    }
+                }
+            }
+            BucketId::CompositeTuple { key, value } => {
+                if let Some(comp_map) = graph.composite_indices.get_mut(&key) {
+                    undo_bucket_append(comp_map.get_mut(&value), idx);
+                    if bucket_was_new {
+                        comp_map.remove(&value);
+                    }
+                }
+            }
         },
         UndoEntry::BucketRemoved { bucket, idx, pos } => match bucket {
             BucketId::NodeType(name) => {
@@ -420,6 +474,31 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
                 let members = graph.secondary_label_index.entry(label).or_default();
                 let pos = pos.min(members.len());
                 members.insert(pos, idx);
+            }
+            // A bucket the statement emptied was dropped from its map by the
+            // maintenance path, so re-inserting has to recreate it. If the
+            // index itself is gone the entry is skipped: nothing to restore
+            // into, and a rolled-back statement never removes an index.
+            BucketId::PropertyValue { key, value } => {
+                if let Some(value_map) = graph.property_indices.get_mut(&key) {
+                    let members = value_map.entry(value).or_default();
+                    let pos = pos.min(members.len());
+                    members.insert(pos, idx);
+                }
+            }
+            BucketId::RangeValue { key, value } => {
+                if let Some(btree) = graph.range_indices.get_mut(&key) {
+                    let members = btree.entry(value).or_default();
+                    let pos = pos.min(members.len());
+                    members.insert(pos, idx);
+                }
+            }
+            BucketId::CompositeTuple { key, value } => {
+                if let Some(comp_map) = graph.composite_indices.get_mut(&key) {
+                    let members = comp_map.entry(value).or_default();
+                    let pos = pos.min(members.len());
+                    members.insert(pos, idx);
+                }
             }
         },
         UndoEntry::TimeseriesRemoved { node, prior } => {
@@ -457,7 +536,6 @@ fn debug_assert_slot_reused(restored: usize, expected: usize, kind: &str) {
 mod tests {
     use super::*;
     use crate::datatypes::Value;
-    use petgraph::graph::NodeIndex;
     use petgraph::stable_graph::StableDiGraph;
     use std::collections::HashMap;
 
@@ -537,15 +615,33 @@ mod tests {
         assert_eq!(graph.type_indices.len(), 1);
     }
 
-    /// A graph with user-created property indexes must keep the clone
-    /// checkpoint until the journal learns to reverse them.
+    /// User-created indexes no longer veto the journal: their bucket edits are
+    /// journalled with positions, so an indexed graph keeps the cheap
+    /// checkpoint instead of paying a whole-graph clone per statement for the
+    /// rest of the session.
     #[test]
-    fn gate_rejects_user_property_indexes() {
+    fn gate_accepts_user_property_indexes() {
         let mut graph = DirGraph::new();
         assert!(journal_covers(&graph));
         graph
             .property_indices
             .insert(("Item".to_string(), "name".to_string()), HashMap::new());
-        assert!(!journal_covers(&graph));
+        graph
+            .range_indices
+            .insert(("Item".to_string(), "qty".to_string()), Default::default());
+        graph.composite_indices.insert(
+            ("Item".to_string(), vec!["name".to_string()]),
+            HashMap::new(),
+        );
+        assert!(journal_covers(&graph));
+    }
+
+    /// Undoing an append must remove the copy the append pushed, not every
+    /// copy — a bucket can hold a pre-statement occurrence of the same node.
+    #[test]
+    fn undoing_an_append_leaves_a_pre_existing_occurrence() {
+        let mut members = vec![NodeIndex::new(3), NodeIndex::new(7), NodeIndex::new(3)];
+        undo_bucket_append(Some(&mut members), NodeIndex::new(3));
+        assert_eq!(members, vec![NodeIndex::new(3), NodeIndex::new(7)]);
     }
 }
