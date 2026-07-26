@@ -1803,7 +1803,10 @@ read-only graph (`read_only(True)`), blocked in a read-only transaction, and
 rolled back with the rest of a failed statement. On a schema-locked graph,
 indexing an undeclared property is rejected — the same typo-guard writes get.
 A schema command is a standalone statement: it cannot follow another clause or
-appear inside a `CALL { }` body.
+appear inside a `CALL { }` body. An index belongs to one node type, so
+`write_scope=[...]` applies: `CREATE INDEX` / `DROP INDEX` on a type outside the
+whitelist is a scope violation. `SHOW INDEXES` is unaffected — a write scope
+restricts mutations, not visibility.
 
 `indexes_added` and `indexes_removed` join `graph.last_mutation_stats`,
 mirroring Neo4j's `indexesAdded` / `indexesRemoved` summary counters.

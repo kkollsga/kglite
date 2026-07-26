@@ -100,3 +100,28 @@ def test_session_execute_enforces_scope(kg):
     s.execute("CREATE (:Task {id: 9})", write_scope=SCOPE)
     with pytest.raises(Exception, match="write scope"):
         s.execute("CREATE (:Algorithm {id: 9})", write_scope=SCOPE)
+
+
+def test_index_ddl_respects_the_write_scope(kg):
+    """An index is schema state for one node type, so `CREATE INDEX` /
+    `DROP INDEX` on a type outside the whitelist is a scope violation like any
+    other write to it."""
+    kg.cypher("CREATE INDEX FOR (n:Plan) ON (n.status)", write_scope=SCOPE)
+    assert kg.has_index("Plan", "status")
+
+    with pytest.raises(Exception, match="write scope"):
+        kg.cypher("CREATE INDEX FOR (n:Algorithm) ON (n.id)", write_scope=SCOPE)
+    assert not kg.has_index("Algorithm", "id")
+
+    kg.create_index("Algorithm", "id")
+    with pytest.raises(Exception, match="write scope"):
+        kg.cypher("DROP INDEX Algorithm.id", write_scope=SCOPE)
+    assert kg.has_index("Algorithm", "id")
+
+
+def test_show_indexes_is_unaffected_by_the_write_scope(kg):
+    """`SHOW INDEXES` is a read; a write whitelist restricts mutations, not
+    visibility (integrity, not secrecy)."""
+    kg.create_index("Algorithm", "id")
+    rows = kg.cypher("SHOW INDEXES", write_scope=SCOPE).to_dicts()
+    assert [row["name"] for row in rows] == ["Algorithm.id"]

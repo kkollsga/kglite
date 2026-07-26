@@ -445,11 +445,11 @@ fn apply_foreach_body_clause(
 
 /// Execute a CREATE clause, creating nodes and edges in the graph.
 /// Enforce the graph's transient role-scoped write whitelist. When
-/// `active_write_scope` is `Some(set)`, a `CREATE`/`SET` touching a node type
-/// not in `set` is rejected. `None` = unrestricted (the common case; this is a
-/// single `Option` check with no allocation). See
+/// `active_write_scope` is `Some(set)`, a `CREATE`/`SET`/schema-DDL statement
+/// touching a node type not in `set` is rejected. `None` = unrestricted (the
+/// common case; this is a single `Option` check with no allocation). See
 /// [`crate::graph::DirGraph::active_write_scope`].
-fn enforce_write_scope(graph: &DirGraph, node_type: &str) -> Result<(), String> {
+pub(super) fn enforce_write_scope(graph: &DirGraph, node_type: &str) -> Result<(), String> {
     if let Some(scope) = &graph.active_write_scope {
         if !scope.contains(node_type) {
             return Err(format!(

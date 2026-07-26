@@ -138,6 +138,9 @@ fn execute_create_index(
     create: &CreateIndex,
 ) -> Result<MutationStats, String> {
     let label = node_label(&create.target, "CREATE INDEX")?;
+    // Role-scoped write guard: an index is schema state for one node type, so a
+    // session restricted to a write whitelist may not index a type outside it.
+    super::write::enforce_write_scope(graph, &label)?;
     if create.has_options {
         return Err(format!(
             "OPTIONS {{ ... }} on CREATE INDEX is not supported: KGLite has no index providers \
@@ -305,6 +308,8 @@ fn execute_drop_index(graph: &mut DirGraph, drop: &DropIndex) -> Result<Mutation
             None => return drop_missing_index(graph, name, drop.if_exists),
         },
     };
+
+    super::write::enforce_write_scope(graph, &label)?;
 
     // One canonical name can cover several KGLite structures — a single
     // property may carry both a hash equality index and a B-tree range index,

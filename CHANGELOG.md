@@ -45,8 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Index DDL is classified as a mutation, since schema is graph state: it is
   blocked on a read-only graph and in a read-only transaction, rolls back with
   a failed statement, and is rejected on a schema-locked graph when the
-  property is undeclared. `SHOW INDEXES` is a read and works on a read-only
-  graph.
+  property is undeclared. `write_scope=[...]` covers it too, since an index
+  belongs to one node type. `SHOW INDEXES` is a read: it works on a read-only
+  graph and is unaffected by a write scope, which restricts mutations rather
+  than visibility.
 - Lifted the backend routing behind `create_index` into the core as
   `DirGraph::create_property_index_routed`, so Cypher `CREATE INDEX` makes the
   same decision the Python API does: on a `storage='disk'` graph it builds the
