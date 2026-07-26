@@ -948,13 +948,17 @@ fn create_node(
             },
         }
     };
-    graph
-        .check_required_fields(&label, constraint_read)
-        .map_err(|violation| violation.to_string())?;
+    // Bind before reporting: `record_constraint_violation` needs `&mut graph`,
+    // so the immutable borrow held by the check must end at the semicolon.
+    let required = graph.check_required_fields(&label, constraint_read);
+    if let Err(violation) = required {
+        return Err(graph.record_constraint_violation(violation));
+    }
     let unique_claims = graph.unique_claims(&label, constraint_read);
-    graph
-        .check_unique_claims(&unique_claims, None)
-        .map_err(|violation| violation.to_string())?;
+    let unique = graph.check_unique_claims(&unique_claims, None);
+    if let Err(violation) = unique {
+        return Err(graph.record_constraint_violation(violation));
+    }
 
     // Clone the id for incremental index maintenance below (it is moved into
     // insert_node_routed). The id-index is maintained incrementally whenever it

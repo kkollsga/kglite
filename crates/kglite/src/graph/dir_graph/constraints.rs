@@ -413,7 +413,27 @@ impl DirGraph {
     ///
     /// Empty on both sides when the type declares no unique constraint, which is
     /// the common case.
+    ///
+    /// A rejection is *also* parked on the graph by
+    /// [`DirGraph::record_constraint_violation`], so callers whose error channel
+    /// is a `String` (the Cypher `SET` / `REMOVE` tree) still surface a typed
+    /// `ConstraintViolationError`. Recording here rather than at each call site
+    /// keeps the violation attached to the code that produced it.
     pub(crate) fn plan_property_write(
+        &mut self,
+        node_type: &str,
+        node_idx: NodeIndex,
+        property: &str,
+        new_value: Option<&Value>,
+    ) -> Result<PropertyWritePlan, ConstraintViolation> {
+        let planned = self.plan_property_write_uncaught(node_type, node_idx, property, new_value);
+        if let Err(violation) = &planned {
+            self.record_constraint_violation(violation.clone());
+        }
+        planned
+    }
+
+    fn plan_property_write_uncaught(
         &mut self,
         node_type: &str,
         node_idx: NodeIndex,

@@ -35,6 +35,8 @@
     "ConstraintError",
     "ConstraintViolationError",
     "ConstraintCreationError",
+    "TransactionConflictError",
+    "retry_on_conflict",
     "NodeNotFoundError",
     "ConnectionNotFoundError",
     "PropertyNotFoundError",
@@ -98,7 +100,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "ConnectionNotFoundError": {
@@ -108,7 +115,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "ConstraintCreationError": {
@@ -118,7 +130,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "ConstraintError": {
@@ -128,7 +145,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "NoneType"
+        }
+      },
       "module": "kglite"
     },
     "ConstraintViolationError": {
@@ -138,7 +160,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "CypherError": {
@@ -148,7 +175,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "NoneType"
+        }
+      },
       "module": "kglite"
     },
     "CypherExecutionError": {
@@ -159,6 +191,10 @@
       "constructor": null,
       "kind": "class",
       "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        },
         "col": {
           "kind": "attribute",
           "type": "NoneType"
@@ -178,6 +214,10 @@
       "constructor": null,
       "kind": "class",
       "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        },
         "col": {
           "kind": "attribute",
           "type": "NoneType"
@@ -196,7 +236,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "CypherTypeMismatchError": {
@@ -206,7 +251,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "ExprError": {
@@ -216,7 +266,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "FileError": {
@@ -226,7 +281,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "FileFormatError": {
@@ -236,7 +296,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "FileIoError": {
@@ -246,7 +311,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "FrozenGraph": {
@@ -279,7 +349,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "InternerCollisionError": {
@@ -289,7 +364,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "KgError": {
@@ -299,7 +379,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "NoneType"
+        }
+      },
       "module": "kglite"
     },
     "KnowledgeGraph": {
@@ -1100,7 +1185,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "NodeNotFoundError": {
@@ -1110,7 +1200,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "PropertyNotFoundError": {
@@ -1120,7 +1215,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "ResultIter": {
@@ -1220,7 +1320,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "Session": {
@@ -1328,6 +1433,21 @@
       },
       "module": "kglite"
     },
+    "TransactionConflictError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
+      "module": "kglite"
+    },
     "ValidationError": {
       "bases": [
         "KgError"
@@ -1335,7 +1455,12 @@
       "constructible": true,
       "constructor": null,
       "kind": "class",
-      "members": {},
+      "members": {
+        "code": {
+          "kind": "attribute",
+          "type": "str"
+        }
+      },
       "module": "kglite"
     },
     "__version__": {
@@ -1389,6 +1514,10 @@
     "outline": {
       "kind": "function",
       "signature": "(graph: 'KnowledgeGraph', root, edge: str, *, max_depth: int | None = None, body: str | None = None) -> str"
+    },
+    "retry_on_conflict": {
+      "kind": "function",
+      "signature": "(graph: 'Any', work: 'Callable[[Any], T]', *, attempts: 'int' = 5, base_delay: 'float' = 0.005, max_delay: 'float' = 0.5, jitter: 'bool' = True) -> 'T'"
     },
     "stamp_file_freshness": {
       "kind": "function",

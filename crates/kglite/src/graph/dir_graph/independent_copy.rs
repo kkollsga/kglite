@@ -35,6 +35,7 @@ impl DirGraph {
         copy.active_write_scope = None;
         copy.active_git_sha = None;
         copy.active_modified_by = None;
+        copy.pending_constraint_violation = None;
         copy
     }
 }

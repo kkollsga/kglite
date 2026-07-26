@@ -274,6 +274,31 @@ pub struct DirGraph {
     pub(crate) active_git_sha: Option<String>,
     #[serde(skip, default)]
     pub(crate) active_modified_by: Option<String>,
+    /// Transient, **execution-scoped** carrier for the structured constraint
+    /// violation behind the write error currently unwinding.
+    ///
+    /// The Cypher mutation tree (`executor/write.rs`, `executor/schema_ddl.rs`)
+    /// and the bulk-loader gate (`mutation/maintain.rs`) both report failures
+    /// over a `Result<_, String>` channel, so a `ConstraintViolation` — which
+    /// already has an `impl From<ConstraintViolation> for KgError` — would
+    /// otherwise be flattened to prose and surface as a generic
+    /// `CypherExecutionError` / `ArgumentError`. Rather than retype ~535 call
+    /// sites across the executor, the violation is parked here by
+    /// [`Self::record_constraint_violation`] at the moment it is stringified
+    /// and drained by the adapter that builds the typed error.
+    ///
+    /// Stored **with the exact message it produced**, and the drain only
+    /// accepts it when the string that arrived is byte-identical: if any
+    /// intermediate frame wrapped or rewrote the message, the pair is
+    /// discarded and the caller falls back to the untyped error. That makes a
+    /// desync fail *safe* rather than fail *wrong*.
+    ///
+    /// Same lifecycle as `active_write_scope`: installed for one execution,
+    /// cleared unconditionally, never serialized, never copied (see
+    /// `independent_copy`).
+    #[serde(skip, default)]
+    pub(crate) pending_constraint_violation:
+        Option<Box<(String, crate::graph::constraints::ConstraintViolation)>>,
     /// Monotonically increasing version counter — incremented on every mutation.
     /// Used for optimistic concurrency control in transactions.
     #[serde(skip, default)]
@@ -418,6 +443,61 @@ impl DirGraph {
         self.version = self.version.wrapping_add(1);
     }
 
+    /// Stringify `violation` for the `Result<_, String>` error channel while
+    /// parking the structured value in
+    /// [`Self::pending_constraint_violation`], so the adapter that ultimately
+    /// builds the typed error can recover the constraint kind, node type,
+    /// properties, and descriptor instead of only the prose.
+    ///
+    /// Returns the message to hand to `Err(..)`; call it at every site that
+    /// would otherwise write `.map_err(|v| v.to_string())`.
+    pub(crate) fn record_constraint_violation(
+        &mut self,
+        violation: crate::graph::constraints::ConstraintViolation,
+    ) -> String {
+        let message = violation.to_string();
+        self.pending_constraint_violation = Some(Box::new((message.clone(), violation)));
+        message
+    }
+
+    /// Clear any parked violation. Called before an execution begins so a
+    /// violation left by an earlier run on the same working copy can never be
+    /// attributed to a later, unrelated error.
+    pub(crate) fn clear_pending_constraint_violation(&mut self) {
+        self.pending_constraint_violation = None;
+    }
+
+    /// Take the parked violation **only if** it is the one behind `message`.
+    ///
+    /// The identity check is what makes the side channel safe: the `String` is
+    /// still the control-flow channel, so if any intermediate frame wrapped or
+    /// replaced the message, the parked violation no longer describes the error
+    /// being reported and is dropped rather than mis-attributed. This is an
+    /// equality test against a string this graph itself produced — not a
+    /// pattern match on error prose.
+    pub(crate) fn take_constraint_violation_for(
+        &mut self,
+        message: &str,
+    ) -> Option<crate::graph::constraints::ConstraintViolation> {
+        let parked = self.pending_constraint_violation.take()?;
+        let (recorded, violation) = *parked;
+        (recorded == message).then_some(violation)
+    }
+
+    /// Typed [`KgError`] for a write that failed with `message`, when that
+    /// failure was a declared-constraint violation.
+    ///
+    /// Returns `None` when the error was something else, so each caller keeps
+    /// its own fallback: the Cypher path degrades to
+    /// [`KgError::CypherExecution`], the bulk-loader path to
+    /// [`KgError::Argument`]. Every binding that surfaces a write error over
+    /// the engine's `Result<_, String>` channel needs exactly this step, so it
+    /// lives here rather than being re-derived per binding.
+    pub fn take_constraint_error(&mut self, message: &str) -> Option<crate::error::KgError> {
+        self.take_constraint_violation_for(message)
+            .map(crate::error::KgError::from)
+    }
+
     pub fn new() -> Self {
         DirGraph {
             graph_id: next_graph_id(),
@@ -464,6 +544,7 @@ impl DirGraph {
             active_write_scope: None,
             active_git_sha: None,
             active_modified_by: None,
+            pending_constraint_violation: None,
             version: 0,
             interner: StringInterner::new(),
             type_schemas: HashMap::new(),
@@ -520,6 +601,7 @@ impl DirGraph {
             active_write_scope: None,
             active_git_sha: None,
             active_modified_by: None,
+            pending_constraint_violation: None,
             version: 0,
             interner: StringInterner::new(),
             type_schemas: HashMap::new(),

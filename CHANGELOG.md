@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A stable `.code` on every kglite exception.** `exc.code` is the wire-stable
+  classifier (`"ConstraintViolation"`, `"TransactionConflict"`,
+  `"CypherSyntax"`, …) that the C ABI already exposed as `KGLITE_STATUS_*` and
+  the Bolt server already mapped to `Neo.*`, but which had no way of reaching
+  Python — `dir(exc)` previously showed only `add_note`, `args`, and
+  `with_traceback`, so applications had no choice but to match on message prose.
+  It is readable on the classes too (`kglite.ConstraintViolationError.code`), so
+  a dispatch table can be built without an instance, and is `None` on the three
+  abstract bases (`KgError`, `CypherError`, `ConstraintError`) which span
+  several codes.
+- **`kglite.TransactionConflictError`**, raised when `Transaction.commit()`
+  loses an optimistic-concurrency race. This previously arrived as
+  `ArgumentError` — "Invalid argument: Transaction conflict…" — which is the
+  wrong class for a condition whose correct handling is "retry the transaction",
+  not "fix the call". The message now also reports the version gap, and the C
+  ABI gains `KGLITE_STATUS_CODE_TRANSACTION_CONFLICT = 20` (appended, so
+  existing discriminants are unchanged). The Bolt status string
+  `Neo.ClientError.Transaction.ConflictDetected` is unchanged.
+- **`kglite.retry_on_conflict(graph, work)`** — the commit-retry loop every
+  concurrent writer needs, with exponential backoff and full jitter. `work(tx)`
+  is re-run against a fresh `begin()` on each attempt; only conflicts are
+  retried, and the final conflict is re-raised unchanged. Conflicts are ordinary
+  rather than rare here, because OCC compares a whole-graph version counter (see
+  the documentation fix below).
 - `kglite-bolt-server --neo4j-compat` (or `KGLITE_BOLT_NEO4J_COMPAT=1`) makes the
   server present a Neo4j-compatible agent in the Bolt handshake, so official
   drivers that refuse to connect to a non-Neo4j server will talk to it. The
@@ -397,6 +421,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A constraint violation is now catchable by type from every write path.**
+  `ConstraintViolationError` existed but was reachable from nowhere: a violation
+  raised through Cypher surfaced as `CypherExecutionError`, and one raised
+  through the bulk loaders (`add_nodes`, and everything funnelling through it)
+  as `ArgumentError`. The only handler an application could write was therefore
+  a substring match on the message — in a signup path, for the single most
+  common error a web application has. Both paths now raise
+  `ConstraintViolationError`, so `except kglite.ConstraintViolationError` works
+  and `except kglite.ConstraintError` still catches that or
+  `ConstraintCreationError`. The messages are unchanged: they still name the
+  constraint, the property, the offending value, and the remedy.
+
+  The structured violation is carried out of the engine's `Result<_, String>`
+  write channel on the graph itself and drained by the adapter that builds the
+  typed error, paired with the exact message it produced — if an intermediate
+  frame rewrites the message the pair is discarded and the untyped error is
+  used, so a mismatch fails safe rather than mis-attributing a violation.
+- The exception-hierarchy diagram in `docs/python/error-handling.md` omitted the
+  entire constraint family (`ConstraintError`, `ConstraintViolationError`,
+  `ConstraintCreationError`). It now lists them alongside
+  `TransactionConflictError`, with new sections covering stable codes,
+  constraint violations, and commit conflicts.
+- `docs/python/guides/primary-store.md` stated that independent transactions
+  proceed concurrently, and that a Cypher constraint violation must be caught by
+  matching the message. Neither was true. OCC compares a **whole-graph version
+  counter**, not read/write sets, because a commit publishes the transaction's
+  working copy by pointer swap — so two transactions touching unrelated nodes do
+  conflict, and the loser's snapshot genuinely does not contain the winner's
+  write, which is why rejecting it is correct rather than over-cautious. The
+  guide now says so plainly, points at `retry_on_conflict`, and suggests
+  `session()` for workloads with many short concurrent writers.
+- The Bolt `neo4j_status_code` coverage test enumerated its codes by hand and
+  had silently stopped covering `Cancelled`, `ConstraintViolation`, and
+  `ConstraintCreationFailed`; all are now included.
 - `ORDER BY` is no longer silently ignored after an aggregating `RETURN` when
   the sort key is not one of the projected columns. `MATCH (t:Task) OPTIONAL
   MATCH (t)-[:X]->(c) RETURN t.title AS title, count(c) AS n ORDER BY

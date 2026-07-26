@@ -33,6 +33,7 @@ from .kglite import (  # explicit re-exports — names listed in __all__ below
     SchemaError,
     Session,
     Transaction,
+    TransactionConflictError,
     ValidationError,
     __version__,
     cypher_pass_names,
@@ -42,6 +43,7 @@ from .kglite import (  # explicit re-exports — names listed in __all__ below
     open,
     open_session,
 )
+from .retry import retry_on_conflict
 
 
 class Agg:
@@ -568,6 +570,8 @@ __all__ = [
     "ConstraintError",
     "ConstraintViolationError",
     "ConstraintCreationError",
+    "TransactionConflictError",
+    "retry_on_conflict",
     "NodeNotFoundError",
     "ConnectionNotFoundError",
     "PropertyNotFoundError",
