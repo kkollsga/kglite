@@ -349,6 +349,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ORDER BY` is no longer silently ignored after an aggregating `RETURN` when
+  the sort key is not one of the projected columns. `MATCH (t:Task) OPTIONAL
+  MATCH (t)-[:X]->(c) RETURN t.title AS title, count(c) AS n ORDER BY
+  t.priority DESC` — the shape behind every "list with a count, most important
+  first" view — returned every correct row in **insertion order**, with the
+  clause dropped and no error. Combined with `SKIP`/`LIMIT` it made pagination
+  incoherent: because the underlying order was unspecified, pages could repeat
+  some rows and skip others.
+
+  Aggregation rebuilds its output rows, so a variable survives onto them only
+  if the executor carries its binding forward. The three aggregation operators
+  (streaming, materialized, and the fused `OPTIONAL MATCH` + `count()`) each
+  carried a different subset, so whether the clause worked depended on which
+  one the planner happened to pick — `count()` worked, `collect()` did not, and
+  adding an `OPTIONAL MATCH` broke a query that was correct without it. Where
+  the binding was missing the sort key evaluated to `NULL` on every row, all
+  keys tied, and the stable sort returned the input order. All three operators
+  now carry bindings for every variable the grouping keys read, so the same
+  query orders identically whichever one runs.
+
+  Ordering by a variable that is **not** determined by the grouping is now a
+  query error instead of a silent non-sort. In `RETURN t.title, count(c) ORDER
+  BY c.label`, `c` collapses into the aggregate and has no single value per
+  group; Neo4j rejects this shape and kglite now does too, with a message
+  naming the fix. The same applies to an aggregate in `ORDER BY` that is not
+  projected (`ORDER BY max(t.priority)`) or that is projected under an alias
+  (`count(*) AS n ORDER BY count(*)` — order by `n`). Ordering by a projected
+  alias, by an unaliased aggregate's expression form (`ORDER BY count(p)`), and
+  by any property of a grouping variable all keep working.
 - `claude_config` now reads and writes Claude MCP config files as UTF-8. On a
   non-UTF-8 Windows codepage the read mis-decoded the file and the atomic write
   committed the damage over every unrelated MCP server entry; non-ASCII text in

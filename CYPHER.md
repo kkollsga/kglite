@@ -186,6 +186,48 @@ graph.cypher("MATCH (n:Person) RETURN median(n.age), percentile_cont(n.age, 0.9)
 graph.cypher("MATCH (n:Person) RETURN variance(n.age), std(n.age)")
 ```
 
+### ORDER BY after an aggregate
+
+An aggregating `RETURN` emits one row per group, so a sort key must have a
+single value on that row. Two things do:
+
+- **Projected columns** — an alias, or an unaliased item's expression form:
+  `RETURN c.name AS company, count(p) ORDER BY count(p) DESC, company`.
+- **Anything read by a grouping key** — every non-aggregate item is a grouping
+  key, so any property of a variable it names is sortable even when it is not
+  itself projected:
+
+```python
+# t is named by the grouping key t.title, so t.priority is sortable.
+graph.cypher("""
+    MATCH (t:Task)
+    OPTIONAL MATCH (t)-[:X]->(c)
+    RETURN t.title AS title, count(c) AS n
+    ORDER BY t.priority DESC
+""")
+```
+
+The value used is the group's first row. When several distinct nodes collapse
+into one group (two `Task`s sharing a title), that representative is which one
+the group met first — project the sort key explicitly if you need it pinned.
+
+Ordering by anything else is rejected rather than silently ignored:
+
+```python
+# ERROR: c collapses into count(c), so c.label has no value per group.
+"... RETURN t.title AS title, count(c) AS n ORDER BY c.label DESC"
+
+# ERROR: aggregate not projected. Project it, then order by the alias.
+"... RETURN t.title AS title, count(*) AS n ORDER BY max(t.priority) DESC"
+
+# ERROR: the aggregate is projected as `n` — order by `n`.
+"... RETURN t.title AS title, count(*) AS n ORDER BY count(*) DESC"
+```
+
+A `RETURN` **without** aggregates keeps every binding on its rows, so ordering
+by a non-projected expression is unrestricted there. `WITH` narrows scope to
+what it projects, so a sort key after `WITH` must be one of its columns.
+
 ## HAVING
 
 Post-aggregation filter — use after RETURN or WITH with aggregates:

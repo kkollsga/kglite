@@ -7,7 +7,7 @@ use super::super::result::*;
 use crate::datatypes::values::Value;
 use crate::graph::schema::{soft_alias_fallback, DirGraph, NodeData, SoftAliasFallback};
 use crate::graph::storage::GraphRead;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // Re-export the ast aggregate helpers so downstream code can refer to them
 // via the executor namespace (backward compatibility with pre-split code).
@@ -18,6 +18,58 @@ pub use super::super::ast::is_aggregate_expression;
 // ============================================================================
 
 // is_aggregate_expression and is_window_expression are re-exported above.
+
+/// Variables a grouped aggregation still pins down on its output rows.
+///
+/// Every non-aggregate projection item is a grouping key, so any variable it
+/// reads has one representative value per group. Variables that occur *only*
+/// inside aggregate arguments do not — `count(c)` collapses many `c`s into a
+/// scalar — and are deliberately excluded.
+///
+/// The three aggregation implementations
+/// ([`super::CypherExecutor::execute_return_with_aggregation`],
+/// [`super::stream::aggregate::apply`], and
+/// [`super::CypherExecutor::execute_fused_optional_match_aggregate`]) all
+/// rebuild their output rows from scratch, so they must agree on this set or
+/// the same query orders differently depending on which one the planner picked.
+pub(crate) fn grouping_variables(items: &[ReturnItem]) -> HashSet<String> {
+    use crate::graph::languages::cypher::planner::simplification::collect_expression_refs;
+
+    let mut vars = HashSet::new();
+    for item in items {
+        if !is_aggregate_expression(&item.expression) {
+            collect_expression_refs(&item.expression, &mut vars);
+        }
+    }
+    vars
+}
+
+/// Carry a group's representative node/edge/path bindings onto an aggregation
+/// output row.
+///
+/// `source` is the group's first input row; `vars` comes from
+/// [`grouping_variables`]. Without this, `ORDER BY t.priority` after
+/// `RETURN t.title AS title, count(c) AS n` evaluates against a row that has
+/// no `t` binding: every sort key resolves to NULL, the keys all tie, and the
+/// stable sort silently hands back insertion order. Downstream
+/// MATCH/OPTIONAL MATCH clauses need the same bindings to re-anchor patterns.
+pub(crate) fn carry_group_bindings(
+    vars: &HashSet<String>,
+    source: &ResultRow,
+    target: &mut ResultRow,
+) {
+    for var in vars {
+        if let Some(&idx) = source.node_bindings.get(var) {
+            target.node_bindings.insert(var.clone(), idx);
+        }
+        if let Some(edge) = source.edge_bindings.get(var) {
+            target.edge_bindings.insert(var.clone(), *edge);
+        }
+        if let Some(path) = source.path_bindings.get(var) {
+            target.path_bindings.insert(var.clone(), path.clone());
+        }
+    }
+}
 
 /// Augment each row's `projected` with an expression-keyed copy of every
 /// aggregate return item, so HAVING predicates like `count(m) > 1` can
@@ -55,8 +107,12 @@ pub fn return_item_column_name(item: &ReturnItem) -> String {
     }
 }
 
-/// Convert an expression to its string representation (for column naming)
-pub(super) fn expression_to_string(expr: &Expression) -> String {
+/// Convert an expression to its string representation (for column naming).
+///
+/// This rendering *is* the identity the executor uses to resolve an unaliased
+/// projection, so `schema_check` compares ORDER BY keys against RETURN items
+/// with it — matching what the runtime can actually resolve.
+pub(crate) fn expression_to_string(expr: &Expression) -> String {
     match expr {
         Expression::PropertyAccess { variable, property } => format!("{}.{}", variable, property),
         Expression::Variable(name) => name.clone(),

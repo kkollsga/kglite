@@ -252,8 +252,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/aggregation/materialized.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_return_with_aggregation",
-      "lines": 246,
-      "branches": 39,
+      "lines": 237,
+      "branches": 34,
       "nesting": 5
     },
     {
@@ -390,13 +390,6 @@
       "nesting": 3
     },
     {
-      "path": "crates/kglite/src/graph/languages/cypher/executor/stream/aggregate.rs",
-      "qualified_name": "crate::apply",
-      "lines": 204,
-      "branches": 26,
-      "nesting": 4
-    },
-    {
       "path": "crates/kglite/src/graph/languages/cypher/executor/where_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::evaluate_predicate_tristate",
       "lines": 321,
@@ -476,8 +469,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/planner/schema_check.rs",
       "qualified_name": "crate::validate_scope",
-      "lines": 201,
-      "branches": 79,
+      "lines": 179,
+      "branches": 72,
       "nesting": 6
     },
     {
@@ -516,6 +509,13 @@
       "nesting": 6
     },
     {
+      "path": "crates/kglite/src/graph/mutation/add_properties.rs",
+      "qualified_name": "crate::add_properties_aggregate",
+      "lines": 165,
+      "branches": 36,
+      "nesting": 10
+    },
+    {
       "path": "crates/kglite/src/graph/mutation/extend.rs",
       "qualified_name": "crate::extend_graph",
       "lines": 218,
@@ -535,13 +535,6 @@
       "lines": 275,
       "branches": 32,
       "nesting": 4
-    },
-    {
-      "path": "crates/kglite/src/graph/mutation/add_properties.rs",
-      "qualified_name": "crate::add_properties_aggregate",
-      "lines": 165,
-      "branches": 36,
-      "nesting": 10
     },
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",

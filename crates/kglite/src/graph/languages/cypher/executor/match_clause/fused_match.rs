@@ -41,6 +41,7 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
+        let carried_vars = grouping_variables(&with_clause.items);
         let mut result_rows = Vec::with_capacity(existing.rows.len());
 
         for (scan_count, row) in existing.rows.iter().enumerate() {
@@ -119,21 +120,14 @@ impl<'a> CypherExecutor<'a> {
                 projected.insert(key, Value::Int64(value));
             }
 
-            // Create result row preserving bindings for group-key variables
+            // Create the result row, preserving bindings for every variable the
+            // grouping keys read (see `helpers::carry_group_bindings`). This
+            // operator is what an `OPTIONAL MATCH` + `count()` query fuses
+            // into, so narrowing the carry-over to bare-variable keys here is
+            // what made `ORDER BY t.priority` differ between the OPTIONAL and
+            // non-OPTIONAL spellings of the same query.
             let mut new_row = ResultRow::from_projected(projected);
-            for &idx in &group_key_indices {
-                if let Expression::Variable(var) = &with_clause.items[idx].expression {
-                    if let Some(&node_idx) = row.node_bindings.get(var) {
-                        new_row.node_bindings.insert(var.clone(), node_idx);
-                    }
-                    if let Some(edge) = row.edge_bindings.get(var) {
-                        new_row.edge_bindings.insert(var.clone(), *edge);
-                    }
-                    if let Some(path) = row.path_bindings.get(var) {
-                        new_row.path_bindings.insert(var.clone(), path.clone());
-                    }
-                }
-            }
+            carry_group_bindings(&carried_vars, row, &mut new_row);
 
             result_rows.push(new_row);
         }

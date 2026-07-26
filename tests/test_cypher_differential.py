@@ -589,6 +589,40 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "ORDER BY count(p) DESC, company LIMIT 3",
         None,
     ),
+    # ORDER BY a non-projected property of a *grouping* variable, after an
+    # aggregate. Aggregation rebuilds its output rows, so `p` survives only
+    # if the operator carries its binding forward — and the three
+    # aggregation operators (streaming, materialized, fused OPTIONAL) used
+    # to disagree about that. Where the binding was dropped the sort key
+    # evaluated to NULL on every row and the ORDER BY was silently ignored.
+    # The optimizer decides which operator runs, so opt-vs-naive is exactly
+    # the axis that exposed it. Row-order assertions live in
+    # tests/test_cypher_order_by_after_aggregate.py; these entries guard the
+    # row-set equality the corpus is responsible for.
+    (
+        "optional_match_aggregate_order_by_non_projected",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:WORKS_AT]->(c:Company) "
+        "RETURN p.name AS person, count(c) AS jobs ORDER BY p.age DESC",
+        None,
+    ),
+    (
+        "optional_match_aggregate_order_by_non_projected_paged",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) "
+        "RETURN p.name AS person, count(f) AS friends "
+        "ORDER BY p.age DESC SKIP 5 LIMIT 5",
+        None,
+    ),
+    # `collect()` is outside the streaming aggregate's reach, so this one
+    # takes the materialized path — the same defect with no OPTIONAL MATCH
+    # involved at all.
+    (
+        "collect_aggregate_order_by_non_projected",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.city AS city, collect(p.name) AS names ORDER BY p.city DESC",
+        None,
+    ),
     # Aggregate on the EDGE variable (not a node variable). Pre-fix the
     # gate at fuse_match_return_aggregate only accepted count(<other-node>);
     # count(<edge_var>) silently fell out of fusion despite being

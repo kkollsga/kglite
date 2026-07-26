@@ -206,6 +206,7 @@ impl<'a> CypherExecutor<'a> {
         }
 
         // Compute results for each group
+        let carried_vars = grouping_variables(&clause.items);
         let mut result_rows = Vec::with_capacity(groups.len());
 
         for (group_idx, (group_key_values, row_indices)) in groups.iter().enumerate() {
@@ -239,26 +240,16 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
 
-            // Preserve node/edge bindings from the first row in the group
-            // for variables that appear in the grouping keys.
-            // This ensures subsequent MATCH/OPTIONAL MATCH clauses can
-            // constrain patterns to the correct nodes.
+            // Preserve node/edge/path bindings from the first row in the group
+            // for every variable the grouping keys read — not just keys spelled
+            // as a bare variable. `RETURN t.title AS title, count(c) AS n`
+            // groups by a property access, and dropping `t` here is what made
+            // a trailing `ORDER BY t.priority` silently return insertion order.
+            // Also lets subsequent MATCH/OPTIONAL MATCH clauses constrain
+            // patterns to the correct nodes.
             let first_row = &result_set.rows[row_indices[0]];
             let mut row = ResultRow::from_projected(projected);
-            for &item_idx in &group_key_indices {
-                let expr = &clause.items[item_idx].expression;
-                if let Expression::Variable(var) = expr {
-                    if let Some(&idx) = first_row.node_bindings.get(var) {
-                        row.node_bindings.insert(var.clone(), idx);
-                    }
-                    if let Some(edge) = first_row.edge_bindings.get(var) {
-                        row.edge_bindings.insert(var.clone(), *edge);
-                    }
-                    if let Some(path) = first_row.path_bindings.get(var) {
-                        row.path_bindings.insert(var.clone(), path.clone());
-                    }
-                }
-            }
+            carry_group_bindings(&carried_vars, first_row, &mut row);
             result_rows.push(row);
         }
 

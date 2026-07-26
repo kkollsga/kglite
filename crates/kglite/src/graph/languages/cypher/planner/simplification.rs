@@ -1550,7 +1550,12 @@ fn collect_predicate_refs(pred: &Predicate, out: &mut HashSet<String>) {
     }
 }
 
-fn collect_expression_refs(expr: &Expression, out: &mut HashSet<String>) {
+/// Collect every variable an expression *reads*.
+///
+/// A pure AST utility shared with the executor (`helpers::grouping_variables`)
+/// and with `schema_check`'s post-aggregation ORDER BY scope. Over-collection
+/// is safe for every caller; under-collection is not.
+pub(crate) fn collect_expression_refs(expr: &Expression, out: &mut HashSet<String>) {
     match expr {
         Expression::Variable(v) => {
             out.insert(v.clone());
