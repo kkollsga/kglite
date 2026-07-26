@@ -129,17 +129,11 @@ pub struct DirGraph {
     #[serde(default)]
     pub graph_instructions: HashMap<String, String>,
     /// **User**-schema version — the caller's own data-model revision, bumped by
-    /// their migrations. Entirely distinct from the two engine version stamps:
-    /// `save_metadata.format_version` / the `.kgl` magic describe *our* on-disk
-    /// layout, and the engine never reads or interprets this number. It exists
-    /// so a migration runner can ask "which of my ordered migration scripts has
-    /// this graph already had applied?" and refuse to re-apply or skip.
-    ///
-    /// `0` = unversioned (baseline, no migrations applied) — which is also what
-    /// every `.kgl` file written before this field existed loads as, via the
-    /// serde default. Read/written directly as a field; there is no invariant
-    /// to guard, so accessors would be sugar. Costs nothing per write: it is
-    /// touched only by an explicit assignment and by save/load.
+    /// their migrations. Distinct from the engine's format stamps
+    /// (`save_metadata.format_version`, the `.kgl` magic), which the engine owns
+    /// and this never touches. `0` = unversioned, which is also what a `.kgl`
+    /// written before this field existed loads as (additive, absent in old
+    /// files). Docs: `docs/python/guides/migrations.md`.
     #[serde(default)]
     pub user_schema_version: u32,
     /// Auto-vacuum threshold: if Some(t), vacuum() is triggered automatically after

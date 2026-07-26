@@ -306,6 +306,10 @@ pub mod api {
         pub use crate::graph::io::export::{
             to_csv, to_csv_dir, to_d3_json, to_gexf, to_graphml, to_text,
         };
+        /// Dependency-free relational exit: a deterministic SQLite-dialect SQL
+        /// script (`sqlite3 out.db < dump.sql`). Node types become tables,
+        /// connection types become link tables.
+        pub use crate::graph::io::export_sql::to_sqlite_dump;
         /// Embedding-vector file export / import.
         pub use crate::graph::io::file::{
             export_embeddings_to_file, import_embeddings_from_file, EmbeddingExportFilter,
