@@ -331,6 +331,27 @@ impl KnowledgeGraph {
         dir.graph = GraphBackend::Recording(Box::new(RecordingGraph::new(inner)));
     }
 
+    /// [`flush_wal`](Self::flush_wal) mapped into `PyResult` — the form every
+    /// `#[pymethods]` mutation site uses.
+    ///
+    /// **Every method that commits a change to graph content must call this
+    /// before returning to Python.** There is no choke point that can do it
+    /// automatically: `get_graph_mut` has no access to the durability state
+    /// (which lives on the binding, not the `DirGraph`), and it runs *before*
+    /// the mutation rather than after. A mutator that forgets leaves its ops
+    /// buffered, where they are invisible to the log and are discarded by the
+    /// next `save()` — i.e. it silently is not crash-safe.
+    ///
+    /// Not every `&mut self` method needs it. Ops only exist for changes the
+    /// log can express — nodes, edges, and labels. Schema/config metadata,
+    /// user indexes, embeddings, and timeseries have no `MutationOp`, so they
+    /// are checkpoint-only by construction and calling this would be a no-op.
+    #[inline]
+    pub(crate) fn commit_wal(&mut self) -> PyResult<()> {
+        self.flush_wal()
+            .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(e)))
+    }
+
     /// Drain the capture buffer, resolve it to logical ops, and append a
     /// durably-`fsync`'d WAL frame. No-op for a non-durable graph or when
     /// no ops are pending. Called after each mutation on a durable graph;

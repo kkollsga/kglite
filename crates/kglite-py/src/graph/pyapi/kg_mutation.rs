@@ -357,6 +357,7 @@ fn write_connections(
         })?;
 
         kg.cursor.selection.clear();
+        kg.commit_wal()?;
         kg.add_report(OperationReport::ConnectionOperation(result.clone()));
 
         return KnowledgeGraph::connection_report_to_py(&result, &connection_type);
@@ -437,6 +438,7 @@ fn write_connections(
         .ensure_disk_edges_built()
         .map_err(pyo3::exceptions::PyOSError::new_err)?;
 
+    kg.commit_wal()?;
     kg.add_report(OperationReport::ConnectionOperation(result.clone()));
 
     KnowledgeGraph::connection_report_to_py(&result, &connection_type)
@@ -1098,6 +1100,7 @@ impl KnowledgeGraph {
         if graph.graph.is_disk() {
             graph.sync_disk_column_stores();
         }
+        self.commit_wal()?;
         self.add_report(OperationReport::NodeOperation(result.clone()));
 
         Python::attach(|py| build_node_report_dict(py, &result))
@@ -1214,6 +1217,7 @@ impl KnowledgeGraph {
                 })?;
 
         self.cursor.selection.clear();
+        self.commit_wal()?;
         build_extend_report_dict(py, &result)
     }
 
@@ -1470,6 +1474,7 @@ impl KnowledgeGraph {
                 None => skipped += 1,
             }
         }
+        self.commit_wal()?;
         let result = PyDict::new(py);
         result.set_item("labelled", labelled)?;
         result.set_item("skipped", skipped)?;
@@ -1525,6 +1530,7 @@ impl KnowledgeGraph {
                 None => skipped += 1,
             }
         }
+        self.commit_wal()?;
         let result = PyDict::new(py);
         result.set_item("removed", removed)?;
         result.set_item("skipped", skipped)?;
@@ -1631,6 +1637,7 @@ impl KnowledgeGraph {
         }
 
         self.cursor.selection.clear();
+        self.commit_wal()?;
         Ok(result_dict.into())
     }
 
@@ -1839,6 +1846,7 @@ impl KnowledgeGraph {
         }
 
         self.cursor.selection.clear();
+        self.commit_wal()?;
         Ok(result_dict.into())
     }
 }

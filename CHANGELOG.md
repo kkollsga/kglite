@@ -36,6 +36,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Mutations other than `cypher()` are now crash-safe on a `durable=True`
+  graph.** Only Cypher statements were written to the write-ahead log. Every
+  other way of changing a graph — `add_nodes`, `add_connections`,
+  `replace_connections`, `add_nodes_bulk`, `add_connections_bulk`,
+  `add_connections_from_source`, `extend`, `add_label`, `remove_label`,
+  `create_connections`, `add_properties`, `purge_provisional`, and a committed
+  transaction — applied the change and left it out of the log, so a crash lost
+  it with no error. A committed transaction is logged as a single entry, and a
+  rolled-back one still leaves nothing behind.
+
+- `load_ntriples()` no longer raises `PanicException` on a graph opened with
+  `durable=True`. The RDF loader's type-resolution pass treated a durable graph
+  as impossible and aborted.
+
+- A `Session` now refuses write queries against a `durable=True` graph instead
+  of applying them somewhere they can never be persisted. Session writes land
+  on a working copy visible only through that session — never on the graph that
+  owns the log or the save path — so they were unreachable by both. Reads are
+  unaffected; run mutations with `g.cypher(...)` or `with g.begin() as tx`.
+
 - **A `vacuum()` no longer switches off write-ahead logging.** Compacting a
   graph rebuilt it into a plain in-memory backend, which discarded whatever the
   triggering statement had written *and* silently ended crash-safety for the

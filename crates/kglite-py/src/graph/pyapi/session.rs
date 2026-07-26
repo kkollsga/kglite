@@ -213,6 +213,26 @@ impl Session {
             // atomically, so a prior writer's panic doesn't cascade.
             let _wguard = write_lock.lock().unwrap_or_else(|p| p.into_inner());
             let mut graph = core.write();
+            // A `Session` carries no durability state: `KnowledgeGraph::session`
+            // hands over an `Arc<DirGraph>`, while the WAL handle and its
+            // log-sequence number stay behind on the `KnowledgeGraph`. A write
+            // here would still be *captured* — the graph is wrapped — but
+            // nothing can ever drain that buffer, and the first copy-on-write
+            // fork resets it. The mutation would apply and then vanish on a
+            // crash, with no error. Refuse instead of losing it silently.
+            if matches!(
+                graph.graph,
+                kglite_core::api::storage::GraphBackend::Recording(_)
+            ) {
+                return Err(KgError::Argument(
+                    "A Session cannot execute write queries against a graph opened with \
+                     durable=True: session writes are not recorded in the write-ahead log, \
+                     so they would be lost on a crash. Run the mutation on the graph itself \
+                     (g.cypher(...)) or in a transaction (with g.begin() as tx: ...), both \
+                     of which are logged. Sessions remain available for reads."
+                        .to_string(),
+                ));
+            }
             let opts = ExecuteOptions {
                 params: &param_map,
                 deadline,

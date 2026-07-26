@@ -663,6 +663,10 @@ impl KnowledgeGraph {
             }
         }
 
+        // The write landed on `self.inner`; the handle returned below is
+        // deliberately detached, so `self` is what owns the durability state.
+        self.commit_wal()?;
+
         // Create the result KnowledgeGraph (clone the Arc for the new graph)
         let mut new_kg = KnowledgeGraph {
             inner: self.inner.clone(),

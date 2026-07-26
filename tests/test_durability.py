@@ -304,6 +304,164 @@ def test_labels_survive_checkpoint_then_crash(tmp_path, storage):
     ]
 
 
+# ── mutation paths other than cypher() ───────────────────────────────
+#
+# The log is appended by an explicit flush at the end of each committing
+# mutation; there is no choke point that can do it automatically. For a long
+# time `cypher()` was the only caller, so every other way of writing to a
+# durable graph buffered its ops and dropped them. One test per entry point,
+# because "this one forgot to flush" is invisible until a crash.
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_add_nodes_survives_crash(tmp_path, storage):
+    """The bulk loader, not Cypher — the same `GraphWrite` seam, a different
+    entry point."""
+    _crash_child(
+        tmp_path,
+        """
+        import pandas as pd
+        g = open_durable()
+        g.add_nodes(
+            pd.DataFrame({"id": [1, 2], "name": ["Alice", "Bob"]}),
+            node_type="Person",
+            unique_id_field="id",
+            node_title_field="name",
+        )
+        """,
+        storage,
+    )
+    g = _open(tmp_path / "app.kgl", storage)
+    names = sorted(r["n"] for r in g.cypher("MATCH (p:Person) RETURN p.name AS n"))
+    assert names == ["Alice", "Bob"]
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_add_connections_survives_crash(tmp_path, storage):
+    _crash_child(
+        tmp_path,
+        """
+        import pandas as pd
+        g = open_durable()
+        g.add_nodes(
+            pd.DataFrame({"id": [1, 2], "name": ["Alice", "Bob"]}),
+            node_type="Person",
+            unique_id_field="id",
+            node_title_field="name",
+        )
+        g.add_connections(
+            pd.DataFrame({"src": [1], "tgt": [2]}),
+            "KNOWS", "Person", "src", "Person", "tgt",
+        )
+        """,
+        storage,
+    )
+    g = _open(tmp_path / "app.kgl", storage)
+    assert g.cypher("MATCH (:Person)-[r:KNOWS]->(:Person) RETURN count(r) AS c").scalar() == 1
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_batch_label_api_survives_crash(tmp_path, storage):
+    """`add_label` / `remove_label` reach the same label choke point Cypher's
+    `SET n:X` does, so they produce the same log entry."""
+    _crash_child(
+        tmp_path,
+        """
+        g = open_durable()
+        g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
+        g.cypher("CREATE (:Person {id: 2, name: 'Bob'})")
+        g.add_label("Person", [1, 2], "Employee")
+        g.add_label("Person", [1], "Manager")
+        g.remove_label("Person", [2], "Employee")
+        """,
+        storage,
+    )
+    g = _open(tmp_path / "app.kgl", storage)
+    assert g.cypher("MATCH (p:Person {id:1}) RETURN labels(p) AS l").scalar() == [
+        "Person",
+        "Employee",
+        "Manager",
+    ]
+    assert g.cypher("MATCH (p:Person {id:2}) RETURN labels(p) AS l").scalar() == ["Person"]
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_committed_transaction_survives_crash(tmp_path, storage):
+    """A transaction commits as exactly one log entry — the whole transaction
+    or none of it, which is the atomicity the caller asked for."""
+    _crash_child(
+        tmp_path,
+        """
+        g = open_durable()
+        with g.begin() as tx:
+            tx.cypher("CREATE (:Person {id: 1, name: 'InTxn'})")
+            tx.cypher("CREATE (:Person {id: 2, name: 'AlsoInTxn'})")
+        """,
+        storage,
+    )
+    g = _open(tmp_path / "app.kgl", storage)
+    names = sorted(r["n"] for r in g.cypher("MATCH (p:Person) RETURN p.name AS n"))
+    assert names == ["AlsoInTxn", "InTxn"]
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_rolled_back_transaction_leaves_nothing_after_crash(tmp_path, storage):
+    """The converse: `Transaction.cypher` must not log, or a rollback would
+    still be recoverable."""
+    _crash_child(
+        tmp_path,
+        """
+        g = open_durable()
+        tx = g.begin()
+        tx.cypher("CREATE (:Person {id: 1, name: 'Discarded'})")
+        tx.rollback()
+        g.cypher("CREATE (:Person {id: 2, name: 'Kept'})")
+        """,
+        storage,
+    )
+    g = _open(tmp_path / "app.kgl", storage)
+    names = sorted(r["n"] for r in g.cypher("MATCH (p:Person) RETURN p.name AS n"))
+    assert names == ["Kept"]
+
+
+def test_durable_session_refuses_writes_but_allows_reads(tmp_path):
+    """A `Session` holds only the graph, never the durability state, and its
+    writes land on an independent working copy visible through the session
+    alone — so they were unreachable by both the log and the parent's
+    `save()`. Refusing beats losing them silently."""
+    g = _open(tmp_path / "app.kgl")
+    g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
+    session = g.session()
+
+    assert session.execute("MATCH (p:Person) RETURN count(*) AS c").to_list() == [{"c": 1}]
+
+    with pytest.raises(Exception) as excinfo:
+        session.execute("CREATE (:Person {id: 2})")
+    message = str(excinfo.value)
+    assert "durable=True" in message
+    assert "g.cypher" in message, "must point at a logged alternative"
+    assert "g.begin()" in message
+
+
+def test_load_ntriples_does_not_panic_on_a_durable_graph(tmp_path):
+    """The RDF loader's type-resolution pass matched on the backend and treated
+    the write-capture wrapper as unreachable, so this panicked outright."""
+    nt = tmp_path / "data.nt"
+    nt.write_text(
+        "<http://www.wikidata.org/entity/Q1> "
+        '<http://www.w3.org/2000/01/rdf-schema#label> "Alice" .\n'
+        "<http://www.wikidata.org/entity/Q1> "
+        "<http://www.wikidata.org/prop/direct/P31> "
+        "<http://www.wikidata.org/entity/Q5> .\n"
+        "<http://www.wikidata.org/entity/Q5> "
+        '<http://www.w3.org/2000/01/rdf-schema#label> "human" .\n'
+    )
+    g = _open(tmp_path / "app.kgl")
+    stats = g.load_ntriples(str(nt))
+    assert stats["entities"] == 2
+    assert stats["edges"] == 1
+
+
 # ── vacuum interaction ───────────────────────────────────────────────
 
 
