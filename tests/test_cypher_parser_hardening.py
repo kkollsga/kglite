@@ -86,6 +86,27 @@ def test_var_length_parse_error_carries_position(chain):
 
 BUDGET = 512  # keep in sync with MAX_EXPRESSION_DEPTH in parser/mod.rs
 
+# Linux caps a *single* argv entry at MAX_ARG_STRLEN — 32 pages, 128 KiB — and
+# no ulimit raises it; exceeding it fails the spawn with E2BIG before the child
+# starts. macOS allows roughly 1 MB, so a crash-shape test that interpolates a
+# pathological query into `python -c` passes locally and dies on every CI
+# interpreter. Pathological payloads therefore go through a file, and
+# `_run_child` enforces that portably so the next such test fails here rather
+# than only on Linux.
+_MAX_ARG_STRLEN = 32 * 4096
+
+
+def _run_child(code: str, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run `python -c code args…`, asserting no argv entry risks E2BIG."""
+    argv = [sys.executable, "-c", code, *args]
+    for entry in argv:
+        assert len(entry.encode()) < _MAX_ARG_STRLEN, (
+            f"argv entry is {len(entry.encode())} bytes, over Linux's "
+            f"{_MAX_ARG_STRLEN}-byte MAX_ARG_STRLEN — pass large payloads "
+            f"through a file or stdin, not the command line"
+        )
+    return subprocess.run(argv, capture_output=True, text=True, timeout=120)
+
 
 def test_deep_nesting_within_budget_parses_and_executes():
     g = KnowledgeGraph()
@@ -173,22 +194,33 @@ def test_operator_chain_past_budget_is_a_clean_syntax_error(shape, chain):
 
 
 @pytest.mark.parametrize("shape", sorted(_CHAIN_SHAPES))
-def test_pathological_operator_chain_cannot_kill_the_process(shape):
+def test_pathological_operator_chain_cannot_kill_the_process(shape, tmp_path):
     # Subprocess for the same reason as the nesting crash-shape test below:
     # on regression this aborts the interpreter, which would otherwise take
     # the whole test run with it. 20k levels is far past any stack.
+    #
+    # The query travels via a *file*, never argv. At 20k levels the widest
+    # shapes reach ~200 KB, and Linux caps a single argument at
+    # MAX_ARG_STRLEN (32 pages = 128 KiB) — a hard kernel limit no ulimit
+    # raises — so embedding it in `-c` made `and`/`or`/`xor`/`concat` die with
+    # E2BIG ("Argument list too long") before the interpreter ever started.
+    # macOS allows ~1 MB per argument, which is why that only ever failed in
+    # CI. The child reads the file, so payload size is now irrelevant.
+    query_file = tmp_path / "query.cypher"
+    query_file.write_text(_CHAIN_SHAPES[shape](20_000), encoding="utf-8")
     code = (
+        "import pathlib, sys\n"
         "import kglite\n"
         "g = kglite.KnowledgeGraph()\n"
         "g.cypher('CREATE (:Hop {id: 0})')\n"
-        f"q = {_CHAIN_SHAPES[shape](20_000)!r}\n"
+        "q = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')\n"
         "try:\n"
         "    g.cypher(q)\n"
         "    print('UNEXPECTED-SUCCESS')\n"
         "except kglite.CypherSyntaxError:\n"
         "    print('CLEAN-ERROR')\n"
     )
-    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    proc = _run_child(code, str(query_file))
     assert proc.returncode == 0, f"process died (rc={proc.returncode}): {proc.stderr[-300:]}"
     assert proc.stdout.strip() == "CLEAN-ERROR", proc.stdout
 
@@ -208,7 +240,7 @@ def test_pathological_nesting_cannot_kill_the_process(opener, closer):
         "except kglite.CypherSyntaxError as e:\n"
         "    print('CLEAN-ERROR')\n"
     )
-    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    proc = _run_child(code)
     assert proc.returncode == 0, f"process died (rc={proc.returncode}): {proc.stderr[-300:]}"
     assert proc.stdout.strip() == "CLEAN-ERROR", proc.stdout
 
