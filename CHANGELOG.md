@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `kglite-bolt-server --neo4j-compat` (or `KGLITE_BOLT_NEO4J_COMPAT=1`) makes the
+  server present a Neo4j-compatible agent in the Bolt handshake, so official
+  drivers that refuse to connect to a non-Neo4j server will talk to it. The
+  official **Java** driver is the one that does this: it requires the handshake
+  agent to start with `Neo4j/` and otherwise aborts with
+  `UntrustedServerException: Server does not identify as a genuine Neo4j
+  instance` before running a query, which left kglite unreachable from the JVM.
+  With the mode on, the agent becomes
+  `Neo4j/5.26.0 (kglite-bolt-server/<version>)` — the prefix the driver checks
+  for, with the real product kept in the string, so the server stays
+  identifiable in logs, in driver errors, and through `ServerInfo.agent()`. Only
+  the handshake's `server` field changes; `bolt_agent` still reports kglite. The
+  environment variable takes `1`/`true`/`yes`/`on` for containers and unit files,
+  and the flag wins if both are set. This is the `--neo4j-compat` flag the 0.10.1
+  notes reserved for exactly this situation.
+
+  It is **off by default**: presenting as a different product is the operator's
+  decision, and the official Python and JavaScript drivers never needed it —
+  neither inspects the agent. When a client whose driver enforces the check
+  connects while the mode is off, the server logs a warning naming both ways to
+  switch it on, so the fix is discoverable from the server's own log instead of
+  only from a client stack trace. The identity is never switched automatically on
+  the strength of a client-supplied string.
 - Cypher index DDL, in the Neo4j 5 grammar, so a schema-setup script ports
   unedited: `CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:Label) ON
   (n.prop, ...)`, `DROP INDEX <name> [IF EXISTS]`, and `SHOW [ALL] INDEX[ES]`.

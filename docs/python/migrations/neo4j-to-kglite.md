@@ -49,12 +49,36 @@ For positioning detail see
 [Bolt v5 wire protocol](https://neo4j.com/docs/bolt/current/). Any
 Neo4j-aware client — the official Python/JS/Java/Go drivers, Cypher
 Shell, Neo4j Browser, LangChain's `Neo4jGraph` — connects with **no
-consumer-side code changes** beyond the connection URL. See the
+consumer-side code changes** beyond the connection URL. Clients on the Java
+driver additionally need the server started with `--neo4j-compat` (see the note
+below); the change is server-side, so their code is still untouched. See the
 [Bolt server operator guide](../../operators/bolt-server.md).
 
 ```bash
 cargo install kglite-bolt-server
 kglite-bolt-server --graph my-graph.kgl --bind 127.0.0.1 --port 7687
+```
+
+```{note}
+**JVM clients need `--neo4j-compat`.** The official Java driver refuses to talk
+to a server whose handshake agent does not begin with `Neo4j/`, and fails at
+connect time with `UntrustedServerException: Server does not identify as a
+genuine Neo4j instance` — before any query runs. The Python and JavaScript
+drivers do not perform this check, so they work against the default identity.
+
+Start the server with compatibility mode (or set
+`KGLITE_BOLT_NEO4J_COMPAT=1`) and the agent becomes
+`Neo4j/5.26.0 (kglite-bolt-server/<version>)`, which the driver accepts while
+still naming the real product:
+
+```bash
+kglite-bolt-server --graph my-graph.kgl --neo4j-compat
+```
+
+It is opt-in because presenting as another product is the operator's decision.
+Connect a driver that enforces the check with compatibility off and the server
+log tells you exactly this, naming both activation routes. See “Driver identity” in the
+[Bolt server operator guide](../../operators/bolt-server.md).
 ```
 
 Your driver code stays almost identical — just re-point the URI:

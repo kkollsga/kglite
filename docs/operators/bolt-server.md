@@ -59,6 +59,41 @@ The supported behavior is locked by the standing Bolt correctness and
 differential suites. Avoid relying on an exact test/query count or a particular
 driver patch version; CI exercises the complete current corpus.
 
+## Driver identity (`--neo4j-compat`)
+
+The handshake reports `kglite-bolt-server/<version>` by default. The official
+Python and JavaScript drivers accept that; the official **Java** driver requires
+a `Neo4j/` prefix and refuses the connection outright without one:
+
+```
+UntrustedServerException: Server does not identify as a genuine Neo4j
+instance: 'kglite-bolt-server/0.14.5'
+```
+
+Enable compatibility mode to serve JVM clients. Either route works, and the flag
+wins if both are set:
+
+```bash
+kglite-bolt-server --graph graph.kgl --neo4j-compat
+KGLITE_BOLT_NEO4J_COMPAT=1 kglite-bolt-server --graph graph.kgl
+```
+
+The agent then becomes `Neo4j/5.26.0 (kglite-bolt-server/<version>)` — enough of
+a Neo4j spelling to pass the driver's check, with the real product retained so
+the server stays identifiable in logs, in driver errors, and through
+`ServerInfo.agent()`. Only the `server` field changes; `bolt_agent` keeps
+reporting kglite.
+
+The variable accepts `1`, `true`, `yes` or `on` (any case) — the useful form for
+container images and unit files, where adding an argument means rebuilding or
+editing a unit.
+
+Off by default on purpose: presenting as a different product is the operator's
+call. When a driver that enforces the check connects with compatibility off, the
+server logs a warning naming both activation routes, so an operator can diagnose
+it from the server log instead of a client stack trace. The identity is never
+switched automatically.
+
 ## Operations and security
 
 - Loopback is the safe default. If exposed remotely, enable basic auth and TLS

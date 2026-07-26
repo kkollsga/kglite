@@ -48,19 +48,44 @@ JAVA_DIR = CONFORMANCE_ROOT / "java"
 EXPECTED_CHECKS = 22
 
 
-@pytest.fixture
-def bolt_url(tmp_path: Path):
-    """A bolt server with default settings — notably no `--allow-csv-import`,
-    which the capability check in each suite relies on."""
+def _serve(tmp_path: Path, *extra_args: str):
+    """Spawn a conformance server, yielding its URL.
+
+    No `--allow-csv-import`, which the capability check in each suite relies on.
+    """
     if not _bolt_binary_available():
         pytest.skip(_BOLT_SKIP_REASON)
     fixture = tmp_path / "conformance.kgl"
     _build_bolt_fixture_graph(fixture)
-    proc, url = _spawn_bolt_server(fixture)
+    proc, url = _spawn_bolt_server(fixture, extra_args=list(extra_args))
     try:
         yield url
     finally:
         _teardown_bolt_server(proc)
+
+
+@pytest.fixture
+def bolt_url(tmp_path: Path):
+    """A server on kglite's **default, honest** identity
+    (`kglite-bolt-server/<version>`).
+
+    Used by the JavaScript suite — and the Python driver suite elsewhere — so the
+    default configuration stays covered. Neither driver inspects the server agent.
+    """
+    yield from _serve(tmp_path)
+
+
+@pytest.fixture
+def bolt_url_neo4j_compat(tmp_path: Path):
+    """A server in **Neo4j compatibility mode** (`--neo4j-compat`).
+
+    The Java driver refuses any server whose agent does not start with `Neo4j/`,
+    failing at HELLO with `UntrustedServerException` before a query runs, so this
+    is the configuration a JVM user actually has to run. Testing Java here and
+    JavaScript on the default above keeps *both* identities covered, which is
+    worth more than standardising on one.
+    """
+    yield from _serve(tmp_path, "--neo4j-compat")
 
 
 def _require(tool: str, install_hint: str) -> str:
@@ -151,7 +176,7 @@ def _require_jdk(minimum: int = 17) -> None:
         pytest.skip(f"JDK {minimum}+ required by the conformance pom, found {blob}")
 
 
-def test_java_driver_conformance(bolt_url: str) -> None:
+def test_java_driver_conformance(bolt_url_neo4j_compat: str) -> None:
     _require_jdk()
     mvn = _require("mvn", "`brew install maven` or apt install maven")
 
@@ -166,7 +191,7 @@ def test_java_driver_conformance(bolt_url: str) -> None:
             "-q",
             "--no-transfer-progress",
             f"-Dmaven.repo.local={JAVA_DIR / '.m2'}",
-            f"-Dkglite.bolt.uri={bolt_url}",
+            f"-Dkglite.bolt.uri={bolt_url_neo4j_compat}",
             "test",
         ],
         cwd=JAVA_DIR,

@@ -18,7 +18,7 @@ use kglite::api::io::{open_or_create_graph, OpenDisposition};
 use kglite::api::session::CsvImportPolicy;
 use kglite::api::storage::StorageMode;
 
-use crate::backend::KgliteBackend;
+use crate::backend::{KgliteBackend, ServerIdentity};
 
 mod auth;
 mod backend;
@@ -69,6 +69,24 @@ struct Cli {
     /// Reject all mutation queries at the execute boundary.
     #[arg(long, default_value_t = false)]
     readonly: bool,
+
+    /// Report a Neo4j-compatible product identifier in the Bolt handshake.
+    ///
+    /// Off by default: the server identifies honestly as
+    /// `kglite-bolt-server/<version>`, which the official Python and JavaScript
+    /// drivers accept. The official **Java** driver refuses any server whose
+    /// agent does not start with `Neo4j/` and fails at connect time with
+    /// `UntrustedServerException: Server does not identify as a genuine Neo4j
+    /// instance` — before running a single query. With this flag the handshake
+    /// reports `Neo4j/5.26.0 (kglite-bolt-server/<version>)`, which satisfies
+    /// that check while keeping the real product visible in logs and in the
+    /// driver's own `ServerInfo.agent()`.
+    ///
+    /// Also settable as `KGLITE_BOLT_NEO4J_COMPAT=1` for Docker, systemd and CI,
+    /// where editing an argv is awkward. Passing the flag wins over the
+    /// environment.
+    #[arg(long, default_value_t = false)]
+    neo4j_compat: bool,
 
     /// Allow `LOAD CSV` to read files inside this directory.
     ///
@@ -145,6 +163,34 @@ fn storage_mode_str(g: &kglite::api::DirGraph) -> &'static str {
     }
 }
 
+/// Environment variable mirroring `--neo4j-compat`.
+const NEO4J_COMPAT_ENV: &str = "KGLITE_BOLT_NEO4J_COMPAT";
+
+/// Read `name` as a boolean, accepting the spellings operators actually write.
+///
+/// Parsed here rather than through clap's `env` support because clap would
+/// require exactly `true`/`false` for a flag, and the documented, obvious thing
+/// to write in a Compose file or unit file is `=1`. Accepts `1/true/yes/on` and
+/// `0/false/no/off`, any case. An unrecognised value is reported and ignored
+/// rather than silently treated as false, so a typo cannot quietly disable a
+/// setting the operator believes is on.
+fn env_flag(name: &str) -> Option<bool> {
+    let raw = std::env::var(name).ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "" | "0" | "false" | "no" | "off" => Some(false),
+        _ => {
+            tracing::warn!(
+                var = name,
+                value = %raw,
+                "unrecognised boolean value; expected one of 1/true/yes/on or \
+                 0/false/no/off — ignoring this variable"
+            );
+            None
+        }
+    }
+}
+
 fn init_tracing() {
     // Match kglite-mcp-server's filter: respect RUST_LOG, default to
     // info for our crate and warn for everything else.
@@ -218,7 +264,20 @@ async fn serve() -> Result<()> {
         Some(dir) => CsvImportPolicy::Directory(dir),
         None => CsvImportPolicy::Denied,
     };
-    let backend = KgliteBackend::new(dir, cli.readonly, advertised_addr, csv_import);
+    // Flag OR environment: either turns compatibility on, and the flag wins when
+    // the two disagree.
+    let neo4j_compat = cli.neo4j_compat || env_flag(NEO4J_COMPAT_ENV).unwrap_or(false);
+    let identity = if neo4j_compat {
+        ServerIdentity::Neo4jCompatible
+    } else {
+        ServerIdentity::Kglite
+    };
+    tracing::info!(
+        server_agent = %identity.product_string(env!("CARGO_PKG_VERSION")),
+        neo4j_compat,
+        "bolt handshake identity"
+    );
+    let backend = KgliteBackend::new(dir, cli.readonly, advertised_addr, csv_import, identity);
 
     let addr = SocketAddr::new(cli.bind, cli.port);
 
