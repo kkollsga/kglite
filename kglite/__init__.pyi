@@ -93,6 +93,29 @@ class InternerCollisionError(KgError):
 class InternalError(KgError):
     """Invariant violation — kglite-internal bug. Reports the source location."""
 
+class ConstraintError(KgError):
+    """Base class for declared-integrity-constraint failures.
+
+    Catch this to handle any constraint problem — a violated write or an
+    uninstallable declaration — without distinguishing the two.
+    """
+
+class ConstraintViolationError(ConstraintError):
+    """A write violated a declared UNIQUE / NOT NULL / NODE KEY constraint.
+
+    The write was rejected before touching storage, so the graph is unchanged.
+    Raised by ``cypher()`` for ``CREATE`` / ``MERGE`` / ``SET`` / ``REMOVE`` and
+    by the bulk writers (``add_nodes`` and everything funnelling through it).
+    """
+
+class ConstraintCreationError(ConstraintError):
+    """Declaring a constraint failed because the stored data already violates it.
+
+    Raised by :meth:`KnowledgeGraph.define_schema` when the schema declares a
+    ``unique`` tuple or ``primary_key`` that existing nodes already duplicate.
+    Nothing is changed, so deduplicate the node type and call it again.
+    """
+
 @runtime_checkable
 class EmbeddingModel(Protocol):
     """Protocol for embedding models passed to ``embed_texts`` / ``search_text``.
@@ -151,35 +174,6 @@ class EmbeddingModel(Protocol):
     def dimension(self) -> int:
         """The dimensionality of the embedding vectors."""
         ...
-
-class ConstraintError(KgError):
-    """Base class for declared-integrity-constraint failures.
-
-    Catch this to handle any constraint problem — a violated write or an
-    uninstallable declaration — without distinguishing the two.
-    """
-
-    ...
-
-class ConstraintViolationError(ConstraintError):
-    """A write violated a declared UNIQUE / NOT NULL / NODE KEY constraint.
-
-    The write was rejected before touching storage, so the graph is unchanged.
-    Raised by ``cypher()`` for ``CREATE`` / ``MERGE`` / ``SET`` / ``REMOVE`` and
-    by the bulk writers (``add_nodes`` and everything funnelling through it).
-    """
-
-    ...
-
-class ConstraintCreationError(ConstraintError):
-    """Declaring a constraint failed because the stored data already violates it.
-
-    Raised by :meth:`KnowledgeGraph.define_schema` when the schema declares a
-    ``unique`` tuple or ``primary_key`` that existing nodes already duplicate.
-    Nothing is changed, so deduplicate the node type and call it again.
-    """
-
-    ...
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts, returning one vector per text."""
