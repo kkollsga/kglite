@@ -418,7 +418,7 @@ impl DirGraph {
     /// Disk-backed persistent `PropertyIndex` stores are deliberately out of
     /// scope here: they never land in `property_indices` (see
     /// [`Self::create_property_index_routed`]), so this helper cannot see them.
-    pub fn refresh_indexes_for_type(&mut self, node_type: &str) -> usize {
+    pub(crate) fn refresh_indexes_for_type(&mut self, node_type: &str) -> usize {
         let prop_keys = Self::keys_for_type(self.property_indices.keys(), node_type);
         let range_keys = Self::keys_for_type(self.range_indices.keys(), node_type);
         let comp_keys: Vec<Vec<String>> = self

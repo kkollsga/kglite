@@ -82,7 +82,7 @@ impl DirGraph {
     /// Whether *any* unique constraint is declared on this graph. The write
     /// path's fast-out: one `is_empty` for the overwhelmingly common case.
     #[inline]
-    pub fn has_unique_constraints(&self) -> bool {
+    pub(crate) fn has_unique_constraints(&self) -> bool {
         !self.unique_indices.is_empty()
     }
 
@@ -123,7 +123,7 @@ impl DirGraph {
     ///
     /// Idempotent: re-declaring an existing constraint rebuilds it rather than
     /// erroring, so `CREATE CONSTRAINT ... IF NOT EXISTS` and a reload both work.
-    pub fn create_unique_constraint(
+    pub(crate) fn create_unique_constraint(
         &mut self,
         node_type: &str,
         properties: &[&str],
@@ -165,7 +165,11 @@ impl DirGraph {
     }
 
     /// Drop a declared unique constraint. Returns whether one was removed.
-    pub fn drop_unique_constraint(&mut self, node_type: &str, properties: &[String]) -> bool {
+    pub(crate) fn drop_unique_constraint(
+        &mut self,
+        node_type: &str,
+        properties: &[String],
+    ) -> bool {
         match self.find_unique_key(node_type, properties).cloned() {
             Some(key) => {
                 self.remove_unique_declaration(&key);
@@ -494,7 +498,7 @@ impl DirGraph {
     /// The properties `node_type` declares as required, via
     /// `define_schema({"nodes": {"T": {"required": [...]}}})`. Empty when the
     /// type declares none.
-    pub fn required_fields_for(&self, node_type: &str) -> &[String] {
+    pub(crate) fn required_fields_for(&self, node_type: &str) -> &[String] {
         self.schema_definition
             .as_ref()
             .and_then(|schema| schema.node_schemas.get(node_type))
@@ -509,7 +513,7 @@ impl DirGraph {
     /// a primary key is unique **and** present (NODE KEY). A key on `id` does not
     /// count: `id` is a `NodeData` field that always exists.
     #[inline]
-    pub fn has_required_fields(&self, node_type: &str) -> bool {
+    pub(crate) fn has_required_fields(&self, node_type: &str) -> bool {
         if !self.required_fields_for(node_type).is_empty() {
             return true;
         }

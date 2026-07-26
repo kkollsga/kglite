@@ -93,12 +93,12 @@ pub struct DirGraph {
     /// Skipped during serialization — rebuilt from `unique_constraint_keys` on
     /// load, which re-verifies the constraint as a side effect.
     #[serde(skip)]
-    pub unique_indices: HashMap<UniqueConstraintKey, HashMap<CompositeValue, NodeIndex>>,
+    pub(crate) unique_indices: HashMap<UniqueConstraintKey, HashMap<CompositeValue, NodeIndex>>,
     /// Persisted list of declared unique constraints so they survive
     /// save/load. Additive serde field — older `.kgl` files load with an empty
     /// list, i.e. no constraints, which is the pre-existing behaviour.
     #[serde(default)]
-    pub unique_constraint_keys: Vec<UniqueConstraintKey>,
+    pub(crate) unique_constraint_keys: Vec<UniqueConstraintKey>,
     /// Fast O(1) lookup by node ID: node_type -> TypeIdIndex
     /// Lazily built on first use for each node type, skipped during serialization.
     /// Uses compact u32 HashMap when all IDs are UniqueId (e.g., Wikidata mapped mode).

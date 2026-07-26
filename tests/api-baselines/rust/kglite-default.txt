@@ -659,6 +659,8 @@ pub fn kglite::api::cypher::LazyResultDescriptor::len(&self) -> usize
 impl core::fmt::Debug for kglite::api::cypher::LazyResultDescriptor
 pub fn kglite::api::cypher::LazyResultDescriptor::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::cypher::MutationStats
+pub kglite::api::cypher::MutationStats::indexes_added: usize
+pub kglite::api::cypher::MutationStats::indexes_removed: usize
 pub kglite::api::cypher::MutationStats::nodes_created: usize
 pub kglite::api::cypher::MutationStats::nodes_deleted: usize
 pub kglite::api::cypher::MutationStats::properties_removed: usize
@@ -1695,6 +1697,18 @@ pub kglite::api::KgError::Argument(alloc::string::String)
 pub kglite::api::KgError::Cancelled
 pub kglite::api::KgError::ConnectionNotFound
 pub kglite::api::KgError::ConnectionNotFound::connection_type: alloc::string::String
+pub kglite::api::KgError::ConstraintCreationFailed
+pub kglite::api::KgError::ConstraintCreationFailed::descriptor: alloc::string::String
+pub kglite::api::KgError::ConstraintCreationFailed::kind: &'static str
+pub kglite::api::KgError::ConstraintCreationFailed::message: alloc::string::String
+pub kglite::api::KgError::ConstraintCreationFailed::node_type: alloc::string::String
+pub kglite::api::KgError::ConstraintCreationFailed::properties: alloc::vec::Vec<alloc::string::String>
+pub kglite::api::KgError::ConstraintViolation
+pub kglite::api::KgError::ConstraintViolation::descriptor: alloc::string::String
+pub kglite::api::KgError::ConstraintViolation::kind: &'static str
+pub kglite::api::KgError::ConstraintViolation::message: alloc::string::String
+pub kglite::api::KgError::ConstraintViolation::node_type: alloc::string::String
+pub kglite::api::KgError::ConstraintViolation::properties: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::KgError::CypherExecution
 pub kglite::api::KgError::CypherExecution::message: alloc::string::String
 pub kglite::api::KgError::CypherExecution::position: core::option::Option<(usize, usize)>
@@ -1754,6 +1768,8 @@ pub fn kglite::error::KgError::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> c
 pub enum kglite::api::KgErrorCode
 pub kglite::api::KgErrorCode::Cancelled
 pub kglite::api::KgErrorCode::ConnectionNotFound
+pub kglite::api::KgErrorCode::ConstraintCreationFailed
+pub kglite::api::KgErrorCode::ConstraintViolation
 pub kglite::api::KgErrorCode::CypherExecution
 pub kglite::api::KgErrorCode::CypherSyntax
 pub kglite::api::KgErrorCode::CypherTimeout
@@ -1989,22 +2005,13 @@ pub fn kglite::api::DirGraph::build_id_index(&mut self, node_type: &str)
 pub fn kglite::api::DirGraph::bump_version(&mut self)
 pub fn kglite::api::DirGraph::check_auto_vacuum(&mut self) -> bool
 pub fn kglite::api::DirGraph::compact_properties(&mut self)
-pub fn kglite::api::DirGraph::create_composite_index(&mut self, node_type: &str, properties: &[&str]) -> usize
-pub fn kglite::api::DirGraph::create_index(&mut self, node_type: &str, property: &str) -> usize
-pub fn kglite::api::DirGraph::create_range_index(&mut self, node_type: &str, property: &str) -> usize
 pub fn kglite::api::DirGraph::disable_columnar(&mut self)
-pub fn kglite::api::DirGraph::drop_composite_index(&mut self, node_type: &str, properties: &[alloc::string::String]) -> bool
-pub fn kglite::api::DirGraph::drop_index(&mut self, node_type: &str, property: &str) -> core::result::Result<bool, alloc::string::String>
-pub fn kglite::api::DirGraph::drop_range_index(&mut self, node_type: &str, property: &str) -> bool
 pub fn kglite::api::DirGraph::embedding_store(&self, node_type: &str, prop_name: &str) -> core::option::Option<&kglite::api::storage::EmbeddingStore>
 pub fn kglite::api::DirGraph::enable_columnar(&mut self)
 pub fn kglite::api::DirGraph::ensure_column_store_for_push(&mut self, node_type: &str) -> &mut kglite::graph::storage::column_store::ColumnStore
 pub fn kglite::api::DirGraph::ensure_id_index(&self, node_type: &str)
 pub fn kglite::api::DirGraph::ensure_type_schema_keys(&mut self, node_type: &str, keys: &[kglite::api::InternedKey])
-pub fn kglite::api::DirGraph::find_matching_composite_index(&self, node_type: &str, filter_properties: &[alloc::string::String]) -> core::option::Option<((alloc::string::String, alloc::vec::Vec<alloc::string::String>), bool)>
 pub fn kglite::api::DirGraph::from_graph(graph: kglite::api::storage::GraphBackend) -> Self
-pub fn kglite::api::DirGraph::get_composite_index_stats(&self, node_type: &str, properties: &[alloc::string::String]) -> core::option::Option<kglite::graph::dir_graph::IndexStats>
-pub fn kglite::api::DirGraph::get_index_stats(&self, node_type: &str, property: &str) -> core::option::Option<kglite::graph::dir_graph::IndexStats>
 pub fn kglite::api::DirGraph::get_node(&self, index: petgraph::graph_impl::NodeIndex) -> core::option::Option<&kglite::api::NodeData>
 pub fn kglite::api::DirGraph::get_node_mut(&mut self, index: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
 pub fn kglite::api::DirGraph::get_node_timeseries(&self, node_index: usize) -> core::option::Option<&kglite::api::timeseries::NodeTimeseries>
@@ -2015,21 +2022,13 @@ pub fn kglite::api::DirGraph::get_spatial_config(&self, node_type: &str) -> core
 pub fn kglite::api::DirGraph::get_type_connectivity(&self) -> core::option::Option<alloc::vec::Vec<kglite::graph::schema::ConnectivityTriple>>
 pub fn kglite::api::DirGraph::graph_id(&self) -> u64
 pub fn kglite::api::DirGraph::graph_info(&self) -> kglite::graph::dir_graph::GraphInfo
-pub fn kglite::api::DirGraph::has_any_index(&self, node_type: &str, property: &str) -> bool
-pub fn kglite::api::DirGraph::has_composite_index(&self, node_type: &str, properties: &[alloc::string::String]) -> bool
 pub fn kglite::api::DirGraph::has_connection_type(&self, connection_type: &str) -> bool
-pub fn kglite::api::DirGraph::has_index(&self, node_type: &str, property: &str) -> bool
 pub fn kglite::api::DirGraph::has_node_type(&self, node_type: &str) -> bool
 pub fn kglite::api::DirGraph::has_type_shadowing_property(&self) -> bool
 pub fn kglite::api::DirGraph::is_columnar(&self) -> bool
-pub fn kglite::api::DirGraph::list_composite_indexes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<alloc::string::String>)>
-pub fn kglite::api::DirGraph::list_indexes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
-pub fn kglite::api::DirGraph::lookup_by_composite_index(&self, node_type: &str, properties: &[alloc::string::String], values: &[kglite::datatypes::values::Value]) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
 pub fn kglite::api::DirGraph::lookup_by_id(&mut self, node_type: &str, id: &kglite::datatypes::values::Value) -> core::option::Option<petgraph::graph_impl::NodeIndex>
 pub fn kglite::api::DirGraph::lookup_by_id_normalized(&self, node_type: &str, id: &kglite::datatypes::values::Value) -> core::option::Option<petgraph::graph_impl::NodeIndex>
 pub fn kglite::api::DirGraph::lookup_by_id_readonly(&self, node_type: &str, id: &kglite::datatypes::values::Value) -> core::option::Option<petgraph::graph_impl::NodeIndex>
-pub fn kglite::api::DirGraph::lookup_by_index(&self, node_type: &str, property: &str, value: &kglite::datatypes::values::Value) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
-pub fn kglite::api::DirGraph::lookup_range(&self, node_type: &str, property: &str, lower: core::ops::range::Bound<&kglite::datatypes::values::Value>, upper: core::ops::range::Bound<&kglite::datatypes::values::Value>) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
 pub fn kglite::api::DirGraph::maybe_spill_columns(&mut self)
 pub fn kglite::api::DirGraph::new() -> Self
 pub fn kglite::api::DirGraph::node_has_label(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> bool
@@ -2045,9 +2044,6 @@ pub fn kglite::api::DirGraph::remove_node_label(&mut self, idx: petgraph::graph_
 pub fn kglite::api::DirGraph::resolve_alias<'a>(&'a self, node_type: &str, property: &'a str) -> &'a str
 pub fn kglite::api::DirGraph::set_type_connectivity(&self, triples: alloc::vec::Vec<kglite::graph::schema::ConnectivityTriple>)
 pub fn kglite::api::DirGraph::set_version(&mut self, v: u64)
-pub fn kglite::api::DirGraph::update_property_indices_for_add(&mut self, node_type: &str, node_idx: petgraph::graph_impl::NodeIndex)
-pub fn kglite::api::DirGraph::update_property_indices_for_remove(&mut self, node_type: &str, node_idx: petgraph::graph_impl::NodeIndex, property: &str, old_value: &kglite::datatypes::values::Value)
-pub fn kglite::api::DirGraph::update_property_indices_for_set(&mut self, node_type: &str, node_idx: petgraph::graph_impl::NodeIndex, property: &str, old_value: core::option::Option<&kglite::datatypes::values::Value>, new_value: &kglite::datatypes::values::Value)
 pub fn kglite::api::DirGraph::upsert_connection_type_metadata(&mut self, conn_type: &str, source_type: &str, target_type: &str, prop_types: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>)
 pub fn kglite::api::DirGraph::upsert_node_type_metadata(&mut self, node_type: &str, props: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>)
 pub fn kglite::api::DirGraph::vacuum(&mut self) -> std::collections::hash::map::HashMap<petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex>
@@ -2061,7 +2057,7 @@ pub fn kglite::api::DirGraph::get_schema(&self) -> core::option::Option<&kglite:
 pub fn kglite::api::DirGraph::layer_for(&self, node_type: &str) -> core::option::Option<&str>
 pub fn kglite::api::DirGraph::primary_key_for(&self, node_type: &str) -> core::option::Option<&str>
 pub fn kglite::api::DirGraph::set_instructions(&mut self, text: &str, channel: core::option::Option<&str>)
-pub fn kglite::api::DirGraph::set_schema(&mut self, schema: kglite::api::SchemaDefinition)
+pub fn kglite::api::DirGraph::set_schema(&mut self, schema: kglite::api::SchemaDefinition) -> core::result::Result<(), kglite::error::KgError>
 pub fn kglite::api::DirGraph::with_write_provenance<R>(&mut self, git_sha: core::option::Option<&str>, modified_by: core::option::Option<&str>, write: impl core::ops::function::FnOnce(&mut Self) -> R) -> R
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::compact_disk(&mut self) -> core::result::Result<usize, alloc::string::String>
@@ -2072,6 +2068,33 @@ pub fn kglite::api::DirGraph::sync_column_stores_from_disk(&mut self)
 pub fn kglite::api::DirGraph::sync_disk_column_stores(&mut self)
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::copy_embeddings_from(&mut self, src: &kglite::api::DirGraph) -> (usize, usize, usize)
+impl kglite::api::DirGraph
+pub fn kglite::api::DirGraph::create_composite_index(&mut self, node_type: &str, properties: &[&str]) -> usize
+pub fn kglite::api::DirGraph::create_index(&mut self, node_type: &str, property: &str) -> usize
+pub fn kglite::api::DirGraph::create_property_index_routed(&mut self, node_type: &str, property: &str) -> core::result::Result<(usize, bool), alloc::string::String>
+pub fn kglite::api::DirGraph::create_range_index(&mut self, node_type: &str, property: &str) -> usize
+pub fn kglite::api::DirGraph::drop_composite_index(&mut self, node_type: &str, properties: &[alloc::string::String]) -> bool
+pub fn kglite::api::DirGraph::drop_index(&mut self, node_type: &str, property: &str) -> core::result::Result<bool, alloc::string::String>
+pub fn kglite::api::DirGraph::drop_range_index(&mut self, node_type: &str, property: &str) -> bool
+pub fn kglite::api::DirGraph::find_matching_composite_index(&self, node_type: &str, filter_properties: &[alloc::string::String]) -> core::option::Option<((alloc::string::String, alloc::vec::Vec<alloc::string::String>), bool)>
+pub fn kglite::api::DirGraph::get_composite_index_stats(&self, node_type: &str, properties: &[alloc::string::String]) -> core::option::Option<kglite::graph::dir_graph::IndexStats>
+pub fn kglite::api::DirGraph::get_index_stats(&self, node_type: &str, property: &str) -> core::option::Option<kglite::graph::dir_graph::IndexStats>
+pub fn kglite::api::DirGraph::has_any_index(&self, node_type: &str, property: &str) -> bool
+pub fn kglite::api::DirGraph::has_composite_index(&self, node_type: &str, properties: &[alloc::string::String]) -> bool
+pub fn kglite::api::DirGraph::has_index(&self, node_type: &str, property: &str) -> bool
+pub fn kglite::api::DirGraph::list_composite_indexes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<alloc::string::String>)>
+pub fn kglite::api::DirGraph::list_indexes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub fn kglite::api::DirGraph::lookup_by_composite_index(&self, node_type: &str, properties: &[alloc::string::String], values: &[kglite::datatypes::values::Value]) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
+pub fn kglite::api::DirGraph::lookup_by_index(&self, node_type: &str, property: &str, value: &kglite::datatypes::values::Value) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
+pub fn kglite::api::DirGraph::lookup_range(&self, node_type: &str, property: &str, lower: core::ops::range::Bound<&kglite::datatypes::values::Value>, upper: core::ops::range::Bound<&kglite::datatypes::values::Value>) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
+pub fn kglite::api::DirGraph::update_property_indices_for_add(&mut self, node_type: &str, node_idx: petgraph::graph_impl::NodeIndex)
+pub fn kglite::api::DirGraph::update_property_indices_for_remove(&mut self, node_type: &str, node_idx: petgraph::graph_impl::NodeIndex, property: &str, old_value: &kglite::datatypes::values::Value)
+pub fn kglite::api::DirGraph::update_property_indices_for_set(&mut self, node_type: &str, node_idx: petgraph::graph_impl::NodeIndex, property: &str, old_value: core::option::Option<&kglite::datatypes::values::Value>, new_value: &kglite::datatypes::values::Value)
+impl kglite::api::DirGraph
+pub fn kglite::api::DirGraph::drop_unique_constraints_for_type(&mut self, node_type: &str) -> usize
+pub fn kglite::api::DirGraph::has_unique_constraint(&self, node_type: &str, properties: &[alloc::string::String]) -> bool
+pub fn kglite::api::DirGraph::list_unique_constraints(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<alloc::string::String>)>
+pub fn kglite::api::DirGraph::verify_unique_constraints(&mut self) -> alloc::vec::Vec<kglite::graph::constraints::ConstraintViolation>
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::get_edge_type_counts(&self) -> std::collections::hash::map::HashMap<alloc::string::String, usize>
 pub fn kglite::api::DirGraph::has_edge_type_counts_cache(&self) -> bool
@@ -2233,6 +2256,7 @@ pub kglite::api::NodeSchemaDefinition::layer: core::option::Option<alloc::string
 pub kglite::api::NodeSchemaDefinition::optional_fields: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::NodeSchemaDefinition::primary_key: core::option::Option<alloc::string::String>
 pub kglite::api::NodeSchemaDefinition::required_fields: alloc::vec::Vec<alloc::string::String>
+pub kglite::api::NodeSchemaDefinition::unique: core::option::Option<alloc::vec::Vec<alloc::vec::Vec<alloc::string::String>>>
 impl core::clone::Clone for kglite::api::NodeSchemaDefinition
 pub fn kglite::api::NodeSchemaDefinition::clone(&self) -> kglite::api::NodeSchemaDefinition
 impl core::default::Default for kglite::api::NodeSchemaDefinition
@@ -2908,6 +2932,18 @@ pub kglite::error::KgError::Argument(alloc::string::String)
 pub kglite::error::KgError::Cancelled
 pub kglite::error::KgError::ConnectionNotFound
 pub kglite::error::KgError::ConnectionNotFound::connection_type: alloc::string::String
+pub kglite::error::KgError::ConstraintCreationFailed
+pub kglite::error::KgError::ConstraintCreationFailed::descriptor: alloc::string::String
+pub kglite::error::KgError::ConstraintCreationFailed::kind: &'static str
+pub kglite::error::KgError::ConstraintCreationFailed::message: alloc::string::String
+pub kglite::error::KgError::ConstraintCreationFailed::node_type: alloc::string::String
+pub kglite::error::KgError::ConstraintCreationFailed::properties: alloc::vec::Vec<alloc::string::String>
+pub kglite::error::KgError::ConstraintViolation
+pub kglite::error::KgError::ConstraintViolation::descriptor: alloc::string::String
+pub kglite::error::KgError::ConstraintViolation::kind: &'static str
+pub kglite::error::KgError::ConstraintViolation::message: alloc::string::String
+pub kglite::error::KgError::ConstraintViolation::node_type: alloc::string::String
+pub kglite::error::KgError::ConstraintViolation::properties: alloc::vec::Vec<alloc::string::String>
 pub kglite::error::KgError::CypherExecution
 pub kglite::error::KgError::CypherExecution::message: alloc::string::String
 pub kglite::error::KgError::CypherExecution::position: core::option::Option<(usize, usize)>
@@ -2967,6 +3003,8 @@ pub fn kglite::error::KgError::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> c
 pub enum kglite::error::KgErrorCode
 pub kglite::error::KgErrorCode::Cancelled
 pub kglite::error::KgErrorCode::ConnectionNotFound
+pub kglite::error::KgErrorCode::ConstraintCreationFailed
+pub kglite::error::KgErrorCode::ConstraintViolation
 pub kglite::error::KgErrorCode::CypherExecution
 pub kglite::error::KgErrorCode::CypherSyntax
 pub kglite::error::KgErrorCode::CypherTimeout
