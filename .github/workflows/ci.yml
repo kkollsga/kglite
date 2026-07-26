@@ -227,11 +227,10 @@ jobs:
 
       - name: Install ruff
         # Pinned deliberately: `pip install ruff` floats to the newest release,
-        # and a newer ruff widens both its formatter's file discovery and its
-        # rule set, so an unrelated release turns every open branch red without
-        # a single source change. Keep this in step with the ruff the local
-        # `make lint` / `make fmt-py` targets run.
-        run: pip install ruff==0.15.16
+        # so a formatter change in an unrelated ruff release turns every open
+        # branch red with no source change behind it. Bump this in a dedicated
+        # commit that also reformats and updates local environments.
+        run: pip install ruff==0.16.0
 
       - name: Check formatting
         run: ruff format --check .

@@ -119,6 +119,13 @@ python-source = "."
 line-length = 120
 target-version = "py310"
 src = ["kglite"]
+# ruff 0.16 began formatting Python code blocks embedded in Markdown. Our
+# prose examples are hand-wrapped for narrow documentation columns, and the
+# formatter joins those wrapped calls onto single lines that are legal under
+# `line-length` but harder to read in a guide. Keep the formatter scoped to
+# real Python: excluding Markdown reproduces the pre-0.16 file set exactly
+# (319 files), so this is a scope decision, not a suppressed finding.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
