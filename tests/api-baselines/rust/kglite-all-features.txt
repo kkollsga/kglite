@@ -616,6 +616,7 @@ impl<'a> kglite::api::cypher::CypherExecutor<'a>
 pub fn kglite::api::cypher::CypherExecutor<'a>::execute(&self, query: &kglite::api::cypher::CypherQuery) -> core::result::Result<kglite::api::cypher::CypherResult, alloc::string::String>
 pub fn kglite::api::cypher::CypherExecutor<'a>::execute_single_clause(&self, clause: &kglite::graph::languages::cypher::ast::Clause, result_set: kglite::graph::languages::cypher::result::ResultSet) -> core::result::Result<kglite::graph::languages::cypher::result::ResultSet, alloc::string::String>
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_cancel(self, cancel: core::option::Option<&'static core::sync::atomic::AtomicBool>) -> Self
+pub fn kglite::api::cypher::CypherExecutor<'a>::with_csv_import(self, policy: kglite::api::session::CsvImportPolicy) -> Self
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_max_rows(self, max_rows: core::option::Option<usize>) -> Self
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_params(graph: &'a kglite::api::DirGraph, params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>, deadline: core::option::Option<std::time::Instant>) -> Self
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_streaming(self, streaming: bool) -> Self
@@ -659,6 +660,8 @@ pub fn kglite::api::cypher::LazyResultDescriptor::len(&self) -> usize
 impl core::fmt::Debug for kglite::api::cypher::LazyResultDescriptor
 pub fn kglite::api::cypher::LazyResultDescriptor::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::cypher::MutationStats
+pub kglite::api::cypher::MutationStats::constraints_added: usize
+pub kglite::api::cypher::MutationStats::constraints_removed: usize
 pub kglite::api::cypher::MutationStats::indexes_added: usize
 pub kglite::api::cypher::MutationStats::indexes_removed: usize
 pub kglite::api::cypher::MutationStats::nodes_created: usize
@@ -735,6 +738,7 @@ impl<G: kglite::api::GraphRead> kglite::api::durable::RecordingGraph<G>
 pub fn kglite::api::durable::RecordingGraph<G>::inner(&self) -> &G
 pub fn kglite::api::durable::RecordingGraph<G>::inner_mut(&mut self) -> &mut G
 pub fn kglite::api::durable::RecordingGraph<G>::new(inner: G) -> Self
+pub fn kglite::api::durable::RecordingGraph<G>::note_node_labels(&mut self, idx: petgraph::graph_impl::NodeIndex)
 pub fn kglite::api::durable::RecordingGraph<G>::note_node_upsert(&mut self, idx: petgraph::graph_impl::NodeIndex)
 pub fn kglite::api::durable::RecordingGraph<G>::ops_len(&self) -> usize
 pub fn kglite::api::durable::RecordingGraph<G>::take_ops(&mut self) -> alloc::vec::Vec<kglite::graph::storage::recording::RawOp>
@@ -816,7 +820,7 @@ impl<'de> serde_core::de::Deserialize<'de> for kglite::api::durable::WalFrame
 pub fn kglite::api::durable::WalFrame::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub fn kglite::api::durable::apply_frames(graph: &mut kglite::api::DirGraph, frames: &[kglite::api::durable::WalFrame], after_lsn: u64) -> core::result::Result<u64, alloc::string::String>
 pub fn kglite::api::durable::recover(path: &std::path::Path) -> core::io::error::Result<alloc::vec::Vec<kglite::api::durable::WalFrame>>
-pub fn kglite::api::durable::resolve_ops(raw: &[kglite::graph::storage::recording::RawOp], graph: &impl kglite::api::GraphRead, interner: &kglite::api::StringInterner) -> alloc::vec::Vec<kglite::graph::wal::MutationOp>
+pub fn kglite::api::durable::resolve_ops(raw: &[kglite::graph::storage::recording::RawOp], graph: &impl kglite::api::GraphRead, interner: &kglite::api::StringInterner, secondary_labels: impl core::ops::function::Fn(petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<alloc::string::String>) -> alloc::vec::Vec<kglite::graph::wal::MutationOp>
 pub fn kglite::api::durable::wal_path(checkpoint: &std::path::Path) -> std::path::PathBuf
 pub mod kglite::api::fluent
 pub enum kglite::api::fluent::EvaluationResult
@@ -1285,8 +1289,23 @@ pub kglite::api::session::CommitOutcome::ConflictDetected::current_version: u64
 pub kglite::api::session::CommitOutcome::NoWritesNoOp
 impl core::fmt::Debug for kglite::api::session::CommitOutcome
 pub fn kglite::api::session::CommitOutcome::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum kglite::api::session::CsvImportPolicy
+pub kglite::api::session::CsvImportPolicy::Denied
+pub kglite::api::session::CsvImportPolicy::Directory(std::path::PathBuf)
+pub kglite::api::session::CsvImportPolicy::LocalFilesystem
+impl core::clone::Clone for kglite::api::session::CsvImportPolicy
+pub fn kglite::api::session::CsvImportPolicy::clone(&self) -> kglite::api::session::CsvImportPolicy
+impl core::cmp::Eq for kglite::api::session::CsvImportPolicy
+impl core::cmp::PartialEq for kglite::api::session::CsvImportPolicy
+pub fn kglite::api::session::CsvImportPolicy::eq(&self, other: &kglite::api::session::CsvImportPolicy) -> bool
+impl core::default::Default for kglite::api::session::CsvImportPolicy
+pub fn kglite::api::session::CsvImportPolicy::default() -> kglite::api::session::CsvImportPolicy
+impl core::fmt::Debug for kglite::api::session::CsvImportPolicy
+pub fn kglite::api::session::CsvImportPolicy::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::session::CsvImportPolicy
 pub struct kglite::api::session::ExecuteOptions<'a>
 pub kglite::api::session::ExecuteOptions::cancel: core::option::Option<&'static core::sync::atomic::AtomicBool>
+pub kglite::api::session::ExecuteOptions::csv_import: kglite::api::session::CsvImportPolicy
 pub kglite::api::session::ExecuteOptions::deadline: core::option::Option<std::time::Instant>
 pub kglite::api::session::ExecuteOptions::disabled_passes: core::option::Option<&'a std::collections::hash::set::HashSet<alloc::string::String>>
 pub kglite::api::session::ExecuteOptions::embedder: core::option::Option<alloc::sync::Arc<dyn kglite::api::Embedder>>
@@ -1300,6 +1319,7 @@ pub kglite::api::session::ExecuteOptions::write_scope: core::option::Option<&'a 
 impl<'a> kglite::api::session::ExecuteOptions<'a>
 pub fn kglite::api::session::ExecuteOptions<'a>::eager(params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> Self
 pub fn kglite::api::session::ExecuteOptions<'a>::new(params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> Self
+pub fn kglite::api::session::ExecuteOptions<'a>::with_csv_import(self, policy: kglite::api::session::CsvImportPolicy) -> Self
 pub struct kglite::api::session::ExecuteOutcome
 pub kglite::api::session::ExecuteOutcome::explain: bool
 pub kglite::api::session::ExecuteOutcome::is_mutation: bool
@@ -1340,6 +1360,7 @@ pub fn kglite::api::storage::GraphBackend::as_stable_digraph(&self) -> &petgraph
 pub fn kglite::api::storage::GraphBackend::for_each_edge_endpoint_key<F>(&self, f: F) where F: core::ops::function::FnMut(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, kglite::api::InternedKey)
 pub fn kglite::api::storage::GraphBackend::for_each_edge_of_conn_type<F>(&self, conn_type: kglite::api::InternedKey, f: F) where F: core::ops::function::FnMut(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, u32, &[(kglite::api::InternedKey, kglite::datatypes::values::Value)]) -> bool
 pub fn kglite::api::storage::GraphBackend::new() -> Self
+pub fn kglite::api::storage::GraphBackend::note_recorded_node_labels(&mut self, idx: petgraph::graph_impl::NodeIndex)
 pub fn kglite::api::storage::GraphBackend::note_recorded_node_upsert(&mut self, idx: petgraph::graph_impl::NodeIndex)
 impl core::clone::Clone for kglite::api::storage::GraphBackend
 pub fn kglite::api::storage::GraphBackend::clone(&self) -> Self
@@ -2067,6 +2088,8 @@ pub fn kglite::api::DirGraph::node_has_label(&self, idx: petgraph::graph_impl::N
 pub fn kglite::api::DirGraph::node_labels(&self, idx: petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<kglite::api::InternedKey>
 pub fn kglite::api::DirGraph::nodes_with_label(&self, label: &str) -> alloc::vec::Vec<petgraph::graph_impl::NodeIndex>
 pub fn kglite::api::DirGraph::remove_node_label(&mut self, idx: petgraph::graph_impl::NodeIndex, label: kglite::api::InternedKey) -> core::result::Result<bool, alloc::string::String>
+pub fn kglite::api::DirGraph::secondary_label_names(&self, idx: petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<alloc::string::String>
+pub fn kglite::api::DirGraph::secondary_labels(&self, idx: petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<kglite::api::InternedKey>
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::auto_timestamp_for(&self, node_type: &str) -> bool
 pub fn kglite::api::DirGraph::auto_timestamp_for_connection(&self, conn_type: &str) -> bool

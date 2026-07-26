@@ -565,15 +565,21 @@ fn indexed_graph_still_rolls_back_via_the_clone_path() {
 // `declared_unique_tuples` skips `primary_key == "id"`, so a constraint over
 // `id` leaves `unique_indices` empty and would make these tests vacuous.
 
+/// One constraint's claimed values as `(value, holding slot)`, sorted.
+type UniqueClaims = Vec<(String, usize)>;
+
+/// `(node_type, constraint properties, claims)` per declared constraint.
+type UniqueFingerprint = Vec<(String, Vec<String>, UniqueClaims)>;
+
 /// The whole occupancy map, per declared constraint: constraint tuple → the
 /// claimed values and the slot holding each. Slot-level so a claim that comes
 /// back pointing at the wrong node is a failure, not just a missing one.
-fn unique_fingerprint(graph: &DirGraph) -> Vec<(String, Vec<String>, Vec<(String, usize)>)> {
+fn unique_fingerprint(graph: &DirGraph) -> UniqueFingerprint {
     let mut out: Vec<_> = graph
         .unique_indices
         .iter()
         .map(|((node_type, properties), occupants)| {
-            let mut claims: Vec<(String, usize)> = occupants
+            let mut claims: UniqueClaims = occupants
                 .iter()
                 .map(|(value, idx)| (format!("{value:?}"), idx.index()))
                 .collect();
