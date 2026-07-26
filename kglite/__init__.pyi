@@ -725,8 +725,10 @@ def open(
 
         **A crash releases the lease.** The lock belongs to the operating
         system, not to the sidecar file, so a writer killed with ``SIGKILL``
-        (or lost to a power cut) frees it immediately. The ``.lock`` file is
-        left behind and is harmless — deleting it does *not* release a live
+        (or lost to a power cut) frees it immediately. Two small sidecars are
+        left behind and are harmless: ``<path>.lock`` (the lock itself, always
+        empty) and ``<path>.lock-owner`` (the pid/timestamp used to name a
+        holder in the error above). Deleting either does *not* release a live
         lock, and does nothing useful for a dead one.
 
     Note:

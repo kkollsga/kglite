@@ -178,10 +178,11 @@ KgError: app.kgl is open for writing by pid 4711 (since 2026-07-26T09:15:03+02:0
 
 Readers are unaffected: `load()` and `open_session()` take no lease, so any
 number of processes can read a graph while one writes. The lease is an OS-owned
-advisory lock, so a writer killed with `SIGKILL` releases it immediately — the
-leftover `<path>.lock` file is a record, not the lock itself, and deleting it
-achieves nothing. `open(..., lock=False)` opts out for callers that coordinate
-writers some other way.
+lock, so a writer killed with `SIGKILL` releases it immediately — the leftover
+`<path>.lock` (the lock, always empty) and `<path>.lock-owner` (the pid and
+acquisition time, used to name a holder) are records, not the lock itself, and
+deleting them achieves nothing. `open(..., lock=False)` opts out for callers
+that coordinate writers some other way.
 
 There is still no shared live multi-process transaction handle and no
 replication protocol. Disk mode publishes immutable generations behind the same

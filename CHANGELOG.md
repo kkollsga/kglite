@@ -39,9 +39,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     analytics deployments to fix a problem only writers have.
   - **A crash releases it.** The lock is owned by the OS, not by the sidecar
     file's existence, so a writer lost to `SIGKILL` or a power cut frees it
-    at once. The leftover `.lock` file is a record of the holder, not the
-    lock — deleting it releases nothing, and the error message says so, since
-    deleting lock files by reflex is how this class of guard gets defeated.
+    at once. The leftover `<path>.lock` (the lock, always empty) and
+    `<path>.lock-owner` (the pid/timestamp used to name a holder) are records,
+    not the lock — deleting them releases nothing, and the error message says
+    so, since deleting lock files by reflex is how this class of guard gets
+    defeated.
+
+  The holder's identity lives in the unlocked `<path>.lock-owner` sidecar
+  rather than inside the lock file, because `fs2` locks via `flock` on Unix
+  (advisory — contenders can still read) but `LockFileEx` on Windows
+  (mandatory over the whole range), where an exclusive lock makes the file
+  unreadable to every other handle and a contender's read fails with
+  `ERROR_LOCK_VIOLATION` instead of returning the pid. Splitting the two keeps
+  the holder *named* on every platform. `<path>.lock` is still the file that
+  is locked, so binaries from either side of this change continue to exclude
+  each other.
   - **`open(..., lock=False)` opts out**, explicitly and never by default, for
     deployments that coordinate writers externally.
 
