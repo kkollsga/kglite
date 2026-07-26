@@ -176,7 +176,7 @@ questions traverse it.
 | **MCP server for LLM agents**              | bundled in the `kglite` wheel     | [separate `mcp-server-ladybug` install](https://github.com/LadybugDB/mcp-server-ladybug) | — | — | — |
 | **`describe()` schema for LLM prompts**    | ✅                                 | —                                                   | —                  | —                  | —                      |
 | **Embeddable in Rust** (no Python in build) | pure-Rust [`kglite`](https://crates.io/crates/kglite) crate | [`lbug`](https://crates.io/crates/lbug) bindings to the C++ engine | — | ✅ | — |
-| **License**                                | MIT                               | MIT                                                 | BSD-3              | Apache-2           | GPLv3 (Community)      |
+| **License**                                | MIT                               | MIT                                                 | BSD-3              | Apache-2           | GPLv3                  |
 
 **Pick KGLite** when you want one embedded package that combines Python and
 pure-Rust Cypher APIs with a bundled MCP binary, prompt-shaped `describe()`, and
@@ -203,43 +203,18 @@ If the graph engine ships *inside* something you distribute, the licence is a
 design constraint rather than a line item.
 
 **kglite is MIT-licensed throughout — every crate in the workspace ships under
-MIT.** Neo4j's embeddable Community artifact (`org.neo4j:neo4j` on Maven
-Central) is published under **GPL-3.0-or-later**; Neo4j's own licence notice
-states that the GPL applies "to all third parties" unless you have executed a
-commercial or OEM agreement with Neo4j. Neo4j's free tiers do not close that gap
-for a shipped product: the Desktop License covers "one Named User on a single
-notebook or desktop machine solely for … internal development use", and the
-Startup License expressly prohibits "distributing any copy of the Software … to
-any third party". **If you're embedding a graph engine in a product you
-distribute, the licensing difference is real — and worth taking to your own
-counsel rather than ours.**
+MIT.** There is no separate commercial tier, no distinction between development
+and production use, and no copyleft obligation attached to shipping it: if you
+can use kglite, you can distribute it inside your own product.
 
-Two honest qualifications:
-
-- **We make no claim about what the GPL requires of an embedder.** That question
-  is unsettled, and the obligation attaches to *distribution* — not to internal
-  use within one organisation. The narrow, checkable point is that the terms
-  differ, and only one of them is MIT.
-- **The default kglite build carries no copyleft, and that is a statement about
-  the default.** The optional `fastembed` embedding backend is itself
-  Apache-2.0 and is off by default in every crate that can enable it, so neither
-  the published wheel nor the default MCP-server binary contains it. A build
-  that opts into `--features fastembed` pulls one transitive MPL-2.0 crate
-  (`option-ext`, four dependencies down); MPL-2.0 is file-level weak copyleft
-  and kglite does not modify it. The reviewed dependency-licence policy is
-  documented in
-  [dependency licences](https://kglite.readthedocs.io/en/latest/explanation/dependency-licenses.html).
-
-kglite is also not the only permissively-licensed embedded Cypher engine —
-[LadybugDB](https://ladybugdb.com/) (MIT) and
-[ArcadeDB](https://arcadedb.com/) (Apache-2.0) are both live options, and the
-comparison table above is the honest place to start. Pick kglite for the reasons
-in that table; the licence is what makes shipping it uncomplicated, not what
-makes it unique.
-
-*Neo4j® is a registered trademark of Neo4j, Inc. The quotations above are from
-Neo4j's published licensing pages and from the artifact's own Maven Central
-metadata, reproduced for factual comparison.*
+One honest qualification, because it is a statement about the *default* build:
+the optional `fastembed` embedding backend is itself Apache-2.0 and is off by
+default in every crate that can enable it, so neither the published wheel nor
+the default MCP-server binary contains it. A build that opts into
+`--features fastembed` pulls one transitive MPL-2.0 crate (`option-ext`, four
+dependencies down); MPL-2.0 is file-level weak copyleft and kglite does not
+modify it. The reviewed dependency-licence policy is documented in
+[dependency licences](https://kglite.readthedocs.io/en/latest/explanation/dependency-licenses.html).
 
 ## Primary store, or derived index?
 

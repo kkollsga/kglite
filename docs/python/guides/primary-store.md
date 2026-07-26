@@ -93,7 +93,7 @@ data, check it against this list first.
 
 **Schema management is not a Cypher surface.** Indexes and constraints are
 created through the Python and Rust APIs. Cypher `CREATE INDEX` is not
-supported, so a Neo4j schema script does not run unedited. `LOAD CSV` is
+supported, so schema setup cannot be expressed in Cypher alone. `LOAD CSV` is
 likewise unsupported — bulk loading goes through `add_nodes` /
 `add_connections`, {doc}`blueprints`, or the CLI's `.import`.
 
