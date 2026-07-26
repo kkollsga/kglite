@@ -1997,7 +1997,6 @@ pub kglite::api::DirGraph::wkt_cache: alloc::sync::Arc<std::sync::poison::rwlock
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::_get_connection(&self, index: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::graph::schema::EdgeData>
 pub fn kglite::api::DirGraph::_get_connection_mut(&mut self, index: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&mut kglite::graph::schema::EdgeData>
-pub fn kglite::api::DirGraph::add_node_label(&mut self, idx: petgraph::graph_impl::NodeIndex, label: kglite::api::InternedKey) -> bool
 pub fn kglite::api::DirGraph::begin_read_pass(&self) -> core::option::Option<kglite::api::DiskQueryGuard>
 pub fn kglite::api::DirGraph::build_connection_types_cache(&mut self)
 pub fn kglite::api::DirGraph::build_id_index(&mut self, node_type: &str)
@@ -2047,16 +2046,12 @@ pub fn kglite::api::DirGraph::lookup_by_index(&self, node_type: &str, property: 
 pub fn kglite::api::DirGraph::lookup_range(&self, node_type: &str, property: &str, lower: core::ops::range::Bound<&kglite::datatypes::values::Value>, upper: core::ops::range::Bound<&kglite::datatypes::values::Value>) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
 pub fn kglite::api::DirGraph::maybe_spill_columns(&mut self)
 pub fn kglite::api::DirGraph::new() -> Self
-pub fn kglite::api::DirGraph::node_has_label(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> bool
-pub fn kglite::api::DirGraph::node_labels(&self, idx: petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<kglite::api::InternedKey>
-pub fn kglite::api::DirGraph::nodes_with_label(&self, label: &str) -> alloc::vec::Vec<petgraph::graph_impl::NodeIndex>
 pub fn kglite::api::DirGraph::populate_index_keys(&mut self)
 pub fn kglite::api::DirGraph::rebuild_indices_from_keys(&mut self)
 pub fn kglite::api::DirGraph::rebuild_type_indices(&mut self)
 pub fn kglite::api::DirGraph::rebuild_type_indices_and_compact(&mut self)
 pub fn kglite::api::DirGraph::register_connection_type(&mut self, connection_type: alloc::string::String)
 pub fn kglite::api::DirGraph::reindex(&mut self)
-pub fn kglite::api::DirGraph::remove_node_label(&mut self, idx: petgraph::graph_impl::NodeIndex, label: kglite::api::InternedKey) -> core::result::Result<bool, alloc::string::String>
 pub fn kglite::api::DirGraph::resolve_alias<'a>(&'a self, node_type: &str, property: &'a str) -> &'a str
 pub fn kglite::api::DirGraph::set_type_connectivity(&self, triples: alloc::vec::Vec<kglite::graph::schema::ConnectivityTriple>)
 pub fn kglite::api::DirGraph::set_version(&mut self, v: u64)
@@ -2067,6 +2062,12 @@ pub fn kglite::api::DirGraph::upsert_connection_type_metadata(&mut self, conn_ty
 pub fn kglite::api::DirGraph::upsert_node_type_metadata(&mut self, node_type: &str, props: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>)
 pub fn kglite::api::DirGraph::vacuum(&mut self) -> std::collections::hash::map::HashMap<petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex>
 pub fn kglite::api::DirGraph::version(&self) -> u64
+impl kglite::api::DirGraph
+pub fn kglite::api::DirGraph::add_node_label(&mut self, idx: petgraph::graph_impl::NodeIndex, label: kglite::api::InternedKey) -> bool
+pub fn kglite::api::DirGraph::node_has_label(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> bool
+pub fn kglite::api::DirGraph::node_labels(&self, idx: petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<kglite::api::InternedKey>
+pub fn kglite::api::DirGraph::nodes_with_label(&self, label: &str) -> alloc::vec::Vec<petgraph::graph_impl::NodeIndex>
+pub fn kglite::api::DirGraph::remove_node_label(&mut self, idx: petgraph::graph_impl::NodeIndex, label: kglite::api::InternedKey) -> core::result::Result<bool, alloc::string::String>
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::auto_timestamp_for(&self, node_type: &str) -> bool
 pub fn kglite::api::DirGraph::auto_timestamp_for_connection(&self, conn_type: &str) -> bool

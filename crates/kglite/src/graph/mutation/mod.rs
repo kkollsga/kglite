@@ -5,6 +5,7 @@
 //! everything that changes state, plus the maintenance helpers that
 //! keep storage caches coherent.
 
+pub mod add_properties;
 pub mod batch;
 pub mod extend;
 pub mod maintain;

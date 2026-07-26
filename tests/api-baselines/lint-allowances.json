@@ -337,11 +337,11 @@
       "classification": "test"
     },
     {
-      "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:add_connections:pub fn add_connections( graph: &mut DirGraph, df_data: DataFrame, connection_type: String, source_type: String, source_id_field: String, target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>, conflict_handling: Option<String>, ) -> Resul::clippy::too_many_arguments",
+      "identity": "crates/kglite/src/graph/mutation/add_properties.rs::fn:add_properties_aggregate:fn add_properties_aggregate( graph: &mut DirGraph, selection: &CurrentSelection, property_spec: &HashMap<String, PropertySpec>, type_to_level: &HashMap<String, usize>, parent_maps: &[HashMap<NodeIndex, NodeIndex>], target_level: usize, ) -> Result<AddPropertiesReport, String>::clippy::too_many_arguments",
       "classification": "transitional"
     },
     {
-      "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:add_properties_aggregate:fn add_properties_aggregate( graph: &mut DirGraph, selection: &CurrentSelection, property_spec: &HashMap<String, PropertySpec>, type_to_level: &HashMap<String, usize>, parent_maps: &[HashMap<NodeIndex, NodeIndex>], target_level: usize, ) -> Result<AddPropertiesReport, String>::clippy::too_many_arguments",
+      "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:add_connections:pub fn add_connections( graph: &mut DirGraph, df_data: DataFrame, connection_type: String, source_type: String, source_id_field: String, target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>, conflict_handling: Option<String>, ) -> Resul::clippy::too_many_arguments",
       "classification": "transitional"
     },
     {

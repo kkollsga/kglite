@@ -14,6 +14,16 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// Report returned by `add_properties()`.
+///
+/// Lives here rather than beside `add_properties` itself: it is the return type
+/// of the public `kglite::api::mutation::add_properties`, and the pinned Rust API
+/// baseline records it at this canonical path.
+pub struct AddPropertiesReport {
+    pub nodes_updated: usize,
+    pub properties_set: usize,
+}
+
 fn check_data_validity(df_data: &DataFrame, unique_id_field: &str) -> Result<(), String> {
     // Remove strict UniqueId type verification to allow nulls
     if !df_data.verify_column(unique_id_field) {
@@ -1546,10 +1556,9 @@ pub fn update_node_properties(
     graph.bump_version();
     Ok(report)
 }
-pub(crate) mod add_properties;
-pub use add_properties::{add_properties, PropertySpec};
 
 #[cfg(test)]
+#[path = "maintain_edge_spec_tests.rs"]
 mod edge_spec_tests;
 
 #[cfg(test)]

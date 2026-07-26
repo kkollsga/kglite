@@ -150,11 +150,12 @@ pub mod api {
         pub use crate::graph::introspection::reporting::{
             ConnectionOperationReport, NodeOperationReport, OperationReport, OperationReports,
         };
+        pub use crate::graph::mutation::add_properties::{add_properties, PropertySpec};
         pub use crate::graph::mutation::extend::{extend_graph, ExtendReport};
         pub use crate::graph::mutation::maintain::{
-            add_connections, add_edges_from_specs, add_nodes, add_properties, create_connections,
+            add_connections, add_edges_from_specs, add_nodes, create_connections,
             purge_provisional_nodes, replace_connections, update_node_properties, EdgeSpec,
-            EdgeSpecReport, PropertySpec,
+            EdgeSpecReport,
         };
         /// Validate a graph against a `SchemaDefinition` (Piece 3 cleanup).
         pub use crate::graph::mutation::validation::validate_graph;

@@ -2,12 +2,13 @@
 //! properties copied, renamed, aggregated, or spatially computed from
 //! ancestor levels.
 //!
-//! Split out of `maintain/mod.rs`: unlike the rest of that module, nothing
-//! here writes topology. It is a selection-scoped property pass with its own
-//! private vocabulary (aggregate/spatial expression parsing, ancestor walk,
-//! geometry resolution) that no other maintain operation calls.
+//! Split out of `maintain.rs`, which had grown past the file-size ceiling. This
+//! is a self-contained unit: one public entry point (`add_properties`), the
+//! aggregate-mode branch it delegates to, and the expression/geometry helpers
+//! only those two use. Nothing here writes topology.
 
 use crate::datatypes::Value;
+use crate::graph::mutation::maintain::AddPropertiesReport;
 use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey};
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::NodeIndex;
@@ -22,12 +23,6 @@ pub enum PropertySpec {
     CopyAll,
     /// Rename/aggregate/spatial: `{'new_name': 'source_expr'}`
     RenameMap(HashMap<String, String>),
-}
-
-/// Report returned by add_properties().
-pub struct AddPropertiesReport {
-    pub nodes_updated: usize,
-    pub properties_set: usize,
 }
 
 /// Enriches the leaf (most recent) level nodes by copying, renaming, aggregating,

@@ -536,28 +536,28 @@
       "nesting": 4
     },
     {
-      "path": "crates/kglite/src/graph/mutation/maintain/mod.rs",
+      "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::add_connections",
       "lines": 305,
       "branches": 41,
       "nesting": 3
     },
     {
-      "path": "crates/kglite/src/graph/mutation/maintain/mod.rs",
+      "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::add_nodes",
       "lines": 282,
       "branches": 39,
       "nesting": 4
     },
     {
-      "path": "crates/kglite/src/graph/mutation/maintain/add_properties.rs",
+      "path": "crates/kglite/src/graph/mutation/add_properties.rs",
       "qualified_name": "crate::add_properties_aggregate",
       "lines": 187,
       "branches": 39,
       "nesting": 10
     },
     {
-      "path": "crates/kglite/src/graph/mutation/maintain/mod.rs",
+      "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::create_connections",
       "lines": 268,
       "branches": 47,
