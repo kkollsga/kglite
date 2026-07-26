@@ -69,8 +69,8 @@
     {
       "path": "crates/kglite-py/src/graph/pyapi/kg_core.rs",
       "qualified_name": "crate::KnowledgeGraph::cypher",
-      "lines": 349,
-      "branches": 35,
+      "lines": 334,
+      "branches": 33,
       "nesting": 4
     },
     {
@@ -83,7 +83,7 @@
     {
       "path": "crates/kglite-py/src/graph/pyapi/kg_mutation.rs",
       "qualified_name": "crate::write_connections",
-      "lines": 230,
+      "lines": 226,
       "branches": 18,
       "nesting": 4
     },

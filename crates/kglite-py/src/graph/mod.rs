@@ -331,6 +331,32 @@ impl KnowledgeGraph {
         dir.graph = GraphBackend::Recording(Box::new(RecordingGraph::new(inner)));
     }
 
+    /// Post-mutation bookkeeping for a Cypher write: make it durable, then
+    /// run the pyapi-specific auto-vacuum and stats housekeeping.
+    ///
+    /// **The order is a correctness requirement, not a preference.** Captured
+    /// WAL ops are keyed by `NodeIndex` and resolved against current graph
+    /// state, while a vacuum rebuilds the graph with contiguous indices — ops
+    /// resolved after a remap describe the wrong nodes, or none at all. The
+    /// flush therefore has to come first, which is exactly the trap that made
+    /// this worth naming instead of leaving inline in `cypher`.
+    pub(crate) fn after_mutation(
+        &mut self,
+        stats: Option<&kglite_core::api::cypher::MutationStats>,
+    ) -> PyResult<()> {
+        self.commit_wal()?;
+        let graph = crate::graph::get_graph_mut(&mut self.inner);
+        if let Some(stats) = stats {
+            if (stats.nodes_deleted > 0 || stats.relationships_deleted > 0)
+                && graph.check_auto_vacuum()
+            {
+                self.cursor.selection = kglite_core::api::CowSelection::new();
+            }
+            self.cursor.last_mutation_stats = Some(stats.clone());
+        }
+        Ok(())
+    }
+
     /// [`flush_wal`](Self::flush_wal) mapped into `PyResult` — the form every
     /// `#[pymethods]` mutation site uses.
     ///

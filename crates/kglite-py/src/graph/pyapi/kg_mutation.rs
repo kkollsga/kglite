@@ -357,10 +357,7 @@ fn write_connections(
         })?;
 
         kg.cursor.selection.clear();
-        kg.commit_wal()?;
-        kg.add_report(OperationReport::ConnectionOperation(result.clone()));
-
-        return KnowledgeGraph::connection_report_to_py(&result, &connection_type);
+        return finish_connection_write(kg, &result, &connection_type);
     }
 
     // ── Data path: pandas DataFrame logic ──
@@ -438,10 +435,23 @@ fn write_connections(
         .ensure_disk_edges_built()
         .map_err(pyo3::exceptions::PyOSError::new_err)?;
 
+    finish_connection_write(kg, &result, &connection_type)
+}
+
+/// Shared tail of both `write_connections` paths: make the edges durable, file
+/// the operation report, and marshal it for Python.
+///
+/// Extracted because the query path and the DataFrame path finished with the
+/// same three steps, and the WAL flush is the step most easily forgotten — one
+/// place to get it right rather than two to keep in sync.
+fn finish_connection_write(
+    kg: &mut KnowledgeGraph,
+    result: &kglite_core::api::mutation::ConnectionOperationReport,
+    connection_type: &str,
+) -> PyResult<Py<PyAny>> {
     kg.commit_wal()?;
     kg.add_report(OperationReport::ConnectionOperation(result.clone()));
-
-    KnowledgeGraph::connection_report_to_py(&result, &connection_type)
+    KnowledgeGraph::connection_report_to_py(result, connection_type)
 }
 
 fn parse_inline_config<'py>(
