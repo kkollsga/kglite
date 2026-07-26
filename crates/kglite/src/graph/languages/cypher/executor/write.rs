@@ -918,6 +918,63 @@ fn is_null_write_target(row: &ResultRow, variable: &str) -> bool {
 }
 
 /// Execute a SET clause, modifying node properties in the graph.
+/// A single-property node `SET` that has already landed in storage, as the
+/// post-write bookkeeping needs to see it.
+struct LandedPropertyWrite<'a> {
+    node_idx: NodeIndex,
+    node_type: &'a str,
+    property: &'a str,
+    old_value: Option<&'a Value>,
+    value: &'a Value,
+    constraint_plan: &'a crate::graph::dir_graph::constraints::PropertyWritePlan,
+}
+
+/// The bookkeeping a single-property node `SET` owes once the value has landed.
+///
+/// Split out of `execute_set` because none of it is about *writing* the value:
+/// it registers the property key on the type's `TypeSchema`, moves the node
+/// between index buckets, redeems the constraint plan (handing the vacated
+/// unique tuples back and taking the new ones), keeps `node_type_metadata`
+/// accurate so `schema()` reports the property's type, and notes the node for
+/// the post-loop `updated_at` bump.
+///
+/// Order is load-bearing and matches the sequence this replaced: the index move
+/// needs the old value, so it runs before the constraint plan is redeemed. The
+/// `updated_at` bump is skipped when the write *is* to `updated_at`, which would
+/// otherwise recurse. A `title` write touches only the title field, not a
+/// property map, so it skips both the schema key and the index move.
+fn finish_node_property_write(
+    graph: &mut DirGraph,
+    write: LandedPropertyWrite<'_>,
+    nodes_to_stamp: &mut std::collections::HashMap<NodeIndex, String>,
+) {
+    if write.property != "title" {
+        let ik = InternedKey::from_str(write.property);
+        if let Some(schema_arc) = graph.type_schemas.get_mut(write.node_type) {
+            if schema_arc.slot(ik).is_none() {
+                Arc::make_mut(schema_arc).add_key(ik);
+            }
+        }
+        graph.update_property_indices_for_set(
+            write.node_type,
+            write.node_idx,
+            write.property,
+            write.old_value,
+            write.value,
+        );
+    }
+
+    graph.apply_property_write_plan(write.constraint_plan, write.node_idx);
+
+    let mut prop_type = HashMap::new();
+    prop_type.insert(write.property.to_string(), value_type_name(write.value));
+    graph.upsert_node_type_metadata(write.node_type, prop_type);
+
+    if write.property != "updated_at" && graph.auto_timestamp_for(write.node_type) {
+        nodes_to_stamp.insert(write.node_idx, write.node_type.to_string());
+    }
+}
+
 fn execute_set(
     graph: &mut DirGraph,
     set: &SetClause,
@@ -1182,43 +1239,18 @@ fn execute_set(
                         }
                     }
 
-                    // Ensure the DirGraph-level TypeSchema includes this property key
-                    if property != "title" {
-                        let ik = InternedKey::from_str(property);
-                        if let Some(schema_arc) = graph.type_schemas.get_mut(&node_type_str) {
-                            if schema_arc.slot(ik).is_none() {
-                                Arc::make_mut(schema_arc).add_key(ik);
-                            }
-                        }
-                    }
-
-                    // Update property/composite indices (no active borrows)
-                    // "title" only changes the title field, not a HashMap property
-                    if property != "title" {
-                        graph.update_property_indices_for_set(
-                            &node_type_str,
-                            *node_idx,
+                    finish_node_property_write(
+                        graph,
+                        LandedPropertyWrite {
+                            node_idx: *node_idx,
+                            node_type: &node_type_str,
                             property,
-                            old_value.as_ref(),
-                            &value_for_index,
-                        );
-                    }
-
-                    // Hand the vacated unique tuples back and take the new ones.
-                    graph.apply_property_write_plan(&constraint_plan, *node_idx);
-
-                    // Keep node_type_metadata in sync so schema() is accurate
-                    {
-                        let mut prop_type = HashMap::new();
-                        prop_type.insert(property.clone(), value_type_name(&value_for_index));
-                        graph.upsert_node_type_metadata(&node_type_str, prop_type);
-                    }
-
-                    // Record this node for a post-loop `updated_at` bump (don't
-                    // recurse on a write to the reserved key itself).
-                    if property != "updated_at" && graph.auto_timestamp_for(&node_type_str) {
-                        nodes_to_stamp.insert(*node_idx, node_type_str.clone());
-                    }
+                            old_value: old_value.as_ref(),
+                            value: &value_for_index,
+                            constraint_plan: &constraint_plan,
+                        },
+                        &mut nodes_to_stamp,
+                    );
                 }
                 SetItem::Map {
                     variable,
