@@ -1425,6 +1425,8 @@ fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String>) {
         | Clause::Delete(_)
         | Clause::Remove(_)
         | Clause::Merge(_)
+        // Schema DDL binds and references no query variables.
+        | Clause::Schema(_)
         | Clause::FusedOptionalMatchAggregate { .. }
         | Clause::FusedVectorScoreTopK { .. }
         | Clause::FusedMatchReturnAggregate { .. }

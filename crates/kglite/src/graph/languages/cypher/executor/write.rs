@@ -3,7 +3,7 @@
 
 use super::super::ast::*;
 use super::super::result::*;
-use super::{clause_display_name, CypherExecutor};
+use super::{clause_display_name, schema_ddl, CypherExecutor};
 use crate::datatypes::values::Value;
 use crate::graph::algorithms::Interrupt;
 use crate::graph::schema::{DirGraph, EdgeData, InternedKey};
@@ -56,6 +56,13 @@ pub(crate) fn clause_is_mutation(clause: &Clause) -> bool {
         // matching Neo4j. A degenerate empty-body FOREACH is then a
         // harmless no-op there rather than erroring on the read path.
         Clause::Foreach { .. } => true,
+        // Schema is graph state, so `CREATE INDEX` / `DROP INDEX` (and the
+        // constraint commands) are mutations: that is what puts them behind the
+        // read-only-graph guard, the read-only-transaction guard, and the
+        // rollback checkpoint. `SHOW INDEXES` is a read and stays on the read
+        // engine.
+        Clause::Schema(SchemaCommand::ShowIndexes) => false,
+        Clause::Schema(_) => true,
         _ => false,
     }
 }
@@ -218,6 +225,15 @@ pub(crate) fn execute_mutable_bounded(
                         &query.clauses[..i],
                     );
                 result_set = executor.execute_call_subquery(import, body, result_set, &declared)?;
+            }
+            // Schema DDL. Runs here — not on the read engine — because schema
+            // is graph state, so it must sit behind the same read-only /
+            // rollback guards as a data mutation. `SHOW INDEXES` classifies as
+            // a read and never reaches this arm.
+            Clause::Schema(command) => {
+                let ddl_stats = schema_ddl::execute_schema_mutation(graph, command)?;
+                stats.indexes_added += ddl_stats.indexes_added;
+                stats.indexes_removed += ddl_stats.indexes_removed;
             }
             // Read clauses: create temporary immutable executor
             _ => {

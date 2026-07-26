@@ -7,6 +7,7 @@
 //! - [`expression`] — expressions (arithmetic, function calls, CASE, list ops)
 //! - [`clauses`] — RETURN / WITH / ORDER BY / LIMIT / SKIP / UNWIND / UNION /
 //!   CREATE / SET / DELETE / REMOVE / MERGE / CALL
+//! - [`schema_ddl`] — CREATE/DROP/SHOW INDEX and CONSTRAINT (Neo4j 5 DDL)
 //!
 //! Each submodule adds another `impl CypherParser` block; PyO3-style,
 //! Rust merges them at codegen.
@@ -21,6 +22,7 @@ pub mod clauses;
 pub mod expression;
 pub mod match_pattern;
 pub mod predicate;
+pub mod schema_ddl;
 
 /// Tokenizes and parses Cypher query strings into a `CypherQuery` AST.
 ///
@@ -349,8 +351,29 @@ impl CypherParser {
                 Some(CypherToken::Except) => {
                     clauses.push(self.parse_except_clause()?);
                 }
+                // Schema DDL shares the CREATE keyword with graph writes. The
+                // discriminator is a single `peek_at(1)`: `CREATE (`/`CREATE <`
+                // (a pattern) can never be DDL, and `CREATE INDEX` can never
+                // be a pattern. Non-CREATE queries never reach this test at
+                // all, so DDL support adds no per-query parse cost.
+                Some(CypherToken::Create) if self.create_opens_schema_ddl() => {
+                    Self::require_standalone_schema_statement(&clauses, end_at_rbrace)?;
+                    clauses.push(self.parse_create_schema_ddl()?);
+                }
                 Some(CypherToken::Create) => {
                     clauses.push(self.parse_create_clause()?);
+                }
+                // DROP / SHOW are not tokenizer keywords; at clause position
+                // they are otherwise always an error, so recognising them here
+                // only turns "unexpected token" into a real statement.
+                Some(CypherToken::Identifier(_)) if self.identifier_opens_schema_ddl() => {
+                    Self::require_standalone_schema_statement(&clauses, end_at_rbrace)?;
+                    let clause = if self.peek_ddl_word_is_drop() {
+                        self.parse_drop_schema_ddl()?
+                    } else {
+                        self.parse_show_schema_ddl()?
+                    };
+                    clauses.push(clause);
                 }
                 Some(CypherToken::Set) => {
                     clauses.push(self.parse_set_clause()?);

@@ -768,12 +768,24 @@ impl<'a> CypherExecutor<'a> {
             // directly (e.g. a hand-built clause list in a test). FOREACH
             // always classifies as a mutation, so it is handled in the
             // mutable engine and only reaches here via that same direct path.
+            // `SHOW INDEXES` is the one schema command that reads rather than
+            // writes, so it lives on this side of the engine split.
+            Clause::Schema(SchemaCommand::ShowIndexes) => {
+                let mut out = ResultSet::new();
+                out.rows = schema_ddl::execute_show_indexes(self.graph);
+                out.columns = schema_ddl::SHOW_INDEXES_COLUMNS
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect();
+                Ok(out)
+            }
             Clause::Create(_)
             | Clause::Set(_)
             | Clause::Delete(_)
             | Clause::Remove(_)
             | Clause::Merge(_)
-            | Clause::Foreach { .. } => {
+            | Clause::Foreach { .. }
+            | Clause::Schema(_) => {
                 Err("Mutation clauses cannot be executed in read-only mode".to_string())
             }
         }
@@ -798,6 +810,7 @@ pub mod return_clause;
 pub mod rev_procedures;
 pub mod rule_procedures;
 pub mod scalar_functions;
+pub(crate) mod schema_ddl;
 mod schema_procedures;
 pub mod shortest_path;
 pub mod spatial_join;
