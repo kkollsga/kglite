@@ -201,6 +201,7 @@ def refresh_binary_size(version: str, current_size: int) -> tuple[bool, str]:
         )
     cur_baseline = int(bl_match.group(2).replace("_", ""))
 
+    original_text = text
     unchanged = cur_baseline == current_size
     if unchanged:
         # An unchanged SIZE is not an unchanged RELEASE. The history is a
@@ -216,8 +217,11 @@ def refresh_binary_size(version: str, current_size: int) -> tuple[bool, str]:
     # Re-stamp the baseline line so its comment names the version being cut,
     # even when the number itself did not move.
     formatted = f"{current_size:_}".replace("_", "_")  # "12_345_678" style
-    suffix = " (unchanged)" if unchanged else ""
-    new_line = f"{bl_match.group(1)}{formatted},  # {version} {platform_key} baseline{suffix}\n"
+    # No "(unchanged)" marker here: the comment must be a pure function of
+    # (size, version, platform) or re-stamping it is not idempotent, and the
+    # second refresh of a release would report a change that did not happen.
+    # The unchanged-ness is recorded in the history row's prose instead.
+    new_line = f"{bl_match.group(1)}{formatted},  # {version} {platform_key} baseline\n"
     text = text[: bl_match.start()] + new_line + text[bl_match.end() :]
 
     # Best-effort: drop a marker into the docstring's "Baseline history:"
@@ -240,8 +244,15 @@ def refresh_binary_size(version: str, current_size: int) -> tuple[bool, str]:
         )
     existing_history = re.search(rf"^      - {re.escape(version)}:.*$", text, re.MULTILINE)
     if existing_history is not None:
-        replacement = todo_marker.strip("\n")
-        text = text[: existing_history.start()] + replacement + text[existing_history.end() :]
+        # A row for this version already exists — leave it exactly as it is.
+        #
+        # Rewriting it was both wrong and unstable. Wrong: the maintainer
+        # replaces the generated TODO with real prose describing what grew,
+        # and regenerating would delete that. Unstable: `unchanged` compares
+        # the size against the baseline *in the file*, which the first run
+        # just updated, so a second run reclassifies the same release as
+        # "unchanged" and rewrites the row it had written moments earlier.
+        pass
     else:
         history_anchor = "    Raising the baseline is a deliberate act"
         if history_anchor in text:
@@ -254,6 +265,13 @@ def refresh_binary_size(version: str, current_size: int) -> tuple[bool, str]:
         f"(+10% over {version} {{platform_key}} baseline {{baseline:,}})",
         text,
     )
+
+    if text == original_text:
+        # Re-running after a completed refresh must be a no-op, or the caller
+        # cannot tell "I just recorded this" from "this was already recorded".
+        # The unchanged-size path still falls through to here, so idempotency
+        # is decided by whether the FILE moved, never by whether the size did.
+        return False, f"binary-size baseline and history already current ({current_size:,} bytes)"
 
     PHASE5_TEST.write_text(text, encoding="utf-8", newline="\n")
     if unchanged:
