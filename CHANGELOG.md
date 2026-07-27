@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`from_blueprint(save=True)` no longer silently does nothing.** `save`
+  defaulted to `True`, but the save only ran when the blueprint declared an
+  `output` / `output_file` setting — so the common call, with the flag left at
+  its default, persisted nothing while reading as if it did. Two independent
+  reports landed on the same day. On a `storage="disk"` build the consequence
+  is worse than a missing file: the directory passed as `path` is the live
+  working directory, publication happens only at `save()`, and the skipped save
+  left behind `.kglite.lock`, a `.working-<pid>-<n>/` directory and a partial
+  `seg_000/` — a directory that looks like a graph and that `kglite.load()`
+  rejects with *"Directory does not contain a valid disk graph (missing
+  disk_graph_meta.json)"*. A downstream package's disk cache had been built on
+  that call and had therefore never once committed a graph.
+
+  A build now has a **save destination** when the blueprint declares one *or*
+  when `storage="disk"` was given a `path`; in disk mode the directory is the
+  graph, so that is what the flag has to mean, and
+  `from_blueprint(storage="disk", path=out)` → `kglite.load(out)` now
+  round-trips. The flag itself stops overpromising: `save` now defaults to
+  `None` — save if a destination exists, build in memory if not — while an
+  explicit `save=True` with nowhere to write raises `ValueError` naming both
+  ways to give it a destination, matching `KnowledgeGraph.save()`, which
+  already refuses rather than guesses when it has no path. `save=False` is
+  unchanged, and so is every build whose blueprint declares an output.
+
 ## [0.15.1] - 2026-07-27
 
 
