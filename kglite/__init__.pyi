@@ -945,7 +945,7 @@ def from_blueprint(
     blueprint_path: Union[str, Path],
     *,
     verbose: bool = False,
-    save: bool = True,
+    save: Optional[bool] = None,
     lock_schema: bool = False,
     storage: str = "default",
     path: Optional[str] = None,
@@ -980,27 +980,45 @@ def from_blueprint(
         graph = kglite.from_blueprint("blueprint.json", verbose=True)
         # All warnings now in blueprint.log instead of stderr.
 
+    **Where the graph is saved.** A build has a save destination when the
+    blueprint declares ``settings.output`` (or ``output_path`` +
+    ``output_file``), or when ``storage="disk"`` was given a ``path`` — in
+    disk mode the directory *is* the graph, and the build alone leaves it
+    unpublished, so that directory is what saving means. ``save=None``
+    (the default) saves when a destination exists and skips otherwise;
+    ``save=True`` demands one and raises if there is none, so an explicit
+    request to persist never silently does nothing; ``save=False`` never
+    saves.
+
     Args:
         blueprint_path: Path to the blueprint JSON file.
         verbose: If True, print progress information during loading.
-        save: If True and the blueprint specifies an ``output`` path,
-            save the graph to that path after building.
+        save: ``None`` (default) saves if a destination exists, ``True``
+            requires one, ``False`` never saves. See above.
         lock_schema: If True, lock the schema after loading. Cypher
             mutations will be validated against the blueprint's types
             and properties.
+        storage: ``"default"`` (in-memory), ``"mapped"`` (mmap columns),
+            or ``"disk"`` (CSR + mmap). Disk requires ``path``.
+        path: Directory for disk storage (only with ``storage="disk"``).
 
     Returns:
         A new KnowledgeGraph populated from the blueprint.
 
     Raises:
         FileNotFoundError: If the blueprint file is missing.
-        ValueError: If the blueprint JSON is malformed.
+        ValueError: If the blueprint JSON is malformed, or ``save=True``
+            was passed with no destination to write to.
 
     Example::
 
         import kglite
 
         graph = kglite.from_blueprint("blueprint.json", verbose=True)
+
+        # Disk mode: the directory is the graph, and it is published here.
+        g = kglite.from_blueprint("blueprint.json", storage="disk", path="graph/")
+        reopened = kglite.load("graph/")
     """
     ...
 
@@ -1040,7 +1058,10 @@ def from_records(
 
     Args:
         spec: The records spec as a ``dict`` or a JSON string.
-        save: If set, save the built graph to this ``.kgl`` path.
+        save: If set, save the built graph to this ``.kgl`` path. With
+            ``storage="disk"`` pass ``path`` here too — the disk build
+            leaves an unpublished working directory until something calls
+            ``save()``, and ``kglite.load()`` rejects that directory.
         lock_schema: If True, lock the schema after building.
         storage: ``"default"`` (in-memory), ``"mapped"``, or ``"disk"``.
         path: Directory for disk storage (only with ``storage="disk"``).

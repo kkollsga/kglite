@@ -392,7 +392,7 @@ graph.select("Contract").valid_during("2024-01-01", "2024-12-31")
 | Key | Description |
 |-----|-------------|
 | `root` (or `input_root`) | Base directory for resolving CSV paths. Defaults to `"."`. |
-| `output` | Path to auto-save the graph after loading (when `save=True`). |
+| `output` | Path to auto-save the graph to after loading. |
 | `output_path` | Alternative: output directory (combined with `output_file`). |
 | `output_file` | Alternative: output filename (combined with `output_path`). |
 
@@ -408,6 +408,35 @@ graph = kglite.from_blueprint("blueprint.json", verbose=True)
 # Skip auto-save (just build in memory)
 graph = kglite.from_blueprint("blueprint.json", save=False)
 ```
+
+### Where the graph gets saved
+
+A build has a **save destination** when either of these is true:
+
+- the blueprint declares `output` (or `output_path` + `output_file`), or
+- `storage="disk"` was given a `path`.
+
+The disk case matters because in disk mode the directory *is* the graph, and
+building alone leaves it unpublished — a directory that looks like a graph but
+that `kglite.load()` refuses with *"missing disk_graph_meta.json"*. Saving is
+what publishes it:
+
+```python
+kglite.from_blueprint("blueprint.json", storage="disk", path="graph/")
+reopened = kglite.load("graph/")     # works — the build published the directory
+```
+
+The `save` argument then selects the policy:
+
+| `save` | Behaviour |
+|--------|-----------|
+| omitted (default) | Save if a destination exists; build in memory if not. |
+| `True` | Save; raise `ValueError` if there is no destination. |
+| `False` | Never save. |
+
+Passing `save=True` on a blueprint with no `output` and no disk `path` is an
+error rather than a silent no-op, so a pipeline that believes it is persisting
+its output finds out at the first run.
 
 ## How Loading Works
 
