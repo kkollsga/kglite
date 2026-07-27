@@ -436,6 +436,31 @@ API changes vs the last published kglite to ground the bump-size decision
 (informational — this project deliberately ships documented breaking changes
 in patch bumps).
 
+### Release preflight and CI polling
+
+Two release-time instruments, both **checkers** — neither performs a release
+step, and neither has a `--fix`:
+
+- `make release-preflight` reports whether the tree is ready for the release
+  commit: workspace version vs. the top CHANGELOG section, internal pin sync,
+  captured constants present for this version, server binaries newer than the
+  manifest, `cargo fmt` + `ruff format` clean (the constants refresh dirties
+  formatting), and `origin/main` an ancestor of HEAD. It prints the command
+  for each unmet precondition and stops there. Run it after promoting the
+  CHANGELOG, before writing the release commit.
+- `python scripts/wait_for_release_ci.py` waits for the four push-triggered
+  workflows. It queries **by branch** with a client-side `head_sha` filter —
+  `gh run list --commit <sha>` returned `runs=0` for an hour during 0.15.0
+  while all four were green on that SHA — **requires all four runs to be
+  present** before concluding anything (a zero-incomplete loop exits instantly
+  green on an empty array), and reports **`conclusion`, not `status`**. A
+  timeout is a non-zero exit, never a pass.
+
+Do not grow either into a driver. A tool that reports "these four things are
+not ready" makes the maintainer faster; a tool that quietly performs the steps
+it checks is how gates stop gating. The bump size, the semver-check reading,
+and the push stay human decisions.
+
 ### PyPI project capacity
 
 PyPI's default project limit is 10.0 GB. The wheel release workflow sums the

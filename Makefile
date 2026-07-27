@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev dev-with-bin bundle-bin build-bolt-server test test-full test-rust test-core test-mcp test-cli test-py bench bench-save bench-compare bench-check bump-version check-release-hygiene refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy gate lint lint-policy lint-full lint-py source-quality rustsec-policy cov stubtest
+.PHONY: dev dev-with-bin bundle-bin build-bolt-server test test-full test-rust test-core test-mcp test-cli test-py bench bench-save bench-compare bench-check bump-version check-release-hygiene release-preflight refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy gate lint lint-policy lint-full lint-py source-quality rustsec-policy cov stubtest
 
 ## Build and install the package into the local .venv
 dev:
@@ -192,6 +192,18 @@ check-lint-allowances:
 bump-version:
 	@test -n "$(VERSION)" || { echo "usage: make bump-version VERSION=X.Y.Z"; exit 1; }
 	python3 scripts/bump_version.py --set $(VERSION)
+
+## Report whether the tree is ready for the release commit: version/CHANGELOG
+## agreement, internal pins, captured constants, server-binary freshness,
+## formatting, and fast-forwardability. Run it after promoting the CHANGELOG
+## and before writing the release commit.
+##
+## CHECKER, NOT A DRIVER. It performs no release step and has no --fix: it
+## prints the command for each unmet precondition and leaves running it — and
+## deciding whether to release at all — to the maintainer. A tool that quietly
+## performs the steps it checks is how gates stop gating.
+release-preflight:
+	python3 scripts/release_preflight.py
 
 ## Release-paperwork gates. Both are pure file reads (no cargo, no imports)
 ## so they stay inside the fast-gate budget:
