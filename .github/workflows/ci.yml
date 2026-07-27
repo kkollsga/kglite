@@ -242,21 +242,25 @@ jobs:
     #
     # WHY IT IS NON-BLOCKING TODAY
     # ----------------------------
-    # It currently fails at the RESOLUTION step, before it can build
-    # anything. Roughly twenty of our direct dependencies are declared as
-    # bare `"1"` / `"0.x"` floors; lowered simultaneously, several conflict
-    # with each other's transitive requirements (e.g. `regex = "1"` resolves
-    # 1.0.0, which lacks the `std` feature `tracing-subscriber` needs).
-    # Reaching green requires giving each direct dependency a real, compiled
-    # floor — a separate piece of work, tracked in
-    # dev-docs/plans/publishing-contract-2026-07-27.md.
+    # The floor-tightening this comment used to defer has now been done:
+    # 21 under-declared direct floors were given real, compiled minimums
+    # (async-trait, subtle, memchr, same-file, libc, indexmap, regex, clap,
+    # tokio, tempfile, flate2, hyper, hyper-util, tracing,
+    # tracing-subscriber, stacker, anyhow). Resolution SUCCEEDS, and every
+    # crate in this workspace compiles against its own declared minimums.
     #
-    # So the job runs, prints its finding, and does NOT block the release
-    # gate. It is deliberately still listed in `ci-success`'s `needs` so it
-    # stays visible in every run rather than becoming a job nobody looks at.
-    # The `cargo check` step below is already wired up: the day the floors
-    # are tightened, this job starts delivering the real signal — and the
-    # `continue-on-error` flags come off — without further edits.
+    # One failure remains, and it is not ours to fix: rmcp 2.2.0 declares
+    # `tokio-util = "0.7"` but imports `tokio_util::bytes`, which that floor
+    # does not guarantee. That is precisely the "third-party crate that
+    # understates ITS floor" case called out above — invisible to rmcp's own
+    # CI for the same reason ours was invisible to us. We cannot fix it by
+    # editing our manifests without taking a direct dependency on a crate we
+    # do not use, so the job stays non-blocking until rmcp corrects it.
+    #
+    # It is deliberately still listed in `ci-success`'s `needs` so it stays
+    # visible in every run rather than becoming a job nobody looks at. When
+    # that upstream floor is fixed, the `continue-on-error` flags come off
+    # and this becomes a real gate — no other edits needed.
     #
     # Non-vacuity is verified, not assumed: with `3114caab` temporarily
     # reverted (`mcp-methods = "0.4"`), resolution selects mcp-methods 0.4.0
