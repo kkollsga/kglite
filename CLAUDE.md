@@ -153,12 +153,13 @@ reproduce them locally.
 
 ## Architecture
 
-- **Rust core** (`crates/kglite/src/`): the engine — `petgraph` storage; `KnowledgeGraph` is exposed to Python via PyO3 from the wrapper crate (`crates/kglite-py/src/`).
-- **Cypher engine** (`crates/kglite/src/graph/languages/cypher/`): parser → AST → planner → executor.
-- **Shared query primitives** (`crates/kglite/src/graph/core/`): pattern matching, filtering, traversal — used by both Cypher and the fluent API.
-- **Python package** (`kglite/`): thin wrapper. (Code-graph building lives in the sibling codingest project; kglite serves/queries its graphs.)
-- **Type stubs** (`kglite/__init__.pyi`): source of truth for API docs.
-- **Introspection** (`crates/kglite/src/graph/introspection/`): `describe()` XML schema for agents.
+Crate and module layout is derivable from `ls crates/` and the manifests; the
+two things it does *not* tell you:
+
+- **`kglite/__init__.pyi` is the source of truth for API docs** — not the Rust
+  docstrings, not the `.md` files.
+- **Code-graph building lives in the sibling codingest project**, not here.
+  kglite serves and queries those graphs; it does not build them.
 
 ### The boundary principle (wrappers vs core) — summary
 
@@ -393,6 +394,15 @@ is often false. `make gate` fails if any of the five drifts apart. The bump
 *size* stays a human decision (see `make semver-check`); the target only
 applies the version you hand it.
 
+Release-run procedure — captured-constant refresh, preflight and CI polling,
+ecosystem version consistency, and PyPI capacity — lives in the `release`
+skill, which loads when you invoke it. It is not repeated here.
+
+**One prohibition from it stays resident, because it is irreversible and
+must not depend on a skill being loaded: never delete published files from
+PyPI or crates.io.** Published artifacts are never removed automatically, and
+any manual deletion permanently breaks every pinned install that depends on
+them — it requires a downstream-impact audit and explicit approval first.
 ### One version bump per push
 
 A version isn't "released" until the user pushes. If a `release(x.y.z): ...` commit is already local, fold any follow-up work into the same `[x.y.z]` CHANGELOG block — amend or extend the release commit, don't add a new `release(x.y.z+1): ...` on top.
@@ -404,141 +414,6 @@ git log origin/main..HEAD --oneline | grep -E "^\w+ release\("
 ```
 
 If that returns a commit, keep the version it picked. Only mint a new version after a clean push to origin.
-
-### Captured-constant refresh at release time
-
-Three captured values drift across releases and need a version-paired refresh as part of the release commit. The gates that check them are otherwise reliable — see Test infrastructure → Phase 4 / Phase 5 / perf-regression — but they go stale silently when nobody updates the captured constants. `make refresh-release-constants` does all three in one pass and prints a `git diff --stat` so the maintainer can stage them into the release commit.
-
-- `tests/test_phase4_parity.py::GOLDEN_V3_DIGEST` (and demote the prior value into `ACCEPTABLE_DIGESTS`). The version string lives in the `.kgl` header, so every release shifts the digest.
-- `tests/test_phase5_parity.py::test_binary_size_regression` baseline. Update the docstring's "what grew" note with each bump — the script adds a `TODO: describe what grew since the prior baseline` line for the maintainer to fill in. **`make gate` fails while that marker survives** (`scripts/check_release_hygiene.py`), so the release can't ship with the placeholder in it.
-- `tests/benchmarks/baselines/<version>.json` and `current.json`. Captured by re-running the 11 tracked core benchmarks. The script is idempotent — if `<version>.json` already exists, recapture is skipped (delete the file to force a fresh capture; benchmark numbers are inherently noisy so we don't want to overwrite on every script run).
-
-The script requires one fresh release artifact (`uv run --no-sync maturin
-develop --release`) for steps 2 and 3. Build it once, after the completed PR's
-full CI is green; it is release-data generation, not a reason to rerun tests in
-release mode.
-
-**No step in that script is best-effort.** A step that cannot do its job —
-missing release artifact, missing *or wrong-version* `cargo-public-api`, a
-rewrite anchor that moved, a failed benchmark run, a fixture lock that won't
-re-resolve — exits non-zero with the remediation command. It never prints a
-line and lets the release continue: in 0.15.0 the public-API step found
-cargo-public-api 0.52.0 against a 0.49.0 pin, reported a no-op, and only a
-human reading the output stopped stale baselines from shipping. The only
-intentional skips are the idempotent per-version benchmark re-capture and an
-explicit `--skip-benchmarks`. Do what the error says and re-run; never route
-around it.
-
-Two release-time companions (both wired into the release skill):
-`make bench-anchor` gates cumulative perf drift (newest baseline vs ~3
-releases back, +30%), and `make semver-check` reports mechanically-detected
-API changes vs the last published kglite to ground the bump-size decision
-(informational — this project deliberately ships documented breaking changes
-in patch bumps).
-
-### Release preflight and CI polling
-
-Two release-time instruments, both **checkers** — neither performs a release
-step, and neither has a `--fix`:
-
-- `make release-preflight` reports whether the tree is ready for the release
-  commit, and **refuses** (exit 1) if not. It asserts workspace coherence —
-  every member inherits `[workspace.package] version`, the workspace
-  *resolves* (a resolving `cargo metadata`, since `--no-deps` skips
-  resolution and passes on exactly the broken tree), and all five publishable
-  crates sit at one version — plus workspace version vs. the top CHANGELOG
-  section, internal pin sync, captured constants present for this version,
-  server binaries newer than the manifest, `cargo fmt` + `ruff format` clean
-  (the constants refresh dirties formatting), and `origin/main` an ancestor of
-  HEAD. It prints the command for each unmet precondition and stops there.
-  Run it after promoting the CHANGELOG, before writing the release commit.
-
-  The coherence assertions are **not** redundant with `make bump-version`.
-  The bump tool fixes the forward path; nothing stops the state drifting some
-  other way (a merge, a hand-edit, a rebase resolving a manifest conflict
-  wrongly). And a member carrying its own stale explicit `version = "..."`
-  resolves perfectly well — resolution cannot see that class at all, only
-  reading the manifests can. Preflight **names the offending files and tells
-  you to run `make bump-version`; it never repairs them.** A divergence might
-  be someone's deliberate in-progress change, and quietly overwriting it
-  would be worse than the drift.
-- `python scripts/wait_for_release_ci.py` waits for the four push-triggered
-  workflows. It queries **by branch** with a client-side `head_sha` filter —
-  `gh run list --commit <sha>` returned `runs=0` for an hour during 0.15.0
-  while all four were green on that SHA — **requires all four runs to be
-  present** before concluding anything (a zero-incomplete loop exits instantly
-  green on an empty array), and reports **`conclusion`, not `status`**. A
-  timeout is a non-zero exit, never a pass.
-
-Do not grow either into a driver. A tool that reports "these four things are
-not ready" makes the maintainer faster; a tool that quietly performs the steps
-it checks is how gates stop gating. The bump size, the semver-check reading,
-and the push stay human decisions.
-
-### Ecosystem version consistency + downstream notification
-
-`scripts/check_version_consistency.py` audits every place a dependency
-version is declared across KGLite and its siblings (`codingest`,
-`kglite-datasets`, `sonagram`, `sonara`, `mcp-methods`) — not just
-`Cargo.toml`/`pyproject.toml`, but CI YAML, Makefiles, Dockerfiles, shell and
-Python scripts, install hints baked into source strings, committed lockfiles,
-and docs.
-
-**The class of bug it exists for:** a version requirement that *understates
-its real minimum*, or that is declared *outside package metadata*, is
-structurally invisible to the repo that declares it. `kglite-mcp-server`
-declared `mcp-methods = "0.4"` while calling 0.4.1 APIs — our lock held 0.4.1,
-so every local build and every CI run here resolved fine, and only a sibling
-with an older lock ever saw it. Same shape: `fastembed = "5"` selecting a
-5.9.0+ feature, `mimalloc = "0.1"` selecting `v2` (0.1.49+), and codingest's
-`ci.yml` pinning a version its own wheel metadata excluded.
-
-- `make check-ecosystem-versions` — run **before the version bump** at release
-  time, and any time you touch a dependency requirement. Exits non-zero on
-  *contradictions* (two binding sites in one resolution unit that no single
-  version satisfies); staleness, understated floors, and stale documented
-  versions are reported but do not fail unless you pass `--fail-on stale`.
-- `make check-ecosystem-versions-verbose` — adds the full inventory of
-  declaration sites outside package metadata, i.e. everything that can drift
-  with nothing watching it.
-- `make notify-downstream-dry-run` / `make notify-downstream` — run **after
-  publish is verified**. Writes a release note into `inbox/unread/` of each
-  *affected* downstream only.
-
-**Deliberately not in `make gate` or CI.** Its subject is disagreement
-*between* repos; CI checks out one repo, so every sibling would be absent and
-the check would pass vacuously or need five extra clones per run. It degrades
-with a skip-and-message when siblings are missing (`--require-siblings`
-inverts that), and it resolves the ecosystem root through a worktree's `.git`
-file, so it works from `/Users/Shared/kglite-wt/<branch>` too.
-
-**The notifier notifies only the affected.** A "we released, nothing changes
-for you" note is noise that trains people to ignore the inbox, and it degrades
-a mechanism that currently works (CLAUDE.md → "Route to the party who can
-act"). A downstream is notified only when its declared range excludes the new
-version, it pins us at a superseded exact version, it states a superseded
-version in published prose, or it references a symbol in this release's
-breaking set (`DEFAULT_BREAKING_SYMBOLS` in the script — refresh it with the
-other captured constants). Otherwise the run prints `SKIP <repo>: <reason>`
-and writes nothing. Notes are local files, never commits: `inbox/` is
-gitignored working state in every repo.
-
-Prose cannot be classified mechanically — "use kglite 0.13.4 to convert
-pre-0.14 artifacts" is correct forever, "a thin KGLite 0.14.3 frontend" is
-rot. Adjudicated cases live in the script's `ACKNOWLEDGED` table with a
-reason, or carry an inline `version-check: ignore` marker; changelogs,
-migration guides and dated ledger rows are skipped wholesale.
-
-### PyPI project capacity
-
-PyPI's default project limit is 10.0 GB. The wheel release workflow sums the
-published file sizes from PyPI's project JSON API, reserves 250 MB for the next
-release, and blocks before builds when projected use reaches 80% of that limit.
-When it blocks, request a project-limit increase before publishing. Published
-files are never deleted automatically; any manual deletion requires a separate
-downstream-impact audit and explicit approval because it permanently breaks
-pinned installs. Update the configured limit only after PyPI confirms a new
-project-specific allowance.
 
 ### Multi-phase plans
 

@@ -60,6 +60,10 @@ RELEASE_WORKFLOWS = (
 TERMINAL_STATUS = "completed"
 
 
+#: Empty polls tolerated before probing whether the API is reachable at all.
+EMPTY_POLLS_BEFORE_PROBE = 3
+
+
 class PollError(RuntimeError):
     """The poll cannot proceed, or finished unsuccessfully."""
 
@@ -96,6 +100,25 @@ def fetch_runs(repo: str, branch: str, sha: str) -> tuple[list[dict], str]:
     merged.update({run["id"]: run for run in by_branch})
     source = f"branch={branch} matched {len(by_branch)}, head_sha matched {len(by_sha)}"
     return list(merged.values()), source
+
+
+def api_is_reachable(repo: str) -> tuple[bool, str]:
+    """Whether the Actions API answers at all, independent of this SHA.
+
+    `fetch_runs` returning nothing is ambiguous: the workflows may not have
+    registered yet, or we may be unable to see them. Those want opposite
+    responses -- keep waiting versus stop and say so -- and a poll loop that
+    cannot tell them apart will report "no runs" right up to its timeout
+    while the real problem is that nothing can reach GitHub.
+
+    Observed 2026-07-27: local ephemeral-port exhaustion made every outbound
+    connection fail with EADDRNOTAVAIL while a release was in flight.
+    """
+    try:
+        gh_api(f"repos/{repo}/actions/runs?per_page=1")
+    except PollError as exc:
+        return False, str(exc)
+    return True, "reachable"
 
 
 def latest_per_workflow(runs: list[dict], expected: tuple[str, ...]) -> dict[str, dict]:
@@ -166,11 +189,32 @@ def main() -> int:
         print(f"timeout {args.timeout}s, poll every {args.interval}s\n")
 
         deadline = time.monotonic() + args.timeout
+        empty_polls = 0
         while True:
             runs, source = fetch_runs(repo, args.branch, sha)
             all_terminal, missing, pending, failed = evaluate(runs, expected)
             print(f"[{time.strftime('%H:%M:%S')}] {source}")
             print(describe(runs, expected))
+
+            # Zero runs is ambiguous -- not registered yet, or not visible.
+            # Those want opposite responses, so after a few empty polls stop
+            # guessing and ask the API a question whose answer does not
+            # depend on this SHA.
+            if not runs:
+                empty_polls += 1
+                if empty_polls == EMPTY_POLLS_BEFORE_PROBE:
+                    ok, detail = api_is_reachable(repo)
+                    if not ok:
+                        raise PollError(
+                            "cannot see any workflow runs, and the Actions API is "
+                            f"unreachable:\n  {detail}\n"
+                            "This is NOT evidence that the release failed to trigger -- "
+                            "it is evidence that this machine cannot observe it. Resolve "
+                            "connectivity, then re-run; the push already happened."
+                        )
+                    print("   (API reachable — runs genuinely have not registered yet)")
+            else:
+                empty_polls = 0
 
             if all_terminal:
                 if failed:

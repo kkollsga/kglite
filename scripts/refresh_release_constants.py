@@ -201,11 +201,26 @@ def refresh_binary_size(version: str, current_size: int) -> tuple[bool, str]:
         )
     cur_baseline = int(bl_match.group(2).replace("_", ""))
 
-    if cur_baseline == current_size:
-        return False, f"binary-size baseline already current ({current_size:,} bytes)"
+    original_text = text
+    unchanged = cur_baseline == current_size
+    if unchanged:
+        # An unchanged SIZE is not an unchanged RELEASE. The history is a
+        # per-release ledger, and `release_preflight` requires a row for the
+        # version being cut -- an absent row reads as an *unmeasured* release,
+        # not an unchanged one. Returning early here made the two tools
+        # disagree: this one reported "already current" while preflight
+        # reported "no entry", which is exactly what happened cutting 0.15.1.
+        # So fall through and write the row (and re-stamp the version comment
+        # on the baseline line), just with the value left alone.
+        pass
 
-    # Replace the baseline line.
+    # Re-stamp the baseline line so its comment names the version being cut,
+    # even when the number itself did not move.
     formatted = f"{current_size:_}".replace("_", "_")  # "12_345_678" style
+    # No "(unchanged)" marker here: the comment must be a pure function of
+    # (size, version, platform) or re-stamping it is not idempotent, and the
+    # second refresh of a release would report a change that did not happen.
+    # The unchanged-ness is recorded in the history row's prose instead.
     new_line = f"{bl_match.group(1)}{formatted},  # {version} {platform_key} baseline\n"
     text = text[: bl_match.start()] + new_line + text[bl_match.end() :]
 
@@ -213,15 +228,31 @@ def refresh_binary_size(version: str, current_size: int) -> tuple[bool, str]:
     # block so the growth narrative gains an entry. We don't try to
     # rewrite the whole prose — that's the maintainer's job; we just
     # leave a TODO so they don't forget.
-    todo_marker = (
-        f"\n      - {version}:       {current_size:,} bytes "
-        f"(≈{current_size / (1024 * 1024):.1f} MB). "
-        "TODO: describe what grew since the prior baseline.\n"
-    )
+    if unchanged:
+        # Nothing grew, so there is nothing for a human to describe -- emitting
+        # a TODO here would be a marker that can never be resolved, and the
+        # hygiene lint would (correctly) block the release on it.
+        todo_marker = (
+            f"\n      - {version}:       {current_size:,} bytes — **unchanged** from the "
+            "prior baseline; this release moved no code size.\n"
+        )
+    else:
+        todo_marker = (
+            f"\n      - {version}:       {current_size:,} bytes "
+            f"(≈{current_size / (1024 * 1024):.1f} MB). "
+            "TODO: describe what grew since the prior baseline.\n"
+        )
     existing_history = re.search(rf"^      - {re.escape(version)}:.*$", text, re.MULTILINE)
     if existing_history is not None:
-        replacement = todo_marker.strip("\n")
-        text = text[: existing_history.start()] + replacement + text[existing_history.end() :]
+        # A row for this version already exists — leave it exactly as it is.
+        #
+        # Rewriting it was both wrong and unstable. Wrong: the maintainer
+        # replaces the generated TODO with real prose describing what grew,
+        # and regenerating would delete that. Unstable: `unchanged` compares
+        # the size against the baseline *in the file*, which the first run
+        # just updated, so a second run reclassifies the same release as
+        # "unchanged" and rewrites the row it had written moments earlier.
+        pass
     else:
         history_anchor = "    Raising the baseline is a deliberate act"
         if history_anchor in text:
@@ -235,7 +266,16 @@ def refresh_binary_size(version: str, current_size: int) -> tuple[bool, str]:
         text,
     )
 
+    if text == original_text:
+        # Re-running after a completed refresh must be a no-op, or the caller
+        # cannot tell "I just recorded this" from "this was already recorded".
+        # The unchanged-size path still falls through to here, so idempotency
+        # is decided by whether the FILE moved, never by whether the size did.
+        return False, f"binary-size baseline and history already current ({current_size:,} bytes)"
+
     PHASE5_TEST.write_text(text, encoding="utf-8", newline="\n")
+    if unchanged:
+        return True, f"binary-size unchanged at {current_size:,} bytes — history row recorded"
     return True, f"binary-size baseline {cur_baseline:,} -> {current_size:,} bytes"
 
 
@@ -413,6 +453,31 @@ def run() -> None:
     print(f"   {'CHANGED' if before != after else 'no-op '}: tests/fixtures/rust-embed-consumer/Cargo.lock\n")
 
     # Pretty diff summary.
+    # ── 6. Generated docs facts ────────────────────────────────────────
+    # `docs/_generated/project-facts.md` embeds the version, so every bump
+    # staled it. Nothing in this script regenerated it, and the only thing
+    # that noticed was `make gate` -- *if* someone happened to run it after
+    # the bump. Cutting 0.15.1 hit exactly that: a clean refresh, then a
+    # red gate from a file the refresh should have owned.
+    print("6. generated docs facts")
+    facts = REPO_ROOT / "docs/_generated/project-facts.md"
+    before_facts = facts.read_bytes() if facts.exists() else b""
+    proc = subprocess.run(
+        [sys.executable, "scripts/render_docs_facts.py"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or "no diagnostic output"
+        raise RefreshError(f"render_docs_facts.py failed:\n{detail}")
+    after_facts = facts.read_bytes() if facts.exists() else b""
+    if after_facts != before_facts:
+        print(f"   CHANGED: {facts.relative_to(REPO_ROOT)}")
+    else:
+        print("   no-op : generated docs facts already current")
+    print()
+
     diff = subprocess.run(
         [
             "git",
@@ -423,6 +488,7 @@ def run() -> None:
             "tests/test_phase5_parity.py",
             "tests/benchmarks/baselines/",
             "tests/api-baselines/",
+            "docs/_generated/project-facts.md",
         ],
         cwd=REPO_ROOT,
         capture_output=True,
@@ -434,7 +500,8 @@ def run() -> None:
             print(f"  {line}")
         print("\nIf the deltas are expected, stage the files and amend into the release commit:")
         print("  git add tests/test_phase4_parity.py tests/test_phase5_parity.py \\")
-        print("          tests/benchmarks/baselines/ tests/api-baselines/")
+        print("          tests/benchmarks/baselines/ tests/api-baselines/ \\")
+        print("          docs/_generated/project-facts.md")
         print("  git commit --amend --no-edit")
     else:
         print("All constants already current — no changes to stage.")
