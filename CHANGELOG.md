@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The undo-journal fast path now applies to graphs that have been saved.**
+  Statement rollback uses a cheap O(changes) undo journal wherever it can, and
+  falls back to a whole-graph O(V+E) clone taken before *every* mutating
+  statement otherwise. The fast path previously excluded any graph holding
+  columnar property stores — which is every graph that has been through
+  `save()`, since saving enables columnar storage and nothing on a mutation
+  path turns it off again. A single `save()` therefore moved the process onto
+  the clone path permanently, and the cost of each subsequent write scaled
+  with the size of the whole graph rather than with what the write touched.
+
+  The exclusion was aimed at one real side channel — `SET` on a columnar
+  property writes the shared per-type store directly — which is now covered
+  instead of avoided: the master store is restored from the checkpoint's
+  schema copy, and the per-node handles come back through the journal. `CREATE`
+  and `DELETE` never touch a column store in memory mode at all.
+
+  Rollback behaviour is unchanged; this is a cost change only. The rollback
+  fidelity suite now runs every statement shape against a saved-graph fixture
+  as well as a fresh one.
+
+- **…and to graphs with user-created indexes.** The same fast path was
+  excluded for any graph holding a property, range, or composite index, for
+  the same reason and with the same permanence: one `create_index` moved every
+  later statement onto the whole-graph clone. That exclusion was the more
+  expensive of the two, and unlike columnar mode there was no way to
+  configure around it — dropping the index to buy back write speed turns the
+  lookup it served into a label scan.
+
+  Index maintenance is now journalled per bucket edit, with the position each
+  edit touched, so a failed statement restores bucket *order* and not merely
+  membership. Bucket order is the row order an indexed `MATCH` without
+  `ORDER BY` returns, so anything less would have made a rolled-back statement
+  observable. This uses the same `BucketAppended` / `BucketRemoved` entries
+  that already covered the built-in type and label indexes.
+
+  One behaviour change falls out of it: composite-index maintenance no longer
+  opportunistically drops buckets that were already empty before the write. It
+  only drops the ones the write itself emptied.
+
 ### Fixed
 
 - **`kglite.open()` now enforces one writer per graph, instead of silently

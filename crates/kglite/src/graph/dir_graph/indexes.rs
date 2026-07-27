@@ -16,6 +16,7 @@ use super::{DirGraph, IndexStats};
 use crate::datatypes::values::Value;
 use crate::graph::schema::{CompositeIndexKey, CompositeValue, IndexKey, InternedKey};
 use crate::graph::storage::backend::GraphBackend;
+use crate::graph::storage::undo::BucketId;
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 
@@ -476,6 +477,164 @@ impl DirGraph {
     }
 
     // ========================================================================
+    // Statement-rollback capture for user indexes
+    // ========================================================================
+    //
+    // These helpers give the undo journal the *index* half of a statement's
+    // writes. Each records a bucket edit together with the position it
+    // touched, because bucket order is the row order an un-`ORDER BY`'d
+    // indexed `MATCH` returns (`lookup_by_index` hands the bucket `Vec`
+    // straight to the matcher) — restoring membership alone would leave a
+    // failed statement visible as a reordering.
+    //
+    // Each is one `Option` check when no checkpoint is capturing, which is
+    // every read and every statement outside a mutating one. They must be
+    // called *before* the edit they describe: an eviction needs the position
+    // while the node is still in the bucket, and an append needs to know
+    // whether the bucket existed beforehand.
+
+    /// Whether a statement checkpoint is currently capturing inverse ops.
+    #[inline]
+    fn capturing_undo(&mut self) -> bool {
+        self.graph.undo_journal_mut().is_some()
+    }
+
+    /// Journal `node_idx`'s position in a property-index bucket before it
+    /// leaves it.
+    fn note_property_eviction(&mut self, key: &IndexKey, value: &Value, node_idx: NodeIndex) {
+        if !self.capturing_undo() {
+            return;
+        }
+        let pos = self
+            .property_indices
+            .get(key)
+            .and_then(|value_map| value_map.get(value))
+            .and_then(|members| members.iter().position(|member| *member == node_idx));
+        let Some(pos) = pos else {
+            return;
+        };
+        let bucket = BucketId::PropertyValue {
+            key: key.clone(),
+            value: value.clone(),
+        };
+        if let Some(journal) = self.graph.undo_journal_mut() {
+            journal.note_bucket_removed(bucket, node_idx, pos);
+        }
+    }
+
+    /// Range-index counterpart of [`note_property_eviction`](Self::note_property_eviction).
+    fn note_range_eviction(&mut self, key: &IndexKey, value: &Value, node_idx: NodeIndex) {
+        if !self.capturing_undo() {
+            return;
+        }
+        let pos = self
+            .range_indices
+            .get(key)
+            .and_then(|btree| btree.get(value))
+            .and_then(|members| members.iter().position(|member| *member == node_idx));
+        let Some(pos) = pos else {
+            return;
+        };
+        let bucket = BucketId::RangeValue {
+            key: key.clone(),
+            value: value.clone(),
+        };
+        if let Some(journal) = self.graph.undo_journal_mut() {
+            journal.note_bucket_removed(bucket, node_idx, pos);
+        }
+    }
+
+    /// Composite-index counterpart of
+    /// [`note_property_eviction`](Self::note_property_eviction).
+    fn note_composite_eviction(
+        &mut self,
+        key: &CompositeIndexKey,
+        value: &CompositeValue,
+        node_idx: NodeIndex,
+    ) {
+        if !self.capturing_undo() {
+            return;
+        }
+        let pos = self
+            .composite_indices
+            .get(key)
+            .and_then(|comp_map| comp_map.get(value))
+            .and_then(|members| members.iter().position(|member| *member == node_idx));
+        let Some(pos) = pos else {
+            return;
+        };
+        let bucket = BucketId::CompositeTuple {
+            key: key.clone(),
+            value: value.clone(),
+        };
+        if let Some(journal) = self.graph.undo_journal_mut() {
+            journal.note_bucket_removed(bucket, node_idx, pos);
+        }
+    }
+
+    /// Journal an append into a property-index bucket, recording whether the
+    /// bucket itself comes into existence with it.
+    fn note_property_append(&mut self, key: &IndexKey, value: &Value, node_idx: NodeIndex) {
+        if !self.capturing_undo() {
+            return;
+        }
+        let bucket_was_new = match self.property_indices.get(key) {
+            Some(value_map) => !value_map.contains_key(value),
+            // No such index: the caller's append will not happen either.
+            None => return,
+        };
+        let bucket = BucketId::PropertyValue {
+            key: key.clone(),
+            value: value.clone(),
+        };
+        if let Some(journal) = self.graph.undo_journal_mut() {
+            journal.note_bucket_appended(bucket, node_idx, bucket_was_new);
+        }
+    }
+
+    /// Range-index counterpart of [`note_property_append`](Self::note_property_append).
+    fn note_range_append(&mut self, key: &IndexKey, value: &Value, node_idx: NodeIndex) {
+        if !self.capturing_undo() {
+            return;
+        }
+        let bucket_was_new = match self.range_indices.get(key) {
+            Some(btree) => !btree.contains_key(value),
+            None => return,
+        };
+        let bucket = BucketId::RangeValue {
+            key: key.clone(),
+            value: value.clone(),
+        };
+        if let Some(journal) = self.graph.undo_journal_mut() {
+            journal.note_bucket_appended(bucket, node_idx, bucket_was_new);
+        }
+    }
+
+    /// Composite-index counterpart of
+    /// [`note_property_append`](Self::note_property_append).
+    fn note_composite_append(
+        &mut self,
+        key: &CompositeIndexKey,
+        value: &CompositeValue,
+        node_idx: NodeIndex,
+    ) {
+        if !self.capturing_undo() {
+            return;
+        }
+        let bucket_was_new = match self.composite_indices.get(key) {
+            Some(comp_map) => !comp_map.contains_key(value),
+            None => return,
+        };
+        let bucket = BucketId::CompositeTuple {
+            key: key.clone(),
+            value: value.clone(),
+        };
+        if let Some(journal) = self.graph.undo_journal_mut() {
+            journal.note_bucket_appended(bucket, node_idx, bucket_was_new);
+        }
+    }
+
+    // ========================================================================
     // Incremental Index Maintenance (called by Cypher mutations)
     // ========================================================================
 
@@ -503,9 +662,11 @@ impl DirGraph {
                 .collect()
         };
         for (key, value) in &prop_updates {
+            self.note_property_append(key, value, node_idx);
             if let Some(value_map) = self.property_indices.get_mut(key) {
                 value_map.entry(value.clone()).or_default().push(node_idx);
             }
+            self.note_range_append(key, value, node_idx);
             if let Some(btree) = self.range_indices.get_mut(key) {
                 btree.entry(value.clone()).or_default().push(node_idx);
             }
@@ -541,6 +702,7 @@ impl DirGraph {
                 .collect()
         };
         for (key, comp_val) in comp_updates {
+            self.note_composite_append(&key, &comp_val, node_idx);
             if let Some(comp_map) = self.composite_indices.get_mut(&key) {
                 comp_map.entry(comp_val).or_default().push(node_idx);
             }
@@ -558,9 +720,12 @@ impl DirGraph {
         new_value: &Value,
     ) {
         let key = (node_type.to_string(), property.to_string());
-        // Update hash index
-        if let Some(value_map) = self.property_indices.get_mut(&key) {
-            if let Some(old_val) = old_value {
+        // Update hash index. Vacating the old bucket and joining the new one
+        // are journalled separately, and each capture has to read the map as
+        // it stands just before its own edit — hence the split borrows.
+        if let Some(old_val) = old_value {
+            self.note_property_eviction(&key, old_val, node_idx);
+            if let Some(value_map) = self.property_indices.get_mut(&key) {
                 if let Some(indices) = value_map.get_mut(old_val) {
                     indices.retain(|&idx| idx != node_idx);
                     if indices.is_empty() {
@@ -568,14 +733,18 @@ impl DirGraph {
                     }
                 }
             }
+        }
+        self.note_property_append(&key, new_value, node_idx);
+        if let Some(value_map) = self.property_indices.get_mut(&key) {
             value_map
                 .entry(new_value.clone())
                 .or_default()
                 .push(node_idx);
         }
         // Update range index
-        if let Some(btree) = self.range_indices.get_mut(&key) {
-            if let Some(old_val) = old_value {
+        if let Some(old_val) = old_value {
+            self.note_range_eviction(&key, old_val, node_idx);
+            if let Some(btree) = self.range_indices.get_mut(&key) {
                 if let Some(indices) = btree.get_mut(old_val) {
                     indices.retain(|&idx| idx != node_idx);
                     if indices.is_empty() {
@@ -583,6 +752,9 @@ impl DirGraph {
                     }
                 }
             }
+        }
+        self.note_range_append(&key, new_value, node_idx);
+        if let Some(btree) = self.range_indices.get_mut(&key) {
             btree.entry(new_value.clone()).or_default().push(node_idx);
         }
 
@@ -599,6 +771,7 @@ impl DirGraph {
         old_value: &Value,
     ) {
         let key = (node_type.to_string(), property.to_string());
+        self.note_property_eviction(&key, old_value, node_idx);
         if let Some(value_map) = self.property_indices.get_mut(&key) {
             if let Some(indices) = value_map.get_mut(old_value) {
                 indices.retain(|&idx| idx != node_idx);
@@ -607,6 +780,7 @@ impl DirGraph {
                 }
             }
         }
+        self.note_range_eviction(&key, old_value, node_idx);
         if let Some(btree) = self.range_indices.get_mut(&key) {
             if let Some(indices) = btree.get_mut(old_value) {
                 indices.retain(|&idx| idx != node_idx);
@@ -651,25 +825,54 @@ impl DirGraph {
         };
 
         for key in comp_keys {
-            if let Some(comp_map) = self.composite_indices.get_mut(&key) {
-                // Remove node from all existing composite buckets
-                for indices in comp_map.values_mut() {
-                    indices.retain(|&idx| idx != node_idx);
-                }
-                // Remove empty buckets
-                comp_map.retain(|_, v| !v.is_empty());
-
-                // Build new composite value from current properties
-                let new_values: Vec<Value> = key
-                    .1
+            // The buckets this node currently sits in, read before vacating
+            // any of them so each position can be journalled.
+            let occupied: Vec<CompositeValue> = match self.composite_indices.get(&key) {
+                Some(comp_map) => comp_map
                     .iter()
-                    .map(|p| current_props.get(p).cloned().unwrap_or(Value::Null))
-                    .collect();
-                if new_values.iter().any(|v| !matches!(v, Value::Null)) {
-                    comp_map
-                        .entry(CompositeValue(new_values))
-                        .or_default()
-                        .push(node_idx);
+                    .filter(|(_, members)| members.contains(&node_idx))
+                    .map(|(value, _)| value.clone())
+                    .collect(),
+                None => continue,
+            };
+            for value in &occupied {
+                self.note_composite_eviction(&key, value, node_idx);
+            }
+            if let Some(comp_map) = self.composite_indices.get_mut(&key) {
+                // Vacate exactly the buckets this node was in, and drop only
+                // the ones this call emptied. The blanket
+                // `retain(|_, v| !v.is_empty())` this replaces also swept away
+                // buckets that were already empty before the call — harmless
+                // in itself, but it made the edit unrepresentable as an
+                // inverse, and "restore the pre-statement graph" includes the
+                // empty buckets it had.
+                for value in &occupied {
+                    let emptied = match comp_map.get_mut(value) {
+                        Some(members) => {
+                            members.retain(|&idx| idx != node_idx);
+                            members.is_empty()
+                        }
+                        None => false,
+                    };
+                    if emptied {
+                        comp_map.remove(value);
+                    }
+                }
+            }
+
+            // Build new composite value from current properties
+            let new_values: Vec<Value> = key
+                .1
+                .iter()
+                .map(|p| current_props.get(p).cloned().unwrap_or(Value::Null))
+                .collect();
+            if new_values.iter().any(|v| !matches!(v, Value::Null)) {
+                let value = CompositeValue(new_values);
+                // After the evictions, so `bucket_was_new` reflects the map
+                // the append actually lands in.
+                self.note_composite_append(&key, &value, node_idx);
+                if let Some(comp_map) = self.composite_indices.get_mut(&key) {
+                    comp_map.entry(value).or_default().push(node_idx);
                 }
             }
         }
