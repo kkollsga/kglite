@@ -755,8 +755,24 @@ def open(
             exists, otherwise created on first ``save()`` (or immediately, for
             ``storage="disk"``, which materializes the directory).
         storage: Storage mode for a *newly created* graph (``"mapped"`` /
-            ``"disk"``); ignored when opening an existing file, which keeps the
-            mode it was saved in.
+            ``"disk"``). Opening an existing path uses the mode the load
+            produces, which is not necessarily the mode that wrote it: a
+            ``.kgl`` checkpoint records no storage mode, so it always loads as
+            ``"memory"``; a disk graph is a directory and always loads as
+            ``"disk"``. A ``storage=`` that disagrees with the loaded backend
+            raises :class:`kglite.ArgumentError` rather than being ignored, so
+            ``open(path, storage="mapped")`` yields a genuinely mapped graph
+            only on the call that *creates* the file, and says so on every call
+            after that. Omit ``storage=`` to accept whatever the file provides.
+
+            Note the durability asymmetry between the two ways to build a
+            graph, which is structural rather than incidental: ``open()``
+            attaches a WAL sidecar next to ``path`` and defaults to
+            ``durable="full"``, whereas :class:`KnowledgeGraph` takes no
+            ``durable`` argument and is never durable — it produces a detached
+            graph with no ``source_path``, so there is nowhere for a log to
+            live. ``KnowledgeGraph(storage="mapped")`` is mapped-and-unlogged;
+            ``open(new_path, storage="mapped")`` is mapped-and-logged.
         durable: Write-ahead logging — **on by default**. Each committed
             mutation is appended to a ``<path>-wal`` sidecar, and on open any
             WAL frames are replayed onto the loaded checkpoint to recover work
@@ -1229,6 +1245,22 @@ class KnowledgeGraph:
                 ``storage="disk"``. The directory IS the graph — data is
                 written directly to disk via mmap. Load with
                 ``kglite.load(path)``.
+
+        Note:
+            **This constructor is never durable, and takes no ``durable``
+            argument.** It returns a *detached* graph — no ``source_path``, so
+            a bare ``save()`` asks for an explicit path and there is nowhere
+            for a write-ahead log to live. :func:`kglite.open` is the durable
+            entry point: it binds the graph to a path and defaults to
+            ``durable="full"``. So ``KnowledgeGraph(storage="mapped")`` is
+            mapped-and-unlogged while ``kglite.open(new_path,
+            storage="mapped")`` is mapped-and-logged. The difference is
+            structural rather than a defaulting inconsistency, but it is easy
+            to trip over when comparing the two.
+
+            Note also that mutating statements on a ``"mapped"`` or ``"disk"``
+            graph do **not** use the cheap statement-rollback journal — see
+            :func:`kglite.open` and the storage-mode guide.
         """
         ...
 

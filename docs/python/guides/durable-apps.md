@@ -200,7 +200,7 @@ optimising for:
 | Every committed write to survive a hard crash | `open(path)` (the default) | One barrier per commit; reopen is O(graph) (loads the whole graph). |
 | Committed writes to survive a crashing *process*, cheaply | `open(path, durable="normal")` | No barrier per commit; an OS crash or power cut loses work since the last `save()`. Call `sync()` for a power-safe point. |
 | Maximum write throughput on rebuildable data | `open(path, durable="off")` | Nothing logged; a crash loses work since the last checkpoint. |
-| Crash safety on a graph that outgrows RAM | `open(path, storage="mapped")` | Same per-commit WAL guarantee; property columns spill to mmap. |
+| Crash safety on a graph that outgrows RAM | `open(path, storage="mapped")` **on the call that creates it** | Same per-commit WAL guarantee; property columns spill to mmap. A `.kgl` records no storage mode, so reopening returns a **memory** graph — pass `storage="mapped"` only when creating, or the reopen raises `kglite.ArgumentError`. See [Choosing a storage mode](../core-concepts.md#choosing-a-storage-mode). |
 | 100 M+ nodes (Wikidata-scale), cheap cold-open | `open(path, storage="disk")` | Paged mmap, lazy load; **no per-commit WAL** — durability is your `save()` calls. |
 
 The first three are **in-memory** — the whole graph lives in RAM, which is what

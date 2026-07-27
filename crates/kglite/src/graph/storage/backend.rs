@@ -106,6 +106,19 @@ impl GraphBackend {
     /// wraps, so a durable graph participates exactly when its underlying
     /// backend would: `Recording(Memory)` journals, `Recording(Mapped)` keeps
     /// the clone. Durability and rollback strategy are independent concerns.
+    ///
+    /// **This is deliberate, and it is the only remaining veto term in
+    /// `journal_covers`** — every other term was retired as the journal grew
+    /// to cover saved, indexed and columnar graphs. The user-visible cost is
+    /// worth stating plainly, because nothing else surfaces it: every mutating
+    /// statement on a mapped or disk graph still opens an O(V+E)
+    /// `fork_transaction()` whole-graph checkpoint, which is the pre-journal
+    /// behaviour. Under the "in-memory wins" doctrine that is the right
+    /// trade — the journal exists to make the *core* product cheap, and
+    /// neither larger-than-RAM backend can express an inverse petgraph edit
+    /// today — but it does mean statement rollback cost scales with graph
+    /// size in exactly the modes chosen for large graphs. Mirrored in the
+    /// user-facing storage-mode guide (`docs/python/core-concepts.md`).
     #[inline]
     pub(crate) fn supports_undo_journal(&self) -> bool {
         match self {

@@ -61,19 +61,43 @@ requires_sigkill = pytest.mark.skipif(
 )
 
 
-def _open_kwargs(storage: str, durable: object = True) -> str:
-    """``kglite.open`` kwargs, as source text for a child script."""
-    parts = [f"durable={durable!r}"]
-    if storage != "memory":
-        parts.insert(0, f"storage={storage!r}")
-    return ", ".join(parts)
+# `storage=` selects a backend for a graph being *created*; an existing path is
+# loaded, and the load decides the backend. A `.kgl` checkpoint records no
+# storage mode, so a reopened one always comes back as memory — passing the mode
+# again is now an `ArgumentError` rather than being silently ignored.
+#
+# So the `[mapped]` parametrisation below means **"created mapped, recovered as
+# memory"**, and cannot mean anything else while `.kgl` carries no mode. That is
+# still a real durability test — the WAL frames under replay were written by a
+# mapped graph — but it does not exercise recovery *into* the mapped backend,
+# and before the kwarg was gated it silently claimed to.
+
+
+def _open_body(storage: str, durable: object = True) -> str:
+    """Source text for a child script's `open_durable()`.
+
+    Emitted as a runtime check rather than a fixed kwarg string because a child
+    may call `open_durable()` more than once — creating the graph on the first
+    call and reopening it after a checkpoint on later ones.
+    """
+    mode = "None" if storage == "memory" else repr(storage)
+    return textwrap.dedent(
+        f"""
+        def open_durable():
+            kwargs = {{"durable": {durable!r}}}
+            storage = {mode}
+            if storage is not None and not os.path.exists(path):
+                kwargs["storage"] = storage
+            return kglite.open(path, **kwargs)
+        """
+    ).strip()
 
 
 def _open(path, storage: str = "memory", durable: object = True):
     """Open *path* in *storage* mode at durability level *durable*
     (parent-side counterpart)."""
     kwargs = {"durable": durable}
-    if storage != "memory":
+    if storage != "memory" and not os.path.exists(str(path)):
         kwargs["storage"] = storage
     return kglite.open(str(path), **kwargs)
 
@@ -84,8 +108,7 @@ def _child_script(tmp_path, body: str, storage: str, ending: str, durable: objec
         import kglite, os, signal
         path = {str(tmp_path / "app.kgl")!r}
 
-        def open_durable():
-            return kglite.open(path, {_open_kwargs(storage, durable)})
+        {textwrap.indent(_open_body(storage, durable), "        ").strip()}
 
         {textwrap.indent(textwrap.dedent(body), "        ").strip()}
         {ending}

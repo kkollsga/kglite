@@ -261,8 +261,24 @@ fn from_bytes(py: Python<'_>, data: &[u8]) -> PyResult<KnowledgeGraph> {
 /// bare `save()` (or the context-manager auto-save-on-close) writes back to
 /// it without re-specifying the target.
 ///
-/// `storage` (`"mapped"` / `"disk"`) applies only when *creating* a new
-/// graph; opening an existing file uses whatever mode it was saved in.
+/// `storage` (`"mapped"` / `"disk"`) applies only when *creating* a new graph.
+/// Opening an existing path uses the mode the load produces, which is not
+/// necessarily the mode that wrote it: a `.kgl` checkpoint records no storage
+/// mode, so it always loads as `"memory"`, while a disk graph is a directory
+/// and always loads as `"disk"`. Passing a `storage=` that disagrees with the
+/// loaded backend raises `kglite.ArgumentError` rather than being ignored — a
+/// silently-downgraded mode is indistinguishable from success, and in
+/// particular `open(path, storage="mapped")` gives a genuinely mapped graph
+/// only on the call that *creates* the file.
+///
+/// **Durability differs between the two ways to build a graph, and the
+/// difference is structural.** `kglite.open()` attaches a WAL sidecar next to
+/// `path` and defaults to `durable="full"`. The `KnowledgeGraph(...)`
+/// constructor has no `durable` argument at all and is never durable: it
+/// produces a *detached* graph with no `source_path`, so there is no location
+/// for a log to live. `KnowledgeGraph(storage="mapped")` is therefore
+/// mapped-and-unlogged, while `open(path, storage="mapped")` on a fresh path is
+/// mapped-and-logged.
 ///
 /// The `durable=` argument: a level name, a bool, or `None`.
 ///
@@ -394,13 +410,55 @@ fn open(
         None
     };
 
-    let mut kg = if std::path::Path::new(&path).exists() {
+    // Parse the mode up front, on *both* branches. Validating it only inside
+    // `construct` meant an unknown spelling was silently accepted whenever the
+    // path happened to exist already.
+    let requested_mode = storage
+        .map(|mode_str| {
+            kglite_core::api::storage::StorageMode::parse(mode_str)
+                .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))
+        })
+        .transpose()?;
+
+    let existed = std::path::Path::new(&path).exists();
+    let mut kg = if existed {
         py.detach(|| load_file(&path))
             .map(KnowledgeGraph::from_arc)
             .map_err(|e| load_err_to_pyerr(e, Some(&path)))?
     } else {
         KnowledgeGraph::construct(storage, Some(&path))?
     };
+    // An existing path is *loaded*, and the load decides the backend — so a
+    // `storage=` that disagrees with what came back cannot be honoured. Refuse
+    // instead of ignoring it: silently handing back a different mode than the
+    // caller asked for is indistinguishable from success, and has already
+    // invalidated at least one mapped-vs-memory comparison where both arms
+    // unknowingly ran on the memory backend.
+    if existed {
+        if let Some(requested) = requested_mode {
+            let actual = actual_storage_mode(&kg);
+            if requested != actual {
+                // `ArgumentError`, matching `KnowledgeGraph(storage="invalid")`
+                // and the parse failure above — one error class for one kwarg.
+                // (The neighbouring disk-plus-`durable` refusal raises
+                // `ValueError`; that is about `durable=`, not about this.)
+                let message = format!(
+                    "cannot open existing graph {path:?} with storage={:?}: it loaded as {:?}. \
+                     `storage=` selects a backend for a graph being *created*; an existing \
+                     path is loaded, and the load decides the backend. A `.kgl` checkpoint \
+                     does not record which mode wrote it, so loading one always yields \
+                     'memory'; a disk graph is a directory and always yields 'disk'. {} \
+                     To accept whatever the file provides, omit `storage=`.",
+                    requested.as_str(),
+                    actual.as_str(),
+                    storage_mode_remedy(requested),
+                );
+                return Err(crate::error_py::kg_to_pyerr(
+                    crate::error::KgError::Argument(message),
+                ));
+            }
+        }
+    }
     kg.lifecycle.source_path = Some(std::path::PathBuf::from(&path));
     kg.lifecycle.writer_lease = writer_lease;
     // Resolved after the graph exists, because the mode of an *existing* path
@@ -417,6 +475,46 @@ fn open(
         setup_durable(&mut kg, &path, level)?;
     }
     Ok(kg)
+}
+
+/// The storage mode `kg` actually ended up in, for comparison against a
+/// caller's `storage=` request.
+fn actual_storage_mode(kg: &KnowledgeGraph) -> kglite_core::api::storage::StorageMode {
+    use kglite_core::api::storage::StorageMode;
+    use kglite_core::api::GraphRead;
+    if kg.inner.graph.is_disk() {
+        StorageMode::Disk
+    } else if kg.inner.graph.is_mapped() {
+        StorageMode::Mapped
+    } else {
+        StorageMode::Memory
+    }
+}
+
+/// The actionable half of the "mode cannot be honoured on open" error: what to
+/// do instead, per requested mode.
+///
+/// `mapped` is the blunt one. There is no load-into-an-existing-graph call and
+/// no saved-graph-to-mapped conversion, so the only route is to build a mapped
+/// graph and re-ingest from the original source data. That is worth saying
+/// plainly rather than implying a conversion exists.
+fn storage_mode_remedy(requested: kglite_core::api::storage::StorageMode) -> &'static str {
+    use kglite_core::api::storage::StorageMode;
+    match requested {
+        StorageMode::Mapped => {
+            "Mapped mode cannot be recovered from a saved graph: build one with \
+             `kglite.KnowledgeGraph(storage=\"mapped\")` and re-ingest from your source data, \
+             or delete the path and let this call create it."
+        }
+        StorageMode::Disk => {
+            "To move a loaded graph onto disk storage, call `g.enable_disk_mode()` after \
+             opening it, or delete the path and let this call create it."
+        }
+        StorageMode::Memory => {
+            "To get a memory-backed graph, open a `.kgl` file rather than a disk-graph \
+             directory."
+        }
+    }
 }
 
 /// Turn `kg` into a durable graph: replay any WAL frames committed since

@@ -350,6 +350,32 @@ impl BatchProcessor {
     /// ref dropped the refcount is 1, `try_unwrap` succeeds, and the append
     /// mutates in place. [`Self::reattach_columnar_stores`] restores the refs.
     ///
+    /// ## Why the detach borrow is silent
+    ///
+    /// The sweep touches *every existing node of the type*, once per chunk.
+    /// Through the recorded [`GraphWrite::node_weight_mut`] that is one
+    /// `RawOp::UpsertNode` per existing node per chunk — with
+    /// `LARGE_BATCH_CHUNK_SIZE`-sized chunks, `O(n²/chunk)` ops for an
+    /// `n`-row append, each resolving at flush to a full property-map clone.
+    /// A one-shot `add_nodes` therefore wrote a *quadratic* WAL payload and
+    /// could overflow the per-frame `u32` byte ceiling.
+    ///
+    /// Silencing it is sound because the detach/reattach pair is a logical
+    /// no-op for an already-existing node: it swaps the node's
+    /// `Arc<ColumnStore>` handle while preserving its `row_id`, and
+    /// `ColumnStore::row_properties` skips null columns, so even a
+    /// schema-growing chunk leaves `id`/`title`/`properties_cloned`
+    /// byte-identical. The rows this chunk genuinely creates are recorded by
+    /// [`GraphWrite::add_node`], and `resolve_ops` reads *final* state at
+    /// flush time — so those ops still carry the columnar values that
+    /// `reattach_columnar_stores` installs after `add_node` returns.
+    ///
+    /// No undo obligation is dropped either: both columnar sweeps run only
+    /// when `is_mapped() || is_disk()`, and `GraphBackend::undo_journal_mut`
+    /// yields `None` for `Mapped` and `Disk` (see
+    /// `GraphBackend::supports_undo_journal`) — there is never a journal
+    /// installed on this path to capture into.
+    ///
     /// Returns `(rows awaiting reattachment, owned stores keyed by node type)`.
     fn detach_columnar_stores(
         creates: &[NodeCreationInterned],
@@ -364,7 +390,7 @@ impl BatchProcessor {
             // Detach existing nodes — record their (NodeIndex, row_id) for pass 2
             if let Some(indices) = graph.type_indices.get(node_type) {
                 for idx in indices.iter() {
-                    if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, idx) {
+                    if let Some(node) = GraphWrite::node_weight_mut_silent(&mut graph.graph, idx) {
                         if let PropertyStorage::Columnar { row_id, .. } = &node.properties {
                             let rid = *row_id;
                             node.properties = PropertyStorage::Map(HashMap::new());
@@ -394,6 +420,12 @@ impl BatchProcessor {
     ///
     /// No-op when pass 1 found nothing to detach and no columnar row was
     /// appended, which is every in-memory flush.
+    ///
+    /// The handle assignment goes through
+    /// [`GraphWrite::node_weight_mut_silent`] for the same reason pass 1
+    /// does — see [`Self::detach_columnar_stores`] for the full argument.
+    /// Newly created rows are already covered by the `RawOp::UpsertNode` that
+    /// `add_node` pushed, which resolves against post-reattachment state.
     fn reattach_columnar_stores(
         graph: &mut DirGraph,
         deferred_columnar: DeferredColumnarRows,
@@ -414,7 +446,7 @@ impl BatchProcessor {
         // keeps the slot-index value assigned by add_node().
         for (node_idx, node_type, row_id) in deferred_columnar {
             let arc_store = graph.column_stores.get(&node_type).unwrap().clone();
-            if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
+            if let Some(node) = GraphWrite::node_weight_mut_silent(&mut graph.graph, node_idx) {
                 node.properties = PropertyStorage::Columnar {
                     store: arc_store,
                     row_id,
@@ -1054,5 +1086,116 @@ mod tests {
     fn test_sum_values_null_cases() {
         assert_eq!(sum_values(&Value::Null, &Value::Int64(5)), Value::Int64(5));
         assert_eq!(sum_values(&Value::Int64(5), &Value::Null), Value::Null);
+    }
+}
+
+/// The WAL payload a mapped/disk `add_nodes` produces must scale with the
+/// number of rows written, not with the number of rows the type already holds.
+///
+/// Regression guard for the quadratic-amplification bug: the columnar
+/// detach/reattach sweeps in [`BatchProcessor::detach_columnar_stores`] and
+/// [`BatchProcessor::reattach_columnar_stores`] touch every existing node of
+/// the type, once per `LARGE_BATCH_CHUNK_SIZE` chunk. Through the *recorded*
+/// `node_weight_mut` that was `O(n²/chunk)` `RawOp::UpsertNode`s for an
+/// `n`-row append, each resolving to a full property-map clone in the frame.
+///
+/// This is deliberately a **byte-count** assertion, not a timing one: it needs
+/// no idle machine, has no `min`-vs-`mean` ambiguity, and fails deterministically
+/// on any reintroduction of a recorded borrow in either sweep.
+#[cfg(test)]
+mod wal_amplification_tests {
+    use crate::datatypes::{DataFrame, Value};
+    use crate::graph::mutation::maintain::add_nodes;
+    use crate::graph::schema::GraphBackend;
+    use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+    use crate::graph::storage::recording::{resolve_ops, RecordingGraph};
+    use crate::graph::storage::GraphRead;
+    use crate::graph::wal::{append_frame, WalFrame};
+
+    /// Append `n` rows to a fresh mapped graph through a recording backend and
+    /// return `(number of resolved WAL ops, encoded frame bytes)`.
+    fn wal_cost_of_appending(n: i64) -> (usize, usize) {
+        let mut dir = new_dir_graph_in_mode(StorageMode::Mapped, None).expect("mapped graph");
+        // Wrap the mapped backend exactly as `setup_durable` does, so the
+        // capture seam under test is the real one.
+        let inner = std::mem::replace(&mut dir.graph, GraphBackend::new());
+        dir.graph = GraphBackend::Recording(Box::new(RecordingGraph::new(inner)));
+        assert!(
+            dir.graph.is_mapped(),
+            "the sweeps under test are mapped-only"
+        );
+
+        let columns = vec!["id".to_string(), "name".to_string(), "dept".to_string()];
+        let rows: Vec<Vec<Value>> = (0..n)
+            .map(|i| {
+                vec![
+                    Value::Int64(i),
+                    Value::String(format!("person-{i}")),
+                    Value::String("engineering".to_string()),
+                ]
+            })
+            .collect();
+        let df = DataFrame::from_cypher_rows(columns, rows).expect("dataframe");
+
+        add_nodes(
+            &mut dir,
+            df,
+            "Person".to_string(),
+            "id".to_string(),
+            Some("name".to_string()),
+            None,
+        )
+        .expect("add_nodes");
+
+        let raw = match &mut dir.graph {
+            GraphBackend::Recording(rg) => rg.take_ops(),
+            _ => unreachable!("wrapped in Recording above"),
+        };
+        let ops = resolve_ops(&raw, &dir.graph, &dir.interner, |idx| {
+            dir.secondary_label_names(idx)
+        });
+        let op_count = ops.len();
+
+        let mut encoded = Vec::new();
+        append_frame(&mut encoded, &WalFrame { lsn: 1, ops }).expect("frame encodes");
+        (op_count, encoded.len())
+    }
+
+    /// One op per row, at every size — the crisp form of the invariant.
+    ///
+    /// `n` spans four `LARGE_BATCH_CHUNK_SIZE` chunks, so the amplifying
+    /// shape (chunk `k` re-touching the `k * 1000` rows already present) is
+    /// exercised. Pre-fix this was 2 ops/row at 1k and 5 ops/row at 4k.
+    #[test]
+    fn add_nodes_records_exactly_one_wal_op_per_row() {
+        for n in [1000_i64, 4000] {
+            let (ops, _) = wal_cost_of_appending(n);
+            assert_eq!(
+                ops, n as usize,
+                "a {n}-row mapped append must record exactly {n} WAL ops, got {ops}; \
+                 a columnar detach/reattach sweep is recording again"
+            );
+        }
+    }
+
+    /// WAL bytes per row stay flat as the row count grows.
+    ///
+    /// The tolerance absorbs the genuine per-row growth in the encoding (id
+    /// and title widen by a byte or two as values get longer) while staying
+    /// far below the pre-fix blow-up, which was ~2.5x over this same span and
+    /// unbounded beyond it.
+    #[test]
+    fn add_nodes_wal_bytes_per_row_are_flat() {
+        let (_, small_bytes) = wal_cost_of_appending(1000);
+        let (_, large_bytes) = wal_cost_of_appending(4000);
+        let small_per_row = small_bytes as f64 / 1000.0;
+        let large_per_row = large_bytes as f64 / 4000.0;
+        let ratio = large_per_row / small_per_row;
+        assert!(
+            ratio < 1.15,
+            "WAL bytes/row must not grow with graph size: {small_per_row:.1} B/row at 1k rows \
+             vs {large_per_row:.1} B/row at 4k rows (ratio {ratio:.2}). A quadratic payload \
+             means a columnar sweep is recording one op per pre-existing node again."
+        );
     }
 }

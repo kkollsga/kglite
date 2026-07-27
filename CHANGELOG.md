@@ -454,6 +454,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed — behaviour
 
+- **Documented: mapped and disk graphs take the whole-graph checkpoint path for
+  statement rollback.** No behaviour change — this is long-standing and
+  deliberate, but it was recorded nowhere a user would look. One mutating
+  Cypher statement is atomic; in-memory graphs deliver that with an undo
+  journal costing O(changes), while mapped and disk graphs cannot express an
+  inverse edit against their mmap-columnar indexes or generation overlays and
+  so fall back to an O(V+E) whole-graph checkpoint before *every* mutating
+  statement. This follows from "in-memory wins", but it means per-statement
+  write overhead scales with graph size in precisely the two modes chosen for
+  large graphs. Now stated in the storage-mode guide, the `KnowledgeGraph`
+  constructor docstring, and at the engine decision point.
+
+- **Documented: the `KnowledgeGraph(...)` constructor is never durable.** It
+  takes no `durable` argument and returns a detached graph with no
+  `source_path`, so there is nowhere for a write-ahead log to live, whereas
+  `kglite.open()` defaults to `durable="full"`. The asymmetry is structural
+  rather than a defaulting inconsistency, but it is easy to trip over when
+  comparing `KnowledgeGraph(storage="mapped")` against
+  `kglite.open(path, storage="mapped")`; both call sites now say so.
+
 - **`define_schema()` now merges per node/connection type instead of replacing
   the whole schema.** A type the call names takes the new declaration entire; a
   type it does not name keeps the declaration it already had. Previously any
@@ -557,6 +577,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   index had shadowed; that case is detected in O(1) by comparing the index
   length against the type's live node count. Statement rollback is unchanged
   — it invalidates whole types by design, on the already-failed path.
+- **`kglite.open(path, storage=...)` no longer ignores the mode when the path
+  already exists.** `storage=` selects a backend for a graph being *created*;
+  an existing path is loaded, and the load decides the backend. Because a
+  `.kgl` checkpoint records no storage mode, a reopened one always comes back
+  as memory — so `open(path, storage="mapped")` produced a genuinely mapped
+  graph on the call that created the file and a silently memory-backed one on
+  every call after that, with nothing reported. An unknown mode such as
+  `storage="banana"` was not even validated on that branch. Both now raise
+  `kglite.ArgumentError`, naming the mode requested, the mode actually
+  produced, and the way forward. This is a deliberate break: the previous
+  behaviour was indistinguishable from success and had already invalidated a
+  mapped-vs-memory comparison in which both arms unknowingly ran on memory.
+  Callers who want whatever the file provides should omit `storage=`. Note
+  there is no saved-graph-to-mapped conversion — a mapped graph has to be
+  built with `KnowledgeGraph(storage="mapped")` and populated from source.
+
+- **`add_nodes()` on a durable mapped or disk graph no longer writes a
+  quadratic write-ahead-log payload.** Appending rows to a columnar graph
+  detaches every existing node of the type from its shared column store and
+  re-attaches it afterwards — pure internal bookkeeping, but it ran through the
+  *recorded* mutation seam, so each sweep logged one full property-map copy per
+  pre-existing node. Because the append is chunked, an `n`-row call re-logged
+  the whole type once per chunk: WAL bytes grew as `n²`, and a large enough
+  single call could exceed the 4 GiB per-frame ceiling. Both sweeps now use the
+  silent borrow that the columnar `SET` handle-refresh already used, so the log
+  records exactly one op per row written. Measured on the regression fixture: a
+  1,000-row append logged 2,000 ops (84 B/row) and a 4,000-row append 20,000
+  ops (213 B/row); both now log one op per row at a flat byte cost. No
+  behavioural change to the graph itself or to log replay — the ops removed
+  were byte-identical restatements of nodes the sweep had not modified.
 
 - **`save()` now barriers the write-ahead log before writing its
   checkpoint.** A checkpoint truncates the log, and recovery folds the
