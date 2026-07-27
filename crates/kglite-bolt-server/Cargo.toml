@@ -65,19 +65,21 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # minimal-versions CI job added in 0.15.1.
 async-trait = "0.1.89"
 
-# 1.21.0, not "1": rmcp 2.2 uses tokio::task::JoinSet, which was added in
-# 1.21.0 (bisected against each version). hyper 1.x independently needs
-# >=1.13. Cargo unifies tokio workspace-wide, so both servers declare the
-# same floor even though only kglite-mcp-server pulls rmcp.
-tokio = { version = "1.21.0", features = ["macros", "rt-multi-thread", "net", "signal", "io-util", "sync", "time"] }
+# 1.37.0, not "1": rmcp 2.2 calls tokio::sync::mpsc::Receiver::is_closed,
+# added in 1.37.0, and uses tokio::task::JoinSet, added in 1.21.0 (both
+# bisected against the individual releases). hyper 1.x independently
+# needs >=1.13. Cargo unifies tokio workspace-wide, so both servers
+# declare the same floor even though only kglite-mcp-server pulls rmcp.
+tokio = { version = "1.37.0", features = ["macros", "rt-multi-thread", "net", "signal", "io-util", "sync", "time"] }
 
 clap = { version = "4.3", features = ["derive"] }
 tracing = "0.1.35"
 tracing-subscriber = { version = "0.3.8", features = ["env-filter"] }
-# 1.0.5, not "1": kglite-cli uses `Context` for `Option` (`.with_context`
-# on a None), which anyhow 1.0.0 does not implement. 1.0.0 fails and
-# 1.0.5 builds -- both verified by compiling against them.
-anyhow = "1.0.5"
+# 1.0.20, not "1": mcp-methods calls anyhow::Error::msg, added in 1.0.20,
+# and kglite-cli uses `Context` for `Option` (added in 1.0.5). Both
+# bisected against the individual releases; cargo unifies anyhow
+# workspace-wide, so all three crates declare the same floor.
+anyhow = "1.0.20"
 sha2 = "0.11"
 # 2.5.0, not "2": rustls 0.23 (above) requires subtle ^2.5.0, and cargo
 # unifies the version across the workspace, so "2" let

@@ -58,14 +58,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   walked only top-level `MATCH` / `OPTIONAL MATCH`, so the identical typo
   inside `CALL { }`, `WHERE EXISTS { }` or a `UNION` branch said nothing, and
   the shape of the query decided whether you were told. The warning and the
-  locked-schema check now reach patterns through a single traversal, so every
-  place a read pattern can appear is covered by both and a newly-covered form
-  lands on both at once. Nothing became an error, and write patterns
+  locked-schema check now reach patterns through a single traversal, so the
+  two surfaces cover exactly the same clauses and a newly-covered form lands
+  on both at once. That traversal is not yet exhaustive — `COUNT {}`
+  subqueries, `EXISTS {}` in expression position, and update clauses inside
+  `FOREACH` reach patterns through a different node type and are still
+  unvisited — but it is now one list for both consumers instead of two that
+  could drift. Nothing became an error, and write patterns
   (`CREATE`, `MERGE`) are still never warned about — on an open schema that
   is how a node type comes into existence.
-- **Twenty-one dependency requirements that understated the version our code
-  actually needs.** The `minimal-versions` CI job added in 0.15.1 found the
-  first one on its first real run, and pulling that thread surfaced the rest.
+- **Seventeen dependency requirements that understated the version our code
+  actually needs** (30 requirement entries, since several crates declare the
+  same dependency and cargo unifies the version across the workspace). The
+  `minimal-versions` CI job added in 0.15.1 found the first one on its first
+  real run, and pulling that thread surfaced the rest.
   A requirement like `async-trait = "0.1"` or `stacker = "0.1"` is invisible
   to us — our lockfile already holds a working version and a fresh resolve
   picks the newest match — but a consumer whose lock pins the declared floor
@@ -78,8 +84,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kglite-cli` uses. Affected requirements: `anyhow`, `async-trait`, `clap`,
   `flate2`, `hyper`, `hyper-util`, `indexmap`, `libc`, `memchr`, `regex`,
   `same-file`, `stacker`, `subtle`, `tempfile`, `tokio`, `tracing`,
-  `tracing-subscriber`. Resolution at declared minimums now succeeds and every
-  crate in the workspace compiles against them.
+  `tracing-subscriber`.
+
+  Resolution at declared minimums now succeeds, where before it failed
+  outright. The *build* at those minimums does not yet complete, and the
+  remaining blocker is not one we can reach: `mcp-methods` calls
+  `WalkBuilder::filter_entry` and `sort_by_file_path` while declaring an
+  `ignore` floor older than both, and `ignore` is not a direct dependency of
+  this workspace. Nothing about the released artifacts depends on this — it is
+  a statement about what a consumer pinning our declared floors would get.
 
 ## [0.15.1] - 2026-07-27
 

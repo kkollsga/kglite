@@ -243,30 +243,35 @@ jobs:
     # WHY IT IS NON-BLOCKING TODAY
     # ----------------------------
     # The floor-tightening this comment used to defer has now been done:
-    # 21 under-declared direct floors were given real, compiled minimums
-    # (async-trait, subtle, memchr, same-file, libc, indexmap, regex, clap,
-    # tokio, tempfile, flate2, hyper, hyper-util, tracing,
-    # tracing-subscriber, stacker, anyhow). Resolution SUCCEEDS, and every
-    # crate in this workspace compiles against its own declared minimums.
+    # 17 direct dependencies (30 requirement entries across the manifests)
+    # were given real, compiled minimums — anyhow, async-trait, clap, flate2,
+    # hyper, hyper-util, indexmap, libc, memchr, regex, same-file, stacker,
+    # subtle, tempfile, tokio, tracing, tracing-subscriber.
     #
-    # Both steps now pass ON THIS RUNNER. The flags stay on because that
-    # green is partly luck, and the luck is worth writing down.
+    # THE RESOLVE STEP SUCCEEDS. THE BUILD STEP STILL FAILS, and it fails on
+    # every platform — there is no "green on ubuntu" here. Read the step log,
+    # not the step's reported conclusion: `continue-on-error: true` makes the
+    # GitHub Steps API report `success` for a step that exited 101, which has
+    # already fooled one reader of this job into recording the opposite.
     #
-    # rmcp 2.2.0 declares `tokio-util = "0.7"` but imports
-    # `tokio_util::bytes`, a re-export tokio-util 0.7.5 does not have (probed
-    # directly, under no features and under `io` and `codec`). That is exactly
-    # the "third-party crate that understates ITS floor" case above. On this
-    # ubuntu runner something else in the tree pulls tokio-util high enough to
-    # hide it; reproducing this job locally on aarch64-apple-darwin resolves
-    # 0.7.5 and fails to compile rmcp. So the defect is real and merely
-    # masked here, and a future dependency shuffle can unmask it at any time.
+    # What remains is one crate, and it is not ours to fix. mcp-methods calls
+    # `WalkBuilder::filter_entry` and `WalkBuilder::sort_by_file_path` while
+    # declaring an `ignore` floor that predates both, so the lowered tree
+    # resolves ignore 0.4.3 and mcp-methods does not compile. `ignore` is not
+    # a direct dependency of this workspace, so no edit here can raise it —
+    # this is the "third-party crate that understates ITS floor" case above,
+    # and fixing it means releasing mcp-methods.
     #
-    # We cannot fix it by editing our manifests without taking a direct
-    # dependency on a crate we do not use. Making the job blocking today would
-    # therefore hand an upstream crate the ability to block our releases for a
-    # bug we have no way to patch. It stays non-blocking until rmcp corrects
-    # its floor; then the `continue-on-error` flags come off and this becomes
-    # a real gate, with no other edits needed.
+    # Two earlier blockers WERE ours and are fixed, which is why the floors
+    # above are worth having: rmcp 2.2 imports `tokio_util::bytes` (absent
+    # from tokio-util 0.7.5) and calls `mpsc::Receiver::is_closed` (added in
+    # tokio 1.37.0). Raising our own `tokio` floor to 1.37.0 pulls tokio-util
+    # to 0.7.13 and clears both.
+    #
+    # Making the job blocking today would hand mcp-methods the ability to
+    # block our releases over a bug we cannot patch from here. It stays
+    # non-blocking until that floor is corrected; then the `continue-on-error`
+    # flags come off and this becomes a real gate, with no other edits needed.
     #
     # It is deliberately still listed in `ci-success`'s `needs` so it stays
     # visible in every run rather than becoming a job nobody looks at.
@@ -301,23 +306,40 @@ jobs:
           cargo +nightly -Z direct-minimal-versions generate-lockfile 2>&1 | tee resolve.log
 
       - name: Build against the lowered lockfile
+        id: build
         if: steps.resolve.outcome == 'success'
         continue-on-error: true
-        run: cargo check --workspace --locked
+        run: |
+          set -o pipefail
+          cargo check --workspace --locked 2>&1 | tee build.log
 
       - name: Report
         if: always()
+        # Reports BOTH steps. The previous version said only "resolution
+        # succeeded; see the build step", which combined with
+        # `continue-on-error` (the Steps API reports `success` for a step that
+        # exited 101) made a failing build read as a pass — the summary and
+        # the job badge both said fine while `cargo check` was aborting. If
+        # you are reading this job's result anywhere other than the step log,
+        # read this summary.
         run: |
           {
             echo "## Minimal versions"
-            if [ "${{ steps.resolve.outcome }}" = "success" ]; then
-              echo "Resolution to declared minimums succeeded; see the build step."
-            else
-              echo "Resolution to declared minimums FAILED — a declared floor is"
+            if [ "${{ steps.resolve.outcome }}" != "success" ]; then
+              echo "**Resolution to declared minimums FAILED** — a declared floor is"
               echo "unreachable or understated. First conflict:"
               echo ''
               echo '```'
               tail -n 25 resolve.log || true
+              echo '```'
+            elif [ "${{ steps.build.outcome }}" = "success" ]; then
+              echo "Resolution **and** build at declared minimums both succeeded."
+            else
+              echo "Resolution succeeded, but the **build at declared minimums FAILED**."
+              echo "A floor is understated — ours, or one a dependency declares."
+              echo ''
+              echo '```'
+              grep -E '^(error|warning: unused)' build.log | sort -u | head -n 25 || true
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"

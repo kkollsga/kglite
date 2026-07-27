@@ -128,6 +128,12 @@ mimalloc = { version = "0.1.49", default-features = false, features = ["v2"] }
 # from a REPL/notebook (src/util.rs::EnterKg). Unix-only; the handler just
 # flips an AtomicBool the engine polls.
 [target.'cfg(unix)'.dependencies]
+# 0.2.182 is the tight floor for the workspace-unified tree, not a
+# guess: rustyline 18 (via kglite-cli) requires ^0.2.182 and nix 0.31
+# requires ^0.2.181, and cargo unifies libc across all members. It is
+# higher than the `kglite` engine alone needs -- overstating is the
+# benign direction (a clear resolution error, not a mystery compile
+# failure), but note it if you ever split the workspace.
 libc = "0.2.182"
 
 [dev-dependencies]
