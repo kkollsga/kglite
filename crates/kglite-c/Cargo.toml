@@ -38,7 +38,7 @@ kglite = { version = "0.15", path = "../kglite", default-features = false }
 # Serde stack — needed to serialize Value to JSON at the C
 # boundary (the design doc fixes JSON-at-boundary for nested
 # value types in §7).
-serde_json = "1"
+serde_json = "1.0.150"
 
 [build-dependencies]
 # cbindgen generates `include/kglite.h` at build time from this

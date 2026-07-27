@@ -26,6 +26,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on exactly the version it declares, with the matrix derived from the
   manifests, so the contract cannot drift away from its check.
 
+### Fixed
+
+- **Two dependency requirements that understated their real minimum.**
+  `fastembed = "5"` selects the `ort-download-binaries-native-tls` feature,
+  which did not exist until **5.9.0**; `mimalloc = "0.1"` selects the `v2`
+  feature, which did not exist until **0.1.49**. Both now declare those
+  minimums. Neither could fail for us — our lockfile has held newer versions
+  throughout — but either would fail at resolution for a consumer whose lock
+  pinned an older version, with "package does not have that feature". This is
+  the same class as the `mcp-methods = "0.4"` fix that shipped just before it,
+  and it was found by the new minimal-versions CI job rather than by a
+  downstream report. `serde`, `serde_json` and `chrono` requirements that
+  differed between our own workspace members were aligned to the tightest
+  floor any member already declares.
+
 ## [0.15.0] - 2026-07-27
 
 ### Added

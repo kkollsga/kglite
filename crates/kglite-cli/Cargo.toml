@@ -37,7 +37,7 @@ rustyline = "18"
 ctrlc = "3"
 
 # `.mode json` output via kglite::api::param::kglite_value_to_json.
-serde_json = "1"
+serde_json = "1.0.150"
 
 # `.import <file.csv> <Type>` — parse the CSV; rows are passed as a Cypher
 # `$rows` param (values parameterized, not interpolated). Already a `kglite` dep.
