@@ -22,7 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could resolve. The writers now resolve, so the directory they emit is always
   one the same build can read back. The same failure could be triggered on any
   disk graph by a read-only query that merely mentions an unknown label
-  (`MATCH (n:Ghost {id: 1})`) before the next `save()`.
+  (`MATCH (n:Ghost {id: 1})`) before the next `save()`. Directories already
+  written that way load again without a rebuild: the stale entry is empty, and
+  an id index is a cache the read path rebuilds on demand, so it is dropped at
+  load. A *populated* entry under an unresolvable key is still rejected — that
+  is a damaged sidecar, not this bug.
 
 ## [0.15.0] - 2026-07-27
 

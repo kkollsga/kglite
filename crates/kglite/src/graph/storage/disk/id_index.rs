@@ -195,9 +195,21 @@ impl IdIndexBase {
                 return Err(invalid_index("general payload exceeds decode limit"));
             }
             expected_payload = payload_end;
-            let name = interner
-                .try_resolve(InternedKey::from_u64(type_key))
-                .ok_or_else(|| invalid_index("directory contains an unresolved type key"))?;
+            let Some(name) = interner.try_resolve(InternedKey::from_u64(type_key)) else {
+                // Directories written before the writer resolved its keys
+                // (through 0.15.0) carry entries for type names the interner
+                // sidecar never received — a type declared with no rows, or a
+                // label a query merely mentioned. Those entries are always
+                // empty, and an id index is a cache the read path rebuilds on
+                // demand, so dropping one recovers the graph at no cost rather
+                // than making the whole directory unreadable. A *populated*
+                // entry under an unresolvable key is not that: it is a
+                // mismatched or damaged sidecar, and still fails the load.
+                if num_entries == 0 {
+                    continue;
+                }
+                return Err(invalid_index("directory contains an unresolved type key"));
+            };
             if variant == 1 {
                 let blob = &mmap[payload_off_usize..payload_end];
                 let map: HashMap<Value, NodeIndex> = serde_codec::decode_exact_with(
@@ -984,6 +996,40 @@ mod validation_tests {
         );
     }
 
+    /// A directory saved before the writer resolved its keys carries an empty
+    /// index under a type key the interner sidecar never received. Both
+    /// variants of that entry are recovered rather than failing the load; a
+    /// populated entry under an unresolvable key still fails (asserted in
+    /// `rejects_unsupported_unresolved_and_trailing_data`).
+    #[test]
+    fn an_empty_entry_with_an_unresolved_type_key_is_recovered() {
+        let mut interner = StringInterner::new();
+        interner.get_or_intern("Person");
+        let stale = InternedKey::from_str("NeverInterned").as_u64();
+
+        let base = load(&integer_fixture(stale, &[]), &interner)
+            .expect("a stale empty entry must not fail the load")
+            .unwrap();
+        assert!(!base.contains("NeverInterned"));
+
+        // The General variant is what a type with no rows actually produced:
+        // `num_entries` is 0, but the Postcard payload of an empty map is not.
+        let blob = serde_codec::encode_versioned(
+            serde_codec::CURRENT_CODEC,
+            &HashMap::<Value, NodeIndex>::new(),
+            MAX_GENERAL_INDEX_DECODE_BYTES,
+        )
+        .unwrap();
+        let mut bytes = integer_fixture(stale, &[]);
+        bytes[40] = 1;
+        bytes[64..72].copy_from_slice(&(blob.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&blob);
+        let base = load(&bytes, &interner)
+            .expect("a stale empty General entry must not fail the load")
+            .unwrap();
+        assert!(!base.contains("NeverInterned"));
+    }
+
     /// The writer resolves names against the interner it is handed, so it can
     /// never emit a directory key that the matching `interner.bin.zst` fails
     /// to resolve. An unregistered name is dropped when its index is empty
@@ -1004,6 +1050,16 @@ mod validation_tests {
             ("Unregistered".to_string(), TypeIdIndex::default()),
         ]));
         write_id_indices_bin(temp.path(), &store, &interner).unwrap();
+
+        // Asserted on the bytes, not through the loader: the loader also
+        // recovers such an entry (directories written before this fix carry
+        // them), so a round trip alone would not pin the writer.
+        let raw = std::fs::read(temp.path().join("id_indices.bin")).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(raw[12..16].try_into().unwrap()),
+            1,
+            "the unregistered name must not reach the directory at all"
+        );
 
         let base = IdIndexBase::load_from(temp.path(), &interner)
             .expect("the written directory must load")
