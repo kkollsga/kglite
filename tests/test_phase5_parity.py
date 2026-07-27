@@ -98,7 +98,7 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 19_056_688,  # 0.14.5 darwin baseline
+    "darwin": 19_536_400,  # 0.15.0 darwin baseline
     "linux": 28_810_000,  # estimate: the post-code_tree Linux estimate (30.2 MB)
     # scaled by the same −4.6% the macOS loader removal measured. Both
     # removals deliberately recaptured DOWNWARD so the +10% budget guards
@@ -199,6 +199,20 @@ def test_binary_size_regression():
                       dependency in the Cypher parser, and the generic
                       WorkspaceGraphHooks lifecycle replacing CodeTreeHooks.
 
+
+      - 0.15.0:       19,536,400 bytes (≈18.6 MB), +479,712 (+2.5%) over
+                      0.14.5. Four features and two fixes account for it:
+                      the three-rung durability level plus its on-demand
+                      barrier and one-write frame append; the single-writer
+                      lease with its `.lock-owner` sidecar and errno-based
+                      contention classification; the typed constraint/conflict
+                      error taxonomy; locked-schema node-label validation
+                      (`schema_check.rs` +270 lines, the largest single
+                      contributor); position-preserving bucket undo for
+                      property/range/composite indexes (`indexes.rs` +245);
+                      and `UndoEntry::ColumnarHandles`. No dependency was
+                      added — this is all first-party code.
+
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise
     drilldown, run `cargo bloat --release --crates --filter kglite`.
@@ -230,7 +244,7 @@ def test_binary_size_regression():
     gate = int(baseline * 1.10)
     assert size <= gate, (
         f"{bin_path.name} = {size:,} bytes > gate {gate:,} "
-        f"(+10% over 0.14.5 {platform_key} baseline {baseline:,}). "
+        f"(+10% over 0.15.0 {platform_key} baseline {baseline:,}). "
         "Investigate what grew before raising the gate — see the "
         "growth note in this test's docstring for the breakdown shape."
     )
