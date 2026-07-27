@@ -83,7 +83,11 @@ def test_linux_perf_gate_uses_isolated_released_wheel_reference() -> None:
     assert "sleep 30" in perf
     assert '.bench-reference-0.13.2.json "$1"' in perf
     assert "--require-exact-set" in perf
-    assert "actions/upload-artifact@v7" in perf
+    # Unversioned for the same reason as the conformance job below: the real
+    # requirement is the `include-hidden-files` setting asserted next (the
+    # baseline JSON is a dotfile and silently would not upload without it),
+    # not any particular release of upload-artifact.
+    assert "actions/upload-artifact@" in perf
     assert "include-hidden-files: true" in perf
     assert "scripts/benchmark_provenance.py" in perf
     assert 'tests/benchmarks/baselines/current.linux.json "$1"' in perf
@@ -197,9 +201,14 @@ def test_bolt_driver_conformance_installs_both_toolchains() -> None:
     executing the Java driver at all. So CI must install both, and `-rs` must
     stay on so any skip is visible in the log rather than silent."""
     job = _job_block("bolt-driver-conformance")
-    assert "actions/setup-java@v4" in job
+    # Matched without the major version on purpose. What this test guards is
+    # that both toolchains get installed; which release of setup-java/
+    # setup-node does it is not part of that contract, and pinning it here
+    # turned a routine "bump the action off a deprecated Node runtime" into a
+    # test failure with nothing wrong behind it.
+    assert "actions/setup-java@" in job
     assert "distribution: temurin" in job
-    assert "actions/setup-node@v4" in job
+    assert "actions/setup-node@" in job
     assert "cargo build --release -p kglite-bolt-server" in job
     assert "pytest tests/test_bolt_driver_conformance.py -m bolt" in job
     assert "-rs" in job
