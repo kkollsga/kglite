@@ -1145,6 +1145,93 @@ fn is_null_write_target(row: &ResultRow, variable: &str) -> bool {
         && matches!(row.projected.get(variable), None | Some(Value::Null))
 }
 
+/// One property write aimed at a node type's master column store.
+///
+/// `row_id` is `None` for a node whose properties are not `Columnar`, which is
+/// one of the fallthrough conditions rather than a caller error — carrying the
+/// `Option` here keeps the whole "can this go through the master?" decision in
+/// one place.
+struct ColumnMasterWrite<'a> {
+    node_idx: NodeIndex,
+    node_type: &'a str,
+    property: &'a str,
+    value: &'a Value,
+    row_id: Option<u32>,
+}
+
+/// Write one property through the in-memory columnar master store, reporting
+/// whether it landed there.
+///
+/// The fast path for `Columnar` storage: route the write through the per-type
+/// master `Arc<ColumnStore>` once, instead of through each node's own handle.
+/// Every node of the type points at the same allocation, so `Arc::make_mut` on
+/// a *node's* handle would clone the whole store on every write — O(N²) for a
+/// batch `SET`. Going through the master forks once; the per-node handles are
+/// re-pointed in a single sweep at the end of the clause.
+///
+/// Returns `false` — leaving the caller to fall through to the per-node setter
+/// — for disk-backed graphs (which have their own write path), for non-
+/// `Columnar` nodes, for a `Columnar` node whose type is absent from
+/// `column_stores`, and for `title`/`name`.
+///
+/// `title`/`name` are excluded deliberately: the fallthrough sets the inline
+/// `node.title`, and `enable_columnar` detects that inline override on save
+/// (it differs from the stale `__title__` column) and rebuilds, consolidating
+/// the fresh title. That single save-side chokepoint covers every title-write
+/// path — Cypher `SET`, `add_nodes` update/replace, connection titles —
+/// without per-path master writes (petekSuite bug 2).
+///
+/// The property name is interned into the graph's `StringInterner` *before*
+/// `column_stores` is borrowed. The per-node path gets this free via
+/// `node.set_property(…, &mut graph.interner)`; the master path once used
+/// `InternedKey::from_str()`, which only hashes, leaving `save()` unable to
+/// resolve the key back to a string at serialize time. Symptom: every
+/// Cypher-`SET` property on a 0.8.39 in-memory Sodir-scale graph survived
+/// in-memory but vanished after save+load, with
+/// `BUG: InternedKey N not found in StringInterner`.
+///
+/// Both journals are handled here, and they pull in opposite directions:
+///
+/// - **WAL**: the write bypasses the recorded `GraphWrite` path, so the one
+///   mutated node is captured explicitly. The end-of-clause refresh sweep must
+///   *not* be, or a single `SET` would log every node of the type.
+/// - **Undo**: the pre-statement master is captured once per type, as
+///   [`UndoEntry::ColumnarHandles`], which is what lets the refresh sweep skip
+///   per-node capture entirely. The store itself is never copied — the fork
+///   already left the pre-statement one pristine, so holding its handle is the
+///   whole pre-image. `touched_columnar_types` keeps this to one attempt per
+///   type per clause; the journal's own first-touch rule covers a later clause
+///   writing the same type again.
+fn set_via_column_master(
+    graph: &mut DirGraph,
+    write: ColumnMasterWrite<'_>,
+    touched_columnar_types: &mut std::collections::HashSet<String>,
+) -> bool {
+    // Disk-backed graphs use a separate write path; the master `column_stores`
+    // Arc is for the in-memory Columnar mode only.
+    let Some(row_id) = write.row_id else {
+        return false;
+    };
+    if graph.graph.is_disk() || write.property == "title" || write.property == "name" {
+        return false;
+    }
+    let key = graph.interner.get_or_intern(write.property);
+    if !touched_columnar_types.contains(write.node_type) {
+        if let Some(prior) = graph.column_stores.get(write.node_type).map(Arc::clone) {
+            if let Some(journal) = graph.graph.undo_journal_mut() {
+                journal.note_columnar_fork(write.node_type, || Some(prior));
+            }
+        }
+    }
+    let Some(master) = graph.column_stores.get_mut(write.node_type) else {
+        return false;
+    };
+    Arc::make_mut(master).set(row_id, key, write.value, None);
+    touched_columnar_types.insert(write.node_type.to_string());
+    graph.graph.note_recorded_node_upsert(write.node_idx);
+    true
+}
+
 /// Execute a SET clause, modifying node properties in the graph.
 /// A single-property node `SET` that has already landed in storage, as the
 /// post-write bookkeeping needs to see it.
@@ -1399,47 +1486,19 @@ fn execute_set(
                             _ => None,
                         }
                     };
-                    let mut wrote_via_master = false;
-                    // Disk-backed graphs use a separate write path; the
-                    // master `column_stores` Arc is for the in-memory
-                    // Columnar mode only.
-                    let is_in_memory = !graph.graph.is_disk();
-                    // NB: title/name are intentionally NOT routed through the
-                    // master store here — the fallthrough sets the inline
-                    // `node.title`, and `enable_columnar` detects that inline
-                    // override on save (it differs from the stale `__title__`
-                    // column) and rebuilds, consolidating the fresh title. That
-                    // single save-side chokepoint covers every title-write path
-                    // (Cypher SET, add_nodes update/replace, connection titles)
-                    // without per-path master writes (petekSuite bug 2).
-                    if is_in_memory && property != "title" && property != "name" {
-                        if let Some(row_id) = columnar_row_id {
-                            // Register the property name in the graph's
-                            // StringInterner BEFORE borrowing column_stores.
-                            // The non-master path does this via
-                            // `node.set_property(..., &mut graph.interner)`;
-                            // the master path used `InternedKey::from_str()`
-                            // which only hashes — leaving `save()` unable
-                            // to resolve the key back to a string at
-                            // serialize time. Symptom: every Cypher-SET
-                            // property on a 0.8.39 in-memory Sodir-scale
-                            // graph survived in-memory but vanished after
-                            // save+load, accompanied by
-                            // `BUG: InternedKey N not found in StringInterner`.
-                            let key = graph.interner.get_or_intern(property);
-                            if let Some(master) = graph.column_stores.get_mut(&node_type_str) {
-                                Arc::make_mut(master).set(row_id, key, &value, None);
-                                touched_columnar_types.insert(node_type_str.clone());
-                                stats.properties_set += 1;
-                                wrote_via_master = true;
-                                // This master-store write bypasses the recorded
-                                // GraphWrite path, so explicitly capture the one
-                                // mutated node for the WAL. (The silent refresh
-                                // sweep below must NOT be captured — else a
-                                // single SET would log every node of the type.)
-                                graph.graph.note_recorded_node_upsert(*node_idx);
-                            }
-                        }
+                    let wrote_via_master = set_via_column_master(
+                        graph,
+                        ColumnMasterWrite {
+                            node_idx: *node_idx,
+                            node_type: &node_type_str,
+                            property,
+                            value: &value,
+                            row_id: columnar_row_id,
+                        },
+                        &mut touched_columnar_types,
+                    );
+                    if wrote_via_master {
+                        stats.properties_set += 1;
                     }
                     if !wrote_via_master {
                         // Compact / Map storage, or title/name, or a Columnar
@@ -1639,7 +1698,6 @@ fn execute_set(
     // equality-index update — provenance is range-queried, not equality-matched.
     if !nodes_to_stamp.is_empty() {
         let prov = graph.provenance_props();
-        let is_in_memory = !graph.graph.is_disk();
         for (node_idx, node_type) in &nodes_to_stamp {
             // Arena guard: node_weight materializes on the disk backend
             // (protocol in disk/graph.rs); scoped so the borrow ends before
@@ -1660,17 +1718,17 @@ fn execute_set(
                         Arc::make_mut(schema_arc).add_key(key);
                     }
                 }
-                let mut wrote = false;
-                if is_in_memory {
-                    if let Some(row_id) = columnar_row_id {
-                        if let Some(master) = graph.column_stores.get_mut(node_type) {
-                            Arc::make_mut(master).set(row_id, key, pval, None);
-                            touched_columnar_types.insert(node_type.clone());
-                            graph.graph.note_recorded_node_upsert(*node_idx);
-                            wrote = true;
-                        }
-                    }
-                }
+                let wrote = set_via_column_master(
+                    graph,
+                    ColumnMasterWrite {
+                        node_idx: *node_idx,
+                        node_type,
+                        property: pname,
+                        value: pval,
+                        row_id: columnar_row_id,
+                    },
+                    &mut touched_columnar_types,
+                );
                 if !wrote {
                     if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, *node_idx) {
                         node.set_property(pname, pval.clone(), &mut graph.interner);

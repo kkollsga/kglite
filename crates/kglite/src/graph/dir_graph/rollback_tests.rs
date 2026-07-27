@@ -747,6 +747,134 @@ fn the_columnar_fixture_writes_through_the_master_store() {
     );
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Columnar SET cost: O(changes), not O(type)
+// ─────────────────────────────────────────────────────────────────────
+
+/// How many `Item` nodes [`wide_columnar`] seeds.
+///
+/// Large enough that an O(type) capture is unmistakable next to the single
+/// node a one-row `SET` actually changes, small enough to stay a unit test.
+const WIDE_ITEMS: usize = 200;
+
+/// A saved graph with many nodes of one type — the shape that separates
+/// "captures per node changed" from "captures per node of the type".
+///
+/// The narrow fixtures cannot do this: `seeded_columnar()` holds three
+/// `Item`s, so a per-node sweep and a per-change capture differ by two
+/// entries and any threshold that catches the difference is indistinguishable
+/// from noise.
+fn wide_columnar() -> DirGraph {
+    let mut graph = DirGraph::new();
+    let rows: Vec<String> = (0..WIDE_ITEMS)
+        .map(|i| format!("(:Item {{id: {i}, name: 'n{i}', qty: {i}}})"))
+        .collect();
+    run(&mut graph, &format!("CREATE {}", rows.join(", ")));
+    graph.enable_columnar();
+    assert!(
+        !graph.column_stores.is_empty(),
+        "the fixture must own a master column store, or this test is vacuous"
+    );
+    graph
+}
+
+/// A one-row columnar `SET` must journal a pre-image for the node it changed,
+/// not for every node of the type.
+///
+/// This is the guard for the cost regression the post-merge benchmark caught:
+/// `MATCH (i:Item {id: …}) SET i.priority = …` on a saved 100k-node graph ran
+/// ~1.8× slower than the whole-graph clone it replaced. The mechanism is the
+/// end-of-batch handle-refresh sweep in `execute_set`, which re-points every
+/// node's `Arc<ColumnStore>` at the forked master. That sweep goes through
+/// `node_weight_mut_silent` — silent towards the WAL recorder, but until this
+/// guard existed it fell through to the *recorded* `node_weight_mut` on
+/// `MemoryGraph`, so a single-property write cloned a `NodeData` per node of
+/// the type into the journal.
+///
+/// Why the existing guards cannot see it: `journalled_statements_copy_zero_nodes`
+/// reads `BACKEND_CLONE_NODES`, which counts backend clones only — the journal
+/// path deliberately clones no backend, so the counter reads zero whether the
+/// journal captured one pre-image or two hundred. The cost lives entirely
+/// inside the journal, so the counter has to as well.
+#[test]
+fn a_columnar_set_journals_one_pre_image_per_changed_node() {
+    use crate::graph::storage::undo::{journal_node_pre_images, reset_journal_node_pre_images};
+
+    let mut graph = wide_columnar();
+    reset_journal_node_pre_images();
+    run(&mut graph, "MATCH (i:Item {id: 7}) SET i.priority = 3");
+    let captured = journal_node_pre_images();
+
+    assert!(
+        captured <= 2,
+        "a one-row columnar SET captured {captured} node pre-images across \
+         {WIDE_ITEMS} nodes of the type; it must be O(nodes changed), not \
+         O(nodes of the type) — the handle-refresh sweep is being journalled"
+    );
+}
+
+/// The same statement on a *plain* (never-saved) graph, as the control.
+///
+/// Pins that the bound above is a property of the columnar path rather than of
+/// this fixture's size: if the plain path ever started capturing per type, the
+/// columnar assertion alone would not say which layer regressed.
+#[test]
+fn a_plain_set_journals_one_pre_image_per_changed_node() {
+    use crate::graph::storage::undo::{journal_node_pre_images, reset_journal_node_pre_images};
+
+    let mut graph = wide_columnar();
+    graph.disable_columnar();
+    reset_journal_node_pre_images();
+    run(&mut graph, "MATCH (i:Item {id: 7}) SET i.priority = 3");
+    let captured = journal_node_pre_images();
+
+    assert!(
+        captured <= 2,
+        "a one-row SET on a non-columnar graph captured {captured} node \
+         pre-images across {WIDE_ITEMS} nodes"
+    );
+}
+
+/// Why the checkpoint's second `Arc` on the master is *not* what makes the
+/// columnar fast path fork the store.
+///
+/// The natural reading of `Arc::make_mut(master)` forking is that something
+/// else holds a handle, and the statement checkpoint's schema shell does hold
+/// one. It is not the cause and removing it would not help: `enable_columnar`
+/// points every node of the type at the master, so its strong count is
+/// `1 + nodes-of-type` before any checkpoint is opened, and the first write of
+/// every statement forks regardless. Pinned here because "drop the shell's
+/// handle to stop the fork" is a plausible-sounding fix that would trade the
+/// rollback guarantee for nothing.
+#[test]
+fn every_node_shares_the_master_column_store_handle() {
+    let graph = wide_columnar();
+    let master = graph
+        .column_stores
+        .get("Item")
+        .expect("the fixture installs a master store for Item");
+
+    assert!(
+        Arc::strong_count(master) > 1,
+        "the master must be shared with the per-node handles; if it were not, \
+         the columnar fast path would mutate in place and need no refresh sweep"
+    );
+    let sharing = graph
+        .graph
+        .node_indices()
+        .filter(
+            |idx| match graph.graph.node_weight(*idx).map(|n| &n.properties) {
+                Some(PropertyStorage::Columnar { store, .. }) => Arc::ptr_eq(store, master),
+                _ => false,
+            },
+        )
+        .count();
+    assert_eq!(
+        sharing, WIDE_ITEMS,
+        "every node of the type must hold its own handle on the master"
+    );
+}
+
 /// An indexed graph rolls back through the journal, not through a whole-graph
 /// clone. The fidelity half is covered by the `indexed` arm of every shape
 /// above; what this pins is the *cost* half — that a user index no longer
@@ -885,6 +1013,71 @@ fn seeded_with_unique_name() -> DirGraph {
          would exercise the clone checkpoint instead of the journal"
     );
     graph
+}
+
+/// `seeded()` with a UNIQUE constraint over `Item.qty`, then saved.
+///
+/// `qty` rather than `name` because the columnar fast path deliberately skips
+/// `name`/`title` (they fall through to the inline node setter), so a
+/// constraint over `name` would exercise the ordinary journalled write and
+/// prove nothing about the master side channel. The seeded `qty` values are
+/// distinct, so the constraint is satisfiable.
+fn seeded_columnar_with_unique_qty() -> DirGraph {
+    let mut graph = seeded();
+    run(
+        &mut graph,
+        "CREATE CONSTRAINT FOR (i:Item) REQUIRE i.qty IS UNIQUE",
+    );
+    graph.enable_columnar();
+    assert_eq!(
+        graph.unique_indices.len(),
+        1,
+        "the constraint must be declared and enforcing"
+    );
+    assert!(
+        !graph.column_stores.is_empty(),
+        "the graph must be saved, or this is the plain unique fixture again"
+    );
+    graph
+}
+
+/// A unique claim moved by a *columnar* `SET` must come back.
+///
+/// This is the shape with no `NodeWeight` entry behind it: the value goes into
+/// the master column store, so the node's weight never changes and the journal
+/// sees only the per-type `ColumnarHandles` entry. Until that entry started
+/// reporting the type as stale, the rebuild was reached only by accident —
+/// the handle-refresh sweep captured a pre-image for every node of the type,
+/// and each of those marked the type stale on the way past. Removing that
+/// per-node capture is what made the report explicit, and this test is what
+/// says so: without it a failed columnar `SET` leaves the claim it took behind
+/// and the claim it released free.
+#[test]
+fn rollback_restores_claims_moved_by_a_columnar_property_overwrite() {
+    let mut graph = seeded_columnar_with_unique_qty();
+    let before = unique_fingerprint(&graph);
+    assert!(
+        !before.is_empty() && !before[0].2.is_empty(),
+        "the constraint must hold claims, or this test is vacuous"
+    );
+
+    let error = expect_failure(
+        &mut graph,
+        "MATCH (i:Item {id: 1}) SET i.qty = 999 \
+         WITH i MATCH (j:Item {id: 2}) SET j.bad = duration({months: 2147483648})",
+        None,
+    );
+
+    assert_eq!(
+        unique_fingerprint(&graph),
+        before,
+        "a claim moved through the master column store must move back.\
+         \nerror: {error}"
+    );
+    // The observable half: 10 is claimed again (no lost claim) and 999 is free
+    // (no phantom occupant).
+    expect_failure(&mut graph, "CREATE (:Item {id: 40, qty: 10})", None);
+    run(&mut graph, "CREATE (:Item {id: 41, qty: 999})");
 }
 
 /// A statement that claims a new value and *then* fails must not leave the

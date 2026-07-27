@@ -347,6 +347,23 @@ impl GraphWrite for MemoryGraph {
         self.inner.node_weight_mut(idx)
     }
 
+    /// Bypasses the undo journal as well as the WAL recorder.
+    ///
+    /// The one caller is the columnar handle-refresh sweep, which re-points
+    /// every node of a type at a forked master store. Capturing a `NodeData`
+    /// pre-image for each of them would make a one-row `SET` cost one clone
+    /// per node *of the type* — the O(V+E)-per-write cost this journal exists
+    /// to remove, reintroduced at a smaller constant. The sweep's inverse is
+    /// journalled once per type instead, as
+    /// [`UndoEntry::ColumnarHandles`](crate::graph::storage::undo::UndoEntry::ColumnarHandles).
+    ///
+    /// Nothing else may use this method to skip capture: a caller that
+    /// changes a node's *content* silently is unrecoverable on rollback.
+    #[inline]
+    fn node_weight_mut_silent(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
+        self.inner.node_weight_mut(idx)
+    }
+
     #[inline]
     fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
         self.invalidate_peer_counts();
