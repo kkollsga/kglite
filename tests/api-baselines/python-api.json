@@ -1481,7 +1481,7 @@
     },
     "from_blueprint": {
       "kind": "function",
-      "signature": "(blueprint_path: 'Union[str, Path]', *, verbose: 'bool' = False, save: 'bool' = True, lock_schema: 'bool' = False, storage: 'str' = 'default', path: 'Optional[str]' = None) -> 'KnowledgeGraph'"
+      "signature": "(blueprint_path: 'Union[str, Path]', *, verbose: 'bool' = False, save: 'Optional[bool]' = None, lock_schema: 'bool' = False, storage: 'str' = 'default', path: 'Optional[str]' = None) -> 'KnowledgeGraph'"
     },
     "from_bytes": {
       "kind": "function",
