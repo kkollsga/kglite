@@ -452,6 +452,7 @@ pub fn kglite::api::cypher::planner::rel_predicate_pushdown::extract_pushable_re
 pub mod kglite::api::cypher::planner::schema_check
 pub enum kglite::api::cypher::planner::schema_check::SchemaErrorKind
 pub kglite::api::cypher::planner::schema_check::SchemaErrorKind::UndefinedVariable
+pub kglite::api::cypher::planner::schema_check::SchemaErrorKind::UnknownNodeType
 pub kglite::api::cypher::planner::schema_check::SchemaErrorKind::UnknownProperty
 impl core::clone::Clone for kglite::api::cypher::planner::schema_check::SchemaErrorKind
 pub fn kglite::api::cypher::planner::schema_check::SchemaErrorKind::clone(&self) -> kglite::api::cypher::planner::schema_check::SchemaErrorKind
@@ -3158,6 +3159,7 @@ impl core::marker::Copy for kglite::error::KgErrorCode
 impl core::marker::StructuralPartialEq for kglite::error::KgErrorCode
 pub enum kglite::error::SchemaErrorKindRepr
 pub kglite::error::SchemaErrorKindRepr::UndefinedVariable
+pub kglite::error::SchemaErrorKindRepr::UnknownNodeType
 pub kglite::error::SchemaErrorKindRepr::UnknownProperty
 impl core::clone::Clone for kglite::error::SchemaErrorKindRepr
 pub fn kglite::error::SchemaErrorKindRepr::clone(&self) -> kglite::error::SchemaErrorKindRepr

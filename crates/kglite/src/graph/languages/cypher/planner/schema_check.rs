@@ -15,9 +15,27 @@
 //!
 //! Deliberately *does not reject* (these are legal, so they are warned about
 //! non-fatally instead — see below — never turned into errors):
-//! - Unknown node types in MATCH (`MATCH (n:Nonexistent)` legitimately
-//!   returns zero rows and is a common existence-check idiom).
-//! - Unknown connection types (same rationale).
+//! - Unknown node types in MATCH **on an open schema** (`MATCH
+//!   (n:Nonexistent)` legitimately returns zero rows and is a common
+//!   existence-check idiom). Under `lock_schema()` this *is* rejected —
+//!   see [`validate_label`] and the note below.
+//! - Unknown connection types (same rationale, both schema states — an
+//!   edge type is not yet part of what a schema lock covers).
+//!
+//! ## Locked schemas reject unknown labels
+//!
+//! `lock_schema()` is the opt-in "catch my typos" mechanism, and it must
+//! cover labels and properties symmetrically. Before this check, a locked
+//! schema rejected `MATCH (i:Issue {titel: 1})` (unknown property) but
+//! silently returned `[]` for `MATCH (i:Isue)` (unknown label) — and an
+//! empty result set reads as "no matching data" rather than "you made a
+//! mistake", so the typo survived review and reached production. The write
+//! path had already made this call: `CREATE (i:Isue)` under a lock has
+//! always failed with `Unknown node type 'Isue'`. [`validate_label`]
+//! applies the same rule, and the same message, to reads.
+//!
+//! The open-schema default is untouched — schemalessness is the product,
+//! and the check is gated entirely on `graph.schema_locked`.
 //!
 //! Deliberately *ignores entirely*:
 //! - Property references in WHERE / RETURN expressions (virtual columns,
@@ -61,6 +79,8 @@ const BUILTIN_FIELDS: &[&str] = &["id", "title", "name", "type"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchemaErrorKind {
     UnknownProperty,
+    /// Raised **only under a locked schema** — see [`validate_label`].
+    UnknownNodeType,
     UndefinedVariable,
 }
 
@@ -1099,6 +1119,16 @@ fn validate_pattern(
 ) -> Result<(), SchemaError> {
     for element in &pattern.elements {
         if let PatternElement::Node(np) = element {
+            // Label check first: on a locked schema an unknown label is a
+            // typo, not an empty result set. Checked before the property
+            // loop so `MATCH (i:Isue {titel: 1})` reports the label — the
+            // outer mistake — rather than a property of a type that does
+            // not exist.
+            if graph.schema_locked {
+                for label in np.node_type.iter().chain(np.extra_labels.iter()) {
+                    validate_label(label, graph)?;
+                }
+            }
             if let Some(ref node_type) = np.node_type {
                 if let Some(ref var) = np.variable {
                     var_types.insert(var.clone(), node_type.clone());
@@ -1145,6 +1175,72 @@ fn walk_predicate_for_nested_patterns(
         _ => {}
     }
     Ok(())
+}
+
+/// A label is "known" if it is a declared primary type, currently has live
+/// nodes, or is a secondary label applied via `add_label` — `MATCH
+/// (n:Reviewer)` is valid even though `Reviewer` is no node's primary type.
+/// Mirrors the identical three-way test in
+/// [`collect_unknown_pattern_warnings`]; keep the two in step.
+fn label_known(label: &str, graph: &DirGraph) -> bool {
+    graph.node_type_metadata.contains_key(label)
+        || graph.type_indices.contains_key(label)
+        || graph
+            .secondary_label_index
+            .contains_key(&InternedKey::from_str(label))
+}
+
+/// Reject an unknown node label. **Caller gates on `graph.schema_locked`.**
+///
+/// On an open schema kglite is schemaless by design and `MATCH
+/// (n:Nonexistent)` legitimately returns zero rows (the existence-check
+/// idiom), so this is never reached and
+/// [`collect_unknown_pattern_warnings`] delivers the typo hint non-fatally
+/// instead. `lock_schema()` is the opt-in "catch my typos" mechanism: it
+/// already rejects an unknown *property* here, and an unknown *node type*
+/// on the CREATE write path
+/// ([`validate_node_creation`](crate::graph::mutation::validation::validate_node_creation)).
+/// This closes the read side, where a typo'd label previously returned `[]`
+/// — indistinguishable from "no matching data".
+///
+/// The message deliberately reuses the write path's wording so a locked
+/// schema reports the same mistake identically whether it is read or
+/// written, and enumerates the valid set exactly like the unknown-property
+/// message above it.
+fn validate_label(label: &str, graph: &DirGraph) -> Result<(), SchemaError> {
+    if label_known(label, graph) {
+        return Ok(());
+    }
+    // Cold path only — the candidate list is built solely to explain a
+    // confirmed typo.
+    let mut valid: Vec<&str> = graph
+        .node_type_metadata
+        .keys()
+        .map(|s| s.as_str())
+        .chain(graph.type_indices.keys())
+        .collect();
+    // `try_resolve`, not `resolve`: the latter panics on a key the interner
+    // has no entry for, and an error-message builder must never be the thing
+    // that takes the process down. A key we cannot name is simply omitted
+    // from the hint.
+    valid.extend(
+        graph
+            .secondary_label_index
+            .keys()
+            .filter_map(|k| graph.interner.try_resolve(*k)),
+    );
+    valid.sort_unstable();
+    valid.dedup();
+    let hint = did_you_mean(label, &valid);
+    Err(SchemaError {
+        kind: SchemaErrorKind::UnknownNodeType,
+        message: format!(
+            "Unknown node type '{}'.{}\n  Valid types: {}",
+            label,
+            hint,
+            valid.join(", ")
+        ),
+    })
 }
 
 fn validate_property(node_type: &str, property: &str, graph: &DirGraph) -> Result<(), SchemaError> {
@@ -1518,5 +1614,173 @@ mod tests {
         // (avoids false positives on dynamically-typed graphs).
         let q = parse_cypher("MATCH (n) WHERE n.whatever = 1 RETURN n").unwrap();
         assert!(collect_unknown_pattern_warnings(&q, &g).is_empty());
+    }
+
+    // ── Locked-schema label rejection ────────────────────────────────────
+    //
+    // `lock_schema()` is the "catch my typos" mechanism; it has always
+    // rejected an unknown *property*, and an unknown *node type* on the
+    // CREATE write path. These cover the read side. Every clause that can
+    // carry a label gets a case — a fix covering only MATCH would recreate
+    // the same asymmetry one level down.
+
+    /// Adds an `Issue` type so `Isue` has a real near-miss to suggest —
+    /// this is the scenario from the field report, verbatim.
+    fn locked_graph() -> DirGraph {
+        let mut g = graph_with_schema();
+        let mut issue_props = HashMap::new();
+        issue_props.insert("status".to_string(), "string".to_string());
+        g.upsert_node_type_metadata("Issue", issue_props);
+        g.schema_locked = true;
+        g
+    }
+
+    /// The one assertion that matters: the offending label is named AND the
+    /// valid set is enumerated, exactly like the unknown-property message.
+    fn assert_rejects_isue(query: &str) {
+        let g = locked_graph();
+        let q = parse_cypher(query).unwrap();
+        let err =
+            validate_schema(&q, &g).expect_err(&format!("locked schema should reject: {query}"));
+        assert_eq!(err.kind, SchemaErrorKind::UnknownNodeType, "for `{query}`");
+        assert_eq!(
+            err.message,
+            "Unknown node type 'Isue'. Did you mean 'Issue'?\n  Valid types: Issue, Paper, Person",
+            "for `{query}`"
+        );
+    }
+
+    #[test]
+    fn locked_schema_rejects_unknown_label_in_match() {
+        assert_rejects_isue("MATCH (i:Isue) RETURN i");
+    }
+
+    #[test]
+    fn locked_schema_rejects_unknown_label_in_optional_match() {
+        assert_rejects_isue("MATCH (p:Person) OPTIONAL MATCH (i:Isue) RETURN p, i");
+    }
+
+    #[test]
+    fn locked_schema_rejects_unknown_label_in_where_pattern_predicate() {
+        assert_rejects_isue("MATCH (p:Person) WHERE EXISTS { MATCH (i:Isue) } RETURN p");
+    }
+
+    #[test]
+    fn locked_schema_rejects_unknown_label_in_call_subquery() {
+        assert_rejects_isue("CALL { MATCH (i:Isue) RETURN i } RETURN i");
+    }
+
+    #[test]
+    fn locked_schema_rejects_unknown_label_in_union_branch() {
+        assert_rejects_isue("MATCH (p:Person) RETURN p UNION MATCH (i:Isue) RETURN i");
+    }
+
+    #[test]
+    fn locked_schema_rejects_unknown_extra_label() {
+        // `(n:A:B)` puts the first label in `node_type` and the rest in
+        // `extra_labels` — a typo in the tail must be caught too.
+        let g = locked_graph();
+        let q = parse_cypher("MATCH (n:Person:Revewer) RETURN n").unwrap();
+        let err = validate_schema(&q, &g).expect_err("extra label typo should be rejected");
+        assert_eq!(err.kind, SchemaErrorKind::UnknownNodeType);
+        assert!(
+            err.message.starts_with("Unknown node type 'Revewer'."),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn locked_schema_offers_did_you_mean_for_near_miss() {
+        let g = locked_graph();
+        let q = parse_cypher("MATCH (n:Persn) RETURN n").unwrap();
+        let err = validate_schema(&q, &g).expect_err("near-miss label should be rejected");
+        assert_eq!(
+            err.message,
+            "Unknown node type 'Persn'. Did you mean 'Person'?\n  Valid types: Issue, Paper, Person"
+        );
+    }
+
+    #[test]
+    fn locked_schema_accepts_known_labels_everywhere() {
+        let g = locked_graph();
+        for query in [
+            "MATCH (p:Person) RETURN p",
+            "MATCH (p:Person) OPTIONAL MATCH (q:Paper) RETURN p, q",
+            "MATCH (p:Person) WHERE EXISTS { MATCH (q:Paper) } RETURN p",
+            "CALL { MATCH (q:Paper) RETURN q } RETURN q",
+            "MATCH (p:Person) RETURN p UNION MATCH (q:Paper) RETURN q",
+            // Untyped patterns carry no label to check.
+            "MATCH (n) RETURN n",
+        ] {
+            let q = parse_cypher(query).unwrap();
+            assert!(
+                validate_schema(&q, &g).is_ok(),
+                "locked schema wrongly rejected `{query}`: {:?}",
+                validate_schema(&q, &g).err()
+            );
+        }
+    }
+
+    #[test]
+    fn locked_schema_reports_the_label_before_the_property() {
+        // When both are wrong, the label is the outer mistake — reporting a
+        // property of a type that does not exist would be nonsense.
+        let g = locked_graph();
+        let q = parse_cypher("MATCH (i:Isue {titel: 'x'}) RETURN i").unwrap();
+        let err = validate_schema(&q, &g).expect_err("should reject");
+        assert_eq!(err.kind, SchemaErrorKind::UnknownNodeType);
+    }
+
+    #[test]
+    fn open_schema_still_tolerates_unknown_label() {
+        // The schemaless default is the product — the zero-row
+        // existence-check idiom must keep working untouched. This is the
+        // regression guard for the gate on `schema_locked`.
+        let g = graph_with_schema();
+        assert!(!g.schema_locked);
+        for query in [
+            "MATCH (i:Isue) RETURN i",
+            "MATCH (p:Person) OPTIONAL MATCH (i:Isue) RETURN p, i",
+            "MATCH (p:Person) WHERE EXISTS { MATCH (i:Isue) } RETURN p",
+            "CALL { MATCH (i:Isue) RETURN i } RETURN i",
+            "MATCH (p:Person) RETURN p UNION MATCH (i:Isue) RETURN i",
+            "MATCH (n:Person:Revewer) RETURN n",
+        ] {
+            let q = parse_cypher(query).unwrap();
+            assert!(
+                validate_schema(&q, &g).is_ok(),
+                "open schema must not reject `{query}`"
+            );
+        }
+    }
+
+    #[test]
+    fn locked_schema_leaves_unknown_relationship_types_alone() {
+        // Edge types are not part of what a schema lock covers on the read
+        // path; only the node-label gap was asymmetric with properties.
+        let g = locked_graph();
+        let q = parse_cypher("MATCH (a:Person)-[:NOSUCH]->(b:Person) RETURN a").unwrap();
+        assert!(validate_schema(&q, &g).is_ok());
+    }
+
+    #[test]
+    fn locked_schema_accepts_secondary_labels() {
+        // A label applied via `add_label` is legitimately matchable even
+        // though it is no node's primary type — rejecting it would be a
+        // false positive.
+        let mut g = locked_graph();
+        let key = g.interner.try_get_or_intern("Reviewer").unwrap();
+        g.secondary_label_index.insert(key, Vec::new());
+        g.has_secondary_labels = true;
+        let q = parse_cypher("MATCH (n:Reviewer) RETURN n").unwrap();
+        assert!(validate_schema(&q, &g).is_ok());
+        // …and it appears in the enumerated valid set for a real typo.
+        let q2 = parse_cypher("MATCH (n:Isue) RETURN n").unwrap();
+        let err = validate_schema(&q2, &g).expect_err("should reject");
+        assert_eq!(
+            err.message,
+            "Unknown node type 'Isue'. Did you mean 'Issue'?\n  Valid types: Issue, Paper, Person, Reviewer"
+        );
     }
 }

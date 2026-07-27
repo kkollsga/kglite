@@ -2407,11 +2407,25 @@ class KnowledgeGraph:
         ...
 
     def lock_schema(self) -> KnowledgeGraph:
-        """Lock the schema: future Cypher mutations must conform to current types.
+        """Lock the schema: Cypher must conform to the current types.
 
         When locked, CREATE, SET, and MERGE operations are validated against
-        the graph's known node types, connection types, and property types.
-        Invalid writes return descriptive errors with 'did you mean?' suggestions.
+        the graph's known node types, connection types, and property types,
+        and **reads are validated too**: an unknown node label in a MATCH,
+        OPTIONAL MATCH, MERGE, ``WHERE EXISTS { ... }`` pattern predicate, or
+        ``CALL { ... }`` subquery raises :class:`SchemaError` instead of
+        silently returning zero rows. Errors name the offending label or
+        property, enumerate the valid set, and add a 'did you mean?'
+        suggestion.
+
+        This is the "catch my typos" mechanism — an empty result set is
+        indistinguishable from "no matching data", so a typo'd label would
+        otherwise reach production looking like a legitimate empty state.
+
+        On an **unlocked** graph (the default) kglite is schemaless: an
+        unknown label matches nothing and is reported only as a non-fatal
+        ``warning:`` on stderr, keeping the zero-row existence-check idiom
+        valid.
 
         Returns:
             Self for method chaining.
@@ -2419,7 +2433,10 @@ class KnowledgeGraph:
         Example::
 
             graph.lock_schema()
-            graph.cypher("CREATE (p:Typo {name: 'x'})")  # raises RuntimeError
+            graph.cypher("CREATE (p:Typo {name: 'x'})")  # raises SchemaError
+            graph.cypher("MATCH (p:Persom) RETURN p")    # raises SchemaError
+            # Schema error: Unknown node type 'Persom'. Did you mean 'Person'?
+            #   Valid types: Paper, Person
 
         See Also:
             :meth:`unlock_schema`, :attr:`schema_locked`
