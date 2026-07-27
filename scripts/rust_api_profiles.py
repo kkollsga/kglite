@@ -192,22 +192,52 @@ def capture_profile(manifest: dict[str, Any], profile: dict[str, Any]) -> str:
     return proc.stdout
 
 
+#: Conventional install location for a pinned cargo-public-api that must not sit
+#: on PATH. The version is frozen deliberately (its output *is* the baseline
+#: format), so a newer one being first on PATH is the normal state on a machine
+#: that also uses cargo-public-api for anything else -- which is exactly what
+#: happened here on 2026-07-27 and silently no-op'd the release refresh.
+PINNED_TOOL_DIRS = ("/Users/Shared/cargo-tools",)
+
+
+def _resolve_pinned_tool(expected_version: str) -> str | None:
+    """Path to a `cargo-public-api` reporting `expected_version`, or None.
+
+    Prefers PATH, then the conventional pinned-tool directories. Returning the
+    binary rather than mutating PATH keeps the choice explicit at the call site.
+    """
+    candidates: list[str] = []
+    on_path = shutil.which("cargo-public-api")
+    if on_path:
+        candidates.append(on_path)
+    for base in PINNED_TOOL_DIRS:
+        candidates.extend(str(p) for p in Path(base).glob("*/bin/cargo-public-api"))
+    for cand in candidates:
+        try:
+            got = subprocess.run([cand, "--version"], check=True, capture_output=True, text=True).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        if got == expected_version:
+            return cand
+    return None
+
+
 def run_profiles(manifest: dict[str, Any], *, check: bool) -> int:
-    if shutil.which("cargo-public-api") is None:
-        raise RuntimeError(
-            "cargo-public-api is not installed; install the version printed by "
-            "`python scripts/rust_api_profiles.py value cargo_public_api_version`"
-        )
-    version = subprocess.run(
-        ["cargo", "public-api", "--version"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
     expected_version = f"cargo-public-api {manifest['cargo_public_api_version']}"
-    if version != expected_version:
-        raise RuntimeError(f"expected {expected_version!r}, found {version!r}")
+    resolved = _resolve_pinned_tool(expected_version)
+    if resolved is None:
+        on_path = shutil.which("cargo-public-api")
+        found = "not installed"
+        if on_path:
+            found = subprocess.run([on_path, "--version"], check=False, capture_output=True, text=True).stdout.strip()
+        raise RuntimeError(
+            f"expected {expected_version!r}, found {found!r} on PATH and no matching "
+            f"binary under {', '.join(PINNED_TOOL_DIRS)}. Install the pinned version "
+            "(`python scripts/rust_api_profiles.py value cargo_public_api_version`) or "
+            "bump the pin in tests/api-baselines/rust-api-profiles.json and refresh "
+            "the baselines."
+        )
+    os.environ["PATH"] = f"{Path(resolved).parent}{os.pathsep}{os.environ['PATH']}"
 
     failed = False
     captures: dict[str, str] = {}
