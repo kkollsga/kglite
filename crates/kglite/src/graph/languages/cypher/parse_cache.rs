@@ -113,6 +113,20 @@ pub fn clear_for_tests() {
 
 /// Current cache occupancy. Test-only.
 #[cfg(test)]
+/// Whether `query` currently has a cache entry.
+///
+/// Preferred over [`entry_count_for_tests`] for hit/miss assertions: the cache
+/// is process-global, so a total count couples a test to whatever else the
+/// binary happened to parse.
+#[cfg(test)]
+pub fn is_cached_for_tests(query: &str) -> bool {
+    let key = hash_query(query);
+    cache()
+        .read()
+        .map(|c| c.map.contains_key(&key))
+        .unwrap_or(false)
+}
+
 pub fn entry_count_for_tests() -> usize {
     cache()
         .read()
@@ -147,7 +161,15 @@ mod tests {
         // ASTs are independently owned — mutation of one doesn't affect
         // the cached entry or other consumers.
         assert_eq!(first.clauses.len(), second.clauses.len());
-        assert_eq!(entry_count_for_tests(), 1);
+        // Assert THIS query is cached, not that it is the ONLY thing cached.
+        // The cache is process-global while `TEST_LOCK` is respected only by
+        // this module, so any test elsewhere that runs Cypher can add entries
+        // between `clear_for_tests()` and here. An exact total was never
+        // testing cache-hit behaviour -- it was testing that no other test
+        // happened to parse anything, which is not a property of this code.
+        // It went red on CI when a new disk-snapshot suite started issuing
+        // queries in the same binary.
+        assert!(is_cached_for_tests(q), "second parse should have hit the cache");
     }
 
     #[test]
