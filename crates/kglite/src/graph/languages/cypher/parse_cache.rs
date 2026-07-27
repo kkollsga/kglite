@@ -169,7 +169,10 @@ mod tests {
         // happened to parse anything, which is not a property of this code.
         // It went red on CI when a new disk-snapshot suite started issuing
         // queries in the same binary.
-        assert!(is_cached_for_tests(q), "second parse should have hit the cache");
+        assert!(
+            is_cached_for_tests(q),
+            "second parse should have hit the cache"
+        );
     }
 
     #[test]
