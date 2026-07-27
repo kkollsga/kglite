@@ -521,6 +521,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`add_nodes()` on a durable mapped or disk graph no longer writes a
+  quadratic write-ahead-log payload.** Appending rows to a columnar graph
+  detaches every existing node of the type from its shared column store and
+  re-attaches it afterwards — pure internal bookkeeping, but it ran through the
+  *recorded* mutation seam, so each sweep logged one full property-map copy per
+  pre-existing node. Because the append is chunked, an `n`-row call re-logged
+  the whole type once per chunk: WAL bytes grew as `n²`, and a large enough
+  single call could exceed the 4 GiB per-frame ceiling. Both sweeps now use the
+  silent borrow that the columnar `SET` handle-refresh already used, so the log
+  records exactly one op per row written. Measured on the regression fixture: a
+  1,000-row append logged 2,000 ops (84 B/row) and a 4,000-row append 20,000
+  ops (213 B/row); both now log one op per row at a flat byte cost. No
+  behavioural change to the graph itself or to log replay — the ops removed
+  were byte-identical restatements of nodes the sweep had not modified.
+
 - **`save()` now barriers the write-ahead log before writing its
   checkpoint.** A checkpoint truncates the log, and recovery folds the
   surviving frames into net per-entity state. Previously the log was
