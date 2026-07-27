@@ -7,138 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **The undo-journal fast path now applies to graphs that have been saved.**
-  Statement rollback uses a cheap O(changes) undo journal wherever it can, and
-  falls back to a whole-graph O(V+E) clone taken before *every* mutating
-  statement otherwise. The fast path previously excluded any graph holding
-  columnar property stores — which is every graph that has been through
-  `save()`, since saving enables columnar storage and nothing on a mutation
-  path turns it off again. A single `save()` therefore moved the process onto
-  the clone path permanently, and the cost of each subsequent write scaled
-  with the size of the whole graph rather than with what the write touched.
-
-  The exclusion was aimed at one real side channel — `SET` on a columnar
-  property writes the shared per-type store directly — which is now covered
-  instead of avoided: the master store is restored from the checkpoint's
-  schema copy, and the per-node handles come back through the journal. `CREATE`
-  and `DELETE` never touch a column store in memory mode at all.
-
-  Rollback behaviour is unchanged; this is a cost change only. The rollback
-  fidelity suite now runs every statement shape against a saved-graph fixture
-  as well as a fresh one.
-
-- **…and to graphs with user-created indexes.** The same fast path was
-  excluded for any graph holding a property, range, or composite index, for
-  the same reason and with the same permanence: one `create_index` moved every
-  later statement onto the whole-graph clone. That exclusion was the more
-  expensive of the two, and unlike columnar mode there was no way to
-  configure around it — dropping the index to buy back write speed turns the
-  lookup it served into a label scan.
-
-  Index maintenance is now journalled per bucket edit, with the position each
-  edit touched, so a failed statement restores bucket *order* and not merely
-  membership. Bucket order is the row order an indexed `MATCH` without
-  `ORDER BY` returns, so anything less would have made a rolled-back statement
-  observable. This uses the same `BucketAppended` / `BucketRemoved` entries
-  that already covered the built-in type and label indexes.
-
-  One behaviour change falls out of it: composite-index maintenance no longer
-  opportunistically drops buckets that were already empty before the write. It
-  only drops the ones the write itself emptied.
-
-### Fixed
-
-- **`save()` now barriers the write-ahead log before writing its
-  checkpoint.** A checkpoint truncates the log, and recovery folds the
-  surviving frames into net per-entity state. Previously the log was
-  guaranteed to be on disk at that point only because every commit had
-  already barriered; with a level that skips the per-commit barrier, a crash
-  in the window between writing the checkpoint and truncating the log could
-  leave a *prefix* of the frames, and replaying that prefix over the newer
-  checkpoint would roll committed properties backwards — losing data that had
-  already been durably saved. The checkpoint path now flushes the log first,
-  restoring the invariant that the on-disk log is complete whenever a
-  checkpoint supersedes it.
-
-- **WAL recovery now rejects a zero-length frame explicitly.** A run of zero
-  bytes — the shape an OS crash leaves when a file's length was extended but
-  its data block never reached the platter — declares a zero-length payload,
-  and `crc32` of an empty payload is zero, so such a prefix passed the
-  integrity check as a "valid" empty frame and was stopped only by the
-  decoder failing further down. Recovery now stops at it by intent. No
-  correct WAL can contain one.
-
-- **`kglite.open()` now enforces one writer per graph, instead of silently
-  losing one.** Two processes that opened the same path both built a complete
-  snapshot in memory and both wrote it at `save()`, so whichever saved last
-  won and everything the other had done disappeared — with both processes
-  exiting 0, nothing logged, and nothing in the file to show it had happened.
-  That is the likeliest accident when deploying an embedded database: a
-  multi-worker `gunicorn` pool, a cron job overlapping a request, or a stale
-  process nobody noticed.
-
-  `open()` now takes an exclusive cross-process writer lease on a
-  `<path>.lock` sidecar and holds it until `close()` / `with`-block exit. A
-  second writer fails immediately, naming the process that has it:
-
-  ```
-  KgError: app.kgl is open for writing by pid 4711 (since 2026-07-26T09:15:03+02:00)
-  ```
-
-  The lease mechanism itself is not new — the CLI and the MCP server have held
-  it since disk generations shipped, and `open_or_create_graph` documents it as
-  a caller's responsibility. The Python binding was the caller that never
-  opted in, which left the most-used surface unguarded.
-
-  Three deliberate boundaries:
-
-  - **Readers are never blocked.** `load()` and `open_session()` take no
-    lease. `save()` republishes the whole graph, so a reader sees the last
-    consistent snapshot; making reads exclusive would break read-replica and
-    analytics deployments to fix a problem only writers have.
-  - **A crash releases it.** The lock is owned by the OS, not by the sidecar
-    file's existence, so a writer lost to `SIGKILL` or a power cut frees it
-    at once. The leftover `<path>.lock` (the lock, always empty) and
-    `<path>.lock-owner` (the pid/timestamp used to name a holder) are records,
-    not the lock — deleting them releases nothing, and the error message says
-    so, since deleting lock files by reflex is how this class of guard gets
-    defeated.
-
-  Contention is classified from the platform's lock errno via
-  `fs2::lock_contended_error()` rather than from `io::ErrorKind`. The kinds
-  differ per platform — `EWOULDBLOCK` maps to `WouldBlock` on Unix, but
-  `ERROR_LOCK_VIOLATION` is uncategorised on Windows — so a kind comparison
-  recognised contention only on Unix. On Windows that meant a blocked writer
-  saw the raw OS error instead of a message naming the holder, **and** the
-  retry loop was skipped entirely, so the 30-second lease timeouts used by
-  `kglite` CLI commands and the MCP server returned instantly rather than
-  waiting for the current writer to finish.
-
-  The holder's identity lives in the unlocked `<path>.lock-owner` sidecar
-  rather than inside the lock file, because `fs2` locks via `flock` on Unix
-  (advisory — contenders can still read) but `LockFileEx` on Windows
-  (mandatory over the whole range), where an exclusive lock makes the file
-  unreadable to every other handle and a contender's read fails with
-  `ERROR_LOCK_VIOLATION` instead of returning the pid. Splitting the two keeps
-  the holder *named* on every platform. `<path>.lock` is still the file that
-  is locked, so binaries from either side of this change continue to exclude
-  each other.
-  - **`open(..., lock=False)` opts out**, explicitly and never by default, for
-    deployments that coordinate writers externally.
-
-  Disk-mode graphs were already protected by their own generation lock, but
-  only failed at the *first mutation* with a bare
-  `Resource temporarily unavailable (os error 35)`; they now fail at `open()`
-  with the same named message as every other storage mode.
-
-  **Possible impact:** a deployment that genuinely opened one graph from two
-  processes was already losing writes, and now gets an error instead. Two
-  overlapping `kglite.open()` calls on one path *within* a single process are
-  refused for the same reason (the error says so explicitly); sequential
-  `with kglite.open(path)` blocks are unaffected, because the lease is
-  released on block exit.
 
 ### Added
 
@@ -458,6 +326,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The undo-journal fast path now applies to graphs that have been saved.**
+  Statement rollback uses a cheap O(changes) undo journal wherever it can, and
+  falls back to a whole-graph O(V+E) clone taken before *every* mutating
+  statement otherwise. The fast path previously excluded any graph holding
+  columnar property stores — which is every graph that has been through
+  `save()`, since saving enables columnar storage and nothing on a mutation
+  path turns it off again. A single `save()` therefore moved the process onto
+  the clone path permanently, and the cost of each subsequent write scaled
+  with the size of the whole graph rather than with what the write touched.
+
+  The exclusion was aimed at one real side channel — `SET` on a columnar
+  property writes the shared per-type store directly — which is now covered
+  instead of avoided: the master store is restored from the checkpoint's
+  schema copy, and the per-node handles come back through the journal. `CREATE`
+  and `DELETE` never touch a column store in memory mode at all.
+
+  Rollback behaviour is unchanged; this is a cost change only. The rollback
+  fidelity suite now runs every statement shape against a saved-graph fixture
+  as well as a fresh one.
+
+- **…and to graphs with user-created indexes.** The same fast path was
+  excluded for any graph holding a property, range, or composite index, for
+  the same reason and with the same permanence: one `create_index` moved every
+  later statement onto the whole-graph clone. That exclusion was the more
+  expensive of the two, and unlike columnar mode there was no way to
+  configure around it — dropping the index to buy back write speed turns the
+  lookup it served into a label scan.
+
+  Index maintenance is now journalled per bucket edit, with the position each
+  edit touched, so a failed statement restores bucket *order* and not merely
+  membership. Bucket order is the row order an indexed `MATCH` without
+  `ORDER BY` returns, so anything less would have made a rolled-back statement
+  observable. This uses the same `BucketAppended` / `BucketRemoved` entries
+  that already covered the built-in type and label indexes.
+
+  One behaviour change falls out of it: composite-index maintenance no longer
+  opportunistically drops buckets that were already empty before the write. It
+  only drops the ones the write itself emptied.
+
 - **Breaking (Rust API): `kglite::api::durable::Wal::open` takes a second
   argument**, `sync: SyncMode`, naming how each appended frame is made durable.
   Any Rust embedder calling it directly must pass a mode; Python callers are
@@ -613,6 +520,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behaviour.
 
 ### Fixed
+
+- **`save()` now barriers the write-ahead log before writing its
+  checkpoint.** A checkpoint truncates the log, and recovery folds the
+  surviving frames into net per-entity state. Previously the log was
+  guaranteed to be on disk at that point only because every commit had
+  already barriered; with a level that skips the per-commit barrier, a crash
+  in the window between writing the checkpoint and truncating the log could
+  leave a *prefix* of the frames, and replaying that prefix over the newer
+  checkpoint would roll committed properties backwards — losing data that had
+  already been durably saved. The checkpoint path now flushes the log first,
+  restoring the invariant that the on-disk log is complete whenever a
+  checkpoint supersedes it.
+
+- **WAL recovery now rejects a zero-length frame explicitly.** A run of zero
+  bytes — the shape an OS crash leaves when a file's length was extended but
+  its data block never reached the platter — declares a zero-length payload,
+  and `crc32` of an empty payload is zero, so such a prefix passed the
+  integrity check as a "valid" empty frame and was stopped only by the
+  decoder failing further down. Recovery now stops at it by intent. No
+  correct WAL can contain one.
+
+- **`kglite.open()` now enforces one writer per graph, instead of silently
+  losing one.** Two processes that opened the same path both built a complete
+  snapshot in memory and both wrote it at `save()`, so whichever saved last
+  won and everything the other had done disappeared — with both processes
+  exiting 0, nothing logged, and nothing in the file to show it had happened.
+  That is the likeliest accident when deploying an embedded database: a
+  multi-worker `gunicorn` pool, a cron job overlapping a request, or a stale
+  process nobody noticed.
+
+  `open()` now takes an exclusive cross-process writer lease on a
+  `<path>.lock` sidecar and holds it until `close()` / `with`-block exit. A
+  second writer fails immediately, naming the process that has it:
+
+  ```
+  KgError: app.kgl is open for writing by pid 4711 (since 2026-07-26T09:15:03+02:00)
+  ```
+
+  The lease mechanism itself is not new — the CLI and the MCP server have held
+  it since disk generations shipped, and `open_or_create_graph` documents it as
+  a caller's responsibility. The Python binding was the caller that never
+  opted in, which left the most-used surface unguarded.
+
+  Three deliberate boundaries:
+
+  - **Readers are never blocked.** `load()` and `open_session()` take no
+    lease. `save()` republishes the whole graph, so a reader sees the last
+    consistent snapshot; making reads exclusive would break read-replica and
+    analytics deployments to fix a problem only writers have.
+  - **A crash releases it.** The lock is owned by the OS, not by the sidecar
+    file's existence, so a writer lost to `SIGKILL` or a power cut frees it
+    at once. The leftover `<path>.lock` (the lock, always empty) and
+    `<path>.lock-owner` (the pid/timestamp used to name a holder) are records,
+    not the lock — deleting them releases nothing, and the error message says
+    so, since deleting lock files by reflex is how this class of guard gets
+    defeated.
+
+  Contention is classified from the platform's lock errno via
+  `fs2::lock_contended_error()` rather than from `io::ErrorKind`. The kinds
+  differ per platform — `EWOULDBLOCK` maps to `WouldBlock` on Unix, but
+  `ERROR_LOCK_VIOLATION` is uncategorised on Windows — so a kind comparison
+  recognised contention only on Unix. On Windows that meant a blocked writer
+  saw the raw OS error instead of a message naming the holder, **and** the
+  retry loop was skipped entirely, so the 30-second lease timeouts used by
+  `kglite` CLI commands and the MCP server returned instantly rather than
+  waiting for the current writer to finish.
+
+  The holder's identity lives in the unlocked `<path>.lock-owner` sidecar
+  rather than inside the lock file, because `fs2` locks via `flock` on Unix
+  (advisory — contenders can still read) but `LockFileEx` on Windows
+  (mandatory over the whole range), where an exclusive lock makes the file
+  unreadable to every other handle and a contender's read fails with
+  `ERROR_LOCK_VIOLATION` instead of returning the pid. Splitting the two keeps
+  the holder *named* on every platform. `<path>.lock` is still the file that
+  is locked, so binaries from either side of this change continue to exclude
+  each other.
+  - **`open(..., lock=False)` opts out**, explicitly and never by default, for
+    deployments that coordinate writers externally.
+
+  Disk-mode graphs were already protected by their own generation lock, but
+  only failed at the *first mutation* with a bare
+  `Resource temporarily unavailable (os error 35)`; they now fail at `open()`
+  with the same named message as every other storage mode.
+
+  **Possible impact:** a deployment that genuinely opened one graph from two
+  processes was already losing writes, and now gets an error instead. Two
+  overlapping `kglite.open()` calls on one path *within* a single process are
+  refused for the same reason (the error says so explicitly); sequential
+  `with kglite.open(path)` blocks are unaffected, because the lease is
+  released on block exit.
 
 - **A constraint violation is now catchable by type from every write path.**
   `ConstraintViolationError` existed but was reachable from nowhere: a violation
