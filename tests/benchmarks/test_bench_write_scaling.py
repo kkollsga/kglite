@@ -28,6 +28,8 @@ Run with:
 
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 import pytest
 
@@ -235,6 +237,43 @@ def test_bench_id_index_invalidation_on_create(benchmark, scaled_graphs_no_pk, s
 # true cost of the barrier. Both are per-commit and neither should scale with
 # graph size, which is why one fixed size is enough here.
 #
+# ── correction, 2026-07-27: what `off` is, and what it is not ────────
+#
+# A competitive benchmark read the `off` cell at 1.8 us and called it
+# impossible, on the grounds that it beat the tracked `cypher_match` READ
+# baseline of 6.2 us and a write must do strictly more work than a read.
+# Both halves of that are wrong, and the correction is worth keeping because
+# the cell invites the mistake:
+#
+#   * The comparison is not like-for-like. `test_bench_cypher_match` is
+#     `MATCH (n:Item) RETURN n.title, n.value LIMIT 100` *without* `.to_list()`
+#     — a lazy 100-row scan, tracked at 5.42 us min / 6.22 us mean. Its
+#     materialized sibling is 19.08 us min. A single-node insert with a warm
+#     plan cache producing no rows is simply less work than planning and
+#     scanning 100 rows. 1.8 us (a min) against 6.2 us (a mean) compares two
+#     different statistics of two different workloads.
+#   * Nothing is being skipped. At `off`, `logs()` is false, so `setup_durable`
+#     never runs (`lib.rs:416-418`), the backend is never wrapped in
+#     `RecordingGraph`, and `flush_wal` returns immediately on
+#     `durable.is_none()` (`graph/mod.rs:405-407`). The mutation itself is
+#     applied in place and synchronously at every level; there is no write
+#     buffer, no deferred commit, no background thread, and no coalescing
+#     anywhere in `wal.rs`. At `off` the write is a petgraph insert and index
+#     bookkeeping, full stop.
+#
+# So the number is real. What was unsound is the FRAMING: `off` is not a
+# cheaper commit, it is **no commit at all**, and there is no per-commit
+# durable work at `off` to measure. Its durability boundary is `save()`.
+# Labelling it a "durability level" alongside two levels that do write to disk
+# invites reading 1.8 us as "what a commit costs at off".
+#
+# Two cells below now hold that framing in place rather than leaving it to a
+# comment: `test_bench_unlogged_write_control` shows a plain in-memory graph
+# produces the same number (so file-backing buys nothing at `off`), and
+# `test_durable_off_loses_unsaved_writes` is the ordinary test proving what the
+# 1.8 us did *not* buy. The `wal_bytes` guard on the headline cell pins each
+# level to the configuration it claims.
+#
 # Not in `test_bench_core.py` on purpose: everything in this file is outside
 # the `make bench-check` tracked set, so adding cells here cannot break the
 # gate. Absolute numbers are machine- and device-specific — a barrier is
@@ -277,11 +316,38 @@ def _persisted_graph(path, level: str) -> KnowledgeGraph:
     return graph
 
 
+def _wal_bytes(path) -> int:
+    """Size of the `<path>-wal` sidecar, or 0 when no log exists.
+
+    `wal_path` is `<checkpoint>-wal` (`wal.rs:520-524`). This is the only
+    Python-visible window onto the WAL — `DurableState` exposes no getter for
+    `wal`, `next_lsn` or `level` — and it is enough to prove which level a cell
+    actually ran at.
+    """
+    try:
+        return os.path.getsize(str(path) + "-wal")
+    except FileNotFoundError:
+        return 0
+
+
 @pytest.mark.benchmark
 @pytest.mark.parametrize("level", DURABILITY_LEVELS)
 def test_bench_single_create_by_durability_level(benchmark, tmp_path, level):
-    """One `CREATE` of one node, per durability level. The headline cell."""
-    graph = _persisted_graph(tmp_path / "bench.kgl", level)
+    """One `CREATE` of one node, per durability level. The headline cell.
+
+    The trailing assertion is a vacuity guard, not a correctness test. A cell
+    that silently ran at the wrong level would report a plausible number under
+    a wrong label, and the 2026-07-27 methodology note is emphatic that this is
+    how benchmark harness defects actually present — every one caught in that
+    run was found because a number contradicted the configuration it claimed,
+    never because it looked implausible. A config-key collision there nearly
+    erased the headline finding while the table looked entirely normal.
+
+    At `off` the sidecar is never created, so a non-zero reading means the log
+    is on and the number is not an `off` number.
+    """
+    path = tmp_path / "bench.kgl"
+    graph = _persisted_graph(path, level)
     ids = iter(range(10_000_000, 1 << 30))
 
     def write():
@@ -289,66 +355,144 @@ def test_bench_single_create_by_durability_level(benchmark, tmp_path, level):
 
     benchmark(write)
 
+    logged = _wal_bytes(path)
+    if level == "off":
+        assert logged == 0, f"durable='off' must write no WAL; found {logged} bytes"
+    else:
+        assert logged > 0, f"durable='{level}' must write a WAL; sidecar is empty or absent"
+
 
 @pytest.mark.benchmark
-@pytest.mark.parametrize("level", ["full", "normal"])
-def test_bench_explicit_sync(benchmark, tmp_path, level):
-    """`sync()` — the on-demand barrier.
+def test_bench_unlogged_write_control(benchmark):
+    """The same `CREATE` on a plain in-memory graph — the control for `off`.
 
-    Under `"normal"` this is a real barrier and should cost about what
-    `full`'s per-commit barrier costs; under `"full"` it returns immediately
-    because every commit was already barriered. That gap is the number a
-    caller needs to decide how often to call it.
+    `durable="off"` opens no log and never wraps the backend, so a file-backed
+    graph at `off` should be indistinguishable from one that was never given a
+    path. This cell is what turns that from a claim into a reading: if it
+    differs materially from `test_bench_single_create_by_durability_level
+    [off]`, then something about file-backing costs per-write time and the
+    `off` row means something other than what it says.
+
+    It also gives the `off` number a name that cannot be misread. There is no
+    per-commit durable work at `off` to measure — the honest cost of durability
+    there is `save()` amortised over N writes, and `save()` is O(graph)
+    (tracked separately as `test_bench_columnar_save_kgl`, 300 us min at 1k and
+    `fsync=False`).
     """
-    graph = _persisted_graph(tmp_path / "bench.kgl", level)
-    ids = iter(range(60_000_000, 1 << 30))
-
-    def commit_then_sync():
-        graph.cypher("CREATE (:Item {id: $i, name: 'x'})", params={"i": next(ids)})
-        graph.sync()
-
-    benchmark(commit_then_sync)
-
-
-# ── diagnostic: what is the non-durable commit actually spending? ────
-#
-# `durable="off"` is the engine's own per-commit cost with no durability
-# excuse, and reading the commit path turns up three candidate explanations
-# that reading alone cannot rank:
-#
-#   1. The Cypher plan cache is keyed on graph `version`, which is bumped
-#      before the lookup — so a write can never hit it and re-runs the full
-#      parse + optimizer pipeline every time.
-#   2. `Arc::make_mut` deep-clones the whole graph when a second
-#      `Arc<DirGraph>` is alive; a lazy `ResultView` above the 32-cell
-#      materialisation budget holds one.
-#   3. The statement rollback checkpoint, when it falls off its skip
-#      whitelist.
-#
-# The pair below discriminates (2) from the rest without changing a line of
-# engine code: same statement, once with the result dropped immediately and
-# once with it held across the next write. If `result_held` is dramatically
-# worse, it is the Arc clone; if the two are close, the cost is elsewhere and
-# (1) is the next suspect.
-#
-# This is a diagnostic, not a regression guard — it exists to attribute a
-# cost, and its conclusion belongs in an issue rather than in a threshold.
-
-
-@pytest.mark.benchmark
-@pytest.mark.parametrize("held", [False, True], ids=["result_dropped", "result_held"])
-def test_bench_create_with_lazy_result_alive(benchmark, held):
-    """One `CREATE`, with and without a lazy `ResultView` pinning the graph."""
     graph = _graph(DURABILITY_BENCH_SIZE)
-    ids = iter(range(50_000_000, 1 << 30))
-    # Wide enough to exceed the eager-materialisation budget, so the view
-    # stays lazy and keeps its own `Arc<DirGraph>` alive.
-    pinned = graph.cypher("MATCH (n:Item) RETURN n.id AS i, n.name AS nm") if held else None
+    ids = iter(range(70_000_000, 1 << 30))
 
     def write():
         graph.cypher("CREATE (:Item {id: $i, name: 'x'})", params={"i": next(ids)})
 
     benchmark(write)
-    # Keep `pinned` referenced past the measurement, or the interpreter is
-    # free to collect it early and quietly turn this into the other case.
-    assert pinned is None or pinned is not None
+
+
+def test_durable_off_loses_unsaved_writes(tmp_path):
+    """What the 1.8 us at `durable="off"` did not buy.
+
+    Not a benchmark — an ordinary test, and deliberately so. The `off` cell's
+    speed is only interpretable next to the guarantee it declines, and a
+    comment saying "off loses your data" is worth less than a test that
+    demonstrates it. Reopening is the closest in-process stand-in for the
+    process dying: no `save()`, so no checkpoint, so nothing to recover from.
+    """
+    path = tmp_path / "off.kgl"
+    graph = _persisted_graph(path, "off")
+    graph.cypher("CREATE (:Item {id: 999000, name: 'lost'})")
+    assert graph.cypher("MATCH (n:Item {id: 999000}) RETURN count(n) AS c").scalar() == 1
+
+    # The first handle is deliberately NOT closed. `close()` performs a full
+    # save, which would persist the very write this test exists to lose — and
+    # an assertion taken after it would be vacuous. Read the file as it stands
+    # on disk instead: the last checkpoint is `_persisted_graph`'s `seed.save()`
+    # from before the write. `lock=False` because the live handle still holds
+    # the writer lease.
+    on_disk = kglite.open(str(path), durable="off", lock=False)
+    survived = on_disk.cypher("MATCH (n:Item {id: 999000}) RETURN count(n) AS c").scalar()
+
+    assert survived == 0, (
+        "durable='off' wrote to a checkpoint it should not have; the speed of "
+        "the 'off' benchmark cell is only meaningful because this write is lost"
+    )
+    assert graph.cypher("MATCH (n:Item {id: 999000}) RETURN count(n) AS c").scalar() == 1
+
+
+# ── repaired 2026-07-27: `sync()` is timed alone, not after a create ──
+#
+# This cell used to time `CREATE` + `sync()` together, and at `full` it read
+# **1439 us — below the same file's create-only cost at `full`**. Create+sync
+# cannot be cheaper than create, so the pair was reported as an impossible
+# measurement. Reading the source says the cell was not measuring an ordering
+# at all:
+#
+#   * `sync()` at `full` is a **hard early return** (`kg_core.rs:711-713`). It
+#     touches no state — no flush, no barrier, no flag — because every commit
+#     was already barriered. `SyncMode` is fixed at `Wal::open` and never
+#     mutated afterwards, and nothing anywhere caches, batches or amortises
+#     across commits.
+#   * `Wal::append` is unconditional (`wal.rs:704-711`): no size threshold, no
+#     timer, no coalescing window. So at `full`, `CREATE` + `sync()` performs
+#     *exactly* the same work as `CREATE` alone.
+#
+# The old cell therefore duplicated `test_bench_single_create_by_durability_
+# level[full]` by construction and could never carry information — and 1439 vs
+# ~3400 us is F_FULLFSYNC variance between two runs of identical work, not an
+# ordering. A device-level barrier is the noisiest thing this suite measures.
+#
+# The repair is to move the `CREATE` into an untimed `pedantic` setup so the
+# timed region is the barrier and nothing else. `full` should now read ~0
+# (pinning the early return) and `normal` should read one barrier — which is
+# the number a caller actually needs to decide how often to call it, and was
+# previously buried under a create.
+#
+# `off` is absent from the parametrisation because `sync()` raises `ValueError`
+# there (`kg_core.rs:693-701`) rather than silently doing nothing.
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("level", ["full", "normal"])
+def test_bench_explicit_sync(benchmark, tmp_path, level):
+    """`sync()` alone — the on-demand barrier, with the commit untimed.
+
+    Under `"normal"` this is one real `F_FULLFSYNC`; under `"full"` it is an
+    early return. The gap between the two arms is the cost of taking a
+    power-safe point on demand, and it is what makes `"normal"` adoptable
+    rather than merely fast.
+
+    See the comment above before changing the shape of this cell — folding the
+    `CREATE` back into the timed region is what made its predecessor
+    uninterpretable.
+    """
+    graph = _persisted_graph(tmp_path / "bench.kgl", level)
+    ids = iter(range(60_000_000, 1 << 30))
+
+    def setup():
+        graph.cypher("CREATE (:Item {id: $i, name: 'x'})", params={"i": next(ids)})
+        return (), {}
+
+    benchmark.pedantic(graph.sync, setup=setup, rounds=OV_ROUNDS, iterations=1, warmup_rounds=OV_WARMUP_ROUNDS)
+
+
+# ── the lazy-`ResultView` diagnostic moved, 2026-07-27 ───────────────
+#
+# A `test_bench_create_with_lazy_result_alive` pair used to sit here, aimed at
+# the `Arc::make_mut` whole-graph clone that a held `ResultView` forces. It
+# reported **no difference**, and that null was wrong twice over:
+#
+#   1. **Under-powered.** It ran only at `DURABILITY_BENCH_SIZE` (1k), where
+#      the clone is ~1000x too small to separate from a write. The clone is
+#      O(V+E); at 100k it is ~5 ms, at 1M ~28 ms.
+#   2. **Structurally blind.** The reference was taken ONCE, outside the
+#      measurement. The clone fires on the first write after a second
+#      `Arc<DirGraph>` appears and once only — so `min`, `p50` and `p95` all
+#      saw post-clone rounds and read healthy. Only `max` could see it.
+#
+# It has been rewritten and moved to `test_bench_fast_write_path.py::
+# test_bench_first_write_after_reference`, which takes the reference in an
+# untimed per-round `setup` and runs at 1k and 100k. Consolidated rather than
+# duplicated: that file also owns the `journal_covers` cells, and both defects
+# are answers to "why did this one write cost milliseconds".
+#
+# Left here as a signpost because a null result that was believed for a while
+# is worth being able to trace.
