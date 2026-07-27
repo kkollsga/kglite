@@ -308,10 +308,12 @@ impl DirGraph {
 /// fields that are rebuilt instead of journal-reversed.
 #[derive(Default)]
 struct ReplayFallout {
-    /// Node types whose id-index the replay perturbed. `IdIndexStore` has no
-    /// per-entry removal, and its read path self-heals via `lookup_or_build`,
-    /// so whole-type invalidation is both the cheapest correct move and
-    /// exactly what the delete path already does.
+    /// Node types whose id-index the replay perturbed. Whole-type
+    /// invalidation, not the per-entry `evict_entries` the delete path uses:
+    /// a replay restores and removes nodes in the same pass, so the surviving
+    /// set is not known per entry, and the read path self-heals via
+    /// `lookup_or_build` anyway. This runs only after a statement has already
+    /// failed, so the rebuild lands on the rare path.
     stale_id_indices: HashSet<String>,
     /// Node types whose unique-occupancy maps must be recomputed from the
     /// restored data. Wider than `stale_id_indices`: a plain property

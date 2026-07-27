@@ -1149,14 +1149,49 @@ pub(crate) fn detach_delete_nodes(
     // Same guard scoping as the edge collection above (node_weight
     // materializes on the disk backend).
     let mut affected_types: HashSet<String> = HashSet::new();
+    // The doomed nodes' ids, per type, so the id index can be edited in place
+    // instead of being dropped and rebuilt by the next lookup. Read here
+    // because after `remove_node` below the weights are gone.
+    let mut doomed_ids: HashMap<String, Vec<(Value, NodeIndex)>> = HashMap::new();
     {
         let _guard = graph.graph.begin_query();
         for &node_idx in nodes_to_delete {
             if let Some(node) = graph.graph.node_weight(node_idx) {
-                affected_types.insert(node.get_node_type_ref(&graph.interner).to_string());
+                let node_type = node.get_node_type_ref(&graph.interner).to_string();
+                let node_id = node.id().into_owned();
+                doomed_ids
+                    .entry(node_type.clone())
+                    .or_default()
+                    .push((node_id, node_idx));
+                affected_types.insert(node_type);
             }
         }
     }
+
+    // Whether each type's id index may be edited in place rather than dropped.
+    //
+    // In-place eviction removes exactly the ids handed to it; a rebuild
+    // re-derives the map from the surviving nodes. The two agree only while
+    // ids are unique within the type. If two live nodes share an id the index
+    // holds one of them, and deleting that one must leave the *other*
+    // reachable by id — which only a rebuild achieves. Duplicates are
+    // detectable in O(1): the index was built with one entry per node of the
+    // type, so a shorter index is exactly the signature of collapsed
+    // duplicates. Unequal (or unbuilt, or base-resident) falls back to the
+    // whole-type invalidation this path has always done.
+    //
+    // Note this differs from the create path, which may maintain the index
+    // incrementally unconditionally: inserting a duplicate collapses it the
+    // same way a rebuild would, so the two stay in agreement there.
+    let evictable: HashSet<String> = affected_types
+        .iter()
+        .filter(|node_type| {
+            let indexed = graph.id_indices.overlay_len(node_type);
+            let live = graph.type_indices.get(node_type).map(|m| m.len());
+            matches!((indexed, live), (Some(i), Some(l)) if i == l)
+        })
+        .cloned()
+        .collect();
 
     for &node_idx in nodes_to_delete {
         GraphWrite::remove_node(&mut graph.graph, node_idx);
@@ -1179,7 +1214,14 @@ pub(crate) fn detach_delete_nodes(
         graph
             .type_indices
             .retain_in_type(node_type, |idx| !nodes_to_delete.contains(idx));
-        graph.id_indices.remove(node_type);
+        match doomed_ids.get(node_type) {
+            Some(entries) if evictable.contains(node_type) => {
+                graph.id_indices.evict_entries(node_type, entries);
+            }
+            _ => {
+                graph.id_indices.remove(node_type);
+            }
+        }
         let prop_keys: Vec<_> = graph
             .property_indices
             .keys()
@@ -2267,3 +2309,7 @@ mod replace_connections_tests {
         assert_eq!(count_edges_of_type(&g, "Doc", 1, "MENTIONS"), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "maintain_delete_id_index_tests.rs"]
+mod delete_id_index_tests;

@@ -521,6 +521,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Deleting a node no longer costs a full rebuild of its type's id index.**
+  `DELETE` dropped the whole `id_indices` entry for every affected node type,
+  so the next `MATCH (n {id: …})` rebuilt the map by scanning every node of
+  that type — one node-weight read and `Value` clone each. A single-node
+  delete was therefore O(nodes of that type), while the create path had
+  already been maintaining the same index incrementally. Deletes now evict
+  just the removed ids in place. Types with duplicate ids still fall back to
+  the full rebuild, since only a rebuild can surface a duplicate that the
+  index had shadowed; that case is detected in O(1) by comparing the index
+  length against the type's live node count. Statement rollback is unchanged
+  — it invalidates whole types by design, on the already-failed path.
+
 - **`save()` now barriers the write-ahead log before writing its
   checkpoint.** A checkpoint truncates the log, and recovery folds the
   surviving frames into net per-entity state. Previously the log was
