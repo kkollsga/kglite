@@ -31,8 +31,9 @@ rdf = ["kglite/rdf"]
 # kglite-bolt-server / kglite-mcp-server pattern — features are
 # opted into here per the [features] block above. Path dep for
 # workspace builds; `cargo publish` strips the path and falls back
-# to the version requirement.
-kglite = { version = "0.15", path = "../kglite", default-features = false }
+# to the version requirement, which tracks the exact workspace version
+# (`make bump-version VERSION=X.Y.Z`; `make gate` fails on drift).
+kglite = { version = "0.15.0", path = "../kglite", default-features = false }
 
 # Serde stack — needed to serialize Value to JSON at the C
 # boundary (the design doc fixes JSON-at-boundary for nested

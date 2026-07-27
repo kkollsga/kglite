@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev dev-with-bin bundle-bin build-bolt-server test test-full test-rust test-core test-mcp test-cli test-py bench bench-save bench-compare bench-check refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy gate lint lint-policy lint-full lint-py source-quality rustsec-policy cov stubtest
+.PHONY: dev dev-with-bin bundle-bin build-bolt-server test test-full test-rust test-core test-mcp test-cli test-py bench bench-save bench-compare bench-check bump-version check-release-hygiene refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy gate lint lint-policy lint-full lint-py source-quality rustsec-policy cov stubtest
 
 ## Build and install the package into the local .venv
 dev:
@@ -179,10 +179,33 @@ check-api-chokepoint:
 check-lint-allowances:
 	python scripts/check_lint_allowances.py
 
+## Bump the workspace version everywhere it is written down: the
+## `[workspace.package] version` in the root Cargo.toml AND the internal
+## `kglite = { version = ... }` requirement in the four member manifests that
+## publish against the engine. Editing only the workspace table leaves the
+## workspace unresolvable across a minor bump (`cargo metadata`: "failed to
+## select a version for the requirement `kglite = ^0.14`"), which broke the
+## 0.15.0 release. Verifies with a RESOLVING `cargo metadata` afterwards --
+## `--no-deps` skips resolution and passes on exactly the broken tree.
+## The bump SIZE is a human decision — see the release skill's `make
+## semver-check` step; this target only applies the version you give it.
+bump-version:
+	@test -n "$(VERSION)" || { echo "usage: make bump-version VERSION=X.Y.Z"; exit 1; }
+	python3 scripts/bump_version.py --set $(VERSION)
+
+## Release-paperwork gates. Both are pure file reads (no cargo, no imports)
+## so they stay inside the fast-gate budget:
+##  - every internal kglite dependency requirement matches the workspace version
+##  - CHANGELOG [Unreleased] has no duplicate/bespoke `###` headings, and no
+##    `TODO:` marker written by refresh_release_constants.py survived
+check-release-hygiene:
+	python3 scripts/bump_version.py --check
+	python3 scripts/check_release_hygiene.py
+
 ## Fast local checkpoint. Pair this with the smallest package/test filter
 ## covering the change. Policy audits, workspace clippy, stubtest, packaged-
 ## consumer verification, and the broad test matrix run in CI.
-gate: lint check-docs-facts
+gate: lint check-docs-facts check-release-hygiene
 
 ## Fast formatting/static lint. Intentionally performs no Rust compilation,
 ## metadata walk, or runtime import.

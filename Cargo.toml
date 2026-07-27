@@ -9,9 +9,16 @@ members = [
 ]
 resolver = "2"
 
-# Single source of truth for the crate version. Every member crate sets
-# `version.workspace = true`, so a release bumps this one line instead of
-# six. All published crates ship in lockstep at the same version.
+# Single source of truth for each crate's own `package.version`: every
+# member sets `version.workspace = true` and inherits this value, so all
+# published crates ship in lockstep.
+#
+# It is NOT the only place the version is written. The four member
+# manifests that publish against the engine also pin it in their
+# `kglite = { version = "X.Y.Z", path = "../kglite" }` requirement, which
+# `cargo publish` needs and `[workspace.package]` does not reach. Bump via
+# `make bump-version VERSION=X.Y.Z` — hand-editing this line alone leaves
+# `cargo metadata` unable to resolve the workspace across a minor bump.
 [workspace.package]
 version = "0.15.0"
 
