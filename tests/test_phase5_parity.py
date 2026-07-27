@@ -98,7 +98,7 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 19_536_400,  # 0.15.0 darwin baseline
+    "darwin": 19_536_400,  # 0.15.1 darwin baseline (unchanged from 0.15.0)
     "linux": 28_810_000,  # estimate: the post-code_tree Linux estimate (30.2 MB)
     # scaled by the same −4.6% the macOS loader removal measured. Both
     # removals deliberately recaptured DOWNWARD so the +10% budget guards
@@ -199,6 +199,15 @@ def test_binary_size_regression():
                       dependency in the Cypher parser, and the generic
                       WorkspaceGraphHooks lifecycle replacing CodeTreeHooks.
 
+
+      - 0.15.1:       19,536,400 bytes — **unchanged** from 0.15.0. The
+                      release is fixes plus manifest/CI metadata: the disk
+                      id-index writer resolving names instead of manufacturing
+                      keys, the `mcp-methods` minimum, MSRV declarations, and a
+                      test-only helper regated behind `cfg(test)`. Nothing that
+                      moves code size. Recorded rather than omitted so the
+                      ledger has a row per release — an absent row reads as an
+                      unmeasured release, not an unchanged one.
 
       - 0.15.0:       19,536,400 bytes (≈18.6 MB), +479,712 (+2.5%) over
                       0.14.5. Four features and two fixes account for it:
