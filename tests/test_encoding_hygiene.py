@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import subprocess
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -96,10 +97,37 @@ def _missing_encoding(call: ast.Call) -> str | None:
 
 
 def _python_files() -> list[Path]:
-    files: list[Path] = []
-    for root in SCANNED_ROOTS:
-        files.extend((REPO_ROOT / root).rglob("*.py"))
-    return sorted(files)
+    """Every *tracked* Python file under the scanned roots.
+
+    Enumerated via `git ls-files`, not `rglob`, and that distinction is the
+    whole point: this gate exists to protect files the repo ships, and several
+    scanned roots have gitignored siblings holding local scratch work
+    (`.gitignore` ignores `/benchmarks/competitive/*`, for one). Walking the
+    filesystem made the gate fail on a developer's untracked scratch file
+    while CI — which only ever checks out tracked files — stayed green. A
+    hygiene check that depends on what happens to be lying around is worse
+    than no check: it trains people to ignore it.
+
+    Falls back to the filesystem walk outside a git checkout (a source
+    tarball, say), where there are no untracked files to confuse it anyway.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--", *SCANNED_ROOTS],
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        files: list[Path] = []
+        for root in SCANNED_ROOTS:
+            files.extend((REPO_ROOT / root).rglob("*.py"))
+        return sorted(files)
+
+    tracked = [REPO_ROOT / name for name in out.split("\0") if name.endswith(".py")]
+    # A tracked-but-deleted file still lists; skip rather than raise.
+    return sorted(p for p in tracked if p.is_file())
 
 
 def test_text_io_pins_utf8():
