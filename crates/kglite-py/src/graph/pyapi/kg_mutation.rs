@@ -957,6 +957,16 @@ fn build_extend_report_dict<'py>(
 
 #[pymethods]
 impl KnowledgeGraph {
+    /// Create an empty graph in the given storage mode.
+    ///
+    /// **Never durable, and there is deliberately no `durable` argument.**
+    /// This produces a *detached* graph — `GraphLifecycle::detached()`, so no
+    /// `source_path` and nowhere for a write-ahead log to live. `kglite.open`
+    /// is the durable entry point: it binds the graph to a path and defaults
+    /// to `DurabilityLevel::Full`. The asymmetry is structural, not a
+    /// defaulting inconsistency, but it means `KnowledgeGraph(storage=
+    /// "mapped")` and `kglite.open(new_path, storage="mapped")` differ in
+    /// whether every commit is logged — worth knowing before comparing them.
     #[new]
     #[pyo3(signature = (*, storage=None, path=None))]
     fn new(storage: Option<&str>, path: Option<&str>) -> PyResult<Self> {
