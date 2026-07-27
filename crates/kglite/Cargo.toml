@@ -7,6 +7,7 @@
 name = "kglite"
 version.workspace = true
 edition = "2021"
+rust-version.workspace = true
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
 description = "Pure-Rust embedded Cypher knowledge graph engine with in-memory, mmap, and disk storage, and agent-facing schema introspection"

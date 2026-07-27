@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A declared minimum supported Rust version on every published crate.** All
+  five crates we publish to crates.io shipped without a `rust-version`, so a
+  consumer on an older toolchain got a compile error from somewhere inside the
+  dependency tree instead of cargo's clear "package X requires rustc 1.88".
+  The floors are now declared, and they are not uniform because the
+  dependencies are not: `kglite`, `kglite-c` and `kglite-mcp-server` require
+  **1.88.0** (the workspace default, inherited via `[workspace.package]`),
+  `kglite-cli` requires **1.89.0**, and `kglite-bolt-server` requires
+  **1.91.0**. Each number was determined by taking the maximum `rust-version`
+  across that crate's resolved dependency tree and then confirming the crate
+  actually builds on it — not by reading metadata alone, which understates the
+  answer: `rustyline 18` declares no `rust-version` at all yet calls
+  `File::lock_shared`, stabilized in 1.89, which is the whole reason
+  `kglite-cli` sits above the workspace floor. A new CI job builds every crate
+  on exactly the version it declares, with the matrix derived from the
+  manifests, so the contract cannot drift away from its check.
+
 ## [0.15.0] - 2026-07-27
 
 ### Added

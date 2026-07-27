@@ -5,6 +5,10 @@
 name = "kglite-py"
 version.workspace = true
 edition = "2021"
+# Inherited from the `kglite-cli` path dependency below, which needs
+# 1.89.0 for rustyline. Not published to crates.io, but the wheel is
+# built from source, so the floor is real for anyone building it.
+rust-version = "1.89.0"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 description = "PyO3 wrapper for kglite — Python bindings around the pure-Rust kglite knowledge graph engine."
 readme = "../../README.md"

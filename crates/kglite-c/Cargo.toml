@@ -2,6 +2,7 @@
 name = "kglite-c"
 version.workspace = true
 edition = "2021"
+rust-version.workspace = true
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
 description = "C ABI for kglite — stable extern \"C\" surface over the kglite engine so non-Rust bindings (Go via cgo, JavaScript via napi, JVM via JNI, .NET via P/Invoke, …) consume a single C header rather than re-implementing wrappers in their host language. The Rust types (DirGraph, Session, CypherResult, KgErrorCode) live in the sibling `kglite` crate; this crate is glue."

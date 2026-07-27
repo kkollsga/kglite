@@ -15,6 +15,31 @@ resolver = "2"
 [workspace.package]
 version = "0.15.0"
 
+# Minimum supported Rust version — the DEFAULT for members that inherit it
+# with `rust-version.workspace = true`. Two members legitimately need more
+# and declare their own (see below); the rest sit on this floor.
+#
+# 1.88.0 is not a guess. It is the maximum `rust-version` across the whole
+# resolved dependency tree of `kglite` / `kglite-c` / `kglite-mcp-server`
+# (`ort`, `geo`, `time`, `cookie_store`, `darling` all declare 1.88), and
+# `cargo +1.88.0 check` on those three members passes.
+#
+# The two members that need more, and why:
+#   - kglite-cli  → 1.89.0. `rustyline 18` declares NO `rust-version` at all
+#     but calls `File::lock_shared`, stabilized in 1.89. Nothing in the
+#     metadata says so; only compiling on 1.88 does (it fails with E0658
+#     `use of unstable library feature 'file_lock'`).
+#   - kglite-bolt-server → 1.91.0. `boltr 0.2.0` declares `rust-version =
+#     "1.91.0"`.
+# kglite-py depends on kglite-cli, so it inherits the 1.89.0 floor.
+#
+# `.github/workflows/ci.yml`'s `msrv` job builds each member on exactly the
+# version declared here, with the matrix derived from these manifests by
+# `scripts/msrv_matrix.py` — so a bump here cannot silently outrun its check.
+# Raising any of these is a user-visible contract change: note it in
+# CHANGELOG.md.
+rust-version = "1.88.0"
+
 # Phase G.4 — workspace root is now virtual (no `[package]`).
 # Polars-style layout: each crate has its own home under
 # `crates/`. The `kglite` Python wheel is built by maturin from

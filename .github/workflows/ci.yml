@@ -146,6 +146,71 @@ jobs:
       - name: Validate temporary RustSec exception policy
         run: python scripts/check_rustsec_advisories.py --policy-only
 
+  msrv-matrix:
+    # Derives the MSRV job's matrix from the manifests themselves. A
+    # hard-coded matrix would let the declared `rust-version` and the job
+    # that verifies it drift apart — which is the exact failure a declared-
+    # but-unchecked MSRV creates, just moved one level up. The script also
+    # fails when a workspace member declares no `rust-version` at all, so a
+    # new crate cannot join without picking a floor.
+    name: Derive MSRV matrix from manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.derive.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Show the declared floors
+        run: python scripts/msrv_matrix.py
+      - id: derive
+        run: python scripts/msrv_matrix.py --github >> "$GITHUB_OUTPUT"
+
+  msrv:
+    # Builds every published crate on exactly the Rust version it declares.
+    # We publish five crates to crates.io; before 0.15 none of them declared
+    # a `rust-version`, so a consumer on an older toolchain got a confusing
+    # compile error from somewhere inside the dep tree instead of a clear
+    # "package X requires rustc 1.88" from cargo.
+    #
+    # The floors are NOT uniform and deliberately so: `kglite-cli` needs
+    # 1.89 (rustyline 18 calls `File::lock_shared` while declaring no
+    # `rust-version` of its own) and `kglite-bolt-server` needs 1.91 (boltr).
+    # Forcing one number would have raised the engine's floor to 1.91 for no
+    # reason.
+    #
+    # Default features only. Optional `okf`/`rdf` are checked on the engine
+    # group; `fastembed` is excluded because it pulls a ~200 MB ONNX runtime
+    # (the `kglite-c` job skips it for the same reason).
+    name: MSRV ${{ matrix.toolchain }} (${{ matrix.label }})
+    needs: msrv-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.msrv-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust ${{ matrix.toolchain }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv-${{ matrix.toolchain }}
+          workspaces: ". -> target"
+
+      - name: Build on the declared MSRV
+        run: cargo check ${{ matrix.packages }}
+
+      - name: Build the engine's optional format loaders on the same floor
+        if: matrix.core == 'true'
+        run: cargo check -p kglite --features okf,rdf
+
   rustsec-audit:
     name: Required RustSec audit
     runs-on: ubuntu-latest
@@ -899,6 +964,8 @@ jobs:
       - rust-checks
       - rust-core-coverage
       - source-quality
+      - msrv-matrix
+      - msrv
       - rustsec-audit
       - kglite-c
       - python-lint

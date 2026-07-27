@@ -2,6 +2,7 @@
 name = "kglite-mcp-server"
 version.workspace = true
 edition = "2021"
+rust-version.workspace = true
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
 description = "MCP server for kglite knowledge graphs — pure-Rust single-binary frontend for cypher_query / graph_overview / save_graph / read_code_source plus the generic source / GitHub surface from mcp-methods. No libpython link."
