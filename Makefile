@@ -223,6 +223,35 @@ check-release-hygiene:
 	python3 scripts/bump_version.py --check
 	python3 scripts/check_release_hygiene.py
 
+## Cross-repo version-consistency audit over the sibling checkouts under
+## ../ (codingest, kglite-datasets, sonagram, sonara, mcp-methods).
+##
+## DELIBERATELY NOT IN `gate` OR CI. Its whole subject is disagreement
+## *between* repos, and CI checks out one repo — there, every sibling is
+## absent and the check would either pass vacuously or need five extra
+## clones per run. It is a release-time and on-demand target instead, and it
+## skips-with-a-message rather than failing when a sibling is missing, so it
+## stays usable from a partial checkout. Exits non-zero on contradictions.
+check-ecosystem-versions:
+	$(ACTIVATE) && python scripts/check_version_consistency.py
+
+## Same audit, plus the full inventory of declaration sites that live outside
+## package metadata — the places that can drift with nothing watching them.
+check-ecosystem-versions-verbose:
+	$(ACTIVATE) && python scripts/check_version_consistency.py --show-sites
+
+## Preview the downstream release notes for the current version without
+## writing anything. Run before `notify-downstream` at release time.
+notify-downstream-dry-run:
+	$(ACTIVATE) && python scripts/check_version_consistency.py --notify --dry-run
+
+## Write a release note into inbox/unread/ of every AFFECTED downstream —
+## and only those (see the affected-only rule in the script's docstring).
+## Run after publish is verified. inbox/ is gitignored working state; the
+## notes are never committed, here or there.
+notify-downstream:
+	$(ACTIVATE) && python scripts/check_version_consistency.py --notify
+
 ## Fast local checkpoint. Pair this with the smallest package/test filter
 ## covering the change. Policy audits, workspace clippy, stubtest, packaged-
 ## consumer verification, and the broad test matrix run in CI.

@@ -7,26 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **A `storage="disk"` graph containing a node type with no rows saved a
-  directory that could not be loaded**, failing with `File format error:
-  invalid id_indices.bin: directory contains an unresolved type key`. Declaring
-  a type that a given data slice leaves empty is ordinary — a blueprint with 26
-  node types legitimately populates a handful — and the build, the queries, and
-  `save()` all succeeded, so the failure only surfaced on the next `load()`.
-  Disk index sidecars address types by interner hash, and the writer derived
-  those hashes from the type name alone instead of resolving them against the
-  interner it persists alongside; a type whose name the interner never carried
-  (nothing interns a type that has no nodes) therefore got a key that nothing
-  could resolve. The writers now resolve, so the directory they emit is always
-  one the same build can read back. The same failure could be triggered on any
-  disk graph by a read-only query that merely mentions an unknown label
-  (`MATCH (n:Ghost {id: 1})`) before the next `save()`. Directories already
-  written that way load again without a rebuild: the stale entry is empty, and
-  an id index is a cache the read path rebuilds on demand, so it is dropped at
-  load. A *populated* entry under an unresolvable key is still rejected — that
-  is a damaged sidecar, not this bug.
 
 ### Added
 
@@ -48,6 +28,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   manifests, so the contract cannot drift away from its check.
 
 ### Fixed
+
+- **A `storage="disk"` graph containing a node type with no rows saved a
+  directory that could not be loaded**, failing with `File format error:
+  invalid id_indices.bin: directory contains an unresolved type key`. Declaring
+  a type that a given data slice leaves empty is ordinary — a blueprint with 26
+  node types legitimately populates a handful — and the build, the queries, and
+  `save()` all succeeded, so the failure only surfaced on the next `load()`.
+  Disk index sidecars address types by interner hash, and the writer derived
+  those hashes from the type name alone instead of resolving them against the
+  interner it persists alongside; a type whose name the interner never carried
+  (nothing interns a type that has no nodes) therefore got a key that nothing
+  could resolve. The writers now resolve, so the directory they emit is always
+  one the same build can read back. The same failure could be triggered on any
+  disk graph by a read-only query that merely mentions an unknown label
+  (`MATCH (n:Ghost {id: 1})`) before the next `save()`. Directories already
+  written that way load again without a rebuild: the stale entry is empty, and
+  an id index is a cache the read path rebuilds on demand, so it is dropped at
+  load. A *populated* entry under an unresolvable key is still rejected — that
+  is a damaged sidecar, not this bug.
 
 - **Two dependency requirements that understated their real minimum.**
   `fastembed = "5"` selects the `ort-download-binaries-native-tls` feature,

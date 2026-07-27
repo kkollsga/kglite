@@ -475,6 +475,60 @@ not ready" makes the maintainer faster; a tool that quietly performs the steps
 it checks is how gates stop gating. The bump size, the semver-check reading,
 and the push stay human decisions.
 
+### Ecosystem version consistency + downstream notification
+
+`scripts/check_version_consistency.py` audits every place a dependency
+version is declared across KGLite and its siblings (`codingest`,
+`kglite-datasets`, `sonagram`, `sonara`, `mcp-methods`) — not just
+`Cargo.toml`/`pyproject.toml`, but CI YAML, Makefiles, Dockerfiles, shell and
+Python scripts, install hints baked into source strings, committed lockfiles,
+and docs.
+
+**The class of bug it exists for:** a version requirement that *understates
+its real minimum*, or that is declared *outside package metadata*, is
+structurally invisible to the repo that declares it. `kglite-mcp-server`
+declared `mcp-methods = "0.4"` while calling 0.4.1 APIs — our lock held 0.4.1,
+so every local build and every CI run here resolved fine, and only a sibling
+with an older lock ever saw it. Same shape: `fastembed = "5"` selecting a
+5.9.0+ feature, `mimalloc = "0.1"` selecting `v2` (0.1.49+), and codingest's
+`ci.yml` pinning a version its own wheel metadata excluded.
+
+- `make check-ecosystem-versions` — run **before the version bump** at release
+  time, and any time you touch a dependency requirement. Exits non-zero on
+  *contradictions* (two binding sites in one resolution unit that no single
+  version satisfies); staleness, understated floors, and stale documented
+  versions are reported but do not fail unless you pass `--fail-on stale`.
+- `make check-ecosystem-versions-verbose` — adds the full inventory of
+  declaration sites outside package metadata, i.e. everything that can drift
+  with nothing watching it.
+- `make notify-downstream-dry-run` / `make notify-downstream` — run **after
+  publish is verified**. Writes a release note into `inbox/unread/` of each
+  *affected* downstream only.
+
+**Deliberately not in `make gate` or CI.** Its subject is disagreement
+*between* repos; CI checks out one repo, so every sibling would be absent and
+the check would pass vacuously or need five extra clones per run. It degrades
+with a skip-and-message when siblings are missing (`--require-siblings`
+inverts that), and it resolves the ecosystem root through a worktree's `.git`
+file, so it works from `/Users/Shared/kglite-wt/<branch>` too.
+
+**The notifier notifies only the affected.** A "we released, nothing changes
+for you" note is noise that trains people to ignore the inbox, and it degrades
+a mechanism that currently works (CLAUDE.md → "Route to the party who can
+act"). A downstream is notified only when its declared range excludes the new
+version, it pins us at a superseded exact version, it states a superseded
+version in published prose, or it references a symbol in this release's
+breaking set (`DEFAULT_BREAKING_SYMBOLS` in the script — refresh it with the
+other captured constants). Otherwise the run prints `SKIP <repo>: <reason>`
+and writes nothing. Notes are local files, never commits: `inbox/` is
+gitignored working state in every repo.
+
+Prose cannot be classified mechanically — "use kglite 0.13.4 to convert
+pre-0.14 artifacts" is correct forever, "a thin KGLite 0.14.3 frontend" is
+rot. Adjudicated cases live in the script's `ACKNOWLEDGED` table with a
+reason, or carry an inline `version-check: ignore` marker; changelogs,
+migration guides and dated ledger rows are skipped wholesale.
+
 ### PyPI project capacity
 
 PyPI's default project limit is 10.0 GB. The wheel release workflow sums the
