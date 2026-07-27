@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev dev-with-bin bundle-bin build-bolt-server test test-full test-rust test-core test-mcp test-cli test-py bench bench-save bench-compare bench-check refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy gate lint lint-policy lint-full lint-py source-quality rustsec-policy cov stubtest
+.PHONY: dev dev-with-bin bundle-bin build-bolt-server test test-full test-rust test-core test-mcp test-cli test-py bench bench-save bench-compare bench-check bump-version check-release-hygiene release-preflight refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy gate lint lint-policy lint-full lint-py source-quality rustsec-policy cov stubtest
 
 ## Build and install the package into the local .venv
 dev:
@@ -179,10 +179,54 @@ check-api-chokepoint:
 check-lint-allowances:
 	python scripts/check_lint_allowances.py
 
+## Bump the workspace version everywhere it is written down: the
+## `[workspace.package] version` in the root Cargo.toml AND the internal
+## `kglite = { version = ... }` requirement in the four member manifests that
+## publish against the engine. Editing only the workspace table leaves the
+## workspace unresolvable across a minor bump (`cargo metadata`: "failed to
+## select a version for the requirement `kglite = ^0.14`"), which broke the
+## 0.15.0 release. Verifies with a RESOLVING `cargo metadata` afterwards --
+## `--no-deps` skips resolution and passes on exactly the broken tree.
+## The bump SIZE is a human decision — see the release skill's `make
+## semver-check` step; this target only applies the version you give it.
+bump-version:
+	@test -n "$(VERSION)" || { echo "usage: make bump-version VERSION=X.Y.Z"; exit 1; }
+	python3 scripts/bump_version.py --set $(VERSION)
+
+## Report whether the tree is ready for the release commit. Asserts workspace
+## coherence -- every member inherits [workspace.package] version, the
+## workspace RESOLVES (which is what a stale internal `kglite = ...` pin
+## breaks), and all five publishable crates are at one version -- plus
+## version/CHANGELOG agreement, captured constants, server-binary freshness,
+## formatting, and fast-forwardability. Run it after promoting the CHANGELOG
+## and before writing the release commit.
+##
+## The three coherence assertions are not redundant with `make bump-version`:
+## the bump tool fixes the forward path, but a merge, hand-edit, or a rebase
+## that resolves a manifest conflict wrongly can drift the state anyway. And
+## resolution alone cannot see a member carrying its own stale explicit
+## version -- that resolves fine and still ships a broken publish set.
+##
+## CHECKER, NOT A DRIVER. It performs no release step and has no --fix: it
+## prints the command for each unmet precondition and leaves running it — and
+## deciding whether to release at all — to the maintainer. A tool that quietly
+## performs the steps it checks is how gates stop gating.
+release-preflight:
+	python3 scripts/release_preflight.py
+
+## Release-paperwork gates. Both are pure file reads (no cargo, no imports)
+## so they stay inside the fast-gate budget:
+##  - every internal kglite dependency requirement matches the workspace version
+##  - CHANGELOG [Unreleased] has no duplicate/bespoke `###` headings, and no
+##    `TODO:` marker written by refresh_release_constants.py survived
+check-release-hygiene:
+	python3 scripts/bump_version.py --check
+	python3 scripts/check_release_hygiene.py
+
 ## Fast local checkpoint. Pair this with the smallest package/test filter
 ## covering the change. Policy audits, workspace clippy, stubtest, packaged-
 ## consumer verification, and the broad test matrix run in CI.
-gate: lint check-docs-facts
+gate: lint check-docs-facts check-release-hygiene
 
 ## Fast formatting/static lint. Intentionally performs no Rust compilation,
 ## metadata walk, or runtime import.

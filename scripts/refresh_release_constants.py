@@ -20,9 +20,24 @@ nobody updates them at release time:
      public-api gate fails until all exact baselines are refreshed and committed.
 
 This script reads ``Cargo.toml`` for the version, then refreshes all
-four. Idempotent: running it twice in a row produces no diff. Step 4
-is best-effort: it no-ops with a message if cargo-public-api / the
-pinned nightly aren't installed locally.
+four. Idempotent: running it twice in a row produces no diff.
+
+**No step is best-effort.** A step that cannot do its job — missing
+release artifact, missing or wrong-version tooling, an anchor the
+rewriter can no longer find, a failed benchmark run — exits non-zero
+with the command that fixes it. It never prints a line and lets the
+release continue: during the 0.15.0 release step 4 found
+``cargo-public-api 0.52.0`` on ``PATH`` against a manifest pin of
+``0.49.0``, reported a no-op, and the run carried on; only a human
+reading the output stopped stale public-API baselines from shipping,
+and those baselines gate downstream Rust embedders and the C ABI.
+
+The one intentional skip is step 3's benchmark re-capture, which is
+skipped when ``<version>.json`` already exists. That is idempotence, not
+a swallowed failure: benchmark numbers are inherently noisy, so the
+per-version file is written once and re-running must not churn it.
+``--skip-benchmarks`` is the other intentional skip — an explicit
+operator request, not a silent one.
 
 Usage:
     python scripts/refresh_release_constants.py [--skip-benchmarks]
@@ -51,6 +66,17 @@ PHASE4_TEST = REPO_ROOT / "tests" / "test_phase4_parity.py"
 PHASE5_TEST = REPO_ROOT / "tests" / "test_phase5_parity.py"
 BASELINES_DIR = REPO_ROOT / "tests" / "benchmarks" / "baselines"
 API_PROFILE_MANIFEST = REPO_ROOT / "tests" / "api-baselines" / "rust-api-profiles.json"
+
+
+class RefreshError(RuntimeError):
+    """A step could not do its job.
+
+    Raising this aborts the run with a non-zero exit and the remediation
+    command. Use it for *every* condition that leaves a captured
+    constant unrefreshed — a release must not proceed on the assumption
+    that a printed line was read. A genuine no-op (the value is already
+    current, or an operator asked for a skip) returns normally instead.
+    """
 
 
 def read_version() -> str:
@@ -117,16 +143,14 @@ def refresh_kgl_golden(version: str, new_digest: str) -> tuple[bool, str]:
 
     cur_match = re.search(r'^(GOLDEN_V3_DIGEST = )"([0-9a-f]{64})"', text, re.MULTILINE)
     if cur_match is None:
-        return False, "tests/test_phase4_parity.py: GOLDEN_V3_DIGEST line not found — refusing to edit"
+        raise RefreshError(
+            "tests/test_phase4_parity.py: GOLDEN_V3_DIGEST line not found. The test moved or "
+            "was renamed; update this script's rewriter before releasing."
+        )
 
     cur_digest = cur_match.group(2)
     if cur_digest == new_digest:
         return False, f"GOLDEN_V3_DIGEST already current ({new_digest[:12]}…)"
-
-    # Demote the current golden into ACCEPTABLE_DIGESTS if it isn't already there.
-    if cur_digest not in text:
-        # extremely defensive; this should always be true since we just matched it
-        return False, "GOLDEN_V3_DIGEST value vanished mid-edit — refusing to edit"
 
     if cur_digest in text.split("ACCEPTABLE_DIGESTS")[1] if "ACCEPTABLE_DIGESTS" in text else False:
         # Already in the allowlist; only need to update the primary.
@@ -136,7 +160,10 @@ def refresh_kgl_golden(version: str, new_digest: str) -> tuple[bool, str]:
         # last entry inside ACCEPTABLE_DIGESTS and insert after it.
         marker = re.search(r"(    )\}\s*\n\)\s*\n", text)
         if marker is None:
-            return False, "ACCEPTABLE_DIGESTS closing brace not found — refusing to edit"
+            raise RefreshError(
+                "tests/test_phase4_parity.py: ACCEPTABLE_DIGESTS closing brace not found, so the "
+                "outgoing golden digest cannot be demoted. Fix the rewriter or demote it by hand."
+            )
         indent = marker.group(1)
         insert = f'{indent}# Demoted from GOLDEN_V3_DIGEST when {version} took over.\n{indent}"{cur_digest}",\n'
         text = text[: marker.start()] + insert + text[marker.start() :]
@@ -168,7 +195,10 @@ def refresh_binary_size(version: str, current_size: int) -> tuple[bool, str]:
         re.MULTILINE,
     )
     if bl_match is None:
-        return False, f"tests/test_phase5_parity.py: {platform_key} baseline entry not found"
+        raise RefreshError(
+            f"tests/test_phase5_parity.py: no {platform_key!r} baseline entry to update. The "
+            "baseline table moved or was reformatted; fix the rewriter before releasing."
+        )
     cur_baseline = int(bl_match.group(2).replace("_", ""))
 
     if cur_baseline == current_size:
@@ -256,7 +286,7 @@ def refresh_perf_baseline(version: str) -> tuple[bool, str]:
         ]
         proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
         if proc.returncode != 0:
-            return False, f"benchmark run failed:\n{proc.stdout}\n{proc.stderr}"
+            raise RefreshError(f"benchmark run failed (no perf baseline captured):\n{proc.stdout}\n{proc.stderr}")
         data = json.loads(tmp_json.read_text(encoding="utf-8"))
 
     # Strip per-iteration `data` — gates need aggregates only; carrying
@@ -276,10 +306,25 @@ def refresh_perf_baseline(version: str) -> tuple[bool, str]:
 
 
 def refresh_api_baseline() -> tuple[bool, str]:
-    """Regenerate every manifest-declared cargo-public-api baseline."""
-    if shutil.which("cargo-public-api") is None:
-        return False, "cargo-public-api not installed — see rust-api-profiles.json for the pinned version (skipped)"
+    """Regenerate every manifest-declared cargo-public-api baseline.
+
+    Both the toolchain pin and the tool-version pin are hard
+    requirements. `rust_api_profiles.py` rejects a mismatched
+    cargo-public-api version outright — a *different* version emits a
+    different surface, so a baseline captured with the wrong one is not
+    a baseline. Neither the missing-tool nor the wrong-version case may
+    degrade to a skip: these baselines gate downstream Rust embedders
+    and the C ABI.
+    """
     manifest = json.loads(API_PROFILE_MANIFEST.read_text(encoding="utf-8"))
+    if shutil.which("cargo-public-api") is None:
+        raise RefreshError(
+            "cargo-public-api is not installed, so the public-API baselines cannot be "
+            "refreshed. Install the pinned toolchain + tool:\n"
+            '  rustup toolchain install "$(python scripts/rust_api_profiles.py value nightly)"\n'
+            "  cargo install cargo-public-api --locked --version "
+            '"$(python scripts/rust_api_profiles.py value cargo_public_api_version)"'
+        )
     paths = [REPO_ROOT / profile["baseline"] for profile in manifest["profiles"]]
     before = {path: path.read_text(encoding="utf-8") if path.exists() else None for path in paths}
     proc = subprocess.run(
@@ -289,15 +334,22 @@ def refresh_api_baseline() -> tuple[bool, str]:
         text=True,
     )
     if proc.returncode != 0:
-        last = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "unknown error"
-        return False, f"cargo public-api profile refresh failed: {last}"
+        detail = (proc.stderr.strip() or proc.stdout.strip() or "unknown error").splitlines()[-1]
+        raise RefreshError(
+            f"cargo public-api profile refresh failed: {detail}\n"
+            "The pinned toolchain and tool version are single-sourced in "
+            "tests/api-baselines/rust-api-profiles.json:\n"
+            '  rustup toolchain install "$(python scripts/rust_api_profiles.py value nightly)"\n'
+            "  cargo install cargo-public-api --locked --version "
+            '"$(python scripts/rust_api_profiles.py value cargo_public_api_version)"'
+        )
     after = {path: path.read_text(encoding="utf-8") if path.exists() else None for path in paths}
     if before == after:
         return False, f"all {len(paths)} Rust API profile baselines already current"
     return True, f"refreshed {len(paths)} Rust API profile baselines"
 
 
-def main() -> int:
+def run() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--skip-benchmarks", action="store_true", help="Skip the perf-baseline capture (~15s wall-clock).")
     args = p.parse_args()
@@ -315,11 +367,14 @@ def main() -> int:
     print("2. binary-size baseline")
     dylib = find_release_dylib()
     if dylib is None:
-        print("   SKIP   : no target/release/libkglite.{dylib,so} — run `cargo build --release` first.\n")
-    else:
-        size = dylib.stat().st_size
-        changed, msg = refresh_binary_size(version, size)
-        print(f"   {'CHANGED' if changed else 'no-op '}: {msg}\n")
+        raise RefreshError(
+            "no target/release/libkglite_py.{dylib,so} or libkglite.{dylib,so} — the binary-size "
+            "baseline describes the release artifact and cannot be captured without one.\n"
+            "  uv run --no-sync maturin develop --release   (or: cargo build --release)"
+        )
+    size = dylib.stat().st_size
+    changed, msg = refresh_binary_size(version, size)
+    print(f"   {'CHANGED' if changed else 'no-op '}: {msg}\n")
 
     # 3. perf baseline
     if args.skip_benchmarks:
@@ -339,14 +394,22 @@ def main() -> int:
     # dependency) must re-resolve its lock or the packaged-feature CI jobs
     # fail on main (bit 0.14.4 and 0.14.5).
     print("5. packaged-consumer fixture lockfile")
-    before = (REPO_ROOT / "tests/fixtures/rust-embed-consumer/Cargo.lock").read_bytes()
-    subprocess.run(
+    fixture_lock = REPO_ROOT / "tests/fixtures/rust-embed-consumer/Cargo.lock"
+    before = fixture_lock.read_bytes()
+    proc = subprocess.run(
         ["cargo", "update", "--manifest-path", "tests/fixtures/rust-embed-consumer/Cargo.toml", "-p", "kglite"],
         cwd=REPO_ROOT,
-        check=True,
         capture_output=True,
+        text=True,
     )
-    after = (REPO_ROOT / "tests/fixtures/rust-embed-consumer/Cargo.lock").read_bytes()
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or "no diagnostic output"
+        raise RefreshError(
+            f"packaged-consumer fixture lock did not re-resolve:\n{detail}\n"
+            "The packaged-feature CI jobs consume kglite by version under --locked, so a stale "
+            "fixture lock fails on main."
+        )
+    after = fixture_lock.read_bytes()
     print(f"   {'CHANGED' if before != after else 'no-op '}: tests/fixtures/rust-embed-consumer/Cargo.lock\n")
 
     # Pretty diff summary.
@@ -376,6 +439,13 @@ def main() -> int:
     else:
         print("All constants already current — no changes to stage.")
 
+
+def main() -> int:
+    try:
+        run()
+    except RefreshError as exc:
+        print(f"\nrelease-constant refresh FAILED: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

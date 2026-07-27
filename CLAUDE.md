@@ -365,7 +365,33 @@ The loop's pushes are still subject to the same rigor as any release push (lint 
 
 Conversational phrasing from earlier in the session ("ship it", "looks good", "you may push", "we're ready") **does not** carry over to a later moment outside the fix-and-push loop, even within the same turn if other actions intervene. When in doubt, prepare the commit, stop, and ask. The cost of a re-prompt is small; an unapproved push to `main` is not.
 
-Version source of truth: **`[workspace.package] version` in the root `Cargo.toml`**. Every member crate (engine, wheel, `kglite-c`, servers, cli) sets `version.workspace = true` and inherits it, so a release bumps this one line and all published crates ship in lockstep.
+Version source of truth: **`[workspace.package] version` in the root
+`Cargo.toml`**. Every member crate (engine, wheel, `kglite-c`, servers, cli)
+sets `version.workspace = true` and inherits it, so all published crates ship
+in lockstep.
+
+**But the version lives in five files, not one.** `[workspace.package]` covers
+each crate's *own* `package.version`; it does not cover the internal
+dependency requirements. Four member manifests — `kglite-bolt-server`,
+`kglite-c`, `kglite-cli`, `kglite-mcp-server` — declare
+`kglite = { version = "X.Y.Z", path = "../kglite", … }`, because `cargo
+publish` rejects a `path`-only dependency. Bumping only the workspace table
+leaves the workspace unresolvable as soon as the bump crosses a minor
+(`cargo metadata`: *failed to select a version for the requirement
+`kglite = ^0.14`*), and every release step that shells out to cargo dies on
+its first call — that is exactly what broke `make refresh-release-constants`
+during the 0.15.0 release.
+
+So: **never hand-edit the version. Run `make bump-version VERSION=X.Y.Z`.**
+It rewrites all five places and verifies with a resolving `cargo metadata`
+that every member resolved (`--no-deps` skips resolution entirely and passes
+on exactly the broken tree). The internal requirement carries the full `X.Y.Z`
+rather than the `X.Y` series, because these crates ship in lockstep and this
+project deliberately ships breaking engine changes in patch bumps — `^0.15`
+would advertise that `kglite-cli 0.15.3` builds against `kglite 0.15.0`, which
+is often false. `make gate` fails if any of the five drifts apart. The bump
+*size* stays a human decision (see `make semver-check`); the target only
+applies the version you hand it.
 
 ### One version bump per push
 
@@ -384,7 +410,7 @@ If that returns a commit, keep the version it picked. Only mint a new version af
 Three captured values drift across releases and need a version-paired refresh as part of the release commit. The gates that check them are otherwise reliable — see Test infrastructure → Phase 4 / Phase 5 / perf-regression — but they go stale silently when nobody updates the captured constants. `make refresh-release-constants` does all three in one pass and prints a `git diff --stat` so the maintainer can stage them into the release commit.
 
 - `tests/test_phase4_parity.py::GOLDEN_V3_DIGEST` (and demote the prior value into `ACCEPTABLE_DIGESTS`). The version string lives in the `.kgl` header, so every release shifts the digest.
-- `tests/test_phase5_parity.py::test_binary_size_regression` baseline. Update the docstring's "what grew" note with each bump — the script adds a `TODO: describe what grew since the prior baseline` line for the maintainer to fill in.
+- `tests/test_phase5_parity.py::test_binary_size_regression` baseline. Update the docstring's "what grew" note with each bump — the script adds a `TODO: describe what grew since the prior baseline` line for the maintainer to fill in. **`make gate` fails while that marker survives** (`scripts/check_release_hygiene.py`), so the release can't ship with the placeholder in it.
 - `tests/benchmarks/baselines/<version>.json` and `current.json`. Captured by re-running the 11 tracked core benchmarks. The script is idempotent — if `<version>.json` already exists, recapture is skipped (delete the file to force a fresh capture; benchmark numbers are inherently noisy so we don't want to overwrite on every script run).
 
 The script requires one fresh release artifact (`uv run --no-sync maturin
@@ -392,12 +418,62 @@ develop --release`) for steps 2 and 3. Build it once, after the completed PR's
 full CI is green; it is release-data generation, not a reason to rerun tests in
 release mode.
 
+**No step in that script is best-effort.** A step that cannot do its job —
+missing release artifact, missing *or wrong-version* `cargo-public-api`, a
+rewrite anchor that moved, a failed benchmark run, a fixture lock that won't
+re-resolve — exits non-zero with the remediation command. It never prints a
+line and lets the release continue: in 0.15.0 the public-API step found
+cargo-public-api 0.52.0 against a 0.49.0 pin, reported a no-op, and only a
+human reading the output stopped stale baselines from shipping. The only
+intentional skips are the idempotent per-version benchmark re-capture and an
+explicit `--skip-benchmarks`. Do what the error says and re-run; never route
+around it.
+
 Two release-time companions (both wired into the release skill):
 `make bench-anchor` gates cumulative perf drift (newest baseline vs ~3
 releases back, +30%), and `make semver-check` reports mechanically-detected
 API changes vs the last published kglite to ground the bump-size decision
 (informational — this project deliberately ships documented breaking changes
 in patch bumps).
+
+### Release preflight and CI polling
+
+Two release-time instruments, both **checkers** — neither performs a release
+step, and neither has a `--fix`:
+
+- `make release-preflight` reports whether the tree is ready for the release
+  commit, and **refuses** (exit 1) if not. It asserts workspace coherence —
+  every member inherits `[workspace.package] version`, the workspace
+  *resolves* (a resolving `cargo metadata`, since `--no-deps` skips
+  resolution and passes on exactly the broken tree), and all five publishable
+  crates sit at one version — plus workspace version vs. the top CHANGELOG
+  section, internal pin sync, captured constants present for this version,
+  server binaries newer than the manifest, `cargo fmt` + `ruff format` clean
+  (the constants refresh dirties formatting), and `origin/main` an ancestor of
+  HEAD. It prints the command for each unmet precondition and stops there.
+  Run it after promoting the CHANGELOG, before writing the release commit.
+
+  The coherence assertions are **not** redundant with `make bump-version`.
+  The bump tool fixes the forward path; nothing stops the state drifting some
+  other way (a merge, a hand-edit, a rebase resolving a manifest conflict
+  wrongly). And a member carrying its own stale explicit `version = "..."`
+  resolves perfectly well — resolution cannot see that class at all, only
+  reading the manifests can. Preflight **names the offending files and tells
+  you to run `make bump-version`; it never repairs them.** A divergence might
+  be someone's deliberate in-progress change, and quietly overwriting it
+  would be worse than the drift.
+- `python scripts/wait_for_release_ci.py` waits for the four push-triggered
+  workflows. It queries **by branch** with a client-side `head_sha` filter —
+  `gh run list --commit <sha>` returned `runs=0` for an hour during 0.15.0
+  while all four were green on that SHA — **requires all four runs to be
+  present** before concluding anything (a zero-incomplete loop exits instantly
+  green on an empty array), and reports **`conclusion`, not `status`**. A
+  timeout is a non-zero exit, never a pass.
+
+Do not grow either into a driver. A tool that reports "these four things are
+not ready" makes the maintainer faster; a tool that quietly performs the steps
+it checks is how gates stop gating. The bump size, the semver-check reading,
+and the push stay human decisions.
 
 ### PyPI project capacity
 
