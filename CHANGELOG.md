@@ -28,6 +28,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   load. A *populated* entry under an unresolvable key is still rejected — that
   is a damaged sidecar, not this bug.
 
+### Added
+
+- **A declared minimum supported Rust version on every published crate.** All
+  five crates we publish to crates.io shipped without a `rust-version`, so a
+  consumer on an older toolchain got a compile error from somewhere inside the
+  dependency tree instead of cargo's clear "package X requires rustc 1.88".
+  The floors are now declared, and they are not uniform because the
+  dependencies are not: `kglite`, `kglite-c` and `kglite-mcp-server` require
+  **1.88.0** (the workspace default, inherited via `[workspace.package]`),
+  `kglite-cli` requires **1.89.0**, and `kglite-bolt-server` requires
+  **1.91.0**. Each number was determined by taking the maximum `rust-version`
+  across that crate's resolved dependency tree and then confirming the crate
+  actually builds on it — not by reading metadata alone, which understates the
+  answer: `rustyline 18` declares no `rust-version` at all yet calls
+  `File::lock_shared`, stabilized in 1.89, which is the whole reason
+  `kglite-cli` sits above the workspace floor. A new CI job builds every crate
+  on exactly the version it declares, with the matrix derived from the
+  manifests, so the contract cannot drift away from its check.
+
+### Fixed
+
+- **Two dependency requirements that understated their real minimum.**
+  `fastembed = "5"` selects the `ort-download-binaries-native-tls` feature,
+  which did not exist until **5.9.0**; `mimalloc = "0.1"` selects the `v2`
+  feature, which did not exist until **0.1.49**. Both now declare those
+  minimums. Neither could fail for us — our lockfile has held newer versions
+  throughout — but either would fail at resolution for a consumer whose lock
+  pinned an older version, with "package does not have that feature". This is
+  the same class as the `mcp-methods = "0.4"` fix that shipped just before it,
+  and it was found by the new minimal-versions CI job rather than by a
+  downstream report. `serde`, `serde_json` and `chrono` requirements that
+  differed between our own workspace members were aligned to the tightest
+  floor any member already declares.
+
 ## [0.15.0] - 2026-07-27
 
 ### Added

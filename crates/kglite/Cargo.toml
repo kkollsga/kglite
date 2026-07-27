@@ -7,6 +7,7 @@
 name = "kglite"
 version.workspace = true
 edition = "2021"
+rust-version.workspace = true
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
 description = "Pure-Rust embedded Cypher knowledge graph engine with in-memory, mmap, and disk storage, and agent-facing schema introspection"
@@ -78,7 +79,13 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [dependencies]
 petgraph = { version = "0.8.3", features = ["serde-1"] }
-fastembed = { version = "5", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
+# 5.9 is a real MINIMUM, not a floor-by-habit: the
+# `ort-download-binaries-native-tls` feature selected below was added in
+# fastembed 5.9.0 (5.0.x has `ort-download-binaries` and
+# `hf-hub-native-tls`, but not the native-tls ort variant). Declaring
+# plain "5" let a consumer resolve 5.0.1 and fail with "fastembed does
+# not have that feature". Found by the minimal-versions CI job.
+fastembed = { version = "5.9", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.150"
 postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }

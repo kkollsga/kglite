@@ -2,6 +2,10 @@
 name = "kglite-bolt-server"
 version.workspace = true
 edition = "2021"
+# Above the 1.88.0 workspace floor: `boltr 0.2.0` declares
+# `rust-version = "1.91.0"`. This was previously recorded only as a
+# comment further down this file; now it is the actual contract.
+rust-version = "1.91.0"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
 description = "Pure-Rust Bolt v5.x protocol server for kglite knowledge graphs, with a regression-tested Neo4j Python driver path."
@@ -40,10 +44,11 @@ kglite = { version = "0.15.0", path = "../kglite", default-features = false }
 # (the 11-method seam in boltr::server::BoltBackend) and hand the
 # instance to BoltServer::builder(...).serve(addr).
 #
-# boltr v0.2.0 requires rust-version = "1.91.0". Local + CI toolchains
-# (rustc stable 1.95+) clear this comfortably. Phase B's plan calls out
-# the upstream-churn risk; we accept it because hand-rolling Bolt
-# framing for Phase B alone is not the right shape.
+# boltr v0.2.0 requires rust-version = "1.91.0" — which is why this crate
+# declares `rust-version = "1.91.0"` above instead of inheriting the
+# workspace 1.88.0 floor. Phase B's plan calls out the upstream-churn
+# risk; we accept it because hand-rolling Bolt framing for Phase B alone
+# is not the right shape.
 boltr = { version = "0.2", features = ["tls"] }
 
 # Phase F #6: rustls crypto provider for boltr's TLS support.

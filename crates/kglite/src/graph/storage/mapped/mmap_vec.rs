@@ -644,7 +644,7 @@ impl<T: MmapPod> MmapOrVec<T> {
             MmapOrVec::Heap { data } => data.as_mut_slice(),
             // SAFETY: `&mut self` + `*len ≤ capacity`, and the mmap has
             // `capacity * size_of::<T>()` bytes. See module invariants.
-            MmapOrVec::Mapped { mmap, len, .. } if *len == 0 => &mut [],
+            MmapOrVec::Mapped { len, .. } if *len == 0 => &mut [],
             MmapOrVec::Mapped { mmap, len, .. } => unsafe {
                 let mmap = mmap.as_mut().expect("non-empty MmapOrVec must be mapped");
                 std::slice::from_raw_parts_mut(mmap.as_mut_ptr() as *mut T, *len)

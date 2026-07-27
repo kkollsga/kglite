@@ -584,9 +584,11 @@ pub struct EdgeSpecReport {
 /// Bulk-create edges from explicit specs, addressed by stable node id +
 /// type. The DataFrame-free sibling of [`add_connections`]: it drives the
 /// *same* engine (`CombinedTypeLookup` + `ConnectionBatchProcessor`) but
-/// takes a spec list instead of a polars `DataFrame` — the path the C ABI
-/// (and future Go / JS / JVM bindings, which can't cheaply build a
-/// DataFrame) use, plus any caller that already has edges as records.
+/// takes a spec list instead of a [`DataFrame`] — the path the C ABI (and
+/// future Go / JS / JVM bindings, which can't cheaply build a DataFrame)
+/// use, plus any caller that already has edges as records. (That
+/// `DataFrame` is kglite's own columnar container in
+/// `crate::datatypes::values`; kglite does not depend on polars.)
 ///
 /// Specs are grouped by `(source_type, target_type, edge_type)`; each
 /// group gets one type lookup and one batch, mirroring `add_connections`.

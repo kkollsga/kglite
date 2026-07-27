@@ -139,8 +139,11 @@ pub mod api {
     /// the DataFrame-free edge-ingest path that non-Python bindings use
     /// (the C ABI's `create_edges_batch` wraps it); the DataFrame-based
     /// `add_nodes` / `add_connections` / `replace_connections` are the
-    /// Rust-side bulk-ingest path (polars `DataFrame` in, operation report
-    /// out). `update_node_properties`, `purge_provisional_nodes`, and
+    /// Rust-side bulk-ingest path (`DataFrame` in, operation report out).
+    /// That `DataFrame` is kglite's own columnar container
+    /// (`crate::datatypes::values::DataFrame`, built on `Value`) — kglite
+    /// does not depend on polars. `update_node_properties`,
+    /// `purge_provisional_nodes`, and
     /// `extend_graph` (merge one graph into another) round out the
     /// generic, non-Selection mutation surface. Lifted in roadmap Piece 2.
     /// `create_connections` (edge-create between the two ends of a

@@ -146,6 +146,169 @@ jobs:
       - name: Validate temporary RustSec exception policy
         run: python scripts/check_rustsec_advisories.py --policy-only
 
+  msrv-matrix:
+    # Derives the MSRV job's matrix from the manifests themselves. A
+    # hard-coded matrix would let the declared `rust-version` and the job
+    # that verifies it drift apart — which is the exact failure a declared-
+    # but-unchecked MSRV creates, just moved one level up. The script also
+    # fails when a workspace member declares no `rust-version` at all, so a
+    # new crate cannot join without picking a floor.
+    name: Derive MSRV matrix from manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.derive.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Show the declared floors
+        run: python scripts/msrv_matrix.py
+      - id: derive
+        run: python scripts/msrv_matrix.py --github >> "$GITHUB_OUTPUT"
+
+  msrv:
+    # Builds every published crate on exactly the Rust version it declares.
+    # We publish five crates to crates.io; before 0.15 none of them declared
+    # a `rust-version`, so a consumer on an older toolchain got a confusing
+    # compile error from somewhere inside the dep tree instead of a clear
+    # "package X requires rustc 1.88" from cargo.
+    #
+    # The floors are NOT uniform and deliberately so: `kglite-cli` needs
+    # 1.89 (rustyline 18 calls `File::lock_shared` while declaring no
+    # `rust-version` of its own) and `kglite-bolt-server` needs 1.91 (boltr).
+    # Forcing one number would have raised the engine's floor to 1.91 for no
+    # reason.
+    #
+    # Default features only. Optional `okf`/`rdf` are checked on the engine
+    # group; `fastembed` is excluded because it pulls a ~200 MB ONNX runtime
+    # (the `kglite-c` job skips it for the same reason).
+    name: MSRV ${{ matrix.toolchain }} (${{ matrix.label }})
+    needs: msrv-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.msrv-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust ${{ matrix.toolchain }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv-${{ matrix.toolchain }}
+          workspaces: ". -> target"
+
+      - name: Build on the declared MSRV
+        run: cargo check ${{ matrix.packages }}
+
+      - name: Build the engine's optional format loaders on the same floor
+        if: matrix.core == 'true'
+        run: cargo check -p kglite --features okf,rdf
+
+  minimal-versions:
+    # WHAT THIS CATCHES
+    # -----------------
+    # A dependency requirement that understates the version our own code
+    # actually needs. `mcp-methods = "0.4"` while calling APIs added in
+    # 0.4.1 (fixed in 3114caab) is the reference case. This class is
+    # STRUCTURALLY INVISIBLE to the repo that declares it: our committed
+    # lockfile already held 0.4.1 and a fresh resolve picks the newest
+    # match, so every local build and every other CI job resolved the
+    # working version. Only a consumer whose lock pinned 0.4.0 ever saw it,
+    # and only as a compile error in their repo.
+    #
+    # This job removes that blindness by resolving our DIRECT dependencies
+    # DOWN to their declared minimums and building the result.
+    #
+    # WHAT THIS DOES NOT CATCH
+    # ------------------------
+    # `-Z direct-minimal-versions` lowers only the direct dependencies of
+    # workspace members; transitive dependencies still resolve normally.
+    # A third-party crate that understates ITS floor is not detected here.
+    # Full `-Z minimal-versions` would cover that, but it fails across the
+    # ecosystem on crates that never declared accurate floors, so its
+    # output would be noise rather than signal.
+    #
+    # It also does not check that a floor is TIGHT — a needlessly high
+    # declared minimum resolves and builds fine. Overstating is the benign
+    # direction (the consumer gets a clear resolution error, not a
+    # mysterious compile failure), so that asymmetry is acceptable.
+    #
+    # WHY IT IS NON-BLOCKING TODAY
+    # ----------------------------
+    # It currently fails at the RESOLUTION step, before it can build
+    # anything. Roughly twenty of our direct dependencies are declared as
+    # bare `"1"` / `"0.x"` floors; lowered simultaneously, several conflict
+    # with each other's transitive requirements (e.g. `regex = "1"` resolves
+    # 1.0.0, which lacks the `std` feature `tracing-subscriber` needs).
+    # Reaching green requires giving each direct dependency a real, compiled
+    # floor — a separate piece of work, tracked in
+    # dev-docs/plans/publishing-contract-2026-07-27.md.
+    #
+    # So the job runs, prints its finding, and does NOT block the release
+    # gate. It is deliberately still listed in `ci-success`'s `needs` so it
+    # stays visible in every run rather than becoming a job nobody looks at.
+    # The `cargo check` step below is already wired up: the day the floors
+    # are tightened, this job starts delivering the real signal — and the
+    # `continue-on-error` flags come off — without further edits.
+    #
+    # Non-vacuity is verified, not assumed: with `3114caab` temporarily
+    # reverted (`mcp-methods = "0.4"`), resolution selects mcp-methods 0.4.0
+    # and the build fails on the missing `ActivationBuild` / `ActivationRequest`
+    # / `PreparedActivation` symbols. See the plan doc for the transcript.
+    name: Minimal versions (declared dependency floors)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust nightly (for -Z direct-minimal-versions)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install Rust stable (builds the lowered lockfile)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: minimal-versions
+          workspaces: ". -> target"
+
+      - name: Resolve direct dependencies down to their declared minimums
+        id: resolve
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo +nightly -Z direct-minimal-versions generate-lockfile 2>&1 | tee resolve.log
+
+      - name: Build against the lowered lockfile
+        if: steps.resolve.outcome == 'success'
+        continue-on-error: true
+        run: cargo check --workspace --locked
+
+      - name: Report
+        if: always()
+        run: |
+          {
+            echo "## Minimal versions"
+            if [ "${{ steps.resolve.outcome }}" = "success" ]; then
+              echo "Resolution to declared minimums succeeded; see the build step."
+            else
+              echo "Resolution to declared minimums FAILED — a declared floor is"
+              echo "unreachable or understated. First conflict:"
+              echo ''
+              echo '```'
+              tail -n 25 resolve.log || true
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   rustsec-audit:
     name: Required RustSec audit
     runs-on: ubuntu-latest
@@ -899,6 +1062,13 @@ jobs:
       - rust-checks
       - rust-core-coverage
       - source-quality
+      - msrv-matrix
+      - msrv
+      # `minimal-versions` is `continue-on-error: true`, so it reports
+      # `success` here even when it finds something. It is listed anyway so
+      # it stays visible in every run instead of quietly rotting; see the
+      # job's own comment for what it catches and why it cannot block yet.
+      - minimal-versions
       - rustsec-audit
       - kglite-c
       - python-lint

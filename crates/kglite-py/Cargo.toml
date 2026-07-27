@@ -5,6 +5,10 @@
 name = "kglite-py"
 version.workspace = true
 edition = "2021"
+# Inherited from the `kglite-cli` path dependency below, which needs
+# 1.89.0 for rustyline. Not published to crates.io, but the wheel is
+# built from source, so the floor is real for anyone building it.
+rust-version = "1.89.0"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 description = "PyO3 wrapper for kglite — Python bindings around the pure-Rust kglite knowledge graph engine."
 readme = "../../README.md"
@@ -111,7 +115,11 @@ serde_json = "1.0.150"
 petgraph = { version = "0.8.3", features = ["serde-1"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 regex = "1"
-mimalloc = { version = "0.1", default-features = false, features = ["v2"] }
+# 0.1.49 is a real MINIMUM, not a floor-by-habit: the `v2` feature that
+# pins us to the mimalloc v2 line was added in 0.1.49. Declaring plain
+# "0.1" let a consumer resolve 0.1.9 and fail with "mimalloc does not
+# have that feature". Found by the minimal-versions CI job.
+mimalloc = { version = "0.1.49", default-features = false, features = ["v2"] }
 # Scoped SIGINT (Ctrl-C) handler so long Cypher queries are interruptible
 # from a REPL/notebook (src/util.rs::EnterKg). Unix-only; the handler just
 # flips an AtomicBool the engine polls.
