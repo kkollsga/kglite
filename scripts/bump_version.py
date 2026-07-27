@@ -77,6 +77,10 @@ INLINE_DEP_RE = re.compile(r"^(?P<key>[A-Za-z0-9_-]+)\s*=\s*\{(?P<body>[^}]*)\}\
 BODY_VERSION_RE = re.compile(r'version\s*=\s*"(?P<version>[^"]*)"')
 BODY_PATH_RE = re.compile(r'path\s*=\s*"(?P<path>[^"]*)"')
 
+# The crates `publish_crates.yml` pushes to crates.io, in lockstep at one
+# version. A divergence here is a broken publish set, not a warning.
+PUBLISHED_CRATES = ("kglite", "kglite-bolt-server", "kglite-c", "kglite-cli", "kglite-mcp-server")
+
 
 class BumpError(RuntimeError):
     """A condition that must stop the release, not print and continue."""
@@ -188,8 +192,33 @@ def bump(new_version: str) -> list[Path]:
     return changed
 
 
-def verify_resolves(expected: str) -> None:
-    """`cargo metadata` must succeed and report every member at `expected`.
+def declared_member_version(manifest: Path) -> str | None:
+    """What the member's own ``[package]`` table says its version is.
+
+    ``"workspace"`` when it inherits via ``version.workspace = true``, the
+    literal string when it hard-codes one, ``None`` when it declares
+    neither. A hard-coded value still *resolves* — cargo is perfectly
+    happy with a member pinned to a stale version — so this is drift that
+    dependency resolution cannot see.
+    """
+    in_package = False
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_package = stripped == "[package]"
+            continue
+        if not in_package:
+            continue
+        if re.match(r"^version\s*\.\s*workspace\s*=\s*true\s*$", stripped):
+            return "workspace"
+        literal = re.match(r'^version\s*=\s*"([^"]+)"', stripped)
+        if literal:
+            return literal.group(1)
+    return None
+
+
+def resolve_workspace_versions() -> dict[str, str]:
+    """Resolve the workspace and return ``{member_name: version}``.
 
     Note the *absence* of ``--no-deps``: that flag skips dependency
     resolution altogether, so it happily reports success on a workspace
@@ -207,11 +236,16 @@ def verify_resolves(expected: str) -> None:
     )
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or "no diagnostic output"
-        raise BumpError(f"cargo metadata failed after the bump:\n{detail}")
+        raise BumpError(f"cargo metadata could not resolve the workspace:\n{detail}")
     metadata = json.loads(proc.stdout)
     members = set(metadata["workspace_members"])
-    packages = [pkg for pkg in metadata["packages"] if pkg["id"] in members]
-    wrong = sorted(f"{pkg['name']} {pkg['version']}" for pkg in packages if pkg["version"] != expected)
+    return {pkg["name"]: pkg["version"] for pkg in metadata["packages"] if pkg["id"] in members}
+
+
+def verify_resolves(expected: str) -> None:
+    """The workspace must resolve and every member must be at `expected`."""
+    packages = resolve_workspace_versions()
+    wrong = sorted(f"{name} {version}" for name, version in packages.items() if version != expected)
     if wrong:
         raise BumpError(f"members did not resolve to {expected}: {', '.join(wrong)}")
     print(f"cargo metadata: all {len(packages)} workspace members resolved to {expected}")

@@ -442,12 +442,26 @@ Two release-time instruments, both **checkers** — neither performs a release
 step, and neither has a `--fix`:
 
 - `make release-preflight` reports whether the tree is ready for the release
-  commit: workspace version vs. the top CHANGELOG section, internal pin sync,
-  captured constants present for this version, server binaries newer than the
-  manifest, `cargo fmt` + `ruff format` clean (the constants refresh dirties
-  formatting), and `origin/main` an ancestor of HEAD. It prints the command
-  for each unmet precondition and stops there. Run it after promoting the
-  CHANGELOG, before writing the release commit.
+  commit, and **refuses** (exit 1) if not. It asserts workspace coherence —
+  every member inherits `[workspace.package] version`, the workspace
+  *resolves* (a resolving `cargo metadata`, since `--no-deps` skips
+  resolution and passes on exactly the broken tree), and all five publishable
+  crates sit at one version — plus workspace version vs. the top CHANGELOG
+  section, internal pin sync, captured constants present for this version,
+  server binaries newer than the manifest, `cargo fmt` + `ruff format` clean
+  (the constants refresh dirties formatting), and `origin/main` an ancestor of
+  HEAD. It prints the command for each unmet precondition and stops there.
+  Run it after promoting the CHANGELOG, before writing the release commit.
+
+  The coherence assertions are **not** redundant with `make bump-version`.
+  The bump tool fixes the forward path; nothing stops the state drifting some
+  other way (a merge, a hand-edit, a rebase resolving a manifest conflict
+  wrongly). And a member carrying its own stale explicit `version = "..."`
+  resolves perfectly well — resolution cannot see that class at all, only
+  reading the manifests can. Preflight **names the offending files and tells
+  you to run `make bump-version`; it never repairs them.** A divergence might
+  be someone's deliberate in-progress change, and quietly overwriting it
+  would be worse than the drift.
 - `python scripts/wait_for_release_ci.py` waits for the four push-triggered
   workflows. It queries **by branch** with a client-side `head_sha` filter —
   `gh run list --commit <sha>` returned `runs=0` for an hour during 0.15.0

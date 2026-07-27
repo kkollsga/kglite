@@ -193,10 +193,19 @@ bump-version:
 	@test -n "$(VERSION)" || { echo "usage: make bump-version VERSION=X.Y.Z"; exit 1; }
 	python3 scripts/bump_version.py --set $(VERSION)
 
-## Report whether the tree is ready for the release commit: version/CHANGELOG
-## agreement, internal pins, captured constants, server-binary freshness,
+## Report whether the tree is ready for the release commit. Asserts workspace
+## coherence -- every member inherits [workspace.package] version, the
+## workspace RESOLVES (which is what a stale internal `kglite = ...` pin
+## breaks), and all five publishable crates are at one version -- plus
+## version/CHANGELOG agreement, captured constants, server-binary freshness,
 ## formatting, and fast-forwardability. Run it after promoting the CHANGELOG
 ## and before writing the release commit.
+##
+## The three coherence assertions are not redundant with `make bump-version`:
+## the bump tool fixes the forward path, but a merge, hand-edit, or a rebase
+## that resolves a manifest conflict wrongly can drift the state anyway. And
+## resolution alone cannot see a member carrying its own stale explicit
+## version -- that resolves fine and still ships a broken publish set.
 ##
 ## CHECKER, NOT A DRIVER. It performs no release step and has no --fix: it
 ## prints the command for each unmet precondition and leaves running it — and

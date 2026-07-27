@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import re
 import sys
 
 import pytest
@@ -173,3 +174,22 @@ def test_expected_workflow_names_exist_in_the_repository(workflow):
                 names.add(line.split(":", 1)[1].strip().strip("\"'"))
                 break
     assert workflow in names
+
+
+# ── workspace coherence (what resolution alone cannot see) ─────────────
+
+
+def test_every_member_inherits_the_workspace_version():
+    """A member with its own explicit version still *resolves*, so
+    `cargo metadata` cannot detect this class at all."""
+    declared = {m.parent.name: bump_version.declared_member_version(m) for m in bump_version.member_manifests()}
+    assert set(declared.values()) == {"workspace"}, declared
+
+
+def test_published_crate_list_matches_the_publish_workflow():
+    """If a crate is added to (or dropped from) the crates.io publish set
+    without updating PUBLISHED_CRATES, the lockstep assertion silently
+    stops covering it."""
+    workflow = (REPO_ROOT / ".github" / "workflows" / "publish_crates.yml").read_text(encoding="utf-8")
+    published = set(re.findall(r"cargo publish -p ([\w-]+)", workflow))
+    assert published == set(bump_version.PUBLISHED_CRATES)

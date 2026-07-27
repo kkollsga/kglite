@@ -106,6 +106,71 @@ def check_internal_pins() -> Check:
     return Check("internal version pins", True, "all internal kglite requirements match the workspace")
 
 
+def check_member_inheritance(version: str) -> Check:
+    """No member may silently carry its own version.
+
+    `make bump-version` fixes the forward path, but nothing stops the
+    state drifting some other way — a merge, a hand-edit, a rebase that
+    resolves a manifest conflict wrongly. A member with a stale explicit
+    `version = "..."` still *resolves*, so dependency resolution cannot
+    see this class at all; only reading the manifests can.
+    """
+    problems: list[str] = []
+    for manifest in bump_version.member_manifests():
+        declared = bump_version.declared_member_version(manifest)
+        rel = manifest.relative_to(REPO_ROOT)
+        if declared is None:
+            problems.append(f"{rel}: [package] declares no version at all")
+        elif declared != "workspace" and declared != version:
+            problems.append(f"{rel}: [package] version = {declared!r}, workspace is {version!r}")
+    if problems:
+        return Check(
+            "member inheritance",
+            False,
+            problems[0] if len(problems) == 1 else f"{len(problems)} members diverge",
+            "set `version.workspace = true` in the offending manifest(s) — do not hand-set a version",
+        )
+    return Check("member inheritance", True, "every member inherits [workspace.package] version")
+
+
+def check_workspace_resolves(resolved: dict[str, str] | None, failure: str) -> Check:
+    """Every internal `kglite*` requirement must be satisfiable by the
+    version in the tree — the exact condition that broke 0.15.0."""
+    if resolved is None:
+        reason = next(
+            (line for line in failure.splitlines() if "failed to select a version" in line),
+            failure.splitlines()[0] if failure else "cargo metadata failed",
+        )
+        return Check(
+            "workspace resolves",
+            False,
+            reason.strip(),
+            "make bump-version VERSION=%s   (do not hand-edit the manifests)" % bump_version.read_workspace_version(),
+        )
+    return Check("workspace resolves", True, f"cargo metadata resolved all {len(resolved)} members")
+
+
+def check_publish_lockstep(version: str, resolved: dict[str, str] | None) -> Check:
+    """All five published crates at one version — they publish as a set."""
+    if resolved is None:
+        return Check("publish lockstep", False, "workspace does not resolve; cannot check", "see `workspace resolves`")
+    problems: list[str] = []
+    for crate in bump_version.PUBLISHED_CRATES:
+        actual = resolved.get(crate)
+        if actual is None:
+            problems.append(f"{crate} is not a workspace member")
+        elif actual != version:
+            problems.append(f"{crate} resolved to {actual}, expected {version}")
+    if problems:
+        return Check(
+            "publish lockstep",
+            False,
+            "; ".join(problems),
+            "make bump-version VERSION=%s" % version,
+        )
+    return Check("publish lockstep", True, f"all {len(bump_version.PUBLISHED_CRATES)} published crates at {version}")
+
+
 def check_server_binaries() -> Check:
     """A prebuilt server binary older than the manifest is stale — its
     suite then fails on a contract mismatch that never mentions the
@@ -236,8 +301,20 @@ def main() -> int:
         return 1
 
     print(f"release preflight for {version} — reporting only, nothing is modified\n")
+
+    # One resolution pass feeds both workspace-coherence checks.
+    resolved: dict[str, str] | None
+    failure = ""
+    try:
+        resolved = bump_version.resolve_workspace_versions()
+    except bump_version.BumpError as exc:
+        resolved, failure = None, str(exc)
+
     checks = [
         check_internal_pins(),
+        check_member_inheritance(version),
+        check_workspace_resolves(resolved, failure),
+        check_publish_lockstep(version, resolved),
         check_changelog_version(version),
         check_hygiene(),
         check_captured_constants(version),
