@@ -32,6 +32,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ways to give it a destination, matching `KnowledgeGraph.save()`, which
   already refuses rather than guesses when it has no path. `save=False` is
   unchanged, and so is every build whose blueprint declares an output.
+- **"Did you mean?" suggested names that were not close.** The edit-distance
+  threshold behind every suggestion — unknown node label, unknown relationship
+  type, unknown property, and the mutation-path validators — was
+  `input.len().clamp(2, 4)`, so a four-character name admitted a distance of 4
+  and matched very nearly any word of similar length. Scored over 66 cases
+  drawn from kglite's own vocabularies, that rule produced 18 confidently
+  wrong suggestions, among them `Isue` → `Paper` against a `{Person, Paper}`
+  schema, `Line` → `File`, and `WROTE` → `KNOWS`. A confidently wrong
+  suggestion is worse than none: it names a real but irrelevant thing the
+  reader may act on. The threshold is now rustc's `max(len, 3) / 3` over
+  character count, and the distance is Damerau–Levenshtein, so an adjacent
+  transposition (`Persno`) costs one edit rather than two — swapped letters
+  are among the most common real typos, and charging them double forced any
+  threshold loose enough to catch them to also admit unrelated words. A
+  case-only typo now gets a suggestion as well (`person` → `Person`), which
+  the old filter discarded because its distance is 0. The
+  `text_edit_distance()` Cypher function is unaffected: it is a user-facing
+  string metric, not a typo heuristic.
+
+- **A typo'd label or relationship type inside a subquery produced no
+  warning.** kglite warns non-fatally — on stderr and in `result.diagnostics`
+  — when a read pattern names a node label or relationship type the graph has
+  never seen, the most common cause of a silently empty result. The collector
+  walked only top-level `MATCH` / `OPTIONAL MATCH`, so the identical typo
+  inside `CALL { }`, `WHERE EXISTS { }` or a `UNION` branch said nothing, and
+  the shape of the query decided whether you were told. The warning and the
+  locked-schema check now reach patterns through a single traversal, so every
+  place a read pattern can appear is covered by both and a newly-covered form
+  lands on both at once. Nothing became an error, and write patterns
+  (`CREATE`, `MERGE`) are still never warned about — on an open schema that
+  is how a node type comes into existence.
 
 ## [0.15.1] - 2026-07-27
 

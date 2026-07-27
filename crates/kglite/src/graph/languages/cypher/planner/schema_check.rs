@@ -55,6 +55,13 @@
 //! the same messages into `QueryDiagnostics` so MCP/agent callers see them
 //! structurally is the natural next step.
 //!
+//! Both surfaces — the fatal check and these warnings — reach patterns through
+//! the single traversal in [`walk_query_patterns`], so a typo warns wherever a
+//! read pattern can appear (`CALL {}` bodies, `WHERE EXISTS {}`, `UNION`
+//! branches) rather than only at the top level. The one exception is
+//! [`absent_property_warnings`], which needs a var → label map and so stays
+//! top-level-only for want of a scope model.
+//!
 //! ## Pipeline placement
 //!
 //! Called by three downstream Cypher consumers after `parse_cypher` and
@@ -70,6 +77,7 @@ use crate::graph::core::pattern_matching::{Pattern, PatternElement};
 use crate::graph::mutation::validation::did_you_mean;
 use crate::graph::schema::{DirGraph, InternedKey};
 use std::collections::{HashMap, HashSet};
+use std::convert::Infallible;
 
 /// Built-in fields valid on any node type — mirrors BUILTIN_FIELDS in
 /// `mutation/validation.rs`. Listed explicitly so it's obvious what's
@@ -117,8 +125,7 @@ pub fn validate_schema(query: &CypherQuery, graph: &DirGraph) -> Result<(), Sche
         return Ok(());
     }
 
-    let mut var_types: HashMap<String, String> = HashMap::new();
-    validate_query(query, graph, &mut var_types)
+    validate_query(query, graph)
 }
 
 fn undefined_variable(name: &str) -> SchemaError {
@@ -912,53 +919,56 @@ pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -
         return Vec::new();
     }
 
-    // Walk MATCH / OPTIONAL MATCH patterns, checking each label/relationship
-    // against the schema directly. The all-valid path (the overwhelming common
-    // case) allocates nothing — only confirmed-unknown, not-yet-seen names are
+    // Walk every read pattern — top-level MATCH / OPTIONAL MATCH *and* the
+    // ones nested in `CALL {}`, `WHERE EXISTS {}` and `UNION` branches (see
+    // [`walk_query_patterns`]) — checking each label/relationship against the
+    // schema directly. The all-valid path (the overwhelming common case)
+    // allocates nothing: only confirmed-unknown, not-yet-seen names are
     // recorded, and the candidate lists for "did you mean?" are built lazily
     // only if there's at least one unknown.
     let mut seen: HashSet<String> = HashSet::new();
     let mut unknown_labels: Vec<String> = Vec::new();
     let mut unknown_rels: Vec<String> = Vec::new();
 
-    for clause in &query.clauses {
-        if let Clause::Match(m) | Clause::OptionalMatch(m) = clause {
-            for pattern in &m.patterns {
-                for element in &pattern.elements {
-                    match element {
-                        PatternElement::Node(np) if have_node_schema => {
-                            for label in np.node_type.iter().chain(np.extra_labels.iter()) {
-                                // A label is known if it's a declared primary
-                                // type OR a secondary label applied via
-                                // add_label (`MATCH (n:Reviewer)` is valid even
-                                // though `Reviewer` is no node's primary type).
-                                let known = graph.node_type_metadata.contains_key(label)
-                                    || graph.type_indices.contains_key(label)
-                                    || graph
-                                        .secondary_label_index
-                                        .contains_key(&InternedKey::from_str(label));
-                                if !known && seen.insert(format!("L:{label}")) {
-                                    unknown_labels.push(label.clone());
-                                }
-                            }
+    for_each_query_pattern(query, &mut |site| {
+        // Write patterns are deliberately skipped: on an open schema
+        // `CREATE (n:NewType)` is how a type comes into existence.
+        let PatternSite::Read(pattern) = site else {
+            return;
+        };
+        for element in &pattern.elements {
+            match element {
+                PatternElement::Node(np) if have_node_schema => {
+                    for label in np.node_type.iter().chain(np.extra_labels.iter()) {
+                        // A label is known if it's a declared primary
+                        // type OR a secondary label applied via
+                        // add_label (`MATCH (n:Reviewer)` is valid even
+                        // though `Reviewer` is no node's primary type).
+                        let known = graph.node_type_metadata.contains_key(label)
+                            || graph.type_indices.contains_key(label)
+                            || graph
+                                .secondary_label_index
+                                .contains_key(&InternedKey::from_str(label));
+                        if !known && seen.insert(format!("L:{label}")) {
+                            unknown_labels.push(label.clone());
                         }
-                        PatternElement::Edge(ep) if have_edge_schema => {
-                            let single = ep.connection_type.iter();
-                            let multi = ep.connection_types.iter().flatten();
-                            for rel in single.chain(multi) {
-                                if !graph.connection_type_metadata.contains_key(rel)
-                                    && seen.insert(format!("R:{rel}"))
-                                {
-                                    unknown_rels.push(rel.clone());
-                                }
-                            }
-                        }
-                        _ => {}
                     }
                 }
+                PatternElement::Edge(ep) if have_edge_schema => {
+                    let single = ep.connection_type.iter();
+                    let multi = ep.connection_types.iter().flatten();
+                    for rel in single.chain(multi) {
+                        if !graph.connection_type_metadata.contains_key(rel)
+                            && seen.insert(format!("R:{rel}"))
+                        {
+                            unknown_rels.push(rel.clone());
+                        }
+                    }
+                }
+                _ => {}
             }
         }
-    }
+    });
 
     // Seed with the absent-property warnings (A1b) so they're emitted alongside
     // the unknown-label/rel ones even when the labels/rels are all valid.
@@ -1009,100 +1019,142 @@ pub fn warn_unknown_pattern_refs(query: &CypherQuery, graph: &DirGraph) {
     }
 }
 
-fn validate_query(
+fn validate_query(query: &CypherQuery, graph: &DirGraph) -> Result<(), SchemaError> {
+    walk_query_patterns(query, &mut |site| match site {
+        PatternSite::Read(pattern) => validate_pattern(pattern, graph),
+        PatternSite::Write(pattern) => validate_create_pattern(pattern, graph),
+    })
+}
+
+/// A pattern the shared traversal hands to its visitor.
+///
+/// Read and write patterns are kept apart because the two consumers treat them
+/// differently: [`validate_schema`] checks pattern-literal property names in
+/// both, while [`collect_unknown_pattern_warnings`] must stay silent on writes
+/// — `CREATE (n:NewType)` on an open schema is how a type comes into
+/// existence, not a typo.
+enum PatternSite<'q> {
+    Read(&'q Pattern),
+    Write(&'q CreatePattern),
+}
+
+/// The one traversal that answers "where can a pattern appear in a query?".
+///
+/// Both schema surfaces route through it — [`validate_schema`] (fatal, locked
+/// schemas) and [`collect_unknown_pattern_warnings`] (non-fatal, open
+/// schemas) — and that is the point. The warning collector used to walk
+/// top-level `MATCH` / `OPTIONAL MATCH` itself, so a typo'd label inside
+/// `CALL {}`, `WHERE EXISTS {}` or a `UNION` branch produced no warning while
+/// the identical typo at top level did: exactly the incomplete-coverage bug
+/// the fatal path had already been extended to fix. Two walkers drift; there
+/// is now one, and a newly-covered nesting form lands on both surfaces at
+/// once.
+///
+/// Covers, recursively so nesting composes: `MATCH` / `OPTIONAL MATCH`,
+/// `EXISTS {}` at any `AND` / `OR` / `XOR` / `NOT` depth inside a `WHERE`
+/// (standalone or attached to a `WITH`), `CALL {}` bodies, `UNION` branches,
+/// and `CREATE` / `MERGE` write patterns.
+///
+/// Not covered — equally for both consumers, which is what keeps them in
+/// step: `COUNT {}` subqueries and `EXISTS {}` in expression position (both
+/// reach patterns through [`Expression`] rather than [`Predicate`]), and
+/// update clauses inside `FOREACH`.
+fn walk_query_patterns<E>(
     query: &CypherQuery,
-    graph: &DirGraph,
-    var_types: &mut HashMap<String, String>,
-) -> Result<(), SchemaError> {
+    visit: &mut impl FnMut(PatternSite<'_>) -> Result<(), E>,
+) -> Result<(), E> {
     for clause in &query.clauses {
-        validate_clause(clause, graph, var_types)?;
+        walk_clause_patterns(clause, visit)?;
     }
     Ok(())
 }
 
-fn validate_clause(
+fn walk_clause_patterns<E>(
     clause: &Clause,
-    graph: &DirGraph,
-    var_types: &mut HashMap<String, String>,
-) -> Result<(), SchemaError> {
+    visit: &mut impl FnMut(PatternSite<'_>) -> Result<(), E>,
+) -> Result<(), E> {
     match clause {
         Clause::Match(m) | Clause::OptionalMatch(m) => {
             for pattern in &m.patterns {
-                validate_pattern(pattern, graph, var_types)?;
+                visit(PatternSite::Read(pattern))?;
             }
         }
-        Clause::Where(w) => {
-            walk_predicate_for_nested_patterns(&w.predicate, graph, var_types)?;
-        }
+        Clause::Where(w) => walk_predicate_patterns(&w.predicate, visit)?,
         Clause::With(w) => {
-            for item in &w.items {
-                if let Some(alias) = &item.alias {
-                    var_types.remove(alias);
-                }
-            }
             if let Some(wc) = &w.where_clause {
-                walk_predicate_for_nested_patterns(&wc.predicate, graph, var_types)?;
+                walk_predicate_patterns(&wc.predicate, visit)?;
             }
         }
-        Clause::Union(u) => {
-            let mut inner_vars: HashMap<String, String> = HashMap::new();
-            validate_query(&u.query, graph, &mut inner_vars)?;
-        }
-        Clause::CallSubquery { import, body } => {
-            // Recurse into the body so pattern-literal property typos inside
-            // `CALL { MATCH (n:T {prp: v}) ... }` get the same "did you
-            // mean?" treatment as top-level patterns (mirrors the Union /
-            // EXISTS recursion).
-            //
-            // Imported variables are EXTERNALLY bound: the leading importing
-            // `WITH` was stripped at parse time, so the body re-binds them
-            // from the outer scope. Seed the body's `var_types` with the
-            // imported names' outer types so a body pattern that re-anchors
-            // on an import (`CALL { WITH p MATCH (p {prp: v}) }`) validates
-            // against the import's real type. Non-imported body variables
-            // start fresh (§1.2 rule 1 — a bare body name is a new variable).
-            let mut inner_vars: HashMap<String, String> = HashMap::new();
-            for name in import {
-                if let Some(ty) = var_types.get(name) {
-                    inner_vars.insert(name.clone(), ty.clone());
-                }
-            }
-            validate_query(body, graph, &mut inner_vars)?;
-        }
-        // LOAD CSV binds an untyped map/list, so there is no node type to
-        // validate properties against — same as UNWIND.
-        Clause::Return(_) | Clause::OrderBy(_) | Clause::Unwind(_) | Clause::LoadCsv(_) => {}
+        Clause::Union(u) => walk_query_patterns(&u.query, visit)?,
+        // The importing `WITH` was stripped at parse time, so the body is a
+        // self-contained sub-pipeline: recurse into it as into a UNION branch.
+        Clause::CallSubquery { body, .. } => walk_query_patterns(body, visit)?,
         Clause::Create(c) => {
             for pattern in &c.patterns {
-                validate_create_pattern(pattern, graph, var_types)?;
+                visit(PatternSite::Write(pattern))?;
             }
         }
-        Clause::Merge(m) => {
-            validate_create_pattern(&m.pattern, graph, var_types)?;
-            // MERGE's `ON CREATE SET` / `ON MATCH SET` use `SetItem`,
-            // which we intentionally skip — see the module doc-comment.
-        }
-        Clause::Set(_) | Clause::Delete(_) | Clause::Remove(_) | Clause::Call(_) => {}
+        // MERGE's `ON CREATE SET` / `ON MATCH SET` use `SetItem`, which the
+        // schema check intentionally skips — see the module doc-comment.
+        Clause::Merge(m) => visit(PatternSite::Write(&m.pattern))?,
+        // LOAD CSV binds an untyped map/list, so it carries no pattern —
+        // same as UNWIND.
         _ => {}
     }
     Ok(())
+}
+
+/// Descend a predicate to the `EXISTS { ... }` patterns nested inside it.
+fn walk_predicate_patterns<E>(
+    predicate: &Predicate,
+    visit: &mut impl FnMut(PatternSite<'_>) -> Result<(), E>,
+) -> Result<(), E> {
+    match predicate {
+        Predicate::And(a, b) | Predicate::Or(a, b) | Predicate::Xor(a, b) => {
+            walk_predicate_patterns(a, visit)?;
+            walk_predicate_patterns(b, visit)?;
+        }
+        Predicate::Not(p) => walk_predicate_patterns(p, visit)?,
+        Predicate::Exists {
+            patterns,
+            where_clause,
+            ..
+        } => {
+            for pattern in patterns {
+                visit(PatternSite::Read(pattern))?;
+            }
+            if let Some(w) = where_clause {
+                walk_predicate_patterns(w, visit)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Infallible companion to [`walk_query_patterns`] for visitors that only
+/// collect — the warning path never rejects, so it should not have to spell
+/// out an error type it cannot produce.
+fn for_each_query_pattern(query: &CypherQuery, visit: &mut impl FnMut(PatternSite<'_>)) {
+    let outcome = walk_query_patterns(query, &mut |site| -> Result<(), Infallible> {
+        visit(site);
+        Ok(())
+    });
+    match outcome {
+        Ok(()) => {}
+        // `Infallible` is uninhabited — this arm cannot be constructed.
+        Err(never) => match never {},
+    }
 }
 
 /// Validate a CREATE / MERGE pattern's node-pattern property names
 /// against the schema. Edge-pattern properties aren't validated —
 /// `connection_type_metadata` is keyed differently and edge schemas
 /// in kglite are looser; revisit if a real divergence shows up.
-fn validate_create_pattern(
-    pattern: &CreatePattern,
-    graph: &DirGraph,
-    var_types: &mut HashMap<String, String>,
-) -> Result<(), SchemaError> {
+fn validate_create_pattern(pattern: &CreatePattern, graph: &DirGraph) -> Result<(), SchemaError> {
     for element in &pattern.elements {
         if let CreateElement::Node(np) = element {
             if let Some(ref node_type) = np.label {
-                if let Some(ref var) = np.variable {
-                    var_types.insert(var.clone(), node_type.clone());
-                }
                 for (prop_name, _expr) in &np.properties {
                     validate_property(node_type, prop_name, graph)?;
                 }
@@ -1112,11 +1164,13 @@ fn validate_create_pattern(
     Ok(())
 }
 
-fn validate_pattern(
-    pattern: &Pattern,
-    graph: &DirGraph,
-    var_types: &mut HashMap<String, String>,
-) -> Result<(), SchemaError> {
+/// Validate a read pattern's labels (locked schemas only) and its
+/// pattern-literal property names.
+///
+/// A node pattern carrying no explicit label is skipped entirely: property
+/// validation needs a node type, and kglite does not infer one from an outer
+/// binding, so `CALL { WITH p MATCH (p {prp: v}) }` is not checked.
+fn validate_pattern(pattern: &Pattern, graph: &DirGraph) -> Result<(), SchemaError> {
     for element in &pattern.elements {
         if let PatternElement::Node(np) = element {
             // Label check first: on a locked schema an unknown label is a
@@ -1130,9 +1184,6 @@ fn validate_pattern(
                 }
             }
             if let Some(ref node_type) = np.node_type {
-                if let Some(ref var) = np.variable {
-                    var_types.insert(var.clone(), node_type.clone());
-                }
                 if let Some(ref props) = np.properties {
                     for prop_name in props.keys() {
                         validate_property(node_type, prop_name, graph)?;
@@ -1140,39 +1191,6 @@ fn validate_pattern(
                 }
             }
         }
-    }
-    Ok(())
-}
-
-/// Descend the predicate to find nested `EXISTS { MATCH ... }` patterns
-/// so their pattern-literal properties get validated too. Does not check
-/// expression-level property accesses or label checks — those are
-/// delivered as Phase 3 diagnostics instead.
-fn walk_predicate_for_nested_patterns(
-    predicate: &Predicate,
-    graph: &DirGraph,
-    var_types: &HashMap<String, String>,
-) -> Result<(), SchemaError> {
-    match predicate {
-        Predicate::And(a, b) | Predicate::Or(a, b) | Predicate::Xor(a, b) => {
-            walk_predicate_for_nested_patterns(a, graph, var_types)?;
-            walk_predicate_for_nested_patterns(b, graph, var_types)?;
-        }
-        Predicate::Not(p) => walk_predicate_for_nested_patterns(p, graph, var_types)?,
-        Predicate::Exists {
-            patterns,
-            where_clause,
-            ..
-        } => {
-            let mut inner_vars = var_types.clone();
-            for p in patterns {
-                validate_pattern(p, graph, &mut inner_vars)?;
-            }
-            if let Some(w) = where_clause {
-                walk_predicate_for_nested_patterns(w, graph, &inner_vars)?;
-            }
-        }
-        _ => {}
     }
     Ok(())
 }
@@ -1782,5 +1800,147 @@ mod tests {
             err.message,
             "Unknown node type 'Isue'. Did you mean 'Issue'?\n  Valid types: Issue, Paper, Person, Reviewer"
         );
+    }
+
+    // ── Open-schema warnings reach every nested clause ───────────────────
+    //
+    // The counterpart to the locked-schema block above. The warning
+    // collector once walked top-level MATCH / OPTIONAL MATCH only, so the
+    // same typo warned at top level and said nothing one level down —
+    // precisely the asymmetry the locked path had already been fixed for.
+    // Both now share [`walk_query_patterns`], so each clause form gets a
+    // case here and stays covered.
+
+    /// Open (unlocked) schema with an `Issue` type, so `Isue` has a real
+    /// near-miss to suggest — the locked block's scenario, unlocked.
+    fn open_graph_with_issue() -> DirGraph {
+        let mut g = graph_with_schema();
+        let mut issue_props = HashMap::new();
+        issue_props.insert("status".to_string(), "string".to_string());
+        g.upsert_node_type_metadata("Issue", issue_props);
+        assert!(!g.schema_locked, "this block is about the open-schema path");
+        g
+    }
+
+    /// Exactly one warning, naming the typo'd label and suggesting the real
+    /// one — and still no error, because a zero-row read stays legal.
+    fn assert_warns_isue(query: &str) {
+        let g = open_graph_with_issue();
+        let q = parse_cypher(query).unwrap();
+        let warnings = collect_unknown_pattern_warnings(&q, &g);
+        assert_eq!(warnings.len(), 1, "for `{query}`, got: {warnings:?}");
+        assert_eq!(
+            warnings[0],
+            "MATCH references unknown node label 'Isue' — the graph has no such type, so this \
+             pattern returns no rows. Did you mean 'Issue'?",
+            "for `{query}`"
+        );
+        assert!(
+            validate_schema(&q, &g).is_ok(),
+            "warning must stay non-fatal on an open schema: `{query}`"
+        );
+    }
+
+    #[test]
+    fn warns_unknown_label_in_top_level_match() {
+        // Control: the surface that already worked must keep working, with
+        // the identical message the nested cases assert.
+        assert_warns_isue("MATCH (i:Isue) RETURN i");
+        assert_warns_isue("MATCH (p:Person) OPTIONAL MATCH (i:Isue) RETURN p, i");
+    }
+
+    #[test]
+    fn warns_unknown_label_in_call_subquery() {
+        assert_warns_isue("CALL { MATCH (i:Isue) RETURN i } RETURN i");
+    }
+
+    #[test]
+    fn warns_unknown_label_in_where_exists() {
+        assert_warns_isue("MATCH (p:Person) WHERE EXISTS { MATCH (i:Isue) } RETURN p");
+        // …and behind boolean nesting, which the predicate walk descends.
+        assert_warns_isue(
+            "MATCH (p:Person) WHERE p.age > 1 AND NOT EXISTS { MATCH (i:Isue) } RETURN p",
+        );
+        // …and on a WITH's WHERE, not just a standalone one.
+        assert_warns_isue("MATCH (p:Person) WITH p WHERE EXISTS { MATCH (i:Isue) } RETURN p");
+    }
+
+    #[test]
+    fn warns_unknown_label_in_union_branch() {
+        assert_warns_isue("MATCH (p:Person) RETURN p UNION MATCH (i:Isue) RETURN i");
+    }
+
+    #[test]
+    fn warns_unknown_label_nested_two_deep() {
+        // Nesting composes: an EXISTS inside a CALL body is reached by the
+        // same recursion, so no clause form needs its own special case.
+        assert_warns_isue(
+            "CALL { MATCH (p:Person) WHERE EXISTS { MATCH (i:Isue) } RETURN p } RETURN p",
+        );
+    }
+
+    #[test]
+    fn warns_unknown_relationship_type_in_nested_clauses() {
+        // The relationship half of the same walk — one warning per query,
+        // wherever the pattern sits.
+        let g = open_graph_with_issue();
+        for query in [
+            "CALL { MATCH (a:Person)-[:KNOWZ]->(b:Person) RETURN a } RETURN a",
+            "MATCH (p:Person) WHERE EXISTS { MATCH (a:Person)-[:KNOWZ]->(b:Person) } RETURN p",
+            "MATCH (p:Person) RETURN p UNION MATCH (a:Person)-[:KNOWZ]->(b:Person) RETURN a",
+        ] {
+            let q = parse_cypher(query).unwrap();
+            let warnings = collect_unknown_pattern_warnings(&q, &g);
+            assert_eq!(warnings.len(), 1, "for `{query}`, got: {warnings:?}");
+            assert!(
+                warnings[0].contains("unknown relationship type 'KNOWZ'")
+                    && warnings[0].contains("Did you mean 'KNOWS'?"),
+                "for `{query}`, got: {}",
+                warnings[0]
+            );
+        }
+    }
+
+    #[test]
+    fn no_warning_for_known_labels_in_nested_clauses() {
+        // The other half of the coverage: descending must not invent
+        // warnings for valid nested patterns.
+        let g = open_graph_with_issue();
+        for query in [
+            "CALL { MATCH (i:Issue) RETURN i } RETURN i",
+            "MATCH (p:Person) WHERE EXISTS { MATCH (i:Issue) } RETURN p",
+            "MATCH (p:Person) RETURN p UNION MATCH (i:Issue) RETURN i",
+            "CALL { MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a } RETURN a",
+        ] {
+            let q = parse_cypher(query).unwrap();
+            assert!(
+                collect_unknown_pattern_warnings(&q, &g).is_empty(),
+                "spurious warning for `{query}`: {:?}",
+                collect_unknown_pattern_warnings(&q, &g)
+            );
+        }
+    }
+
+    #[test]
+    fn no_warning_for_new_label_in_nested_write() {
+        // Write patterns are how a type comes into existence on an open
+        // schema — warning "the graph has no such type" for a CREATE would
+        // be wrong. The shared walk visits them (the fatal check needs their
+        // property names), so the warning collector must skip them by kind.
+        // (A write inside `CALL { }` is rejected by the parser, so top-level
+        // CREATE / MERGE are the reachable cases.)
+        let g = open_graph_with_issue();
+        for query in [
+            "CREATE (i:Ticket {title: 'x'})",
+            "MERGE (i:Ticket {title: 'x'})",
+            "MATCH (p:Person) MERGE (p)-[:KNOWZ]->(t:Ticket {title: 'x'})",
+        ] {
+            let q = parse_cypher(query).unwrap();
+            assert!(
+                collect_unknown_pattern_warnings(&q, &g).is_empty(),
+                "write pattern wrongly warned for `{query}`: {:?}",
+                collect_unknown_pattern_warnings(&q, &g)
+            );
+        }
     }
 }
