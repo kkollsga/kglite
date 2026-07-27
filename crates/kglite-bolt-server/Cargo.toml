@@ -58,18 +58,31 @@ boltr = { version = "0.2", features = ["tls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 # Async trait sugar used by boltr's BoltBackend trait declaration.
-async-trait = "0.1"
+# 0.1.89 is the real workspace floor, not this crate's alone: kglite-mcp-server
+# pulls rmcp 2.2, which requires async-trait ^0.1.89, and cargo unifies the
+# version across the workspace. Declaring "0.1" let direct-minimal-versions
+# lower it to 0.1.0 and fail resolution outright -- caught by the
+# minimal-versions CI job added in 0.15.1.
+async-trait = "0.1.89"
 
-# Async runtime. Features match what boltr needs from tokio at runtime
-# plus what main.rs needs to register a SIGINT shutdown future.
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "io-util", "sync", "time"] }
+# 1.21.0, not "1": rmcp 2.2 uses tokio::task::JoinSet, which was added in
+# 1.21.0 (bisected against each version). hyper 1.x independently needs
+# >=1.13. Cargo unifies tokio workspace-wide, so both servers declare the
+# same floor even though only kglite-mcp-server pulls rmcp.
+tokio = { version = "1.21.0", features = ["macros", "rt-multi-thread", "net", "signal", "io-util", "sync", "time"] }
 
-clap = { version = "4", features = ["derive"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-anyhow = "1"
+clap = { version = "4.3", features = ["derive"] }
+tracing = "0.1.35"
+tracing-subscriber = { version = "0.3.8", features = ["env-filter"] }
+# 1.0.5, not "1": kglite-cli uses `Context` for `Option` (`.with_context`
+# on a None), which anyhow 1.0.0 does not implement. 1.0.0 fails and
+# 1.0.5 builds -- both verified by compiling against them.
+anyhow = "1.0.5"
 sha2 = "0.11"
-subtle = "2"
+# 2.5.0, not "2": rustls 0.23 (above) requires subtle ^2.5.0, and cargo
+# unifies the version across the workspace, so "2" let
+# direct-minimal-versions pick 2.0.0 and fail resolution.
+subtle = "2.5.0"
 # `Value::DateTime(NaiveDate)` arithmetic for the Bolt Date encoding
 # (days-since-Unix-epoch). Already transitive via kglite; pin to the
 # same version range so a workspace-level chrono bump touches us too.

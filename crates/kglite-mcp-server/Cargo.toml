@@ -57,15 +57,18 @@ kglite = { version = "0.15.1", path = "../kglite", default-features = false }
 # rmcp re-export for the dynamic tool registration path.
 rmcp = { version = "2.2", features = ["server", "macros", "transport-io", "schemars"] }
 
-# Async runtime + JSON
-# `net` is needed by csv_http's TcpListener — was previously pulled
-# in transitively by fastembed → reqwest → hyper → tokio/net. After
-# making fastembed optional in 0.10.1, declare net explicitly so the
-# default build still compiles.
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "fs", "sync", "time", "net"] }
+# 1.21.0, not "1": rmcp 2.2 uses tokio::task::JoinSet, which was added in
+# 1.21.0 (bisected against each version). hyper 1.x independently needs
+# >=1.13. Cargo unifies tokio workspace-wide, so both servers declare the
+# same floor even though only kglite-mcp-server pulls rmcp.
+tokio = { version = "1.21.0", features = ["macros", "rt-multi-thread", "io-std", "fs", "sync", "time", "net"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.150"
-regex = "1"
+# 1.10 is a real minimum: tokenizers 0.22 requires regex ^1.10, and the
+# `std` feature tracing-subscriber needs only exists from 1.3.0. Cargo
+# unifies the version workspace-wide, so a bare "1" let
+# direct-minimal-versions select regex 1.0.0 for the whole tree.
+regex = "1.10"
 schemars = "1"
 # ISO-8601 formatting of the active-graph build timestamp surfaced in
 # graph_overview / cypher_query / set_root_dir output. Already in the
@@ -73,23 +76,26 @@ schemars = "1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 
 # Error handling + CLI
-anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+# 1.0.5, not "1": kglite-cli uses `Context` for `Option` (`.with_context`
+# on a None), which anyhow 1.0.0 does not implement. 1.0.0 fails and
+# 1.0.5 builds -- both verified by compiling against them.
+anyhow = "1.0.5"
+clap = { version = "4.3", features = ["derive"] }
 
 # Logging
-tracing = "0.1"
+tracing = "0.1.35"
 
 # CSV-over-HTTP server (extensions.csv_http_server). hyper 1.x with
 # its server adapter from hyper-util — both are already in the
 # resolved dep graph (rmcp uses hyper transitively), so this just
 # surfaces them as direct deps for the csv_http module.
-hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["server", "tokio", "http1"] }
+hyper = { version = "1.1.0", features = ["server", "http1"] }
+hyper-util = { version = "0.1.3", features = ["server", "tokio", "http1"] }
 http-body-util = "0.1"
 bytes = "1"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = "3.10.0"
 # Exercise hidden-tool rejection through a real in-memory MCP handshake. The
 # production dependency enables only the server half; client code is test-only.
 rmcp = { version = "2.2", features = ["client"] }

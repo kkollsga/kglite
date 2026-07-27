@@ -114,7 +114,11 @@ kglite-mcp-server = { path = "../kglite-mcp-server", default-features = false, o
 serde_json = "1.0.150"
 petgraph = { version = "0.8.3", features = ["serde-1"] }
 chrono = { version = "0.4.45", features = ["serde"] }
-regex = "1"
+# 1.10 is a real minimum: tokenizers 0.22 requires regex ^1.10, and the
+# `std` feature tracing-subscriber needs only exists from 1.3.0. Cargo
+# unifies the version workspace-wide, so a bare "1" let
+# direct-minimal-versions select regex 1.0.0 for the whole tree.
+regex = "1.10"
 # 0.1.49 is a real MINIMUM, not a floor-by-habit: the `v2` feature that
 # pins us to the mimalloc v2 line was added in 0.1.49. Declaring plain
 # "0.1" let a consumer resolve 0.1.9 and fail with "mimalloc does not
@@ -124,7 +128,7 @@ mimalloc = { version = "0.1.49", default-features = false, features = ["v2"] }
 # from a REPL/notebook (src/util.rs::EnterKg). Unix-only; the handler just
 # flips an AtomicBool the engine polls.
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = "0.2.182"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = "3.10.0"

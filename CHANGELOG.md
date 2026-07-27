@@ -63,6 +63,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lands on both at once. Nothing became an error, and write patterns
   (`CREATE`, `MERGE`) are still never warned about — on an open schema that
   is how a node type comes into existence.
+- **Twenty-one dependency requirements that understated the version our code
+  actually needs.** The `minimal-versions` CI job added in 0.15.1 found the
+  first one on its first real run, and pulling that thread surfaced the rest.
+  A requirement like `async-trait = "0.1"` or `stacker = "0.1"` is invisible
+  to us — our lockfile already holds a working version and a fresh resolve
+  picks the newest match — but a consumer whose lock pins the declared floor
+  gets a resolution failure or a compile error in *their* repo. Each new floor
+  was determined by compiling against it, not by reading metadata: `stacker`
+  0.1.0–0.1.3 abort the build on `aarch64-apple-darwin`, `tokio` gained the
+  `JoinSet` that rmcp 2.2 needs in 1.21.0, `regex` gained the `std` feature
+  tracing-subscriber requires in 1.3.0 (and tokenizers 0.22 pushes it to
+  1.10), and `anyhow` 1.0.0 lacks the `Context` impl for `Option` that
+  `kglite-cli` uses. Affected requirements: `anyhow`, `async-trait`, `clap`,
+  `flate2`, `hyper`, `hyper-util`, `indexmap`, `libc`, `memchr`, `regex`,
+  `same-file`, `stacker`, `subtle`, `tempfile`, `tokio`, `tracing`,
+  `tracing-subscriber`. Resolution at declared minimums now succeeds and every
+  crate in the workspace compiles against them.
 
 ## [0.15.1] - 2026-07-27
 

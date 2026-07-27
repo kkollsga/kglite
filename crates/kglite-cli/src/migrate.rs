@@ -66,7 +66,7 @@ fn parse_migration_name(file_name: &str) -> Result<(u32, String)> {
     let (digits, name) = stem.split_once('_').with_context(|| {
         format!("migration {file_name} must be named <version>_<name>.{MIGRATION_EXTENSION}")
     })?;
-    let version: u32 = digits.parse().with_context(|| {
+    let version = digits.parse::<u32>().with_context(|| {
         format!(
             "migration {file_name} must start with an integer version, got {digits:?} \
              (expected <version>_<name>.{MIGRATION_EXTENSION})"
