@@ -264,37 +264,90 @@ pub fn get_value_type_name(value: &Value) -> String {
 }
 
 // ============================================================================
-// Edit distance (Levenshtein) for "did you mean?" suggestions
+// Edit distance for "did you mean?" suggestions
 // ============================================================================
 
-/// Compute Levenshtein edit distance between two strings (case-insensitive).
+/// Damerau–Levenshtein edit distance (optimal string alignment), computed
+/// case-insensitively.
+///
+/// Transpositions cost **one** edit, not two. Swapped adjacent letters
+/// (`Papre`/`Paper`, `Fucntion`/`Function`) are among the most common real
+/// typos, and plain Levenshtein charges them the same as two unrelated
+/// substitutions — which forces any threshold loose enough to catch them to
+/// also admit genuinely different words. Charging a swap 1 is what lets
+/// [`did_you_mean`] run a threshold tight enough to stay silent on an
+/// unrelated name.
+///
+/// Not to be confused with the `text_edit_distance()` Cypher function, which
+/// is plain, case-*sensitive* Levenshtein (`executor::helpers::levenshtein`)
+/// because it is a user-facing string metric rather than a typo heuristic.
 pub fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().flat_map(|c| c.to_lowercase()).collect();
     let b: Vec<char> = b.chars().flat_map(|c| c.to_lowercase()).collect();
     let (m, n) = (a.len(), b.len());
+    // A transposition reads the row *before* the previous one, so three rows
+    // rotate here instead of two.
+    let mut prev2 = vec![0usize; n + 1];
     let mut prev = (0..=n).collect::<Vec<_>>();
-    let mut curr = vec![0; n + 1];
+    let mut curr = vec![0usize; n + 1];
     for i in 1..=m {
         curr[0] = i;
         for j in 1..=n {
             let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+            let mut best = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                best = best.min(prev2[j - 2] + cost);
+            }
+            curr[j] = best;
         }
+        // prev2 ← row i-1, then prev ← row i.
+        std::mem::swap(&mut prev2, &mut prev);
         std::mem::swap(&mut prev, &mut curr);
     }
     prev[n]
 }
 
-/// Format a "did you mean 'X'?" suffix, or empty string if no close match.
+/// Maximum edit distance at which `input` still counts as a typo of a
+/// candidate: `max(len, 3) / 3` over the input's **character** count.
+///
+/// The rule is rustc's (`rustc_span::edit_distance`), and it was picked on
+/// measurement rather than taste. Scored over 66 (typo, vocabulary, expected)
+/// cases drawn from this repo's real vocabularies — the `Person`/`Paper`/
+/// `Issue` schema in `schema_check.rs`, the graph-algorithm config keys in
+/// `call_clause.rs`, and a code-graph node/property schema — it is the only
+/// candidate rule that suggests on every genuine typo *and* stays silent on
+/// every unrelated word.
+///
+/// The rule it replaced, `input.len().clamp(2, 4)`, admitted **4** edits for a
+/// 4-character input, i.e. very nearly any word of similar length: it produced
+/// 18 confidently-wrong suggestions over the same corpus, among them `Isue` →
+/// `Paper` against a `{Person, Paper}` schema, `Line` → `File`, and `WROTE` →
+/// `KNOWS`. A confidently wrong suggestion is worse than none — it sends the
+/// reader to a real but irrelevant name they may then act on — so the bar is
+/// "genuinely close, or silent".
+fn suggestion_threshold(input: &str) -> usize {
+    input.chars().count().max(3) / 3
+}
+
+/// Format a " Did you mean 'X'?" suffix, or an empty string when no candidate
+/// is genuinely close (see [`suggestion_threshold`]).
 pub fn did_you_mean(input: &str, candidates: &[&str]) -> String {
     if candidates.is_empty() {
         return String::new();
     }
-    let threshold = input.len().clamp(2, 4);
+    let threshold = suggestion_threshold(input);
     let mut best: Option<(&str, usize)> = None;
     for &c in candidates {
+        // A candidate spelled exactly like the input is not a suggestion.
+        // Distance 0 with a *differing* spelling is a case-only typo
+        // (`person` → `Person`) — the most useful hint of all, since the
+        // reader cannot see what is wrong — so it must not be discarded
+        // along with it.
+        if c == input {
+            continue;
+        }
         let d = edit_distance(input, c);
-        if d > 0 && d <= threshold && (best.is_none() || d < best.unwrap().1) {
+        if d <= threshold && (best.is_none() || d < best.unwrap().1) {
             best = Some((c, d));
         }
     }
@@ -594,10 +647,108 @@ mod tests {
     }
 
     #[test]
+    fn edit_distance_charges_a_transposition_one_edit() {
+        // The whole reason the metric is Damerau rather than plain
+        // Levenshtein: a swap must not cost the same as two unrelated
+        // substitutions, or the threshold cannot be tight.
+        assert_eq!(edit_distance("Papre", "Paper"), 1);
+        assert_eq!(edit_distance("Fucntion", "Function"), 1);
+        assert_eq!(edit_distance("Isseu", "Issue"), 1);
+        assert_eq!(edit_distance("Pesron", "Person"), 1);
+        // …and a swap of *non*-adjacent letters is still two edits — the
+        // discount is for adjacent transposition only.
+        assert_eq!(edit_distance("ebcda", "abcde"), 2);
+    }
+
+    #[test]
     fn test_did_you_mean() {
         let candidates = vec!["Paper", "Person", "Software", "Grant"];
         assert!(did_you_mean("Papier", &candidates).contains("Paper"));
         assert!(did_you_mean("Persom", &candidates).contains("Person"));
         assert!(did_you_mean("ZZZZZZZZZ", &candidates).is_empty());
+    }
+
+    /// The reported defect, verbatim: `Isue` against a `{Person, Paper}`
+    /// schema used to suggest `Paper` (edit distance 4, admitted because the
+    /// old threshold was `len().clamp(2, 4)` and the input is 4 characters).
+    /// A real-but-irrelevant type is worse than no suggestion.
+    #[test]
+    fn did_you_mean_stays_silent_when_nothing_is_close() {
+        let schema = ["Person", "Paper"];
+        assert_eq!(did_you_mean("Isue", &schema), "");
+        // …and the same input still suggests once the near-miss exists.
+        let with_issue = ["Person", "Paper", "Issue"];
+        assert_eq!(did_you_mean("Isue", &with_issue), " Did you mean 'Issue'?");
+    }
+
+    #[test]
+    fn did_you_mean_rejects_unrelated_words_of_similar_length() {
+        // Every one of these was suggested by the old `clamp(2, 4)` rule.
+        for (input, vocabulary) in [
+            ("Node", &["Person", "Paper"][..]),
+            ("Task", &["Person", "Paper"][..]),
+            ("User", &["Person", "Paper"][..]),
+            ("Repo", &["Person", "Paper"][..]),
+            ("Topic", &["Person", "Paper", "Issue"][..]),
+            ("year", &["age", "email"][..]),
+            ("name", &["age", "email"][..]),
+            ("WROTE", &["KNOWS", "AUTHORED"][..]),
+            ("OWNS", &["KNOWS", "AUTHORED"][..]),
+            ("CITES", &["KNOWS", "AUTHORED"][..]),
+            ("Line", &["File", "Function", "Class", "Module"][..]),
+            ("Field", &["File", "Function", "Class", "Module"][..]),
+            ("bogus_key", &["where", "node_type", "timeout_ms"][..]),
+        ] {
+            assert_eq!(
+                did_you_mean(input, vocabulary),
+                "",
+                "{input:?} should get no suggestion from {vocabulary:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn did_you_mean_still_catches_real_typos() {
+        for (input, vocabulary, expected) in [
+            ("Persn", &["Person", "Paper"][..], "Person"),
+            ("Peson", &["Person", "Paper"][..], "Person"),
+            ("Pape", &["Person", "Paper"][..], "Paper"),
+            // Transpositions — the case plain Levenshtein scores as 2.
+            ("Papre", &["Person", "Paper"][..], "Paper"),
+            ("Preson", &["Person", "Paper"][..], "Person"),
+            ("agee", &["age", "email"][..], "age"),
+            ("emial", &["age", "email"][..], "email"),
+            ("KNOWZ", &["KNOWS", "AUTHORED"][..], "KNOWS"),
+            ("AUTHOR", &["KNOWS", "AUTHORED"][..], "AUTHORED"),
+            // Long identifiers: the threshold scales, so a one-edit slip in a
+            // 14-character config key is still caught.
+            (
+                "connection_typ",
+                &["where", "node_type", "connection_types"][..],
+                "connection_types",
+            ),
+            (
+                "maximum_iterations",
+                &["max_iterations", "tolerance"][..],
+                "max_iterations",
+            ),
+        ] {
+            assert_eq!(
+                did_you_mean(input, vocabulary),
+                format!(" Did you mean '{expected}'?"),
+                "{input:?} against {vocabulary:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn did_you_mean_suggests_on_a_case_only_typo() {
+        // Distance 0 under a case-insensitive metric, but a different
+        // spelling — and the hardest kind of typo to spot unaided.
+        let schema = ["Person", "Paper"];
+        assert_eq!(did_you_mean("person", &schema), " Did you mean 'Person'?");
+        assert_eq!(did_you_mean("PERSON", &schema), " Did you mean 'Person'?");
+        // An identical spelling is never echoed back as a suggestion.
+        assert_eq!(did_you_mean("Person", &schema), "");
     }
 }
