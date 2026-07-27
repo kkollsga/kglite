@@ -1766,12 +1766,26 @@ fn execute_set(
         }
     }
 
-    // Refresh per-node `Arc<ColumnStore>` handles for every type we wrote
-    // into during this batch. Each node holds its own Arc clone for
-    // efficient property reads; after the batch wrote through the
-    // graph master, those per-node handles are stale and would surface
-    // pre-batch values. This sweep is O(N) per touched type and runs
-    // once per SET clause regardless of row count.
+    refresh_columnar_node_handles(graph, touched_columnar_types);
+    Ok(())
+}
+
+/// Re-point every node's `Arc<ColumnStore>` handle at the graph master, for
+/// each type written through the master during this clause.
+///
+/// Each node holds its own Arc clone for efficient property reads; after a
+/// clause wrote through the graph master those per-node handles are stale and
+/// would surface pre-clause values. This sweep is O(N) per touched type and
+/// runs once per clause regardless of row count — which is the whole reason
+/// the master fast paths accumulate a type set instead of refreshing per row.
+///
+/// Shared by `execute_set` and `execute_remove`, which must agree: a node
+/// whose property was removed on its own forked store while the master kept
+/// the value has the value resurrected by the *next* clause's sweep.
+fn refresh_columnar_node_handles(
+    graph: &mut DirGraph,
+    touched_columnar_types: std::collections::HashSet<String>,
+) {
     for node_type in touched_columnar_types {
         let new_master = match graph.column_stores.get(&node_type) {
             Some(m) => Arc::clone(m),
@@ -1785,7 +1799,7 @@ fn execute_set(
         for idx in indices {
             // `_silent`: re-pointing per-node Arc handles is internal storage
             // bookkeeping, not a logical mutation — must not be captured by the
-            // WAL recorder (the actual SET was recorded in the fast path above).
+            // WAL recorder (the actual write was recorded in the fast path).
             if let Some(node) = GraphWrite::node_weight_mut_silent(&mut graph.graph, idx) {
                 if let crate::graph::schema::PropertyStorage::Columnar { store, .. } =
                     &mut node.properties
@@ -1795,7 +1809,6 @@ fn execute_set(
             }
         }
     }
-    Ok(())
 }
 
 /// Execute a DELETE clause, removing nodes and/or edges from the graph.
@@ -1937,6 +1950,12 @@ fn execute_remove(
     stats: &mut MutationStats,
     interrupt: &Interrupt,
 ) -> Result<(), String> {
+    // Same batching contract as `execute_set`: Columnar types written through
+    // the graph master get their per-node `Arc<ColumnStore>` handles refreshed
+    // in one O(N-per-type) sweep at the end, not once per row.
+    let mut touched_columnar_types: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
     for (row_idx, row) in result_set.rows.iter().enumerate() {
         check_interrupt_periodic(interrupt, row_idx)?;
         for item in &remove.items {
@@ -2006,7 +2025,58 @@ fn execute_remove(
                     // writes through, matching SET-to-null semantics
                     // (verified working on disk).
                     let is_disk = graph.graph.is_disk();
-                    let removed_value = if let Some(node) = graph.get_node_mut(*node_idx) {
+
+                    // In-memory Columnar: clear through the graph master, the
+                    // same chokepoint `execute_set` writes through, and refresh
+                    // the per-node handles once at the end of the clause.
+                    //
+                    // Going through the node's own `Arc<ColumnStore>` instead
+                    // (what `PropertyStorage::remove` does) is both wrong and
+                    // slow. Wrong: `Arc::make_mut` forks the node's store, so
+                    // the master keeps the removed value and the next clause's
+                    // refresh sweep re-points this node at the master and
+                    // resurrects it — no save required. Slow: the fork is a
+                    // full `ColumnStore` clone per node removed, so a REMOVE
+                    // over R rows of a type with N nodes was O(R x N).
+                    //
+                    // title/name are excluded for the same reason as in
+                    // `execute_set`: they live inline on the node and are
+                    // consolidated by `enable_columnar` at save time.
+                    let mut cleared_via_master = None;
+                    if !is_disk && property != "name" && property != "title" {
+                        let columnar_row_id = {
+                            let _arena_guard = graph.graph.begin_query();
+                            match graph.graph.node_weight(*node_idx).map(|n| &n.properties) {
+                                Some(crate::graph::schema::PropertyStorage::Columnar {
+                                    row_id,
+                                    ..
+                                }) => Some(*row_id),
+                                _ => None,
+                            }
+                        };
+                        if let Some(row_id) = columnar_row_id {
+                            let key = graph.interner.get_or_intern(property);
+                            let prior = graph
+                                .column_stores
+                                .get(&node_type_str)
+                                .and_then(|master| master.get(row_id, key));
+                            if let Some(master) = graph.column_stores.get_mut(&node_type_str) {
+                                Arc::make_mut(master).set(row_id, key, &Value::Null, None);
+                                touched_columnar_types.insert(node_type_str.clone());
+                                // The master write bypasses the recorded
+                                // GraphWrite path, so capture the one mutated
+                                // node for the WAL explicitly. (The silent
+                                // refresh sweep must NOT be captured — else one
+                                // REMOVE would log every node of the type.)
+                                graph.graph.note_recorded_node_upsert(*node_idx);
+                                cleared_via_master = Some(prior);
+                            }
+                        }
+                    }
+
+                    let removed_value = if let Some(prior) = cleared_via_master {
+                        prior
+                    } else if let Some(node) = graph.get_node_mut(*node_idx) {
                         if property == "name" || property == "title" {
                             let old = std::mem::replace(&mut node.title, Value::Null);
                             node.remove_property("name");
@@ -2051,6 +2121,8 @@ fn execute_remove(
             }
         }
     }
+
+    refresh_columnar_node_handles(graph, touched_columnar_types);
     Ok(())
 }
 
@@ -2372,6 +2444,10 @@ fn try_match_merge_pattern(
         _ => Err("MERGE supports single-node or single-edge patterns only".to_string()),
     }
 }
+
+#[cfg(test)]
+#[path = "write_remove_columnar_tests.rs"]
+mod remove_columnar_tests;
 
 #[cfg(test)]
 mod is_mutation_query_tests {

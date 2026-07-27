@@ -1001,6 +1001,77 @@ impl TypeIdIndex {
         }
     }
 
+    /// Number of indexed ids.
+    pub fn len(&self) -> usize {
+        match self {
+            TypeIdIndex::Integer(map) => map.len(),
+            TypeIdIndex::General(map) => map.len(),
+        }
+    }
+
+    /// Whether the index holds no entries.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Drop the entry for `id`, but only when it currently resolves to `idx`.
+    ///
+    /// The `idx` check is what makes this safe to call while deleting: if the
+    /// id has since been re-pointed at a different node, the live mapping is
+    /// left alone rather than silently unindexing the survivor. Resolution
+    /// goes through [`get`](Self::get), so the same `Int64`/`UniqueId`/
+    /// `Float64` coercions apply — the key is removed under whichever
+    /// spelling it was actually stored, not under the caller's spelling.
+    ///
+    /// Returns whether an entry was removed.
+    pub fn remove_matching(&mut self, id: &Value, idx: NodeIndex) -> bool {
+        if self.get(id) != Some(idx) {
+            return false;
+        }
+        match self {
+            TypeIdIndex::Integer(map) => {
+                let key = match id {
+                    Value::UniqueId(u) => Some(*u),
+                    Value::Int64(i) if *i >= 0 && *i <= u32::MAX as i64 => Some(*i as u32),
+                    Value::Float64(f) if f.fract() == 0.0 => {
+                        let i = *f as i64;
+                        if i >= 0 && i <= u32::MAX as i64 {
+                            Some(i as u32)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                key.is_some_and(|k| map.remove(&k).is_some())
+            }
+            TypeIdIndex::General(map) => {
+                if map.remove(id).is_some() {
+                    return true;
+                }
+                // `get` resolved it, so it is stored under a coerced spelling.
+                let coerced = match id {
+                    Value::Int64(i) if *i >= 0 && *i <= u32::MAX as i64 => {
+                        Some(Value::UniqueId(*i as u32))
+                    }
+                    Value::UniqueId(u) => Some(Value::Int64(*u as i64)),
+                    Value::Float64(f) if f.fract() == 0.0 => {
+                        let i = *f as i64;
+                        if map.contains_key(&Value::Int64(i)) {
+                            Some(Value::Int64(i))
+                        } else if i >= 0 && i <= u32::MAX as i64 {
+                            Some(Value::UniqueId(i as u32))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                coerced.is_some_and(|k| map.remove(&k).is_some())
+            }
+        }
+    }
+
     /// Iterate over all (Value, NodeIndex) pairs.
     pub fn iter(&self) -> Box<dyn Iterator<Item = (Value, NodeIndex)> + '_> {
         match self {

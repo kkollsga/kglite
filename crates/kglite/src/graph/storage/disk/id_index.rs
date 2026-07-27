@@ -514,6 +514,44 @@ impl IdIndexStore {
         self.overlay.get_mut().unwrap().insert(name, idx);
     }
 
+    /// Number of ids indexed for `name` in the mutable overlay, or `None`
+    /// when the type is not overlay-resident. Deliberately does not consult
+    /// the mmap'd base: the only caller uses this to decide whether an
+    /// in-place edit is safe, and base entries are never edited in place.
+    pub fn overlay_len(&self, name: &str) -> Option<usize> {
+        self.overlay.read().unwrap().get(name).map(|idx| idx.len())
+    }
+
+    /// Drop `entries` (`id → node`) from `name`'s index in place, instead of
+    /// invalidating the whole type.
+    ///
+    /// Deleting one node used to `remove()` the entire type index, so the next
+    /// id lookup rebuilt it by scanning every node of the type — an O(N_type)
+    /// cost charged to a single-node delete. The create path already maintains
+    /// this index incrementally (see the `pk_id` match in the Cypher create
+    /// executor); this is the same treatment for the delete side.
+    ///
+    /// Falls back to whole-type invalidation, and returns `false`, whenever the
+    /// index is not overlay-resident — an unbuilt type has nothing to edit, and
+    /// a base-resident type lives in an immutable mmap. Each entry is removed
+    /// only if it still resolves to the given node, so a re-pointed id is left
+    /// intact.
+    ///
+    /// The caller is responsible for the duplicate-id precondition: this edits
+    /// exactly the ids it is given, whereas a rebuild re-derives the whole map
+    /// and would surface a shadowed duplicate. See `detach_delete_nodes`.
+    pub fn evict_entries(&mut self, name: &str, entries: &[(Value, NodeIndex)]) -> bool {
+        let overlay = self.overlay.get_mut().unwrap();
+        let Some(index) = overlay.get_mut(name) else {
+            self.remove(name);
+            return false;
+        };
+        for (id, idx) in entries {
+            index.remove_matching(id, *idx);
+        }
+        true
+    }
+
     pub fn remove(&mut self, name: &str) -> Option<TypeIdIndex> {
         let prev = self.overlay.get_mut().unwrap().remove(name);
         if self.base.as_ref().is_some_and(|b| b.contains(name)) {

@@ -535,6 +535,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indexed-write throughput are unaffected, and rollback fidelity is unchanged:
   a failed statement still restores the master store, every node's handle, and
   any unique claims the write moved.
+- **`REMOVE` on a columnar node no longer leaves the property in the graph's
+  master column store, where a later write brought it back.** Each node of a
+  columnar type holds its own `Arc<ColumnStore>` handle and the graph holds the
+  master. `REMOVE` wrote through the node's handle, and `Arc::make_mut` forks
+  it — so the node stopped reporting the property while the master kept it. The
+  next `SET` on that type re-pointed every node's handle at the master and the
+  removed property reappeared, with no `save()` involved. `REMOVE` now clears
+  through the master, the same chokepoint `SET` already used. This also removes
+  a full `ColumnStore` clone per node removed, so `REMOVE` over R rows of a
+  type with N nodes is no longer O(R × N).
+
+- **Deleting a node no longer costs a full rebuild of its type's id index.**
+  `DELETE` dropped the whole `id_indices` entry for every affected node type,
+  so the next `MATCH (n {id: …})` rebuilt the map by scanning every node of
+  that type — one node-weight read and `Value` clone each. A single-node
+  delete was therefore O(nodes of that type), while the create path had
+  already been maintaining the same index incrementally. Deletes now evict
+  just the removed ids in place. Types with duplicate ids still fall back to
+  the full rebuild, since only a rebuild can surface a duplicate that the
+  index had shadowed; that case is detected in O(1) by comparing the index
+  length against the type's live node count. Statement rollback is unchanged
+  — it invalidates whole types by design, on the already-failed path.
 
 - **`save()` now barriers the write-ahead log before writing its
   checkpoint.** A checkpoint truncates the log, and recovery folds the
