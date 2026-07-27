@@ -99,6 +99,8 @@ Run with::
 
 from __future__ import annotations
 
+import itertools
+
 import pandas as pd
 import pytest
 
@@ -151,6 +153,14 @@ WARMUP_ROUNDS = 5
 #: because a pinned reference keeps the pre-clone copy alive.
 REF_ROUNDS = 20
 REF_WARMUP_ROUNDS = 2
+
+# Module-level, NOT per-test. The defect-B cells are parametrized over `holder`
+# but every parametrization writes to the SAME shared `(size, "fresh")` graph,
+# so a per-test `iter(range(BASE, ...))` hands the second parametrization ids
+# the first one already inserted -- a `duplicate primary key` failure that only
+# appears when the cells run together, never in isolation. A shared counter is
+# immune to that however these cells are parametrized in future.
+_FRESH_GRAPH_IDS = itertools.count(20_000_000)
 
 
 # ⚠ STATEMENT SHAPE — THE SINGLE EASIEST WAY TO SILENTLY DISABLE THIS FILE.
@@ -450,7 +460,7 @@ def test_bench_first_write_after_reference(benchmark, veto_graphs, size, holder)
     the two.
     """
     graph = veto_graphs[(size, "fresh")]
-    ids = iter(range(20_000_000, 1 << 30))
+    ids = _FRESH_GRAPH_IDS
 
     def setup():
         if holder == "result_view":
@@ -491,7 +501,7 @@ def test_bench_write_recovers_after_reference_released(benchmark, veto_graphs, s
     Expect this to match `test_bench_insert_after_veto_trigger[*-fresh]`.
     """
     graph = veto_graphs[(size, "fresh")]
-    ids = iter(range(30_000_000, 1 << 30))
+    ids = _FRESH_GRAPH_IDS
     # Taken and dropped before the measurement, so the graph has definitely
     # been through the clone-and-recover cycle by the time timing starts.
     _wide_result(graph)
