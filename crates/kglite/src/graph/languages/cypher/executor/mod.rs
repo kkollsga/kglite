@@ -888,6 +888,7 @@ pub(crate) mod budget;
 pub mod call_clause;
 pub mod call_subquery;
 mod centrality_procedures;
+mod columnar_write;
 pub mod dead_code;
 mod execution_support;
 pub mod expression;

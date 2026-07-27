@@ -406,8 +406,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
       "qualified_name": "crate::execute_set",
-      "lines": 508,
-      "branches": 70,
+      "lines": 479,
+      "branches": 64,
       "nesting": 8
     },
     {
