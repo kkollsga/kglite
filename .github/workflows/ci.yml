@@ -249,18 +249,27 @@ jobs:
     # tracing-subscriber, stacker, anyhow). Resolution SUCCEEDS, and every
     # crate in this workspace compiles against its own declared minimums.
     #
-    # One failure remains, and it is not ours to fix: rmcp 2.2.0 declares
-    # `tokio-util = "0.7"` but imports `tokio_util::bytes`, which that floor
-    # does not guarantee. That is precisely the "third-party crate that
-    # understates ITS floor" case called out above — invisible to rmcp's own
-    # CI for the same reason ours was invisible to us. We cannot fix it by
-    # editing our manifests without taking a direct dependency on a crate we
-    # do not use, so the job stays non-blocking until rmcp corrects it.
+    # Both steps now pass ON THIS RUNNER. The flags stay on because that
+    # green is partly luck, and the luck is worth writing down.
+    #
+    # rmcp 2.2.0 declares `tokio-util = "0.7"` but imports
+    # `tokio_util::bytes`, a re-export tokio-util 0.7.5 does not have (probed
+    # directly, under no features and under `io` and `codec`). That is exactly
+    # the "third-party crate that understates ITS floor" case above. On this
+    # ubuntu runner something else in the tree pulls tokio-util high enough to
+    # hide it; reproducing this job locally on aarch64-apple-darwin resolves
+    # 0.7.5 and fails to compile rmcp. So the defect is real and merely
+    # masked here, and a future dependency shuffle can unmask it at any time.
+    #
+    # We cannot fix it by editing our manifests without taking a direct
+    # dependency on a crate we do not use. Making the job blocking today would
+    # therefore hand an upstream crate the ability to block our releases for a
+    # bug we have no way to patch. It stays non-blocking until rmcp corrects
+    # its floor; then the `continue-on-error` flags come off and this becomes
+    # a real gate, with no other edits needed.
     #
     # It is deliberately still listed in `ci-success`'s `needs` so it stays
-    # visible in every run rather than becoming a job nobody looks at. When
-    # that upstream floor is fixed, the `continue-on-error` flags come off
-    # and this becomes a real gate — no other edits needed.
+    # visible in every run rather than becoming a job nobody looks at.
     #
     # Non-vacuity is verified, not assumed: with `3114caab` temporarily
     # reverted (`mcp-methods = "0.4"`), resolution selects mcp-methods 0.4.0
