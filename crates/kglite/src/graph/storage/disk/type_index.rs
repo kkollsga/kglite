@@ -518,12 +518,20 @@ impl TypeIndexStore {
 // Writer
 // =============================================================================
 
+/// Write `type_indices.bin` (flat CSR layout).
+///
+/// Type names are *resolved* against the interner that ships with the same
+/// snapshot, never interned here — see the equivalent note on
+/// [`write_id_indices_bin`](super::id_index::write_id_indices_bin). An
+/// unregistered name has no persisted identity: an empty entry is dropped
+/// (nothing to record), and a populated one fails the save rather than
+/// shipping a directory whose type keys the loader cannot resolve.
 pub fn write_type_indices_bin(
     dir: &Path,
     store: &TypeIndexStore,
     interner: &StringInterner,
 ) -> Result<(), String> {
-    // Collect (type_key, name, slice-or-vec) sorted by type_key.
+    // Collect (type_key, slice-or-vec) sorted by type_key.
     enum Source<'a> {
         Slice(&'a [u8]),
         Vec(&'a [NodeIndex]),
@@ -547,18 +555,24 @@ pub fn write_type_indices_bin(
         }
     }
 
-    let mut interner_clone = interner.clone();
     let mut entries: Vec<(u64, Source<'_>)> = Vec::new();
     for (name, view) in store.iter() {
-        let key = interner_clone
-            .try_get_or_intern(name)
-            .map_err(|e| e.to_string())?
-            .as_u64();
         let src = match view {
             TypeNodesRef::Overlay(s) => Source::Vec(s),
             TypeNodesRef::Mmap(s) => Source::Slice(s),
         };
-        entries.push((key, src));
+        let Some(key) = interner.try_resolve_to_key(name) else {
+            if src.len() == 0 {
+                continue;
+            }
+            return Err(format!(
+                "type index for type '{name}' holds {} nodes but the type name \
+                 is not in the graph's interner; refusing to write a \
+                 type_indices.bin that cannot be read back",
+                src.len()
+            ));
+        };
+        entries.push((key.as_u64(), src));
     }
     entries.sort_by_key(|(k, _)| *k);
 
@@ -701,5 +715,38 @@ mod validation_tests {
             load(&duplicate, &interner).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
+    }
+
+    /// The writer resolves names against the interner it is handed, so the
+    /// directory it emits is always readable by the snapshot's own interner
+    /// sidecar. An unregistered name is dropped when empty and fails the save
+    /// when populated (a type index is not a rebuildable cache — silently
+    /// dropping a populated one would hide every node of that type).
+    #[test]
+    fn writer_never_emits_a_key_the_interner_cannot_resolve() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut interner = StringInterner::new();
+        interner.get_or_intern("Known");
+
+        let mut store = TypeIndexStore::default();
+        store.replace_with(HashMap::from([
+            ("Known".to_string(), vec![NodeIndex::new(0)]),
+            ("Unregistered".to_string(), Vec::new()),
+        ]));
+        write_type_indices_bin(temp.path(), &store, &interner).unwrap();
+
+        let base = TypeIndexBase::load_from(temp.path(), &interner)
+            .expect("the written directory must load")
+            .unwrap();
+        assert_eq!(base.materialize("Known").unwrap(), vec![NodeIndex::new(0)]);
+        assert!(base.materialize("Unregistered").is_none());
+
+        store.replace_with(HashMap::from([(
+            "Unregistered".to_string(),
+            vec![NodeIndex::new(0)],
+        )]));
+        let error = write_type_indices_bin(temp.path(), &store, &interner).unwrap_err();
+        assert!(error.contains("Unregistered"), "{error}");
+        assert!(error.contains("cannot be read back"), "{error}");
     }
 }
