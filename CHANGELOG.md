@@ -521,6 +521,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `SET` on a saved graph no longer costs one node copy per node of the
+  type.** Writing a single property to a type with N nodes journalled N
+  `NodeData` pre-images rather than one, making a one-row `SET` on a saved
+  100k-node graph measurably *slower* (~1.8×) than the whole-graph clone the
+  undo journal replaced. The cause is the end-of-statement sweep that
+  re-points every node's shared column-store handle after a columnar write
+  forks the master: that sweep is bookkeeping rather than a logical mutation,
+  but it ran through the recorded write path and so captured an undo pre-image
+  for each node it touched. The sweep's inverse is now journalled once per
+  node type — the pre-statement master handle, no store copy — so the cost of
+  a `SET` again scales with the number of rows it changes. `CREATE` and
+  indexed-write throughput are unaffected, and rollback fidelity is unchanged:
+  a failed statement still restores the master store, every node's handle, and
+  any unique claims the write moved.
+
 - **`save()` now barriers the write-ahead log before writing its
   checkpoint.** A checkpoint truncates the log, and recovery folds the
   surviving frames into net per-entity state. Previously the log was

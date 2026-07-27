@@ -56,6 +56,7 @@
 //!   `NodeData` clone, not five.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use petgraph::graph::{EdgeIndex, NodeIndex};
 
@@ -64,6 +65,33 @@ use crate::graph::features::timeseries::NodeTimeseries;
 use crate::graph::schema::{
     CompositeIndexKey, CompositeValue, EdgeData, IndexKey, InternedKey, NodeData,
 };
+use crate::graph::storage::column_store::ColumnStore;
+
+#[cfg(test)]
+thread_local! {
+    /// Node pre-images actually cloned into an undo journal since the last
+    /// reset.
+    ///
+    /// The complement of `BACKEND_CLONE_NODES` (`storage/backend.rs`), which
+    /// counts nodes copied by a *backend* clone and is therefore blind to the
+    /// journal path by construction: the whole point of the journal checkpoint
+    /// is that it clones no backend. A statement that captures a pre-image per
+    /// node of a type rather than per node it changed is O(type)-per-write,
+    /// which is the cost class the journal exists to remove, and this is the
+    /// only counter that can see it.
+    static JOURNAL_NODE_PRE_IMAGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_journal_node_pre_images() {
+    JOURNAL_NODE_PRE_IMAGES.set(0);
+}
+
+/// Node pre-images cloned into an undo journal since the last reset.
+#[cfg(test)]
+pub(crate) fn journal_node_pre_images() -> usize {
+    JOURNAL_NODE_PRE_IMAGES.get()
+}
 
 /// A `Vec<NodeIndex>` bucket in one of `DirGraph`'s inverted indexes.
 /// Bucket edits are journalled with a *position* so a rollback restores the
@@ -141,6 +169,22 @@ pub enum UndoEntry {
         node: usize,
         prior: Box<NodeTimeseries>,
     },
+    /// `execute_set`'s columnar fast path wrote through the master
+    /// `Arc<ColumnStore>` for `node_type`, forking it, and then re-pointed
+    /// every node of that type at the fork. `prior` is the master as it stood
+    /// before the statement's first such write; undo re-points them all back.
+    ///
+    /// **One entry per type per statement, not per node.** That is the whole
+    /// reason this variant exists: the refresh sweep touches every node of the
+    /// type, so journalling it through the ordinary weight-capture seam would
+    /// cost a `NodeData` clone per node of the type on every single-row `SET`.
+    /// The store itself needs no copy — `ColumnStore` has no interior
+    /// mutability and the fork already left `prior` pristine, so holding the
+    /// handle is the entire pre-image.
+    ColumnarHandles {
+        node_type: String,
+        prior: Arc<ColumnStore>,
+    },
 }
 
 /// Buffer of inverse operations for exactly one statement.
@@ -157,6 +201,11 @@ pub struct UndoJournal {
     weighed_nodes: HashSet<NodeIndex>,
     /// Edge counterpart of `weighed_nodes`.
     weighed_edges: HashSet<EdgeIndex>,
+    /// Node types whose pre-statement master column store is already captured.
+    /// First touch wins, exactly like `weighed_nodes`: a statement can write
+    /// through the same master in several clauses, and only the first one saw
+    /// the pre-statement store.
+    forked_columnar_types: HashSet<String>,
 }
 
 impl UndoJournal {
@@ -189,6 +238,8 @@ impl UndoJournal {
     pub fn note_node_weight(&mut self, idx: NodeIndex, prior: impl FnOnce() -> Option<NodeData>) {
         if self.weighed_nodes.insert(idx) {
             if let Some(prior) = prior() {
+                #[cfg(test)]
+                JOURNAL_NODE_PRE_IMAGES.set(JOURNAL_NODE_PRE_IMAGES.get() + 1);
                 self.entries.push(UndoEntry::NodeWeight { idx, prior });
             }
         }
@@ -275,6 +326,31 @@ impl UndoJournal {
         for (pos, idx) in hits {
             self.note_bucket_removed(bucket.clone(), idx, pos);
         }
+    }
+
+    /// The master column store for `node_type` is about to be forked by a
+    /// columnar write. `prior` is only taken on the statement's first fork of
+    /// that type, so the captured handle is the pre-statement one.
+    ///
+    /// Returns whether the capture happened, so the caller can skip the
+    /// `Arc::clone` on later writes of the same statement.
+    #[inline]
+    pub fn note_columnar_fork(
+        &mut self,
+        node_type: &str,
+        prior: impl FnOnce() -> Option<Arc<ColumnStore>>,
+    ) -> bool {
+        if !self.forked_columnar_types.contains(node_type) {
+            self.forked_columnar_types.insert(node_type.to_string());
+            if let Some(prior) = prior() {
+                self.entries.push(UndoEntry::ColumnarHandles {
+                    node_type: node_type.to_string(),
+                    prior,
+                });
+                return true;
+            }
+        }
+        false
     }
 
     /// A node's timeseries was dropped.

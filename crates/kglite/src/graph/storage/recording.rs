@@ -581,8 +581,11 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
     #[inline]
     fn node_weight_mut_silent(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
         // Bypass recording — internal bookkeeping (columnar handle refresh),
-        // not a logical mutation. See the trait method docs.
-        self.inner.node_weight_mut(idx)
+        // not a logical mutation. See the trait method docs. Delegated to the
+        // inner backend's *silent* method rather than its recorded one so the
+        // silence composes: `MemoryGraph` also skips undo-journal capture
+        // here, and wrapping it must not put that capture back.
+        self.inner.node_weight_mut_silent(idx)
     }
 
     #[inline]
