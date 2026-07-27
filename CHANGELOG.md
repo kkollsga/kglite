@@ -521,6 +521,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`lock_schema()` now catches a typo'd node label in a query, not just in a
+  write.** `MATCH (i:Isue) RETURN i` used to return `[]` with no error even on
+  a locked schema, while the equivalent property typo —
+  `MATCH (i:Issue {titel: 1})` — was rejected with a message naming the
+  mistake and listing the valid properties. That asymmetry was the bug: an
+  empty result set reads as *"no matching data"* rather than *"you made a
+  mistake"*, so a typo'd label survives code review and reaches production
+  looking like a legitimate empty state, whereas a wrong property value is at
+  least visibly wrong at the point of use. A locked schema now rejects an
+  unknown label with the same shape of message the unknown-property path has
+  always produced, and the same wording the `CREATE` write path has always
+  used:
+
+  ```text
+  Schema error: Unknown node type 'Isue'. Did you mean 'Issue'?
+    Valid types: Issue, Person
+  ```
+
+  It is raised as `kglite.SchemaError` (`.code == "Schema"`) from every clause
+  that can carry a label — `MATCH`, `OPTIONAL MATCH`, `MERGE`, multi-label
+  patterns like `(n:A:B)`, `WHERE EXISTS { … }` pattern predicates, `CALL { … }`
+  subqueries, and `UNION` branches.
+
+  **The schemaless default is unchanged.** kglite is open-schema by design, so
+  on an unlocked graph an unknown label still matches nothing without error —
+  the zero-row existence-check idiom stays valid, and the existing non-fatal
+  `warning:` on stderr is still how the typo is surfaced there. Labels applied
+  via `add_label` count as known, and creating a genuinely new label on an
+  unlocked graph is unaffected. Relationship types are deliberately still not
+  rejected: only the node-label gap was asymmetric with properties.
+
 - **`save()` now barriers the write-ahead log before writing its
   checkpoint.** A checkpoint truncates the log, and recovery folds the
   surviving frames into net per-entity state. Previously the log was

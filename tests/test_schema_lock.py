@@ -182,10 +182,11 @@ class TestUnlock:
         # Should succeed now — schema unlocked
         g.cypher("CREATE (x:NewType {name: 'anything'})")
 
-    def test_reads_always_allowed(self):
+    def test_valid_reads_always_allowed(self):
         g = _make_graph()
         g.lock_schema()
-        # MATCH should always work regardless of lock
+        # A read against a *known* label is never blocked by the lock — the
+        # lock rejects typos, it does not gate reading.
         result = g.cypher("MATCH (p:Person) RETURN p.name")
         assert len(result) == 2
 
@@ -194,6 +195,122 @@ class TestUnlock:
         g.lock_schema()
         # DELETE should work even when schema locked
         g.cypher("MATCH (p:Person {name: 'Bob'}) DETACH DELETE p")
+
+
+# ── Read-side label validation ───────────────────────────────────────────────
+#
+# `lock_schema()` is the opt-in "catch my typos" mechanism. It has always
+# rejected an unknown *property* and an unknown *node type* on writes, but a
+# typo'd label in a MATCH used to return `[]` with no error — and an empty
+# result set reads as "no matching data" rather than "you made a mistake", so
+# it survives review and reaches production. These lock the symmetry in.
+
+
+class TestMatchLabelValidation:
+    def test_unknown_label_in_match_raises(self):
+        g = _make_graph()
+        g.lock_schema()
+        with pytest.raises(kglite.SchemaError, match="Unknown node type 'Persom'"):
+            g.cypher("MATCH (p:Persom) RETURN p")
+
+    def test_error_enumerates_the_valid_labels(self):
+        # Mirrors the unknown-property message, which lists valid properties.
+        g = _make_graph()
+        g.lock_schema()
+        with pytest.raises(kglite.SchemaError, match=r"Valid types: Paper, Person"):
+            g.cypher("MATCH (p:Persom) RETURN p")
+
+    def test_error_suggests_the_near_miss(self):
+        g = _make_graph()
+        g.lock_schema()
+        with pytest.raises(kglite.SchemaError, match="Did you mean 'Person'"):
+            g.cypher("MATCH (p:Persom) RETURN p")
+
+    def test_error_carries_the_schema_code(self):
+        # Applications branch on `.code`, not on message prose.
+        g = _make_graph()
+        g.lock_schema()
+        with pytest.raises(kglite.SchemaError) as exc:
+            g.cypher("MATCH (p:Persom) RETURN p")
+        assert exc.value.code == "Schema"
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            # Every clause that can carry a label — covering only MATCH would
+            # recreate the same asymmetry one level down.
+            "MATCH (p:Persom) RETURN p",
+            "MATCH (p:Person) OPTIONAL MATCH (q:Persom) RETURN p, q",
+            "MATCH (p:Person) WHERE EXISTS { MATCH (q:Persom) } RETURN p",
+            "CALL { MATCH (q:Persom) RETURN q } RETURN q",
+            "MATCH (p:Person) RETURN p.name AS n UNION MATCH (q:Persom) RETURN q.name AS n",
+            "MATCH (n:Person:Persom) RETURN n",
+            "MERGE (q:Persom {name: 'x'})",
+        ],
+    )
+    def test_every_label_carrying_clause_is_covered(self, query):
+        g = _make_graph()
+        g.lock_schema()
+        with pytest.raises(kglite.KgError, match="Unknown node type 'Persom'"):
+            g.cypher(query)
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "MATCH (p:Person) RETURN p",
+            "MATCH (p:Person) OPTIONAL MATCH (q:Paper) RETURN p, q",
+            "MATCH (p:Person) WHERE EXISTS { MATCH (q:Paper) } RETURN p",
+            "CALL { MATCH (q:Paper) RETURN q } RETURN q",
+            "MATCH (p:Person) RETURN p.name AS n UNION MATCH (q:Paper) RETURN q.title AS n",
+            "MATCH (n) RETURN n",
+            "MATCH (p:Person)-[:AUTHORED]->(q:Paper) RETURN p, q",
+        ],
+    )
+    def test_known_labels_are_never_rejected(self, query):
+        g = _make_graph()
+        g.lock_schema()
+        g.cypher(query)  # must not raise
+
+    def test_unlocking_restores_the_zero_row_idiom(self):
+        g = _make_graph()
+        g.lock_schema()
+        g.unlock_schema()
+        assert len(g.cypher("MATCH (p:Persom) RETURN p")) == 0
+
+
+class TestOpenSchemaUnchanged:
+    """The schemaless default is the product — it must be untouched."""
+
+    @pytest.mark.parametrize(
+        ("query", "rows"),
+        [
+            ("MATCH (p:Nonexistent) RETURN p", 0),
+            ("CALL { MATCH (q:Nonexistent) RETURN q } RETURN q", 0),
+            (
+                "MATCH (p:Person) RETURN p.name AS n UNION MATCH (q:Nonexistent) RETURN q.name AS n",
+                2,
+            ),
+            # OPTIONAL MATCH keeps the left rows with a null right side —
+            # still no error, which is the point.
+            ("MATCH (p:Person) OPTIONAL MATCH (q:Nonexistent) RETURN p, q", 2),
+        ],
+    )
+    def test_unknown_label_does_not_error(self, query, rows):
+        # The existence-check idiom: an unknown label is legal Cypher on an
+        # open schema and simply matches nothing.
+        g = _make_graph()
+        assert g.schema_locked is False
+        assert len(g.cypher(query)) == rows
+
+    def test_create_of_a_brand_new_label_still_works(self):
+        g = _make_graph()
+        g.cypher("CREATE (x:BrandNewType {name: 'anything'})")
+        assert len(g.cypher("MATCH (x:BrandNewType) RETURN x")) == 1
+
+    def test_merge_of_a_brand_new_label_still_works(self):
+        g = _make_graph()
+        g.cypher("MERGE (x:AnotherNewType {name: 'anything'})")
+        assert len(g.cypher("MATCH (x:AnotherNewType) RETURN x")) == 1
 
 
 # ── Introspection ────────────────────────────────────────────────────────────
