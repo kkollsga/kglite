@@ -55,9 +55,11 @@ never observes a torn file.
 `storage="disk"` is the exception, and not because it was overlooked: a disk
 graph commits by publishing an immutable generation, so a logical write-ahead
 log is not its durability boundary. A disk graph opens non-durable and takes
-`save()` checkpoints instead. Asking for `durable=True` there raises
-`ValueError` explaining that; the *default* does not raise, so disk callers are
-unaffected by the default being on elsewhere.
+`save()` checkpoints instead. Asking for any logging level there —
+`durable=True`/`"full"` *or* `durable="normal"` — raises `ValueError`
+explaining that, since the blocker is the commit boundary rather than barrier
+strength; only `durable="off"` is supported. The *default* does not raise, so
+disk callers are unaffected by the default being on elsewhere.
 
 **Not everything is logged.** State the log cannot express is *checkpoint-only*
 and is persisted by `save()` rather than by the log: schema and config metadata,
@@ -66,13 +68,16 @@ user-created indexes, embeddings, and timeseries. If those matter to you, a
 
 Three consequences worth internalising before you rely on this:
 
-- **It costs one `fsync` per committed mutation.** Writes now wait on physical
+- **It costs one barrier per committed mutation.** Writes now wait on physical
   storage, so the cost is device latency rather than graph size — most visible
   in loops of many small writes, negligible for a few large ones. Reads are
-  unaffected. `durable=False` remains fully supported and is the right choice
-  for bulk loading and for graphs you can rebuild from source. Batching writes
-  into one statement, or one `begin()` transaction, buys throughput *and* crash
-  safety.
+  unaffected. `durable="normal"` keeps the log and drops only that barrier: a
+  committed mutation still survives the process dying, but an OS crash or power
+  cut loses work since the last `save()`, and `sync()` gives you a power-safe
+  point on demand. `durable=False` (no log at all) remains fully supported and
+  is the right choice for bulk loading and for graphs you can rebuild from
+  source. Batching writes into one statement, or one `begin()` transaction,
+  buys throughput *and* the strongest guarantee.
 - **A `with` block is not a transaction.** Mutations commit as they run, so an
   exception inside the block does not discard them — they are recovered on the
   next `open()`. What the clean or failed exit controls is whether a *checkpoint*
@@ -186,7 +191,7 @@ offending value, and is worth logging; the type and code are the contract.
 
 | | Default | To change |
 |---|---|---|
-| Crash safety | **On** for in-memory and `mapped`; `disk` opens non-durable | `durable=False` to opt out |
+| Crash safety | **On** (`"full"` — survives power loss) for in-memory and `mapped`; `disk` opens non-durable | `durable="normal"` to keep the log without the per-commit barrier, `durable="off"` to opt out entirely |
 | Schema | No schema; any property on any node | `define_schema(...)` |
 | UNIQUE / NOT NULL / node key | Permissive — a type declaring none keeps the old behaviour | `unique` / `required` / `primary_key` in `define_schema` |
 | Freshness stamps | Off, so writes stay deterministic | `auto_timestamp: True` per type |

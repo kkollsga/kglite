@@ -31,6 +31,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+import kglite
 from kglite import KnowledgeGraph
 
 # 1k / 100k / 1M spans three orders of magnitude, which is enough for a linear
@@ -212,3 +213,142 @@ def test_bench_id_index_invalidation_on_create(benchmark, scaled_graphs_no_pk, s
         )
 
     benchmark.pedantic(write, rounds=OV_ROUNDS, iterations=1, warmup_rounds=OV_WARMUP_ROUNDS)
+
+
+# ── durability levels: what does a commit actually cost? ─────────────
+#
+# `durable` picks what a committed mutation survives, and the levels differ
+# only in whether each commit is barriered:
+#
+#   "full"   — barrier per commit (survives power loss)
+#   "normal" — log written, no barrier (survives the process dying)
+#   "off"    — no log
+#
+# The point of measuring all three side by side is to attribute the cost
+# rather than assume it. Reading the code says the barrier should dominate
+# "full" and that "normal" should land near "off", because a WAL frame is one
+# postcard encode, one CRC32, and one `write` — but that is a *hypothesis
+# derived from reading*, and the whole reason these cells exist is that it has
+# to be measured before anyone quotes a number.
+#
+# Read `normal - off` as the true cost of logging, and `full - normal` as the
+# true cost of the barrier. Both are per-commit and neither should scale with
+# graph size, which is why one fixed size is enough here.
+#
+# Not in `test_bench_core.py` on purpose: everything in this file is outside
+# the `make bench-check` tracked set, so adding cells here cannot break the
+# gate. Absolute numbers are machine- and device-specific — a barrier is
+# storage-hardware latency, so these are meaningless across machines and must
+# never be compared against a number captured elsewhere.
+
+#: 1k matches the scale the competitive single-insert comparison uses. The
+#: per-commit cost is independent of graph size, so a second decade would add
+#: runtime without adding information.
+DURABILITY_BENCH_SIZE = 1_000
+
+DURABILITY_LEVELS = ["full", "normal", "off"]
+
+
+def _persisted_graph(path, level: str) -> KnowledgeGraph:
+    """A file-backed graph of `DURABILITY_BENCH_SIZE` nodes, opened at `level`.
+
+    Built and checkpointed with logging off, then reopened at the level under
+    test, so the fixture's own bulk load never lands in the measurement.
+    """
+    seed = kglite.open(str(path), durable="off")
+    seed.define_schema({"nodes": {"Item": {"primary_key": "id"}}})
+    seed.add_nodes(
+        pd.DataFrame(
+            {
+                "id": range(DURABILITY_BENCH_SIZE),
+                "name": [f"item-{i}" for i in range(DURABILITY_BENCH_SIZE)],
+            }
+        ),
+        "Item",
+        "id",
+        "name",
+    )
+    seed.save()
+    seed.close()
+
+    graph = kglite.open(str(path), durable=level)
+    # Warm the id index so the measurement is the write, not a first touch.
+    graph.cypher("MATCH (n:Item {id: 0}) RETURN n.id")
+    return graph
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("level", DURABILITY_LEVELS)
+def test_bench_single_create_by_durability_level(benchmark, tmp_path, level):
+    """One `CREATE` of one node, per durability level. The headline cell."""
+    graph = _persisted_graph(tmp_path / "bench.kgl", level)
+    ids = iter(range(10_000_000, 1 << 30))
+
+    def write():
+        graph.cypher("CREATE (:Item {id: $i, name: 'x'})", params={"i": next(ids)})
+
+    benchmark(write)
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("level", ["full", "normal"])
+def test_bench_explicit_sync(benchmark, tmp_path, level):
+    """`sync()` — the on-demand barrier.
+
+    Under `"normal"` this is a real barrier and should cost about what
+    `full`'s per-commit barrier costs; under `"full"` it returns immediately
+    because every commit was already barriered. That gap is the number a
+    caller needs to decide how often to call it.
+    """
+    graph = _persisted_graph(tmp_path / "bench.kgl", level)
+    ids = iter(range(60_000_000, 1 << 30))
+
+    def commit_then_sync():
+        graph.cypher("CREATE (:Item {id: $i, name: 'x'})", params={"i": next(ids)})
+        graph.sync()
+
+    benchmark(commit_then_sync)
+
+
+# ── diagnostic: what is the non-durable commit actually spending? ────
+#
+# `durable="off"` is the engine's own per-commit cost with no durability
+# excuse, and reading the commit path turns up three candidate explanations
+# that reading alone cannot rank:
+#
+#   1. The Cypher plan cache is keyed on graph `version`, which is bumped
+#      before the lookup — so a write can never hit it and re-runs the full
+#      parse + optimizer pipeline every time.
+#   2. `Arc::make_mut` deep-clones the whole graph when a second
+#      `Arc<DirGraph>` is alive; a lazy `ResultView` above the 32-cell
+#      materialisation budget holds one.
+#   3. The statement rollback checkpoint, when it falls off its skip
+#      whitelist.
+#
+# The pair below discriminates (2) from the rest without changing a line of
+# engine code: same statement, once with the result dropped immediately and
+# once with it held across the next write. If `result_held` is dramatically
+# worse, it is the Arc clone; if the two are close, the cost is elsewhere and
+# (1) is the next suspect.
+#
+# This is a diagnostic, not a regression guard — it exists to attribute a
+# cost, and its conclusion belongs in an issue rather than in a threshold.
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("held", [False, True], ids=["result_dropped", "result_held"])
+def test_bench_create_with_lazy_result_alive(benchmark, held):
+    """One `CREATE`, with and without a lazy `ResultView` pinning the graph."""
+    graph = _graph(DURABILITY_BENCH_SIZE)
+    ids = iter(range(50_000_000, 1 << 30))
+    # Wide enough to exceed the eager-materialisation budget, so the view
+    # stays lazy and keeps its own `Arc<DirGraph>` alive.
+    pinned = graph.cypher("MATCH (n:Item) RETURN n.id AS i, n.name AS nm") if held else None
+
+    def write():
+        graph.cypher("CREATE (:Item {id: $i, name: 'x'})", params={"i": next(ids)})
+
+    benchmark(write)
+    # Keep `pinned` referenced past the measurement, or the interpreter is
+    # free to collect it early and quietly turn this into the other case.
+    assert pinned is None or pinned is not None

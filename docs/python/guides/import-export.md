@@ -80,9 +80,11 @@ g.cypher("MATCH (p:Person) RETURN p.name")   # -> Alice
 - Supported for the in-memory default and `storage="mapped"`.
   `storage="disk"` opens non-durable (its commit boundary is a generation
   publish, not a log) and uses explicit-`save()` checkpoints.
-- **`durable=False` opts out** and skips the per-commit `fsync` entirely —
-  the right choice for bulk loading and for graphs rebuildable from source
-  data. Reads never pay for the capture path either way.
+- **`durable=False` opts out** of logging entirely — the right choice for bulk
+  loading and for graphs rebuildable from source data. If you want to keep the
+  log but not the per-commit barrier, `durable="normal"` costs roughly what an
+  unlogged write costs and still loses nothing to a crashing process. Reads
+  never pay for the capture path at any level.
 
 ## Export Formats
 

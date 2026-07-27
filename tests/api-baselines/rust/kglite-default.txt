@@ -733,6 +733,39 @@ pub fn kglite::api::cypher::resolve_node_property(node: &kglite::api::NodeData, 
 pub fn kglite::api::cypher::rewrite_text_score(query: &mut kglite::api::cypher::CypherQuery, params: &std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> core::result::Result<kglite::api::cypher::planner::simplification::TextScoreRewrite, alloc::string::String>
 pub fn kglite::api::cypher::validate_schema(query: &kglite::api::cypher::CypherQuery, graph: &kglite::api::DirGraph) -> core::result::Result<(), kglite::api::cypher::planner::schema_check::SchemaError>
 pub mod kglite::api::durable
+pub enum kglite::api::durable::DurabilityLevel
+pub kglite::api::durable::DurabilityLevel::Full
+pub kglite::api::durable::DurabilityLevel::Normal
+pub kglite::api::durable::DurabilityLevel::Off
+impl kglite::api::durable::DurabilityLevel
+pub const kglite::api::durable::DurabilityLevel::NAMES: [&'static str; 3]
+pub fn kglite::api::durable::DurabilityLevel::from_name(name: &str) -> core::option::Option<Self>
+pub fn kglite::api::durable::DurabilityLevel::logs(self) -> bool
+pub fn kglite::api::durable::DurabilityLevel::name(self) -> &'static str
+pub fn kglite::api::durable::DurabilityLevel::sync_mode(self) -> core::option::Option<kglite::api::durable::SyncMode>
+impl core::clone::Clone for kglite::api::durable::DurabilityLevel
+pub fn kglite::api::durable::DurabilityLevel::clone(&self) -> kglite::api::durable::DurabilityLevel
+impl core::cmp::Eq for kglite::api::durable::DurabilityLevel
+impl core::cmp::PartialEq for kglite::api::durable::DurabilityLevel
+pub fn kglite::api::durable::DurabilityLevel::eq(&self, other: &kglite::api::durable::DurabilityLevel) -> bool
+impl core::default::Default for kglite::api::durable::DurabilityLevel
+pub fn kglite::api::durable::DurabilityLevel::default() -> kglite::api::durable::DurabilityLevel
+impl core::fmt::Debug for kglite::api::durable::DurabilityLevel
+pub fn kglite::api::durable::DurabilityLevel::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::durable::DurabilityLevel
+impl core::marker::StructuralPartialEq for kglite::api::durable::DurabilityLevel
+pub enum kglite::api::durable::SyncMode
+pub kglite::api::durable::SyncMode::Barrier
+pub kglite::api::durable::SyncMode::PageCache
+impl core::clone::Clone for kglite::api::durable::SyncMode
+pub fn kglite::api::durable::SyncMode::clone(&self) -> kglite::api::durable::SyncMode
+impl core::cmp::Eq for kglite::api::durable::SyncMode
+impl core::cmp::PartialEq for kglite::api::durable::SyncMode
+pub fn kglite::api::durable::SyncMode::eq(&self, other: &kglite::api::durable::SyncMode) -> bool
+impl core::fmt::Debug for kglite::api::durable::SyncMode
+pub fn kglite::api::durable::SyncMode::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::durable::SyncMode
+impl core::marker::StructuralPartialEq for kglite::api::durable::SyncMode
 pub struct kglite::api::durable::RecordingGraph<G: kglite::api::GraphRead>
 impl<G: kglite::api::GraphRead> kglite::api::durable::RecordingGraph<G>
 pub fn kglite::api::durable::RecordingGraph<G>::inner(&self) -> &G
@@ -799,9 +832,10 @@ pub fn kglite::api::durable::RecordingGraph<G>::str_prop_eq(&self, idx: petgraph
 pub struct kglite::api::durable::Wal
 impl kglite::api::durable::Wal
 pub fn kglite::api::durable::Wal::append(&mut self, frame: &kglite::api::durable::WalFrame) -> core::io::error::Result<()>
-pub fn kglite::api::durable::Wal::open(path: std::path::PathBuf) -> core::io::error::Result<Self>
+pub fn kglite::api::durable::Wal::open(path: std::path::PathBuf, sync: kglite::api::durable::SyncMode) -> core::io::error::Result<Self>
 pub fn kglite::api::durable::Wal::path(&self) -> &std::path::Path
 pub fn kglite::api::durable::Wal::reset(&mut self) -> core::io::error::Result<()>
+pub fn kglite::api::durable::Wal::sync(&mut self) -> core::io::error::Result<()>
 impl core::fmt::Debug for kglite::api::durable::Wal
 pub fn kglite::api::durable::Wal::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::durable::WalFrame

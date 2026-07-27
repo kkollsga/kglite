@@ -67,15 +67,53 @@ You get this without asking for it because it is what makes an embedded database
 trustworthy: the alternative default silently loses every write since the last
 explicit `save()` whenever a process dies.
 
-## Opting out: `durable=False`
+The default is the *strongest* level, not the only one. If power-loss safety is
+more than your application needs, `durable="normal"` keeps the log and drops
+only the per-commit barrier — see [Choosing a durability
+level](#choosing-a-durability-level).
 
-Durability costs one `fsync` per commit. When the graph is rebuildable from
-source data — a bulk load, a derived index, a scratch analysis — that cost buys
-nothing, and `durable=False` gives you the older snapshot-on-close behaviour:
+## Choosing a durability level
+
+`durable` names **what a committed mutation survives**. It uses SQLite's
+`synchronous` vocabulary, and the levels are stated as guarantees rather than
+as syscalls — the syscall differs by platform, the guarantee does not.
+
+| `durable=` | A committed mutation survives… | Per-commit cost |
+|---|---|---|
+| `"full"` (or `True`) — **default** | process crash, OS crash, **power loss** | one barrier |
+| `"normal"` | **process crash** — `kill -9`, panic, OOM-kill | no barrier |
+| `"off"` (or `False`) | nothing since the last `save()` | no log |
+
+`True` and `False` are accepted spellings of `"full"` and `"off"`, so existing
+code keeps working unchanged.
+
+### `"normal"` — the process-crash level
 
 ```python
-g = kglite.open("kb.kgl", durable=False)
-g.add_nodes(df, node_type="Topic", unique_id_field="id")   # no fsync per write
+g = kglite.open("app.kgl", durable="normal")
+g.cypher("CREATE (:Order {id: 1001, total: 49.90})")   # logged, not barriered
+```
+
+The frame is handed to the kernel with a plain write before the call returns.
+**The page cache belongs to the kernel, not to your process**, so the commit
+survives your process dying by any means — an uncaught exception, `kill -9`,
+the OOM killer. What it does not survive is the *kernel* dying: an OS crash or
+a power cut loses commits made since the last `save()`.
+
+That is the right trade for most applications, because a crashing process is
+the failure that actually happens and a power cut is the one you keep backups
+for. It is also the level to reach for when per-commit barrier latency is
+shaping your write throughput — `"normal"` writes the same log frame and skips
+only the barrier.
+
+### `"off"` — no log at all
+
+When the graph is rebuildable from source data — a bulk load, a derived index,
+a scratch analysis — logging buys nothing:
+
+```python
+g = kglite.open("kb.kgl", durable="off")
+g.add_nodes(df, node_type="Topic", unique_id_field="id")   # nothing logged
 g.save()          # one explicit checkpoint at the end
 g.close()
 ```
@@ -85,6 +123,31 @@ What that is **not**: crash-safe. A snapshot is written only when *you* call
 killed mid-session (`kill -9`, power loss, an unhandled crash before the next
 `save()`), the work since the last checkpoint is gone.
 
+### Taking a power-safe point on demand: `sync()`
+
+`"normal"` skips the per-commit barrier — but you can take that barrier
+whenever it matters:
+
+```python
+g = kglite.open("app.kgl", durable="normal")
+
+def handle_request(payload):
+    g.cypher("CREATE (:Event $props)", params={"props": payload})
+
+handle_request(...)
+g.sync()      # everything committed so far now survives power loss too
+```
+
+`sync()` writes **no checkpoint** and truncates nothing — it only makes the
+existing log durable, which is why it is the right granularity for "flush at
+the end of a request" or "flush before shutdown". A full `save()` republishes
+the entire graph and is far more expensive.
+
+Under `"full"` it returns immediately (every commit was already barriered). On
+a graph with no log it raises `ValueError` rather than silently doing nothing,
+because a caller who believes they bought power-safety and got nothing is the
+failure that costs data.
+
 ## How durability works
 
 With durability on, every committed mutation is appended to a
@@ -93,9 +156,11 @@ returns**. A mutation that has returned is guaranteed to survive a hard crash.
 
 How it fits together:
 
-- **Each mutation** → one WAL frame, `fsync`'d per commit. This is the
-  durability cost: durable writes are bounded by `fsync` latency, not by engine
-  speed (see "Cost and tuning" below).
+- **Each mutation** → one WAL frame, written before the call returns. Under
+  `"full"` the frame is also barriered to stable storage per commit; that
+  barrier is the durability cost, and it bounds write latency by device
+  latency rather than engine speed (see "Cost and tuning" below). Under
+  `"normal"` the frame is written but not barriered.
 - **`save()`** → writes a full checkpoint (`.kgl`) and **truncates the WAL**.
   The checkpoint is the new baseline; the WAL starts empty again.
 - **`open(...)`** → loads the last checkpoint, then **replays**
@@ -132,12 +197,13 @@ optimising for:
 
 | You want… | Use | Trade-off |
 |---|---|---|
-| Every committed write to survive a hard crash | `open(path)` (the default) | One `fsync` per commit; reopen is O(graph) (loads the whole graph). |
-| Maximum write throughput on rebuildable data | `open(path, durable=False)` | No `fsync` per write; a crash loses work since the last checkpoint. |
+| Every committed write to survive a hard crash | `open(path)` (the default) | One barrier per commit; reopen is O(graph) (loads the whole graph). |
+| Committed writes to survive a crashing *process*, cheaply | `open(path, durable="normal")` | No barrier per commit; an OS crash or power cut loses work since the last `save()`. Call `sync()` for a power-safe point. |
+| Maximum write throughput on rebuildable data | `open(path, durable="off")` | Nothing logged; a crash loses work since the last checkpoint. |
 | Crash safety on a graph that outgrows RAM | `open(path, storage="mapped")` | Same per-commit WAL guarantee; property columns spill to mmap. |
 | 100 M+ nodes (Wikidata-scale), cheap cold-open | `open(path, storage="disk")` | Paged mmap, lazy load; **no per-commit WAL** — durability is your `save()` calls. |
 
-The first two are **in-memory** — the whole graph lives in RAM, which is what
+The first three are **in-memory** — the whole graph lives in RAM, which is what
 makes traversal and multi-hop queries fast. Durability adds crash-safety on
 top of that model without changing the in-memory read path.
 
@@ -178,13 +244,23 @@ model.
 
 ## Cost and tuning
 
-- **Durability is `fsync`-bound, not engine-bound.** A workload of many
-  small committed transactions spends its time waiting on the disk to confirm
-  each `fsync`, not in KGLite. `durable=False` does the same logical work
-  far faster precisely because it skips the per-commit `fsync`. This is the
-  price of crash-safety and is inherent to any WAL database. The cost scales
-  with the *number* of commits and with device latency, not with graph size,
-  and reads pay nothing at all.
+- **`"full"` is barrier-bound, not engine-bound.** A workload of many small
+  committed transactions spends its time waiting on the disk to confirm each
+  barrier, not in KGLite. This is the price of power-loss safety and is
+  inherent to any WAL database. The cost scales with the *number* of commits
+  and with device latency, not with graph size, and reads pay nothing at all.
+- **`"normal"` is the level to try before you reach for `"off"`.** It writes
+  the same log frame and skips only the barrier, so it costs roughly what an
+  unlogged write costs while still losing nothing to a crashing process. If
+  you were about to disable durability purely for write throughput, this is
+  almost always the better answer — and `sync()` gives you power-safe points
+  wherever you actually need them.
+- **On macOS, `"full"` buys more than SQLite's default does.** KGLite's
+  barrier is `F_FULLFSYNC`, which flushes the drive's own write cache;
+  SQLite's default `synchronous=FULL` issues a plain `fsync`, which on macOS
+  does not. The guarantees are therefore not the same thing measured
+  differently — KGLite's default is the stronger one, and it costs
+  accordingly.
 - **Batch where you can.** One `cypher()` that creates 1,000 nodes is one
   `fsync`; 1,000 separate `cypher()` calls are 1,000 `fsync`s. Group related
   mutations into a single statement (or a transaction — see
@@ -200,10 +276,13 @@ model.
   immutable generation, so its durability boundary is that publish rather than a
   logical log; reconciling a replayed frame against a published generation needs
   a generation-aware log this release does not have. `open(path,
-  storage="disk")` therefore opens **non-durable**, and passing an explicit
-  `durable=True` raises `ValueError` rather than pretending. The in-memory
-  default and `storage="mapped"` are both fully durable — if you want crash
-  safety on a graph that outgrew RAM, `mapped` is the answer.
+  storage="disk")` therefore opens **non-durable**, and **both `durable="full"`
+  and `durable="normal"` raise `ValueError`** rather than pretending — the
+  levels are not uniform across storage modes, because the blocker here is the
+  commit boundary itself and not barrier strength. `storage="disk"` supports
+  only `durable="off"`. The in-memory default and `storage="mapped"` support
+  every level — if you want crash safety on a graph that outgrew RAM, `mapped`
+  is the answer.
 
   What disk mode *does* guarantee is worth stating exactly, because it is
   stronger than "no crash safety" and is kill-9 tested

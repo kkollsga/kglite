@@ -370,7 +370,7 @@ pub mod api {
     pub mod durable {
         pub use crate::graph::mutation::wal_replay::apply_frames;
         pub use crate::graph::storage::recording::{resolve_ops, RecordingGraph};
-        pub use crate::graph::wal::{recover, wal_path, Wal, WalFrame};
+        pub use crate::graph::wal::{recover, wal_path, DurabilityLevel, SyncMode, Wal, WalFrame};
     }
 
     /// Code-entity read surface — resolve / locate / contextualize entities
