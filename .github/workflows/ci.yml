@@ -977,14 +977,28 @@ jobs:
           cache: pip
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
-          cache: maven
+          # Deliberately NOT `cache: maven`. That caches ~/.m2/repository, and
+          # tests/test_bolt_driver_conformance.py runs maven with
+          # `-Dmaven.repo.local=tests/conformance/java/.m2` so it never
+          # pollutes a developer's home repo. The built-in cache therefore
+          # pointed at a directory this job never writes: it warned
+          # "Path Validation Error: Path(s) ... do(es) not exist" on every run
+          # and saved nothing, while maven re-downloaded the Neo4j driver each
+          # time. The explicit cache below covers the path actually used.
+
+      - name: Cache the conformance Maven repository
+        uses: actions/cache@v6
+        with:
+          path: tests/conformance/java/.m2
+          key: conformance-m2-${{ runner.os }}-${{ hashFiles('tests/conformance/java/pom.xml') }}
+          restore-keys: conformance-m2-${{ runner.os }}-
 
       - name: Set up Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
