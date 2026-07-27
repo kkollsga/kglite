@@ -111,8 +111,6 @@ pub fn clear_for_tests() {
     guard.order.clear();
 }
 
-/// Current cache occupancy. Test-only.
-#[cfg(test)]
 /// Whether `query` currently has a cache entry.
 ///
 /// Preferred over [`entry_count_for_tests`] for hit/miss assertions: the cache
@@ -127,6 +125,8 @@ pub fn is_cached_for_tests(query: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Current cache occupancy. Test-only.
+#[cfg(test)]
 pub fn entry_count_for_tests() -> usize {
     cache()
         .read()
