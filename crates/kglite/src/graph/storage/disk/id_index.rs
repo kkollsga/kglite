@@ -195,9 +195,21 @@ impl IdIndexBase {
                 return Err(invalid_index("general payload exceeds decode limit"));
             }
             expected_payload = payload_end;
-            let name = interner
-                .try_resolve(InternedKey::from_u64(type_key))
-                .ok_or_else(|| invalid_index("directory contains an unresolved type key"))?;
+            let Some(name) = interner.try_resolve(InternedKey::from_u64(type_key)) else {
+                // Directories written before the writer resolved its keys
+                // (through 0.15.0) carry entries for type names the interner
+                // sidecar never received — a type declared with no rows, or a
+                // label a query merely mentioned. Those entries are always
+                // empty, and an id index is a cache the read path rebuilds on
+                // demand, so dropping one recovers the graph at no cost rather
+                // than making the whole directory unreadable. A *populated*
+                // entry under an unresolvable key is not that: it is a
+                // mismatched or damaged sidecar, and still fails the load.
+                if num_entries == 0 {
+                    continue;
+                }
+                return Err(invalid_index("directory contains an unresolved type key"));
+            };
             if variant == 1 {
                 let blob = &mmap[payload_off_usize..payload_end];
                 let map: HashMap<Value, NodeIndex> = serde_codec::decode_exact_with(
@@ -685,24 +697,48 @@ fn coerce_to_u32(id: &Value) -> Option<u32> {
 /// Write `id_indices.bin` (raw mmap layout). Iterates the store's union view
 /// (overlay + base) so saves capture both fresh mutations and unchanged
 /// base entries.
+///
+/// Directory keys are `InternedKey` hashes and the loader turns each one back
+/// into a type name through the interner sidecar that ships with the same
+/// snapshot. Names are therefore *resolved*, never interned here: deriving a
+/// key from the name alone — the old `interner.clone().try_get_or_intern`,
+/// which registered the name in a throwaway clone — manufactured keys for
+/// names the persisted interner never carried, and a single such entry made
+/// the whole directory unloadable ("directory contains an unresolved type
+/// key").
+///
+/// Only an empty index can carry an unregistered name: creating a node interns
+/// its type (`mutation/batch.rs`), so any index holding ids names an interned
+/// type. Empty entries do reach the store — the read path caches a
+/// build-on-miss index for a label a query merely mentioned
+/// ([`IdIndexStore::lookup_or_build`]) — and they are pure cache, so dropping
+/// them loses nothing. A non-empty unregistered entry would be a broken
+/// invariant, so it fails the save rather than shipping a directory that
+/// cannot be read back.
 pub fn write_id_indices_bin(
     dir: &Path,
     store: &IdIndexStore,
     interner: &StringInterner,
 ) -> Result<(), String> {
-    // Collect (type_key, name, materialized) triples sorted by type_key.
+    // Collect (type_key, materialized) pairs sorted by type_key.
     // `store.iter()` already returns owned, fully-materialized indices
     // (overlay + unshadowed base).
-    let mut entries: Vec<(u64, String, TypeIdIndex)> = Vec::new();
-    let mut interner_clone = interner.clone();
+    let mut entries: Vec<(u64, TypeIdIndex)> = Vec::new();
     for (name, materialized) in store.iter() {
-        let key = interner_clone
-            .try_get_or_intern(&name)
-            .map_err(|e| e.to_string())?
-            .as_u64();
-        entries.push((key, name, materialized));
+        let Some(key) = interner.try_resolve_to_key(&name) else {
+            if materialized.is_empty() {
+                continue;
+            }
+            return Err(format!(
+                "id index for type '{name}' holds {} ids but the type name is \
+                 not in the graph's interner; refusing to write an \
+                 id_indices.bin that cannot be read back",
+                materialized.len()
+            ));
+        };
+        entries.push((key.as_u64(), materialized));
     }
-    entries.sort_by_key(|(k, _, _)| *k);
+    entries.sort_by_key(|(k, _)| *k);
 
     let num_types = entries.len();
     let header_size = HEADER_BYTES;
@@ -722,7 +758,7 @@ pub fn write_id_indices_bin(
     let mut plans: Vec<Plan> = Vec::with_capacity(num_types);
     let mut cursor = data_offset as u64;
 
-    for (type_key, _name, idx) in &entries {
+    for (type_key, idx) in &entries {
         match idx {
             TypeIdIndex::Integer(map) => {
                 let mut pairs: Vec<(u32, u32)> =
@@ -958,6 +994,89 @@ mod validation_tests {
             base.lookup(integer_name, &Value::UniqueId(7)),
             Some(NodeIndex::new(4))
         );
+    }
+
+    /// A directory saved before the writer resolved its keys carries an empty
+    /// index under a type key the interner sidecar never received. Both
+    /// variants of that entry are recovered rather than failing the load; a
+    /// populated entry under an unresolvable key still fails (asserted in
+    /// `rejects_unsupported_unresolved_and_trailing_data`).
+    #[test]
+    fn an_empty_entry_with_an_unresolved_type_key_is_recovered() {
+        let mut interner = StringInterner::new();
+        interner.get_or_intern("Person");
+        let stale = InternedKey::from_str("NeverInterned").as_u64();
+
+        let base = load(&integer_fixture(stale, &[]), &interner)
+            .expect("a stale empty entry must not fail the load")
+            .unwrap();
+        assert!(!base.contains("NeverInterned"));
+
+        // The General variant is what a type with no rows actually produced:
+        // `num_entries` is 0, but the Postcard payload of an empty map is not.
+        let blob = serde_codec::encode_versioned(
+            serde_codec::CURRENT_CODEC,
+            &HashMap::<Value, NodeIndex>::new(),
+            MAX_GENERAL_INDEX_DECODE_BYTES,
+        )
+        .unwrap();
+        let mut bytes = integer_fixture(stale, &[]);
+        bytes[40] = 1;
+        bytes[64..72].copy_from_slice(&(blob.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&blob);
+        let base = load(&bytes, &interner)
+            .expect("a stale empty General entry must not fail the load")
+            .unwrap();
+        assert!(!base.contains("NeverInterned"));
+    }
+
+    /// The writer resolves names against the interner it is handed, so it can
+    /// never emit a directory key that the matching `interner.bin.zst` fails
+    /// to resolve. An unregistered name is dropped when its index is empty
+    /// (pure cache, rebuilt on demand) and fails the save when it is not.
+    #[test]
+    fn writer_never_emits_a_key_the_interner_cannot_resolve() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut interner = StringInterner::new();
+        interner.get_or_intern("Known");
+
+        let mut store = IdIndexStore::default();
+        store.replace_with(HashMap::from([
+            (
+                "Known".to_string(),
+                TypeIdIndex::Integer(HashMap::from([(7, NodeIndex::new(1))])),
+            ),
+            // Never interned: an id index cached for a type with no rows.
+            ("Unregistered".to_string(), TypeIdIndex::default()),
+        ]));
+        write_id_indices_bin(temp.path(), &store, &interner).unwrap();
+
+        // Asserted on the bytes, not through the loader: the loader also
+        // recovers such an entry (directories written before this fix carry
+        // them), so a round trip alone would not pin the writer.
+        let raw = std::fs::read(temp.path().join("id_indices.bin")).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(raw[12..16].try_into().unwrap()),
+            1,
+            "the unregistered name must not reach the directory at all"
+        );
+
+        let base = IdIndexBase::load_from(temp.path(), &interner)
+            .expect("the written directory must load")
+            .unwrap();
+        assert_eq!(
+            base.lookup("Known", &Value::UniqueId(7)),
+            Some(NodeIndex::new(1))
+        );
+        assert!(!base.contains("Unregistered"));
+
+        store.insert(
+            "Unregistered".to_string(),
+            TypeIdIndex::Integer(HashMap::from([(1, NodeIndex::new(0))])),
+        );
+        let error = write_id_indices_bin(temp.path(), &store, &interner).unwrap_err();
+        assert!(error.contains("Unregistered"), "{error}");
+        assert!(error.contains("cannot be read back"), "{error}");
     }
 
     #[test]
