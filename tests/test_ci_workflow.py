@@ -798,7 +798,7 @@ def test_no_workflow_script_executes_the_prose_it_prints() -> None:
 # --- the version probe every publish decision hangs off ---------------------
 
 #: The anchored semver test a version read out of `Cargo.toml` must survive.
-SEMVER_GUARD = r"""grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+"""
+SEMVER_GUARD = "grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+'"
 
 _CARGO_VERSION_READ = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=\$\(grep .*Cargo\.toml *\| *cut ")
 _QUOTED_SHELL_VAR = re.compile(r'"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"')
@@ -1283,8 +1283,8 @@ jobs:
         run: |
           VERSION=$(grep -m 1 '^version' Cargo.toml | cut -d '"' -f 2)
           UNCHECKED=$(grep -m 1 '^other' Cargo.toml | cut -d '"' -f 2)
-          # if ! printf '%s\n' "$UNCHECKED" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
-          if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+          # if ! printf '%s\n' "$UNCHECKED" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+'; then
+          if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+'; then
             echo "::error::bad version"
             exit 1
           fi
