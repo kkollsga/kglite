@@ -275,11 +275,11 @@ jobs:
     name: Minimal versions (declared dependency floors)
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # No job-level `continue-on-error` — that flag made this job structurally
-    # incapable of failing, so the "Enforce the expected-failure contract"
-    # step below would have been decorative. The two flags that remain are on
-    # the resolve/build steps only, so the contract step can inspect their
-    # real `outcome` and decide.
+    # No `continue-on-error` anywhere in this job — not job-level, not on
+    # any step. That flag made this job structurally incapable of failing:
+    # the Steps API reports `conclusion: success` for a step that exited
+    # 101, and on the strength of that green a false claim about this job
+    # reached this file and CHANGELOG.md twice before review caught it.
     steps:
       - uses: actions/checkout@v7
 
@@ -1107,10 +1107,8 @@ jobs:
       - source-quality
       - msrv-matrix
       - msrv
-      # `minimal-versions` is `continue-on-error: true`, so it reports
-      # `success` here even when it finds something. It is listed anyway so
-      # it stays visible in every run instead of quietly rotting; see the
-      # job's own comment for what it catches and why it cannot block yet.
+      # `minimal-versions` is a plain blocking gate as of 0.15.2 — no
+      # `continue-on-error` at any level, so a red there is red here.
       - minimal-versions
       - rustsec-audit
       - kglite-c

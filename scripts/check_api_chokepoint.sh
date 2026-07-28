@@ -34,6 +34,19 @@ cd "$(dirname "$0")/.."
 # never counts. grep exits 1 on no match; `|| true` tolerates that.
 count_reaches() {
 	local dir="$1"
+	# Fail loudly on an empty scan. Without this the function returns 0 for a
+	# directory that does not exist or holds no .rs files, and 0 reads as
+	# "ok: 0 below-api reaches" / "at baseline" — the gate reports green
+	# having examined nothing. The crate layout has already moved once (the
+	# kglite-py split), so this is not hypothetical.
+	# NOTE: this function is always called via $( ), so `exit` here would only
+	# kill the subshell and the caller would read an empty count as 0 — the
+	# very silent-pass this guard exists to stop. Emit a sentinel instead and
+	# make every call site check it.
+	if [ ! -d "$dir" ] || [ -z "$(find "$dir" -name '*.rs' -print -quit)" ]; then
+		echo "EMPTYSCAN"
+		return 0
+	fi
 	find "$dir" -name '*.rs' -exec cat {} + 2>/dev/null \
 		| perl -0pe 's{/\*.*?\*/}{}gs; s{//[^\n]*}{}g' \
 		| { grep -cE "(kglite|kglite_core)::graph::" || true; }
@@ -68,6 +81,10 @@ fail=0
 # --- 1. Server crates: hard zero -------------------------------------------
 for crate in kglite-bolt-server kglite-mcp-server kglite-c; do
 	n=$(count_reaches "crates/$crate/src")
+	if [ "$n" = "EMPTYSCAN" ]; then
+		echo "FAIL: crates/$crate/src has no .rs files — this gate would report 0 reaches having scanned nothing" >&2
+		exit 1
+	fi
 	if [ "$n" -ne 0 ]; then
 		echo "FAIL: crates/$crate reaches below kglite::api ($n times) — must be 0."
 		echo "      Offending lines:"
@@ -81,6 +98,10 @@ done
 
 # --- 2. Wheel: frozen ratchet ----------------------------------------------
 wheel=$(count_reaches "crates/kglite-py/src")
+if [ "$wheel" = "EMPTYSCAN" ]; then
+	echo "FAIL: crates/kglite-py/src has no .rs files — this gate would report 0 reaches having scanned nothing" >&2
+	exit 1
+fi
 if [ "$wheel" -gt "$WHEEL_BASELINE" ]; then
 	echo "FAIL: crates/kglite-py below-api reaches grew to $wheel (baseline $WHEEL_BASELINE)."
 	echo "      A new kglite_core::graph:: reach crept in. Route it through"

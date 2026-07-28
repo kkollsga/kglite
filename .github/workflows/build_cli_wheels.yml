@@ -35,6 +35,15 @@ jobs:
           # Version is single-sourced in [workspace.package] (root Cargo.toml);
           # kglite-cli inherits it via `version.workspace = true`.
           VERSION=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)
+          # The pipeline's status is `cut`'s, which is always 0, so a grep that
+          # matches nothing yields an empty VERSION without failing. That value
+          # drives every publish decision below: empty means the version probe
+          # queries a malformed URL and this workflow can report green while
+          # publishing nothing at all. Assert it looks like a version.
+          if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error::could not read a version from Cargo.toml (got '$VERSION')"
+            exit 1
+          fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "kglite-cli version: $VERSION"
           # 404 from PyPI's per-version JSON ⇒ not yet published ⇒ publish.
@@ -90,6 +99,11 @@ jobs:
         with:
           name: cli-wheels-${{ matrix.os }}-${{ matrix.target }}
           path: crates/kglite-cli/wheels/*.whl
+          # `error`, not the default `warn`: a build job that exits 0 while
+          # producing no wheel would otherwise upload an empty artifact and
+          # stay green, and publish runs with `skip-existing: true` — so a
+          # partial wheel set ships silently.
+          if-no-files-found: error
 
   build-linux:
     name: cli wheel - linux - ${{ matrix.target }}
@@ -119,6 +133,11 @@ jobs:
         with:
           name: cli-wheels-linux-${{ matrix.target }}
           path: crates/kglite-cli/wheels/*.whl
+          # `error`, not the default `warn`: a build job that exits 0 while
+          # producing no wheel would otherwise upload an empty artifact and
+          # stay green, and publish runs with `skip-existing: true` — so a
+          # partial wheel set ships silently.
+          if-no-files-found: error
 
   build-linux-arm:
     name: cli wheel - linux - ${{ matrix.target }} (best-effort)
@@ -152,6 +171,11 @@ jobs:
         with:
           name: cli-wheels-linux-${{ matrix.target }}
           path: crates/kglite-cli/wheels/*.whl
+          # `error`, not the default `warn`: a build job that exits 0 while
+          # producing no wheel would otherwise upload an empty artifact and
+          # stay green, and publish runs with `skip-existing: true` — so a
+          # partial wheel set ships silently.
+          if-no-files-found: error
 
   publish:
     name: Publish kglite-cli to PyPI

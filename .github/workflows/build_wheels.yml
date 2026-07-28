@@ -32,6 +32,15 @@ jobs:
           # inherits it via `version.workspace = true`. Read the root table —
           # the per-crate Cargo.tomls no longer carry a literal version.
           VERSION=$(grep -m 1 '^version' Cargo.toml | cut -d '"' -f 2)
+          # The pipeline's status is `cut`'s, which is always 0, so a grep that
+          # matches nothing yields an empty VERSION without failing. That value
+          # drives every publish decision below: empty means the version probe
+          # queries a malformed URL and this workflow can report green while
+          # publishing nothing at all. Assert it looks like a version.
+          if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error::could not read a version from Cargo.toml (got '$VERSION')"
+            exit 1
+          fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "kglite-py Cargo.toml version: $VERSION"
 
@@ -187,6 +196,11 @@ jobs:
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.target }}
           path: wheels/*.whl
+          # `error`, not the default `warn`: a build job that exits 0 while
+          # producing no wheel would otherwise upload an empty artifact and
+          # stay green, and publish runs with `skip-existing: true` — so a
+          # partial wheel set ships silently.
+          if-no-files-found: error
 
       # ---- pyarrow-coexistence canary (macOS arm64 only) ----
       # The dual-mimalloc teardown SIGSEGV this guards (kglite's Rust global
@@ -272,6 +286,11 @@ jobs:
         with:
           name: wheels-linux-${{ matrix.target }}
           path: wheels/*.whl
+          # `error`, not the default `warn`: a build job that exits 0 while
+          # producing no wheel would otherwise upload an empty artifact and
+          # stay green, and publish runs with `skip-existing: true` — so a
+          # partial wheel set ships silently.
+          if-no-files-found: error
 
   # aarch64 Linux — extra coverage built via QEMU/cross. These are the
   # fragile combos (native C deps cross-compiling to aarch64, esp.
@@ -331,6 +350,11 @@ jobs:
         with:
           name: wheels-linux-${{ matrix.target }}
           path: wheels/*.whl
+          # `error`, not the default `warn`: a build job that exits 0 while
+          # producing no wheel would otherwise upload an empty artifact and
+          # stay green, and publish runs with `skip-existing: true` — so a
+          # partial wheel set ships silently.
+          if-no-files-found: error
 
   build-sdist:
     name: Build sdist (source fallback)
@@ -383,6 +407,11 @@ jobs:
         with:
           name: wheels-sdist
           path: dist/*.tar.gz
+          # `error`, not the default `warn`: a build job that exits 0 while
+          # producing no wheel would otherwise upload an empty artifact and
+          # stay green, and publish runs with `skip-existing: true` — so a
+          # partial wheel set ships silently.
+          if-no-files-found: error
 
   publish:
     name: Publish to PyPI

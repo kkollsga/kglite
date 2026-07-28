@@ -33,6 +33,15 @@ jobs:
           # all five share one value. The per-crate Cargo.tomls no longer carry
           # a literal version — read the root table.
           WS_VERSION=$(grep -m 1 '^version' Cargo.toml | cut -d '"' -f 2)
+          # The pipeline's status is `cut`'s, which is always 0, so a grep that
+          # matches nothing yields an empty WS_VERSION without failing. That value
+          # drives every publish decision below: empty means the version probe
+          # queries a malformed URL and this workflow can report green while
+          # publishing nothing at all. Assert it looks like a version.
+          if ! printf '%s\n' "$WS_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error::could not read a version from Cargo.toml (got '$WS_VERSION')"
+            exit 1
+          fi
           KG_VERSION=$WS_VERSION
           BS_VERSION=$WS_VERSION
           MS_VERSION=$WS_VERSION
