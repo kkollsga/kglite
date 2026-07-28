@@ -332,9 +332,61 @@ jobs:
           name: wheels-linux-${{ matrix.target }}
           path: wheels/*.whl
 
+  build-sdist:
+    name: Build sdist (source fallback)
+    # WHY AN SDIST, when we ship wheels for the common platforms:
+    # a wheel exists only for the targets built above. Anyone else — Intel
+    # macOS, an older-glibc Linux, musl, a BSD, an unusual arch — currently
+    # cannot install kglite at all, and at least one downstream ended up
+    # vendoring a fork for exactly that reason. pip falls back to the sdist
+    # and compiles from source, which needs a Rust toolchain but works.
+    #
+    # This sdist is self-contained by construction: kglite has no path
+    # dependency pointing outside its own workspace, so nothing foreign gets
+    # vendored (contrast sonagram, whose sdist carried 258 files of KGLite
+    # because it path-depends on a sibling checkout). Verified locally: 1.8 MB,
+    # 354 files, and `cargo metadata` resolves after unpacking it somewhere
+    # with nothing else present.
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install Maturin
+        run: pip install maturin
+      - name: Build sdist
+        run: maturin sdist --out dist
+      - name: Verify the sdist is self-contained and carries its licence
+        # A source fallback that cannot build is worse than no fallback: it
+        # turns a clear "no matching distribution" into a compile error deep
+        # in someone else's install log. Resolve it in a scratch directory
+        # with no sibling checkouts, exactly as a consumer would.
+        run: |
+          set -euo pipefail
+          sdist=$(ls dist/*.tar.gz)
+          test "$(tar -tzf "$sdist" | grep -c '/LICENSE$')" -ge 1
+          work=$(mktemp -d)
+          tar -xzf "$sdist" -C "$work"
+          cd "$work"/*/
+          cargo metadata --format-version 1 > /dev/null
+          echo "sdist resolves standalone: $(basename "$sdist")"
+      - name: Upload sdist as artifact
+        # Named `wheels-sdist` on purpose: the publish job collects
+        # `pattern: wheels-*`, so this needs no change there.
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-sdist
+          path: dist/*.tar.gz
+
   publish:
     name: Publish to PyPI
-    needs: [version-check, ci-gate, build-native, build-linux, build-linux-arm]
+    needs: [version-check, ci-gate, build-native, build-linux, build-linux-arm, build-sdist]
     # Run once CI has passed (ci-gate) AND the must-pass builds are green,
     # regardless of the best-effort aarch64 job's result — a `continue-on-error`
     # job that fails still counts as a failed dependency, which would otherwise
@@ -349,6 +401,7 @@ jobs:
       needs.ci-gate.result == 'success' &&
       needs.build-native.result == 'success' &&
       needs.build-linux.result == 'success'
+      && needs.build-sdist.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write

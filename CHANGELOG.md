@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **An sdist, so platforms without a wheel can install at all.** kglite
+  publishes wheels for the common targets; anyone else — Intel macOS, an
+  older-glibc Linux, musl, a BSD, an unusual arch — had no install path, and
+  at least one downstream ended up vendoring a fork over exactly that. pip now
+  falls back to building from source (a Rust toolchain is required). The
+  release job asserts the sdist is genuinely usable rather than merely
+  produced: it unpacks it in a scratch directory with nothing else present and
+  resolves it there, because a source fallback that cannot build turns a clear
+  "no matching distribution" into a compile error inside someone else's
+  install log.
+
 ### Fixed
 
 - **The workspace now builds at its own declared dependency minimums, and CI
