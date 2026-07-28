@@ -22,6 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The crates.io publish workflow executed a line of its own explanatory
+  text.** An index-propagation fallback printed ``Proceeding anyway —
+  `cargo publish` for the next crate will surface a real error``, but
+  unescaped backticks inside a double-quoted shell string are command
+  substitution — so the sentence *ran* `cargo publish`, inside the publish
+  job, immediately before publishing the next crate, against whatever package
+  cargo picks by default. Confirmed by executing it rather than reading it.
+  Escaped, and a test now rejects unescaped backticks in any `run:` block
+  across every workflow.
+
+
 - **The workspace now builds at its own declared dependency minimums, and CI
   enforces it.** 0.15.2 fixed 17 understated floors but the build at those
   minimums still failed, on a floor that was not ours: `mcp-methods` declared
