@@ -12,6 +12,7 @@ jobs:
   version-check:
     name: Check if version needs publishing
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       should_publish: ${{ steps.check.outputs.should_publish }}
       version: ${{ steps.check.outputs.version }}
@@ -64,6 +65,7 @@ jobs:
     needs: [version-check]
     if: needs.version-check.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       # Wait on the single CI aggregate gate (ci.yml's `ci-success` job, which
       # `needs` every CI job and fails if any failed). This replaces the old
@@ -120,6 +122,7 @@ jobs:
     needs: [version-check]
     if: needs.version-check.outputs.should_publish == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     permissions:
       contents: write
     strategy:
@@ -249,6 +252,7 @@ jobs:
     needs: [version-check]
     if: needs.version-check.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       contents: write
     strategy:
@@ -304,6 +308,7 @@ jobs:
     needs: [version-check]
     if: needs.version-check.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     continue-on-error: true
     permissions:
       contents: write
@@ -374,6 +379,7 @@ jobs:
     needs: [version-check]
     if: needs.version-check.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -414,6 +420,12 @@ jobs:
           if-no-files-found: error
 
   publish:
+    # No `timeout-minutes`: this job publishes to a registry, and
+    # publish_crates.yml pushes five crates in dependency order. Killing a
+    # publish part-way leaves a partial release that has to be repaired by
+    # hand, and crates.io is irreversible — a job that runs long is the
+    # cheaper failure. The CI-wait loops inside these jobs already bound
+    # themselves (see their own deadlines).
     name: Publish to PyPI
     needs: [version-check, ci-gate, build-native, build-linux, build-linux-arm, build-sdist]
     # Run once CI has passed (ci-gate) AND the must-pass builds are green,

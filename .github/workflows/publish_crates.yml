@@ -12,6 +12,7 @@ jobs:
   version-check:
     name: Check if kglite version needs publishing
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       should_publish_kglite: ${{ steps.check.outputs.should_publish_kglite }}
       should_publish_bolt: ${{ steps.check.outputs.should_publish_bolt }}
@@ -128,6 +129,7 @@ jobs:
     needs: [version-check]
     if: needs.version-check.outputs.should_publish_kglite == 'true' || needs.version-check.outputs.should_publish_bolt == 'true' || needs.version-check.outputs.should_publish_mcp == 'true' || needs.version-check.outputs.should_publish_c == 'true' || needs.version-check.outputs.should_publish_cli == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       # Wait on the single CI aggregate gate (ci.yml's `ci-success` job, which
       # `needs` every CI job and fails if any failed). Replaces the old
@@ -202,6 +204,12 @@ jobs:
           allowed-conclusions: success,skipped
 
   publish:
+    # No `timeout-minutes`: this job publishes to a registry, and
+    # publish_crates.yml pushes five crates in dependency order. Killing a
+    # publish part-way leaves a partial release that has to be repaired by
+    # hand, and crates.io is irreversible — a job that runs long is the
+    # cheaper failure. The CI-wait loops inside these jobs already bound
+    # themselves (see their own deadlines).
     name: Publish to crates.io
     needs: [version-check, ci-gate]
     if: needs.version-check.outputs.should_publish_kglite == 'true' || needs.version-check.outputs.should_publish_bolt == 'true' || needs.version-check.outputs.should_publish_mcp == 'true' || needs.version-check.outputs.should_publish_c == 'true' || needs.version-check.outputs.should_publish_cli == 'true'
