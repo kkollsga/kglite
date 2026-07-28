@@ -406,6 +406,28 @@ jobs:
           cd "$work"/*/
           cargo metadata --format-version 1 > /dev/null
           echo "sdist resolves standalone: $(basename "$sdist")"
+
+      - name: Install the sdist from source and import it
+        # Resolving proves the manifest is coherent; it does NOT prove the
+        # thing builds. docs/python/platform-support.md promises a *tested*
+        # source distribution, and this is the step that makes the promise
+        # true — a full `pip install` of the tarball, compiling the engine
+        # exactly as a user on an uncovered platform would, then importing
+        # the result. Slow on purpose; it runs once per release.
+        run: |
+          set -euo pipefail
+          sdist=$(ls dist/*.tar.gz)
+          python -m venv /tmp/sdist-check
+          /tmp/sdist-check/bin/pip install --upgrade pip
+          /tmp/sdist-check/bin/pip install --no-binary :all: "$sdist"
+          /tmp/sdist-check/bin/python -c "
+          import kglite
+          g = kglite.KnowledgeGraph()
+          g.cypher_query('CREATE (n:Probe {name: \"sdist\"})')
+          rows = g.cypher_query('MATCH (n:Probe) RETURN n.name AS name')
+          assert rows and rows[0]['name'] == 'sdist', rows
+          print('sdist installs and runs:', kglite.__version__)
+          "
       - name: Upload sdist as artifact
         # Named `wheels-sdist` on purpose: the publish job collects
         # `pattern: wheels-*`, so this needs no change there.

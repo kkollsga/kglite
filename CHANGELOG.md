@@ -9,16 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **An sdist, so platforms without a wheel can install at all.** kglite
+- **A tested sdist, so platforms without a wheel can install at all.** kglite
   publishes wheels for the common targets; anyone else — Intel macOS, an
   older-glibc Linux, musl, a BSD, an unusual arch — had no install path, and
   at least one downstream ended up vendoring a fork over exactly that. pip now
-  falls back to building from source (a Rust toolchain is required). The
-  release job asserts the sdist is genuinely usable rather than merely
-  produced: it unpacks it in a scratch directory with nothing else present and
-  resolves it there, because a source fallback that cannot build turns a clear
-  "no matching distribution" into a compile error inside someone else's
-  install log.
+  falls back to building from source (a Rust toolchain is required).
+
+  This reverses a documented policy, deliberately: `platform-support.md`
+  previously said "no supported sdist" *because* an untested source
+  distribution is a liability. So the release job proves the artifact rather
+  than producing it — it unpacks the tarball into an empty directory to
+  confirm it resolves with no sibling checkouts present, then `pip install`s
+  it, compiling the engine exactly as an uncovered-platform user would, and
+  imports and queries the result. A source fallback that cannot build is worse
+  than none: it turns a clear "no matching distribution" into a compile error
+  inside someone else's install log. Wheels remain the supported path, and the
+  sdist is verified on the CI runner rather than on every target it may
+  reach.
 
 ### Fixed
 

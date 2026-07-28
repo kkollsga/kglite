@@ -78,13 +78,25 @@ rejects it because PyPy requires a `pp310`-compatible artifact. The project
 therefore does not publish the PyPy classifier. A future PyPy claim requires a
 dedicated build and runtime test, not only a source-level PyO3 capability.
 
-## Wheel-first distribution; no supported sdist
+## Wheel-first distribution, with a tested source fallback
 
-PyPI publication uploads platform wheels. It does not currently publish or
-test a source distribution, so pip has no supported PyPI sdist fallback when a
-wheel is unavailable.
+PyPI publication uploads platform wheels for the targets listed above, and a
+source distribution for everything else. When pip finds no matching wheel it
+falls back to the sdist and builds from source, which requires a Rust
+toolchain on the installing machine.
 
-Developers on another target can try a source checkout with a Rust toolchain:
+The sdist is not a courtesy upload: every release builds it, unpacks it into
+an empty directory to confirm it resolves with no sibling checkouts present,
+then `pip install`s the tarball and imports the result. A source fallback
+that cannot build is worse than none — it turns a clear "no matching
+distribution" into a compile error deep in someone else's install log.
+
+What this does *not* promise is that an unlisted platform is release-tested.
+The sdist is verified to build on the CI runner; it is not exercised on every
+target it might reach. Wheels remain the supported path, and a platform in
+the table above has been built and smoke-tested there.
+
+Developers can also work from a source checkout with a Rust toolchain:
 
 ```bash
 git clone https://github.com/kkollsga/kglite.git

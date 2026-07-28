@@ -86,7 +86,16 @@ def test_wheel_policy_and_support_page_match_workflow() -> None:
     assert "continue-on-error: true" in workflow
     assert "uploads platform wheels" in support
     assert "source distribution" in support
-    assert "dist/*.tar.gz" not in workflow
+    # The sdist is published and must be PROVEN usable, not merely produced.
+    # Policy lives in docs/python/platform-support.md ("Wheel-first
+    # distribution, with a tested source fallback"); this asserts the workflow
+    # actually keeps that promise. Resolving the manifest is not enough — an
+    # sdist that resolves and then fails to compile turns a clear "no matching
+    # distribution" into a compile error inside a stranger's install log.
+    assert "dist/*.tar.gz" in workflow
+    assert "maturin sdist" in workflow
+    assert "pip install --no-binary :all:" in workflow
+    assert "tested source fallback" in support
 
 
 def test_cp310_abi3_policy_does_not_claim_pypy_compatibility() -> None:
