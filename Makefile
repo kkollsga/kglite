@@ -286,8 +286,16 @@ cov-rust-core:
 ## lint-allowance drift — both halves the CI `source-quality` job runs. Keep
 ## these in step: this target ran only the first script, so a tree with an
 ## unreviewed or stale #[allow] passed local verification and failed CI.
+## The `--self-test` runs come first, and they are the reason this target is
+## worth running at all when the scripts change: each one feeds a synthetic
+## known-bad tree to the detectors and asserts they fire. A gate whose
+## detectors have gone blind reports a clean tree, so proving they still
+## trigger must not be reachable only through CI — which is where these two
+## invocations previously lived alone.
 source-quality:
+	python scripts/check_source_quality.py --self-test
 	python scripts/check_source_quality.py
+	python scripts/check_lint_allowances.py --self-test
 	python scripts/check_lint_allowances.py
 
 ## Validate that every temporary RustSec exception is justified and unexpired

@@ -29,6 +29,14 @@ assertion here therefore compares whole stripped logical lines for equality
 PyYAML maps the YAML 1.1 key ``on`` to the boolean ``True``; the trigger table
 is read as ``workflow[True]`` rather than avoiding the parser over it.
 
+Every assertion in this module is only as good as the helper that derived what
+it inspects: a helper that silently returns an empty list leaves each test
+built on it green having examined nothing — the exact shape of the artifact
+guard that died. The final section therefore self-tests the derivation helpers
+against synthetic workflow text, in both directions (the shape is extracted
+when present, and *not* extracted when absent or only mentioned in a comment),
+following ``scripts/check_source_quality.py::_self_test``.
+
 ``import yaml`` below is deliberately unguarded. ``pytest.importorskip`` would
 turn a missing dependency into a skip, and a skip counts as a pass both to
 pytest and to the ``ci-success`` aggregate job — reintroducing the precise
@@ -44,6 +52,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shlex
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -482,8 +491,26 @@ def test_bolt_driver_conformance_installs_both_toolchains() -> None:
 BEST_EFFORT_PRODUCERS = {"build-linux-arm"}
 
 
-def _artifact_producers() -> set[str]:
-    producers = {name for name, job in WHEELS["jobs"].items() if _steps_using(job, "actions/upload-artifact@")}
+def _uploaded_artifacts(workflow: dict) -> list[tuple[str, str | None]]:
+    """``(job name, declared artifact name)`` for every upload step in ``workflow``.
+
+    The name is returned exactly as declared, including the two shapes the
+    regex this replaced could not see: a ``${{ }}`` template (which may contain
+    spaces), and ``None`` when the step omits ``name:`` altogether — that
+    upload lands under the default name ``artifact``, which no ``wheels-*``
+    pattern matches. Both are *found* here and judged by the caller; a
+    derivation that silently skipped them is how the old guard came to inspect
+    nothing.
+    """
+    return [
+        (job_name, (step.get("with") or {}).get("name"))
+        for job_name, job in (workflow.get("jobs") or {}).items()
+        for step in _steps_using(job, "actions/upload-artifact@")
+    ]
+
+
+def _artifact_producers(workflow: dict) -> set[str]:
+    producers = {job_name for job_name, _ in _uploaded_artifacts(workflow)}
     assert producers, "no artifact-producing jobs found — the scan is broken"
     return producers
 
@@ -509,7 +536,7 @@ def test_publish_gates_on_every_artifact_producer() -> None:
 
     gated = set(re.findall(r"needs\.([a-zA-Z0-9_-]+)\.result\s*==\s*'success'", publish["if"]))
 
-    producers = _artifact_producers()
+    producers = _artifact_producers(WHEELS)
 
     missing_needs = producers - declared
     assert not missing_needs, f"publish does not `needs` producer(s): {sorted(missing_needs)}"
@@ -542,19 +569,16 @@ def test_publish_collects_every_uploaded_artifact_name() -> None:
     assert pattern.endswith("*"), f"publish downloads a literal name, not a pattern: {pattern!r}"
     prefix = pattern[:-1]
 
-    uploaded: list[tuple[str, str]] = []
-    for job_name, job in WHEELS["jobs"].items():
-        for step in _steps_using(job, "actions/upload-artifact@"):
-            name = (step.get("with") or {}).get("name")
-            assert name is not None, (
-                f"{job_name} uploads an artifact with no `name` — it defaults to `artifact`, "
-                f"which publish's pattern {pattern!r} never matches"
-            )
-            uploaded.append((job_name, name))
+    uploaded = _uploaded_artifacts(WHEELS)
     assert uploaded, "no uploaded artifact names found — the scan is broken"
-    assert {job_name for job_name, _ in uploaded} == _artifact_producers()
+    unnamed = [job_name for job_name, name in uploaded if name is None]
+    assert not unnamed, (
+        f"{unnamed} upload an artifact with no `name` — it defaults to `artifact`, "
+        f"which publish's pattern {pattern!r} never matches"
+    )
+    assert {job_name for job_name, _ in uploaded} == _artifact_producers(WHEELS)
 
-    stray = [(job_name, name) for job_name, name in uploaded if not name.startswith(prefix)]
+    stray = [(job_name, name) for job_name, name in uploaded if name is not None and not name.startswith(prefix)]
     assert not stray, f"artifact name(s) {stray} do not match publish's pattern {pattern!r}"
 
 
@@ -570,3 +594,195 @@ def test_sdist_is_built_and_proven_usable() -> None:
     _assert_runs(sdist, 'tar -xzf "$sdist" -C "$work"')
     _assert_runs(sdist, "cargo metadata --format-version 1 > /dev/null")
     _assert_runs(sdist, 'test "$(tar -tzf "$sdist" | grep -c \'/LICENSE$\')" -ge 1')
+
+
+# --- self-tests for the derivation helpers ----------------------------------
+# Every guard above inspects only what the helpers at the top of this file
+# derive. A helper that quietly stops matching — a moved key, a narrowed
+# regex, an invocation form it no longer recognises — leaves each test built
+# on it green while it examines nothing; that is precisely how the artifact
+# guard died with 19 green tests around it. The tests below pin each helper
+# against synthetic workflow text in both directions: the shape is extracted
+# when present, and is *not* extracted when absent or merely mentioned in a
+# comment. A rule that always fires is as useless as one that never does.
+
+SYNTHETIC_WORKFLOW = """
+name: synthetic
+on:
+  push:
+jobs:
+  build-wheels:
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test
+        run: |
+          set -euo pipefail
+          # pytest tests/test_commented_out.py -m ghost
+          pytest tests/test_real.py -m parity \\
+              --benchmark-json=out.json
+          KGLITE_LOG=debug .venv/bin/pytest tests/test_env_prefixed.py::test_one -m stress
+          python -m pytest -m bolt -rs tests/test_module_form.py
+          python -m mypy kglite
+      - name: Upload wheels as artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.os }} ${{ matrix.target }}
+          path: wheels/*.whl
+      - name: Upload logs under no name at all
+        uses: actions/upload-artifact@v7
+        with:
+          path: logs/
+  build-sdist:
+    steps:
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-sdist
+  lint:
+    steps:
+      - run: cargo fmt --check
+"""
+
+#: A workflow with jobs and steps but no uploads at all — the shape every
+#: "the scan is broken" guard exists to tell apart from a clean scan.
+UPLOADLESS_WORKFLOW = {"jobs": {"lint": {"steps": [{"run": "cargo fmt --check"}]}}}
+
+
+def _synthetic() -> dict:
+    return yaml.safe_load(SYNTHETIC_WORKFLOW)
+
+
+def _synthetic_job(name: str = "build-wheels") -> _Job:
+    return _job(_synthetic(), "synthetic.yml", name)
+
+
+def test_helper_load_workflow_requires_a_parsed_mapping(tmp_path: Path) -> None:
+    good = tmp_path / "good.yml"
+    good.write_text("jobs:\n  lint:\n    steps: []\n", encoding="utf-8")
+    assert _load_workflow(good)["jobs"] == {"lint": {"steps": []}}
+
+    bad = tmp_path / "bad.yml"
+    bad.write_text("- not\n- a mapping\n", encoding="utf-8")
+    with pytest.raises(AssertionError):
+        _load_workflow(bad)
+
+
+def test_helper_job_and_step_lookup_stay_scoped_to_the_named_job() -> None:
+    workflow = _synthetic()
+    assert _steps(_job(workflow, "synthetic.yml", "lint")) == [{"run": "cargo fmt --check"}]
+    with pytest.raises(AssertionError):
+        _job(workflow, "synthetic.yml", "no-such-job")
+    with pytest.raises(AssertionError):
+        _job({"jobs": {"lint": "not-a-mapping"}}, "synthetic.yml", "lint")
+
+    build = _synthetic_job()
+    assert len(_steps_using(build, "actions/upload-artifact@")) == 2
+    assert _steps_using(build, "actions/setup-python@")[0]["with"]["python-version"] == "3.12"
+    # Absent action, and an action present in a *different* job: neither may
+    # leak into this job's step list.
+    assert _steps_using(build, "actions/setup-java@") == []
+    assert _steps_using(_synthetic_job("lint"), "actions/upload-artifact@") == []
+
+
+def test_helper_logical_lines_drop_comments_and_join_continuations() -> None:
+    script = "# cargo test --release\n\n  cargo test \\\n      --release\nsleep 30\n"
+    assert list(_logical_lines(script)) == ["cargo test --release", "sleep 30"]
+    # A continuation that runs off the end of the script is still a command.
+    assert list(_logical_lines("echo a \\\n")) == ["echo a"]
+    # Steps with no `run:` contribute nothing rather than raising.
+    assert _step_commands({"uses": "actions/checkout@v5"}) == []
+    assert _step_commands({"run": "cargo fmt --check"}) == ["cargo fmt --check"]
+    assert _command_lines(_synthetic_job("lint")) == ["cargo fmt --check"]
+    assert "python -m mypy kglite" in _command_lines(_synthetic_job())
+
+
+def test_helper_command_assertions_reject_absent_prefix_and_commented_commands() -> None:
+    lint = _synthetic_job("lint")
+    _assert_runs(lint, "cargo fmt --check")
+    with pytest.raises(AssertionError):
+        _assert_runs(lint, "cargo clippy")
+    # Whole-line equality: a strict prefix of a real command must not satisfy
+    # the assertion, which is the subsumption that kept a deleted check green.
+    with pytest.raises(AssertionError):
+        _assert_runs(lint, "cargo fmt")
+
+    build = _synthetic_job()
+    # Present in the script, but only inside a `#` comment.
+    with pytest.raises(AssertionError):
+        _assert_runs(build, "pytest tests/test_commented_out.py -m ghost")
+
+    assert _step_running(build, "python -m mypy kglite")["name"] == "Test"
+    with pytest.raises(AssertionError):
+        _step_running(build, "python -m mypy")
+    with pytest.raises(AssertionError):
+        _step_running(build, "cargo fmt --check")
+
+
+def test_helper_tokens_are_exact_arguments() -> None:
+    assert _tokens('python x.py --flag "a b"') == ["python", "x.py", "--flag", "a b"]
+    # Unbalanced quotes fall back to a whitespace split instead of raising.
+    assert _tokens("echo 'unterminated") == ["echo", "'unterminated"]
+
+    tokens = _command_tokens(_synthetic_job())
+    assert "-rs" in tokens
+    assert "-r" not in tokens, "a flag must not be found inside a longer token"
+    assert "tests/test_real.py" in tokens
+    assert "tests/test_commented_out.py" not in tokens
+
+
+def test_helper_pytest_invocations_cover_every_launcher_form() -> None:
+    invocations = _pytest_invocations(_synthetic_job())
+    assert len(invocations) == 3, f"expected the three real launcher forms, got {invocations}"
+    assert [_markers(args) for args in invocations] == [["parity"], ["stress"], ["bolt"]]
+
+    # `pytest …`, with the continuation joined so its flags belong to it.
+    assert "tests/test_real.py" in invocations[0]
+    assert "--benchmark-json=out.json" in invocations[0]
+    # `VAR=value .venv/bin/pytest …`, node id preserved verbatim.
+    assert "tests/test_env_prefixed.py::test_one" in invocations[1]
+    # `python -m pytest …`, with `-m pytest` itself not read as a marker.
+    assert "tests/test_module_form.py" in invocations[2]
+    assert "pytest" not in _markers(invocations[2])
+
+    # Non-pytest commands, comments, and jobs without any pytest run.
+    flattened = [arg for args in invocations for arg in args]
+    assert "kglite" not in flattened, "`python -m mypy kglite` was read as a pytest invocation"
+    assert "tests/test_commented_out.py" not in flattened
+    assert _pytest_invocations(_synthetic_job("lint")) == []
+
+    assert _markers([]) == []
+    assert _markers(["-m"]) == [], "a trailing -m with no expression must not be read as a marker"
+
+
+def test_helper_artifact_derivation_sees_templated_and_unnamed_uploads() -> None:
+    """The case whose absence made the previous artifact guard vacuous.
+
+    A name inside `${{ }}` (with spaces) and an upload step with no `name:` at
+    all are exactly what the old regex could not see; both must be *found*
+    here, so the guard above can judge them.
+    """
+    uploaded = _uploaded_artifacts(_synthetic())
+    assert uploaded == [
+        ("build-wheels", "wheels-${{ matrix.os }} ${{ matrix.target }}"),
+        ("build-wheels", None),
+        ("build-sdist", "wheels-sdist"),
+    ]
+    assert _artifact_producers(_synthetic()) == {"build-wheels", "build-sdist"}
+
+    # A workflow whose jobs upload nothing derives nothing — which is what
+    # makes the guard below meaningful rather than decorative.
+    assert _uploaded_artifacts(UPLOADLESS_WORKFLOW) == []
+    assert _uploaded_artifacts({}) == []
+
+
+def test_helper_empty_scan_guard_fires_instead_of_reporting_clean() -> None:
+    """`assert producers, "the scan is broken"` must actually be reachable.
+
+    Several guards above are vacuous the moment the derivation returns
+    nothing, so the non-empty assertion is the only thing standing between a
+    blinded helper and a wall of green tests. It has to fire.
+    """
+    for workflow in (UPLOADLESS_WORKFLOW, {"jobs": {}}, {}):
+        with pytest.raises(AssertionError, match="the scan is broken"):
+            _artifact_producers(workflow)
