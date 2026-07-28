@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-07-28
+
 ### Fixed
 
 - **`from_blueprint(save=True)` no longer silently does nothing.** `save`
