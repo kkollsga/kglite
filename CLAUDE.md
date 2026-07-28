@@ -73,6 +73,34 @@ that crosses package boundaries; otherwise let GitHub CI parallelize them.
   ceiling is a FAILED test — fix the hang; never raise the default, never
   wait out a stuck run. The default suite's slowest test is ~2 s, so the
   ceiling is pure hang detection.
+- **A reported status is not the result — check the primitive (added
+  2026-07-28).** Every instance below failed in the *reassuring* direction,
+  and two of them put a false claim into a committed file:
+  - `cargo check … | tail` reports **tail's** exit code. Use `set -o pipefail`
+    or read `$?` from the command itself. Never claim "verified" from a
+    pipeline's status.
+  - A GitHub step with `continue-on-error: true` reports
+    `conclusion: success` **after exiting 101**. Read `.outcome`, never
+    `.conclusion` — and check for a **job-level** `continue-on-error`, which
+    makes the whole job unable to fail and any gate step inside it decorative.
+  - `cargo metadata --no-deps` skips resolution entirely and passes on a
+    workspace that cannot resolve (use `make bump-version`, which resolves).
+  - `gh run list` straight after a push returns a partial set, so "0
+    incomplete" is true and meaningless. Require the expected run **count**
+    first, then wait for completion.
+  - **"It compiles" is a weak test for a dependency floor.** Below `anyhow`
+    1.0.47, `anyhow!("{e}")` compiles with a warning and prints the literal
+    `{e}` to users. Where a version can compile yet misbehave, *run* it.
+
+  Same rule as the non-vacuity doctrine, applied to observability: ask "can
+  this green go red?" and prove it. Prefer an **expected-failure contract**
+  (tolerate one named failure; red on anything else, *including* the failure
+  disappearing) over a blanket `continue-on-error`, which silences a job
+  instead of scoping what it tolerates.
+- **When a committed claim is retracted, grep for every place it was
+  written.** The 2026-07-28 minimal-versions claim lived in three files; two
+  were corrected and `dev-docs/todos.md` — which advertises itself as enough
+  to brief a fresh agent — stayed wrong for hours.
 
 **Dev-environment cleanliness — every file accumulation needs a gate.** Any
 path the tooling writes outside git must have a bound and an owner: `target/`
@@ -131,7 +159,16 @@ never routinely:**
 - `crates/kglite-c/**` or the `kglite::api` / C ABI surface → kglite-c clippy +
   tests (`--features rdf`, then default features) and the cbindgen header-drift
   check (`cargo build -p kglite-c --features fastembed,rdf` then
-  `git diff crates/kglite-c/include/kglite.h`).
+  `git diff crates/kglite-c/include/kglite.h`). Note that *any* workspace-wide
+  `cargo check`/`build` runs this build script and rewrites the header — an
+  unrelated command can leave `kglite.h` dirty (a non-default cbindgen, e.g.
+  the one a minimal-versions resolve picks, rewrites it into an older form).
+  Check `git status` for it before staging.
+- `.github/workflows/**` → `pytest tests/test_ci_workflow.py`. `make gate`
+  compiles no Rust and runs no Python tests, so a workflow edit is
+  **completely ungated locally**: bumping two action majors once failed all
+  four Python-matrix jobs on `main` because a guard test pinned the old
+  versions. The file is fast (~0.2 s) and there is no excuse for skipping it.
 - `docs/**`, top-level `*.md`, or `kglite/__init__.pyi` →
   `sphinx-build -W --keep-going -b html docs <out>` with `docs/requirements.txt`.
 - A deliberate public Rust API change → refresh only the affected API profile
