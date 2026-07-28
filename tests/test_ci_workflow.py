@@ -212,3 +212,109 @@ def test_bolt_driver_conformance_installs_both_toolchains() -> None:
     assert "cargo build --release -p kglite-bolt-server" in job
     assert "pytest tests/test_bolt_driver_conformance.py -m bolt" in job
     assert "-rs" in job
+
+
+# --- build_wheels.yml -------------------------------------------------------
+# This file guarded ci.yml only, so the publish workflow — the one that
+# actually decides what reaches PyPI — had no local gate at all. That is the
+# same shape as the gap that let an action-major bump fail the whole Python
+# matrix: `make gate` runs no Python tests, so a workflow edit is unverified
+# until CI. The sdist job below is the first thing to depend on it.
+
+WHEELS_PATH = REPO_ROOT / ".github" / "workflows" / "build_wheels.yml"
+WHEELS_TEXT = WHEELS_PATH.read_text(encoding="utf-8")
+
+
+def _wheels_job(job: str) -> str:
+    match = re.search(rf"(?ms)^  {re.escape(job)}:\n(.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)", WHEELS_TEXT)
+    assert match is not None, f"missing required build_wheels job: {job}"
+    return match.group(1)
+
+
+def _wheels_job_commands(job: str) -> str:
+    """A job block with comment lines stripped.
+
+    Asserting a command is present is worthless if the same words appear in
+    the comment explaining that command — which is exactly what happened
+    here: gutting `cargo metadata` from the sdist verification still passed,
+    because the prose above it says "cargo metadata resolves after unpacking".
+    Caught by mutating the workflow and watching the guard stay green.
+    """
+    return "\n".join(line for line in _wheels_job(job).splitlines() if not line.lstrip().startswith("#"))
+
+
+#: Artifact producers `publish` deliberately does NOT require to succeed.
+#: Each entry is a conscious "this platform may silently not ship" decision,
+#: not an oversight — cross-compiled aarch64 wheels are fragile and were
+#: judged not worth blocking a release over.
+BEST_EFFORT_PRODUCERS = {"build-linux-arm"}
+
+
+def test_publish_gates_on_every_artifact_producer() -> None:
+    """`publish` must require every producer to have SUCCEEDED.
+
+    Listing a job in `needs` is not enough, and that distinction is the point.
+    The publish job is guarded by `if: always() && ...`, and `always()`
+    neutralises the implicit needs-succeeded gate — so what actually decides
+    is the chain of `needs.<job>.result == 'success'` terms in that condition.
+    A producer present in `needs` but absent from the `if:` can fail while
+    publish proceeds: the wheels ship and its artifact silently does not.
+
+    Not hypothetical. The sdist job was added to `needs` only, and its commit
+    message claimed publish gated on it. It did not. Caught in review, which
+    is why this reads the `if:` rather than `needs`.
+    """
+    publish = _wheels_job("publish")
+
+    needs = re.search(r"needs:\s*\[([^\]]*)\]", publish)
+    assert needs is not None, "publish job declares no `needs`"
+    declared = {n.strip() for n in needs.group(1).split(",")}
+
+    gated = set(re.findall(r"needs\.([a-zA-Z0-9_-]+)\.result\s*==\s*'success'", publish))
+
+    producers = {
+        job for job in re.findall(r"(?m)^  ([a-zA-Z0-9_-]+):$", WHEELS_TEXT) if "upload-artifact" in _wheels_job(job)
+    }
+    assert producers, "no artifact-producing jobs found — the scan is broken"
+
+    missing_needs = producers - declared
+    assert not missing_needs, f"publish does not `needs` producer(s): {sorted(missing_needs)}"
+
+    ungated = producers - gated - BEST_EFFORT_PRODUCERS
+    assert not ungated, (
+        f"publish does not require producer(s) {sorted(ungated)} to succeed — add "
+        "`needs.<job>.result == 'success'` to its `if:`, or record the job in "
+        "BEST_EFFORT_PRODUCERS with the reason it may silently not ship"
+    )
+
+
+def test_publish_collects_every_uploaded_artifact_name() -> None:
+    """Every uploaded artifact must match the pattern `publish` downloads.
+
+    `download-artifact` silently returns nothing for a non-matching name, so
+    an artifact named outside the pattern is dropped without an error. The
+    sdist is deliberately named `wheels-sdist` for this reason.
+    """
+    publish = _wheels_job("publish")
+    pattern = re.search(r"pattern:\s*(\S+)", publish)
+    assert pattern is not None, "publish job downloads without a `pattern`"
+    prefix = pattern.group(1).rstrip("*")
+
+    names = re.findall(r"(?m)^\s+name:\s*(wheels[a-zA-Z0-9_${}.\-]*)$", WHEELS_TEXT)
+    assert names, "no uploaded artifact names found — the scan is broken"
+    stray = [n for n in names if not n.startswith(prefix)]
+    assert not stray, f"artifact name(s) {stray} do not match publish's pattern {pattern.group(1)!r}"
+
+
+def test_sdist_is_built_and_proven_usable() -> None:
+    """The sdist job must verify the artifact resolves, not just that it built.
+
+    A source fallback that cannot build is worse than none: it turns a clear
+    "no matching distribution" into a compile error inside a stranger's
+    install log. Producing a tarball proves nothing about that.
+    """
+    sdist = _wheels_job_commands("build-sdist")
+    assert "maturin sdist" in sdist
+    assert "cargo metadata" in sdist, "sdist job never resolves the unpacked artifact"
+    assert "tar -xzf" in sdist, "sdist job never unpacks the artifact it built"
+    assert "LICENSE" in sdist, "sdist job does not assert the licence ships"
