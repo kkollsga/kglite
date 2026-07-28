@@ -423,6 +423,13 @@ jobs:
           python -m venv /tmp/sdist-check
           /tmp/sdist-check/bin/pip install --upgrade pip
           /tmp/sdist-check/bin/pip install --no-binary :all: "$sdist"
+          # Probe from a neutral directory. The repo root holds a `kglite/`
+          # source package, and CWD precedes site-packages on sys.path — so
+          # running this here imports the SOURCE tree, which has no compiled
+          # extension, and the probe fails with "No module named
+          # kglite.kglite" while the install was in fact fine. CLAUDE.md
+          # records the same trap for benchmark A/B runs.
+          cd /tmp
           /tmp/sdist-check/bin/python -c "
           import kglite
           g = kglite.KnowledgeGraph()
