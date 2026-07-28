@@ -256,7 +256,10 @@ jobs:
             sleep 30
           done
           echo "WARNING: cargo search didn't find kglite $VERSION after 90s + 5×30s."
-          echo "Proceeding anyway — `cargo publish` for the next crate will surface a"
+          # Backticks stay escaped: unescaped, this double-quoted string is a
+          # command substitution and the "explanation" runs a bare
+          # `cargo publish` against whatever package cargo picks by default.
+          echo "Proceeding anyway — \`cargo publish\` for the next crate will surface a"
           echo "real error if the index isn't ready."
 
       # 3. Publish kglite-bolt-server. Skipped if its version is

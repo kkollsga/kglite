@@ -56,9 +56,21 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CI_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-WHEELS_PATH = REPO_ROOT / ".github" / "workflows" / "build_wheels.yml"
+WORKFLOWS = REPO_ROOT / ".github" / "workflows"
+CI_PATH = WORKFLOWS / "ci.yml"
+WHEELS_PATH = WORKFLOWS / "build_wheels.yml"
+CLI_WHEELS_PATH = WORKFLOWS / "build_cli_wheels.yml"
+CRATES_PATH = WORKFLOWS / "publish_crates.yml"
 
+#: Jobs whose *existence* is a guarantee in its own right.
+#:
+#: This is deliberately not the aggregate-gate list — that one is derived (see
+#: :func:`test_ci_success_needs_every_job_defined_in_ci_yml`), because a
+#: hand-maintained copy of it reproduces the exact failure the `ci-success` job
+#: was created to abolish. What a derivation *cannot* notice is a job deleted
+#: from `ci.yml` outright: `ci-success` still needs every job that remains, so
+#: the gate is truthfully complete while a specific guarantee has silently
+#: disappeared. These names are the ones whose loss would be that.
 REQUIRED_JOBS = {
     "docs",
     "rust-core-coverage",
@@ -72,6 +84,7 @@ REQUIRED_JOBS = {
     "dependency-maintenance",
     "scheduled-concurrency-stress",
     "bolt-driver-conformance",
+    "perf-regression",
 }
 
 
@@ -83,6 +96,8 @@ def _load_workflow(path: Path) -> dict:
 
 CI = _load_workflow(CI_PATH)
 WHEELS = _load_workflow(WHEELS_PATH)
+CLI_WHEELS = _load_workflow(CLI_WHEELS_PATH)
+CRATES = _load_workflow(CRATES_PATH)
 
 
 class _Job(dict):
@@ -106,6 +121,14 @@ def _ci_job(name: str) -> _Job:
 
 def _wheels_job(name: str) -> _Job:
     return _job(WHEELS, "build_wheels.yml", name)
+
+
+def _cli_wheels_job(name: str) -> _Job:
+    return _job(CLI_WHEELS, "build_cli_wheels.yml", name)
+
+
+def _crates_job(name: str) -> _Job:
+    return _job(CRATES, "publish_crates.yml", name)
 
 
 def _steps(job: dict) -> list[dict]:
@@ -225,11 +248,65 @@ def _markers(args: list[str]) -> list[str]:
     return [args[index + 1] for index, arg in enumerate(args[:-1]) if arg == "-m"]
 
 
-def test_required_verification_jobs_are_aggregated() -> None:
-    needs = set(_ci_job("ci-success")["needs"])
-    for job in REQUIRED_JOBS:
-        _ci_job(job)
-        assert job in needs, f"ci-success.needs does not include {job}"
+def test_ci_success_needs_every_job_defined_in_ci_yml() -> None:
+    """`ci-success` must depend on every job the workflow defines.
+
+    Derived from `ci.yml`, never listed here. `ci-success` exists precisely
+    because a hand-maintained allowlist of jobs let 0.11.6 ship while the
+    free-threading job was red — and its own `needs:` is hand-maintained, so
+    guarding it with a second hand-maintained list in this file reproduced the
+    same shape one layer up: a job added to `ci.yml` and forgotten in `needs`
+    was gated by nothing, and nothing noticed.
+
+    `skipped` stays a pass in the aggregate's shell on purpose — three jobs are
+    `if: github.event_name == 'schedule'` and skip on every push and PR. That
+    is a recorded trade-off, not something this test may tighten.
+    """
+    jobs = set(CI["jobs"])
+    assert len(jobs) > 1, "ci.yml defines no jobs — the derivation is broken"
+
+    ci_success = _ci_job("ci-success")
+    needs = set(ci_success["needs"])
+
+    missing = jobs - needs - {"ci-success"}
+    assert not missing, (
+        f"ci.yml job(s) {sorted(missing)} are not in ci-success.needs, so nothing gates them. "
+        "Every job in the file must be aggregated — add them to `needs:`."
+    )
+
+    unknown = needs - jobs
+    assert not unknown, f"ci-success needs job(s) that ci.yml does not define: {sorted(unknown)}"
+    assert "ci-success" not in needs, "ci-success cannot depend on itself"
+
+
+def test_required_verification_jobs_still_exist() -> None:
+    """Deleting a job outright leaves the derivation above green.
+
+    `ci-success` needing every *remaining* job stays true when a job is removed
+    from `ci.yml`, so the aggregate gate reports honestly while the guarantee
+    is gone. These names are checked for existence for that reason only — their
+    aggregation is the derivation's job, not this one's.
+    """
+    for name in sorted(REQUIRED_JOBS):
+        _ci_job(name)
+
+
+def test_ci_success_actually_fails_when_a_dependency_does() -> None:
+    """The aggregate gate's own body must be able to go red.
+
+    It is the single check both publish workflows wait on, and it runs under
+    `if: always()` — so if its script stopped reading `needs.*.result`, or
+    stopped exiting non-zero, every downstream release gate would pass on a
+    workflow full of failures without anything else changing.
+    """
+    ci_success = _ci_job("ci-success")
+    assert ci_success["if"] == "always()", (
+        "ci-success must run under `always()`; otherwise a failed dependency skips it "
+        "and there is no definitive check for the publish workflows to wait on"
+    )
+    _assert_runs(ci_success, "results=\"${{ join(needs.*.result, ',') }}\"")
+    _assert_runs(ci_success, "*,failure,* | *,cancelled,*)")
+    _assert_runs(ci_success, "exit 1")
 
 
 def test_storage_and_disk_jobs_run_bounded_regression_targets() -> None:
@@ -323,10 +400,6 @@ def test_linux_perf_gate_uses_isolated_released_wheel_reference() -> None:
     upload = uploads[0]
     assert upload["with"]["include-hidden-files"] is True
     assert upload["if"] == "always()"
-
-
-def test_perf_regression_is_part_of_the_aggregate_gate() -> None:
-    assert "perf-regression" in _ci_job("ci-success")["needs"]
 
 
 def test_loom_and_unsafe_jobs_use_the_intended_commands() -> None:
@@ -477,18 +550,75 @@ def test_bolt_driver_conformance_installs_both_toolchains() -> None:
     assert "-rs" in args, "the conformance run does not pass -rs, so skips would be invisible"
 
 
-# --- build_wheels.yml -------------------------------------------------------
-# This file guarded ci.yml only, so the publish workflow — the one that
-# actually decides what reaches PyPI — had no local gate at all. That is the
-# same shape as the gap that let an action-major bump fail the whole Python
-# matrix: `make gate` runs no Python tests, so a workflow edit is unverified
-# until CI. The sdist job below is the first thing to depend on it.
+# --- the publish workflows --------------------------------------------------
+# This file guarded ci.yml only, so the publish workflows — the ones that
+# actually decide what reaches PyPI and crates.io — had no local gate at all.
+# That is the same shape as the gap that let an action-major bump fail the
+# whole Python matrix: `make gate` runs no Python tests, so a workflow edit is
+# unverified until CI.
+#
+# Everything guarded below is a property whose failure is *silent*: the run
+# still goes green, and what is missing is an artifact, a wheel, or a publish
+# that simply never happened. Loud failures (a build that errors, a `cargo
+# publish` that rejects a duplicate) need no guard here — they announce
+# themselves.
 
-#: Artifact producers `publish` deliberately does NOT require to succeed.
-#: Each entry is a conscious "this platform may silently not ship" decision,
-#: not an oversight — cross-compiled aarch64 wheels are fragile and were
-#: judged not worth blocking a release over.
-BEST_EFFORT_PRODUCERS = {"build-linux-arm"}
+_WHEELS_PARAM = pytest.param(WHEELS, "build_wheels.yml", id="build_wheels")
+_CLI_WHEELS_PARAM = pytest.param(CLI_WHEELS, "build_cli_wheels.yml", id="build_cli_wheels")
+_CRATES_PARAM = pytest.param(CRATES, "publish_crates.yml", id="publish_crates")
+
+PUBLISHING_WORKFLOWS = [_WHEELS_PARAM, _CLI_WHEELS_PARAM, _CRATES_PARAM]
+
+#: The two artifact-producing wheel workflows. `publish_crates.yml` uploads
+#: nothing — it publishes source crates straight from the checkout — so the
+#: artifact guards below do not apply to it and must not be parametrized over
+#: it, or they would pass on an empty scan. Listed rather than sliced out of
+#: the set above: a slice that silently shrinks drops a whole workflow's
+#: guards without failing anything.
+WHEEL_WORKFLOWS = [_WHEELS_PARAM, _CLI_WHEELS_PARAM]
+
+#: Artifact producers each `publish` job deliberately does NOT require to
+#: succeed. Each entry is a conscious "this platform may silently not ship"
+#: decision, not an oversight — cross-compiled aarch64 wheels are fragile and
+#: were judged not worth blocking a release over. `build_cli_wheels.yml` goes
+#: further and marks its arm job `continue-on-error` at *job* level, which
+#: makes the job structurally unable to fail.
+BEST_EFFORT_PRODUCERS = {
+    "build_wheels.yml": {"build-linux-arm"},
+    "build_cli_wheels.yml": {"build-linux-arm"},
+}
+
+
+_MATRIX_REF = re.compile(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}")
+
+
+def _rendered_job_names(job: dict, fallback: str) -> list[str]:
+    """Every check name a job produces, with ``${{ matrix.* }}`` substituted.
+
+    GitHub names each matrix leg by rendering the job's ``name:`` against that
+    leg's values; the unrendered template appears only when the job never ran.
+    A guard matching the template alone could not tell the must-pass legs from
+    the best-effort ones — which is the whole distinction the crates.io gate's
+    ``check-regexp`` exists to make.
+
+    A reference to a key the leg does not define is left as-is rather than
+    blanked, so a typo shows up as an unmatched name instead of quietly
+    rendering to something that matches.
+    """
+    template = job.get("name") or fallback
+    includes = ((job.get("strategy") or {}).get("matrix") or {}).get("include") or [{}]
+    return [
+        _MATRIX_REF.sub(lambda match: str(values.get(match.group(1), match.group(0))), template) for values in includes
+    ]
+
+
+def _upload_steps(workflow: dict) -> list[tuple[str, dict]]:
+    """``(job name, step)`` for every ``upload-artifact`` step in ``workflow``."""
+    return [
+        (job_name, step)
+        for job_name, job in (workflow.get("jobs") or {}).items()
+        for step in _steps_using(job, "actions/upload-artifact@")
+    ]
 
 
 def _uploaded_artifacts(workflow: dict) -> list[tuple[str, str | None]]:
@@ -502,11 +632,7 @@ def _uploaded_artifacts(workflow: dict) -> list[tuple[str, str | None]]:
     derivation that silently skipped them is how the old guard came to inspect
     nothing.
     """
-    return [
-        (job_name, (step.get("with") or {}).get("name"))
-        for job_name, job in (workflow.get("jobs") or {}).items()
-        for step in _steps_using(job, "actions/upload-artifact@")
-    ]
+    return [(job_name, (step.get("with") or {}).get("name")) for job_name, step in _upload_steps(workflow)]
 
 
 def _artifact_producers(workflow: dict) -> set[str]:
@@ -515,46 +641,57 @@ def _artifact_producers(workflow: dict) -> set[str]:
     return producers
 
 
-def test_publish_gates_on_every_artifact_producer() -> None:
+def _gated_successes(job: dict) -> set[str]:
+    """Jobs whose ``success`` result the ``if:`` condition explicitly requires."""
+    return set(re.findall(r"needs\.([a-zA-Z0-9_-]+)\.result\s*==\s*'success'", str(job.get("if", ""))))
+
+
+@pytest.mark.parametrize("workflow, workflow_name", WHEEL_WORKFLOWS)
+def test_publish_gates_on_every_artifact_producer(workflow: dict, workflow_name: str) -> None:
     """`publish` must require every producer to have SUCCEEDED.
 
     Listing a job in `needs` is not enough, and that distinction is the point.
-    The publish job is guarded by `if: always() && ...`, and `always()`
+    Both publish jobs are guarded by `if: always() && ...`, and `always()`
     neutralises the implicit needs-succeeded gate — so what actually decides
     is the chain of `needs.<job>.result == 'success'` terms in that condition.
     A producer present in `needs` but absent from the `if:` can fail while
     publish proceeds: the wheels ship and its artifact silently does not.
 
-    Not hypothetical. The sdist job was added to `needs` only, and its commit
-    message claimed publish gated on it. It did not. Caught in review, which
-    is why this reads the `if:` rather than `needs`.
+    Not hypothetical. `build_wheels.yml`'s sdist job was added to `needs` only,
+    and its commit message claimed publish gated on it. It did not. Caught in
+    review, which is why this reads the `if:` rather than `needs`.
     """
-    publish = _wheels_job("publish")
+    publish = _job(workflow, workflow_name, "publish")
 
     declared = set(publish["needs"])
-    assert declared, "publish job declares no `needs`"
+    assert declared, f"{publish.label} declares no `needs`"
 
-    gated = set(re.findall(r"needs\.([a-zA-Z0-9_-]+)\.result\s*==\s*'success'", publish["if"]))
-
-    producers = _artifact_producers(WHEELS)
+    assert "always()" in publish["if"], (
+        f"{publish.label} no longer uses `always()`, so `needs` gates it directly — "
+        "this test reads the `if:` chain and would now be checking the wrong thing"
+    )
+    gated = _gated_successes(publish)
+    producers = _artifact_producers(workflow)
 
     missing_needs = producers - declared
-    assert not missing_needs, f"publish does not `needs` producer(s): {sorted(missing_needs)}"
+    assert not missing_needs, f"{publish.label} does not `needs` producer(s): {sorted(missing_needs)}"
 
-    ungated = producers - gated - BEST_EFFORT_PRODUCERS
+    ungated = producers - gated - BEST_EFFORT_PRODUCERS[workflow_name]
     assert not ungated, (
-        f"publish does not require producer(s) {sorted(ungated)} to succeed — add "
+        f"{publish.label} does not require producer(s) {sorted(ungated)} to succeed — add "
         "`needs.<job>.result == 'success'` to its `if:`, or record the job in "
         "BEST_EFFORT_PRODUCERS with the reason it may silently not ship"
     )
 
 
-def test_publish_collects_every_uploaded_artifact_name() -> None:
+@pytest.mark.parametrize("workflow, workflow_name", WHEEL_WORKFLOWS)
+def test_publish_collects_every_uploaded_artifact_name(workflow: dict, workflow_name: str) -> None:
     """Every uploaded artifact must match the pattern `publish` downloads.
 
     `download-artifact` silently returns nothing for a non-matching name, so
     an artifact named outside the pattern is dropped without an error. The
-    sdist is deliberately named `wheels-sdist` for this reason.
+    sdist is deliberately named `wheels-sdist` for this reason, and every
+    `build_cli_wheels.yml` upload carries the `cli-wheels-` prefix.
 
     The names are read from the parsed `with.name` of each upload step. The
     regex this replaced scanned for `^\\s+name:\\s*(wheels…)$`, which could not
@@ -562,24 +699,46 @@ def test_publish_collects_every_uploaded_artifact_name() -> None:
     `${{ }}`) and — because the capture group itself began with `wheels` —
     could not express the stray name it existed to reject.
     """
-    publish = _wheels_job("publish")
+    publish = _job(workflow, workflow_name, "publish")
     downloads = _steps_using(publish, "actions/download-artifact@")
-    assert len(downloads) == 1, "publish should download artifacts in exactly one step"
+    assert len(downloads) == 1, f"{publish.label} should download artifacts in exactly one step"
     pattern = downloads[0]["with"]["pattern"]
-    assert pattern.endswith("*"), f"publish downloads a literal name, not a pattern: {pattern!r}"
+    assert pattern.endswith("*"), f"{publish.label} downloads a literal name, not a pattern: {pattern!r}"
     prefix = pattern[:-1]
 
-    uploaded = _uploaded_artifacts(WHEELS)
+    uploaded = _uploaded_artifacts(workflow)
     assert uploaded, "no uploaded artifact names found — the scan is broken"
     unnamed = [job_name for job_name, name in uploaded if name is None]
     assert not unnamed, (
         f"{unnamed} upload an artifact with no `name` — it defaults to `artifact`, "
-        f"which publish's pattern {pattern!r} never matches"
+        f"which {publish.label}'s pattern {pattern!r} never matches"
     )
-    assert {job_name for job_name, _ in uploaded} == _artifact_producers(WHEELS)
+    assert {job_name for job_name, _ in uploaded} == _artifact_producers(workflow)
 
     stray = [(job_name, name) for job_name, name in uploaded if name is not None and not name.startswith(prefix)]
-    assert not stray, f"artifact name(s) {stray} do not match publish's pattern {pattern!r}"
+    assert not stray, f"artifact name(s) {stray} do not match {publish.label}'s pattern {pattern!r}"
+
+
+@pytest.mark.parametrize("workflow, workflow_name", WHEEL_WORKFLOWS)
+def test_no_upload_can_contribute_an_empty_artifact(workflow: dict, workflow_name: str) -> None:
+    """Every upload must set `if-no-files-found: error`.
+
+    The action's default is `warn`. A build job that exits 0 without producing
+    a wheel therefore uploads an empty artifact and stays green; publish then
+    ships whatever it collected, and a platform is missing from the release
+    with nothing in any log marked as a failure.
+    """
+    uploads = _upload_steps(workflow)
+    assert uploads, f"no upload steps found in {workflow_name} — the scan is broken"
+    lax = [
+        (job_name, (step.get("with") or {}).get("name"))
+        for job_name, step in uploads
+        if (step.get("with") or {}).get("if-no-files-found") != "error"
+    ]
+    assert not lax, (
+        f"{workflow_name} upload(s) {lax} do not set `if-no-files-found: error`, so an "
+        "empty artifact uploads silently and the release ships without that platform"
+    )
 
 
 def test_sdist_is_built_and_proven_usable() -> None:
@@ -594,6 +753,325 @@ def test_sdist_is_built_and_proven_usable() -> None:
     _assert_runs(sdist, 'tar -xzf "$sdist" -C "$work"')
     _assert_runs(sdist, "cargo metadata --format-version 1 > /dev/null")
     _assert_runs(sdist, 'test "$(tar -tzf "$sdist" | grep -c \'/LICENSE$\')" -ge 1')
+
+
+_SINGLE_QUOTED = re.compile(r"'[^']*'")
+
+
+def _runs_prose_as_a_command(line: str) -> bool:
+    """True if ``line`` carries a backtick the shell would execute.
+
+    Single-quoted spans are dropped first (``echo '```'`` is literal text) and
+    ``\\```  is an escaped backtick. Anything left is legacy command
+    substitution — which inside a double-quoted ``echo`` runs the very example
+    the message was quoting.
+    """
+    return "`" in _SINGLE_QUOTED.sub("", line).replace("\\`", "")
+
+
+def test_no_workflow_script_executes_the_prose_it_prints() -> None:
+    """No `run:` command may contain an unescaped backtick.
+
+    `publish_crates.yml`'s index-propagation fallback printed
+    ``echo "Proceeding anyway — `cargo publish` for the next crate…"``. Inside
+    double quotes those backticks are command substitution, so the explanation
+    ran a bare `cargo publish` against whatever package cargo picks by default
+    — and the step still exited 0, because the status reported is `echo`'s.
+
+    Backticks are never needed here: every real substitution in these files
+    uses `$( )`. Scanned across every workflow, since this is a shell
+    property, not a property of one file.
+    """
+    offenders = [
+        (path.name, job_name, line)
+        for path in sorted(WORKFLOWS.glob("*.yml"))
+        for job_name, job in (_load_workflow(path).get("jobs") or {}).items()
+        for line in _command_lines(job)
+        if _runs_prose_as_a_command(line)
+    ]
+    assert not offenders, (
+        "unescaped backticks run as command substitution; escape them (\\`) or use single quotes:\n  "
+        + "\n  ".join(f"{name} `{job}`: {line}" for name, job, line in offenders)
+    )
+
+
+# --- the version probe every publish decision hangs off ---------------------
+
+#: The anchored semver test a version read out of `Cargo.toml` must survive.
+SEMVER_GUARD = r"""grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+"""
+
+_CARGO_VERSION_READ = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=\$\(grep .*Cargo\.toml *\| *cut ")
+_QUOTED_SHELL_VAR = re.compile(r'"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"')
+_GITHUB_OUTPUT_WRITE = re.compile(r'echo "([A-Za-z_][A-Za-z0-9_]*)=[^"]*" >> \$GITHUB_OUTPUT')
+_STEP_OUTPUT_REF = re.compile(r"\$\{\{\s*steps\.[A-Za-z0-9_-]+\.outputs\.([A-Za-z0-9_]+)\s*\}\}")
+
+
+def _cargo_version_reads(job: dict) -> set[str]:
+    """Variables assigned from the ``grep … Cargo.toml | cut`` version pipeline.
+
+    That pipeline reports ``cut``'s exit status, which is always 0, so a grep
+    matching nothing assigns the empty string and the job carries on green.
+    Every variable found here goes on to steer a publish decision, so every
+    one of them has to be validated before it is used.
+    """
+    return {match.group(1) for line in _command_lines(job) if (match := _CARGO_VERSION_READ.match(line))}
+
+
+def _semver_validated_variables(job: dict) -> set[str]:
+    """Variables the job pipes through the anchored semver ``grep -Eq``.
+
+    Read from whole logical lines, so the prose explaining the guard cannot
+    stand in for the guard (``_logical_lines`` drops ``#`` comments) and the
+    variable must appear on the same line as the test that validates it.
+    """
+    return {name for line in _command_lines(job) if SEMVER_GUARD in line for name in _QUOTED_SHELL_VAR.findall(line)}
+
+
+def _github_outputs_written(job: dict) -> set[str]:
+    """Output names the job's scripts append to ``$GITHUB_OUTPUT``."""
+    return {match.group(1) for line in _command_lines(job) for match in _GITHUB_OUTPUT_WRITE.finditer(line)}
+
+
+@pytest.mark.parametrize("workflow, workflow_name", PUBLISHING_WORKFLOWS)
+def test_version_probe_validates_the_version_it_read(workflow: dict, workflow_name: str) -> None:
+    """A malformed version read must abort, not publish nothing quietly.
+
+    `VERSION=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)` reports
+    `cut`'s status — always 0. Rename the key, reformat the table, and the
+    grep matches nothing, `VERSION` is empty, the registry probe queries a
+    malformed URL, its non-404 answer reads as "already published", and the
+    whole workflow goes green having published nothing at all.
+    """
+    check = _job(workflow, workflow_name, "version-check")
+
+    read = _cargo_version_reads(check)
+    assert read, f"{check.label} does not read a version out of Cargo.toml — the scan is broken"
+
+    unvalidated = read - _semver_validated_variables(check)
+    assert not unvalidated, (
+        f"{check.label} reads {sorted(unvalidated)} from Cargo.toml without asserting it looks "
+        f"like a version ({SEMVER_GUARD}…) — an empty read then drives every publish decision"
+    )
+
+    guard_steps = [step for step in _steps(check) if any(SEMVER_GUARD in line for line in _step_commands(step))]
+    assert len(guard_steps) == 1, f"{check.label} has {len(guard_steps)} semver guards, expected exactly 1"
+    assert "exit 1" in _step_commands(guard_steps[0]), (
+        f"{check.label}'s semver guard does not `exit 1` — it reports the problem and continues"
+    )
+
+
+@pytest.mark.parametrize("workflow, workflow_name", PUBLISHING_WORKFLOWS)
+def test_version_check_outputs_are_actually_written(workflow: dict, workflow_name: str) -> None:
+    """Every declared `version-check` output must be written by a step.
+
+    A job output wired to a step output no step writes resolves to the empty
+    string — GitHub raises nothing. Downstream, `... == 'true'` is then false
+    forever: the build jobs skip, the publish steps skip, and the run is green
+    having shipped nothing. That is the same silent shape as the empty version
+    above, one layer further along.
+    """
+    check = _job(workflow, workflow_name, "version-check")
+    written = _github_outputs_written(check)
+    assert written, f"{check.label} writes nothing to $GITHUB_OUTPUT — the scan is broken"
+
+    declared = check.get("outputs") or {}
+    assert declared, f"{check.label} declares no outputs"
+
+    for name, expression in declared.items():
+        referenced = _STEP_OUTPUT_REF.findall(str(expression))
+        assert len(referenced) == 1, (
+            f"{check.label} output {name} is not a single step-output reference: {expression!r}"
+        )
+        assert referenced[0] in written, (
+            f"{check.label} declares output `{name}` from `{referenced[0]}`, which no step writes to "
+            "$GITHUB_OUTPUT — it resolves to the empty string and every decision it drives silently "
+            "becomes a no-op"
+        )
+
+
+# --- the CI gate that stands between a commit and a published artifact ------
+
+_CONCLUSION_IS_SUCCESS = re.compile(r'"\$conclusion"\s*=\s*"success"')
+_EXITS_NONZERO = re.compile(r"(?:^|;\s*)exit [1-9]")
+
+
+def _ci_poll_commands(job: _Job) -> list[str]:
+    """Commands of the single step that polls ci.yml's push-triggered run.
+
+    Scoped to that one step so the three things a working gate needs — the
+    query, the success comparison, and the non-zero exit — must live together.
+    Spread across the job they could be satisfied by unrelated steps.
+    """
+    polling = [
+        step for step in _steps(job) if any("actions/workflows/ci.yml/runs" in line for line in _step_commands(step))
+    ]
+    assert len(polling) == 1, f"{job.label} polls ci.yml runs in {len(polling)} steps, expected exactly 1"
+    return _step_commands(polling[0])
+
+
+def _assert_waits_for_ci_success(job: _Job) -> None:
+    lines = _ci_poll_commands(job)
+    query = [line for line in lines if "actions/workflows/ci.yml/runs" in line]
+    assert len(query) == 1, f"{job.label} queries the ci.yml runs endpoint {len(query)} times, expected 1"
+    assert "event=push" in query[0], (
+        f"{job.label} does not restrict the CI lookup to `event=push`; a same-SHA pull-request "
+        "run would be accepted as the release gate"
+    )
+    assert any(_CONCLUSION_IS_SUCCESS.search(line) for line in lines), (
+        f"{job.label} never compares the run's conclusion to `success` — it would accept any "
+        "completed run, including a failed one"
+    )
+    assert any(_EXITS_NONZERO.search(line) for line in lines), (
+        f"{job.label} never exits non-zero, so a red CI run cannot stop the publish"
+    )
+
+
+def test_pypi_publishes_cannot_outrun_the_ci_gate() -> None:
+    """Both wheel workflows must block PyPI on ci.yml, in the two shapes they use.
+
+    `build_wheels.yml` gates through a separate `ci-gate` job named in the
+    publish `if:` chain; `build_cli_wheels.yml` waits inline as the publish
+    job's first step. Both are load-bearing and neither had a test.
+    """
+    wheels_publish = _wheels_job("publish")
+    assert "ci-gate" in _gated_successes(wheels_publish), (
+        "build_wheels.yml `publish` does not require `needs.ci-gate.result == 'success'`; "
+        "under `always()` the builds run in parallel with CI, so this term is the only thing "
+        "keeping an un-CI'd commit off PyPI"
+    )
+    _assert_waits_for_ci_success(_wheels_job("ci-gate"))
+
+    cli_publish = _cli_wheels_job("publish")
+    assert "needs.version-check.outputs.should_publish == 'true'" in cli_publish["if"], (
+        "build_cli_wheels.yml `publish` does not require a publish decision, so it would run on every push to main"
+    )
+    _assert_waits_for_ci_success(cli_publish)
+
+    # The inline wait only gates what runs after it.
+    steps = _steps(cli_publish)
+    waits = [
+        index
+        for index, step in enumerate(steps)
+        if any("actions/workflows/ci.yml/runs" in line for line in _step_commands(step))
+    ]
+    uploads = [
+        index
+        for index, step in enumerate(steps)
+        if str(step.get("uses", "")).startswith("pypa/gh-action-pypi-publish@")
+    ]
+    assert len(waits) == 1 and len(uploads) == 1, f"expected one CI wait and one PyPI upload, got {waits} and {uploads}"
+    assert waits[0] < uploads[0], "build_cli_wheels.yml waits for CI *after* uploading to PyPI — the wait gates nothing"
+
+
+# --- publish_crates.yml: five irreversible publishes ------------------------
+
+#: Each `cargo publish` command in `publish_crates.yml`, and the
+#: `version-check` output that must gate it. Publishing a crate version is
+#: irreversible; yanking does not free the version number.
+CRATE_PUBLISH_GATES = {
+    "cargo publish -p kglite --locked": "should_publish_kglite",
+    "cargo publish -p kglite-bolt-server --locked": "should_publish_bolt",
+    "cargo publish -p kglite-mcp-server --locked": "should_publish_mcp",
+    "cargo publish -p kglite-c --locked": "should_publish_c",
+    "cargo publish -p kglite-cli --locked": "should_publish_cli",
+}
+
+
+def test_crates_publish_waits_for_ci() -> None:
+    """crates.io publishes must be downstream of a green ci.yml run.
+
+    Unlike the PyPI publish jobs this one carries no `always()`, so `needs`
+    gates it directly — which means the guard here is that `ci-gate` is in
+    `needs` and that `always()` has not appeared since. If it ever did, every
+    `needs` term would stop gating and the `if:` (an OR of five publish
+    decisions, none of them about CI) would let publish run on a red CI.
+    """
+    publish = _crates_job("publish")
+    assert "always()" not in publish["if"], (
+        "publish_crates.yml `publish` gained `always()`, which neutralises its `needs` gate — "
+        "add explicit `needs.<job>.result == 'success'` terms to the `if:` if that is intended"
+    )
+    assert "ci-gate" in set(publish["needs"]), "publish_crates.yml `publish` does not wait on `ci-gate`"
+
+    gate = _crates_job("ci-gate")
+    _assert_waits_for_ci_success(gate)
+
+
+def test_crates_gate_waits_on_the_must_pass_wheel_legs() -> None:
+    """The wheel-matrix wait must actually match the must-pass legs.
+
+    It selects checks by regexp against *rendered* matrix names. A renamed job
+    or a widened negative lookahead leaves the regexp matching the wrong set,
+    and a gate that waits on nothing is the same as no gate — while looking
+    identical in the file.
+    """
+    gate = _crates_job("ci-gate")
+    waits = _steps_using(gate, "lewagon/wait-on-check-action@")
+    assert len(waits) == 1, f"publish_crates.yml `ci-gate` has {len(waits)} check waits, expected 1"
+    settings = waits[0]["with"]
+    regexp = re.compile(settings["check-regexp"])
+
+    must_pass = [
+        name
+        for job_name in ("build-native", "build-linux")
+        for name in _rendered_job_names(_wheels_job(job_name), job_name)
+    ]
+    assert must_pass, "no must-pass wheel legs derived — the scan is broken"
+    unmatched = [name for name in must_pass if not regexp.match(name)]
+    assert not unmatched, (
+        f"the crates.io gate's check-regexp {settings['check-regexp']!r} does not match must-pass "
+        f"wheel leg(s) {unmatched} — it would wait on a smaller set than it appears to"
+    )
+
+    best_effort = _rendered_job_names(_wheels_job("build-linux-arm"), "build-linux-arm")
+    assert best_effort
+    blocking = [name for name in best_effort if regexp.match(name)]
+    assert not blocking, (
+        f"the crates.io gate waits on best-effort leg(s) {blocking}; those are `continue-on-error` "
+        "and their failure must not wedge an irreversible crates.io publish"
+    )
+
+    allowed = {conclusion.strip() for conclusion in settings["allowed-conclusions"].split(",")}
+    assert not allowed & {"failure", "cancelled", "timed_out"}, (
+        f"the crates.io gate accepts {sorted(allowed)} as a pass — a failed wheel build would not block the publish"
+    )
+
+
+def test_every_crates_io_publish_is_gated_on_its_own_version_check() -> None:
+    """Each of the five publishes must be gated by its own `should_publish_*`.
+
+    Two silent shapes live here. An *ungated* `cargo publish` is loud (cargo
+    rejects a duplicate version), but a publish gated on an output name that
+    `version-check` does not declare is not: the expression resolves to the
+    empty string, the step is skipped every single run, and the crate quietly
+    stops being released. So the gate names are checked against what
+    `version-check` actually declares, in both directions.
+    """
+    publish = _crates_job("publish")
+    version_check = _crates_job("version-check")
+    declared = set(version_check.get("outputs") or {})
+
+    found = sorted(line for line in _command_lines(publish) if line.startswith("cargo publish"))
+    assert found == sorted(CRATE_PUBLISH_GATES), (
+        f"publish_crates.yml publishes {found}, but this test knows {sorted(CRATE_PUBLISH_GATES)} — "
+        "a crate was added or removed and its gate is unverified"
+    )
+
+    for command, output in CRATE_PUBLISH_GATES.items():
+        step = _step_running(publish, command)
+        assert f"needs.version-check.outputs.{output} == 'true'" in str(step.get("if", "")), (
+            f"`{command}` is not gated on needs.version-check.outputs.{output}"
+        )
+        assert output in declared, (
+            f"`{command}` is gated on needs.version-check.outputs.{output}, which version-check does "
+            "not declare — the expression is always empty, so this crate is never published"
+        )
+
+    orphaned = {name for name in declared if name.startswith("should_publish")} - set(CRATE_PUBLISH_GATES.values())
+    assert not orphaned, (
+        f"version-check computes {sorted(orphaned)} but no `cargo publish` step consumes it — that "
+        "crate's version is probed against crates.io and then never published"
+    )
 
 
 # --- self-tests for the derivation helpers ----------------------------------
@@ -786,3 +1264,163 @@ def test_helper_empty_scan_guard_fires_instead_of_reporting_clean() -> None:
     for workflow in (UPLOADLESS_WORKFLOW, {"jobs": {}}, {}):
         with pytest.raises(AssertionError, match="the scan is broken"):
             _artifact_producers(workflow)
+
+
+# --- self-tests for the publish-workflow helpers ----------------------------
+
+SYNTHETIC_PUBLISH_WORKFLOW = r"""
+name: synthetic-publish
+on:
+  push:
+jobs:
+  version-check:
+    outputs:
+      should_publish: ${{ steps.check.outputs.should_publish }}
+      ghost: ${{ steps.check.outputs.never_written }}
+      literal: not-a-step-output
+    steps:
+      - id: check
+        run: |
+          VERSION=$(grep -m 1 '^version' Cargo.toml | cut -d '"' -f 2)
+          UNCHECKED=$(grep -m 1 '^other' Cargo.toml | cut -d '"' -f 2)
+          # if ! printf '%s\n' "$UNCHECKED" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+          if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error::bad version"
+            exit 1
+          fi
+          echo "should_publish=true" >> $GITHUB_OUTPUT
+  build:
+    name: Build wheel - ${{ matrix.os }} - ${{ matrix.target }} (${{ matrix.absent }})
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            target: aarch64-unknown-linux-gnu
+          - os: linux
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-strict
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-lax
+  publish:
+    name: Publish
+    needs: [version-check, build]
+    if: always() && needs.build.result == 'success' && needs.other.result != 'success'
+    steps:
+      - name: Wait for CI to pass
+        run: |
+          # gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA" -q '.x'
+          line=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push" -q '.status')
+          [ "$conclusion" = "success" ] && { echo ok; exit 0; }
+          echo bad; exit 1
+      - uses: pypa/gh-action-pypi-publish@release/v1
+  lint:
+    steps:
+      - run: cargo fmt --check
+"""
+
+
+def _synthetic_publish() -> dict:
+    return yaml.safe_load(SYNTHETIC_PUBLISH_WORKFLOW)
+
+
+def _synthetic_publish_job(name: str) -> _Job:
+    return _job(_synthetic_publish(), "synthetic-publish.yml", name)
+
+
+def test_helper_upload_steps_and_rendered_names_are_derived_per_job() -> None:
+    uploads = _upload_steps(_synthetic_publish())
+    assert [(job_name, step["with"].get("if-no-files-found")) for job_name, step in uploads] == [
+        ("build", "error"),
+        ("build", None),
+    ]
+    assert _upload_steps(UPLOADLESS_WORKFLOW) == []
+
+    # Matrix values are substituted per leg; a reference to a key no leg
+    # defines is left visible rather than blanked.
+    assert _rendered_job_names(_synthetic_publish_job("build"), "build") == [
+        "Build wheel - linux - aarch64-unknown-linux-gnu (${{ matrix.absent }})",
+        "Build wheel - linux - x86_64-unknown-linux-gnu (${{ matrix.absent }})",
+    ]
+    # A job with no matrix renders exactly one name, and a job with no `name:`
+    # falls back to its key rather than to None.
+    assert _rendered_job_names(_synthetic_publish_job("publish"), "publish") == ["Publish"]
+    assert _rendered_job_names(_synthetic_publish_job("lint"), "lint") == ["lint"]
+
+
+def test_helper_backtick_detection_tells_substitution_from_literal_text() -> None:
+    # Runs as a command: bare, and inside double quotes.
+    assert _runs_prose_as_a_command("VERSION=`cat VERSION`")
+    assert _runs_prose_as_a_command('echo "Proceeding — `cargo publish` will surface it"')
+    # Literal text: single-quoted (ci.yml fences a code block this way) and
+    # backslash-escaped inside double quotes.
+    assert not _runs_prose_as_a_command("echo '```'")
+    assert not _runs_prose_as_a_command("echo 'run `cargo publish` yourself'")
+    assert not _runs_prose_as_a_command('echo "Proceeding — \\`cargo publish\\` will surface it"')
+    assert not _runs_prose_as_a_command("cargo publish -p kglite --locked")
+
+
+def test_helper_gated_successes_reads_only_success_terms() -> None:
+    assert _gated_successes(_synthetic_publish_job("publish")) == {"build"}
+    # `!= 'success'` is not a gate, and a job with no `if:` gates nothing.
+    assert "other" not in _gated_successes(_synthetic_publish_job("publish"))
+    assert _gated_successes(_synthetic_publish_job("lint")) == set()
+
+
+def test_helper_version_probe_derivations_see_the_read_and_the_guard() -> None:
+    check = _synthetic_publish_job("version-check")
+
+    # Both `grep … Cargo.toml | cut` reads are found — including the one the
+    # workflow forgot to validate, which is the whole point of finding them.
+    assert _cargo_version_reads(check) == {"VERSION", "UNCHECKED"}
+    assert _cargo_version_reads(_synthetic_publish_job("lint")) == set()
+
+    # Only the real guard counts; the commented-out one above it does not.
+    assert _semver_validated_variables(check) == {"VERSION"}
+    assert _cargo_version_reads(check) - _semver_validated_variables(check) == {"UNCHECKED"}
+    assert _semver_validated_variables(_synthetic_publish_job("lint")) == set()
+
+    assert _github_outputs_written(check) == {"should_publish"}
+    assert _github_outputs_written(_synthetic_publish_job("lint")) == set()
+    # `ghost` is declared from a step output nothing writes — the shape the
+    # guard above exists to reject must actually be visible here.
+    declared = check["outputs"]
+    assert _STEP_OUTPUT_REF.findall(declared["ghost"]) == ["never_written"]
+    assert _STEP_OUTPUT_REF.findall(declared["literal"]) == []
+
+
+def test_helper_ci_wait_assertions_are_scoped_and_can_fail() -> None:
+    publish = _synthetic_publish_job("publish")
+    lines = _ci_poll_commands(publish)
+    # The commented-out query does not count as the poll, so exactly one
+    # command line carries it.
+    assert len([line for line in lines if "actions/workflows/ci.yml/runs" in line]) == 1
+    _assert_waits_for_ci_success(publish)
+
+    # A job that never polls ci.yml must raise rather than pass vacuously.
+    with pytest.raises(AssertionError, match="polls ci.yml runs in 0 steps"):
+        _ci_poll_commands(_synthetic_publish_job("lint"))
+
+    # Each of the three requirements must be independently able to fail.
+    for script, expected in (
+        (
+            'line=$(gh api "repos/x/actions/workflows/ci.yml/runs?head_sha=$SHA")\n'
+            '[ "$conclusion" = "success" ] || exit 1\n',
+            "event=push",
+        ),
+        (
+            'line=$(gh api "…/actions/workflows/ci.yml/runs?event=push")\n[ "$status" = "completed" ] || exit 1\n',
+            "conclusion",
+        ),
+        (
+            'line=$(gh api "…/actions/workflows/ci.yml/runs?event=push")\n[ "$conclusion" = "success" ] && exit 0\n',
+            "exits non-zero",
+        ),
+    ):
+        broken = _Job("synthetic.yml `broken`", {"steps": [{"run": script}]})
+        with pytest.raises(AssertionError, match=expected):
+            _assert_waits_for_ci_success(broken)
