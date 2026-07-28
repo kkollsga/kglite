@@ -364,11 +364,14 @@ jobs:
   build-sdist:
     name: Build sdist (source fallback)
     # WHY AN SDIST, when we ship wheels for the common platforms:
-    # a wheel exists only for the targets built above. Anyone else — Intel
-    # macOS, an older-glibc Linux, musl, a BSD, an unusual arch — currently
-    # cannot install kglite at all, and at least one downstream ended up
-    # vendoring a fork for exactly that reason. pip falls back to the sdist
-    # and compiles from source, which needs a Rust toolchain but works.
+    # a wheel exists only for the targets built above. Anyone else — an
+    # older-glibc Linux (glibc < 2.17), a BSD, an unusual arch, or an
+    # aarch64-musl box on a release where that best-effort leg did not
+    # build — cannot install kglite at all. pip falls back to the sdist and
+    # compiles from source, which needs a Rust toolchain but works.
+    # (Intel macOS and x86_64 musl DO get release-blocking wheels. An
+    # earlier draft of this comment listed them as uncovered, written from
+    # a stale memory of mid-2026 before those legs existed.)
     #
     # This sdist is self-contained by construction: kglite has no path
     # dependency pointing outside its own workspace, so nothing foreign gets

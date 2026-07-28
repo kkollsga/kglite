@@ -297,4 +297,10 @@ def test_wheel_license_gate_covers_every_published_wheel_family() -> None:
     assert cli_release.count("python scripts/check_wheel_license.py --expected-name kglite-cli") == 3
     assert 'scripts/check_wheel_license.py --expected-name kglite "$RUNNER_TEMP/candidate-wheel/*.whl"' in ci
     assert "wheel-only" in documentation
-    assert "does not build or validate source distributions or generate SBOMs" in " ".join(documentation.split())
+    # Narrowed 2026-07-29: the release process DOES build and install the
+    # sdist now. What stayed wheel-only is licence verification, so that is
+    # what this pins. The previous wording made this file enforce one side
+    # of a contradiction while test_wheel_policy_and_support_page_match_workflow
+    # enforced the other, and both passed because they read different files.
+    assert "does not generate SBOMs" in " ".join(documentation.split())
+    assert "not** licence-verified" in " ".join(documentation.split())

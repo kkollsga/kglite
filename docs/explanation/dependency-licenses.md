@@ -20,8 +20,13 @@ The reviewed package list lives in
 `tests/api-baselines/dependency-licenses.json`; changes require an explicit
 license review rather than an automatic refresh.
 
-Release artifact verification is deliberately wheel-only: every main KGLite
-wheel and standalone `kglite-cli` wheel must declare `License-Expression: MIT`
-and `License-File: LICENSE`, and must embed a byte-exact copy of its checked-in
-LICENSE. The release process does not build or validate source distributions or
-generate SBOMs.
+Licence verification is deliberately wheel-only: every main KGLite wheel and
+standalone `kglite-cli` wheel must declare `License-Expression: MIT` and
+`License-File: LICENSE`, and must embed a byte-exact copy of its checked-in
+LICENSE. The release process does not generate SBOMs.
+
+The source distribution is built, installed and imported at release time (see
+`docs/python/platform-support.md`), but it is **not** licence-verified to the
+same standard: `check_wheel_license.py` runs against wheels only, and the
+sdist is checked merely for the presence of a `LICENSE` path. Tightening that
+is a known gap, not an oversight.

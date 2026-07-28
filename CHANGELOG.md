@@ -10,8 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **A tested sdist, so platforms without a wheel can install at all.** kglite
-  publishes wheels for the common targets; anyone else — Intel macOS, an
-  older-glibc Linux, musl, a BSD, an unusual arch — had no install path, and
+  publishes wheels for the common targets; anyone else — an older-glibc Linux (glibc < 2.17), a BSD, an
+  unusual arch, or an aarch64-musl box on a release where that best-effort
+  leg did not build — had no install path, and
   at least one downstream ended up vendoring a fork over exactly that. pip now
   falls back to building from source (a Rust toolchain is required).
 
