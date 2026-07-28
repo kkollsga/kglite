@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The workspace now builds at its own declared dependency minimums, and CI
+  enforces it.** 0.15.2 fixed 17 understated floors but the build at those
+  minimums still failed, on a floor that was not ours: `mcp-methods` declared
+  `ignore = "0.4"` while calling `WalkBuilder::filter_entry`, which arrived in
+  0.4.15. That is fixed upstream in mcp-methods 0.4.2, so the requirement here
+  moves to 0.4.2 and `same-file` to 1.0.4 (`ignore` 0.4.15 needs it). With
+  those, resolution *and* the build both succeed, and the `minimal-versions`
+  CI job became an ordinary blocking gate — no `continue-on-error` anywhere in
+  it. A consumer pinning our declared floors now gets a workspace that
+  compiles.
+
 ## [0.15.2] - 2026-07-28
 
 ### Fixed
