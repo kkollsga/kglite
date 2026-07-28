@@ -81,10 +81,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `JoinSet` that rmcp 2.2 needs in 1.21.0, `regex` gained the `std` feature
   tracing-subscriber requires in 1.3.0 (and tokenizers 0.22 pushes it to
   1.10), and `anyhow` 1.0.0 lacks the `Context` impl for `Option` that
-  `kglite-cli` uses. Affected requirements: `anyhow`, `async-trait`, `clap`,
-  `flate2`, `hyper`, `hyper-util`, `indexmap`, `libc`, `memchr`, `regex`,
-  `same-file`, `stacker`, `subtle`, `tempfile`, `tokio`, `tracing`,
-  `tracing-subscriber`.
+  `kglite-cli` uses.
+
+  One floor needed a stronger test than compiling. Below `anyhow` 1.0.47,
+  `anyhow!("failed: {e}")` compiles and emits only a warning, but the macro
+  sent a lone literal straight to `Error::msg`, so the error a user saw
+  printed the characters `{e}` instead of the value — `kglite-cli` formats
+  several of its errors that way. That floor was fixed by *running* each
+  candidate version and reading the output (1.0.45 prints `failed: {e}`,
+  1.0.47 prints the value; 1.0.46 is yanked).
+
+  Affected requirements: `anyhow`, `async-trait`, `clap`, `flate2`, `hyper`,
+  `hyper-util`, `indexmap`, `libc`, `memchr`, `regex`, `same-file`,
+  `stacker`, `subtle`, `tempfile`, `tokio`, `tracing`, `tracing-subscriber`.
 
   Resolution at declared minimums now succeeds, where before it failed
   outright. The *build* at those minimums does not yet complete, and the

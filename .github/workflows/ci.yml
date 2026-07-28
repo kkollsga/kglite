@@ -240,27 +240,27 @@ jobs:
     # direction (the consumer gets a clear resolution error, not a
     # mysterious compile failure), so that asymmetry is acceptable.
     #
-    # WHY IT IS NON-BLOCKING TODAY
-    # ----------------------------
+    # HOW IT BLOCKS: AN EXPECTED-FAILURE CONTRACT
+    # -------------------------------------------
     # The floor-tightening this comment used to defer has now been done:
     # 17 direct dependencies (30 requirement entries across the manifests)
-    # were given real, compiled minimums — anyhow, async-trait, clap, flate2,
-    # hyper, hyper-util, indexmap, libc, memchr, regex, same-file, stacker,
-    # subtle, tempfile, tokio, tracing, tracing-subscriber.
+    # were given real minimums — anyhow, async-trait, clap, flate2, hyper,
+    # hyper-util, indexmap, libc, memchr, regex, same-file, stacker, subtle,
+    # tempfile, tokio, tracing, tracing-subscriber. Each was established by
+    # compiling — and, where a version compiles but misbehaves, by RUNNING:
+    # anyhow below 1.0.47 accepts `anyhow!("{e}")` and prints the literal
+    # "{e}", so "it compiles" was not a strong enough test for that one.
     #
-    # THE RESOLVE STEP SUCCEEDS. THE BUILD STEP STILL FAILS, and it fails on
-    # every platform — there is no "green on ubuntu" here. Read the step log,
-    # not the step's reported conclusion: `continue-on-error: true` makes the
-    # GitHub Steps API report `success` for a step that exited 101, which has
-    # already fooled one reader of this job into recording the opposite.
+    # THE RESOLVE STEP SUCCEEDS. THE BUILD STEP STILL FAILS, on every
+    # platform — there was never a "green on ubuntu, red on darwin" split.
     #
-    # What remains is one crate, and it is not ours to fix. mcp-methods calls
+    # What remains is one crate, and it is not ours to fix: mcp-methods calls
     # `WalkBuilder::filter_entry` and `WalkBuilder::sort_by_file_path` while
     # declaring an `ignore` floor that predates both, so the lowered tree
     # resolves ignore 0.4.3 and mcp-methods does not compile. `ignore` is not
     # a direct dependency of this workspace, so no edit here can raise it —
-    # this is the "third-party crate that understates ITS floor" case above,
-    # and fixing it means releasing mcp-methods.
+    # the "third-party crate that understates ITS floor" case above. Fixing
+    # it means releasing mcp-methods.
     #
     # Two earlier blockers WERE ours and are fixed, which is why the floors
     # above are worth having: rmcp 2.2 imports `tokio_util::bytes` (absent
@@ -268,13 +268,16 @@ jobs:
     # tokio 1.37.0). Raising our own `tokio` floor to 1.37.0 pulls tokio-util
     # to 0.7.13 and clears both.
     #
-    # Making the job blocking today would hand mcp-methods the ability to
-    # block our releases over a bug we cannot patch from here. It stays
-    # non-blocking until that floor is corrected; then the `continue-on-error`
-    # flags come off and this becomes a real gate, with no other edits needed.
-    #
-    # It is deliberately still listed in `ci-success`'s `needs` so it stays
-    # visible in every run rather than becoming a job nobody looks at.
+    # So this job does NOT simply pass. The final step encodes that exact
+    # expectation: green only while mcp-methods is the sole crate that fails,
+    # red on a resolution failure, red if any other crate fails, and red if
+    # the build starts SUCCEEDING (which means upstream fixed its floor and
+    # this contract should be deleted). Blanket `continue-on-error` was the
+    # wrong shape — it made the job structurally unable to report anything,
+    # and a false claim about it reached this file and CHANGELOG.md twice in
+    # one evening before human review caught it. An expected-failure contract
+    # keeps the upstream bug from blocking releases without also making the
+    # job unable to speak.
     #
     # Non-vacuity is verified, not assumed: with `3114caab` temporarily
     # reverted (`mcp-methods = "0.4"`), resolution selects mcp-methods 0.4.0
@@ -283,7 +286,11 @@ jobs:
     name: Minimal versions (declared dependency floors)
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    continue-on-error: true
+    # No job-level `continue-on-error` — that flag made this job structurally
+    # incapable of failing, so the "Enforce the expected-failure contract"
+    # step below would have been decorative. The two flags that remain are on
+    # the resolve/build steps only, so the contract step can inspect their
+    # real `outcome` and decide.
     steps:
       - uses: actions/checkout@v7
 
@@ -312,6 +319,73 @@ jobs:
         run: |
           set -o pipefail
           cargo check --workspace --locked 2>&1 | tee build.log
+
+      - name: Enforce the expected-failure contract
+        if: always()
+        # THIS STEP IS THE GATE. It has no `continue-on-error`, so the job can
+        # actually go red — which the two steps above deliberately cannot.
+        #
+        # Why it exists: `continue-on-error: true` makes the Steps API report
+        # `conclusion: success` for a step that exited 101, so the job badge,
+        # the step list, and `ci-success`'s `needs` all read green while
+        # `cargo check` was aborting. That is not a hypothetical — a false
+        # claim about this job was committed to this file and to CHANGELOG.md
+        # twice in one evening on the strength of that green, and was caught
+        # by human review rather than by CI. A job whose correctness depends
+        # on someone reading its log is not a gate.
+        #
+        # The contract: we tolerate exactly ONE known upstream failure and
+        # nothing else.
+        #   - resolve fails            -> RED. A floor we declare is
+        #                                 unreachable. Always ours to fix.
+        #   - build fails, only in     -> GREEN. The known upstream blocker.
+        #     mcp-methods
+        #   - build fails anywhere     -> RED. A new floor defect, ours or a
+        #     else                       dependency's.
+        #   - build SUCCEEDS           -> RED, on purpose. Upstream fixed its
+        #                                 floor; delete this contract and the
+        #                                 two `continue-on-error` flags. This
+        #                                 is what announces the fix, so nobody
+        #                                 has to poll mcp-methods for it.
+        #
+        # Matching on the set of crates that failed to compile — rather than
+        # on error text or an error count — keeps this stable across upstream
+        # edits to its own diagnostics while still failing the moment a
+        # DIFFERENT crate breaks.
+        env:
+          EXPECTED_FAILING_CRATE: mcp-methods
+        run: |
+          set -euo pipefail
+
+          if [ "${{ steps.resolve.outcome }}" != "success" ]; then
+            echo "::error::Resolution to declared minimums FAILED — a floor we declare is unreachable or understated."
+            tail -n 25 resolve.log || true
+            exit 1
+          fi
+
+          if [ "${{ steps.build.outcome }}" = "success" ]; then
+            echo "::error::The build at declared minimums now SUCCEEDS. The upstream blocker in ${EXPECTED_FAILING_CRATE} is gone — remove this step and the two 'continue-on-error: true' flags above so this job becomes an ordinary gate."
+            exit 1
+          fi
+
+          # Every crate cargo reported as failing to compile.
+          failed=$(grep -oE 'could not compile `[^`]+`' build.log \
+                   | sed -E 's/could not compile `([^`]+)`/\1/' | sort -u)
+
+          if [ -z "$failed" ]; then
+            echo "::error::The build failed but named no crate — the failure is not the known upstream one. Inspect build.log."
+            tail -n 40 build.log || true
+            exit 1
+          fi
+
+          unexpected=$(echo "$failed" | grep -vx "$EXPECTED_FAILING_CRATE" || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::A crate other than ${EXPECTED_FAILING_CRATE} failed to build at declared minimums: $(echo "$unexpected" | tr '\n' ' ')— a floor is understated."
+            grep -E '^error' build.log | sort -u | head -n 25 || true
+            exit 1
+          fi
+
+          echo "Only ${EXPECTED_FAILING_CRATE} failed, as expected. Contract holds."
 
       - name: Report
         if: always()

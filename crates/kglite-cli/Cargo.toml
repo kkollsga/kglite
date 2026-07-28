@@ -45,11 +45,15 @@ serde_json = "1.0.150"
 csv = "1.4"
 
 clap = { version = "4.3", features = ["derive"] }
-# 1.0.20, not "1": mcp-methods calls anyhow::Error::msg, added in 1.0.20,
-# and kglite-cli uses `Context` for `Option` (added in 1.0.5). Both
-# bisected against the individual releases; cargo unifies anyhow
-# workspace-wide, so all three crates declare the same floor.
-anyhow = "1.0.20"
+# 1.0.47 is a BEHAVIOURAL floor, not just a compiling one. Below it,
+# `anyhow!("... {e}")` does not capture `e` -- the macro routed a lone
+# literal straight to `Error::msg`, so the message printed the literal
+# text "{e}". kglite-cli relies on inline captures (src/lib.rs:405 and
+# others). Verified by RUNNING each version, not by compiling: 1.0.45
+# prints "failed: {e}", 1.0.47 prints "failed: BOOM" (1.0.46 is yanked).
+# 1.0.20 also matters (anyhow::Error::msg, used by mcp-methods) and
+# 1.0.5 (Context for Option, used by kglite-cli); 1.0.47 covers all.
+anyhow = "1.0.47"
 
 [dev-dependencies]
 tempfile = "3.10.0"
