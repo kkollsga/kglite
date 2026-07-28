@@ -426,8 +426,8 @@ jobs:
           /tmp/sdist-check/bin/python -c "
           import kglite
           g = kglite.KnowledgeGraph()
-          g.cypher_query('CREATE (n:Probe {name: \"sdist\"})')
-          rows = g.cypher_query('MATCH (n:Probe) RETURN n.name AS name')
+          g.cypher('CREATE (n:Probe {name: \"sdist\"})')
+          rows = g.cypher('MATCH (n:Probe) RETURN n.name AS name').to_list()
           assert rows and rows[0]['name'] == 'sdist', rows
           print('sdist installs and runs:', kglite.__version__)
           "
