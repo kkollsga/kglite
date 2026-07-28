@@ -1062,6 +1062,12 @@ ACKNOWLEDGED: dict[tuple[str, str, str], str] = {
         "docs/python-api.md",
         "kglite",
     ): "states which kglite release removed the Python builder — history, not a pin",
+    (
+        "codingest",
+        "docs/mcp-parity.md",
+        "kglite",
+    ): "names the release that introduced WorkspaceGraphHooks/ServerExtensions — "
+    "history, and it matches codingest's own 0.15.0 pin",
 }
 
 
