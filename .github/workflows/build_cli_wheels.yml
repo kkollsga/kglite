@@ -101,8 +101,10 @@ jobs:
           path: crates/kglite-cli/wheels/*.whl
           # `error`, not the default `warn`: a build job that exits 0 while
           # producing no wheel would otherwise upload an empty artifact and
-          # stay green, and publish runs with `skip-existing: true` — so a
-          # partial wheel set ships silently.
+          # stay green. Unlike build_wheels.yml this workflow does NOT set
+          # `skip-existing`, so a re-run after a partial publish fails loudly
+          # rather than filling the gap — which makes an empty artifact worse
+          # here, not better: the gap needs a manual fix.
           if-no-files-found: error
 
   build-linux:
@@ -135,8 +137,10 @@ jobs:
           path: crates/kglite-cli/wheels/*.whl
           # `error`, not the default `warn`: a build job that exits 0 while
           # producing no wheel would otherwise upload an empty artifact and
-          # stay green, and publish runs with `skip-existing: true` — so a
-          # partial wheel set ships silently.
+          # stay green. Unlike build_wheels.yml this workflow does NOT set
+          # `skip-existing`, so a re-run after a partial publish fails loudly
+          # rather than filling the gap — which makes an empty artifact worse
+          # here, not better: the gap needs a manual fix.
           if-no-files-found: error
 
   build-linux-arm:
@@ -173,8 +177,10 @@ jobs:
           path: crates/kglite-cli/wheels/*.whl
           # `error`, not the default `warn`: a build job that exits 0 while
           # producing no wheel would otherwise upload an empty artifact and
-          # stay green, and publish runs with `skip-existing: true` — so a
-          # partial wheel set ships silently.
+          # stay green. Unlike build_wheels.yml this workflow does NOT set
+          # `skip-existing`, so a re-run after a partial publish fails loudly
+          # rather than filling the gap — which makes an empty artifact worse
+          # here, not better: the gap needs a manual fix.
           if-no-files-found: error
 
   publish:
