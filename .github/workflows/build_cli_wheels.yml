@@ -41,7 +41,7 @@ jobs:
           # drives every publish decision below: empty means the version probe
           # queries a malformed URL and this workflow can report green while
           # publishing nothing at all. Assert it looks like a version.
-          if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+          if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+'; then
             echo "::error::could not read a version from Cargo.toml (got '$VERSION')"
             exit 1
           fi
