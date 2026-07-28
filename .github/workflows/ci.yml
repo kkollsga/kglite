@@ -464,7 +464,13 @@ jobs:
           workspaces: ". -> target"
 
       - name: Install dependencies
-        run: pip install maturin pytest pytest-timeout pandas hypothesis -r requirements/coverage.txt
+        # pyyaml is not optional. tests/test_ci_workflow.py parses these
+        # workflow files and imports it unguarded on purpose: an
+        # `importorskip` there would turn a missing parser into a skip, and a
+        # skip is a pass — to pytest and to the `ci-success` aggregate job
+        # alike — which is the exact "gate that cannot fail" shape those tests
+        # exist to prevent.
+        run: pip install maturin pytest pytest-timeout pandas hypothesis pyyaml -r requirements/coverage.txt
 
       - name: Install pyarrow for the coexistence canary (newest-python leg only)
         # Only the newest-python leg installs pyarrow, so tests/test_pyarrow_coexistence.py
