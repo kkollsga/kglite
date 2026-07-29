@@ -305,15 +305,18 @@ Docs auto-rebuild at [kglite.readthedocs.io](https://kglite.readthedocs.io) on e
 - **Guide content**: `docs/python/guides/*.md`.
 - **README.md**: landing page only — don't duplicate guide content.
 
-## dev-docs is operational, not archival
+## dev-docs steers the sprint; commits are the durable record
 
-`dev-docs/` is gitignored and backed up nowhere, so prose written there for a
-future reader dies with the disk. Keep open actions, live plans, benchmark
-results and cross-project design contracts. Do not write decision histories or
-"why we rejected X" narratives — if a decision must outlive the session, it
-belongs in the commit message that implements it, a comment at the code it
-constrains, or here. Never cite a `dev-docs/` path from committed code: the
-citation outlives the file, silently.
+`dev-docs/todos.md` is read at the start of every phase and by every steering
+agent, so detail there is load-bearing — an entry recording what was tried,
+what was rejected and why, stops a fresh agent burning a phase relitigating a
+settled decision. The test is "would an agent act differently for having read
+it?", not length. Entries whose action has shipped are dead weight; prune those.
+
+It is gitignored and unbacked, so anything that must survive the machine also
+goes somewhere tracked: the commit message that implements it, a comment at the
+code it constrains, or here. And never cite a `dev-docs/` path from committed
+code — the citation outlives the file, silently.
 
 ## Inbox hygiene
 
