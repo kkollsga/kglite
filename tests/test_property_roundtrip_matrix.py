@@ -38,7 +38,7 @@ Fixed (the cells below now round-trip and pass — kept as passing rows):
   subscript ``n.m['k']`` worked (node and edge). Fixed: ``ExprPropertyAccess``
   now has a ``Value::Map`` arm mirroring ``map_subscript``
   (`executor/expression.rs`). Was Fact #2 in
-  ``dev-docs/plans/rev-aware-code-graphs.md`` (B.2 design).
+  the rev-aware code-graph work (see the commit that added this test).
 
 No reachable *silent*-degradation cells remain. Loud-not-silent (acceptable
 half of the contract):

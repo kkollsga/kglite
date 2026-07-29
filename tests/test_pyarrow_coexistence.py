@@ -9,7 +9,7 @@ statically-linked mimalloc-v3 instances in a single process — kglite's Rust
 colliding during thread-heap teardown (``_mi_theap_collect_retired``). Fixed in
 commit a2f52032 by pinning kglite's bundled mimalloc to the v2 series, which
 coexists cleanly with the v3 copy. See
-``dev-docs/plans/dataset-fetch-standardization.md`` (Phase 6 sections) for the
+the 0.12.x pyarrow-coexistence investigation (see the commits that added this
 full bisect archaeology.
 
 This file is a permanent regression canary so that class of dual-allocator
