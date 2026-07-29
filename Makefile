@@ -255,7 +255,7 @@ notify-downstream:
 ## Fast local checkpoint. Pair this with the smallest package/test filter
 ## covering the change. Policy audits, workspace clippy, stubtest, packaged-
 ## consumer verification, and the broad test matrix run in CI.
-gate: lint check-docs-facts check-release-hygiene
+gate: lint check-docs-facts check-release-hygiene check-skill-mirrors
 
 ## Fast formatting/static lint. Intentionally performs no Rust compilation,
 ## metadata walk, or runtime import.
@@ -340,3 +340,7 @@ prune-target:
 	else \
 		echo "target/ is $${size_gb:-0} GB — under the $(PRUNE_TARGET_GB) GB prune threshold"; \
 	fi
+
+.PHONY: check-skill-mirrors
+check-skill-mirrors:
+	python3 scripts/check_skill_mirrors.py
