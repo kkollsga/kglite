@@ -1,0 +1,25 @@
+# Jobs permitted to carry a job-level `continue-on-error` (doctrine RULES.md R1).
+#
+# A job-level flag makes the entire job structurally unable to turn the build
+# red — `minimal-versions` carried one for two days while exiting 101, and two
+# false claims were committed on its green. So each one here is a decision on
+# the record, with the reason and the compensating check named. An entry is not
+# a silencer: if the job's failure carries signal, it does not belong here.
+#
+# Format: <workflow-file>:<job-id>
+
+# aarch64 Linux wheels, cross-built via QEMU. Native C deps cross-compiling to
+# aarch64 (especially musl) are the genuinely fragile combos, and a cross-build
+# failure must not block a release for every other platform. The publish job
+# reasons about this explicitly: `always()` plus per-dependency result gates, so
+# a failed best-effort job cannot *skip* publish, while `ci-gate.result ==
+# 'success'` remains the wall that keeps an un-CI'd commit off PyPI.
+#
+# COMPENSATING CHECK REQUIRED (RULES.md R9 — verify the artifact set, not the
+# version): the tolerated failure mode is a silently absent platform. Version
+# verification cannot see it, and `if-no-files-found: error` only catches an
+# empty upload from a job that ran. Until the release flow compares the
+# published artifact set against the previous release, these two entries are
+# accepted risk, not covered risk.
+build_wheels.yml:build-linux-arm
+build_cli_wheels.yml:build-linux-arm

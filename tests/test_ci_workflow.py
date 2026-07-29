@@ -1424,3 +1424,102 @@ def test_helper_ci_wait_assertions_are_scoped_and_can_fail() -> None:
         broken = _Job("synthetic.yml `broken`", {"steps": [{"run": script}]})
         with pytest.raises(AssertionError, match=expected):
             _assert_waits_for_ci_success(broken)
+
+
+# --- job-level continue-on-error (doctrine RULES.md R1) ----------------------
+#
+# A *step*-level `continue-on-error` tolerates one fragile command. A
+# *job*-level one makes the entire job structurally incapable of turning the
+# build red — every gate inside it becomes decorative. `minimal-versions`
+# carried one for two days while exiting 101, and two false claims were
+# committed on its green before independent review caught it.
+#
+# So each one is an entry in `.github/workflows/doctrine-allowlist.txt`, with
+# the reason and the compensating check written down. The allowlist is checked
+# in *both* directions: an unlisted flag is a failure, and so is a listed job
+# that no longer carries the flag — an exemption that outlives its reason is
+# how a temporary tolerance becomes permanent blindness.
+
+DOCTRINE_ALLOWLIST = WORKFLOWS / "doctrine-allowlist.txt"
+
+
+def _parse_allowlist(text: str) -> set[str]:
+    entries = set()
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            entries.add(line)
+    return entries
+
+
+def _jobs_with_job_level_continue_on_error(paths: list[Path]) -> set[str]:
+    found = set()
+    scanned = 0
+    for path in paths:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for name, job in (data.get("jobs") or {}).items():
+            scanned += 1
+            if isinstance(job, dict) and job.get("continue-on-error") not in (None, False):
+                found.add(f"{path.name}:{name}")
+    assert scanned, f"scanned no jobs across {[p.name for p in paths]} — the scan is broken"
+    return found
+
+
+def test_job_level_continue_on_error_is_allowlisted_and_the_allowlist_is_current() -> None:
+    workflows = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
+    assert workflows, "found no workflow files — an empty scan is not a pass"
+    flagged = _jobs_with_job_level_continue_on_error(workflows)
+    allowed = _parse_allowlist(DOCTRINE_ALLOWLIST.read_text(encoding="utf-8"))
+
+    unlisted = sorted(flagged - allowed)
+    assert not unlisted, (
+        f"job-level continue-on-error without an allowlist entry: {unlisted}. "
+        f"These jobs cannot turn the build red, so any gate inside them is "
+        f"decorative. Narrow the flag to the fragile steps, or add the entry to "
+        f"{DOCTRINE_ALLOWLIST.name} with its reason and compensating check."
+    )
+    stale = sorted(allowed - flagged)
+    assert not stale, (
+        f"{DOCTRINE_ALLOWLIST.name} exempts jobs that no longer carry a "
+        f"job-level continue-on-error: {stale}. Delete the entries — an "
+        f"exemption that outlives its reason is how a temporary tolerance "
+        f"becomes permanent blindness."
+    )
+    # The allowlist must not be a bare list: each entry is a decision, and a
+    # decision with no recorded reason cannot be reviewed later.
+    assert "COMPENSATING CHECK" in DOCTRINE_ALLOWLIST.read_text(encoding="utf-8")
+
+
+def test_helper_continue_on_error_scan_and_allowlist_can_fail(tmp_path: Path) -> None:
+    # Each branch must be independently able to fail, or the guard above is
+    # only accidentally green.
+    clean = tmp_path / "clean.yml"
+    clean.write_text("jobs:\n  build:\n    runs-on: ubuntu-latest\n", encoding="utf-8")
+    assert _jobs_with_job_level_continue_on_error([clean]) == set()
+
+    flagged = tmp_path / "flagged.yml"
+    flagged.write_text(
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    continue-on-error: true\n",
+        encoding="utf-8",
+    )
+    assert _jobs_with_job_level_continue_on_error([flagged]) == {"flagged.yml:build"}
+
+    # A step-level flag is the tolerated shape and must NOT be reported, or the
+    # guard is unusable and gets deleted.
+    step_level = tmp_path / "step.yml"
+    step_level.write_text(
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: flaky\n        continue-on-error: true\n",
+        encoding="utf-8",
+    )
+    assert _jobs_with_job_level_continue_on_error([step_level]) == set()
+
+    # A workflow with no jobs at all is a broken scan, not a clean result.
+    empty = tmp_path / "empty.yml"
+    empty.write_text("name: nothing\non: [push]\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="scanned no jobs"):
+        _jobs_with_job_level_continue_on_error([empty])
+
+    # Comments and blank lines are not entries; real entries are.
+    assert _parse_allowlist("# just a comment\n\n  a.yml:job  # trailing\n") == {"a.yml:job"}
+    assert _parse_allowlist("# only comments\n") == set()
