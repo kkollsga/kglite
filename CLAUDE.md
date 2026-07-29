@@ -404,6 +404,17 @@ benchmark wording", "tidy CHANGELOG") over anything that narrates the reason.
 
 **Pushing requires explicit, in-the-moment approval.** Default is *don't push*. The user runs `git push` manually unless they tell you, *in the same turn you'd run it*, to push for them — e.g. "go ahead and push now", "push it", "yes, push". Approval is one-shot: it covers exactly that one `git push` invocation and does not carry across to any later commit, amend, or branch.
 
+**How this interacts with `/release`.** Invoking the skill authorizes the run's
+non-publishing pushes — the final feature-branch push, and the CI fix-and-push
+loop below — without a separate prompt. It does **not** authorize the push to
+`main` that fires the publish. That one takes its own confirmation, named
+version and all, immediately before it happens (`release` skill step 9).
+`/release` is typed before the run learns the semver findings, the benchmark
+verdict, or whether every artifact built; treating it as approval for the last
+push authorizes a decision made with less information than exists when it is
+made. One prompt, at the one irreversible moment. The consequence is
+deliberate: **a release cannot complete unattended.**
+
 **Exception — the CI fix-and-push loop.** When an approved push triggers CI that fails, and you diagnose the failure as a bug in shipped code or test/CI infra (not a feature gap), you may push subsequent `fix(...)` / `ci(...)` commits *for that same loop* without re-asking, until CI on the most recent push is fully green. This covers the common case where the first push surfaces a flaky dep / missing fixture / linter-only issue and you'd otherwise need to ping the user every iteration just to type "push" again.
 
 The exception **stops applying** the moment any of these are true:
@@ -440,9 +451,18 @@ on exactly the broken tree). The internal requirement carries the full `X.Y.Z`
 rather than the `X.Y` series, because these crates ship in lockstep and this
 project deliberately ships breaking engine changes in patch bumps — `^0.15`
 would advertise that `kglite-cli 0.15.3` builds against `kglite 0.15.0`, which
-is often false. `make gate` fails if any of the five drifts apart. The bump
-*size* stays a human decision (see `make semver-check`); the target only
-applies the version you hand it.
+is often false. `make gate` fails if any of the five drifts apart.
+
+**The bump size is always patch unless the release command said otherwise.**
+`/release` with no size means `x.y.Z+1`, with no clarification prompt — a
+breaking change is not a reason to stop and ask, because this project
+deliberately ships documented breaking changes in patch bumps, so asking
+spends the user's attention re-confirming a default they already set. A minor
+or major happens only when the invocation specified one (`/release minor`,
+`/release 0.16.0`). `make semver-check` still runs, and its findings still get
+quoted — into the CHANGELOG and the downstream notes. It is evidence for what
+to *write*, never a gate on what to *number*. The target only applies the
+version you hand it.
 
 Release-run procedure — captured-constant refresh, preflight and CI polling,
 ecosystem version consistency, and PyPI capacity — lives in the `release`
