@@ -125,7 +125,12 @@ src = ["kglite"]
 # `line-length` but harder to read in a guide. Keep the formatter scoped to
 # real Python: excluding Markdown reproduces the pre-0.16 file set exactly
 # (319 files), so this is a scope decision, not a suppressed finding.
-extend-exclude = ["*.md"]
+# `dev-docs/bench/scripts/` is tracked (see .gitignore) so hand-authored
+# harnesses that exist in exactly one copy survive an `rm -rf` — durability,
+# not promotion into the shipped-code lint surface. Reformatting them wholesale
+# to satisfy the gate would be an unreviewed rewrite of the very files we track
+# to preserve as-written, so exclude the folder instead of suppressing findings.
+extend-exclude = ["*.md", "dev-docs"]
 
 [tool.ruff.lint]
 # PLW1514 (`open`/`read_text`/`write_text` without an explicit encoding) is

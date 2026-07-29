@@ -1,0 +1,110 @@
+"""Rebuild graph_500.0 from latest-truthy.nt.bz2 with max_entities=6_000_000.
+
+The original graph had 5,885,127 nodes / 7,221,805 edges. We can't reproduce
+the exact same selection (the X.X naming indicates a build script we don't
+have), but max_entities=6_000_000 lands close enough for benchmarking.
+
+Run from repo root:
+    python bench/rebuild_graph_500.py
+"""
+
+import os
+import shutil
+import sys
+import time
+from pathlib import Path
+
+import kglite
+
+DUMP = "/Volumes/EksternalHome/Data/Wikidata/latest-truthy.nt.bz2"
+GRAPH_DIR = "/Volumes/EksternalHome/Data/Wikidata/graph_500.0"
+TARGET_ENTITIES = 6_000_000
+
+# Use merge sort for CSR build — sequential I/O on macOS external drive.
+os.environ.setdefault("KGLITE_CSR_ALGO", "merge_sort")
+os.environ.setdefault("KGLITE_CSR_VERBOSE", "1")
+
+
+def main() -> int:
+    if not Path(DUMP).exists():
+        print(f"error: dump not found at {DUMP}", file=sys.stderr)
+        return 2
+
+    if Path(GRAPH_DIR).exists():
+        print(f"removing existing {GRAPH_DIR}…")
+        shutil.rmtree(GRAPH_DIR)
+
+    print("=" * 70)
+    print(f"BUILDING {GRAPH_DIR}")
+    print(f"  dump:           {DUMP}  ({Path(DUMP).stat().st_size / 1024**3:.1f} GB)")
+    print(f"  max_entities:   {TARGET_ENTITIES:,}")
+    print("=" * 70)
+    print()
+
+    t0 = time.perf_counter()
+    g = kglite.KnowledgeGraph(storage="disk", path=GRAPH_DIR)
+    stats = g.load_ntriples(
+        DUMP,
+        languages=["en"],
+        max_entities=TARGET_ENTITIES,
+        verbose=True,
+    )
+    t_parse = time.perf_counter() - t0
+    print()
+    print(f"parse done in {t_parse:.1f}s ({t_parse / 60:.1f} min)")
+    print(f"  triples_scanned: {stats.get('triples_scanned', 0):,}")
+    print(f"  entities:        {stats.get('entities', 0):,}")
+    print(f"  edges:           {stats.get('edges', 0):,}")
+    print()
+
+    if hasattr(g, "rebuild_caches"):
+        t0 = time.perf_counter()
+        g.rebuild_caches()
+        print(f"rebuild_caches in {time.perf_counter() - t0:.1f}s")
+
+    t0 = time.perf_counter()
+    g.save(GRAPH_DIR)
+    print(f"save in {time.perf_counter() - t0:.1f}s")
+
+    info = g.graph_info()
+    total_bytes = sum(
+        os.path.getsize(os.path.join(r, f))
+        for r, _, files in os.walk(GRAPH_DIR)
+        for f in files
+    )
+    print()
+    print("=" * 70)
+    print("RESULT")
+    print("=" * 70)
+    print(f"  nodes:  {info['node_count']:,}")
+    print(f"  edges:  {info['edge_count']:,}")
+    print(f"  disk:   {total_bytes / 1024**3:.2f} GB")
+
+    # Smoke-test the new mmap-resident format files exist.
+    required = ["id_indices.bin", "type_indices.bin"]
+    for f in required:
+        p = Path(GRAPH_DIR) / f
+        if not p.exists():
+            print(f"  WARNING: {f} not present (expected new format)")
+        else:
+            print(f"  {f}: {p.stat().st_size / 1024**2:.1f} MB")
+
+    # Quick query smoke-test: count(r) should match edge_count.
+    del g
+    print("\nreloading + smoke-testing…")
+    t0 = time.perf_counter()
+    g = kglite.load(GRAPH_DIR)
+    print(f"  reload in {(time.perf_counter() - t0) * 1000:.0f}ms")
+    rows = list(g.cypher("MATCH ()-[r]->() RETURN count(r) AS c"))
+    expected = info["edge_count"]
+    actual = rows[0]["c"] if rows else 0
+    if actual == expected:
+        print(f"  count(r) = {actual:,} (matches edge_count) ✓")
+        return 0
+    else:
+        print(f"  FAIL: count(r) = {actual:,} but edge_count = {expected:,}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -18,8 +18,20 @@
 # reference), `bench/scripts/` + `bench/results/`, `todos.md`. Auto-purged by
 # the dev-docs-cleanup skill: `temp/` (>1d, offload large output here to dodge
 # the token gate), `bench/out/` (>14d, generated graphs/dumps), `bin/` (>7d,
-# soft-deleted). Local working state, never committed.
-/dev-docs/
+# soft-deleted). Local working state, never committed — with ONE exception:
+# `bench/scripts/` IS tracked. Those harnesses are hand-authored source that
+# exists in exactly one copy; gitignoring them meant a stray `rm -rf` could
+# lose work no backup, review or CI ever saw. `bench/out/` and
+# `bench/results/` stay local. Build output and captured data produced *inside*
+# a harness dir are re-excluded below so a `cargo`/`python` run there can never
+# be committed. (`/dir/*` + `!/dir/sub/` so a subdir can be re-included.)
+/dev-docs/*
+!/dev-docs/bench/
+/dev-docs/bench/*
+!/dev-docs/bench/scripts/
+/dev-docs/bench/scripts/**/target/
+/dev-docs/bench/scripts/**/__pycache__/
+/dev-docs/bench/scripts/**/node_modules/
 # Inbox of feedback/coordination notes (`unread/` = needs action, `read/` =
 # archive). Kept at the repo root by preference; local working state, never
 # committed — see the "Inbox hygiene" section in CLAUDE.md.

@@ -255,7 +255,7 @@ notify-downstream:
 ## Fast local checkpoint. Pair this with the smallest package/test filter
 ## covering the change. Policy audits, workspace clippy, stubtest, packaged-
 ## consumer verification, and the broad test matrix run in CI.
-gate: lint check-docs-facts check-release-hygiene check-skill-mirrors
+gate: lint check-docs-facts check-release-hygiene check-skill-mirrors check-dev-docs
 
 ## Fast formatting/static lint. Intentionally performs no Rust compilation,
 ## metadata walk, or runtime import.
@@ -344,3 +344,31 @@ prune-target:
 .PHONY: check-skill-mirrors
 check-skill-mirrors:
 	python3 scripts/check_skill_mirrors.py
+
+## Mechanical bound on the gitignored dev-docs/ working folder — the one
+## accumulation with no reviewer, no CI and no remote watching it grow. Unlike
+## prune-target this NEVER deletes: which tier a file belongs in, and whether
+## it is reproducible, is a judgement call, so the gate FAILS and hands the
+## decision back. Stale purge-tier entries are reported as a warning (temp/bin
+## churn is normal working state; failing on it would only teach people to
+## bypass the gate). Tier lifecycles: dev-docs/README.md.
+DEV_DOCS_MAX_MB := 256
+.PHONY: check-dev-docs
+check-dev-docs:
+	@[ -d dev-docs ] || { echo "no dev-docs/ — nothing to bound"; exit 0; }; \
+	mb=$$(du -sm dev-docs | cut -f1); \
+	stale=$$( { find dev-docs/bench/out -mindepth 1 -maxdepth 1 -mtime +14; \
+	            find dev-docs/temp      -mindepth 1 -maxdepth 1 -mtime +1;  \
+	            find dev-docs/bin       -mindepth 1 -maxdepth 1 -mtime +7;  \
+	          } 2>/dev/null ); \
+	if [ "$${mb:-0}" -ge $(DEV_DOCS_MAX_MB) ]; then \
+		echo "FAIL: dev-docs/ is $${mb} MB (>= $(DEV_DOCS_MAX_MB) MB)"; \
+		echo "  largest tiers:"; \
+		du -sm dev-docs/* dev-docs/bench/* 2>/dev/null | sort -rn | head -8 | sed 's/^/    /'; \
+		[ -z "$$stale" ] || { echo "  past their documented lifetime:"; echo "$$stale" | sed 's/^/    /'; }; \
+		echo "  -> reclaim, or move anything irreproducible to a durable tier (dev-docs/README.md)"; \
+		exit 1; \
+	fi; \
+	echo "dev-docs/ is $${mb} MB (limit $(DEV_DOCS_MAX_MB) MB)"; \
+	[ -z "$$stale" ] || { echo "WARN: past their documented lifetime (dev-docs/README.md):"; \
+	                      echo "$$stale" | sed 's/^/    /'; }
