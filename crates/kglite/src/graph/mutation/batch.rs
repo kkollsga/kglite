@@ -370,11 +370,24 @@ impl BatchProcessor {
     /// flush time — so those ops still carry the columnar values that
     /// `reattach_columnar_stores` installs after `add_node` returns.
     ///
-    /// No undo obligation is dropped either: both columnar sweeps run only
-    /// when `is_mapped() || is_disk()`, and `GraphBackend::undo_journal_mut`
-    /// yields `None` for `Mapped` and `Disk` (see
-    /// `GraphBackend::supports_undo_journal`) — there is never a journal
-    /// installed on this path to capture into.
+    /// The undo journal is skipped here too, and since 2026-07-30 that is a
+    /// deliberate choice rather than a vacuous one. Both columnar sweeps run
+    /// only when `is_mapped() || is_disk()`; `Disk` still journals nothing, but
+    /// `Mapped` now does, so `node_weight_mut_silent` must bypass undo capture
+    /// on `MappedGraph` exactly as it does on `MemoryGraph` — otherwise the
+    /// per-node pre-image this sweep would clone reproduces, inside the
+    /// journal, the very `O(n²/chunk)` amplification the paragraph above
+    /// removed from the WAL.
+    ///
+    /// No undo obligation is dropped by that bypass: the pair is a logical
+    /// no-op for an existing node (same argument as above), the *created* rows
+    /// are captured structurally by [`GraphWrite::add_node`], and the master
+    /// store itself is restored from the rollback checkpoint's schema shell,
+    /// which does not park `column_stores`. No Cypher statement reaches this
+    /// funnel today in any case — the executor creates nodes through
+    /// `DirGraph::insert_node_routed` — so there is currently no journal
+    /// installed while it runs; the override is what keeps that safe if one
+    /// ever is.
     ///
     /// Returns `(rows awaiting reattachment, owned stores keyed by node type)`.
     fn detach_columnar_stores(

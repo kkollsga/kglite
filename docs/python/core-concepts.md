@@ -98,17 +98,17 @@ re-ingest from the original source. This matters most for benchmarks — a
 create-then-reopen script that passed `storage="mapped"` on both runs was
 previously measuring the memory backend twice.
 
-**Statement rollback is cheap only in memory mode.** One mutating Cypher
-statement is atomic: if it fails partway through, the graph is restored to its
-pre-statement state. In-memory graphs do that with an undo journal costing
-O(changes). Mapped and disk graphs cannot — neither backend can express an
-inverse edit against its mmap-columnar indexes or generation overlays — so both
-fall back to taking a **whole-graph O(V+E) checkpoint before every mutating
-statement**. This is a deliberate consequence of "in-memory wins", but it means
-per-statement write overhead grows with graph size in precisely the two modes
-you would choose for a large graph. If a mapped graph's writes feel slow
-relative to its reads, this is why; batching more work into fewer statements is
-the lever that helps.
+**Statement rollback is cheap in memory and mapped mode, expensive on disk.**
+One mutating Cypher statement is atomic: if it fails partway through, the graph
+is restored to its pre-statement state. Memory and mapped graphs do that with
+an undo journal costing O(changes) — mapped spills *properties* to mmap, but
+its node/edge graph is the same heap structure the memory backend uses, so the
+journal applies unchanged. Disk graphs cannot: they hold no such structure to
+record an inverse edit against, so a disk graph falls back to taking a
+**whole-graph O(V+E) checkpoint before every mutating statement**. That means
+per-statement write overhead grows with graph size on disk. If a disk graph's
+writes feel slow relative to its reads, this is why; batching more work into
+fewer statements is the lever that helps.
 
 ## Return Types
 

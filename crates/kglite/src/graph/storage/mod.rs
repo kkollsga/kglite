@@ -546,6 +546,17 @@ pub struct MappedGraph {
     /// Backs `lookup_by_property_eq_any_type` / `_prefix_any_type`
     /// (used by untyped patterns like `MATCH (n {title: 'X'})`).
     pub(crate) global_property_index: RwLock<HashMap<String, Arc<MappedPropertyIndex>>>,
+    /// Statement-scoped inverse-op buffer. `Some` only while a mutating
+    /// Cypher statement holds a rollback checkpoint; `None` is the steady
+    /// state, so reads pay nothing and writes pay one discriminant check.
+    /// See [`crate::graph::storage::undo`].
+    ///
+    /// Mapped journals for exactly the same reason memory does: `inner` is a
+    /// heap `StableDiGraph`, so every `UndoEntry` variant — all of which are
+    /// keyed on a petgraph `NodeIndex`/`EdgeIndex` — is expressible here. The
+    /// mmap spilling that `StorageMode::Mapped` turns on lives in the
+    /// *columnar property store*, not in the node/edge graph.
+    pub(crate) undo: Option<Box<UndoJournal>>,
 }
 
 /// Per-conn-type edge index for `MappedGraph`. CSR-style layout
@@ -631,20 +642,6 @@ impl MappedPropertyIndex {
             i += 1;
         }
         out
-    }
-}
-
-impl Clone for MappedGraph {
-    fn clone(&self) -> Self {
-        // All lazy indexes are derived state; drop them on clone and
-        // let the clone rebuild on demand. Avoids `RwLock` clone
-        // plumbing.
-        Self {
-            inner: self.inner.clone(),
-            type_index: RwLock::new(HashMap::new()),
-            property_index: RwLock::new(HashMap::new()),
-            global_property_index: RwLock::new(HashMap::new()),
-        }
     }
 }
 
@@ -783,6 +780,7 @@ impl<'de> serde::Deserialize<'de> for MappedGraph {
             type_index: RwLock::new(HashMap::new()),
             property_index: RwLock::new(HashMap::new()),
             global_property_index: RwLock::new(HashMap::new()),
+            undo: None,
         })
     }
 }

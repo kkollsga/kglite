@@ -496,6 +496,16 @@ macro_rules! rollback_shapes {
                 fn indexed() {
                     assert_rolls_back(&mut seeded_indexed(), $query, $scope);
                 }
+
+                /// The **mapped** shape — the storage mode a large-graph
+                /// application runs in, and a journal-path configuration
+                /// since 2026-07-30. Before that flip Mapped took the clone
+                /// checkpoint, so no shape here had ever been rolled back
+                /// through the journal on it.
+                #[test]
+                fn mapped() {
+                    assert_rolls_back(&mut seeded_mapped(), $query, $scope);
+                }
             }
         )*
     };
@@ -719,49 +729,28 @@ fn journalled_statements_copy_zero_nodes_on_an_indexed_graph() {
     assert_statements_copy_zero_nodes(&mut seeded_indexed(), "indexed");
 }
 
-/// The mapped backend takes the **clone** path — measured, not assumed.
+/// The mapped backend now takes the **journal** path too.
 ///
-/// This is the inverse of every arm above, and it is deliberate. Mapped and
-/// Disk return `false` from `supports_undo_journal` (`storage/backend.rs`),
-/// which since PR #86 is the *only* remaining veto term in `journal_covers`
-/// (`rollback.rs`). So every mutating statement on a mapped graph still opens
-/// an `O(V+E)` `fork_transaction()` whole-graph checkpoint — the pre-journal
-/// behaviour, still live. Mapped also fails the only escape hatch,
-/// `can_skip_rollback_checkpoint`, whose gate is
-/// `matches!(self, GraphBackend::Memory(_))`.
+/// This arm was the inverse until 2026-07-30: it asserted `copied > 0`,
+/// pinning the whole-graph clone every mapped statement used to open, with a
+/// note to invert rather than delete it when Mapped gained a journal. This is
+/// that inversion. `MappedGraph.inner` is the same heap `StableDiGraph` as
+/// `MemoryGraph.inner`, so the same capture seam applies; only `Disk`, which
+/// has no petgraph and no `NodeIndex` identity for an `UndoEntry` to name,
+/// still returns `false` from `supports_undo_journal`.
 ///
-/// Asserting the *cost* rather than asserting zero is the point. A gap that no
-/// test executes reads identically to a gap that does not exist: the previous
-/// state of this file was not "mapped is slow", it was silence. This arm makes
-/// the price an explicit number that changes visibly when someone changes it.
-///
-/// **When Mapped gets an undo journal, this test must be inverted, not
-/// deleted.** The counter should fall to 0 and this arm becomes another
-/// `assert_statements_copy_zero_nodes` call. Deleting it instead would remove
-/// the only mapped coverage in the file and restore the silence.
+/// Keeping the arm rather than folding it into the list above is deliberate:
+/// it is still the only place the *cost* of a mapped statement is measured,
+/// and a regression that quietly re-vetoes Mapped would otherwise be invisible
+/// again.
 #[test]
-fn mapped_statements_still_take_the_clone_path() {
-    use crate::graph::storage::backend::{backend_clone_nodes, reset_backend_clone_count};
-
+fn mapped_statements_copy_zero_nodes() {
     let mut graph = seeded_mapped();
-    let nodes = graph.graph.node_count();
     assert!(
-        nodes > 0,
+        graph.graph.node_count() > 0,
         "fixture must have nodes or the counter proves nothing"
     );
-
-    for &query in ZERO_COPY_QUERIES {
-        reset_backend_clone_count();
-        run(&mut graph, query);
-        let copied = backend_clone_nodes();
-        assert!(
-            copied > 0,
-            "mapped statements are expected to copy the graph today, but this \
-             one copied nothing: {query}. If Mapped gained an undo journal, \
-             invert this test rather than deleting it — it is the only mapped \
-             rollback coverage in this file."
-        );
-    }
+    assert_statements_copy_zero_nodes(&mut graph, "mapped");
 }
 
 /// Mapped rollback must be *correct*, whichever path it takes.
@@ -772,9 +761,9 @@ fn mapped_statements_still_take_the_clone_path() {
 /// So the cost is pinned by a counter and correctness is pinned by the
 /// fingerprint, and neither stands in for the other.
 ///
-/// This is the arm that must keep passing unchanged when Mapped switches to
-/// the journal. If it ever fails, the journal restored something the clone
-/// used to restore, and the fingerprint says which field.
+/// This is the arm that kept passing unchanged when Mapped switched to the
+/// journal. If it ever fails, the journal restored less than the clone used
+/// to, and the fingerprint says which field.
 #[test]
 fn mapped_rolls_back_completely() {
     let mut graph = seeded_mapped();
@@ -782,6 +771,72 @@ fn mapped_rolls_back_completely() {
         &mut graph,
         "MATCH (n:Item) DETACH DELETE n CREATE (:Blocked {id: 1})",
         Some(&["Item"]),
+    );
+}
+
+/// The mapped **silent** write path must record nothing in the undo journal.
+///
+/// [`GraphWrite::node_weight_mut_silent`] has a *trait default* that forwards
+/// to the recorded `node_weight_mut`. `MemoryGraph` overrides it to bypass
+/// capture; `MappedGraph` relying on the default was harmless only while
+/// Mapped had no journal to capture into. The moment it got one, the default
+/// makes every silent write clone a `NodeData` pre-image — and both silent
+/// callers are sweeps over *every node of a type*:
+/// `refresh_columnar_node_handles`, and `BatchProcessor::detach_columnar_stores`
+/// / `reattach_columnar_stores`, which run only under
+/// `is_mapped() || is_disk()` and so are exercised by no memory-backed test at
+/// all. That is exactly the O(type)-per-write amplification commit 3bf9ef00
+/// removed from the WAL, re-created inside the journal.
+///
+/// Nothing existing catches it. The WAL payload guard
+/// (`tests/benchmarks/test_bench_wal_payload.py`) measures WAL *bytes*, which
+/// this override does not change; every `BACKEND_CLONE_NODES` arm counts
+/// backend clones, and the journal path clones no backend by construction. So
+/// the assertion has to read the journal itself.
+///
+/// The recorded arm is the non-vacuity control: without it a test that
+/// silently failed to install a journal, or looked at the wrong node, would
+/// pass by reading zero from an empty buffer.
+#[test]
+fn the_mapped_silent_write_path_records_nothing() {
+    use crate::graph::storage::GraphWrite;
+
+    let mut graph = seeded_mapped();
+    let idx = graph
+        .graph
+        .node_indices()
+        .next()
+        .expect("the fixture must have a node");
+
+    // Control: the recorded seam does capture, so the journal is really live.
+    graph.graph.begin_undo();
+    GraphWrite::node_weight_mut(&mut graph.graph, idx).expect("node is live");
+    let recorded = graph
+        .graph
+        .take_undo()
+        .expect("begin_undo must install a journal on a mapped graph")
+        .into_replay_order()
+        .count();
+    assert_eq!(
+        recorded, 1,
+        "the recorded seam must capture a pre-image, or the silent arm below \
+         is comparing against an empty journal for the wrong reason"
+    );
+
+    // The claim: the silent seam captures nothing.
+    graph.graph.begin_undo();
+    GraphWrite::node_weight_mut_silent(&mut graph.graph, idx).expect("node is live");
+    let silent = graph
+        .graph
+        .take_undo()
+        .expect("begin_undo must install a journal on a mapped graph")
+        .into_replay_order()
+        .count();
+    assert_eq!(
+        silent, 0,
+        "the mapped silent write path journalled {silent} entries; it must \
+         journal none, or the columnar detach/reattach and handle-refresh \
+         sweeps cost one pre-image per node of the type per chunk"
     );
 }
 
@@ -816,6 +871,14 @@ fn journalled_rollback_copies_zero_nodes_on_a_saved_graph() {
 #[test]
 fn journalled_rollback_copies_zero_nodes_on_an_indexed_graph() {
     assert_rollback_copies_zero_nodes(&mut seeded_indexed(), "indexed");
+}
+
+/// The rollback half of the mapped switch. `mapped_rolls_back_completely`
+/// pins that the restore is faithful; this pins that it got there without a
+/// whole-graph copy.
+#[test]
+fn journalled_rollback_copies_zero_nodes_on_a_mapped_graph() {
+    assert_rollback_copies_zero_nodes(&mut seeded_mapped(), "mapped");
 }
 
 /// Pins that the `columnar` arms exercise the master side channel rather than
@@ -868,7 +931,27 @@ const WIDE_ITEMS: usize = 200;
 /// entries and any threshold that catches the difference is indistinguishable
 /// from noise.
 fn wide_columnar() -> DirGraph {
-    let mut graph = DirGraph::new();
+    wide_columnar_into(DirGraph::new())
+}
+
+/// [`wide_columnar`] on the **mapped** backend.
+///
+/// Not interchangeable with `seeded_mapped()`: a mapped graph built by Cypher
+/// `CREATE` has an *empty* `column_stores` (the mapped bulk-columnar path in
+/// `mutation::batch` is reached by `add_nodes`, not by the Cypher executor),
+/// so the master-store write path the cost guard below is about never fires on
+/// it. `enable_columnar()` — what `save()` calls — is what puts a mapped graph
+/// into the shape a real application graph is in, and the preconditions are
+/// asserted so the arm cannot go vacuous if that stops being true.
+fn wide_columnar_mapped() -> DirGraph {
+    use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+
+    let graph = new_dir_graph_in_mode(StorageMode::Mapped, None).expect("mapped graph");
+    assert!(graph.graph.is_mapped(), "fixture must be on Mapped");
+    wide_columnar_into(graph)
+}
+
+fn wide_columnar_into(mut graph: DirGraph) -> DirGraph {
     let rows: Vec<String> = (0..WIDE_ITEMS)
         .map(|i| format!("(:Item {{id: {i}, name: 'n{i}', qty: {i}}})"))
         .collect();
@@ -913,6 +996,39 @@ fn a_columnar_set_journals_one_pre_image_per_changed_node() {
         "a one-row columnar SET captured {captured} node pre-images across \
          {WIDE_ITEMS} nodes of the type; it must be O(nodes changed), not \
          O(nodes of the type) — the handle-refresh sweep is being journalled"
+    );
+}
+
+/// The same bound on the **mapped** backend, which is where it is easiest to
+/// lose and hardest to notice.
+///
+/// `node_weight_mut_silent` has a trait *default* that forwards to the recorded
+/// `node_weight_mut`. `MemoryGraph` overrides it, which is what the arm above
+/// pins; `MappedGraph` had no reason to until it gained a journal, and adding
+/// the journal without the override re-creates the O(type)-per-write cost
+/// exactly. Measured, not assumed: with the override removed this captured
+/// **200** pre-images for a one-row `SET`, against 0 with it.
+///
+/// This arm and `the_mapped_silent_write_path_records_nothing` guard the same
+/// override from opposite ends — one at the seam, one through the statement
+/// that actually reaches it — because the seam has a second caller
+/// (`mutation::batch`'s columnar detach/reattach, gated on
+/// `is_mapped() || is_disk()`) that no Cypher statement reaches today and so
+/// no end-to-end test can cover.
+#[test]
+fn a_mapped_columnar_set_journals_one_pre_image_per_changed_node() {
+    use crate::graph::storage::undo::{journal_node_pre_images, reset_journal_node_pre_images};
+
+    let mut graph = wide_columnar_mapped();
+    reset_journal_node_pre_images();
+    run(&mut graph, "MATCH (i:Item {id: 7}) SET i.priority = 3");
+    let captured = journal_node_pre_images();
+
+    assert!(
+        captured <= 2,
+        "a one-row columnar SET on a mapped graph captured {captured} node \
+         pre-images across {WIDE_ITEMS} nodes of the type; the mapped \
+         handle-refresh sweep is being journalled"
     );
 }
 

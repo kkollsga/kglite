@@ -201,7 +201,11 @@ fn undo_bucket_append(members: Option<&mut Vec<NodeIndex>>, idx: NodeIndex) {
 ///   worse than the journal plus a per-touched-type unique rebuild, which is
 ///   that field's undo story.
 fn journal_covers(graph: &DirGraph) -> bool {
-    // Only the heap backend can express an inverse petgraph edit.
+    // Only a petgraph-backed backend can express an inverse edit. That is
+    // Memory and Mapped — MappedGraph.inner is the same StableDiGraph, which
+    // is why it gained a journal in this sprint. Disk has no petgraph and no
+    // NodeIndex identity to restore, and every UndoEntry variant is keyed on
+    // one, so it still takes the whole-graph checkpoint.
     graph.graph.supports_undo_journal()
 }
 

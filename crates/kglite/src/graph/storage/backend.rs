@@ -99,44 +99,53 @@ impl GraphBackend {
     /// statement-scoped undo journal, i.e. whether rollback can avoid the
     /// whole-graph clone.
     ///
-    /// Only the heap backend can. `Mapped` maintains lazy mmap-columnar
-    /// indexes and `Disk` mutates through generation overlays whose inverse is
-    /// not expressible as a petgraph edit, so both keep the clone checkpoint
-    /// (see `dir_graph/rollback.rs`). `Recording` forwards to whatever it
-    /// wraps, so a durable graph participates exactly when its underlying
-    /// backend would: `Recording(Memory)` journals, `Recording(Mapped)` keeps
-    /// the clone. Durability and rollback strategy are independent concerns.
+    /// Every petgraph-backed backend can. `Memory` and `Mapped` both hold a
+    /// heap `StableDiGraph<NodeData, EdgeData>` as `inner`, and every
+    /// `UndoEntry` variant is keyed on the `NodeIndex`/`EdgeIndex` that graph
+    /// hands out, so the capture seam is the same one for both. "Larger than
+    /// RAM" is loose for `Mapped`: what `StorageMode::Mapped` changes is where
+    /// *properties* live (`memory_limit = Some(0)` spills the columnar store
+    /// to mmap), not the node/edge graph, which stays heap-resident.
     ///
-    /// **This is deliberate, and it is the only remaining veto term in
-    /// `journal_covers`** — every other term was retired as the journal grew
-    /// to cover saved, indexed and columnar graphs. The user-visible cost is
-    /// worth stating plainly, because nothing else surfaces it: every mutating
-    /// statement on a mapped or disk graph still opens an O(V+E)
-    /// `fork_transaction()` whole-graph checkpoint, which is the pre-journal
-    /// behaviour. Under the "in-memory wins" doctrine that is the right
-    /// trade — the journal exists to make the *core* product cheap, and
-    /// neither larger-than-RAM backend can express an inverse petgraph edit
-    /// today — but it does mean statement rollback cost scales with graph
-    /// size in exactly the modes chosen for large graphs. Mirrored in the
+    /// `Disk` cannot, and that is the whole of the remaining veto. It has no
+    /// petgraph at all — it mutates a CSR + mmap layout through generation
+    /// overlays and arena-staged writes, its slots carry no `NodeIndex`
+    /// identity for an entry to name, and it has no free list whose LIFO
+    /// ordering reverse replay could exploit to restore slot identity. So a
+    /// disk graph keeps the clone checkpoint (see `dir_graph/rollback.rs`):
+    /// every mutating statement on it still opens an O(V+E)
+    /// `fork_transaction()` whole-graph checkpoint, the pre-journal behaviour,
+    /// and its statement-rollback cost scales with graph size. Mirrored in the
     /// user-facing storage-mode guide (`docs/python/core-concepts.md`).
+    ///
+    /// `Recording` forwards to whatever it wraps, so a durable graph
+    /// participates exactly when its underlying backend would:
+    /// `Recording(Memory)` and `Recording(Mapped)` journal,
+    /// `Recording(Disk)` keeps the clone. Durability and rollback strategy are
+    /// independent concerns.
+    ///
+    /// **This is the only remaining veto term in `journal_covers`** — every
+    /// other term was retired as the journal grew to cover saved, indexed and
+    /// columnar graphs.
     #[inline]
     pub(crate) fn supports_undo_journal(&self) -> bool {
         match self {
-            GraphBackend::Memory(_) => true,
+            GraphBackend::Memory(_) | GraphBackend::Mapped(_) => true,
             GraphBackend::Recording(rg) => rg.inner().supports_undo_journal(),
-            GraphBackend::Mapped(_) | GraphBackend::Disk(_) => false,
+            GraphBackend::Disk(_) => false,
         }
     }
 
-    /// Install a fresh undo journal on the heap backend. No-op on backends
-    /// that do not support one — callers gate on
+    /// Install a fresh undo journal on a petgraph-backed backend. No-op on
+    /// backends that do not support one — callers gate on
     /// [`Self::supports_undo_journal`] first.
     #[inline]
     pub(crate) fn begin_undo(&mut self) {
         match self {
             GraphBackend::Memory(g) => g.begin_undo(),
+            GraphBackend::Mapped(g) => g.begin_undo(),
             GraphBackend::Recording(rg) => rg.inner_mut().begin_undo(),
-            GraphBackend::Mapped(_) | GraphBackend::Disk(_) => {}
+            GraphBackend::Disk(_) => {}
         }
     }
 
@@ -145,8 +154,9 @@ impl GraphBackend {
     pub(crate) fn take_undo(&mut self) -> Option<Box<UndoJournal>> {
         match self {
             GraphBackend::Memory(g) => g.take_undo(),
+            GraphBackend::Mapped(g) => g.take_undo(),
             GraphBackend::Recording(rg) => rg.inner_mut().take_undo(),
-            GraphBackend::Mapped(_) | GraphBackend::Disk(_) => None,
+            GraphBackend::Disk(_) => None,
         }
     }
 
@@ -157,8 +167,9 @@ impl GraphBackend {
     pub(crate) fn undo_journal_mut(&mut self) -> Option<&mut UndoJournal> {
         match self {
             GraphBackend::Memory(g) => g.undo_journal_mut(),
+            GraphBackend::Mapped(g) => g.undo_journal_mut(),
             GraphBackend::Recording(rg) => rg.inner_mut().undo_journal_mut(),
-            GraphBackend::Mapped(_) | GraphBackend::Disk(_) => None,
+            GraphBackend::Disk(_) => None,
         }
     }
 

@@ -1,11 +1,13 @@
-//! `impl MappedGraph` — type-index / property-index build helpers and
-//! the columnar-mode `flatten_to_csr` helper used by both index builds.
+//! `impl MappedGraph` — construction, `Clone`, the statement-scoped undo
+//! journal accessors, type-index / property-index build helpers, and the
+//! columnar-mode `flatten_to_csr` helper used by both index builds.
 //!
 //! Split out of `storage/mod.rs` to keep that file under its 800-line
 //! cap. Lives in a sibling `impl MappedGraph {}` block.
 
 use crate::datatypes::Value;
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
+use crate::graph::storage::undo::UndoJournal;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
@@ -13,6 +15,23 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use super::{flatten_to_csr, MappedGraph, MappedPropertyIndex, MappedTypeIndex};
+
+impl Clone for MappedGraph {
+    fn clone(&self) -> Self {
+        // All lazy indexes are derived state; drop them on clone and
+        // let the clone rebuild on demand. Avoids `RwLock` clone
+        // plumbing.
+        Self {
+            inner: self.inner.clone(),
+            type_index: RwLock::new(HashMap::new()),
+            property_index: RwLock::new(HashMap::new()),
+            global_property_index: RwLock::new(HashMap::new()),
+            // A journal belongs to the statement that opened it, never to a
+            // copy of the graph it was recorded against.
+            undo: None,
+        }
+    }
+}
 
 impl MappedGraph {
     #[inline]
@@ -22,7 +41,28 @@ impl MappedGraph {
             type_index: RwLock::new(HashMap::new()),
             property_index: RwLock::new(HashMap::new()),
             global_property_index: RwLock::new(HashMap::new()),
+            undo: None,
         }
+    }
+
+    /// Install a fresh statement-scoped undo journal, discarding any stale
+    /// one (defensive: a journal must never outlive its statement).
+    #[inline]
+    pub(crate) fn begin_undo(&mut self) {
+        self.undo = Some(Box::new(UndoJournal::new()));
+    }
+
+    /// Uninstall and return the journal, ending capture.
+    #[inline]
+    pub(crate) fn take_undo(&mut self) -> Option<Box<UndoJournal>> {
+        self.undo.take()
+    }
+
+    /// Mutable access to the active journal, for the `DirGraph`-level capture
+    /// seam (inverted-index and timeseries edits the backend cannot see).
+    #[inline]
+    pub(crate) fn undo_journal_mut(&mut self) -> Option<&mut UndoJournal> {
+        self.undo.as_deref_mut()
     }
 
     /// Wrap an existing petgraph, with every derived index empty.
@@ -40,6 +80,7 @@ impl MappedGraph {
             type_index: RwLock::new(HashMap::new()),
             property_index: RwLock::new(HashMap::new()),
             global_property_index: RwLock::new(HashMap::new()),
+            undo: None,
         }
     }
 

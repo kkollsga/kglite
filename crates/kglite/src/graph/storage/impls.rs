@@ -34,9 +34,10 @@ use std::time::Instant;
 // `MemoryGraph` and `MappedGraph` wrap identical `StableDiGraph` today but
 // carry distinct type identity for per-backend divergence. The
 // `impl_heap_graph_read!` macro emits the shared read body. The write side is
-// written out per backend: `MappedGraph` maintains its own lazy indexes and
-// `MemoryGraph` carries the statement-scoped undo journal, so the two have
-// nothing left in common to share.
+// written out per backend: both carry the statement-scoped undo journal, but
+// `MappedGraph` also maintains its own lazy type/property indexes and
+// `MemoryGraph` its peer counts, so the two have nothing left in common to
+// share.
 // ──────────────────────────────────────────────────────────────────────────
 
 macro_rules! impl_heap_graph_read {
@@ -762,46 +763,170 @@ impl GraphRead for MappedGraph {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// MappedGraph GraphWrite — lazy-index invalidation + undo-journal capture
+//
 // GraphWrite invalidates the type index on every edge mutation and the
 // property index on every node-property mutation. `add_node` and
 // `remove_node` also clear the property index since the set of
 // `(value, node_idx)` pairs has changed.
+//
+// On top of that, and since 2026-07-30, the same undo-capture seam
+// `MemoryGraph` carries above — for the same reason: `inner` is a heap
+// `StableDiGraph`, so every `UndoEntry` variant, all keyed on a petgraph
+// index, is expressible here. What `StorageMode::Mapped` changes is where
+// *properties* live (mmap-spilled column stores), not the node/edge graph, so
+// the journal transfers verbatim.
+//
+// Each method captures the inverse of the edit *if a journal is installed*,
+// then performs the edit — never at the cost of the invalidation it already
+// owed. With no journal (the steady state, and every read path) the added cost
+// is one `Option` discriminant check; the clone-the-pre-image work lives in
+// `#[cold]` helpers.
+// ──────────────────────────────────────────────────────────────────────────
+
+impl MappedGraph {
+    /// Clone `idx`'s current weight into the journal as its pre-statement
+    /// state, unless this statement already captured it.
+    #[cold]
+    fn capture_node_weight(&mut self, idx: NodeIndex) {
+        let inner = &self.inner;
+        if let Some(journal) = self.undo.as_deref_mut() {
+            journal.note_node_weight(idx, || inner.node_weight(idx).cloned());
+        }
+    }
+
+    /// Edge counterpart of [`Self::capture_node_weight`].
+    #[cold]
+    fn capture_edge_weight(&mut self, idx: EdgeIndex) {
+        let inner = &self.inner;
+        if let Some(journal) = self.undo.as_deref_mut() {
+            journal.note_edge_weight(idx, || inner.edge_weight(idx).cloned());
+        }
+    }
+
+    /// Any edge incident to `idx`, in either direction.
+    fn first_incident_edge(&self, idx: NodeIndex) -> Option<EdgeIndex> {
+        self.inner
+            .edges_directed(idx, Direction::Outgoing)
+            .next()
+            .or_else(|| self.inner.edges_directed(idx, Direction::Incoming).next())
+            .map(|edge| edge.id())
+    }
+
+    /// Detach `idx`'s edges one at a time, through the recorded
+    /// [`GraphWrite::remove_edge`], so each gets its own journal entry.
+    ///
+    /// petgraph's `remove_node` drops incident edges in one internal sweep
+    /// whose order we neither observe nor control, which would leave reverse
+    /// replay unable to hand each edge back its own free-list slot. Doing the
+    /// detach ourselves makes the removal order the recorded order. The end
+    /// state is identical either way; the Cypher delete path already detaches
+    /// explicitly (`mutation::maintain::detach_delete_nodes`), so in practice
+    /// this loop finds nothing to do and exists for every *other* caller of
+    /// `remove_node`.
+    #[cold]
+    fn detach_for_journal(&mut self, idx: NodeIndex) {
+        while let Some(edge) = self.first_incident_edge(idx) {
+            GraphWrite::remove_edge(self, edge);
+        }
+    }
+}
+
 impl GraphWrite for MappedGraph {
     #[inline]
     fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
         // Caller may mutate properties — invalidate property index.
         self.invalidate_property_index();
+        if self.undo.is_some() {
+            self.capture_node_weight(idx);
+        }
         self.inner_mut().node_weight_mut(idx)
     }
+
+    /// Bypasses the undo journal as well as the WAL recorder.
+    ///
+    /// Two callers, both pure storage bookkeeping and both mapped-relevant:
+    /// the columnar handle-refresh sweep in
+    /// [`crate::graph::languages::cypher::executor`], and the
+    /// detach/reattach pair in [`crate::graph::mutation::batch`], which runs
+    /// *only* under `is_mapped() || is_disk()` and touches every existing node
+    /// of a type per chunk. Capturing a `NodeData` pre-image for each of them
+    /// would make one `SET`, or one bulk `CREATE`, cost a clone per node *of
+    /// the type* — the O(V+E)-per-write cost this journal exists to remove,
+    /// reintroduced at a smaller constant. Without this override `MappedGraph`
+    /// would inherit the trait default, which forwards to the *recorded*
+    /// `node_weight_mut`; that is precisely the quadratic amplification commit
+    /// 3bf9ef00 removed from the WAL, and no existing guard would see it in
+    /// the journal.
+    ///
+    /// Nothing else may use this method to skip capture: a caller that
+    /// changes a node's *content* silently is unrecoverable on rollback.
+    #[inline]
+    fn node_weight_mut_silent(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
+        self.invalidate_property_index();
+        self.inner_mut().node_weight_mut(idx)
+    }
+
     #[inline]
     fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
         // Mutating an edge weight can change its connection_type, which
         // would invalidate the per-conn-type index.
         self.invalidate_type_index();
+        if self.undo.is_some() {
+            self.capture_edge_weight(idx);
+        }
         self.inner_mut().edge_weight_mut(idx)
     }
+
     #[inline]
     fn add_node(&mut self, data: NodeData) -> NodeIndex {
         self.invalidate_property_index();
-        self.inner_mut().add_node(data)
+        let node_type = data.node_type;
+        let idx = self.inner_mut().add_node(data);
+        if let Some(journal) = self.undo.as_deref_mut() {
+            journal.note_node_added(idx, node_type);
+        }
+        idx
     }
+
     #[inline]
     fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData> {
         // Removing a node removes its incident edges and any property
         // entries pointing at it.
         self.invalidate_type_index();
         self.invalidate_property_index();
-        self.inner_mut().remove_node(idx)
+        if self.undo.is_some() {
+            self.detach_for_journal(idx);
+        }
+        let removed = self.inner_mut().remove_node(idx)?;
+        if let Some(journal) = self.undo.as_deref_mut() {
+            journal.note_node_removed(idx, removed.clone());
+        }
+        Some(removed)
     }
+
     #[inline]
     fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
         self.invalidate_type_index();
-        self.inner_mut().add_edge(a, b, data)
+        let idx = self.inner_mut().add_edge(a, b, data);
+        if let Some(journal) = self.undo.as_deref_mut() {
+            journal.note_edge_added(idx);
+        }
+        idx
     }
+
     #[inline]
     fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData> {
         self.invalidate_type_index();
-        self.inner_mut().remove_edge(idx)
+        let endpoints = self.undo.is_some().then(|| self.inner.edge_endpoints(idx));
+        let removed = self.inner_mut().remove_edge(idx)?;
+        if let Some(journal) = self.undo.as_deref_mut() {
+            if let Some(Some((src, tgt))) = endpoints {
+                journal.note_edge_removed(idx, src, tgt, removed.clone());
+            }
+        }
+        Some(removed)
     }
 }
 

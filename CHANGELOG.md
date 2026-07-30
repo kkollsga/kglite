@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Mapped graphs no longer copy the whole graph before every mutating
+  statement.** `MappedGraph` now carries a statement-scoped undo journal, so a
+  mutating statement records inverse operations instead of forking an
+  `O(V + E)` checkpoint. Previously the journal was vetoed for both mapped and
+  disk backends, which since the columnar-journal work was the only remaining
+  veto term — so mapped writes kept paying the pre-journal cost, scaling with
+  graph size in exactly the mode chosen for large graphs.
+
+  The veto's stated reason was wrong for mapped: `MappedGraph` holds the same
+  heap `StableDiGraph` as `MemoryGraph`, so it could always express an inverse
+  edit. **Disk is unchanged and still takes the checkpoint** — it has no
+  petgraph and no stable node identity to restore, so the reason holds there.
+
+  Rollback fidelity on mapped graphs is now covered by the full mid-statement
+  failure matrix rather than a single shape; before this change no test in the
+  suite executed the mapped rollback path at all.
+
 ## [0.15.3] - 2026-07-29
 
 ### Added
