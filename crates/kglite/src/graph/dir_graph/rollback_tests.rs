@@ -1054,6 +1054,73 @@ fn a_plain_set_journals_one_pre_image_per_changed_node() {
     );
 }
 
+/// The fork-detection guard is a no-op *today*, and this is what proves it.
+///
+/// `set_via_column_master` now adds a type to `touched_columnar_types` only
+/// when `Arc::make_mut` actually forked the master, rather than
+/// unconditionally. That must change nothing while every node holds its own
+/// strong handle: the master's count is `1 (map) + N (nodes)` at the first
+/// write of a clause, so the fork is unavoidable and the type is registered
+/// exactly as before.
+///
+/// Two writes to the same type in one statement are the interesting case —
+/// the second finds the fresh allocation uniquely owned and mutates in place,
+/// so it does NOT fork. The sweep must still have happened, via the first
+/// write's registration. A regression here would surface as a stale per-node
+/// handle serving a pre-clause value, which is exactly what the assertions
+/// below read back.
+///
+/// When per-node handles become weak this test is expected to change meaning,
+/// not to be deleted: the fork count drops but the observable values must not.
+#[test]
+fn fork_detection_is_a_no_op_while_nodes_hold_strong_handles() {
+    let mut graph = wide_columnar();
+
+    // Locate the node up front: `id` is an inline canonical field, not a
+    // column-store property, so it cannot be used to read back through the
+    // per-node handle. `qty` is columnar and seeded to the node's index.
+    let idx = graph
+        .graph
+        .node_indices()
+        .find(|i| {
+            graph
+                .graph
+                .node_weight(*i)
+                .and_then(|n| n.get_property_value("qty"))
+                .map(|v| v == crate::datatypes::Value::Int64(1))
+                .unwrap_or(false)
+        })
+        .expect("fixture seeds qty = node index");
+
+    // Two SET clauses in one statement, same type and same property. The first
+    // forks (count is 1 + N); the second finds the fresh allocation uniquely
+    // owned and mutates IN PLACE, so it does not fork.
+    run(
+        &mut graph,
+        "MATCH (n:Item {id: 1}) SET n.qty = 111 SET n.qty = 222",
+    );
+
+    // Read back THROUGH the per-node handle, not through the master. If the
+    // first write had failed to register the type, no sweep would run and this
+    // handle would still point at the pre-clause allocation serving qty = 1.
+    let node = graph.graph.node_weight(idx).expect("node still present");
+    assert_eq!(
+        node.get_property_value("qty"),
+        Some(crate::datatypes::Value::Int64(222)),
+        "both writes must be visible through the per-node handle; reading 1 \
+         means the refresh sweep never ran, i.e. fork detection failed to \
+         register the type on the write that actually forked"
+    );
+
+    // The design pin still holds afterwards: the sweep re-pointed every node at
+    // the current master, so it is shared again.
+    let master = graph.column_stores.get("Item").expect("master");
+    assert!(
+        Arc::strong_count(master) > 1,
+        "the sweep must have re-pointed the per-node handles at the master"
+    );
+}
+
 /// Why the checkpoint's second `Arc` on the master is *not* what makes the
 /// columnar fast path fork the store.
 ///

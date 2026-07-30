@@ -95,8 +95,31 @@ pub(super) fn set_via_column_master(
     let Some(master) = graph.column_stores.get_mut(write.node_type) else {
         return false;
     };
+    // Did `make_mut` actually fork, or did it mutate in place?
+    //
+    // Only a fork leaves the per-node handles stale, and only stale handles
+    // need the O(N) end-of-clause sweep. Comparing the allocation address
+    // across the call is the exact question — `Arc::strong_count` is not, since
+    // it cannot distinguish "nobody else holds this" from "the clone already
+    // happened".
+    //
+    // TODAY THIS IS A PROVABLE NO-OP, and that is the point of landing it
+    // alone. Every node of a type holds its own strong handle, so the master's
+    // count is `1 (map) + N (nodes)` at the first write of a clause and
+    // `make_mut` always forks; the second and later writes in the same clause
+    // find the fresh allocation uniquely owned and mutate in place, but the
+    // type is already in the set by then. So the set ends up identical either
+    // way, which `fork_detection_is_a_no_op_while_nodes_hold_strong_handles`
+    // pins.
+    //
+    // It stops being a no-op the moment nodes stop holding strong handles: then
+    // most writes mutate in place, and an unconditional insert would keep
+    // paying a sweep that has nothing to re-point.
+    let before = Arc::as_ptr(master);
     Arc::make_mut(master).set(row_id, key, write.value, None);
-    touched_columnar_types.insert(write.node_type.to_string());
+    if !std::ptr::eq(before, Arc::as_ptr(master)) {
+        touched_columnar_types.insert(write.node_type.to_string());
+    }
     graph.graph.note_recorded_node_upsert(write.node_idx);
     true
 }
