@@ -633,6 +633,27 @@ impl KnowledgeGraph {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
         }
 
+        // Stamp how far this checkpoint has consumed the log, so a reopen can
+        // *gate* replay instead of trusting the log's extent.
+        //
+        // The barrier above stops a stale prefix from arising under a clean
+        // crash; it cannot make replay robust to one that arises any other way
+        // (an operator restoring an old sidecar from backup, a copied graph
+        // directory, a filesystem that resurrects a truncated file). The gate
+        // is anchored here, in the checkpoint, because the checkpoint is the
+        // only artifact that knows which frames it already contains.
+        //
+        // `next_lsn` is the LSN the *next* frame will carry, so the newest
+        // frame folded into this snapshot is `next_lsn - 1`; a session that has
+        // logged nothing leaves the stamp at 0 (replay everything, unchanged
+        // behaviour). Any ops still sitting in the capture buffer are folded in
+        // by the serialize below and then dropped un-logged, so they consume no
+        // LSN and the arithmetic stays exact.
+        if let Some(ds) = self.lifecycle.durable.as_ref() {
+            let checkpoint_lsn = ds.next_lsn.saturating_sub(1);
+            get_graph_mut(&mut self.inner).checkpoint_lsn = checkpoint_lsn;
+        }
+
         // Mode-aware durable save lives in core (`save_graph_with`): disk dir
         // vs in-memory `.kgl`, columnar consolidation (v3 requires columnar;
         // handles fresh / mixed / mapped), atomic temp+rename, and file +
@@ -658,7 +679,13 @@ impl KnowledgeGraph {
                 ds.wal
                     .reset()
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-                ds.next_lsn = 1;
+                // `next_lsn` deliberately keeps climbing across the truncation.
+                // Restarting it at 1 would make every post-checkpoint frame
+                // reuse LSNs a pre-checkpoint frame already spent, so the
+                // checkpoint stamp above could never distinguish a stale frame
+                // from a fresh one — and, since the stamp is taken as
+                // `next_lsn - 1`, the very next checkpoint would record 0 and
+                // the replay gate would be vacuous.
             }
         }
         Ok(())

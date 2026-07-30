@@ -5,12 +5,20 @@
 //!
 //! A `.kgl-wal` sidecar holds an append-only sequence of **logical**
 //! mutation frames. Each committed mutation operation appends one
-//! [`WalFrame`] — a batch of [`MutationOp`]s tagged with the post-commit
-//! graph `version` as its log-sequence number (LSN) — and `fsync`s. On
-//! open, the engine loads the `.kgl` checkpoint snapshot, then replays
-//! every WAL frame with `lsn > checkpoint.version` to recover work
-//! committed since the last checkpoint. A checkpoint (a full `.kgl`
-//! save) truncates the WAL.
+//! [`WalFrame`] — a batch of [`MutationOp`]s tagged with a log-sequence
+//! number (LSN) — and `fsync`s. On open, the engine loads the `.kgl`
+//! checkpoint snapshot, then replays every WAL frame with
+//! `lsn > DirGraph::checkpoint_lsn` to recover work committed since the
+//! last checkpoint. A checkpoint (a full `.kgl` save) truncates the WAL
+//! and stamps the LSN it consumed up to into the `.kgl`.
+//!
+//! The LSN is a **counter owned by the log**, not the graph `version`:
+//! the writing binding hands out `next_lsn` and increments it (see
+//! `KnowledgeGraph::flush_wal`). It is monotonic for the life of the log
+//! and survives checkpoint truncation, which is what lets the stamped
+//! `checkpoint_lsn` distinguish a frame the snapshot already contains
+//! from one committed after it. Graph `version` is a different quantity —
+//! it advances on work that is never logged — and is not a log position.
 //!
 //! This module owns only the **on-disk format**: the op schema, the
 //! frame envelope, and crash-safe read/write. Capture (translating
@@ -265,13 +273,18 @@ pub enum MutationOp {
     },
 }
 
-/// One committed mutation operation: the ops it produced, tagged with
-/// the post-commit graph version as the log-sequence number.
+/// One committed mutation operation: the ops it produced, tagged with a
+/// log-sequence number.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalFrame {
-    /// Post-commit graph `version`. Frames replay in ascending `lsn`;
-    /// on recovery, frames with `lsn <= checkpoint_version` are already
+    /// Log-sequence number, issued by the writer's own monotonic counter —
+    /// **not** the graph `version`. Frames replay in ascending `lsn`; on
+    /// recovery, frames with `lsn <= DirGraph::checkpoint_lsn` are already
     /// folded into the snapshot and skipped.
+    ///
+    /// The counter must never restart at a checkpoint: a restarted LSN would
+    /// be reused by a post-checkpoint frame, making a stale pre-checkpoint
+    /// frame indistinguishable from a fresh one.
     pub lsn: u64,
     /// The logical ops this commit produced, in application order.
     pub ops: Vec<MutationOp>,

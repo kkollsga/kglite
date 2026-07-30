@@ -167,6 +167,25 @@ pub(crate) struct FileMetadata {
     /// files simply lack the key and default to 0.
     #[serde(default, skip_serializing_if = "is_zero")]
     user_schema_version: u32,
+    /// Highest WAL log-sequence number this checkpoint already contains (see
+    /// `DirGraph::checkpoint_lsn`). On a durable reopen, replay skips every
+    /// frame at or below it, so a **stale WAL prefix** — one whose frames
+    /// predate the checkpoint — cannot be folded back over a newer snapshot and
+    /// roll committed properties backwards.
+    ///
+    /// The gate is anchored in the checkpoint rather than in the log because the
+    /// failure is precisely that the log is stale *relative to* the checkpoint;
+    /// only the checkpoint is authoritative about how much of the log it
+    /// consumed.
+    ///
+    /// Additive and *invisible when unset*, exactly like `user_schema_version`
+    /// above: `skip_serializing_if` omits the key entirely at the baseline, so a
+    /// graph that was never durable serializes byte-for-byte as it did before
+    /// this field existed — which is what keeps the `test_phase4_parity` golden
+    /// digest stable. Older files simply lack the key and default to 0, i.e.
+    /// replay everything, the pre-gate behaviour.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    checkpoint_lsn: u64,
     /// Spatial configuration per node type.
     #[serde(default)]
     spatial_configs: HashMap<String, SpatialConfig>,
@@ -221,10 +240,12 @@ fn default_ts_data_version() -> u32 {
     2
 }
 
-/// `skip_serializing_if` predicate for the additive `user_schema_version` key:
-/// omitting it at the baseline keeps saves byte-identical to pre-field ones.
-fn is_zero(value: &u32) -> bool {
-    *value == 0
+/// `skip_serializing_if` predicate for the additive integer keys
+/// (`user_schema_version`, `checkpoint_lsn`): omitting them at the baseline
+/// keeps saves byte-identical to pre-field ones. Generic over the integer width
+/// so a second such key needs no near-duplicate predicate.
+fn is_zero<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 // ─── Metadata transfer helpers ───────────────────────────────────────────────
@@ -250,6 +271,7 @@ impl FileMetadata {
             parent_types: graph.parent_types.clone(),
             graph_instructions: graph.graph_instructions.clone(),
             user_schema_version: graph.user_schema_version,
+            checkpoint_lsn: graph.checkpoint_lsn,
             spatial_configs: graph.spatial_configs.clone(),
             timeseries_configs: graph.timeseries_configs.clone(),
             temporal_node_configs: graph.temporal_node_configs.clone(),
@@ -307,6 +329,7 @@ impl FileMetadata {
         graph.parent_types = self.parent_types;
         graph.graph_instructions = self.graph_instructions;
         graph.user_schema_version = self.user_schema_version;
+        graph.checkpoint_lsn = self.checkpoint_lsn;
         graph.spatial_configs = self.spatial_configs;
         graph.timeseries_configs = self.timeseries_configs;
         graph.temporal_node_configs = self.temporal_node_configs;

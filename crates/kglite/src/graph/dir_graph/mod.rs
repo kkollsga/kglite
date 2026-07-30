@@ -176,6 +176,25 @@ pub struct DirGraph {
     /// files). Docs: `docs/python/guides/schema-migrations.md`.
     #[serde(default)]
     pub user_schema_version: u32,
+    /// Highest WAL log-sequence number already folded into this graph's last
+    /// checkpoint — the replay gate for a durable session.
+    ///
+    /// A durable `save()` stamps the LSN of the newest logged frame here before
+    /// serializing, so the `.kgl` records *how far* the snapshot has consumed
+    /// the log. On the next durable open, replay skips every frame at or below
+    /// it, which is what makes recovery robust to a **stale WAL prefix** — a log
+    /// whose surviving frames predate the checkpoint. Folding such a prefix over
+    /// a newer snapshot would roll properties back to an earlier commit and
+    /// destroy already-durable data.
+    ///
+    /// `0` = "no checkpoint has consumed the log", which is also what a `.kgl`
+    /// written before this field existed loads as: replay everything, the
+    /// pre-gate behaviour. The counter is monotonic for the life of the log and
+    /// is **not** reset by a checkpoint — a per-checkpoint reset would make
+    /// every stamped value 0 and the gate vacuous, and would let a stale frame
+    /// carry the same LSN as a fresh one.
+    #[serde(default)]
+    pub checkpoint_lsn: u64,
     /// Auto-vacuum threshold: if Some(t), vacuum() is triggered automatically after
     /// DELETE operations when fragmentation_ratio exceeds t and tombstones > 100.
     /// Default: Some(0.3). Set to None to disable.
@@ -524,6 +543,7 @@ impl DirGraph {
             parent_types: HashMap::new(),
             graph_instructions: HashMap::new(),
             user_schema_version: 0,
+            checkpoint_lsn: 0,
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -581,6 +601,7 @@ impl DirGraph {
             parent_types: HashMap::new(),
             graph_instructions: HashMap::new(),
             user_schema_version: 0,
+            checkpoint_lsn: 0,
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),

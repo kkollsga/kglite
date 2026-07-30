@@ -732,6 +732,63 @@ def test_normal_checkpoint_truncates_then_recovers_post_checkpoint(tmp_path, sto
     assert names == ["Alice3", "Bob"]
 
 
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_stale_wal_prefix_is_gated_by_the_checkpoint_lsn(tmp_path, storage):
+    """Replay is gated on the LSN the checkpoint says it already contains, so a
+    **stale WAL prefix cannot roll a newer checkpoint backwards**.
+
+    Why this test and not
+    ``test_normal_checkpoint_truncates_then_recovers_post_checkpoint``: that one
+    crashes the child *after* ``save()`` has already truncated, so the WAL it
+    recovers holds only post-checkpoint frames — the one input that separates a
+    gated replay from an ungated one is absent, and it passes identically with
+    the gate deleted. It pins the pre-checkpoint barrier, not the gate.
+
+    The barrier stops a stale prefix *arising* from a clean crash; nothing stops
+    one arriving another way — an operator restoring a sidecar from backup, a
+    half-copied graph directory, a filesystem that resurrects a truncated file.
+    So the hazard is constructed directly: a real log captured before a
+    checkpoint is written back over the sidecar afterwards, with a genuinely
+    post-checkpoint frame appended behind it. Recovery must skip the first and
+    apply the second — asserting both is what keeps this non-vacuous, since a
+    gate that skipped *everything* would satisfy the first assertion alone.
+    """
+    path = tmp_path / "app.kgl"
+    wal = tmp_path / "app.kgl-wal"
+
+    g = _open(path, storage, durable="full")
+    # The sidecar exists with a header and no frames the moment it is opened;
+    # reading it here derives the header length rather than hard-coding it, so
+    # the frame splice below survives a header-format change.
+    header = wal.read_bytes()
+    assert header, "the sidecar must exist before any commit for this splice"
+
+    g.cypher("CREATE (:Person {id: 1, name: 'Alice1'})")
+    stale = wal.read_bytes()
+    assert len(stale) > len(header), "the captured prefix must hold a real frame"
+
+    g.save()  # checkpoint 1 — folds 'Alice1' in, truncates the log
+    g.cypher("MATCH (p:Person {id: 1}) SET p.name = 'Alice2'")
+    g.save()  # checkpoint 2 — folds 'Alice2' in, truncates again
+
+    # Committed after the newest checkpoint, so it lives only in the log.
+    g.cypher("CREATE (:Person {id: 2, name: 'Bob'})")
+    fresh_frames = wal.read_bytes()[len(header) :]
+    assert fresh_frames, "the post-checkpoint frame must have been logged"
+
+    del g  # release the single-writer lease; no save(), so checkpoint 2 stands
+
+    # The hazard: the pre-checkpoint log, back in front of the frames that
+    # legitimately postdate it.
+    wal.write_bytes(stale + fresh_frames)
+
+    g = _open(path, storage, durable="full")
+    names = sorted(r["n"] for r in g.cypher("MATCH (p:Person) RETURN p.name AS n"))
+    # 'Alice1' here would mean the stale frame was folded over the newer
+    # checkpoint; a missing 'Bob' would mean the gate ate a live frame too.
+    assert names == ["Alice2", "Bob"]
+
+
 # ── level spellings and validation ───────────────────────────────────
 
 

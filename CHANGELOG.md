@@ -26,6 +26,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure matrix rather than a single shape; before this change no test in the
   suite executed the mapped rollback path at all.
 
+### Fixed
+
+- **WAL replay is now gated on the checkpoint, so a stale log cannot roll a
+  durable graph backwards.** A `.kgl` checkpoint records the highest
+  log-sequence number it already contains, and reopening a `durable=` graph
+  replays only the frames above it. Previously replay started from zero and
+  folded in *every* frame the sidecar held, so a `<graph>-wal` that predated
+  the checkpoint — restored from a backup, carried along in a half-copied
+  graph directory, or otherwise surviving the truncation — would overwrite
+  already-durable properties with their values as of an earlier commit.
+
+  0.15.0 added a log barrier before the checkpoint, which prevents a stale
+  prefix from *arising* under a clean crash; this makes recovery robust to one
+  that arrives any other way. The frame counter also no longer restarts at each
+  checkpoint, so a pre-checkpoint frame can never reuse a live frame's
+  sequence number.
+
+  The stamp is additive and written only by a durable save, so existing `.kgl`
+  files load unchanged (replaying everything, as before) and a graph that was
+  never durable serializes byte-for-byte as it did previously.
+
 ## [0.15.3] - 2026-07-29
 
 ### Added

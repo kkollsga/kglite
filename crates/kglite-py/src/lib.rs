@@ -575,7 +575,14 @@ fn setup_durable(
     // mutations are captured. Replaying before wrapping keeps the replay's
     // own GraphWrite calls out of the capture buffer.
     let dir = crate::graph::get_graph_mut(&mut kg.inner);
-    let max_lsn = kglite_core::api::durable::apply_frames(dir, &frames, 0)
+    // Gate replay on what the checkpoint says it already contains. Frames at or
+    // below this LSN are a **stale prefix** — already folded into the `.kgl` we
+    // just loaded — and folding them again would roll properties back to their
+    // values as of an earlier commit. A graph with no durable history (or a
+    // `.kgl` written before the stamp existed) reports 0, i.e. replay
+    // everything, which is the pre-gate behaviour.
+    let checkpoint_lsn = dir.checkpoint_lsn;
+    let max_lsn = kglite_core::api::durable::apply_frames(dir, &frames, checkpoint_lsn)
         .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
     KnowledgeGraph::wrap_backend_for_durability(dir);
 
