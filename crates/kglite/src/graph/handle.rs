@@ -787,3 +787,120 @@ mod boundary_lift_tests {
         assert!(!is_canonical_node_column("Title"));
     }
 }
+
+/// The cost of holding a reader across a write — pinned as a *count*, not a
+/// timing.
+///
+/// [`make_dir_graph_mut`] deep-clones the whole graph whenever a second
+/// `Arc<DirGraph>` is alive, which the doc on
+/// [`make_dir_graph_mut_preserving_lineage`] warns about. The reachable-from-
+/// ordinary-code shape is mundane: a request handler keeps a query result in a
+/// local, then writes. No snapshot API, no threading, no `freeze()`.
+///
+/// This is measured elsewhere as wall time — and that measurement is
+/// structurally hard to gate on. `min`-of-N and p95 both *hide* it, because
+/// only the first write after acquiring the reference pays; the Python
+/// benchmark that does see it (`test_bench_first_write_after_reference`) has to
+/// re-acquire the reference in an untimed `pedantic` setup before every round,
+/// and even then it asserts no threshold, and lives behind a marker the default
+/// suite deselects. Meanwhile `bench-check` and `bench-anchor` both run
+/// `--metric min`, so neither can ever see this.
+///
+/// `BACKEND_CLONE_NODES` sidesteps all of it. It counts nodes copied, so the
+/// intentional O(1) clone of an emptied backend registers zero while a real
+/// fork registers the node count. That turns a ~28 ms cliff at 1M nodes into an
+/// exact integer at ten — no idle machine, no statistics, no marker.
+///
+/// These tests pin **current** behaviour, including the cost. They are not
+/// asserting the cost is acceptable; they are making it impossible to change
+/// either direction silently. When the fork is fixed (structural sharing in
+/// `MemoryGraph` — its own sprint), `held_reader_forces_a_whole_graph_copy`
+/// is the test that must be inverted, and the diff will say so out loud.
+#[cfg(test)]
+mod held_reference_clone_tests {
+    use super::*;
+    use crate::graph::session::{execute_mut, ExecuteOptions};
+    use crate::graph::storage::backend::{backend_clone_nodes, reset_backend_clone_count};
+    use crate::graph::storage::GraphRead;
+    use std::collections::HashMap;
+
+    /// Small on purpose. The defect is O(V), so ten nodes prove the shape
+    /// exactly as well as a million and keep the test in the millisecond range.
+    const FIXTURE_NODES: usize = 10;
+
+    fn seeded_arc() -> Arc<DirGraph> {
+        let mut graph = DirGraph::new();
+        let params = HashMap::new();
+        for i in 0..FIXTURE_NODES {
+            execute_mut(
+                &mut graph,
+                &format!("CREATE (:Item {{id: {i}, name: 'item-{i}'}})"),
+                &ExecuteOptions::eager(&params),
+            )
+            .expect("fixture node");
+        }
+        Arc::new(graph)
+    }
+
+    /// The baseline: a uniquely-owned handle mutates in place.
+    ///
+    /// Without this arm the guard below would pass on a build where *every*
+    /// write copies the graph, and would still look like it was measuring
+    /// something specific to holding a reader.
+    #[test]
+    fn unique_handle_copies_nothing() {
+        let mut arc = seeded_arc();
+        reset_backend_clone_count();
+        let _ = make_dir_graph_mut(&mut arc);
+        assert_eq!(
+            backend_clone_nodes(),
+            0,
+            "a uniquely-owned Arc<DirGraph> must mutate in place"
+        );
+    }
+
+    /// The defect, as an exact integer.
+    ///
+    /// Holding one extra `Arc` — what a live `ResultView` or an open
+    /// transaction snapshot does — makes the next write copy every node.
+    #[test]
+    fn held_reader_forces_a_whole_graph_copy() {
+        let mut arc = seeded_arc();
+        let reader = Arc::clone(&arc);
+
+        reset_backend_clone_count();
+        let _ = make_dir_graph_mut(&mut arc);
+        let copied = backend_clone_nodes();
+
+        // Keep the reader alive across the write. Dropping it earlier would
+        // make `Arc::get_mut` succeed and the test would measure the baseline
+        // above while appearing to measure this.
+        assert_eq!(reader.graph.node_count(), FIXTURE_NODES);
+
+        assert_eq!(
+            copied, FIXTURE_NODES,
+            "a live second Arc<DirGraph> must (today) force a whole-graph copy; \
+             getting 0 here means the fork was fixed — invert this test and \
+             retire the backlog item rather than deleting the assertion"
+        );
+    }
+
+    /// Dropping the reader restores in-place mutation.
+    ///
+    /// This is what makes the guard above a statement about *sharing* rather
+    /// than about `make_dir_graph_mut` being unconditionally expensive.
+    #[test]
+    fn dropping_the_reader_restores_in_place_mutation() {
+        let mut arc = seeded_arc();
+        let reader = Arc::clone(&arc);
+        drop(reader);
+
+        reset_backend_clone_count();
+        let _ = make_dir_graph_mut(&mut arc);
+        assert_eq!(
+            backend_clone_nodes(),
+            0,
+            "once the extra Arc is gone the write must mutate in place again"
+        );
+    }
+}
