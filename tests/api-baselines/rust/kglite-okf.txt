@@ -2032,6 +2032,7 @@ impl core::default::Default for kglite::api::CurrentSelection
 pub fn kglite::api::CurrentSelection::default() -> kglite::api::CurrentSelection
 pub struct kglite::api::DirGraph
 pub kglite::api::DirGraph::auto_vacuum_threshold: core::option::Option<f64>
+pub kglite::api::DirGraph::checkpoint_lsn: u64
 pub kglite::api::DirGraph::column_stores: std::collections::hash::map::HashMap<alloc::string::String, alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
 pub kglite::api::DirGraph::composite_index_keys: alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<alloc::string::String>)>
 pub kglite::api::DirGraph::composite_indices: std::collections::hash::map::HashMap<(alloc::string::String, alloc::vec::Vec<alloc::string::String>), std::collections::hash::map::HashMap<kglite::graph::schema::CompositeValue, alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>>

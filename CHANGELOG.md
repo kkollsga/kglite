@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`DirGraph::checkpoint_lsn` (Rust API).** Public because the wheel crate sets
+  it across a crate boundary at `save()` and reads it at load to gate WAL
+  replay. Additive: the field defaults to 0, which is the pre-gate
+  replay-everything behaviour, so existing embedders are unaffected.
+
 ### Changed
 
 - **Mapped graphs no longer copy the whole graph before every mutating
