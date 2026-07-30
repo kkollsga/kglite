@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev dev-with-bin bundle-bin build-bolt-server test test-full test-rust test-core test-mcp test-cli test-py bench bench-save bench-compare bench-check bump-version check-release-hygiene release-preflight refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy gate lint lint-policy lint-full lint-py source-quality rustsec-policy cov stubtest
+.PHONY: dev dev-with-bin bundle-bin build-bolt-server test test-full test-rust test-core test-mcp test-cli test-py test-parity bench bench-save bench-compare bench-check bump-version check-release-hygiene release-preflight refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy gate lint lint-policy lint-full lint-py source-quality rustsec-policy cov stubtest
 
 ## Build and install the package into the local .venv
 dev:
@@ -42,6 +42,17 @@ test-mcp:
 
 test-cli:
 	cargo test -p kglite-cli
+
+## Cross-storage-mode parity oracles + the .kgl golden-digest tripwire.
+##
+## Exists because `pytest tests/test_phase4_parity.py` WITHOUT `-m parity`
+## exits 5 with "8 deselected" — the marker is in pyproject addopts. That is a
+## green that cannot go red, and it silently covers `test_kgl_golden_hash`, the
+## only byte-level check on the .kgl format. It was written into a sprint brief
+## on 2026-07-30 and only caught because the agent following the brief noticed
+## the exit code. A named target means no one has to remember the flag.
+test-parity:
+	$(ACTIVATE) && pytest tests/ -v -m parity
 
 ## Run Python tests only (excludes benchmarks)
 test-py:
