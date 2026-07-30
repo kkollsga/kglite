@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.4] - 2026-07-31
+
 ### Added
 
 - **`DirGraph::checkpoint_lsn` (Rust API).** Public because the wheel crate sets

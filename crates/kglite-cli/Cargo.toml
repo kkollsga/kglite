@@ -26,7 +26,7 @@ path = "src/main.rs"
 # pattern: path dep locally, version requirement on `cargo publish`. The
 # requirement tracks the exact workspace version (`make bump-version
 # VERSION=X.Y.Z`; `make gate` fails on drift).
-kglite = { version = "0.15.3", path = "../kglite", default-features = false, features = ["okf"] }
+kglite = { version = "0.15.4", path = "../kglite", default-features = false, features = ["okf"] }
 
 # Line editor: prompt, history, Emacs/Vi keybindings, Ctrl-C/Ctrl-D handling.
 # The standard Rust REPL choice; not otherwise a workspace dep.
