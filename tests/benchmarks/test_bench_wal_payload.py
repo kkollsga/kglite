@@ -33,30 +33,46 @@ is the **WAL**:
   116-byte strings that is **0.15 * n^2 bytes** — which is the measured
   0.1496 * n^2, including the constant.
 
-Two ingredients are therefore required, and **neither of them is "mapped"**:
-the type must already own a column store (so the detach/reattach loops run at
-all), and the WAL must be on (so the ops are recorded rather than discarded).
-The competitive run had both without intending either — `kglite.open(path,
-storage="mapped")` resolves `durable=None` to **`Full`** (`lib.rs:422-431`),
-silently turning the log on, whereas `KnowledgeGraph(storage="mapped")` has no
-WAL at all.
+Two ingredients are required: the type must already own a column store (so the
+detach/reattach loops run at all), and the WAL must be on (so the ops are
+recorded rather than discarded). The competitive run had both without intending
+either — `kglite.open(path, storage="mapped")` resolves `durable=None` to
+**`Full`**, silently turning the log on, whereas `KnowledgeGraph(storage=
+"mapped")` has no WAL at all.
 
-The three arms below are chosen to decide this. If `default_normal` matches
-`mapped_normal`, the mapped attribution is refuted and the bug belongs to the
-WAL path, where an ordinary `kglite.open(...)` application after a `save()`
-would hit it too. If `default_off` stays linear while both logged arms go
-quadratic, the WAL is confirmed as the carrier.
+**SETTLED 2026-07-30, and the guess above was wrong.** The paragraph that stood
+here argued "neither ingredient is mapped" and predicted that an ordinary
+`kglite.open(...)` application would hit this after any `save()`. It does not.
+The sweeps are storage-mode gated at `batch.rs:186`::
 
-**This looks like a defect with a fix already sitting in the codebase.**
-`GraphWrite::node_weight_mut_silent` exists for exactly this
-(`storage/mod.rs:448`, impl `recording.rs:582-586`) and its doc reads *"Bypass
-recording — internal bookkeeping (columnar handle refresh), not a logical
-mutation."* Both loops are precisely that: the detach writes a temporary empty
-map that reattach restores before the flush, and genuinely-new nodes already
-got their op from `RecordingGraph::add_node` (`recording.rs:597-601`). Since
-`resolve_ops` reads *final* state, switching both call sites to the silent
-variant should collapse the payload to O(n). Not attempted here — this branch
-only adds benchmarks. Filed as a finding.
+    let mapped = graph.graph.is_mapped() || graph.graph.is_disk();
+
+and the detach/reattach pair runs only under that flag, so a memory-backed
+durable graph never enters the amplifying path. Demonstrated rather than read:
+reverting the reattach call site to the recorded borrow turns `mapped_normal`
+red at ratio 2.18 while `default_normal` passes untouched.
+
+The correct scope is **mapped or disk, plus a WAL** — which is exactly how the
+shipped CHANGELOG entry phrases it. That mis-attribution propagated into the
+backlog, where it was recorded as "THIS IS NOT A MAPPED-MODE BUG"; it is not a
+*mapped-mode* bug in the narrow sense, because disk hits it too, but it is
+firmly a not-memory bug, and the difference matters when choosing which arm
+guards it.
+
+**RESOLVED — and the fix was exactly this.** `GraphWrite::node_weight_mut_silent`
+existed for the case already (`storage/mod.rs`, impl in `recording.rs`), doc
+reading *"Bypass recording — internal bookkeeping (columnar handle refresh),
+not a logical mutation."* Both loops were precisely that: the detach writes a
+temporary empty map that reattach restores before the flush, and genuinely-new
+nodes already got their op from `RecordingGraph::add_node`. Since `resolve_ops`
+reads *final* state, switching both call sites collapsed the payload to O(n).
+Shipped in v0.15.0 as `3bf9ef00`; measured 1k-row 2,000 ops / 84 B per row and
+4k-row 20,000 ops / 213 B per row, both now 1 op/row at flat byte cost.
+
+The file also moved: the two sweeps are now `graph/mutation/batch.rs:393`
+(detach) and `:449` (reattach), not the `batch.rs:367`/`:417` cited above. The
+remaining *recorded* `node_weight_mut` in that file is a genuine logical
+mutation and is correctly still recorded.
 
 ────────────────────────────────────────────────────────────────────────────
 Why payload bytes, and not just wall time
@@ -74,12 +90,24 @@ Each cell records `wal_bytes` and `wal_bytes_per_row` into
 `wal_bytes_per_row` across the row counts: **flat = linear = fixed; growing
 proportionally to `rows` = the quadratic is still there.**
 
-⚠ This file asserts nothing about the exponent, because at the time of writing
-**the defect is live** and a guard would fail on `main`. It is a marker for a
-known open issue in the sense `test_bench_write_scaling.py::test_bench_id_
-index_invalidation_on_create` is one. Once the two `batch.rs` call sites are
-switched to the silent accessor, `wal_bytes_per_row` becomes flat and a real
-assertion can be added here — that is the follow-up this file is setting up.
+The defect this file was built to measure was **fixed in v0.15.0** by
+`3bf9ef00`, which switched both `batch.rs` sweeps to the silent accessor. The
+follow-up that fix set up — a real assertion — is
+`test_wal_bytes_per_row_are_flat` below.
+
+That guard is deliberately **not** marked `benchmark`. Everything else here is,
+and `-m 'not benchmark'` is in the default `addopts`, so a guard living behind
+that marker would never run in the ordinary suite — a gate nobody executes. It
+needs no `benchmark` fixture either: the payload measurement is an untimed pair
+of `stat` calls, exact on the first try, with nothing to average.
+
+⚠ Historical note, kept because it cost real time: between 07:14 and 11:00 on
+2026-07-27 this docstring said "**the defect is live** and a guard would fail
+on `main`". The fix landed at 11:00 and the docstring was not updated. On
+2026-07-30 an investigating agent read it, trusted it over the code, and
+reported the bug as still live — while `batch.rs:393` and `:449` had been
+calling `node_weight_mut_silent` for three days. A file that asserts nothing
+cannot correct a stale claim about itself; only an assertion can.
 
 Row counts stop at 32k on purpose: `postcard::to_stdvec` materialises the whole
 payload before the limit is checked (`postcard_v1.rs:27-31`), so approaching
@@ -296,3 +324,120 @@ def test_bench_add_nodes_chunked_workaround(benchmark, tmp_path, arm):
 
     benchmark.pedantic(ingest, setup=setup, rounds=ROUNDS, iterations=1, warmup_rounds=WARMUP_ROUNDS)
     _reset(path)
+
+
+# ---------------------------------------------------------------------------
+# The guard. Unmarked on purpose — see the module docstring.
+# ---------------------------------------------------------------------------
+
+#: Two row counts an octave apart. The defect was `payload ~= 0.1496 * n^2`, so
+#: an 8x row count meant ~8x the bytes *per row*; linear means the ratio sits at
+#: 1.0. Anything between those is not a shape this code can produce, which is
+#: why a single loose threshold separates them cleanly.
+FLAT_ROW_COUNTS = (1_000, 8_000)
+
+#: Slack over 1.0. The per-row cost is not perfectly constant — the frame header
+#: and the postcard varint widths grow with row *count*, not row count squared —
+#: so a few percent of drift is real and expected. 1.25 sits far above that and
+#: far below the ~8x a reintroduced quadratic would produce.
+FLAT_TOLERANCE = 1.25
+
+#: 32k is used by the benchmark cells above but not here: it writes ~150 MB per
+#: measurement, and this guard runs in the DEFAULT suite under a 120 s timeout.
+#: 8k is enough to separate n from n^2 by 8x.
+#:
+#: ONLY the arms that actually execute the sweeps. `batch.rs:186` reads
+#: `let mapped = graph.graph.is_mapped() || graph.graph.is_disk();` and the
+#: detach/reattach pair runs only under that flag — so a memory-backed durable
+#: graph never enters the amplifying path at all. `default_normal` was in this
+#: tuple for one revision and is the reason it is now documented: with the
+#: reattach site deliberately reverted to the recorded borrow, `mapped_normal`
+#: went red at ratio 2.18 while `default_normal` sailed through. An arm that
+#: cannot fail is not a guard, whatever it is measuring.
+#:
+#: Disk shares the identical `is_disk()` branch. It is not covered here only
+#: because a disk fixture is materially heavier to stand up; the mapped arm
+#: exercises the same two call sites.
+SWEEP_ARMS = ("mapped_normal",)
+
+
+def _wal_bytes_per_row(tmp_path, arm: str, rows: int) -> float:
+    """Bytes the WAL grew by during one `add_nodes`, divided by rows written.
+
+    Mirrors the untimed measurement in `test_bench_add_nodes_wal_payload` — the
+    seeded graph gives the type a column store so the detach/reattach sweeps
+    actually execute, and the post-`save()` sidecar is a clean zero point.
+    """
+    path = str(tmp_path / f"flat-{arm}-{rows}.kgl")
+    probe = _seeded_columnar_graph(path, arm)
+    before = _wal_bytes(path)
+    probe.add_nodes(_frame(rows, SEED_ROWS), "Item", "id", "name")
+    logged = _wal_bytes(path) - before
+    del probe
+    _reset(path)
+    return logged / rows
+
+
+@pytest.mark.parametrize("arm", SWEEP_ARMS)
+def test_wal_bytes_per_row_are_flat(tmp_path, arm):
+    """One `add_nodes` must log a constant number of bytes per row.
+
+    Guards the v0.15.0 fix (`3bf9ef00`): the columnar detach/reattach sweeps in
+    `batch.rs` once iterated every existing node of the type through the
+    *recorded* `node_weight_mut`, pushing a `RawOp::UpsertNode` carrying the
+    whole property map per call — `~n^2/1000` ops at `LARGE_BATCH_CHUNK_SIZE`.
+
+    Byte counts are deterministic, so this needs no idle machine, no warmup and
+    no min-vs-mean argument. It is a correctness assertion that happens to live
+    in a benchmark file, not a performance gate.
+    """
+    small = _wal_bytes_per_row(tmp_path, arm, FLAT_ROW_COUNTS[0])
+    large = _wal_bytes_per_row(tmp_path, arm, FLAT_ROW_COUNTS[1])
+
+    # A zero here would make the ratio meaningless (0/0) and pass vacuously —
+    # exactly the failure this file spent three days demonstrating. These arms
+    # are the LOGGED ones; if nothing was logged, the measurement is broken,
+    # not the code under test.
+    assert small > 0, f"{arm}: no WAL bytes logged at {FLAT_ROW_COUNTS[0]} rows"
+    assert large > 0, f"{arm}: no WAL bytes logged at {FLAT_ROW_COUNTS[1]} rows"
+
+    ratio = large / small
+    assert ratio <= FLAT_TOLERANCE, (
+        f"{arm}: WAL payload is not linear in row count. "
+        f"{FLAT_ROW_COUNTS[0]} rows logged {small:.1f} B/row, "
+        f"{FLAT_ROW_COUNTS[1]} rows logged {large:.1f} B/row "
+        f"(ratio {ratio:.2f} > {FLAT_TOLERANCE}). "
+        f"An {FLAT_ROW_COUNTS[1] // FLAT_ROW_COUNTS[0]}x ratio means the "
+        f"quadratic amplification is back: check that both sweeps in "
+        f"graph/mutation/batch.rs still call node_weight_mut_silent."
+    )
+
+
+def test_durable_off_logs_nothing(tmp_path):
+    """Control. Without it, a broken measurement reads as a pass.
+
+    `durable="off"` never creates the sidecar, so `_wal_bytes` returns 0 by the
+    FileNotFoundError path. If this ever reports bytes, the arm above is
+    measuring something other than the WAL and its ratio proves nothing.
+    """
+    assert _wal_bytes_per_row(tmp_path, "default_off", FLAT_ROW_COUNTS[0]) == 0
+
+
+def test_memory_backed_durable_graph_never_runs_the_sweeps(tmp_path):
+    """Pins WHY `default_normal` is absent from `SWEEP_ARMS` — it cannot fail.
+
+    This is documentation with an assertion attached, not a regression guard.
+    The columnar detach/reattach pair is gated on
+    `graph.graph.is_mapped() || graph.graph.is_disk()` (`batch.rs:186`), so a
+    memory-backed durable graph never enters the path that once amplified the
+    payload. Its bytes-per-row is therefore flat by construction, and would
+    stay flat with the fix reverted — verified by doing exactly that.
+
+    If this ever goes red, the mode gate at `batch.rs:186` changed and
+    `SWEEP_ARMS` must grow to match, or the real guard silently stops covering
+    the ordinary durable path.
+    """
+    small = _wal_bytes_per_row(tmp_path, "default_normal", FLAT_ROW_COUNTS[0])
+    large = _wal_bytes_per_row(tmp_path, "default_normal", FLAT_ROW_COUNTS[1])
+    assert small > 0 and large > 0, "expected a memory-backed durable graph to log"
+    assert large / small <= FLAT_TOLERANCE
