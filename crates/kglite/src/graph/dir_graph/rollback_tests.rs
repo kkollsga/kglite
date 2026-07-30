@@ -326,27 +326,37 @@ fn assert_rolls_back(graph: &mut DirGraph, query: &str, scope: Option<&[&str]>) 
 /// property variety that a partial restore shows up in the fingerprint.
 fn seeded() -> DirGraph {
     let mut graph = DirGraph::new();
+    seed_into(&mut graph);
+    graph
+}
+
+/// The seeding itself, factored out so a fixture on a *different backend*
+/// is provably the same graph rather than a similar one written twice.
+///
+/// Every arm below compares behaviour across backends, so a drift between
+/// two hand-maintained copies of these queries would surface as a backend
+/// difference and be believed.
+fn seed_into(graph: &mut DirGraph) {
     run(
-        &mut graph,
+        graph,
         "CREATE (a:Item {id: 1, name: 'a', qty: 10}), \
                 (b:Item {id: 2, name: 'b', qty: 20}), \
                 (c:Item {id: 3, name: 'c', qty: 30})",
     );
-    run(&mut graph, "CREATE (t:Tag:Hot {id: 1, name: 'urgent'})");
-    run(&mut graph, "CREATE (t:Tag:Cold {id: 2, name: 'later'})");
+    run(graph, "CREATE (t:Tag:Hot {id: 1, name: 'urgent'})");
+    run(graph, "CREATE (t:Tag:Cold {id: 2, name: 'later'})");
     run(
-        &mut graph,
+        graph,
         "MATCH (a:Item {id: 1}), (b:Item {id: 2}) CREATE (a)-[:LINKS {weight: 5}]->(b)",
     );
     run(
-        &mut graph,
+        graph,
         "MATCH (b:Item {id: 2}), (c:Item {id: 3}) CREATE (b)-[:LINKS {weight: 7}]->(c)",
     );
     run(
-        &mut graph,
+        graph,
         "MATCH (a:Item {id: 1}), (t:Tag {id: 1}) CREATE (a)-[:TAGGED]->(t)",
     );
-    graph
 }
 
 /// `seeded()` after `enable_columnar()` — the shape every graph takes the
@@ -381,6 +391,33 @@ fn seeded_columnar() -> DirGraph {
         graph.graph.node_count(),
         "every seeded node must read its properties through a column store"
     );
+    graph
+}
+
+/// `seeded()` on the **Mapped** backend — the storage mode a large-graph
+/// application actually runs in.
+///
+/// This fixture exists because the whole file was memory-only until 2026-07-30:
+/// `seeded`, `seeded_columnar` and `seeded_indexed` all build a bare
+/// `DirGraph`, so nothing here had ever executed the mapped path. Rollback on a
+/// mapped graph was entirely unverified — not "verified and slow", unverified.
+///
+/// Mapped is not a larger-than-RAM backend in the way the name suggests:
+/// `MappedGraph.inner` is the same heap `StableDiGraph<NodeData, EdgeData>` as
+/// `MemoryGraph.inner`. What `StorageMode::Mapped` changes is the backend
+/// variant plus `memory_limit = Some(0)`, which forces the columnar property
+/// store to spill to mmap. That distinction is the whole reason the arms below
+/// can be written at all.
+fn seeded_mapped() -> DirGraph {
+    use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+
+    let mut graph = new_dir_graph_in_mode(StorageMode::Mapped, None).expect("mapped graph");
+    assert!(
+        graph.graph.is_mapped(),
+        "the mapped fixture must actually be on the Mapped backend, or every \
+         arm below is a second run of the plain fixture"
+    );
+    seed_into(&mut graph);
     graph
 }
 
@@ -680,6 +717,72 @@ fn journalled_statements_copy_zero_nodes_on_a_saved_graph() {
 #[test]
 fn journalled_statements_copy_zero_nodes_on_an_indexed_graph() {
     assert_statements_copy_zero_nodes(&mut seeded_indexed(), "indexed");
+}
+
+/// The mapped backend takes the **clone** path — measured, not assumed.
+///
+/// This is the inverse of every arm above, and it is deliberate. Mapped and
+/// Disk return `false` from `supports_undo_journal` (`storage/backend.rs`),
+/// which since PR #86 is the *only* remaining veto term in `journal_covers`
+/// (`rollback.rs`). So every mutating statement on a mapped graph still opens
+/// an `O(V+E)` `fork_transaction()` whole-graph checkpoint — the pre-journal
+/// behaviour, still live. Mapped also fails the only escape hatch,
+/// `can_skip_rollback_checkpoint`, whose gate is
+/// `matches!(self, GraphBackend::Memory(_))`.
+///
+/// Asserting the *cost* rather than asserting zero is the point. A gap that no
+/// test executes reads identically to a gap that does not exist: the previous
+/// state of this file was not "mapped is slow", it was silence. This arm makes
+/// the price an explicit number that changes visibly when someone changes it.
+///
+/// **When Mapped gets an undo journal, this test must be inverted, not
+/// deleted.** The counter should fall to 0 and this arm becomes another
+/// `assert_statements_copy_zero_nodes` call. Deleting it instead would remove
+/// the only mapped coverage in the file and restore the silence.
+#[test]
+fn mapped_statements_still_take_the_clone_path() {
+    use crate::graph::storage::backend::{backend_clone_nodes, reset_backend_clone_count};
+
+    let mut graph = seeded_mapped();
+    let nodes = graph.graph.node_count();
+    assert!(
+        nodes > 0,
+        "fixture must have nodes or the counter proves nothing"
+    );
+
+    for &query in ZERO_COPY_QUERIES {
+        reset_backend_clone_count();
+        run(&mut graph, query);
+        let copied = backend_clone_nodes();
+        assert!(
+            copied > 0,
+            "mapped statements are expected to copy the graph today, but this \
+             one copied nothing: {query}. If Mapped gained an undo journal, \
+             invert this test rather than deleting it — it is the only mapped \
+             rollback coverage in this file."
+        );
+    }
+}
+
+/// Mapped rollback must be *correct*, whichever path it takes.
+///
+/// Separate from the cost arm above on purpose. The clone path and the journal
+/// path produce identical observable state by construction, which is exactly
+/// why the Python parity oracle cannot tell them apart — it compares outputs.
+/// So the cost is pinned by a counter and correctness is pinned by the
+/// fingerprint, and neither stands in for the other.
+///
+/// This is the arm that must keep passing unchanged when Mapped switches to
+/// the journal. If it ever fails, the journal restored something the clone
+/// used to restore, and the fingerprint says which field.
+#[test]
+fn mapped_rolls_back_completely() {
+    let mut graph = seeded_mapped();
+    assert_rolls_back(
+        &mut graph,
+        "MATCH (n:Item) DETACH DELETE n CREATE (:Blocked {id: 1})",
+        Some(&["Item"]),
+    );
 }
 
 /// Rollback is allowed to be the expensive direction, but it must still not
