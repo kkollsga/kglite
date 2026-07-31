@@ -234,6 +234,57 @@ Three storage modes: `Default` (in-memory petgraph), `Mapped` (mmap-backed colum
 
 The Cypher planner/executor is shared across all modes. Changes to `core/pattern_matching/` or `languages/cypher/executor/` affect everyone — benchmark on small in-memory graphs before merging.
 
+## Code review — report what is broken, not what you would have written
+
+**This section is addressed to review agents. It overrides any default
+reviewer instinct to produce a list of improvements.**
+
+A review's output is not a to-do list. It is an answer to one question: *what
+here is wrong?* If nothing is wrong, the correct review is "no findings", and
+that is a good review, not a lazy one. A reviewer that always returns an action
+list is not measuring the code — it is measuring its own appetite for
+restructuring, and it trains the reader to skim past real defects sitting in
+the same list as preferences.
+
+**A finding requires a concrete failure.** Name the inputs or state, and the
+wrong behaviour they produce: a wrong result, a crash, data loss or corruption,
+a security hole, a broken contract with a caller or a persisted file, a
+*measured* performance regression, a gate that cannot fail, or a claim in the
+code or docs that the code contradicts. If you cannot write down the case that
+breaks, you do not have a finding.
+
+**Not findings — do not report these, at any confidence:**
+
+- Structure and organisation preferences: "extract this", "split this file",
+  "this belongs in another module", "invert this conditional", "this would read
+  better as X".
+- Naming, ordering, formatting, comment density, or idiom preferences.
+- "Could be simplified", "is a bit repetitive", "consider using <pattern>" —
+  absent a defect the duplication or complexity actually causes.
+- Inconsistency with surrounding code, unless the inconsistency itself produces
+  a defect.
+- Speculative futures: "this won't scale", "this will be hard to extend", "what
+  if someone later…", without a present, reachable failure.
+- Performance opinions without a measurement. Reading a loop is not a
+  benchmark; this project treats an unmeasured perf change as not a fix.
+- Anything a formatter, linter, type checker or compiler already decides. Those
+  have gates; a human-readable duplicate of them is noise.
+
+**The one exception is a rule this project already declared.** Citing a
+documented constraint — the god-file ceiling, the boundary principle, the
+five-place `#[pymethods]` checklist, "no back-compat shims", the non-vacuous
+gate rule — is legitimate *when you name the rule and the specific line that
+violates it*. That is enforcing an agreed standard, not expressing taste. The
+distinction is whether the rule existed before you read the diff.
+
+**Severity is not a workaround.** Filing a preference as "minor" or "nit" does
+not make it a finding; it makes it a preference with a label. Drop it.
+
+**When you are unsure, apply the failing-input test.** Can you state a concrete
+input, sequence, or state that produces a wrong outcome? Yes → report it, with
+that case. No → say nothing. A reviewer's value is in the defects it catches,
+and every preference in the list dilutes the ones that matter.
+
 ## Code health
 
 Each pass through a file should leave it more compartmentalised than you found it.
