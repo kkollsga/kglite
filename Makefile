@@ -266,7 +266,7 @@ notify-downstream:
 ## Fast local checkpoint. Pair this with the smallest package/test filter
 ## covering the change. Policy audits, workspace clippy, stubtest, packaged-
 ## consumer verification, and the broad test matrix run in CI.
-gate: lint check-docs-facts check-release-hygiene check-skill-mirrors check-dev-docs
+gate: lint check-docs-facts check-release-hygiene check-skill-mirrors check-shipped-skill-copies check-dev-docs
 
 ## Fast formatting/static lint. Intentionally performs no Rust compilation,
 ## metadata walk, or runtime import.
@@ -350,6 +350,28 @@ prune-target:
 		cargo clean; \
 	else \
 		echo "target/ is $${size_gb:-0} GB — under the $(PRUNE_TARGET_GB) GB prune threshold"; \
+	fi
+
+.PHONY: check-shipped-skill-copies
+## The kglite-code-review skill exists in TWO trees that must stay identical:
+## `crates/kglite-cli/skills/` (compiled into the CLI via include_str!) and
+## `skills/` at the repo root (the checked-in copy). A cargo test asserts it —
+## `kglite-cli::skill::tests::embedded_artifact_matches_checked_in_files` — but
+## `make gate` performs no Rust compilation by design, so the test only fires in
+## CI. On 2026-07-31 an edit to the crate copy alone passed gate, passed the
+## release preconditions, and failed CI on three jobs mid-release. This check is
+## a plain file diff: no build, and it fires where the edit happens.
+check-shipped-skill-copies:
+	@a=crates/kglite-cli/skills/kglite-code-review; b=skills/kglite-code-review; \
+	[ -d "$$a" ] && [ -d "$$b" ] || { echo "shipped skill copies: a tree is missing ($$a / $$b)"; exit 1; }; \
+	if diff -r "$$a" "$$b" >/dev/null 2>&1; then \
+		echo "shipped skill copies: $$(find $$a -type f | wc -l | tr -d ' ') file(s) identical across both trees"; \
+	else \
+		echo "FAIL: the shipped kglite-code-review skill has diverged between its two trees"; \
+		diff -rq "$$a" "$$b" | sed 's/^/    /'; \
+		echo "  -> the crate copy is what ships (include_str!); sync the root copy to match:"; \
+		echo "     rsync -a $$a/ $$b/"; \
+		exit 1; \
 	fi
 
 .PHONY: check-skill-mirrors
