@@ -404,16 +404,20 @@ benchmark wording", "tidy CHANGELOG") over anything that narrates the reason.
 
 **Pushing requires explicit, in-the-moment approval.** Default is *don't push*. The user runs `git push` manually unless they tell you, *in the same turn you'd run it*, to push for them — e.g. "go ahead and push now", "push it", "yes, push". Approval is one-shot: it covers exactly that one `git push` invocation and does not carry across to any later commit, amend, or branch.
 
-**How this interacts with `/release`.** Invoking the skill authorizes the run's
-non-publishing pushes — the final feature-branch push, and the CI fix-and-push
-loop below — without a separate prompt. It does **not** authorize the push to
-`main` that fires the publish. That one takes its own confirmation, named
-version and all, immediately before it happens (`release` skill step 9).
-`/release` is typed before the run learns the semver findings, the benchmark
-verdict, or whether every artifact built; treating it as approval for the last
-push authorizes a decision made with less information than exists when it is
-made. One prompt, at the one irreversible moment. The consequence is
-deliberate: **a release cannot complete unattended.**
+**How this interacts with `/release`.** Invoking the skill authorizes the
+entire release run, **including the `main` push that fires the publish**. No
+separate prompt. The run still *reports* — version, semver-check findings, perf
+numbers, anything it learned that the user did not know at invocation — but
+immediately before pushing, not as a gate on it.
+
+That distinction was got wrong on 2026-07-30 and corrected on 2026-07-31. Making
+the report a blocking confirmation sounded safer and was not: it fired *after*
+the irreversible decision had already been made, so it added no information to
+the choice, and it broke unattended releases — 0.15.4 sat at a staged commit
+while the user was away, and they noticed it had not landed before the agent
+did. The safety that matters is upstream and unchanged: green branch CI, the ten
+`release-preflight` preconditions, refreshed constants, artifact-set
+verification, surgical staging, ff-merge clean. Those can fail. A prompt cannot.
 
 **Exception — the CI fix-and-push loop.** When an approved push triggers CI that fails, and you diagnose the failure as a bug in shipped code or test/CI infra (not a feature gap), you may push subsequent `fix(...)` / `ci(...)` commits *for that same loop* without re-asking, until CI on the most recent push is fully green. This covers the common case where the first push surfaces a flaky dep / missing fixture / linter-only issue and you'd otherwise need to ping the user every iteration just to type "push" again.
 
