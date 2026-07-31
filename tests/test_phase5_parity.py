@@ -98,7 +98,7 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 19_552_912,  # 0.15.4 darwin baseline
+    "darwin": 19_602_720,  # 0.15.5 darwin baseline
     "linux": 28_810_000,  # estimate: the post-code_tree Linux estimate (30.2 MB)
     # scaled by the same −4.6% the macOS loader removal measured. Both
     # removals deliberately recaptured DOWNWARD so the +10% budget guards
@@ -239,6 +239,14 @@ def test_binary_size_regression():
                       serde threading for the WAL replay gate. All engine code; no
                       new dependency and no new feature.
 
+
+      - 0.15.5:       19,602,720 bytes (≈18.7 MB). +49,808 bytes, essentially
+                      all of it the mcp-methods 0.4.2 -> 0.4.3 bump: the default
+                      extension links the MCP server, which links mcp-methods,
+                      and 0.4.3 adds roots adoption plus sandbox containment.
+                      kglite's own contribution is ~40 lines of manifest-key
+                      plumbing in kglite-mcp-server.
+
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise
     drilldown, run `cargo bloat --release --crates --filter kglite`.
@@ -270,7 +278,7 @@ def test_binary_size_regression():
     gate = int(baseline * 1.10)
     assert size <= gate, (
         f"{bin_path.name} = {size:,} bytes > gate {gate:,} "
-        f"(+10% over 0.15.4 {platform_key} baseline {baseline:,}). "
+        f"(+10% over 0.15.5 {platform_key} baseline {baseline:,}). "
         "Investigate what grew before raising the gate — see the "
         "growth note in this test's docstring for the breakdown shape."
     )
