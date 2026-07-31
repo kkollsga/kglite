@@ -41,7 +41,7 @@ path = "src/main.rs"
 # on the missing symbols -- which is exactly what happened to a sibling
 # repo against the published 0.15.0. Our own lock held 0.4.1, so no local
 # build ever saw it.
-mcp-methods = { version = "0.4.2", default-features = false, features = ["server"] }
+mcp-methods = { version = "0.4.3", default-features = false, features = ["server"] }
 
 # kglite (pure-Rust core) — no pyo3 in the resulting binary, no
 # libpython link. The 0.10.1 lift moved KnowledgeGraph +

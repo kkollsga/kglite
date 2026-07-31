@@ -46,7 +46,8 @@ instructions: |
 
 workspace:
   kind: local
-  root: /Volumes/EksternalHome/Koding   # the sandbox boundary
+  root: /Volumes/EksternalHome/Koding   # the STARTING root, not a boundary
+  sandbox_root: /Volumes/EksternalHome/Koding   # the boundary — opt in, or swaps are unbounded
   watch: true                            # auto-rebuild on file changes
 ```
 
@@ -84,22 +85,36 @@ workspace:
 
 ## Sandbox boundary
 
-`workspace.root` is the manifest-declared root. The sandbox check on
-`set_root_dir(path)` validates against this immutable boundary, not
-the current active root. After `set_root_dir(/.../Rust/KGLite)`,
-a subsequent `set_root_dir(/.../MCP servers)` works because both
-paths are under `workspace.root`:
+**Corrected 2026-07-31.** This section previously claimed `workspace.root` was
+an "immutable boundary" that `set_root_dir` validated against, and showed a
+refusal — `"Error: path '/tmp' escapes the workspace root."` — that the server
+never produced. **No containment existed.** The read window was *derived from*
+the active root, so the `starts_with` checks in the source tools only ever
+bounded reads relative to wherever the server already pointed; they never
+constrained where it could be pointed. A swap to any readable directory
+succeeded.
+
+The boundary is real from **kglite 0.15.5 / mcp-methods 0.4.3**, and it is
+**opt-in**: set `workspace.sandbox_root`. Without that key, `set_root_dir`
+remains unbounded — which is the pre-0.4.3 behaviour, preserved deliberately so
+the upgrade breaks nobody.
 
 ```
+# with workspace.sandbox_root: /Volumes/EksternalHome/Koding
+
 {"name":"set_root_dir","arguments":{"path":"/Volumes/EksternalHome/Koding/Rust/KGLite"}}
-→ "Active root set to /Volumes/EksternalHome/Koding/Rust/KGLite."   ✓
+→ activated                                                   ✓ inside the boundary
 
 {"name":"set_root_dir","arguments":{"path":"/Volumes/EksternalHome/Koding/MCP servers"}}
-→ "Active root set to /Volumes/EksternalHome/Koding/MCP servers."   ✓ (sibling swap, no restart)
+→ activated                                                   ✓ sibling swap, no restart
 
 {"name":"set_root_dir","arguments":{"path":"/tmp"}}
-→ "Error: path '/tmp' escapes the workspace root."                 ✓ (outside the sandbox)
+→ refused; the active root does not change                     ✓ outside the boundary
 ```
+
+Set `sandbox_root` wide enough to cover every directory you intend to swap
+between, and no wider. It bounds an operator's `set_root_dir` and an adopted
+client root alike.
 
 ## github_issues integration
 

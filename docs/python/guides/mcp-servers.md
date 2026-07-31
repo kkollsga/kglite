@@ -837,9 +837,30 @@ the discriminator for `--graph` / `--workspace` / `--watch` /
 | `env_file` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `workspace.kind: local` + `workspace.root: <dir>` | — | — | — | — | promotes into local-workspace mode |
 | `workspace.watch: true` | — | — | ✓ (auto-rebuild) | — | ✓ when `workspace.kind: local` |
+| `workspace.sandbox_root: <dir>` | — | — | — | — | ✓ bounds `set_root_dir` and any adopted client root. **Opt-in; without it swaps are unbounded.** kglite 0.15.5+ / mcp-methods 0.4.3+. Requires `workspace.kind: local`. |
+| `workspace.adopt_client_roots: true` | — | — | — | — | ✓ adopt the MCP-client-advertised root as a **fallback** when no explicit root is configured; explicit config always wins. **Pair it with `sandbox_root`** — an adopted root is proposed by an external party. See the deprecation note below. |
 | `tools[].cypher` | ✓ | ✓ (per active repo) | ✓ | — (no graph) | — |
 | `trust.allow_embedder` | parsed, required by `extensions.embedder` | parsed, required by matching extension | parsed, required by matching extension | parsed (no graph) | parsed (no graph) |
 | `builtins.save_graph: true` | ✓ (registers `save_graph`) | — (multiple graphs) | — | — | — |
+
+> **`adopt_client_roots` rests on a deprecated protocol feature.** MCP `roots`
+> was deprecated in protocol revision `2026-07-28` (SEP-2577): *"New
+> implementations SHOULD NOT adopt it; existing implementations SHOULD migrate
+> to passing directories or files via tool parameters, resource URIs, or server
+> configuration."* Earliest removal is the first revision released on or after
+> 2027-07-28, and that revision re-plumbs the mechanism entirely — no
+> server→client `roots/list`, the capability moves to per-request `_meta`, and
+> `notifications/roots/list_changed` does not exist in it.
+>
+> The key is supported because it works today against clients negotiating a
+> revision where the mechanism is live, and it is inert when unset. But if you
+> are choosing between this and passing the directory as a tool parameter or as
+> server configuration, the latter is the spec's own migration path and will
+> outlive this one.
+>
+> `workspace.sandbox_root` is **not** affected — it is a local containment
+> boundary with no protocol dependency, and it is worth setting whether or not
+> you adopt client roots.
 | `builtins.temp_cleanup: on_overview` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `extensions.embedder` | ✓ | ✓ (per active repo) | ✓ | — (no graph) | — |
 | `extensions.csv_http_server` | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -867,7 +888,7 @@ will my agent see?"
 | `save_graph` | `--graph` mode AND `builtins.save_graph: true` | Other modes have no single graph to save back to. |
 | `read_source` / `grep` / `list_source` | a source root is configured (`--source-root`, `--graph` parent auto-bind, manifest `source_root:`, or active workspace repo) | All three register together; never registered independently. |
 | `repo_management` | `codingest-mcp --workspace` clone-tracker mode | Not registered in local-workspace mode; use `set_root_dir` there. |
-| `set_root_dir` | `workspace.kind: local` only | Sandboxed against the manifest-declared `workspace.root` for the lifetime of the server. |
+| `set_root_dir` | `workspace.kind: local` only | **Unbounded unless `workspace.sandbox_root` is set** (kglite 0.15.5+, mcp-methods 0.4.3+). Without that key a swap may point the server at any readable directory; `workspace.root` is the *starting* root, not a boundary. |
 | `github_issues` / `github_api` | `GITHUB_TOKEN` (or `GH_TOKEN`) reachable at boot | Token loaded from process env, walk-up `.env`, or explicit `env_file:`. Tools are registered together; never one without the other. |
 | Manifest `tools[].cypher` entries | the manifest declares them AND the mode supports cypher (anything but `--source-root` and bare) | Tool names cannot collide with the built-ins above. |
 

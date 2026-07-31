@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`workspace.sandbox_root` — a real containment boundary for `set_root_dir`.**
+  Requires mcp-methods 0.4.3. Opt-in: without the key, a root swap remains
+  unbounded, which is the prior behaviour, preserved so the upgrade breaks
+  nobody. With it, a swap outside the boundary is refused and the active root
+  does not move.
+- **`workspace.adopt_client_roots` — adopt the MCP-client-advertised root as a
+  fallback** when no explicit root is configured. Explicit configuration always
+  wins. Pair it with `sandbox_root`: an adopted root is proposed by an external
+  party. Note that MCP `roots` was deprecated upstream in protocol revision
+  `2026-07-28` (SEP-2577) — the key works today and is inert when unset, but
+  passing the directory as a tool parameter or server configuration is the
+  spec's own migration path. See the manifest guide.
+
+### Fixed
+
+- **Documentation claimed a sandbox boundary that did not exist.** Three places
+  described `workspace.root` as an "immutable sandbox boundary" that
+  `set_root_dir` validated against — the manifest guide's tool table, the
+  local-code-review example, and the manifest-workspace example, which even
+  showed a refusal (`"Error: path '/tmp' escapes the workspace root."`) the
+  server never produced. No containment existed: the read window was *derived
+  from* the active root, so the source tools' checks bounded reads relative to
+  wherever the server already pointed and never constrained where it could be
+  pointed. All three corrected, and the boundary they described is now real —
+  behind `workspace.sandbox_root`.
+
+### Changed
+
+- Minimum `mcp-methods` is now **0.4.3** (from 0.4.2). Beyond the two keys
+  above, 0.4.3 refuses a manifest with `watch: true` and no `root` at load time
+  (previously accepted, then silently dead), and stops an activation refresh
+  from superseding a bind.
+
 ## [0.15.4] - 2026-07-31
 
 ### Added

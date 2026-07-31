@@ -56,10 +56,18 @@ instructions: |
 
 workspace:
   kind: local
-  # The immutable sandbox boundary for set_root_dir. Set it WIDE (a parent that
-  # contains every project you want reachable) so the agent can swap laterally
-  # between subdirectories without a restart. Replace with your own path.
+  # The STARTING root, and the parent the agent swaps within. Set it WIDE (a
+  # parent containing every project you want reachable) so the agent can move
+  # laterally between subdirectories without a restart. Replace with your own path.
+  #
+  # NOT a boundary on its own — that was a documentation error corrected on
+  # 2026-07-31. Before kglite 0.15.5 / mcp-methods 0.4.3 nothing constrained
+  # where set_root_dir could point; a swap to any readable directory succeeded.
   root: /abs/path/to/your/projects
+  # The actual boundary — opt in. A set_root_dir outside it is refused and the
+  # active root does not move. Requires kglite 0.15.5+ / mcp-methods 0.4.3+.
+  # Usually the same path as `root`; widen only if you intend swaps outside it.
+  sandbox_root: /abs/path/to/your/projects
   # Auto-rebuild on file change. Rebuilds are scoped to the active set_root_dir
   # target (not the wide root) and fire lazily on the next tool call, so a wide
   # boundary stays cheap. Boot build is deferred until the first set_root_dir.
