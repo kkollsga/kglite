@@ -141,7 +141,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Python 3.10 (abi3 floor)
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.10'
       - name: Install Rust
@@ -218,7 +218,7 @@ jobs:
       # arm64 runner and can't run its wheel; the windows cell is a different OS.
       - name: Set up Python 3.14 for the pyarrow-coexistence canary
         if: matrix.target == 'aarch64-apple-darwin'
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.14'
       - name: pyarrow-coexistence canary (macOS arm64)
@@ -386,7 +386,7 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.10'
       - name: Install Rust
