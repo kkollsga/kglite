@@ -343,11 +343,25 @@ prune-dev: prune-target
 
 PRUNE_TARGET_GB := 40
 prune-target:
-	@dir=$$(readlink target 2>/dev/null || echo target); \
+	@link_target=$$(readlink target 2>/dev/null || true); \
+	dir=$${CARGO_TARGET_DIR:-$${link_target:-target}}; \
 	size_gb=$$(du -sg "$$dir" 2>/dev/null | cut -f1); \
 	if [ "$${size_gb:-0}" -ge $(PRUNE_TARGET_GB) ]; then \
 		echo "target/ is $${size_gb} GB (>= $(PRUNE_TARGET_GB) GB) — running cargo clean"; \
-		cargo clean; \
+		mkdir -p "$$dir"; \
+		printf '%s\n' \
+			'Signature: 8a477f597d28d172789f06886806bc55' \
+			'# This file is a cache directory tag created by cargo.' \
+			'# For information about cache directory tags see https://bford.info/cachedir/' \
+			> "$$dir/CACHEDIR.TAG"; \
+		cargo clean --target-dir "$$dir" || exit $$?; \
+		mkdir -p "$$dir"; \
+		printf '%s\n' \
+			'Signature: 8a477f597d28d172789f06886806bc55' \
+			'# This file is a cache directory tag created by cargo.' \
+			'# For information about cache directory tags see https://bford.info/cachedir/' \
+			> "$$dir/CACHEDIR.TAG"; \
+		if [ -n "$$link_target" ] && [ ! -L target ]; then ln -s "$$link_target" target; fi; \
 	else \
 		echo "target/ is $${size_gb:-0} GB — under the $(PRUNE_TARGET_GB) GB prune threshold"; \
 	fi
