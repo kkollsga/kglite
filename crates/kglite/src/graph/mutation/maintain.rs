@@ -1844,7 +1844,7 @@ pub fn update_node_properties(
     let batch_size = nodes.len();
     let mut batch = BatchProcessor::new(batch_size);
 
-    for ((node_idx_opt, value), is_validated) in nodes.iter().zip(validated_nodes.into_iter()) {
+    for ((node_idx_opt, value), is_validated) in nodes.iter().zip(validated_nodes) {
         if let Some(node_idx) = node_idx_opt {
             if is_validated {
                 let mut properties = HashMap::new();
