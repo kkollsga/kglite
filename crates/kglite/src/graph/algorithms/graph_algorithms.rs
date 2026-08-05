@@ -1901,54 +1901,67 @@ pub fn shortest_path_cost_weighted(
     shortest_path_weighted(graph, source, target, weight_property, options).map(|r| r.weight)
 }
 
-/// Sum of edge weights for all nodes in a community.
-/// Compute Newman modularity: Q = (1/2m) * sum [ A_ij - k_i*k_j/(2m) ] * delta(c_i, c_j)
+/// Compute standard Newman modularity (`resolution = 1`) over the filtered
+/// induced subgraph. Each edge contributes once to `m` and internal weight,
+/// and once to each endpoint's community degree (twice for a self-loop).
 pub(super) fn compute_modularity(
     graph: &DirGraph,
     community: &[usize],
     node_exists: &[bool],
-    total_weight: f64,
     weight_property: Option<&str>,
+    connection_types: Option<&[String]>,
 ) -> f64 {
+    let community_count = graph
+        .graph
+        .node_indices()
+        .filter(|node| node_exists.get(node.index()).copied().unwrap_or(false))
+        .map(|node| community[node.index()])
+        .max()
+        .map_or(0, |max_id| max_id + 1);
+    if community_count == 0 {
+        return 0.0;
+    }
+
+    let interned_ct = intern_connection_types(connection_types);
+    let mut internal_weight = vec![0.0f64; community_count];
+    let mut degree_sum = vec![0.0f64; community_count];
+    let mut total_weight = 0.0f64;
+    for edge in graph.graph.edge_references() {
+        let u = edge.source().index();
+        let v = edge.target().index();
+        if !node_exists.get(u).copied().unwrap_or(false)
+            || !node_exists.get(v).copied().unwrap_or(false)
+        {
+            continue;
+        }
+        if let Some(ref types) = interned_ct {
+            if !types
+                .iter()
+                .any(|edge_type| *edge_type == edge.connection_type())
+            {
+                continue;
+            }
+        }
+        let w = edge_weight(graph, edge.id(), weight_property);
+        let cu = community[u];
+        let cv = community[v];
+        total_weight += w;
+        degree_sum[cu] += w;
+        degree_sum[cv] += w;
+        if cu == cv {
+            internal_weight[cu] += w;
+        }
+    }
     if total_weight == 0.0 {
         return 0.0;
     }
 
     let two_m = 2.0 * total_weight;
-    let mut q = 0.0f64;
-
-    // Compute degree (sum of edge weights) for each node
-    let g = &graph.graph;
-    let bound = g.node_bound();
-    let mut degrees: Vec<f64> = vec![0.0; bound];
-    for node_idx in g.node_indices() {
-        let i = node_idx.index();
-        if !node_exists[i] {
-            continue;
-        }
-        for edge in g.edges(node_idx) {
-            degrees[i] += edge_weight(graph, edge.id(), weight_property);
-        }
-        for edge in g.edges_directed(node_idx, petgraph::Direction::Incoming) {
-            degrees[i] += edge_weight(graph, edge.id(), weight_property);
-        }
-    }
-
-    // Sum over all edges
-    for edge in {
-        let g = &graph.graph;
-        g.edge_references()
-    } {
-        let u = edge.source().index();
-        let v = edge.target().index();
-        let w = edge_weight(graph, edge.id(), weight_property);
-
-        if community[u] == community[v] {
-            q += w - degrees[u] * degrees[v] / two_m;
-        }
-    }
-
-    q / two_m
+    internal_weight
+        .iter()
+        .zip(degree_sum.iter())
+        .map(|(&internal, &degree)| internal / total_weight - (degree / two_m).powi(2))
+        .sum()
 }
 
 #[cfg(test)]

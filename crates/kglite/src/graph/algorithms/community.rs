@@ -692,8 +692,8 @@ fn build_community_result(
     graph: &DirGraph,
     nodes: &[NodeIndex],
     levels: &[Vec<usize>],
-    total_weight: f64,
     weight_property: Option<&str>,
+    connection_types: Option<&[String]>,
 ) -> CommunityResult {
     let best = levels.last().expect("at least one level");
     let bound = graph.graph.node_bound();
@@ -704,17 +704,16 @@ fn build_community_result(
         node_exists[node.index()] = true;
     }
     let num_communities = best.iter().copied().max().map(|m| m + 1).unwrap_or(0);
-    let modularity = if total_weight == 0.0 {
-        0.0
-    } else {
-        compute_modularity(
-            graph,
-            &community_bound,
-            &node_exists,
-            total_weight,
-            weight_property,
-        )
-    };
+    // Report standard Newman modularity (gamma=1) for the resulting partition.
+    // `resolution` controls partition search but is not part of this public
+    // quality score.
+    let modularity = compute_modularity(
+        graph,
+        &community_bound,
+        &node_exists,
+        weight_property,
+        connection_types,
+    );
     let levels_out: Vec<Vec<CommunityAssignment>> = levels
         .iter()
         .map(|lc| {
@@ -767,32 +766,30 @@ pub fn louvain_communities(
     // materialise the (scope-bounded) adjacency. build_weighted_adjacency reads
     // through GraphRead (scoped_node_set / edge_in_scope), exactly like
     // connected_components' scoped path, so scoping works on every storage mode.
-    let (nodes, levels, m) =
-        if (graph.graph.is_disk() || graph.graph.is_mapped()) && scope.is_none() {
-            let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
-            if nodes.is_empty() {
-                return Ok(empty_community_result());
-            }
-            let src = CsrSource::new(graph, weight_property, connection_types);
-            let m = src.total_weight();
-            let levels = louvain_levels(&src, resolution, deadline)?;
-            (nodes, levels, m)
-        } else {
-            let (nodes, adj, m) =
-                build_weighted_adjacency(graph, weight_property, connection_types, scope);
-            if nodes.is_empty() {
-                return Ok(empty_community_result());
-            }
-            let src = MaterializedAdj { adj: &adj, m };
-            let levels = louvain_levels(&src, resolution, deadline)?;
-            (nodes, levels, m)
-        };
+    let (nodes, levels) = if (graph.graph.is_disk() || graph.graph.is_mapped()) && scope.is_none() {
+        let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+        if nodes.is_empty() {
+            return Ok(empty_community_result());
+        }
+        let src = CsrSource::new(graph, weight_property, connection_types);
+        let levels = louvain_levels(&src, resolution, deadline)?;
+        (nodes, levels)
+    } else {
+        let (nodes, adj, m) =
+            build_weighted_adjacency(graph, weight_property, connection_types, scope);
+        if nodes.is_empty() {
+            return Ok(empty_community_result());
+        }
+        let src = MaterializedAdj { adj: &adj, m };
+        let levels = louvain_levels(&src, resolution, deadline)?;
+        (nodes, levels)
+    };
     Ok(build_community_result(
         graph,
         &nodes,
         &levels,
-        m,
         weight_property,
+        connection_types,
     ))
 }
 
@@ -957,32 +954,30 @@ pub fn leiden_communities(
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
-    let (nodes, levels, m) =
-        if (graph.graph.is_disk() || graph.graph.is_mapped()) && scope.is_none() {
-            let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
-            if nodes.is_empty() {
-                return Ok(empty_community_result());
-            }
-            let src = CsrSource::new(graph, weight_property, connection_types);
-            let m = src.total_weight();
-            let levels = leiden_levels(&src, resolution, deadline)?;
-            (nodes, levels, m)
-        } else {
-            let (nodes, adj, m) =
-                build_weighted_adjacency(graph, weight_property, connection_types, scope);
-            if nodes.is_empty() {
-                return Ok(empty_community_result());
-            }
-            let src = MaterializedAdj { adj: &adj, m };
-            let levels = leiden_levels(&src, resolution, deadline)?;
-            (nodes, levels, m)
-        };
+    let (nodes, levels) = if (graph.graph.is_disk() || graph.graph.is_mapped()) && scope.is_none() {
+        let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+        if nodes.is_empty() {
+            return Ok(empty_community_result());
+        }
+        let src = CsrSource::new(graph, weight_property, connection_types);
+        let levels = leiden_levels(&src, resolution, deadline)?;
+        (nodes, levels)
+    } else {
+        let (nodes, adj, m) =
+            build_weighted_adjacency(graph, weight_property, connection_types, scope);
+        if nodes.is_empty() {
+            return Ok(empty_community_result());
+        }
+        let src = MaterializedAdj { adj: &adj, m };
+        let levels = leiden_levels(&src, resolution, deadline)?;
+        (nodes, levels)
+    };
     Ok(build_community_result(
         graph,
         &nodes,
         &levels,
-        m,
         weight_property,
+        connection_types,
     ))
 }
 
@@ -1119,13 +1114,18 @@ pub fn label_propagation(
 
     // label propagation is single-level: `levels` empty ⇒ consumers treat
     // `assignments` as the only level.
-    Ok(label_prop_result(graph, &nodes, &labels))
+    Ok(label_prop_result(graph, &nodes, &labels, connection_types))
 }
 
 /// Build the single-level `CommunityResult` shared by both the in-memory and the
 /// streaming label-propagation paths: renumber labels contiguously, emit one
 /// assignment per node, and compute modularity over the bound-sized label array.
-fn label_prop_result(graph: &DirGraph, nodes: &[NodeIndex], labels: &[usize]) -> CommunityResult {
+fn label_prop_result(
+    graph: &DirGraph,
+    nodes: &[NodeIndex],
+    labels: &[usize],
+    connection_types: Option<&[String]>,
+) -> CommunityResult {
     let bound = graph.graph.node_bound();
     let mut labels_bound: Vec<usize> = vec![0; bound];
     let mut node_exists: Vec<bool> = vec![false; bound];
@@ -1150,9 +1150,8 @@ fn label_prop_result(graph: &DirGraph, nodes: &[NodeIndex], labels: &[usize]) ->
         })
         .collect();
 
-    let total_weight = graph.graph.edge_count() as f64;
     let num_communities = id_map.len();
-    let modularity = compute_modularity(graph, &labels_bound, &node_exists, total_weight, None);
+    let modularity = compute_modularity(graph, &labels_bound, &node_exists, None, connection_types);
 
     CommunityResult {
         assignments,
@@ -1235,5 +1234,10 @@ fn label_propagation_streaming(
         }
     }
 
-    Ok(label_prop_result(graph, &src.nodes, &labels))
+    Ok(label_prop_result(
+        graph,
+        &src.nodes,
+        &labels,
+        connection_types,
+    ))
 }

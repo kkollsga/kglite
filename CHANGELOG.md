@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Community-detection modularity now reports the complete Newman score.**
+  Louvain, Leiden, and label propagation include the expected-degree term for
+  non-edges and honor connection-type and node-scope filters when scoring the
+  returned partition, including weighted, parallel, and self-loop edges.
 - **Sampled centrality rejects an empty source sample.** Passing
   `sample_size=0` to betweenness or closeness centrality now returns a clear
   error instead of producing NaN betweenness scores or an empty closeness

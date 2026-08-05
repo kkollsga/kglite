@@ -760,6 +760,121 @@ fn build_two_triangle_bridge() -> (DirGraph, Vec<petgraph::graph::NodeIndex>) {
     (graph, indices)
 }
 
+#[test]
+fn test_modularity_uses_complete_filtered_scoped_weighted_graph() {
+    let mut graph = DirGraph::new();
+    let nodes: Vec<_> = (0..4)
+        .map(|i| {
+            graph.graph.add_node(NodeData::new(
+                Value::Int64(i),
+                Value::String(format!("M_{i}")),
+                "Node".to_string(),
+                HashMap::new(),
+                &mut graph.interner,
+            ))
+        })
+        .collect();
+    // Scoped LINK edges: two parallel internal edges (weights 2 + 1), one
+    // cross-community edge (1), and one self-loop (4). The OTHER edge and the
+    // LINK to out-of-scope node 3 are deliberate high-weight noise.
+    for (source, target, edge_type, weight) in [
+        (0, 1, "LINK", 2.0),
+        (0, 1, "LINK", 1.0),
+        (1, 2, "LINK", 1.0),
+        (2, 2, "LINK", 4.0),
+        (0, 2, "OTHER", 100.0),
+        (0, 3, "LINK", 100.0),
+    ] {
+        let properties = HashMap::from([("weight".to_string(), Value::Float64(weight))]);
+        let edge = EdgeData::new(edge_type.to_string(), properties, &mut graph.interner);
+        graph.graph.add_edge(nodes[source], nodes[target], edge);
+    }
+
+    let community = [0, 0, 1, 0];
+    let node_exists = [true, true, true, false];
+    let connection_types = ["LINK".to_string()];
+    let modularity = compute_modularity(
+        &graph,
+        &community,
+        &node_exists,
+        Some("weight"),
+        Some(&connection_types),
+    );
+
+    // m=8; internal=(3,4); community degree sums=(7,9).
+    let expected = 3.0 / 8.0 - (7.0_f64 / 16.0).powi(2) + 4.0 / 8.0 - (9.0_f64 / 16.0).powi(2);
+    assert!((modularity - expected).abs() < 1e-15);
+}
+
+/// Two disconnected LINK triangles plus edges that the public community
+/// options must exclude from both partitioning and the reported modularity.
+fn build_filtered_scoped_two_triangles() -> (DirGraph, Vec<petgraph::graph::NodeIndex>) {
+    let mut graph = DirGraph::new();
+    let nodes: Vec<_> = (0..7)
+        .map(|i| {
+            graph.graph.add_node(NodeData::new(
+                Value::Int64(i),
+                Value::String(format!("F_{i}")),
+                "Node".to_string(),
+                HashMap::new(),
+                &mut graph.interner,
+            ))
+        })
+        .collect();
+
+    for (source, target, edge_type, weight) in [
+        (0, 1, "LINK", 1.0),
+        (1, 2, "LINK", 1.0),
+        (0, 2, "LINK", 1.0),
+        (3, 4, "LINK", 1.0),
+        (4, 5, "LINK", 1.0),
+        (3, 5, "LINK", 1.0),
+        // Excluded by connection type despite lying inside the node scope.
+        (2, 3, "OTHER", 100.0),
+        // Excluded because node 6 is outside the requested scope.
+        (0, 6, "LINK", 100.0),
+    ] {
+        let properties = HashMap::from([("weight".to_string(), Value::Float64(weight))]);
+        let edge = EdgeData::new(edge_type.to_string(), properties, &mut graph.interner);
+        graph.graph.add_edge(nodes[source], nodes[target], edge);
+    }
+    (graph, nodes)
+}
+
+#[test]
+fn test_public_community_modularity_honors_filters_and_scope() {
+    let (graph, nodes) = build_filtered_scoped_two_triangles();
+    let scope: NodeScope = nodes[..6].iter().copied().collect();
+    let connection_types = ["LINK".to_string()];
+    let community_options = CommunityOptions::default()
+        .with_weight_property("weight")
+        .with_connection_types(&connection_types)
+        .with_scope(&scope);
+
+    let louvain = louvain_communities(&graph, &community_options).unwrap();
+    let leiden = leiden_communities(&graph, &community_options).unwrap();
+    let label_options = LabelPropagationOptions::default()
+        .with_connection_types(&connection_types)
+        .with_scope(&scope);
+    let label_propagation = label_propagation(&graph, &label_options).unwrap();
+
+    // Each triangle has internal weight 3 and degree sum 6, while total
+    // included weight is 6: 2 * (3/6 - (6/12)^2) = 0.5.
+    for (name, result) in [
+        ("Louvain", louvain),
+        ("Leiden", leiden),
+        ("label propagation", label_propagation),
+    ] {
+        assert_eq!(result.assignments.len(), 6, "{name} scope");
+        assert_eq!(result.num_communities, 2, "{name} partition");
+        assert!(
+            (result.modularity - 0.5).abs() < 1e-15,
+            "{name} modularity: {}",
+            result.modularity
+        );
+    }
+}
+
 fn community_of(result: &CommunityResult, idx: petgraph::graph::NodeIndex) -> usize {
     result
         .assignments
