@@ -397,24 +397,29 @@ mod tests {
 
     #[test]
     fn clustering_inner_loops_honor_cancellation() {
-        let features = vec![vec![0.0, 0.0], vec![3.0, 4.0]];
+        let features = vec![vec![0.0, 0.0], vec![3.0, 4.0], vec![6.0, 8.0]];
         let dm = euclidean_distance_matrix(&features, cancelled());
-        assert_eq!(dm[0][1], 0.0);
+        assert_eq!(dm, vec![vec![0.0; features.len()]; features.len()]);
         assert!(dbscan(&dm, 1.0, 1, cancelled()).is_empty());
         assert!(kmeans(&features, 2, 10, cancelled()).is_empty());
 
-        let points = vec![(0.0, 0.0), (1.0, 1.0)];
+        let points = vec![(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)];
         let geo = haversine_distance_matrix(&points, cancelled());
-        assert_eq!(geo[0][1], 0.0);
+        assert_eq!(geo, vec![vec![0.0; points.len()]; points.len()]);
     }
 
     #[test]
     fn test_euclidean_distance_matrix() {
-        let features = vec![vec![0.0, 0.0], vec![3.0, 4.0]];
+        let features = vec![vec![0.0, 0.0], vec![3.0, 4.0], vec![3.0, 0.0]];
         let dm = euclidean_distance_matrix(&features, Interrupt::default());
-        assert!((dm[0][1] - 5.0).abs() < 1e-10);
-        assert!((dm[1][0] - 5.0).abs() < 1e-10);
-        assert_eq!(dm[0][0], 0.0);
+        assert_eq!(
+            dm,
+            vec![
+                vec![0.0, 5.0, 3.0],
+                vec![5.0, 0.0, 4.0],
+                vec![3.0, 4.0, 0.0]
+            ]
+        );
     }
 
     #[test]

@@ -1241,3 +1241,26 @@ fn label_propagation_streaming(
         connection_types,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::renumber_communities;
+
+    #[test]
+    fn renumber_communities_preserves_first_seen_order() {
+        assert_eq!(
+            renumber_communities(&[4, 1, 4, 3, 1]),
+            (vec![0, 1, 0, 2, 1], 3)
+        );
+    }
+
+    #[test]
+    fn renumber_communities_handles_empty_input() {
+        assert_eq!(renumber_communities(&[]), (Vec::new(), 0));
+    }
+
+    #[test]
+    fn renumber_communities_preserves_all_distinct_order() {
+        assert_eq!(renumber_communities(&[3, 0, 2, 1]), (vec![0, 1, 2, 3], 4));
+    }
+}
