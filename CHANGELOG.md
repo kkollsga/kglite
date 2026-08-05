@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Coreness reuses its final degree storage as the result and builds
+  overwritten bookkeeping buffers directly.** The in-memory 2,048-node gate
+  is 6–16% faster with exact memory, mapped, and disk parity.
 - **Euclidean DBSCAN avoids zero-initializing its full distance matrix before
   overwriting it.** Safe capacity-plus-push construction is 23–25% faster on
   the 2,048-point gate, with exact cluster/noise and cancellation parity.

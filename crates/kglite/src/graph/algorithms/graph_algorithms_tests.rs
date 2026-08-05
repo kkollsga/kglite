@@ -454,6 +454,24 @@ fn test_coreness_chain_all_one() {
 }
 
 #[test]
+fn test_coreness_streaming_pre_cancel_drops_partial_degree_buffer_safely() {
+    static CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+    let (graph, _) = build_triangle_graph();
+    let result = coreness_scoped_streaming(
+        &graph,
+        None,
+        None,
+        crate::graph::algorithms::Interrupt {
+            deadline: None,
+            cancel: Some(&CANCELLED),
+        },
+    );
+
+    assert_eq!(result.unwrap_err(), algorithm_timeout_err());
+}
+
+#[test]
 fn test_clustering_triangle_all_one() {
     let (graph, _) = build_triangle_graph();
     let scores = clustering_coefficient_scoped(

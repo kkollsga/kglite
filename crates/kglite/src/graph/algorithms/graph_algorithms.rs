@@ -1259,21 +1259,20 @@ pub fn coreness_scoped(
     // `vert` lists vertices ordered by degree; `pos` is each vertex's index in
     // `vert`. (Bin offsets are consumed as vertices are placed.)
     let mut vert = vec![0usize; n];
-    let mut pos = vec![0usize; n];
+    let mut pos = Vec::with_capacity(n);
     {
         let mut binc = bin.clone();
         for v in 0..n {
             let d = deg[v] as usize;
-            pos[v] = binc[d];
-            vert[pos[v]] = v;
+            let position = binc[d];
+            pos.push(position);
+            vert[position] = v;
             binc[d] += 1;
         }
     }
 
-    let mut core = vec![0i64; n];
     for i in 0..n {
         let v = vert[i];
-        core[v] = deg[v] as i64;
         // Iterating `adj[v]` immutably while mutating the separate bookkeeping
         // vectors (vert/pos/bin/deg) is fine — there are no self-loops, so
         // `deg[v]` is never touched inside the loop.
@@ -1297,13 +1296,17 @@ pub fn coreness_scoped(
         }
     }
 
-    Ok(nodes.into_iter().zip(core).collect())
+    Ok(nodes
+        .into_iter()
+        .zip(deg)
+        .map(|(node, core)| (node, i64::from(core)))
+        .collect())
 }
 
 /// Bounded-memory k-core for mapped/disk: the same Batagelj–Zaversnik peeling as
 /// `coreness_scoped`, but the per-node neighbour lists are streamed on demand from
 /// the CSR (`DedupNeighborSource`) instead of materialising the whole O(edges)
-/// adjacency. Resident state is O(nodes) (deg/bin/vert/pos/core + index map);
+/// adjacency. Resident state is O(nodes) (deg/bin/vert/pos + index map);
 /// edges stay on mmap. Two streaming sweeps: one to count degrees, one for the
 /// peeling. Produces results identical to the materialised path.
 fn coreness_scoped_streaming(
@@ -1322,15 +1325,15 @@ fn coreness_scoped_streaming(
     let mut buf: Vec<u32> = Vec::new();
 
     // Pass 1: distinct-neighbour degree per node.
-    let mut deg: Vec<u32> = vec![0; n];
-    for (v, d) in deg.iter_mut().enumerate() {
+    let mut deg: Vec<u32> = Vec::with_capacity(n);
+    for v in 0..n {
         if v & 0xFFFFF == 0 && deadline.exceeded() {
             {
                 return Err(algorithm_timeout_err());
             }
         }
         src.neighbors_deduped(v, &mut buf);
-        *d = buf.len() as u32;
+        deg.push(buf.len() as u32);
     }
     let max_deg = deg.iter().copied().max().unwrap_or(0) as usize;
 
@@ -1349,19 +1352,19 @@ fn coreness_scoped_streaming(
     // `vert` lists vertices ordered by degree; `pos` is each vertex's index in
     // `vert`.
     let mut vert = vec![0usize; n];
-    let mut pos = vec![0usize; n];
+    let mut pos = Vec::with_capacity(n);
     {
         let mut binc = bin.clone();
         for v in 0..n {
             let d = deg[v] as usize;
-            pos[v] = binc[d];
-            vert[pos[v]] = v;
+            let position = binc[d];
+            pos.push(position);
+            vert[position] = v;
             binc[d] += 1;
         }
     }
 
     // Pass 2: peel in degree order, re-streaming each vertex's neighbours once.
-    let mut core = vec![0i64; n];
     for i in 0..n {
         if i & 0xFFFFF == 0 && deadline.exceeded() {
             {
@@ -1369,7 +1372,6 @@ fn coreness_scoped_streaming(
             }
         }
         let v = vert[i];
-        core[v] = deg[v] as i64;
         let dv = deg[v];
         src.neighbors_deduped(v, &mut buf);
         for &nbr in &buf {
@@ -1391,7 +1393,12 @@ fn coreness_scoped_streaming(
         }
     }
 
-    Ok(src.nodes.into_iter().zip(core).collect())
+    Ok(src
+        .nodes
+        .into_iter()
+        .zip(deg)
+        .map(|(node, core)| (node, i64::from(core)))
+        .collect())
 }
 
 /// Dependency-frontier / "ready set": over a DAG on edge type `E`, return the

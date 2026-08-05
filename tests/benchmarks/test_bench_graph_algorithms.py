@@ -936,7 +936,4 @@ def test_bench_brandes_work_threshold(
 def test_bench_coreness_nonuniform(benchmark, coreness_case: GraphCase) -> None:
     rows = benchmark(_coreness_rows, coreness_case.graph)
     by_id = {int(row["id"]): int(row["coreness"]) for row in rows}
-    assert len(by_id) == coreness_case.node_count
-    assert by_id[0] == 6
-    assert by_id[1_791] == 6
-    assert by_id[1_792] == 1
+    assert by_id == {node: 6 if node < 1_792 else 1 for node in range(coreness_case.node_count)}
