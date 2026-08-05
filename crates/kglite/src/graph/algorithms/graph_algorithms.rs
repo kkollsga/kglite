@@ -1262,8 +1262,8 @@ pub fn coreness_scoped(
     let mut pos = Vec::with_capacity(n);
     {
         let mut binc = bin.clone();
-        for v in 0..n {
-            let d = deg[v] as usize;
+        for (v, &degree) in deg.iter().enumerate() {
+            let d = degree as usize;
             let position = binc[d];
             pos.push(position);
             vert[position] = v;
@@ -1355,8 +1355,8 @@ fn coreness_scoped_streaming(
     let mut pos = Vec::with_capacity(n);
     {
         let mut binc = bin.clone();
-        for v in 0..n {
-            let d = deg[v] as usize;
+        for (v, &degree) in deg.iter().enumerate() {
+            let d = degree as usize;
             let position = binc[d];
             pos.push(position);
             vert[position] = v;

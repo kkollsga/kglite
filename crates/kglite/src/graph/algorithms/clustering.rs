@@ -483,10 +483,10 @@ mod tests {
         // Oslo, Bergen, Trondheim
         let points = vec![(59.91, 10.75), (60.39, 5.32), (63.43, 10.39)];
         let dm = haversine_distance_matrix(&points, Interrupt::default());
-        for i in 0..points.len() {
-            assert_eq!(dm[i][i], 0.0);
-            for j in 0..points.len() {
-                assert_eq!(dm[i][j], dm[j][i]);
+        for (i, row) in dm.iter().enumerate() {
+            assert_eq!(row[i], 0.0);
+            for (j, &distance) in row.iter().enumerate() {
+                assert_eq!(distance, dm[j][i]);
             }
         }
         assert_eq!(
