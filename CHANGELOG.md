@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Euclidean DBSCAN avoids zero-initializing its full distance matrix before
+  overwriting it.** Safe capacity-plus-push construction is 23–25% faster on
+  the 2,048-point gate, with exact cluster/noise and cancellation parity.
 - **Clustering and triangle counting skip sorted-neighbor prefixes that cannot
   intersect.** Clustering is 12% faster on the dense gate and 80–81% faster on
   the sparse hub gate, with exact HashSet-oracle parity.

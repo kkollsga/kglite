@@ -15,19 +15,9 @@ pub struct ClusterAssignment {
 
 /// Compute pairwise Euclidean distance matrix from feature vectors.
 pub fn euclidean_distance_matrix(features: &[Vec<f64>], interrupt: Interrupt) -> Vec<Vec<f64>> {
-    let n = features.len();
-    let mut dist = vec![vec![0.0; n]; n];
-    for i in 0..n {
-        if i & 0x3FF == 0 && interrupt.exceeded() {
-            return dist;
-        }
-        for j in (i + 1)..n {
-            let d = euclidean_distance(&features[i], &features[j]);
-            dist[i][j] = d;
-            dist[j][i] = d;
-        }
-    }
-    dist
+    symmetric_distance_matrix(features.len(), interrupt, |i, j| {
+        euclidean_distance(&features[i], &features[j])
+    })
 }
 
 /// Compute pairwise Haversine (geodesic) distance matrix.
@@ -51,6 +41,38 @@ pub fn haversine_distance_matrix(points: &[(f64, f64)], interrupt: Interrupt) ->
         }
     }
     dist
+}
+
+fn symmetric_distance_matrix<F>(n: usize, interrupt: Interrupt, mut distance: F) -> Vec<Vec<f64>>
+where
+    F: FnMut(usize, usize) -> f64,
+{
+    let mut distances: Vec<Vec<f64>> = Vec::with_capacity(n);
+    for i in 0..n {
+        if i & 0x3FF == 0 && interrupt.exceeded() {
+            return finish_symmetric_distance_matrix(distances, n);
+        }
+        let mut row = Vec::with_capacity(n);
+        row.extend((0..i).map(|j| distances[j][i]));
+        row.push(0.0);
+        for j in (i + 1)..n {
+            row.push(distance(i, j));
+        }
+        distances.push(row);
+    }
+    distances
+}
+
+fn finish_symmetric_distance_matrix(mut distances: Vec<Vec<f64>>, n: usize) -> Vec<Vec<f64>> {
+    debug_assert!(distances.len() <= n);
+    while distances.len() < n {
+        let i = distances.len();
+        let mut row = Vec::with_capacity(n);
+        row.extend((0..i).map(|j| distances[j][i]));
+        row.resize(n, 0.0);
+        distances.push(row);
+    }
+    distances
 }
 
 fn euclidean_distance(a: &[f64], b: &[f64]) -> f64 {
@@ -398,14 +420,48 @@ mod tests {
     #[test]
     fn clustering_inner_loops_honor_cancellation() {
         let features = vec![vec![0.0, 0.0], vec![3.0, 4.0], vec![6.0, 8.0]];
-        let dm = euclidean_distance_matrix(&features, cancelled());
-        assert_eq!(dm, vec![vec![0.0; features.len()]; features.len()]);
+        let dm = euclidean_distance_matrix(&features, Interrupt::default());
         assert!(dbscan(&dm, 1.0, 1, cancelled()).is_empty());
         assert!(kmeans(&features, 2, 10, cancelled()).is_empty());
+    }
+
+    #[test]
+    fn distance_matrices_preserve_shape_on_immediate_cancellation() {
+        let features = vec![vec![0.0, 0.0], vec![3.0, 4.0], vec![6.0, 8.0]];
+        let dm = euclidean_distance_matrix(&features, cancelled());
+        assert_eq!(dm, vec![vec![0.0; features.len()]; features.len()]);
 
         let points = vec![(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)];
         let geo = haversine_distance_matrix(&points, cancelled());
         assert_eq!(geo, vec![vec![0.0; points.len()]; points.len()]);
+    }
+
+    #[test]
+    fn distance_matrices_handle_empty_and_singleton_inputs() {
+        assert!(euclidean_distance_matrix(&[], Interrupt::default()).is_empty());
+        assert!(haversine_distance_matrix(&[], Interrupt::default()).is_empty());
+        assert_eq!(
+            euclidean_distance_matrix(&[vec![1.0, 2.0]], Interrupt::default()),
+            vec![vec![0.0]]
+        );
+        assert_eq!(
+            haversine_distance_matrix(&[(59.91, 10.75)], Interrupt::default()),
+            vec![vec![0.0]]
+        );
+    }
+
+    #[test]
+    fn cancellation_finisher_preserves_completed_distances_and_symmetry() {
+        let partial = vec![vec![0.0, 2.0, 3.0, 4.0], vec![2.0, 0.0, 5.0, 6.0]];
+        assert_eq!(
+            finish_symmetric_distance_matrix(partial, 4),
+            vec![
+                vec![0.0, 2.0, 3.0, 4.0],
+                vec![2.0, 0.0, 5.0, 6.0],
+                vec![3.0, 5.0, 0.0, 0.0],
+                vec![4.0, 6.0, 0.0, 0.0],
+            ]
+        );
     }
 
     #[test]
@@ -424,11 +480,25 @@ mod tests {
 
     #[test]
     fn test_haversine_distance_matrix() {
-        // Oslo (59.91, 10.75) to Bergen (60.39, 5.32)
-        let points = vec![(59.91, 10.75), (60.39, 5.32)];
+        // Oslo, Bergen, Trondheim
+        let points = vec![(59.91, 10.75), (60.39, 5.32), (63.43, 10.39)];
         let dm = haversine_distance_matrix(&points, Interrupt::default());
-        // Should be roughly 300km
+        for i in 0..points.len() {
+            assert_eq!(dm[i][i], 0.0);
+            for j in 0..points.len() {
+                assert_eq!(dm[i][j], dm[j][i]);
+            }
+        }
+        assert_eq!(
+            dm[0][1],
+            crate::graph::features::spatial::geodesic_distance(
+                points[0].0,
+                points[0].1,
+                points[1].0,
+                points[1].1,
+            )
+        );
+        // Oslo to Bergen should be roughly 300 km.
         assert!(dm[0][1] > 250_000.0 && dm[0][1] < 350_000.0);
-        assert_eq!(dm[0][0], 0.0);
     }
 }
