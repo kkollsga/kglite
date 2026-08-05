@@ -184,6 +184,7 @@ pub kglite::api::algorithms::VectorSearchOptions::top_k: usize
 impl kglite::api::algorithms::VectorSearchOptions
 pub fn kglite::api::algorithms::VectorSearchOptions::with_exact(self, exact: bool) -> Self
 pub fn kglite::api::algorithms::VectorSearchOptions::with_metric(self, metric: kglite::api::algorithms::DistanceMetric) -> Self
+pub fn kglite::api::algorithms::VectorSearchOptions::with_stored_metric(self) -> Self
 pub fn kglite::api::algorithms::VectorSearchOptions::with_top_k(self, top_k: usize) -> Self
 impl core::clone::Clone for kglite::api::algorithms::VectorSearchOptions
 pub fn kglite::api::algorithms::VectorSearchOptions::clone(&self) -> kglite::api::algorithms::VectorSearchOptions

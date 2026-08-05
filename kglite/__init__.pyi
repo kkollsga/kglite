@@ -5349,8 +5349,11 @@ class KnowledgeGraph:
             query_vector: The query embedding vector.
             top_k: Number of results to return (default 10).
             metric: ``'cosine'``, ``'dot_product'``, ``'euclidean'``, or ``'poincare'``.
-                If omitted, uses the metric stored via ``set_embeddings(metric=...)``,
-                or falls back to ``'cosine'``.
+                If omitted, uses the unique metric stored by embedding stores
+                represented in the selection, or falls back to ``'cosine'``
+                when none is stored. Selections spanning different stored
+                metrics must pass this explicitly because their scores are not
+                comparable.
             to_df: If ``True``, return a pandas DataFrame instead of list of dicts.
             returning: Optional list of fields to project onto each hit. Omitted
                 (default) → each hit carries ``id``, ``title``, ``type``, ``score``
@@ -5686,7 +5689,9 @@ class KnowledgeGraph:
             text_column: Text column whose embeddings to search (e.g. ``'summary'``).
             query: The text query to search for.
             top_k: Number of results (default 10).
-            metric: ``'cosine'`` (default), ``'dot_product'``, ``'euclidean'``, or ``'poincare'``.
+            metric: ``'cosine'``, ``'dot_product'``, ``'euclidean'``, or
+                ``'poincare'``. Omitted uses the same selection-aware stored
+                metric resolution as :meth:`vector_search`.
             to_df: If True, return a pandas DataFrame.
             returning: Optional field projection — see :meth:`vector_search`.
                 Omitted → full hit (all properties); given → ``id`` + ``score`` +

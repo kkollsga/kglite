@@ -265,8 +265,10 @@ impl KnowledgeGraph {
     ///     text_column: Source column name (e.g. 'summary'). Resolves to '{text_column}_emb'.
     ///     query_vector: The query embedding vector (list of floats)
     ///     top_k: Number of results to return (default 10)
-    ///     metric: Distance metric - 'cosine' (default), 'dot_product', 'euclidean', or 'poincare'.
-    ///            If omitted, uses the metric stored with set_embeddings(), or 'cosine'.
+    ///     metric: Distance metric - 'cosine', 'dot_product', 'euclidean', or 'poincare'.
+    ///            If omitted, uses the unique metric stored by the selected
+    ///            embedding stores, or cosine when none is stored. Selections
+    ///            spanning different stored metrics must pass this explicitly.
     ///     to_df: If True, return a pandas DataFrame instead of list of dicts
     ///
     ///     returning: Optional list of fields to project onto each hit. When
@@ -307,45 +309,34 @@ impl KnowledgeGraph {
         let want =
             |k: &str| k == "id" || k == "score" || keep.as_ref().is_none_or(|set| set.contains(k));
 
-        // Resolve metric: explicit arg > stored metric > cosine default
-        let effective_metric = match metric {
-            Some(m) => m.to_string(),
-            None => {
-                // Look up stored metric from any embedding store matching this property
-                self.inner
-                    .embeddings
-                    .iter()
-                    .find(|((_, pn), _)| pn == &embedding_property)
-                    .and_then(|(_, store)| store.metric.clone())
-                    .unwrap_or_else(|| "cosine".to_string())
-            }
-        };
-        let metric = match effective_metric.as_str() {
-            "cosine" => kglite_core::api::algorithms::DistanceMetric::Cosine,
-            "dot_product" => kglite_core::api::algorithms::DistanceMetric::DotProduct,
-            "euclidean" => kglite_core::api::algorithms::DistanceMetric::Euclidean,
-            "poincare" => kglite_core::api::algorithms::DistanceMetric::Poincare,
-            other => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Unknown metric '{}'. Use 'cosine', 'dot_product', 'euclidean', or 'poincare'.",
-                    other
-                )));
-            }
-        };
+        let metric = metric
+            .map(|name| {
+                kglite_core::api::algorithms::DistanceMetric::from_name(name).ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Unknown metric '{}'. Use 'cosine', 'dot_product', 'euclidean', or 'poincare'.",
+                        name
+                    ))
+                })
+            })
+            .transpose()?;
         // Release GIL during heavy vector similarity computation
         let inner = self.inner.clone();
         let selection = self.cursor.selection.clone();
         let results = py
             .detach(|| {
+                let options = kglite_core::api::algorithms::VectorSearchOptions::default()
+                    .with_top_k(top_k)
+                    .with_exact(exact);
+                let options = match metric {
+                    Some(metric) => options.with_metric(metric),
+                    None => options.with_stored_metric(),
+                };
                 kglite_core::api::algorithms::vector_search(
                     &inner,
                     &selection,
                     &embedding_property,
                     &query_vector,
-                    &kglite_core::api::algorithms::VectorSearchOptions::default()
-                        .with_top_k(top_k)
-                        .with_metric(metric)
-                        .with_exact(exact),
+                    &options,
                 )
             })
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
@@ -1266,7 +1257,8 @@ impl KnowledgeGraph {
     ///     text_column: Text column whose embeddings to search (e.g. ``'summary'``).
     ///     query: The text query to search for.
     ///     top_k: Number of results to return (default 10).
-    ///     metric: Distance metric (default ``'cosine'``).
+    ///     metric: Distance metric. Omitted uses the same selection-aware stored
+    ///         metric resolution as ``vector_search``.
     ///     to_df: If True, return a pandas DataFrame.
     ///
     /// Returns:

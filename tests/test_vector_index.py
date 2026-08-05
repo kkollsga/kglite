@@ -40,6 +40,21 @@ def _ids(rows):
     return [r["id"] for r in rows]
 
 
+def _two_type_metric_selection(node_order, store_order, metrics):
+    graph = kglite.KnowledgeGraph()
+    vectors = {"A": {"a": [100.0, 0.0]}, "B": {"b": [1.0, 1.0]}}
+    for node_type in node_order:
+        graph.add_nodes(
+            pd.DataFrame({"id": [node_type.lower()], "title": [node_type], "summary": [node_type]}),
+            node_type,
+            "id",
+            "title",
+        )
+    for node_type in store_order:
+        graph.set_embeddings(node_type, "summary", vectors[node_type], metric=metrics[node_type])
+    return graph.select("A").union(graph.select("B"))
+
+
 class TestIndexLifecycle:
     def test_build_drop_has(self):
         g, _ = _build_graph(n=500)
@@ -180,6 +195,64 @@ class TestAutoUseAndRecall:
             g.select("A").union(g.select("B")).vector_search("summary", [0.0, 0.0], top_k=10, metric="euclidean")
         )
         assert [(row["type"], row["id"]) for row in approximate] == expected
+
+    @pytest.mark.parametrize("node_order", [("A", "B"), ("B", "A")], ids=["nodes-a-b", "nodes-b-a"])
+    @pytest.mark.parametrize("store_order", [("A", "B"), ("B", "A")], ids=["stores-a-b", "stores-b-a"])
+    def test_mixed_stored_metrics_require_explicit_metric(self, node_order, store_order):
+        selected = _two_type_metric_selection(
+            node_order,
+            store_order,
+            {"A": "cosine", "B": "euclidean"},
+        )
+        with pytest.raises(ValueError, match="multiple stored metrics.*metric"):
+            selected.vector_search("summary", [1.0, 0.0], top_k=2, exact=True)
+
+    def test_same_stored_metric_ranks_multi_type_selection(self):
+        selected = _two_type_metric_selection(
+            ("B", "A"),
+            ("A", "B"),
+            {"A": "euclidean", "B": "euclidean"},
+        )
+        rows = selected.vector_search("summary", [1.0, 0.0], top_k=2, exact=True)
+        assert [(row["type"], row["id"]) for row in rows] == [("B", "b"), ("A", "a")]
+
+    def test_unembedded_selected_type_does_not_contribute_its_store_metric(self):
+        graph = kglite.KnowledgeGraph()
+        graph.add_nodes(
+            pd.DataFrame({"id": ["a"], "title": ["A"], "summary": ["A"]}),
+            "A",
+            "id",
+            "title",
+        )
+        graph.add_nodes(
+            pd.DataFrame(
+                {
+                    "id": ["selected", "stored"],
+                    "title": ["Selected", "Stored"],
+                    "summary": ["Selected", "Stored"],
+                }
+            ),
+            "B",
+            "id",
+            "title",
+        )
+        graph.set_embeddings("A", "summary", {"a": [100.0, 0.0]}, metric="cosine")
+        graph.set_embeddings("B", "summary", {"stored": [1.0, 1.0]}, metric="euclidean")
+        selected = graph.select("A").union(graph.select("B").where({"id": "selected"}))
+
+        rows = selected.vector_search("summary", [1.0, 0.0], top_k=2, exact=True)
+        assert [(row["type"], row["id"]) for row in rows] == [("A", "a")]
+
+    def test_explicit_metric_overrides_mixed_stored_metrics(self):
+        selected = _two_type_metric_selection(
+            ("A", "B"),
+            ("B", "A"),
+            {"A": "cosine", "B": "euclidean"},
+        )
+        cosine = selected.vector_search("summary", [1.0, 0.0], top_k=2, metric="cosine", exact=True)
+        euclidean = selected.vector_search("summary", [1.0, 0.0], top_k=2, metric="euclidean", exact=True)
+        assert [(row["type"], row["id"]) for row in cosine] == [("A", "a"), ("B", "b")]
+        assert [(row["type"], row["id"]) for row in euclidean] == [("B", "b"), ("A", "a")]
 
     def test_euclidean_index(self):
         # Stored-vector query (see test_recall_vs_exact) for a stable recall gate.

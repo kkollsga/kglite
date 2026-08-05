@@ -6,7 +6,7 @@ use crate::graph::schema::{CurrentSelection, DirGraph, EmbeddingStore};
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use std::borrow::Cow;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BTreeSet, BinaryHeap, HashSet};
 
 /// Distance metric for vector similarity search.
 #[derive(Clone, Copy, Debug)]
@@ -52,6 +52,10 @@ pub struct VectorSearchOptions {
     pub metric: DistanceMetric,
     /// Force a full exact scan, bypassing any HNSW index (default `false`).
     pub exact: bool,
+    /// Resolve the metric from embedding stores represented by the selection.
+    /// Set through [`Self::with_stored_metric`]; explicit metrics remain the
+    /// default for direct Rust callers.
+    use_stored_metric: bool,
 }
 
 impl Default for VectorSearchOptions {
@@ -60,6 +64,7 @@ impl Default for VectorSearchOptions {
             top_k: 10,
             metric: DistanceMetric::Cosine,
             exact: false,
+            use_stored_metric: false,
         }
     }
 }
@@ -73,6 +78,14 @@ impl VectorSearchOptions {
     /// Set the distance metric.
     pub fn with_metric(mut self, metric: DistanceMetric) -> Self {
         self.metric = metric;
+        self.use_stored_metric = false;
+        self
+    }
+    /// Use the unique stored metric represented by the current selection.
+    /// Falls back to cosine when no selected embedding store supplies a metric
+    /// and rejects selections whose contributing stores disagree.
+    pub fn with_stored_metric(mut self) -> Self {
+        self.use_stored_metric = true;
         self
     }
     /// Force an exact full scan (bypass HNSW).
@@ -94,6 +107,50 @@ const HNSW_AUTO_MIN: usize = 256;
 /// dropping any that fall outside the (possibly filtered) selection, `top_k`
 /// survive. If too few survive, the caller falls back to an exact scan.
 const HNSW_OVERSAMPLE: usize = 4;
+
+fn parse_stored_metric(metric: &str) -> Result<DistanceMetric, String> {
+    DistanceMetric::from_name(metric).ok_or_else(|| {
+        format!(
+            "Embedding store uses unknown metric '{metric}'. Expected cosine, dot_product, euclidean, or poincare."
+        )
+    })
+}
+
+fn resolve_metric_from_nodes(
+    graph: &DirGraph,
+    nodes: impl Iterator<Item = NodeIndex>,
+    embedding_property: &str,
+) -> Result<DistanceMetric, String> {
+    let mut seen_types = BTreeSet::new();
+    let mut metrics = BTreeSet::new();
+    for node in nodes {
+        let Some(node_type_key) = GraphRead::node_type_of(&graph.graph, node) else {
+            continue;
+        };
+        if seen_types.contains(&node_type_key) {
+            continue;
+        }
+        let node_type = graph.interner.resolve(node_type_key);
+        let key = (node_type.to_string(), embedding_property.to_string());
+        let Some(store) = graph.embeddings.get(&key) else {
+            seen_types.insert(node_type_key);
+            continue;
+        };
+        if store.get_embedding(node.index()).is_none() {
+            continue;
+        }
+        seen_types.insert(node_type_key);
+        metrics.insert(store.metric.as_deref().unwrap_or("cosine"));
+    }
+
+    if metrics.len() > 1 {
+        return Err(format!(
+            "Selected embedding stores use multiple stored metrics ({}); pass metric= explicitly",
+            metrics.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    parse_stored_metric(metrics.into_iter().next().unwrap_or("cosine"))
+}
 
 /// Perform vector search over the current selection.
 ///
@@ -119,6 +176,7 @@ pub fn vector_search(
         top_k,
         metric,
         exact,
+        use_stored_metric,
     } = *options;
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena, which must run under a DiskQueryGuard (arena protocol in
@@ -180,6 +238,17 @@ pub fn vector_search(
                 })
             })
     });
+
+    let metric = if use_stored_metric {
+        match single_type {
+            Some((_, store)) => parse_stored_metric(store.metric.as_deref().unwrap_or("cosine"))?,
+            None => {
+                resolve_metric_from_nodes(graph, candidates.iter().copied(), embedding_property)?
+            }
+        }
+    } else {
+        metric
+    };
 
     let results = if let Some((node_type, store)) = single_type {
         // Validate query vector dimension

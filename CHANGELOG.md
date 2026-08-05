@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Mixed-type vector search no longer chooses a stored distance metric from
+  randomized map iteration.** When `metric` is omitted, only embedding stores
+  contributing selected vectors participate; searches use their unique metric,
+  fall back to cosine when none contributes, and require an explicit metric
+  when selected stores disagree.
 - **Community-detection modularity now reports the complete Newman score.**
   Louvain, Leiden, and label propagation include the expected-degree term for
   non-edges and honor connection-type and node-scope filters when scoring the
