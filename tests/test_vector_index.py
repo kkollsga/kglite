@@ -151,6 +151,36 @@ class TestAutoUseAndRecall:
         exact = _ids(sub2.vector_search("summary", q, top_k=5, exact=True))
         assert got == exact
 
+    def test_mixed_embedded_types_use_global_exact_ranking(self):
+        g = kglite.KnowledgeGraph()
+        for node_type in ("A", "B"):
+            g.add_nodes(
+                pd.DataFrame(
+                    {
+                        "id": list(range(300)),
+                        "title": [f"{node_type}{i}" for i in range(300)],
+                        "summary": [f"text {node_type}{i}" for i in range(300)],
+                    }
+                ),
+                node_type,
+                "id",
+                "title",
+            )
+        g.set_embeddings("A", "summary", {i: [float(2 * i), 0.0] for i in range(300)}, metric="euclidean")
+        g.set_embeddings("B", "summary", {i: [float(2 * i + 1), 0.0] for i in range(300)}, metric="euclidean")
+
+        expected = [("A", 0), ("B", 0), ("A", 1), ("B", 1), ("A", 2), ("B", 2), ("A", 3), ("B", 3), ("A", 4), ("B", 4)]
+        selected = g.select("A").union(g.select("B"))
+        exact = selected.vector_search("summary", [0.0, 0.0], top_k=10, metric="euclidean", exact=True)
+        assert [(row["type"], row["id"]) for row in exact] == expected
+
+        g.build_vector_index("A", "summary", metric="euclidean")
+        g.build_vector_index("B", "summary", metric="euclidean")
+        approximate = (
+            g.select("A").union(g.select("B")).vector_search("summary", [0.0, 0.0], top_k=10, metric="euclidean")
+        )
+        assert [(row["type"], row["id"]) for row in approximate] == expected
+
     def test_euclidean_index(self):
         # Stored-vector query (see test_recall_vs_exact) for a stable recall gate.
         g, emb = _build_graph(n=2000, metric="euclidean")
@@ -274,6 +304,38 @@ class TestHnswInCypher:
         g.build_vector_index("Doc", "summary")
         got = [r["id"] for r in g.cypher(QF, params={"q": q})]
         assert got == exact  # filtered subset → exact result preserved
+
+    def test_cypher_mixed_unembedded_rows_do_not_suppress_exact_fallback(self):
+        embedded = 320
+        unembedded = 320
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame(
+                {
+                    "id": list(range(embedded + unembedded)),
+                    "title": [f"n{i}" for i in range(embedded + unembedded)],
+                    "summary": [f"text {i}" for i in range(embedded + unembedded)],
+                }
+            ),
+            "Doc",
+            "id",
+            "title",
+        )
+        vectors = {i: [float(i), 0.0] for i in range(embedded)}
+        g.set_embeddings("Doc", "summary", vectors, metric="euclidean")
+        query = [0.0, 0.0]
+        mixed_query = (
+            "MATCH (d:Doc) WHERE d.id >= 32 "
+            "RETURN d.id AS id, vector_score(d,'summary_emb',$q,'euclidean') AS s "
+            "ORDER BY s DESC LIMIT 5"
+        )
+
+        exact = [row["id"] for row in g.cypher(mixed_query, params={"q": query})]
+        assert exact == [32, 33, 34, 35, 36]
+
+        g.build_vector_index("Doc", "summary", metric="euclidean")
+        approximate = [row["id"] for row in g.cypher(mixed_query, params={"q": query})]
+        assert approximate == exact
 
     def test_text_score_uses_index(self):
         # text_score rewrites to vector_score, so it rides the same fast path.

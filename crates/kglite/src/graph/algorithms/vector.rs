@@ -5,6 +5,7 @@ use super::hnsw::{HnswIndex, HnswMetric};
 use crate::graph::schema::{CurrentSelection, DirGraph, EmbeddingStore};
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
+use std::borrow::Cow;
 use std::collections::{BinaryHeap, HashSet};
 
 /// Distance metric for vector similarity search.
@@ -128,24 +129,56 @@ pub fn vector_search(
         return Ok(Vec::new());
     }
 
-    let candidates: Vec<NodeIndex> = selection
-        .get_level(level_count - 1)
-        .map(|l| l.get_all_nodes())
-        .unwrap_or_default();
-
-    if candidates.is_empty() || top_k == 0 {
+    let level = match selection.get_level(level_count - 1) {
+        Some(level) => level,
+        None => return Ok(Vec::new()),
+    };
+    if level.node_count() == 0 || top_k == 0 {
         return Ok(Vec::new());
     }
 
-    // Fast path: check if first candidate's type has an embedding store (common after type_filter)
-    let first_type: Option<&str> = graph
-        .graph
-        .node_weight(candidates[0])
-        .map(|n| n.node_type_str(&graph.interner));
+    // A normal select/filter/set-operation level has one group. Borrow its
+    // contiguous node slice directly so the common vector-search path does not
+    // clone O(N) candidates before inspecting them; multi-parent traversal
+    // levels retain the established flattened owned shape.
+    let candidates: Cow<'_, [NodeIndex]> = {
+        let mut groups = level.iter_groups();
+        match (groups.next(), groups.next()) {
+            (Some((_, nodes)), None) => Cow::Borrowed(nodes.as_slice()),
+            _ => Cow::Owned(level.get_all_nodes()),
+        }
+    };
+    let first_candidate = candidates[0];
+    let first_type = GraphRead::node_type_of(&graph.graph, first_candidate);
+    let tentative_single_type = first_type.and_then(|node_type| {
+        let node_type = graph.interner.resolve(node_type);
+        let key = (node_type.to_string(), embedding_property.to_string());
+        graph.embeddings.get(&key).map(|store| (node_type, store))
+    });
 
-    let single_type = first_type.and_then(|ft| {
-        let key = (ft.to_string(), embedding_property.to_string());
-        graph.embeddings.get(&key).map(|store| (ft, store))
+    // Type selections preserve embedding insertion order. Exact slot identity
+    // proves coverage and single-store eligibility without backend type reads
+    // or membership allocation; borrowing above replaces the old candidate
+    // clone with this comparison instead of adding a second O(N) pass.
+    let ordered_whole_store = tentative_single_type.is_some_and(|(_, store)| {
+        candidates.len() == store.len()
+            && candidates
+                .iter()
+                .zip(&store.slot_to_node)
+                .all(|(candidate, &stored)| candidate.index() == stored)
+    });
+
+    // Looking at the first row alone drops other embedded types from a union
+    // selection. Non-contiguous shapes therefore prove type homogeneity with
+    // granular primary-type reads before entering the single-store branch.
+    let single_type = tentative_single_type.filter(|_| {
+        ordered_whole_store
+            || first_type.is_some_and(|expected| {
+                candidates.iter().all(|&candidate| {
+                    GraphRead::node_type_of(&graph.graph, candidate)
+                        .is_none_or(|node_type| node_type == expected)
+                })
+            })
     });
 
     let results = if let Some((node_type, store)) = single_type {
@@ -173,7 +206,15 @@ pub fn vector_search(
                     && candidates.len() >= HNSW_AUTO_MIN
                     && candidates.len().saturating_mul(2) >= store.len();
                 if eligible {
-                    hnsw_search(store, idx, &candidates, query_vector, top_k, &scorer)
+                    hnsw_search(
+                        store,
+                        idx,
+                        candidates.as_ref(),
+                        ordered_whole_store,
+                        query_vector,
+                        top_k,
+                        &scorer,
+                    )
                 } else {
                     None
                 }
@@ -192,7 +233,7 @@ pub fn vector_search(
         let scorer = Scorer::new(metric, query_vector);
         let mut heap = MinHeap::with_capacity(top_k);
 
-        for &node_idx in &candidates {
+        for &node_idx in candidates.iter() {
             let node_type = match graph.graph.node_weight(node_idx) {
                 Some(n) => n.node_type_str(&graph.interner),
                 None => continue,
@@ -236,22 +277,33 @@ pub fn vector_search(
 /// Returns `None` to signal "fall back to an exact scan" when a selective filter
 /// leaves fewer than `top_k` survivors — guaranteeing correctness when the
 /// filter is tight enough that the index's over-fetch wasn't sufficient.
+///
+/// Exact whole-store coverage is deliberately factored into
+/// [`store_is_fully_selected`]. Any future fast path that scans the embedding
+/// store contiguously instead of walking the selection must use the same gate.
 fn hnsw_search(
     store: &EmbeddingStore,
     idx: &HnswIndex,
     candidates: &[NodeIndex],
+    ordered_whole_store: bool,
     query: &[f32],
     top_k: usize,
     scorer: &Scorer,
 ) -> Option<Vec<VectorSearchResult>> {
-    let whole_store = candidates.len() >= store.len();
-    // Membership test for the filtered case; skipped when the selection is the
-    // whole store (every slot trivially qualifies).
-    let membership: Option<HashSet<usize>> = if whole_store {
+    // Candidate collection already proved the common ordered whole-store
+    // shape. Every other shape builds membership once and reuses it both for
+    // exact coverage and for filtering HNSW results.
+    let membership: Option<HashSet<usize>> = if ordered_whole_store {
         None
     } else {
-        Some(candidates.iter().map(|n| n.index()).collect())
+        let selected: HashSet<usize> = candidates.iter().map(|n| n.index()).collect();
+        if store_is_fully_selected(store, |node| selected.contains(&node)) {
+            None
+        } else {
+            Some(selected)
+        }
     };
+    let whole_store = membership.is_none();
 
     let query_norm = dot_product(query, query).sqrt();
     let k_fetch = top_k
@@ -291,6 +343,20 @@ fn hnsw_search(
         return None;
     }
     Some(results)
+}
+
+/// Whether a selection contains every node represented by `store`.
+///
+/// Cardinality alone is insufficient: a same-sized mixed selection can omit
+/// embedded nodes and replace them with unrelated, unembedded, or duplicate
+/// nodes. Enumerating `slot_to_node` makes coverage exact. Callers supply their
+/// existing membership structure, so Cypher's node-to-row map needs no extra
+/// allocation and fluent HNSW can reuse its filter set.
+pub(crate) fn store_is_fully_selected(
+    store: &EmbeddingStore,
+    contains_node: impl Fn(usize) -> bool,
+) -> bool {
+    store.slot_to_node.iter().copied().all(contains_node)
 }
 
 // ─── Similarity Functions ──────────────────────────────────────────────────────
@@ -706,6 +772,192 @@ fn parallel_search(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::datatypes::Value;
+    use crate::graph::algorithms::hnsw::HnswParams;
+    use crate::graph::schema::NodeData;
+    use crate::graph::storage::GraphWrite;
+    use std::collections::HashMap;
+
+    fn selection_of(nodes: Vec<NodeIndex>) -> CurrentSelection {
+        let mut selection = CurrentSelection::new();
+        selection
+            .get_level_mut(0)
+            .expect("initial selection level")
+            .add_selection(None, nodes);
+        selection
+    }
+
+    #[test]
+    fn hnsw_mixed_selection_never_returns_unselected_store_nodes() {
+        const DOCS: usize = 320;
+        const OMITTED_DOCS: usize = 32;
+        const UNEMBEDDED: usize = 320;
+
+        let mut graph = DirGraph::new();
+        let mut docs = Vec::with_capacity(DOCS);
+        for id in 0..DOCS {
+            let node = NodeData::new(
+                Value::Int64(id as i64),
+                Value::String(format!("Doc {id}")),
+                "Doc".to_string(),
+                HashMap::new(),
+                &mut graph.interner,
+            );
+            let idx = GraphWrite::add_node(&mut graph.graph, node);
+            graph
+                .type_indices
+                .entry_or_default("Doc".to_string())
+                .push(idx);
+            docs.push(idx);
+        }
+
+        let mut unembedded = Vec::with_capacity(UNEMBEDDED);
+        for id in 0..UNEMBEDDED {
+            let node = NodeData::new(
+                Value::Int64(id as i64),
+                Value::String(format!("Other {id}")),
+                "Doc".to_string(),
+                HashMap::new(),
+                &mut graph.interner,
+            );
+            let idx = GraphWrite::add_node(&mut graph.graph, node);
+            graph
+                .type_indices
+                .entry_or_default("Doc".to_string())
+                .push(idx);
+            unembedded.push(idx);
+        }
+
+        let mut store = EmbeddingStore::with_metric(2, "euclidean");
+        for (id, &node) in docs.iter().enumerate() {
+            store.set_embedding(node.index(), &[id as f32, 0.0]);
+        }
+        store
+            .build_index(DistanceMetric::Euclidean, HnswParams::default(), 7)
+            .expect("build HNSW index");
+        graph
+            .embeddings
+            .insert(("Doc".to_string(), "summary_emb".to_string()), store);
+
+        let selected_docs = docs[OMITTED_DOCS..].to_vec();
+        let mut mixed_nodes = selected_docs.clone();
+        mixed_nodes.extend(unembedded);
+        assert!(mixed_nodes.len() >= DOCS);
+        let store = graph
+            .embeddings
+            .get(&("Doc".to_string(), "summary_emb".to_string()))
+            .expect("inserted embedding store");
+        let mixed_store_members: HashSet<usize> =
+            mixed_nodes.iter().map(|node| node.index()).collect();
+        assert!(!store_is_fully_selected(store, |node| {
+            mixed_store_members.contains(&node)
+        }));
+        let whole_store_members: HashSet<usize> = docs.iter().map(|node| node.index()).collect();
+        assert!(store_is_fully_selected(store, |node| {
+            whole_store_members.contains(&node)
+        }));
+        let duplicate_candidates = vec![docs[OMITTED_DOCS]; DOCS];
+        let duplicate_nodes: HashSet<usize> = duplicate_candidates
+            .iter()
+            .map(|node| node.index())
+            .collect();
+        assert!(
+            !store_is_fully_selected(store, |node| duplicate_nodes.contains(&node)),
+            "duplicate candidates cannot stand in for omitted store nodes"
+        );
+        let mixed_members: HashSet<NodeIndex> = mixed_nodes.iter().copied().collect();
+        let query = [0.0, 0.0];
+        let options = VectorSearchOptions::default()
+            .with_top_k(5)
+            .with_metric(DistanceMetric::Euclidean);
+
+        let mixed = vector_search(
+            &graph,
+            &selection_of(mixed_nodes.clone()),
+            "summary_emb",
+            &query,
+            &options,
+        )
+        .expect("mixed approximate search");
+        assert_eq!(mixed.len(), 5);
+        assert!(
+            mixed
+                .iter()
+                .all(|result| mixed_members.contains(&result.node_idx)),
+            "mixed HNSW results escaped the current selection: {:?}",
+            mixed
+                .iter()
+                .map(|result| result.node_idx)
+                .collect::<Vec<_>>()
+        );
+
+        let mixed_exact = vector_search(
+            &graph,
+            &selection_of(mixed_nodes),
+            "summary_emb",
+            &query,
+            &options.clone().with_exact(true),
+        )
+        .expect("mixed exact search");
+        assert_eq!(mixed_exact.len(), 5);
+        assert_eq!(mixed_exact[0].node_idx, docs[OMITTED_DOCS]);
+        assert!(mixed_exact
+            .iter()
+            .all(|result| mixed_members.contains(&result.node_idx)));
+
+        let filtered_members: HashSet<NodeIndex> = selected_docs.iter().copied().collect();
+        let filtered = vector_search(
+            &graph,
+            &selection_of(selected_docs.clone()),
+            "summary_emb",
+            &query,
+            &options,
+        )
+        .expect("filtered approximate search");
+        assert_eq!(filtered.len(), 5);
+        assert!(filtered
+            .iter()
+            .all(|result| filtered_members.contains(&result.node_idx)));
+
+        let exact = vector_search(
+            &graph,
+            &selection_of(selected_docs),
+            "summary_emb",
+            &query,
+            &options.clone().with_exact(true),
+        )
+        .expect("filtered exact search");
+        assert_eq!(exact.len(), 5);
+        assert_eq!(exact[0].node_idx, docs[OMITTED_DOCS]);
+
+        let whole = vector_search(
+            &graph,
+            &selection_of(docs.clone()),
+            "summary_emb",
+            &query,
+            &options,
+        )
+        .expect("whole-store approximate search");
+        let whole_members: HashSet<NodeIndex> = docs.iter().copied().collect();
+        assert_eq!(whole.len(), 5);
+        assert!(whole
+            .iter()
+            .all(|result| whole_members.contains(&result.node_idx)));
+
+        let whole_exact = vector_search(
+            &graph,
+            &selection_of(docs.clone()),
+            "summary_emb",
+            &query,
+            &options.with_exact(true),
+        )
+        .expect("whole-store exact search");
+        assert_eq!(whole_exact.len(), 5);
+        assert_eq!(whole_exact[0].node_idx, docs[0]);
+        assert!(whole_exact
+            .iter()
+            .all(|result| whole_members.contains(&result.node_idx)));
+    }
 
     #[test]
     fn test_cosine_similarity_identical() {

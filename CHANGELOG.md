@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   second time. The 10,000-node update gate is 16–27% faster on disk, with no
   memory or mapped regression and exact parity across all three backends.
 
+### Fixed
+
+- **Vector search now dispatches mixed selections correctly.** A same-sized
+  selection that omitted embedded nodes but included unrelated or unembedded
+  nodes could be mistaken for the whole embedding store, allowing fluent HNSW
+  search to return an omitted node or a fused Cypher top-k to return fewer than
+  its limit. Selections spanning multiple embedded types also now rank across
+  every type instead of silently returning only the first candidate's type,
+  including with `exact=True`.
+
 ## [0.15.5] - 2026-07-31
 
 ### Added

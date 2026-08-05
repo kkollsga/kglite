@@ -390,34 +390,53 @@ impl<'a> CypherExecutor<'a> {
             None => None,
         };
 
+        // Resolve the first row's store before building membership. This lets
+        // the existing row walk prove the common ordered whole-store shape by
+        // comparing each binding with the parallel slot_to_node entry, without
+        // a second store-sized HashMap lookup pass.
+        let first_idx = match first_row.node_bindings.get(&var) {
+            Some(&idx) => idx,
+            None => return Ok(None),
+        };
+        let node_type = match self.graph.graph.node_weight(first_idx) {
+            Some(node) => node.node_type_str(&self.graph.interner).to_string(),
+            None => return Ok(None),
+        };
+        let store = match self.graph.embedding_store(&node_type, &prop) {
+            Some(store) => store,
+            None => return Ok(None),
+        };
+
         // Membership + node→row map. Bail on a row that doesn't bind `var`, a
         // mixed type, or a duplicate node (the exact path handles those).
         let mut node_to_row: HashMap<usize, usize> = HashMap::with_capacity(result_set.rows.len());
-        let mut node_type: Option<String> = None;
-        for (ri, row) in result_set.rows.iter().enumerate() {
+        node_to_row.insert(first_idx.index(), 0);
+        let mut ordered_whole_store = result_set.rows.len() == store.len()
+            && store.slot_to_node.first() == Some(&first_idx.index());
+        for (ri, row) in result_set.rows.iter().enumerate().skip(1) {
             let idx = match row.node_bindings.get(&var) {
                 Some(&i) => i,
                 None => return Ok(None),
             };
+            if ordered_whole_store && store.slot_to_node.get(ri) == Some(&idx.index()) {
+                if node_to_row.insert(idx.index(), ri).is_some() {
+                    return Ok(None); // duplicate node binding
+                }
+                continue;
+            }
+            ordered_whole_store = false;
             let nt = match self.graph.graph.node_weight(idx) {
                 Some(n) => n.node_type_str(&self.graph.interner).to_string(),
                 None => return Ok(None),
             };
-            match &node_type {
-                None => node_type = Some(nt),
-                Some(t) if *t != nt => return Ok(None),
-                _ => {}
+            if nt != node_type {
+                return Ok(None);
             }
             if node_to_row.insert(idx.index(), ri).is_some() {
                 return Ok(None); // duplicate node binding
             }
         }
-        let node_type = node_type.unwrap(); // rows are non-empty here
 
-        let store = match self.graph.embedding_store(&node_type, &prop) {
-            Some(s) => s,
-            None => return Ok(None),
-        };
         let index = match store.index.as_ref() {
             Some(i) => i,
             None => return Ok(None), // no index → exact path
@@ -440,7 +459,9 @@ impl<'a> CypherExecutor<'a> {
         // HNSW search → membership filter → re-score for exact score scale.
         let scorer = vs::Scorer::new(metric, &query_vec);
         let query_norm = vs::dot_product(&query_vec, &query_vec).sqrt();
-        let whole_store = node_to_row.len() >= store.len();
+        let whole_store = ordered_whole_store
+            || (node_to_row.len() >= store.len()
+                && vs::store_is_fully_selected(store, |node| node_to_row.contains_key(&node)));
         let k_fetch = limit.saturating_mul(4).max(limit).min(store.len());
         let ef = k_fetch.max(index.params().ef_search);
         let raw = index.search(

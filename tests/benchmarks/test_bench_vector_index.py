@@ -202,6 +202,41 @@ def test_bench_hnsw_search(benchmark, vector_corpus):
 
 
 @pytest.mark.benchmark
+def test_bench_cypher_fused_hnsw_whole_store(benchmark, vector_corpus):
+    """Fused Cypher top-k over every node represented by the HNSW store."""
+    _ensure_index(vector_corpus)
+    query_id = vector_corpus.query_ids[len(vector_corpus.query_ids) // 2]
+    expected = vector_corpus.oracle_ids(query_id)
+    query = (
+        "MATCH (n:Doc) RETURN n.id AS id, vector_score(n, 'summary_emb', $query) AS score ORDER BY score DESC LIMIT 10"
+    )
+    params = {"query": vector_corpus.query(query_id).tolist()}
+
+    def search() -> list[dict]:
+        return vector_corpus.graph.cypher(query, params=params).to_list()
+
+    rows = benchmark.pedantic(
+        search,
+        rounds=SEARCH_ROUNDS,
+        iterations=1,
+        warmup_rounds=SEARCH_WARMUP_ROUNDS,
+    )
+    actual = [int(row["id"]) for row in rows]
+    scores = [float(row["score"]) for row in rows]
+    recall = len(set(actual) & set(expected)) / TOP_K
+
+    assert len(actual) == TOP_K
+    assert len(set(actual)) == TOP_K
+    assert set(actual) <= vector_corpus.selected_ids
+    assert actual[0] == expected[0]
+    assert scores == sorted(scores, reverse=True)
+    assert recall > RECALL_FLOOR, f"fused Cypher HNSW recall@{TOP_K} too low: {recall:.3f}"
+    benchmark.extra_info["recall_at_10"] = recall
+    benchmark.extra_info["dimension"] = DIMENSION
+    benchmark.extra_info["vectors"] = len(vector_corpus.selected_ids)
+
+
+@pytest.mark.benchmark
 def test_bench_exact_vector_search(benchmark, vector_corpus):
     """Exact scan control for the same stored-vector query and selection."""
     query_id = vector_corpus.query_ids[len(vector_corpus.query_ids) // 2]
