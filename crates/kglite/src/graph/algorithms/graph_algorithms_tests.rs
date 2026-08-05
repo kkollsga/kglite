@@ -2,7 +2,7 @@ use super::*;
 use crate::datatypes::values::Value;
 use crate::graph::schema::{DirGraph, EdgeData, InternedKey, NodeData};
 use crate::graph::storage::GraphWrite;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Build a linear graph: A -> B -> C -> D -> E
 fn build_chain_graph() -> (DirGraph, Vec<petgraph::graph::NodeIndex>) {
@@ -383,6 +383,40 @@ fn test_wcc_scoped_to_node_type_and_relationship() {
 // ========================================================================
 // coreness (k-core) + clustering coefficient
 // ========================================================================
+
+fn intersection_count_gt_hashset_oracle(a: &[u32], b: &[u32], gt: u32) -> u64 {
+    let eligible: HashSet<u32> = a.iter().copied().filter(|value| *value > gt).collect();
+    b.iter()
+        .filter(|value| **value > gt && eligible.contains(value))
+        .count() as u64
+}
+
+#[test]
+fn intersection_count_gt_matches_hashset_at_boundaries() {
+    let cases: &[(&[u32], &[u32], u32)] = &[
+        (&[], &[], 0),
+        (&[], &[1], 0),
+        (&[0, 1, 2], &[0, 1, 2], 0),
+        (&[0, 1, 2], &[0, 1, 2], 1),
+        (&[0, 1, 2], &[0, 1, 2], 2),
+        (&[0, 2, 4, 6, 8], &[1, 2, 3, 4, 7, 8], 3),
+        (&[1, 3, 5, 7, 9], &[0, 1, 4, 5, 8, 9], 0),
+        (
+            &[u32::MAX - 1, u32::MAX],
+            &[u32::MAX - 1, u32::MAX],
+            u32::MAX - 1,
+        ),
+        (&[u32::MAX], &[u32::MAX], u32::MAX),
+    ];
+
+    for &(a, b, gt) in cases {
+        assert_eq!(
+            intersection_count_gt(a, b, gt),
+            intersection_count_gt_hashset_oracle(a, b, gt),
+            "a={a:?}, b={b:?}, gt={gt}"
+        );
+    }
+}
 
 #[test]
 fn test_coreness_triangle_all_two() {

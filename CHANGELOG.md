@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Clustering and triangle counting skip sorted-neighbor prefixes that cannot
+  intersect.** Clustering is 12% faster on the dense gate and 80–81% faster on
+  the sparse hub gate, with exact HashSet-oracle parity.
 - **Bulk `degrees()` no longer opens query guards and materializes full nodes
   once per selected row.** On the 10,000-node ring gate this is 6–18% faster
   in memory and 49–51% faster on disk than the 0.15.5 wheel, with exact

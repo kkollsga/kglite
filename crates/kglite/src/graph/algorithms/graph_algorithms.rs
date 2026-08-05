@@ -1635,18 +1635,17 @@ pub fn diameter_scoped(
 }
 
 /// Count elements common to two sorted slices that are strictly greater than
-/// `gt`. Linear merge.
+/// `gt`. Binary-searches to the eligible suffixes, then uses a linear merge.
 fn intersection_count_gt(a: &[u32], b: &[u32], gt: u32) -> u64 {
-    let (mut i, mut j) = (0usize, 0usize);
+    let mut i = a.partition_point(|&value| value <= gt);
+    let mut j = b.partition_point(|&value| value <= gt);
     let mut count = 0u64;
     while i < a.len() && j < b.len() {
         match a[i].cmp(&b[j]) {
             std::cmp::Ordering::Less => i += 1,
             std::cmp::Ordering::Greater => j += 1,
             std::cmp::Ordering::Equal => {
-                if a[i] > gt {
-                    count += 1;
-                }
+                count += 1;
                 i += 1;
                 j += 1;
             }

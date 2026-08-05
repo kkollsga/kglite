@@ -252,6 +252,18 @@ def test_clustering_matches_hashset_oracle() -> None:
     assert actual == pytest.approx(expected, abs=1e-15)
 
 
+def test_clustering_benchmark_cases_match_hashset_oracle(
+    dense_clustering_case: GraphCase,
+    sparse_clustering_case: GraphCase,
+) -> None:
+    """Keep both timed fixture shapes non-vacuous and exact."""
+    for case in (dense_clustering_case, sparse_clustering_case):
+        expected = _clustering_oracle(case)
+        actual = {int(row["id"]): float(row["coefficient"]) for row in _clustering_rows(case.graph)}
+        assert actual == pytest.approx(expected, abs=1e-15)
+        assert any(coefficient > 0.0 for coefficient in expected.values())
+
+
 @pytest.mark.parametrize("node_count", [127, 4_097], ids=["sequential", "parallel"])
 def test_pagerank_matches_scalar_oracle(node_count: int) -> None:
     case = _pagerank_case(node_count)
@@ -357,7 +369,7 @@ def test_coreness_matches_slow_peel() -> None:
 def test_bench_clustering_dense(benchmark, dense_clustering_case: GraphCase) -> None:
     rows = benchmark(_clustering_rows, dense_clustering_case.graph)
     assert len(rows) == dense_clustering_case.node_count
-    assert all(0.0 <= float(row["coefficient"]) <= 1.0 for row in rows)
+    assert all(0.0 < float(row["coefficient"]) <= 1.0 for row in rows)
 
 
 @pytest.mark.benchmark
