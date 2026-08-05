@@ -1,9 +1,10 @@
 """Release-mode coverage for disk query-guard overhead.
 
 The disk backend protects arena-backed materializations with a query guard.
-These cells cover three shapes where redundant or nested guards are visible:
+These cells cover four shapes where redundant or nested guards are visible:
 
 * ``degrees()`` performs guarded node-info and adjacency reads for every node;
+* an in-memory ``degrees()`` control catches backend-neutral regressions;
 * same-node shortest-path length makes the fixed guard cost large relative to
   the algorithm work; and
 * fluent ``update()`` sends all selected nodes through the bulk property
@@ -40,9 +41,8 @@ MUTATION_ROUNDS = 5
 MUTATION_WARMUP_ROUNDS = 1
 
 
-def _publish_ring(root: Path, node_count: int) -> None:
-    """Publish a deterministic directed ring as a disk graph."""
-    graph = KnowledgeGraph(storage="disk", path=str(root))
+def _populate_ring(graph: KnowledgeGraph, node_count: int) -> None:
+    """Populate ``graph`` with a deterministic directed ring."""
     graph.add_nodes(
         pd.DataFrame(
             {
@@ -68,6 +68,12 @@ def _publish_ring(root: Path, node_count: int) -> None:
         "Node",
         "target",
     )
+
+
+def _publish_ring(root: Path, node_count: int) -> None:
+    """Publish a deterministic directed ring as a disk graph."""
+    graph = KnowledgeGraph(storage="disk", path=str(root))
+    _populate_ring(graph, node_count)
     graph.save(str(root), fsync=False)
 
 
@@ -81,6 +87,13 @@ def disk_guard_template(tmp_path_factory) -> Path:
 @pytest.fixture(scope="module")
 def disk_guard_graph(disk_guard_template) -> KnowledgeGraph:
     return kglite.load(str(disk_guard_template))
+
+
+@pytest.fixture(scope="module")
+def memory_guard_graph() -> KnowledgeGraph:
+    graph = KnowledgeGraph()
+    _populate_ring(graph, DISK_GUARD_NODES)
+    return graph
 
 
 @pytest.fixture(scope="module")
@@ -108,6 +121,22 @@ def test_disk_guard_result_oracle(disk_guard_oracle_graph):
 def test_bench_disk_degrees_10k(benchmark, disk_guard_graph):
     """Degree materialization for all 10k ring nodes."""
     selected = disk_guard_graph.select("Node")
+    expected = {f"Node {node_id}": 2 for node_id in range(DISK_GUARD_NODES)}
+
+    result = benchmark.pedantic(
+        selected.degrees,
+        rounds=READ_ROUNDS,
+        iterations=1,
+        warmup_rounds=READ_WARMUP_ROUNDS,
+    )
+
+    assert result == expected
+
+
+@pytest.mark.benchmark
+def test_bench_memory_degrees_10k(benchmark, memory_guard_graph):
+    """In-memory control for the same 10k-node degree materialization."""
+    selected = memory_guard_graph.select("Node")
     expected = {f"Node {node_id}": 2 for node_id in range(DISK_GUARD_NODES)}
 
     result = benchmark.pedantic(

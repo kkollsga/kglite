@@ -21,6 +21,40 @@ pub struct LevelValues {
     pub values: Vec<Vec<Value>>,
 }
 
+/// Collect `(title, degree)` rows for the current selection in iteration order.
+///
+/// The result is owned so the disk arena guard never escapes this bulk read.
+/// Using granular title reads and neighbour iterators also avoids retaining one
+/// materialized `NodeData`/`EdgeData` per selected node for the guard lifetime.
+pub fn get_node_degrees(graph: &DirGraph, selection: &CurrentSelection) -> Vec<(String, usize)> {
+    // One guard covers the complete disk read pass; memory/mapped return None.
+    let _arena_guard = graph.graph.begin_query();
+
+    selection
+        .current_node_indices()
+        .filter_map(|node_idx| {
+            let title = GraphRead::get_node_title(&graph.graph, node_idx)?;
+            let title = match title {
+                Value::String(title) => title,
+                other => format!("{other:?}"),
+            };
+            let degree = GraphRead::neighbors_directed(
+                &graph.graph,
+                node_idx,
+                petgraph::Direction::Outgoing,
+            )
+            .count()
+                + GraphRead::neighbors_directed(
+                    &graph.graph,
+                    node_idx,
+                    petgraph::Direction::Incoming,
+                )
+                .count();
+            Some((title, degree))
+        })
+        .collect()
+}
+
 pub fn get_nodes(
     graph: &DirGraph,
     selection: &CurrentSelection,
@@ -562,4 +596,62 @@ pub fn get_connections(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::schema::{EdgeData, NodeData};
+    use crate::graph::storage::GraphWrite;
+
+    #[test]
+    fn node_degrees_preserve_order_duplicates_and_edge_multiplicity() {
+        let mut graph = DirGraph::new();
+        let a = NodeData::new(
+            Value::Int64(1),
+            Value::String("same".to_string()),
+            "Node".to_string(),
+            HashMap::new(),
+            &mut graph.interner,
+        );
+        let b = NodeData::new(
+            Value::Int64(2),
+            Value::String("same".to_string()),
+            "Node".to_string(),
+            HashMap::new(),
+            &mut graph.interner,
+        );
+        let c_title = Value::Int64(7);
+        let c = NodeData::new(
+            Value::Int64(3),
+            c_title.clone(),
+            "Node".to_string(),
+            HashMap::new(),
+            &mut graph.interner,
+        );
+        let a = graph.graph.add_node(a);
+        let b = graph.graph.add_node(b);
+        let c = graph.graph.add_node(c);
+
+        for (source, target) in [(a, b), (a, b), (c, a), (a, a)] {
+            let edge = EdgeData::new("LINK".to_string(), HashMap::new(), &mut graph.interner);
+            graph.graph.add_edge(source, target, edge);
+        }
+
+        let mut selection = CurrentSelection::new();
+        selection
+            .get_level_mut(0)
+            .expect("initial selection level")
+            .add_selection(None, vec![a, b, c, a]);
+
+        assert_eq!(
+            get_node_degrees(&graph, &selection),
+            vec![
+                ("same".to_string(), 5),
+                ("same".to_string(), 2),
+                (format!("{c_title:?}"), 1),
+                ("same".to_string(), 5),
+            ]
+        );
+    }
 }

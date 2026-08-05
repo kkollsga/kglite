@@ -751,7 +751,7 @@ impl KnowledgeGraph {
             return Ok(result_dict.into());
         }
 
-        let level = self
+        let _level = self
             .cursor
             .selection
             .get_level(level_count - 1)
@@ -759,11 +759,10 @@ impl KnowledgeGraph {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No selection level")
             })?;
 
-        for node_idx in level.iter_node_indices() {
-            if let Some(info) = kglite_core::api::algorithms::get_node_info(&self.inner, node_idx) {
-                let degree = kglite_core::api::algorithms::node_degree(&self.inner, node_idx);
-                result_dict.set_item(&info.title, degree)?;
-            }
+        for (title, degree) in
+            kglite_core::api::fluent::get_node_degrees(&self.inner, &self.cursor.selection)
+        {
+            result_dict.set_item(title, degree)?;
         }
 
         Ok(result_dict.into())

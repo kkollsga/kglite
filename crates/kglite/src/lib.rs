@@ -215,8 +215,9 @@ pub mod api {
         };
         // Node/connection/property retrieval from a selection + result types.
         pub use crate::graph::core::data_retrieval::{
-            format_unique_values_for_storage, get_connections, get_nodes, get_property_values,
-            get_unique_values, LevelConnections, LevelNodes, LevelValues, UniqueValues,
+            format_unique_values_for_storage, get_connections, get_node_degrees, get_nodes,
+            get_property_values, get_unique_values, LevelConnections, LevelNodes, LevelValues,
+            UniqueValues,
         };
         // Aggregate statistics over selected nodes.
         pub use crate::graph::core::statistics::{

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`api::fluent::get_node_degrees`** collects owned title/degree rows for a
+  selection under one storage read pass, giving non-Python bindings the same
+  bulk primitive used by the wheel.
+
+### Changed
+
+- **Bulk `degrees()` no longer opens query guards and materializes full nodes
+  once per selected row.** On the 10,000-node ring gate this is 6–18% faster
+  in memory and 49–51% faster on disk than the 0.15.5 wheel, with exact
+  memory/mapped/disk parity.
+
 ## [0.15.5] - 2026-07-31
 
 ### Added

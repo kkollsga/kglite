@@ -181,6 +181,15 @@ def test_find_by_title_parity(graphs):
             assert len(results[mode]) == ref_len, f"find('{name}'): {mode} returned {len(results[mode])} vs {ref_len}"
 
 
+def test_degrees_parity(graphs):
+    """Bulk fluent degree materialization must agree across all backends."""
+    results = {mode: graphs[mode].select("Entity").degrees() for mode in STORAGE_MODES}
+    ref = results["memory"]
+    assert len(ref) == N_NODES
+    for mode in ("mapped", "disk"):
+        assert results[mode] == ref, f"degrees: {mode} diverged from memory"
+
+
 def test_schema_parity(graphs):
     """schema() must report the same node types + counts across modes."""
     schemas = {mode: graphs[mode].schema() for mode in STORAGE_MODES}
