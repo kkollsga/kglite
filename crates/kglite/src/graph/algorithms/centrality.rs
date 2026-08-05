@@ -146,6 +146,29 @@ impl<'a> CentralityOptions<'a> {
     }
 }
 
+/// Choose evenly spaced source indices for a sampled centrality algorithm.
+/// An explicit empty sample is invalid: Brandes would otherwise scale zero
+/// scores by infinity, while closeness would silently return no rows.
+fn sampled_source_indices(
+    node_count: usize,
+    sample_size: Option<usize>,
+) -> Result<Vec<usize>, String> {
+    let Some(sample_size) = sample_size else {
+        return Ok((0..node_count).collect());
+    };
+    if sample_size == 0 {
+        return Err("sample_size must be greater than 0".to_string());
+    }
+    let sample_size = sample_size.min(node_count);
+    if sample_size == node_count {
+        return Ok((0..node_count).collect());
+    }
+    let step = node_count as f64 / sample_size as f64;
+    Ok((0..sample_size)
+        .map(|i| (i as f64 * step) as usize)
+        .collect())
+}
+
 /// Tunable options for [`degree_centrality`]. Degree is exact and O(1) per
 /// node, so it has no `sample_size` knob (unlike [`CentralityOptions`]).
 #[derive(Clone)]
@@ -232,6 +255,7 @@ pub fn betweenness_centrality(
 
     let nodes: Vec<NodeIndex> = scoped_node_set(graph, scope);
     let n = nodes.len();
+    let source_indices = sampled_source_indices(n, sample_size)?;
 
     if n <= 2 {
         return Ok(nodes
@@ -277,22 +301,6 @@ pub fn betweenness_centrality(
         neighbors.sort_unstable();
         neighbors.dedup();
     }
-
-    // Determine which nodes to use as sources
-    // Use stride-based sampling to ensure even coverage across the graph,
-    // avoiding bias from sequential selection (e.g. first k nodes being
-    // Module/Class containers with no outgoing edges of the filtered type).
-    let source_indices: Vec<usize> = if let Some(k) = sample_size {
-        let k = k.min(n);
-        if k == n {
-            (0..n).collect()
-        } else {
-            let step = n as f64 / k as f64;
-            (0..k).map(|i| (i as f64 * step) as usize).collect()
-        }
-    } else {
-        (0..n).collect()
-    };
 
     // Parallel vs sequential Brandes' algorithm
     let use_parallel = n >= 4096;
@@ -791,6 +799,7 @@ pub fn closeness_centrality(
 
     let nodes: Vec<NodeIndex> = scoped_node_set(graph, scope);
     let n = nodes.len();
+    let source_indices = sampled_source_indices(n, sample_size)?;
 
     if n == 0 {
         return Ok(Vec::new());
@@ -830,20 +839,6 @@ pub fn closeness_centrality(
         neighbors.sort_unstable();
         neighbors.dedup();
     }
-
-    // Determine which nodes to use as sources.
-    // Stride-based sampling ensures even coverage across the graph.
-    let source_indices: Vec<usize> = if let Some(k) = sample_size {
-        let k = k.min(n);
-        if k == n {
-            (0..n).collect()
-        } else {
-            let step = n as f64 / k as f64;
-            (0..k).map(|i| (i as f64 * step) as usize).collect()
-        }
-    } else {
-        (0..n).collect()
-    };
 
     // Parallel path: each source BFS is independent, no shared accumulator
     let use_parallel = source_indices.len() >= 4096;

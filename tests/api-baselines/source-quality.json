@@ -91,15 +91,15 @@
     {
       "path": "crates/kglite/src/graph/algorithms/centrality.rs",
       "qualified_name": "crate::betweenness_centrality",
-      "lines": 290,
-      "branches": 26,
+      "lines": 275,
+      "branches": 25,
       "nesting": 6
     },
     {
       "path": "crates/kglite/src/graph/algorithms/centrality.rs",
       "qualified_name": "crate::closeness_centrality",
-      "lines": 261,
-      "branches": 20,
+      "lines": 248,
+      "branches": 19,
       "nesting": 5
     },
     {

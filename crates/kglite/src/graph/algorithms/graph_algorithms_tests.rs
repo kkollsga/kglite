@@ -568,6 +568,14 @@ fn test_betweenness_centrality_with_sampling() {
 }
 
 #[test]
+fn test_betweenness_rejects_zero_sample_size() {
+    let (graph, _) = build_chain_graph();
+    let err = betweenness_centrality(&graph, &CentralityOptions::default().with_sample_size(0))
+        .unwrap_err();
+    assert_eq!(err, "sample_size must be greater than 0");
+}
+
+#[test]
 fn test_degree_centrality() {
     let (graph, indices) = build_chain_graph();
     let results = degree_centrality(
@@ -616,6 +624,14 @@ fn test_closeness_centrality_chain() {
         .unwrap()
         .score;
     assert!(middle > end);
+}
+
+#[test]
+fn test_closeness_rejects_zero_sample_size() {
+    let (graph, _) = build_chain_graph();
+    let err = closeness_centrality(&graph, &CentralityOptions::default().with_sample_size(0))
+        .unwrap_err();
+    assert_eq!(err, "sample_size must be greater than 0");
 }
 
 #[test]

@@ -1,8 +1,9 @@
 """Tests for graph algorithms: shortest path, all paths, connected components, centrality."""
 
 import pandas as pd
+import pytest
 
-from kglite import KnowledgeGraph
+from kglite import KgError, KnowledgeGraph
 
 
 class TestShortestPath:
@@ -158,3 +159,8 @@ class TestCentrality:
     def test_closeness_centrality(self, social_graph):
         result = social_graph.closeness_centrality()
         assert result is not None
+
+    @pytest.mark.parametrize("method_name", ["betweenness_centrality", "closeness_centrality"])
+    def test_zero_sample_size_is_rejected(self, social_graph, method_name):
+        with pytest.raises(KgError, match="sample_size must be greater than 0"):
+            getattr(social_graph, method_name)(sample_size=0)
