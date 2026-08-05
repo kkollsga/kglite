@@ -301,20 +301,28 @@ pub fn vector_search(
         // Multi-type path: group by node type
         let scorer = Scorer::new(metric, query_vector);
         let mut heap = MinHeap::with_capacity(top_k);
+        let mut cached_type = None;
+        let mut cached_store = None;
 
         for &node_idx in candidates.iter() {
-            let node_type = match graph.graph.node_weight(node_idx) {
-                Some(n) => n.node_type_str(&graph.interner),
+            let node_type = match GraphRead::node_type_of(&graph.graph, node_idx) {
+                Some(node_type) => node_type,
                 None => continue,
             };
 
-            let key = (node_type.to_string(), embedding_property.to_string());
-            let store = match graph.embeddings.get(&key) {
+            if cached_type != Some(node_type) {
+                let node_type_name = graph.interner.resolve(node_type);
+                let key = (node_type_name.to_string(), embedding_property.to_string());
+                cached_store = graph.embeddings.get(&key);
+                cached_type = Some(node_type);
+            }
+            let store = match cached_store {
                 Some(s) => s,
                 None => continue,
             };
 
             if query_vector.len() != store.dimension {
+                let node_type = graph.interner.resolve(node_type);
                 return Err(format!(
                     "Query vector dimension {} does not match embedding dimension {} for '{}.{}'",
                     query_vector.len(),

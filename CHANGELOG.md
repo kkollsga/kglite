@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Multi-type exact vector search caches embedding-store resolution by
+  interned node type.** The measured two-store exact scans are 34–36% faster
+  with identical IDs, ordering, scores, and stored-metric behavior.
 - **HNSW traversal uses integer-specialized visited-set hashing.** Across the
   measured index configurations, builds are 7–19% faster and fixed-topology
   searches are 14–25% faster with unchanged ordered results and recall.
