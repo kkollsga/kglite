@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **HNSW traversal uses integer-specialized visited-set hashing.** Across the
+  measured index configurations, builds are 7–19% faster and fixed-topology
+  searches are 14–25% faster with unchanged ordered results and recall.
 - **Coreness reuses its final degree storage as the result and builds
   overwritten bookkeeping buffers directly.** The in-memory 2,048-node gate
   is 6–16% faster with exact memory, mapped, and disk parity.

@@ -333,6 +333,9 @@ def test_bench_hnsw_fixed_topology_visited_width(
     query_id = fixed_search_corpus.query_ids[len(fixed_search_corpus.query_ids) // 2]
     expected = fixed_search_corpus.oracle_ids(query_id, top_k)
     search = fixed_search_corpus.graph.select("Doc").vector_search
+    fixed_rows = search("summary", fixed_search_corpus.query(query_id), top_k=top_k)
+    fixed_ids = [int(row["id"]) for row in fixed_rows]
+    fixed_scores = [float(row["score"]) for row in fixed_rows]
 
     rows = benchmark.pedantic(
         search,
@@ -343,7 +346,10 @@ def test_bench_hnsw_fixed_topology_visited_width(
         warmup_rounds=SEARCH_WARMUP_ROUNDS,
     )
     actual = [int(row["id"]) for row in rows]
+    actual_scores = [float(row["score"]) for row in rows]
     timed_recall = len(set(actual) & set(expected)) / top_k
+    assert actual == fixed_ids
+    assert actual_scores == fixed_scores
     assert len(actual) == top_k
     assert len(set(actual)) == top_k
     assert set(actual) <= fixed_search_corpus.selected_ids

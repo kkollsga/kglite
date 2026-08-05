@@ -19,6 +19,7 @@
 
 use super::vector::{dot_product, neg_euclidean_distance, DistanceMetric};
 use rayon::prelude::*;
+use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::RwLock;
@@ -607,7 +608,7 @@ impl HnswIndex {
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
 
-        let mut visited = std::collections::HashSet::with_capacity(ef * 4);
+        let mut visited = FxHashSet::with_capacity_and_hasher(ef * 4, Default::default());
         // candidates: min-heap (nearest popped first).
         let mut candidates: BinaryHeap<Reverse<Cand>> = BinaryHeap::new();
         // w: max-heap (farthest popped first), the running result set bounded to ef.
@@ -764,7 +765,7 @@ fn search_layer_locked(
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
 
-    let mut visited = std::collections::HashSet::with_capacity(ef * 4);
+    let mut visited = FxHashSet::with_capacity_and_hasher(ef * 4, Default::default());
     let mut candidates: BinaryHeap<Reverse<Cand>> = BinaryHeap::new();
     let mut w: BinaryHeap<Cand> = BinaryHeap::new();
 
