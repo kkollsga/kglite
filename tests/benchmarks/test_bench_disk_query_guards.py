@@ -1,14 +1,16 @@
 """Release-mode coverage for disk query-guard overhead.
 
 The disk backend protects arena-backed materializations with a query guard.
-These cells cover four shapes where redundant or nested guards are visible:
+These cells cover six shapes where redundant or nested guards are
+performance-sensitive regression targets:
 
 * ``degrees()`` performs guarded node-info and adjacency reads for every node;
 * an in-memory ``degrees()`` control catches backend-neutral regressions;
 * same-node shortest-path length makes the fixed guard cost large relative to
   the algorithm work; and
 * fluent ``update()`` sends all selected nodes through the bulk property
-  updater, whose validation currently performs a guarded read per node.
+  updater, whose validation historically performed a guarded materialization
+  per node, with identical in-memory and mapped updates as comparison controls.
 
 Run after building the extension in release mode::
 
@@ -16,9 +18,9 @@ Run after building the extension in release mode::
     .venv/bin/python -m pytest \
         tests/benchmarks/test_bench_disk_query_guards.py -m benchmark -v
 
-The mutation cell uses a fresh copy of the published template for every timed
-round. Copying, loading, and selection construction happen in ``setup`` and
-are therefore outside the measurement.
+The mutation cells use an identical fresh graph for every timed round. Disk
+copying/loading and in-memory/mapped construction happen in ``setup`` and are
+therefore outside the measurement.
 """
 
 from __future__ import annotations
@@ -37,8 +39,8 @@ ORACLE_NODES = 32
 PATH_CALLS_PER_SAMPLE = 64
 READ_ROUNDS = 100
 READ_WARMUP_ROUNDS = 20
-MUTATION_ROUNDS = 5
-MUTATION_WARMUP_ROUNDS = 1
+MUTATION_ROUNDS = 100
+MUTATION_WARMUP_ROUNDS = 20
 
 
 def _populate_ring(graph: KnowledgeGraph, node_count: int) -> None:
@@ -183,6 +185,58 @@ def test_bench_disk_update_10k(benchmark, disk_guard_template, tmp_path):
         shutil.copytree(disk_guard_template, root)
         selected = kglite.load(str(root)).select("Node")
         return (selected,), {}
+
+    def update(selected: KnowledgeGraph):
+        return selected.update({"guard_marker": 1})
+
+    result = benchmark.pedantic(
+        update,
+        setup=setup,
+        rounds=MUTATION_ROUNDS,
+        iterations=1,
+        warmup_rounds=MUTATION_WARMUP_ROUNDS,
+    )
+
+    assert result["nodes_updated"] == DISK_GUARD_NODES
+    rows = result["graph"].cypher("MATCH (n:Node) WHERE n.guard_marker = 1 RETURN count(n) AS count").to_list()
+    assert rows == [{"count": DISK_GUARD_NODES}]
+
+
+@pytest.mark.benchmark
+@pytest.mark.slow
+def test_bench_memory_update_10k(benchmark):
+    """In-memory control for the same fresh-state 10k-node bulk update."""
+
+    def setup():
+        graph = KnowledgeGraph()
+        _populate_ring(graph, DISK_GUARD_NODES)
+        return (graph.select("Node"),), {}
+
+    def update(selected: KnowledgeGraph):
+        return selected.update({"guard_marker": 1})
+
+    result = benchmark.pedantic(
+        update,
+        setup=setup,
+        rounds=MUTATION_ROUNDS,
+        iterations=1,
+        warmup_rounds=MUTATION_WARMUP_ROUNDS,
+    )
+
+    assert result["nodes_updated"] == DISK_GUARD_NODES
+    rows = result["graph"].cypher("MATCH (n:Node) WHERE n.guard_marker = 1 RETURN count(n) AS count").to_list()
+    assert rows == [{"count": DISK_GUARD_NODES}]
+
+
+@pytest.mark.benchmark
+@pytest.mark.slow
+def test_bench_mapped_update_10k(benchmark):
+    """Mapped control for the same fresh-state 10k-node bulk update."""
+
+    def setup():
+        graph = KnowledgeGraph(storage="mapped")
+        _populate_ring(graph, DISK_GUARD_NODES)
+        return (graph.select("Node"),), {}
 
     def update(selected: KnowledgeGraph):
         return selected.update({"guard_marker": 1})

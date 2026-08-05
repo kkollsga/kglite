@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once per selected row.** On the 10,000-node ring gate this is 6–18% faster
   in memory and 49–51% faster on disk than the 0.15.5 wheel, with exact
   memory/mapped/disk parity.
+- **Bulk selected-node updates reuse their initial liveness/type validation**
+  instead of materializing each disk node and then checking every target a
+  second time. The 10,000-node update gate is 16–27% faster on disk, with no
+  memory or mapped regression and exact parity across all three backends.
 
 ## [0.15.5] - 2026-07-31
 

@@ -190,6 +190,30 @@ def test_degrees_parity(graphs):
         assert results[mode] == ref, f"degrees: {mode} diverged from memory"
 
 
+def test_bulk_selected_update_parity(tmp_path):
+    """Selected-node bulk updates preserve counts and values on every backend."""
+    results = {}
+    for mode in STORAGE_MODES:
+        path = str(tmp_path / f"update_{mode}") if mode == "disk" else None
+        graph = _build_graph(mode, path=path)
+        report = graph.select("Entity").where({"rank": 3}).update({"rank": 1003})
+        updated = report["graph"]
+        results[mode] = {
+            "nodes_updated": report["nodes_updated"],
+            "old": _rows(updated.cypher("MATCH (n:Entity) WHERE n.rank = 3 RETURN n.eid AS id ORDER BY id")),
+            "new": _rows(updated.cypher("MATCH (n:Entity) WHERE n.rank = 1003 RETURN n.eid AS id ORDER BY id")),
+        }
+
+    expected = {
+        "nodes_updated": 2,
+        "old": [],
+        "new": [{"id": 1003}, {"id": 3}],
+    }
+    assert results["memory"] == expected
+    for mode in ("mapped", "disk"):
+        assert results[mode] == expected, f"bulk update: {mode} diverged: {results[mode]}"
+
+
 def test_schema_parity(graphs):
     """schema() must report the same node types + counts across modes."""
     schemas = {mode: graphs[mode].schema() for mode in STORAGE_MODES}

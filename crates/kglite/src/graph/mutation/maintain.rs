@@ -1760,7 +1760,6 @@ pub fn update_node_properties(
     nodes: &[(Option<NodeIndex>, Value)],
     property: &str,
 ) -> Result<NodeOperationReport, String> {
-    let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     if nodes.is_empty() {
         return Err("No nodes to update".to_string());
     }
@@ -1779,16 +1778,23 @@ pub fn update_node_properties(
 
     // Step 1: Collect information about node types and check if schema update is needed
     let mut node_types = HashMap::new();
+    // Cache the validation result for Step 3. `node_type_of` is a granular,
+    // allocation-free liveness/type lookup on every backend; unlike
+    // `get_node`, it does not materialize one full `NodeData` per row into the
+    // disk query arena. Keeping the result aligned with `nodes` also avoids a
+    // second backend lookup when the batch actions are assembled.
+    let mut validated_nodes = Vec::with_capacity(nodes.len());
     let mut first_value_type = None;
     let mut skipped_count = 0;
 
     for (node_idx_opt, value) in nodes {
         if let Some(node_idx) = node_idx_opt {
-            if let Some(node) = graph.get_node(*node_idx) {
+            if let Some(node_type) = GraphRead::node_type_of(&graph.graph, *node_idx) {
                 // Track node type and count for each node
                 *node_types
-                    .entry(node.node_type_str(&graph.interner).to_string())
+                    .entry(graph.interner.resolve(node_type).to_string())
                     .or_insert(0) += 1;
+                validated_nodes.push(true);
 
                 // Capture type of first value for schema
                 if first_value_type.is_none() {
@@ -1801,10 +1807,12 @@ pub fn update_node_properties(
                     });
                 }
             } else {
+                validated_nodes.push(false);
                 skipped_count += 1;
                 errors.push(format!("Node index {:?} not found in graph", node_idx));
             }
         } else {
+            validated_nodes.push(false);
             skipped_count += 1;
         }
     }
@@ -1836,15 +1844,9 @@ pub fn update_node_properties(
     let batch_size = nodes.len();
     let mut batch = BatchProcessor::new(batch_size);
 
-    for (node_idx_opt, value) in nodes {
+    for ((node_idx_opt, value), is_validated) in nodes.iter().zip(validated_nodes.into_iter()) {
         if let Some(node_idx) = node_idx_opt {
-            // Only add valid nodes to batch. Arena guard: node_weight
-            // materializes on the disk backend; scoped read.
-            let is_live = {
-                let _arena_guard = graph.graph.begin_query();
-                graph.graph.node_weight(*node_idx).is_some()
-            };
-            if is_live {
+            if is_validated {
                 let mut properties = HashMap::new();
                 properties.insert(property_string.clone(), value.clone());
 

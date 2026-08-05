@@ -363,6 +363,7 @@ mod overwrite_index_freshness_tests {
     use super::*;
     use crate::datatypes::values::{DataFrame, Value};
     use crate::graph::mutation::maintain::{add_nodes, update_node_properties};
+    use crate::graph::storage::GraphWrite;
 
     fn people(rows: Vec<(&str, &str)>) -> DataFrame {
         DataFrame::from_cypher_rows(
@@ -475,6 +476,78 @@ mod overwrite_index_freshness_tests {
         assert!(
             composite.is_empty(),
             "the composite index still resolves the overwritten value: {composite:?}"
+        );
+    }
+
+    /// Bulk-update validation is intentionally reused when batch actions are
+    /// assembled. Duplicate live rows must still count as duplicate updates,
+    /// while missing/absent rows retain the existing report and error shape.
+    #[test]
+    fn update_node_properties_reuses_validation_without_changing_report_semantics() {
+        let mut g = DirGraph::new();
+        add_nodes(
+            &mut g,
+            people(vec![("p1", "Oslo"), ("p2", "Trondheim")]),
+            "Person".to_string(),
+            "id".to_string(),
+            None,
+            None,
+        )
+        .expect("load");
+
+        let loaded: Vec<NodeIndex> = g
+            .type_indices
+            .get("Person")
+            .expect("the loaded Person nodes")
+            .iter()
+            .collect();
+        let [node, dead] = loaded.as_slice() else {
+            panic!("expected exactly two loaded Person nodes");
+        };
+        let (node, dead) = (*node, *dead);
+        GraphWrite::remove_node(&mut g.graph, dead).expect("remove the second node");
+        let missing = NodeIndex::new(node.index() + 10_000);
+        let report = update_node_properties(
+            &mut g,
+            &[
+                (Some(node), Value::Int64(7)),
+                (Some(node), Value::Int64(7)),
+                (Some(dead), Value::Int64(7)),
+                (Some(missing), Value::Int64(7)),
+                (None, Value::Int64(7)),
+            ],
+            "city",
+        )
+        .expect("valid rows still update when other rows are absent");
+
+        assert_eq!(
+            report.nodes_updated, 2,
+            "duplicate live rows remain updates"
+        );
+        assert_eq!(
+            report.nodes_skipped, 6,
+            "dead, missing, and absent rows retain validation + assembly skip accounting"
+        );
+        assert_eq!(report.errors.len(), 5);
+        for invalid in [dead, missing] {
+            assert!(report
+                .errors
+                .iter()
+                .any(|error| error == &format!("Node index {:?} not found in graph", invalid)));
+            assert!(report
+                .errors
+                .iter()
+                .any(|error| error == &format!("Node index {:?} is out of bounds", invalid)));
+        }
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("Type mismatch")));
+        assert_eq!(
+            g.get_node(node)
+                .and_then(|data| data.get_property("city"))
+                .map(|value| value.into_owned()),
+            Some(Value::Int64(7))
         );
     }
 }
