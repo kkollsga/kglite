@@ -73,7 +73,10 @@ pub(super) fn decode_vector_indexes(payload: &[u8], graph: &mut DirGraph) {
         if let Some(store) = graph.embeddings.get_mut(&(node_type, prop)) {
             // Defensive: only attach an index whose shape still matches the
             // store it was built over (dimension + vector count).
-            if idx.dim() == store.dimension && idx.len() == store.len() {
+            if idx
+                .validate_for_store(&store.data, &store.norms, store.dimension)
+                .is_ok()
+            {
                 store.index = Some(idx);
             }
         }

@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sample_size=0` to betweenness or closeness centrality now returns a clear
   error instead of producing NaN betweenness scores or an empty closeness
   result.
+- **Persisted HNSW indexes are validated before attachment.** Malformed
+  topology is now discarded as a rebuildable cache while exact vector search
+  remains available; malformed embedding-store cardinalities fail loading
+  cleanly instead of panicking. Vector queries also bypass an index built for
+  a different distance metric rather than navigating with the wrong metric.
 - **Vector search now dispatches mixed selections correctly.** A same-sized
   selection that omitted embedded nodes but included unrelated or unembedded
   nodes could be mistaken for the whole embedding store, allowing fluent HNSW

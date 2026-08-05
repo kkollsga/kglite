@@ -337,6 +337,35 @@ class TestHnswInCypher:
         approximate = [row["id"] for row in g.cypher(mixed_query, params={"q": query})]
         assert approximate == exact
 
+    def test_cypher_bypasses_index_built_for_a_different_metric(self):
+        n = 320
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame(
+                {
+                    "id": list(range(n)),
+                    "title": [f"n{i}" for i in range(n)],
+                    "summary": [f"text {i}" for i in range(n)],
+                }
+            ),
+            "Doc",
+            "id",
+            "title",
+        )
+        vectors = {i: ([1.0, 0.0] if i == 0 else [100.0, 100.0] if i == 1 else [1.0, 0.1]) for i in range(n)}
+        g.set_embeddings("Doc", "summary", vectors, metric="cosine")
+        query = (
+            "MATCH (d:Doc) "
+            "RETURN d.id AS id, vector_score(d,'summary_emb',$q,'dot_product') AS s "
+            "ORDER BY s DESC LIMIT 1"
+        )
+
+        exact = g.cypher(query, params={"q": [1.0, 0.0]})
+        assert [row["id"] for row in exact] == [1]
+        g.build_vector_index("Doc", "summary", metric="cosine")
+        automatic = g.cypher(query, params={"q": [1.0, 0.0]})
+        assert [(row["id"], row["s"]) for row in automatic] == [(row["id"], row["s"]) for row in exact]
+
     def test_text_score_uses_index(self):
         # text_score rewrites to vector_score, so it rides the same fast path.
         import hashlib

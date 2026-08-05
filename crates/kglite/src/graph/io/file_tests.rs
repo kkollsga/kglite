@@ -149,6 +149,122 @@ mod atomic_save_tests {
     }
 
     #[test]
+    fn non_default_vector_index_parameters_roundtrip() {
+        use crate::graph::algorithms::hnsw::HnswParams;
+        use crate::graph::algorithms::vector::DistanceMetric;
+
+        let mut graph = tiny_indexed_graph();
+        let key = ("Doc".to_string(), "vec_emb".to_string());
+        let params = HnswParams {
+            m: 8,
+            ef_construction: 80,
+            ef_search: 24,
+        };
+        Arc::make_mut(&mut graph)
+            .embeddings
+            .get_mut(&key)
+            .unwrap()
+            .build_index(DistanceMetric::Cosine, params, 91)
+            .unwrap();
+        let payload = encode_vector_indexes(&graph).unwrap().unwrap();
+
+        let mut destination = tiny_indexed_graph();
+        Arc::make_mut(&mut destination)
+            .embeddings
+            .get_mut(&key)
+            .unwrap()
+            .index = None;
+        decode_vector_indexes(&payload, Arc::make_mut(&mut destination));
+        let restored = destination.embeddings[&key]
+            .index
+            .as_ref()
+            .unwrap()
+            .params();
+        assert_eq!(restored.m, params.m);
+        assert_eq!(restored.ef_construction, params.ef_construction);
+        assert_eq!(restored.ef_search, params.ef_search);
+    }
+
+    #[test]
+    fn zero_dimension_embedding_store_roundtrips_without_an_index() {
+        use crate::graph::schema::EmbeddingStore;
+
+        let mut graph = tiny_graph(1);
+        let mut store = EmbeddingStore::new(0);
+        store.set_embedding(0, &[]);
+        Arc::make_mut(&mut graph)
+            .embeddings
+            .insert(("Doc".to_string(), "empty_emb".to_string()), store);
+
+        let mut bytes = Vec::new();
+        write_kgl_to(&graph, &mut bytes).unwrap();
+        let loaded = load_kgl_bytes(&bytes).unwrap();
+        let restored = &loaded.embeddings[&("Doc".to_string(), "empty_emb".to_string())];
+        assert_eq!(restored.dimension, 0);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored.get_embedding(0), Some([].as_slice()));
+        assert!(!restored.has_index());
+    }
+
+    #[test]
+    fn corrupt_vector_index_is_skipped_and_exact_search_remains_usable() {
+        use crate::graph::algorithms::vector::{
+            vector_search, DistanceMetric, VectorSearchOptions,
+        };
+        use crate::graph::schema::CurrentSelection;
+        use petgraph::graph::NodeIndex;
+
+        let mut source = tiny_indexed_graph();
+        let key = ("Doc".to_string(), "vec_emb".to_string());
+        Arc::make_mut(&mut source)
+            .embeddings
+            .get_mut(&key)
+            .unwrap()
+            .index
+            .as_mut()
+            .unwrap()
+            .corrupt_entry_point_for_test();
+        let payload = encode_vector_indexes(&source).unwrap().unwrap();
+
+        let mut destination = tiny_indexed_graph();
+        Arc::make_mut(&mut destination)
+            .embeddings
+            .get_mut(&key)
+            .unwrap()
+            .index = None;
+        decode_vector_indexes(&payload, Arc::make_mut(&mut destination));
+        let store = destination.embeddings.get(&key).unwrap();
+        assert!(
+            !store.has_index(),
+            "a malformed rebuildable index must not attach to the store"
+        );
+
+        let mut selection = CurrentSelection::new();
+        selection.get_level_mut(0).unwrap().add_selection(
+            None,
+            store
+                .slot_to_node
+                .iter()
+                .copied()
+                .map(NodeIndex::new)
+                .collect(),
+        );
+        let results = vector_search(
+            &destination,
+            &selection,
+            "vec_emb",
+            &[0.0, 0.0, 1.0, 0.0],
+            &VectorSearchOptions::default()
+                .with_metric(DistanceMetric::Cosine)
+                .with_top_k(3)
+                .with_exact(true),
+        )
+        .unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].node_idx, NodeIndex::new(0));
+    }
+
+    #[test]
     fn pre_014_vector_index_v1_payload_is_skipped() {
         let mut payload = Vec::new();
         payload.extend_from_slice(vector_persistence::VECTOR_INDEX_MAGIC);

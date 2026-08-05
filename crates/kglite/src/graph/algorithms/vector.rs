@@ -202,7 +202,7 @@ pub fn vector_search(
             None
         } else {
             store.index.as_ref().and_then(|idx| {
-                let eligible = HnswMetric::from_distance(metric).is_some()
+                let eligible = HnswMetric::from_distance(metric) == Some(idx.metric())
                     && candidates.len() >= HNSW_AUTO_MIN
                     && candidates.len().saturating_mul(2) >= store.len();
                 if eligible {
@@ -957,6 +957,63 @@ mod tests {
         assert!(whole_exact
             .iter()
             .all(|result| whole_members.contains(&result.node_idx)));
+    }
+
+    #[test]
+    fn hnsw_index_is_not_used_for_a_different_requested_metric() {
+        const DOCS: usize = 320;
+        let mut graph = DirGraph::new();
+        let mut docs = Vec::with_capacity(DOCS);
+        let mut store = EmbeddingStore::with_metric(2, "cosine");
+        for id in 0..DOCS {
+            let node = NodeData::new(
+                Value::Int64(id as i64),
+                Value::String(format!("Doc {id}")),
+                "Doc".to_string(),
+                HashMap::new(),
+                &mut graph.interner,
+            );
+            let idx = GraphWrite::add_node(&mut graph.graph, node);
+            graph
+                .type_indices
+                .entry_or_default("Doc".to_string())
+                .push(idx);
+            docs.push(idx);
+            let embedding = match id {
+                0 => [1.0, 0.0],
+                1 => [100.0, 100.0],
+                _ => [1.0, 0.1],
+            };
+            store.set_embedding(idx.index(), &embedding);
+        }
+        store
+            .build_index(DistanceMetric::Cosine, HnswParams::default(), 7)
+            .unwrap();
+        graph
+            .embeddings
+            .insert(("Doc".to_string(), "summary_emb".to_string()), store);
+
+        let options = VectorSearchOptions::default()
+            .with_top_k(1)
+            .with_metric(DistanceMetric::DotProduct);
+        let automatic = vector_search(
+            &graph,
+            &selection_of(docs.clone()),
+            "summary_emb",
+            &[1.0, 0.0],
+            &options,
+        )
+        .unwrap();
+        let exact = vector_search(
+            &graph,
+            &selection_of(docs),
+            "summary_emb",
+            &[1.0, 0.0],
+            &options.with_exact(true),
+        )
+        .unwrap();
+        assert_eq!(automatic[0].node_idx, exact[0].node_idx);
+        assert_eq!(exact[0].node_idx, NodeIndex::new(1));
     }
 
     #[test]

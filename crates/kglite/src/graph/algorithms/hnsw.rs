@@ -20,6 +20,7 @@
 use super::vector::{dot_product, neg_euclidean_distance, DistanceMetric};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::RwLock;
 
 /// Metric subset HNSW navigates over. A strict subset of [`DistanceMetric`] —
@@ -64,6 +65,18 @@ impl Default for HnswParams {
             ef_construction: 200,
             ef_search: 64,
         }
+    }
+}
+
+impl HnswParams {
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        if self.m < 2 || self.ef_construction == 0 || self.ef_search == 0 {
+            return Err("HNSW tuning parameters are outside their valid range");
+        }
+        self.m
+            .checked_mul(2)
+            .map(|_| ())
+            .ok_or("HNSW layer-zero degree bound overflows usize")
     }
 }
 
@@ -235,6 +248,150 @@ impl HnswIndex {
         self.params
     }
 
+    /// Validate deserialized topology against its owning embedding store.
+    ///
+    /// Persistence treats an HNSW index as a rebuildable cache, so callers
+    /// must reject an error here and retain the store without the index.
+    pub(crate) fn validate_for_store(
+        &self,
+        data: &[f32],
+        norms: &[f32],
+        dimension: usize,
+    ) -> Result<(), &'static str> {
+        self.validate_store_header(data, norms, dimension)?;
+        let Some(entry_point) = self.validate_canonical_state()? else {
+            return Ok(());
+        };
+        self.validate_link_topology(entry_point)
+    }
+
+    fn validate_store_header(
+        &self,
+        data: &[f32],
+        norms: &[f32],
+        dimension: usize,
+    ) -> Result<(), &'static str> {
+        if dimension == 0 || self.dim != dimension {
+            return Err("HNSW dimension does not match its embedding store");
+        }
+        self.params.validate()?;
+        if self.len > u32::MAX as usize {
+            return Err("HNSW topology has more slots than its u32 identifiers can address");
+        }
+        let expected_data_len = self
+            .len
+            .checked_mul(self.dim)
+            .ok_or("HNSW vector cardinality overflows usize")?;
+        if data.len() != expected_data_len {
+            return Err("HNSW vector cardinality does not match its embedding store");
+        }
+        if norms.len() != self.len {
+            return Err("HNSW norm cardinality does not match its embedding store");
+        }
+        if self.node_levels.len() != self.len {
+            return Err("HNSW node-level cardinality does not match its length");
+        }
+        if self.links.len() != self.len {
+            return Err("HNSW link cardinality does not match its length");
+        }
+        Ok(())
+    }
+
+    fn validate_canonical_state(&self) -> Result<Option<usize>, &'static str> {
+        if self.len == 0 {
+            return if self.entry_point.is_none() && self.max_level == 0 && self.insert_counter == 0
+            {
+                Ok(None)
+            } else {
+                Err("empty HNSW topology has non-canonical state")
+            };
+        }
+        if self.insert_counter != self.len as u64 {
+            return Err("HNSW insert counter does not match its length");
+        }
+
+        let entry_point =
+            self.entry_point
+                .ok_or("non-empty HNSW topology has no entry point")? as usize;
+        if entry_point >= self.len {
+            return Err("HNSW entry point is outside the topology");
+        }
+        Ok(Some(entry_point))
+    }
+
+    fn validate_link_topology(&self, entry_point: usize) -> Result<(), &'static str> {
+        let layer_zero_degree = self.params.m * 2;
+        let mut observed_max_level = 0usize;
+        let mut unique_neighbors = HashSet::new();
+        for (slot, (&node_level, layers)) in self.node_levels.iter().zip(&self.links).enumerate() {
+            let node_level = node_level as usize;
+            observed_max_level = observed_max_level.max(node_level);
+            if layers.len() != node_level + 1 {
+                return Err("HNSW node layer count does not match its declared level");
+            }
+            for (layer, neighbors) in layers.iter().enumerate() {
+                unique_neighbors.clear();
+                let degree_bound = if layer == 0 {
+                    layer_zero_degree
+                } else {
+                    self.params.m
+                };
+                if neighbors.len() > degree_bound {
+                    return Err("HNSW layer exceeds its degree bound");
+                }
+                for &neighbor in neighbors {
+                    if !unique_neighbors.insert(neighbor) {
+                        return Err("HNSW layer contains a duplicate neighbor");
+                    }
+                    let neighbor = neighbor as usize;
+                    if neighbor >= self.len {
+                        return Err("HNSW neighbor is outside the topology");
+                    }
+                    if (self.node_levels[neighbor] as usize) < layer {
+                        return Err("HNSW neighbor does not participate in its linked layer");
+                    }
+                    if neighbor == slot {
+                        return Err("HNSW node links to itself");
+                    }
+                }
+            }
+        }
+        if self.max_level != observed_max_level {
+            return Err("HNSW maximum level does not match its topology");
+        }
+        if self.node_levels[entry_point] as usize != self.max_level {
+            return Err("HNSW entry point does not participate in the maximum layer");
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn corrupt_entry_point_for_test(&mut self) {
+        self.entry_point = Some(self.len as u32);
+    }
+
+    fn validate_incremental_state(&self) -> Result<(), &'static str> {
+        self.params.validate()?;
+        if self.len > u32::MAX as usize
+            || self.node_levels.len() != self.len
+            || self.links.len() != self.len
+            || self.insert_counter != self.len as u64
+        {
+            return Err("HNSW incremental topology cardinalities are inconsistent");
+        }
+        match self.entry_point {
+            None if self.len == 0 && self.max_level == 0 => Ok(()),
+            Some(entry) if self.len > 0 && (entry as usize) < self.len => {
+                if self.node_levels[entry as usize] as usize == self.max_level {
+                    Ok(())
+                } else {
+                    Err("HNSW entry point does not participate in the maximum layer")
+                }
+            }
+            _ => Err("HNSW incremental entry-point state is inconsistent"),
+        }
+    }
+
     /// Build an index over slots `0..n` of `data` (a flat `n*dim` buffer) with
     /// matching `norms` (length `n`; used by cosine, ignored otherwise).
     ///
@@ -314,8 +471,33 @@ impl HnswIndex {
 
     /// Insert a single slot incrementally. `data`/`norms`/`dim` must describe the
     /// same buffer the index was built over (extended to include `slot`).
-    pub fn insert(&mut self, slot: u32, data: &[f32], norms: &[f32], dim: usize) {
-        debug_assert_eq!(dim, self.dim, "dimension mismatch on incremental insert");
+    pub fn insert(
+        &mut self,
+        slot: u32,
+        data: &[f32],
+        norms: &[f32],
+        dim: usize,
+    ) -> Result<(), String> {
+        self.validate_incremental_state().map_err(str::to_string)?;
+        if dim != self.dim {
+            return Err("dimension mismatch on incremental insert".to_string());
+        }
+        if dim == 0 {
+            return Err("incremental insert requires a non-zero dimension".to_string());
+        }
+        if slot as usize != self.len {
+            return Err("incremental insert slot must be the next contiguous slot".to_string());
+        }
+        if !data.len().is_multiple_of(dim) {
+            return Err("incremental insert vector buffer has a partial vector".to_string());
+        }
+        let vector_count = data.len() / dim;
+        if norms.len() != vector_count {
+            return Err("incremental insert vector and norm cardinalities differ".to_string());
+        }
+        if (slot as usize) >= vector_count {
+            return Err("incremental insert buffers do not contain the new slot".to_string());
+        }
         let ctx = DistCtx {
             data,
             norms,
@@ -323,6 +505,7 @@ impl HnswIndex {
             metric: self.metric,
         };
         self.insert_with_ctx(slot, &ctx);
+        Ok(())
     }
 
     /// Draw the next level for the sequential `insert` path (advances the
@@ -673,7 +856,12 @@ fn insert_concurrent(
             if lc >= eg.len() {
                 continue; // defensive: e doesn't participate in this layer
             }
-            eg[lc].push(slot);
+            // Another insertion can already have added this reciprocal edge:
+            // unlike the sequential builder, all concurrently built slots are
+            // visible from the start. Keep each adjacency list set-like.
+            if !eg[lc].contains(&slot) {
+                eg[lc].push(slot);
+            }
             if eg[lc].len() > m_max {
                 let cands: Vec<Cand> = eg[lc]
                     .iter()
@@ -722,6 +910,268 @@ mod tests {
             norms.push(nn);
         }
         (data, norms)
+    }
+
+    fn valid_index() -> (HnswIndex, Vec<f32>, Vec<f32>) {
+        let (data, norms) = make_data(40, 8, 0x51A7);
+        let index = HnswIndex::build(
+            &data,
+            &norms,
+            8,
+            HnswMetric::Cosine,
+            HnswParams::default(),
+            19,
+        );
+        (index, data, norms)
+    }
+
+    fn empty_index() -> HnswIndex {
+        HnswIndex::build(&[], &[], 8, HnswMetric::Cosine, HnswParams::default(), 1)
+    }
+
+    #[test]
+    fn persisted_validation_accepts_valid_topology() {
+        let (index, data, norms) = valid_index();
+        assert_eq!(index.validate_for_store(&data, &norms, 8), Ok(()));
+    }
+
+    #[test]
+    fn persisted_validation_accepts_repeated_concurrent_topology() {
+        let (data, norms) = make_data(500, 16, 11);
+        for attempt in 0..10 {
+            let index = HnswIndex::build(
+                &data,
+                &norms,
+                16,
+                HnswMetric::Cosine,
+                HnswParams::default(),
+                7,
+            );
+            assert_eq!(
+                index.validate_for_store(&data, &norms, 16),
+                Ok(()),
+                "attempt {attempt}"
+            );
+        }
+    }
+
+    #[test]
+    fn persisted_validation_rejects_len_dimension_overflow() {
+        let (mut index, data, norms) = valid_index();
+        index.len = usize::MAX;
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_data_cardinality() {
+        let (index, mut data, norms) = valid_index();
+        data.pop();
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_norm_cardinality() {
+        let (index, data, mut norms) = valid_index();
+        norms.pop();
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_node_level_length() {
+        let (mut index, data, norms) = valid_index();
+        index.node_levels.pop();
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_link_length() {
+        let (mut index, data, norms) = valid_index();
+        index.links.pop();
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_entry_point() {
+        let (mut index, data, norms) = valid_index();
+        index.entry_point = Some(index.len as u32);
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_neighbor_id() {
+        let (mut index, data, norms) = valid_index();
+        index.links[0][0] = vec![index.len as u32];
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_layer_count() {
+        let (mut index, data, norms) = valid_index();
+        index.links[0].push(Vec::new());
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_max_level() {
+        let (mut index, data, norms) = valid_index();
+        index.max_level += 1;
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_layer_degree() {
+        let (mut index, data, norms) = valid_index();
+        index.links[0][0] = vec![1; index.m_max(0) + 1];
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_m_below_minimum() {
+        let (mut index, data, norms) = valid_index();
+        index.params.m = 1;
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_zero_construction_width() {
+        let (mut index, data, norms) = valid_index();
+        index.params.ef_construction = 0;
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_zero_search_width() {
+        let (mut index, data, norms) = valid_index();
+        index.params.ef_search = 0;
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_layer_zero_degree_overflow() {
+        let (mut index, data, norms) = valid_index();
+        index.params.m = usize::MAX;
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_noncanonical_empty_state() {
+        let mut index = empty_index();
+        index.insert_counter = 1;
+        assert!(index.validate_for_store(&[], &[], 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_empty_layer_zero_degree_overflow() {
+        let mut index = empty_index();
+        index.params.m = usize::MAX;
+        assert!(index.validate_for_store(&[], &[], 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_insert_counter() {
+        let (mut index, data, norms) = valid_index();
+        index.insert_counter -= 1;
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_duplicate_neighbor() {
+        let (mut index, data, norms) = valid_index();
+        index.links[0][0] = vec![1, 1];
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_self_link() {
+        let (mut index, data, norms) = valid_index();
+        index.links[0][0] = vec![0];
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_validation_rejects_neighbor_missing_layer() {
+        let (mut index, data, norms) = valid_index();
+        let upper_slot = index
+            .node_levels
+            .iter()
+            .position(|&level| level > 0)
+            .expect("fixture must contain an upper-layer node");
+        let layer = index.node_levels[upper_slot] as usize;
+        let lower_slot = index
+            .node_levels
+            .iter()
+            .position(|&level| (level as usize) < layer)
+            .expect("fixture must contain a lower-layer node");
+        index.links[upper_slot][layer] = vec![lower_slot as u32];
+        assert!(index.validate_for_store(&data, &norms, 8).is_err());
+    }
+
+    #[test]
+    fn incremental_insert_checks_dimension_in_release_builds() {
+        let mut index = empty_index();
+        let before = format!("{index:?}");
+        assert!(index.insert(0, &[0.0; 4], &[0.0], 4).is_err());
+        assert_eq!(format!("{index:?}"), before);
+    }
+
+    #[test]
+    fn incremental_insert_checks_complete_vector_cardinality_in_release_builds() {
+        let mut index = empty_index();
+        let before = format!("{index:?}");
+        assert!(index.insert(0, &[0.0; 7], &[0.0], 8).is_err());
+        assert_eq!(format!("{index:?}"), before);
+    }
+
+    #[test]
+    fn incremental_insert_checks_norm_cardinality_in_release_builds() {
+        let mut index = empty_index();
+        let before = format!("{index:?}");
+        assert!(index.insert(0, &[0.0; 8], &[], 8).is_err());
+        assert_eq!(format!("{index:?}"), before);
+    }
+
+    #[test]
+    fn incremental_insert_checks_slot_cardinality_in_release_builds() {
+        let mut index = empty_index();
+        let before = format!("{index:?}");
+        assert!(index.insert(1, &[0.0; 16], &[0.0; 2], 8).is_err());
+        assert_eq!(format!("{index:?}"), before);
+    }
+
+    #[test]
+    fn incremental_insert_checks_current_parameters_before_mutation() {
+        let (mut index, mut data, mut norms) = valid_index();
+        index.params.ef_construction = 0;
+        data.extend_from_slice(&[0.0; 8]);
+        norms.push(0.0);
+        let before = format!("{index:?}");
+        assert!(index.insert(40, &data, &norms, 8).is_err());
+        assert_eq!(format!("{index:?}"), before);
+    }
+
+    #[test]
+    fn incremental_insert_checks_current_topology_before_mutation() {
+        let (mut index, mut data, mut norms) = valid_index();
+        index.links.pop();
+        data.extend_from_slice(&[0.0; 8]);
+        norms.push(0.0);
+        let before = format!("{index:?}");
+        assert!(index.insert(40, &data, &norms, 8).is_err());
+        assert_eq!(format!("{index:?}"), before);
+    }
+
+    #[test]
+    fn incremental_insert_success_is_immediately_searchable() {
+        let mut index = empty_index();
+        let data = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let norms = [1.0];
+        index.insert(0, &data, &norms, 8).unwrap();
+
+        assert_eq!(index.validate_for_store(&data, &norms, 8), Ok(()));
+        assert_eq!(
+            index.search(&data, norms[0], 1, None, &data, &norms),
+            vec![(0, 0.0)]
+        );
     }
 
     fn brute_topk(
@@ -857,7 +1307,7 @@ mod tests {
             insert_counter: 0,
         };
         for slot in 0..1500u32 {
-            index.insert(slot, &data, &norms, 24);
+            index.insert(slot, &data, &norms, 24).unwrap();
         }
         assert_eq!(index.len(), 1500);
 

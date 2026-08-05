@@ -4,9 +4,22 @@ use super::super::ast::*;
 use super::helpers::*;
 use super::*;
 use crate::datatypes::values::Value;
+use crate::graph::schema::EmbeddingStore;
 use chrono::Datelike;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BinaryHeap, HashMap};
+
+struct HnswScoreArgs {
+    variable: String,
+    property: String,
+    query: Vec<f32>,
+    explicit_metric: Option<String>,
+}
+
+struct HnswRowCoverage {
+    node_to_row: HashMap<usize, usize>,
+    ordered_whole_store: bool,
+}
 
 impl<'a> CypherExecutor<'a> {
     pub(super) fn execute_return(
@@ -325,6 +338,141 @@ impl<'a> CypherExecutor<'a> {
     // Fused RETURN + ORDER BY + LIMIT for vector_score (min-heap top-k)
     // ========================================================================
 
+    /// Parse the constant arguments required by the HNSW fused path.
+    /// Returning `None` delegates unsupported expression shapes to the exact
+    /// scorer; evaluation errors keep their established error channel.
+    fn hnsw_score_args(
+        &self,
+        score_expr: &Expression,
+        first_row: &ResultRow,
+    ) -> Result<Option<HnswScoreArgs>, String> {
+        let args = match score_expr {
+            Expression::FunctionCall { name, args, .. }
+                if name == "vector_score" && (3..=4).contains(&args.len()) =>
+            {
+                args
+            }
+            _ => return Ok(None),
+        };
+        let variable = match &args[0] {
+            Expression::Variable(variable) => variable.clone(),
+            _ => return Ok(None),
+        };
+        let property = match self.evaluate_expression(&args[1], first_row)? {
+            Value::String(property) => property,
+            _ => return Ok(None),
+        };
+        let query = self.extract_float_list(&args[2], first_row)?;
+        let explicit_metric = match args.get(3) {
+            Some(expr) => match self.evaluate_expression(expr, first_row)? {
+                Value::String(metric) => Some(metric),
+                _ => None,
+            },
+            None => None,
+        };
+        Ok(Some(HnswScoreArgs {
+            variable,
+            property,
+            query,
+            explicit_metric,
+        }))
+    }
+
+    /// Build the node-to-row lookup while validating the single-type,
+    /// duplicate-free contract required by the HNSW path. The common ordered
+    /// whole-store case is proved during this same walk, avoiding the rejected
+    /// second store-sized membership pass.
+    fn hnsw_row_coverage(
+        &self,
+        variable: &str,
+        node_type: &str,
+        store: &EmbeddingStore,
+        first_idx: petgraph::graph::NodeIndex,
+        result_set: &ResultSet,
+    ) -> Option<HnswRowCoverage> {
+        let mut node_to_row = HashMap::with_capacity(result_set.rows.len());
+        node_to_row.insert(first_idx.index(), 0);
+        let mut ordered_whole_store = result_set.rows.len() == store.len()
+            && store.slot_to_node.first() == Some(&first_idx.index());
+
+        for (row_index, row) in result_set.rows.iter().enumerate().skip(1) {
+            let idx = *row.node_bindings.get(variable)?;
+            if ordered_whole_store && store.slot_to_node.get(row_index) == Some(&idx.index()) {
+                if node_to_row.insert(idx.index(), row_index).is_some() {
+                    return None;
+                }
+                continue;
+            }
+            ordered_whole_store = false;
+            let current_type = self
+                .graph
+                .graph
+                .node_weight(idx)?
+                .node_type_str(&self.graph.interner);
+            if current_type != node_type || node_to_row.insert(idx.index(), row_index).is_some() {
+                return None;
+            }
+        }
+        Some(HnswRowCoverage {
+            node_to_row,
+            ordered_whole_store,
+        })
+    }
+
+    /// Project RETURN expressions for HNSW winners using their pre-computed
+    /// exact-scale scores. This mirrors Phase 3 of the exact fused path.
+    fn project_hnsw_winners(
+        &self,
+        scored: Vec<(usize, f64)>,
+        score_expr: &Expression,
+        result_set: &ResultSet,
+        return_clause: &ReturnClause,
+        score_item_index: usize,
+    ) -> Result<Option<ResultSet>, String> {
+        let columns = return_clause
+            .items
+            .iter()
+            .map(return_item_column_name)
+            .collect();
+        let folded_exprs: Vec<Expression> = return_clause
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                if index == score_item_index {
+                    score_expr.clone()
+                } else {
+                    self.fold_constants_expr(&item.expression)
+                }
+            })
+            .collect();
+
+        let mut rows = Vec::with_capacity(scored.len());
+        for (row_index, score) in scored {
+            let row = &result_set.rows[row_index];
+            let mut projected = Bindings::with_capacity(return_clause.items.len());
+            for (index, item) in return_clause.items.iter().enumerate() {
+                let value = if index == score_item_index {
+                    Value::Float64(score)
+                } else {
+                    self.evaluate_expression(&folded_exprs[index], row)?
+                };
+                projected.insert(return_item_column_name(item), value);
+            }
+            rows.push(ResultRow {
+                node_bindings: row.node_bindings.clone(),
+                edge_bindings: row.edge_bindings.clone(),
+                path_bindings: row.path_bindings.clone(),
+                projected,
+            });
+        }
+        Ok(Some(ResultSet {
+            rows,
+            columns,
+            lazy_return_items: None,
+        }))
+    }
+
     /// Fused path: compute vector_score for all rows using a min-heap of size k,
     /// then project RETURN expressions only for the k surviving rows.
     /// O(n log k) instead of O(n log n) sort + O(n) full projection.
@@ -351,50 +499,26 @@ impl<'a> CypherExecutor<'a> {
         score_item_index: usize,
     ) -> Result<Option<ResultSet>, String> {
         use crate::graph::algorithms::vector as vs;
-        use std::collections::HashMap;
 
         // ANN models "top-k most similar" — descending score, non-empty limit.
         if !descending || limit == 0 {
             return Ok(None);
         }
 
-        // Extract vector_score(var, prop, query [, metric]).
-        let (var, prop_expr, query_expr, metric_arg) = match score_expr {
-            Expression::FunctionCall { name, args, .. }
-                if name == "vector_score" && (3..=4).contains(&args.len()) =>
-            {
-                let var = match &args[0] {
-                    Expression::Variable(v) => v.clone(),
-                    _ => return Ok(None),
-                };
-                (var, &args[1], &args[2], args.get(3))
-            }
-            _ => return Ok(None),
-        };
-
-        // Constant args — evaluate against the first row (they don't vary).
         let first_row = match result_set.rows.first() {
             Some(r) => r,
             None => return Ok(None),
         };
-        let prop = match self.evaluate_expression(prop_expr, first_row)? {
-            Value::String(s) => s,
-            _ => return Ok(None),
-        };
-        let query_vec = self.extract_float_list(query_expr, first_row)?;
-        let explicit_metric = match metric_arg {
-            Some(e) => match self.evaluate_expression(e, first_row)? {
-                Value::String(s) => Some(s),
-                _ => None,
-            },
-            None => None,
+        let args = match self.hnsw_score_args(score_expr, first_row)? {
+            Some(args) => args,
+            None => return Ok(None),
         };
 
         // Resolve the first row's store before building membership. This lets
         // the existing row walk prove the common ordered whole-store shape by
         // comparing each binding with the parallel slot_to_node entry, without
         // a second store-sized HashMap lookup pass.
-        let first_idx = match first_row.node_bindings.get(&var) {
+        let first_idx = match first_row.node_bindings.get(&args.variable) {
             Some(&idx) => idx,
             None => return Ok(None),
         };
@@ -402,70 +526,54 @@ impl<'a> CypherExecutor<'a> {
             Some(node) => node.node_type_str(&self.graph.interner).to_string(),
             None => return Ok(None),
         };
-        let store = match self.graph.embedding_store(&node_type, &prop) {
+        let store = match self.graph.embedding_store(&node_type, &args.property) {
             Some(store) => store,
             None => return Ok(None),
         };
-
-        // Membership + node→row map. Bail on a row that doesn't bind `var`, a
-        // mixed type, or a duplicate node (the exact path handles those).
-        let mut node_to_row: HashMap<usize, usize> = HashMap::with_capacity(result_set.rows.len());
-        node_to_row.insert(first_idx.index(), 0);
-        let mut ordered_whole_store = result_set.rows.len() == store.len()
-            && store.slot_to_node.first() == Some(&first_idx.index());
-        for (ri, row) in result_set.rows.iter().enumerate().skip(1) {
-            let idx = match row.node_bindings.get(&var) {
-                Some(&i) => i,
-                None => return Ok(None),
-            };
-            if ordered_whole_store && store.slot_to_node.get(ri) == Some(&idx.index()) {
-                if node_to_row.insert(idx.index(), ri).is_some() {
-                    return Ok(None); // duplicate node binding
-                }
-                continue;
-            }
-            ordered_whole_store = false;
-            let nt = match self.graph.graph.node_weight(idx) {
-                Some(n) => n.node_type_str(&self.graph.interner).to_string(),
-                None => return Ok(None),
-            };
-            if nt != node_type {
-                return Ok(None);
-            }
-            if node_to_row.insert(idx.index(), ri).is_some() {
-                return Ok(None); // duplicate node binding
-            }
-        }
+        let coverage = match self.hnsw_row_coverage(
+            &args.variable,
+            &node_type,
+            store,
+            first_idx,
+            result_set,
+        ) {
+            Some(coverage) => coverage,
+            None => return Ok(None),
+        };
 
         let index = match store.index.as_ref() {
             Some(i) => i,
             None => return Ok(None), // no index → exact path
         };
-        if query_vec.len() != store.dimension {
+        if args.query.len() != store.dimension {
             return Ok(None); // let the exact path raise the dimension error
         }
         // Resolve metric: explicit > stored > cosine; Poincaré → exact.
-        let metric_name = explicit_metric
+        let metric_name = args
+            .explicit_metric
             .or_else(|| store.metric.clone())
             .unwrap_or_else(|| "cosine".to_string());
         let metric = match vs::DistanceMetric::from_name(&metric_name) {
             Some(m) => m,
             None => return Ok(None),
         };
-        if crate::graph::algorithms::hnsw::HnswMetric::from_distance(metric).is_none() {
+        if crate::graph::algorithms::hnsw::HnswMetric::from_distance(metric) != Some(index.metric())
+        {
             return Ok(None);
         }
 
         // HNSW search → membership filter → re-score for exact score scale.
-        let scorer = vs::Scorer::new(metric, &query_vec);
-        let query_norm = vs::dot_product(&query_vec, &query_vec).sqrt();
-        let whole_store = ordered_whole_store
-            || (node_to_row.len() >= store.len()
-                && vs::store_is_fully_selected(store, |node| node_to_row.contains_key(&node)));
+        let scorer = vs::Scorer::new(metric, &args.query);
+        let query_norm = vs::dot_product(&args.query, &args.query).sqrt();
+        let whole_store = coverage.ordered_whole_store
+            || (coverage.node_to_row.len() >= store.len()
+                && vs::store_is_fully_selected(store, |node| {
+                    coverage.node_to_row.contains_key(&node)
+                }));
         let k_fetch = limit.saturating_mul(4).max(limit).min(store.len());
         let ef = k_fetch.max(index.params().ef_search);
         let raw = index.search(
-            &query_vec,
+            &args.query,
             query_norm,
             k_fetch,
             Some(ef),
@@ -476,11 +584,11 @@ impl<'a> CypherExecutor<'a> {
         let mut scored: Vec<(usize, f64)> = Vec::with_capacity(limit.min(raw.len()));
         for (slot, _dist) in raw {
             let node_raw = store.slot_to_node[slot as usize];
-            if let Some(&ri) = node_to_row.get(&node_raw) {
+            if let Some(&ri) = coverage.node_to_row.get(&node_raw) {
                 let start = slot as usize * store.dimension;
                 let emb = &store.data[start..start + store.dimension];
                 let norm = store.norms[slot as usize];
-                scored.push((ri, scorer.score(&query_vec, emb, norm) as f64));
+                scored.push((ri, scorer.score(&args.query, emb, norm) as f64));
             }
         }
         // Stable sort: ties keep row order (matches the exact path's behaviour
@@ -497,51 +605,13 @@ impl<'a> CypherExecutor<'a> {
             return Ok(None);
         }
 
-        // Project RETURN items for the winners (mirrors the exact Phase 3).
-        let columns: Vec<String> = return_clause
-            .items
-            .iter()
-            .map(return_item_column_name)
-            .collect();
-        let folded_exprs: Vec<Expression> = return_clause
-            .items
-            .iter()
-            .enumerate()
-            .map(|(idx, item)| {
-                if idx == score_item_index {
-                    score_expr.clone()
-                } else {
-                    self.fold_constants_expr(&item.expression)
-                }
-            })
-            .collect();
-
-        let mut rows = Vec::with_capacity(scored.len());
-        for (ri, score) in scored {
-            let row = &result_set.rows[ri];
-            let mut projected = Bindings::with_capacity(return_clause.items.len());
-            for (j, item) in return_clause.items.iter().enumerate() {
-                let key = return_item_column_name(item);
-                let val = if j == score_item_index {
-                    Value::Float64(score)
-                } else {
-                    self.evaluate_expression(&folded_exprs[j], row)?
-                };
-                projected.insert(key, val);
-            }
-            rows.push(ResultRow {
-                node_bindings: row.node_bindings.clone(),
-                edge_bindings: row.edge_bindings.clone(),
-                path_bindings: row.path_bindings.clone(),
-                projected,
-            });
-        }
-
-        Ok(Some(ResultSet {
-            rows,
-            columns,
-            lazy_return_items: None,
-        }))
+        self.project_hnsw_winners(
+            scored,
+            score_expr,
+            result_set,
+            return_clause,
+            score_item_index,
+        )
     }
 
     pub(super) fn execute_fused_vector_score_top_k(

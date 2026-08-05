@@ -792,4 +792,87 @@ mod embedding_store_tests {
         assert_eq!(store.model_id, None);
         assert!(store.text_hashes.is_empty());
     }
+
+    #[test]
+    fn serialized_embedding_shape_requires_exact_data_cardinality() {
+        let mut store = EmbeddingStore::new(2);
+        store.set_embedding(7, &[1.0, 2.0]);
+        assert_eq!(store.validate_shape(), Ok(()));
+        store.data.pop();
+        assert!(store.validate_shape().is_err());
+    }
+
+    #[test]
+    fn serialized_embedding_shape_requires_node_slot_bijection() {
+        let mut store = EmbeddingStore::new(2);
+        store.set_embedding(7, &[1.0, 2.0]);
+        store.node_to_slot.insert(7, 1);
+        assert!(store.validate_shape().is_err());
+    }
+
+    #[test]
+    fn malformed_embedding_store_cannot_build_an_index() {
+        use crate::graph::algorithms::hnsw::HnswParams;
+        use crate::graph::algorithms::vector::DistanceMetric;
+
+        let mut store = EmbeddingStore::new(2);
+        store.set_embedding(7, &[1.0, 2.0]);
+        store.data.pop();
+        let before = format!("{store:?}");
+        assert!(store
+            .build_index(DistanceMetric::Cosine, HnswParams::default(), 1)
+            .is_err());
+        assert_eq!(format!("{store:?}"), before);
+    }
+
+    #[test]
+    fn zero_dimension_store_is_valid_but_cannot_build_an_index() {
+        use crate::graph::algorithms::hnsw::HnswParams;
+        use crate::graph::algorithms::vector::DistanceMetric;
+
+        let mut store = EmbeddingStore::new(0);
+        store.set_embedding(7, &[]);
+        assert_eq!(store.validate_shape(), Ok(()));
+        let before = format!("{store:?}");
+        let error = store
+            .build_index(DistanceMetric::Cosine, HnswParams::default(), 1)
+            .unwrap_err();
+        assert!(error.contains("non-zero embedding dimension"));
+        assert_eq!(format!("{store:?}"), before);
+    }
+
+    #[test]
+    fn invalid_hnsw_parameters_do_not_mutate_embedding_store() {
+        use crate::graph::algorithms::hnsw::HnswParams;
+        use crate::graph::algorithms::vector::DistanceMetric;
+
+        let mut valid = EmbeddingStore::new(2);
+        valid.set_embedding(7, &[1.0, 2.0]);
+        let invalid = [
+            HnswParams {
+                m: 1,
+                ..HnswParams::default()
+            },
+            HnswParams {
+                ef_construction: 0,
+                ..HnswParams::default()
+            },
+            HnswParams {
+                ef_search: 0,
+                ..HnswParams::default()
+            },
+            HnswParams {
+                m: usize::MAX,
+                ..HnswParams::default()
+            },
+        ];
+        for params in invalid {
+            let mut store = valid.clone();
+            let before = format!("{store:?}");
+            assert!(store
+                .build_index(DistanceMetric::Cosine, params, 1)
+                .is_err());
+            assert_eq!(format!("{store:?}"), before);
+        }
+    }
 }

@@ -1643,6 +1643,13 @@ impl EmbeddingStore {
         let hm = crate::graph::algorithms::hnsw::HnswMetric::from_distance(metric).ok_or_else(
             || "HNSW does not support the Poincaré metric; it stays on the exact (brute-force) path.".to_string(),
         )?;
+        if self.dimension == 0 {
+            return Err(
+                "HNSW index construction requires a non-zero embedding dimension".to_string(),
+            );
+        }
+        params.validate().map_err(str::to_string)?;
+        self.validate_shape().map_err(str::to_string)?;
         if self.norms.len() != self.slot_to_node.len() {
             self.rebuild_norms();
         }
@@ -1654,6 +1661,30 @@ impl EmbeddingStore {
             params,
             seed,
         ));
+        Ok(())
+    }
+
+    /// Validate the serialized, parallel embedding-store columns before any
+    /// derived cache indexes into them. Persistence callers must run this
+    /// before [`Self::rebuild_norms`] so malformed cardinalities become a
+    /// load error rather than a slice panic.
+    pub(crate) fn validate_shape(&self) -> Result<(), &'static str> {
+        let expected_data_len = self
+            .slot_to_node
+            .len()
+            .checked_mul(self.dimension)
+            .ok_or("embedding data cardinality overflows usize")?;
+        if self.data.len() != expected_data_len {
+            return Err("embedding data cardinality does not match its slot count");
+        }
+        if self.node_to_slot.len() != self.slot_to_node.len() {
+            return Err("embedding node/slot maps have different cardinalities");
+        }
+        for (slot, &node) in self.slot_to_node.iter().enumerate() {
+            if self.node_to_slot.get(&node) != Some(&slot) {
+                return Err("embedding node/slot maps are not a bijection");
+            }
+        }
         Ok(())
     }
 

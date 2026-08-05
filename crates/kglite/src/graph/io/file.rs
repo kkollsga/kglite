@@ -1555,6 +1555,16 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
+fn validate_and_rebuild_embedding_norms(
+    embeddings: &mut HashMap<(String, String), EmbeddingStore>,
+) -> io::Result<()> {
+    for store in embeddings.values_mut() {
+        store.validate_shape().map_err(invalid_data)?;
+        store.rebuild_norms();
+    }
+    Ok(())
+}
+
 pub(crate) fn pre_014_bincode_error(artifact: &str) -> io::Error {
     invalid_data(format!(
         "Unsupported pre-0.14 bincode persistence: {artifact}. This build reads Postcard \
@@ -2045,10 +2055,10 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
                 .map_err(|e| invalid_data(e.to_string()))
         })()
         .map_err(|e| corrupt_sidecar_error("embeddings.bin.zst", &e))?;
-        // `norms` is `#[serde(skip)]` — recompute from `data` post-load.
-        for store in embeddings.values_mut() {
-            store.rebuild_norms();
-        }
+        // `norms` is `#[serde(skip)]` — validate its source columns, then
+        // recompute from `data` post-load.
+        validate_and_rebuild_embedding_norms(&mut embeddings)
+            .map_err(|e| corrupt_sidecar_error("embeddings.bin.zst", &e))?;
         graph.embeddings = embeddings;
     }
 
@@ -2388,9 +2398,7 @@ fn load_portable_optional_sections(
         let raw = zstd_decompress(compressed)?;
         let mut embeddings: HashMap<(String, String), EmbeddingStore> =
             codec_deser(codec, &raw, raw.capacity() as u64)?;
-        for store in embeddings.values_mut() {
-            store.rebuild_norms();
-        }
+        validate_and_rebuild_embedding_norms(&mut embeddings)?;
         dir_graph.embeddings = embeddings;
     }
     if plan.timeseries > 0 {
