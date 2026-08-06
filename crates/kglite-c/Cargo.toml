@@ -34,7 +34,7 @@ rdf = ["kglite/rdf"]
 # workspace builds; `cargo publish` strips the path and falls back
 # to the version requirement, which tracks the exact workspace version
 # (`make bump-version VERSION=X.Y.Z`; `make gate` fails on drift).
-kglite = { version = "0.15.5", path = "../kglite", default-features = false }
+kglite = { version = "0.15.6", path = "../kglite", default-features = false }
 
 # Serde stack — needed to serialize Value to JSON at the C
 # boundary (the design doc fixes JSON-at-boundary for nested
