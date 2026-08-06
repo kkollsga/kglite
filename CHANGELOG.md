@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.7] - 2026-08-06
+
+### Changed
+
+- **The MCP server now uses mcp-methods 0.4.4 and rmcp 3.1.1.** Dynamic tool
+  handlers use rmcp's response envelope while preserving the existing tool
+  result payload and MCP behavior.
+
 ## [0.15.6] - 2026-08-06
 
 ### Added
