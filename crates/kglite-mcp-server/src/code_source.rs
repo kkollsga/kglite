@@ -21,7 +21,7 @@ use mcp_methods::server::source::{read_source, ReadOpts, SourceRootsProvider};
 use mcp_methods::server::McpServer;
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::handler::server::tool::ToolCallContext;
-use rmcp::model::{CallToolResult, ContentBlock, Tool};
+use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock, Tool};
 use rmcp::ErrorData as McpError;
 use serde_json::{json, Map, Value};
 
@@ -105,14 +105,14 @@ pub fn register(
     let roots_provider = source_roots;
     server.tool_router_mut().add_route(ToolRoute::new_dyn(
         attr,
-        move |ctx: ToolCallContext<'_, McpServer>| -> DynFut<'_, Result<CallToolResult, McpError>> {
+        move |ctx: ToolCallContext<'_, McpServer>| -> DynFut<'_, Result<CallToolResponse, McpError>> {
             let state = state.clone();
             let roots_provider = roots_provider.clone();
             let arguments = ctx.arguments.clone();
             Box::pin(async move {
                 let args: Map<String, Value> = arguments.unwrap_or_default();
                 let body = run(&state, roots_provider.as_ref(), &args);
-                Ok(CallToolResult::success(vec![ContentBlock::text(body)]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(body)]).into())
             })
         },
     ));

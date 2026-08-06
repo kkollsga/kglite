@@ -113,13 +113,13 @@
     ],
     [
       "rmcp",
-      "2.2.0",
+      "3.1.1",
       "Apache-2.0",
       "runtime MCP protocol implementation"
     ],
     [
       "rmcp-macros",
-      "2.2.0",
+      "3.1.1",
       "Apache-2.0",
       "MCP build-time proc macro"
     ],

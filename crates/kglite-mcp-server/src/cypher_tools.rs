@@ -19,7 +19,7 @@ use anyhow::Result;
 use mcp_methods::server::{Manifest, McpServer, ToolSpec};
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::handler::server::tool::ToolCallContext;
-use rmcp::model::{CallToolResult, ContentBlock, Tool};
+use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock, Tool};
 use rmcp::ErrorData as McpError;
 use serde_json::{Map, Value};
 
@@ -94,7 +94,7 @@ pub fn register_cypher_tools(
         let runner = runner.clone();
         router.add_route(ToolRoute::new_dyn(
             attr,
-            move |ctx: ToolCallContext<'_, McpServer>| -> DynFut<'_, Result<CallToolResult, McpError>> {
+            move |ctx: ToolCallContext<'_, McpServer>| -> DynFut<'_, Result<CallToolResponse, McpError>> {
                 let runner = runner.clone();
                 let template = template.clone();
                 let name = name.clone();
@@ -105,7 +105,7 @@ pub fn register_cypher_tools(
                         Ok(text) => text,
                         Err(e) => format!("cypher tool {name:?} error: {e}"),
                     };
-                    Ok(CallToolResult::success(vec![ContentBlock::text(body)]))
+                    Ok(CallToolResult::success(vec![ContentBlock::text(body)]).into())
                 })
             },
         ));

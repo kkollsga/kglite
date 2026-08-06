@@ -59,13 +59,13 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 
 # Async trait sugar used by boltr's BoltBackend trait declaration.
 # 0.1.89 is the real workspace floor, not this crate's alone: kglite-mcp-server
-# pulls rmcp 2.2, which requires async-trait ^0.1.89, and cargo unifies the
-# version across the workspace. Declaring "0.1" let direct-minimal-versions
-# lower it to 0.1.0 and fail resolution outright -- caught by the
-# minimal-versions CI job added in 0.15.1.
+# pulls rmcp 3.1.1, whose optional auth path requires async-trait ^0.1.89,
+# and cargo unifies the version across the workspace. Declaring "0.1" let
+# direct-minimal-versions lower it to 0.1.0 and fail resolution outright --
+# caught by the minimal-versions CI job added in 0.15.1.
 async-trait = "0.1.89"
 
-# 1.37.0, not "1": rmcp 2.2 calls tokio::sync::mpsc::Receiver::is_closed,
+# 1.37.0, not "1": rmcp 3.1.1 calls tokio::sync::mpsc::Receiver::is_closed,
 # added in 1.37.0, and uses tokio::task::JoinSet, added in 1.21.0 (both
 # bisected against the individual releases). hyper 1.x independently
 # needs >=1.13. Cargo unifies tokio workspace-wide, so both servers
