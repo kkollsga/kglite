@@ -128,6 +128,28 @@ def test_consistent_ecosystem_passes(ecosystem: Path) -> None:
     assert "0 contradiction(s)" in out
 
 
+def test_default_root_uses_current_checkout_as_upstream(
+    ecosystem: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A release worktree must not read the stale primary checkout version."""
+    worktree = tmp_path / "release-worktree"
+    _write(worktree / "Cargo.toml", '[workspace.package]\nversion = "0.15.1"\n')
+    monkeypatch.setattr(vc, "REPO_ROOT", worktree)
+    monkeypatch.setattr(vc, "ECOSYSTEM_ROOT", ecosystem)
+
+    import contextlib
+    import io
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        code = vc.main([])
+
+    out = buf.getvalue()
+    assert code == 0, out
+    assert "upstream: KGLite 0.15.1" in out
+    assert "cannot install the current kglite 0.15.1" not in out
+
+
 # --------------------------------------------------------------------------
 # 1. Contradictions — the highest-severity category, and the exit-code contract
 # --------------------------------------------------------------------------

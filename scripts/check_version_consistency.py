@@ -1452,21 +1452,18 @@ def run_notify(
 #: a machine contract) and refreshed at release time alongside the other
 #: captured constants. Empty is a valid state: a release with no breaking
 #: surface notifies only on range/pin grounds.
-DEFAULT_BREAKING_SYMBOLS = [
-    "kglite::api::durable::Wal",  # 0.15.0: `Wal::open` gained a second argument
-]
+DEFAULT_BREAKING_SYMBOLS: list[str] = []
 
 DEFAULT_HIGHLIGHTS = [
-    "`kglite.open()` is now crash-safe by default (`durable` defaults on) and "
-    "enforces one writer per graph instead of silently allowing two.",
-    "Every kglite exception now carries a wire-stable `.code`; "
-    "`TransactionConflictError` is a distinct type (was `ArgumentError`).",
-    "Breaking (Rust API): `kglite::api::durable::Wal::open` takes a second argument.",
+    "The MCP server now aligns on mcp-methods 0.4.4 and rmcp 3.1.1; "
+    "low-level dynamic tool handlers use rmcp's response envelope without "
+    "changing completed tool payloads.",
 ]
 
 
 def main(argv: list[str] | None = None) -> int:
     global ECOSYSTEM_ROOT
+    default_ecosystem_root = ECOSYSTEM_ROOT.resolve()
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--root", type=Path, default=ECOSYSTEM_ROOT, help="parent directory holding the sibling repos")
     p.add_argument(
@@ -1498,6 +1495,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     ECOSYSTEM_ROOT = args.root.resolve()
+    using_default_root = ECOSYSTEM_ROOT == default_ecosystem_root
 
     # --- resolve repos, degrading cleanly when siblings are absent
     repos: dict[str, Path] = {}
@@ -1509,8 +1507,11 @@ def main(argv: list[str] | None = None) -> int:
         else:
             missing.append(repo)
 
-    if UPSTREAM_REPO not in repos:
-        # Running from inside KGLite itself: use our own tree.
+    if using_default_root or UPSTREAM_REPO not in repos:
+        # The ecosystem root locates siblings, but the current checkout is the
+        # upstream authority. In a release worktree the primary checkout can
+        # still be one commit/version behind, so reading <root>/KGLite would
+        # generate notes for the previous release.
         repos[UPSTREAM_REPO] = REPO_ROOT
         if UPSTREAM_REPO in missing:
             missing.remove(UPSTREAM_REPO)
