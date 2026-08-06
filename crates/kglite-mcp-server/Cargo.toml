@@ -55,7 +55,7 @@ mcp-methods = { version = "0.4.3", default-features = false, features = ["server
 kglite = { version = "0.15.6", path = "../kglite", default-features = false }
 
 # rmcp re-export for the dynamic tool registration path.
-rmcp = { version = "2.2", features = ["server", "macros", "transport-io", "schemars"] }
+rmcp = { version = "3.1", features = ["server", "macros", "transport-io", "schemars"] }
 
 # 1.37.0, not "1": rmcp 2.2 calls tokio::sync::mpsc::Receiver::is_closed,
 # added in 1.37.0, and uses tokio::task::JoinSet, added in 1.21.0 (both
@@ -103,7 +103,7 @@ bytes = "1"
 tempfile = "3.10.0"
 # Exercise hidden-tool rejection through a real in-memory MCP handshake. The
 # production dependency enables only the server half; client code is test-only.
-rmcp = { version = "2.2", features = ["client"] }
+rmcp = { version = "3.1", features = ["client"] }
 
 [features]
 # `fastembed` is an OPTIONAL feature, default OFF. Enabling it
