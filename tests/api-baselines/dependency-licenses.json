@@ -77,7 +77,7 @@
     ],
     [
       "fastembed",
-      "5.17.3",
+      "5.17.4",
       "Apache-2.0",
       "optional embedding backend"
     ],
