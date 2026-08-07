@@ -9,8 +9,12 @@
 //! There is no `Python::attach` anywhere in this module — the binary
 //! has no libpython link at all.
 
+use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
-use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{
+    Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
+};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
@@ -20,13 +24,42 @@ use kglite::api::introspection::{
     compute_description, compute_schema, ConnectionDetail, CypherDetail, FluentDetail,
 };
 use kglite::api::io::{open_or_create_graph, GraphWriterLease, OpenDisposition};
+use kglite::api::session::ExecuteOutcome;
 use kglite::api::storage::StorageMode;
-use kglite::api::{Embedder, KnowledgeGraph, Value};
+use kglite::api::{Embedder, KgError, KnowledgeGraph, Value};
 use mcp_methods::server::McpServer;
 use serde::{Deserialize, Serialize};
 
 const NO_GRAPH: &str =
     "No active graph. Pass --graph X.kgl, or activate one via repo_management('org/repo').";
+
+const MUTATION_NOT_ALLOWED: &str =
+    "mutation Cypher (CREATE/SET/DELETE/REMOVE/MERGE, and schema DDL such as \
+     CREATE INDEX / DROP INDEX / CREATE CONSTRAINT / DROP CONSTRAINT) is not \
+     allowed through the MCP cypher_query tool. Use the kglite CLI for graph \
+     edits. SHOW INDEXES and SHOW CONSTRAINTS are reads and are accepted.";
+
+/// Typed failure from the MCP server's canonical read-only Cypher seam.
+///
+/// Engine failures retain their [`KgError`] so structured MCP routes can use
+/// the stable error taxonomy without parsing rendered prose. Text-oriented
+/// legacy tools convert this error only at their compatibility boundary.
+#[derive(Debug)]
+pub(crate) enum CypherRunError {
+    NoActiveGraph,
+    MutationNotAllowed,
+    Engine(KgError),
+}
+
+impl fmt::Display for CypherRunError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoActiveGraph => f.write_str(NO_GRAPH),
+            Self::MutationNotAllowed => f.write_str(MUTATION_NOT_ALLOWED),
+            Self::Engine(error) => error.fmt(f),
+        }
+    }
+}
 
 /// Hot-fail guard for the lazy workspace-graph rebuild: after this many
 /// consecutive failures for the same target, [`GraphState::ensure_workspace_graph_fresh`]
@@ -50,6 +83,11 @@ pub(crate) fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
 /// Write-lock companion to [`read_lock`] — same poison-recovery policy.
 pub(crate) fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     lock.write().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Poison-recovering lock helper for the workspace rebuild gate.
+fn mutex_lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+    lock.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Refusal surfaced when a workspace mode has no graph producer configured.
@@ -182,6 +220,12 @@ pub struct WorkspaceGraphHooks {
 #[derive(Clone, Default)]
 pub struct GraphState {
     inner: Arc<RwLock<Option<ActiveGraph>>>,
+    /// Clone-shared ownership gate for lazy workspace rebuilds. A rebuild is
+    /// prepared without holding the active-graph lock, so readers that also
+    /// passed through freshness handling must wait here until publication (or
+    /// failure bookkeeping) completes instead of querying the old generation.
+    /// Non-workspace states bypass this gate entirely.
+    rebuild_gate: Arc<WorkspaceRebuildGate>,
     /// Deferred-rebuild slot. The watcher tags the active root here
     /// (cheap, microseconds — sets the slot, drops the lock); each
     /// MCP tool entry calls [`ensure_workspace_graph_fresh`] which atomically
@@ -222,6 +266,97 @@ struct RebuildStatus {
     consecutive_failures: u32,
     /// The target whose rebuilds keep failing.
     failed_target: Option<WorkspaceGraphTarget>,
+}
+
+/// Machine-readable reason that an ensured workspace graph remains stale.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceRebuildFailureReason {
+    /// The failed target remains queued for a retry on the next ensured read.
+    RebuildFailed,
+    /// The consecutive-failure cap was reached; retries resume only after a
+    /// new relevant filesystem event re-tags the workspace.
+    HotFail,
+}
+
+impl WorkspaceRebuildFailureReason {
+    /// Stable detail value for structured MCP errors.
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::RebuildFailed => "rebuild_failed",
+            Self::HotFail => "hot_fail",
+        }
+    }
+}
+
+/// Typed snapshot of a failed rebuild for the currently installed workspace
+/// generation. Structured routes consume this after freshness handling; the
+/// legacy warning renderer uses the same snapshot rather than parsing prose.
+#[derive(Clone, Debug)]
+pub(crate) struct WorkspaceRebuildFailureSnapshot {
+    pub(crate) reason: WorkspaceRebuildFailureReason,
+    pub(crate) message: String,
+    pub(crate) failed_at: SystemTime,
+    pub(crate) consecutive_failures: u32,
+    pub(crate) retry_limit: u32,
+}
+
+#[derive(Default)]
+struct WorkspaceRebuildGate {
+    state: Mutex<WorkspaceRebuildGateState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct WorkspaceRebuildGateState {
+    in_flight: bool,
+    waiters: usize,
+}
+
+impl WorkspaceRebuildGate {
+    fn enter(&self) -> WorkspaceRebuildGuard<'_> {
+        let mut state = mutex_lock(&self.state);
+        if state.in_flight {
+            state.waiters += 1;
+            self.changed.notify_all();
+            while state.in_flight {
+                state = self
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            state.waiters -= 1;
+        }
+        state.in_flight = true;
+        drop(state);
+        WorkspaceRebuildGuard { gate: self }
+    }
+
+    #[cfg(test)]
+    fn wait_for_waiter(&self) {
+        let state = mutex_lock(&self.state);
+        let (state, timeout) = self
+            .changed
+            .wait_timeout_while(state, Duration::from_secs(5), |state| state.waiters == 0)
+            .unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            !timeout.timed_out() && state.waiters > 0,
+            "second freshness caller never waited behind the in-flight rebuild"
+        );
+    }
+}
+
+struct WorkspaceRebuildGuard<'a> {
+    gate: &'a WorkspaceRebuildGate,
+}
+
+impl Drop for WorkspaceRebuildGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = mutex_lock(&self.gate.state);
+        debug_assert!(state.in_flight, "rebuild gate released without an owner");
+        state.in_flight = false;
+        drop(state);
+        self.gate.changed.notify_all();
+    }
 }
 
 /// Exact installed workspace product a watcher event observed. The generation
@@ -483,6 +618,16 @@ impl GraphState {
     /// being served (error still surfaced) and the next retry happens
     /// only when a fresh FS event re-tags the target.
     pub fn ensure_workspace_graph_fresh(&self) {
+        // Ordinary loaded/in-memory graphs never participate in workspace
+        // rebuilds and must not contend on workspace lifecycle state.
+        if self.workspace_mode.is_none() {
+            return;
+        }
+
+        // `pending_rebuild` is empty while an owner prepares off-lock. Keep
+        // later freshness callers behind that owner until it has installed
+        // the new generation or published a typed failure snapshot.
+        let _rebuild_owner = self.rebuild_gate.enter();
         let target = write_lock(&self.pending_rebuild).take();
         let Some(target) = target else { return };
         tracing::info!(
@@ -530,31 +675,44 @@ impl GraphState {
         }
     }
 
-    /// A one-line warning describing the last failed lazy rebuild, or
-    /// `None` when the last rebuild succeeded (the common case).
-    /// Appended to tool output wherever the graph's built-at identity
-    /// appears, so an agent knows the graph it queries is staler than
-    /// the filesystem.
-    pub fn rebuild_error_note(&self) -> Option<String> {
+    /// Snapshot the failed rebuild for the currently installed workspace
+    /// generation. Call after [`Self::ensure_workspace_graph_fresh`] when a
+    /// route must reject stale evidence instead of rendering the legacy
+    /// warning and continuing.
+    pub(crate) fn workspace_rebuild_failure(&self) -> Option<WorkspaceRebuildFailureSnapshot> {
         let active = read_lock(&self.inner);
         let active_target = active.as_ref().and_then(ActiveGraph::workspace_target)?;
         let status = read_lock(&self.rebuild_status);
         if status.failed_target.as_ref() != Some(&active_target) {
             return None;
         }
-        let err = status.last_error.as_ref()?;
-        let age = status
-            .failed_at
-            .map(humanize_age)
-            .unwrap_or_else(|| "?".to_string());
+        Some(WorkspaceRebuildFailureSnapshot {
+            reason: if status.consecutive_failures >= MAX_CONSECUTIVE_REBUILD_FAILURES {
+                WorkspaceRebuildFailureReason::HotFail
+            } else {
+                WorkspaceRebuildFailureReason::RebuildFailed
+            },
+            message: status.last_error.clone()?,
+            failed_at: status.failed_at?,
+            consecutive_failures: status.consecutive_failures,
+            retry_limit: MAX_CONSECUTIVE_REBUILD_FAILURES,
+        })
+    }
+
+    /// A one-line warning describing the last failed lazy rebuild, or
+    /// `None` when the last rebuild succeeded (the common case).
+    /// Appended to tool output wherever the graph's built-at identity
+    /// appears, so an agent knows the graph it queries is staler than
+    /// the filesystem.
+    pub fn rebuild_error_note(&self) -> Option<String> {
+        let failure = self.workspace_rebuild_failure()?;
+        let age = humanize_age(failure.failed_at);
         let note = format!(
             "WARNING: workspace graph rebuild failed {age} ago ({} consecutive \
              failure(s)) — the active graph is STALE relative to the \
-             filesystem. Error: {err}",
-            status.consecutive_failures
+             filesystem. Error: {}",
+            failure.consecutive_failures, failure.message
         );
-        drop(status);
-        drop(active);
         Some(note)
     }
 
@@ -1003,23 +1161,37 @@ impl GraphState {
         args: &serde_json::Map<String, serde_json::Value>,
         csv_http: Option<&crate::csv_http::CsvHttpConfig>,
     ) -> String {
-        // The lazy rebuild may replace the active graph, so it must finish
-        // before this legacy text path takes its read guard.
-        self.ensure_workspace_graph_fresh();
-        let guard = read_lock(&self.inner);
-        let Some(active) = guard.as_ref() else {
-            return NO_GRAPH.to_string();
-        };
-        let mut params = std::collections::HashMap::new();
+        let mut params = HashMap::new();
         for (k, v) in args {
             params.insert(k.clone(), json_to_value(v));
         }
-        // extensions.value_codecs apply to manifest cypher tools too (passed
-        // through ExecuteOptions, not by rewriting the template text).
-        match run_cypher_inner(&active.kg, template, params, self.value_codecs(), csv_http) {
-            Ok(body) => body,
-            Err(e) => cypher_tool_error(&e),
+        match self.execute_cypher_read(template, params) {
+            Ok(outcome) => render_cypher_output(
+                &outcome.result,
+                outcome.output_format == cypher::OutputFormat::Csv,
+                csv_http,
+            )
+            .unwrap_or_else(|error| cypher_tool_error(&error)),
+            Err(error) => legacy_cypher_error(&error),
         }
+    }
+
+    /// Execute read-only Cypher and preserve its structured outcome.
+    ///
+    /// The lazy rebuild completes before the active-graph guard is acquired;
+    /// that guard then remains held for the complete eager execution. This is
+    /// the shared entry point for automation-safe structured MCP routes. It
+    /// intentionally performs no text rendering or result postprocessing.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn execute_cypher_read(
+        &self,
+        query: &str,
+        params: HashMap<String, Value>,
+    ) -> std::result::Result<ExecuteOutcome, CypherRunError> {
+        self.ensure_workspace_graph_fresh();
+        let guard = read_lock(&self.inner);
+        let active = guard.as_ref().ok_or(CypherRunError::NoActiveGraph)?;
+        execute_cypher_inner(&active.kg, query, params, self.value_codecs())
     }
 }
 
@@ -1046,6 +1218,43 @@ fn cypher_tool_error(e: &str) -> String {
     }
 }
 
+/// Preserve the historical no-graph response while applying the Cypher tool
+/// prefix to every other legacy error exactly as before the typed seam.
+fn legacy_cypher_error(error: &CypherRunError) -> String {
+    match error {
+        CypherRunError::NoActiveGraph => error.to_string(),
+        _ => cypher_tool_error(&error.to_string()),
+    }
+}
+
+/// Execute read-only Cypher without choosing a presentation format.
+///
+/// This is the canonical MCP execution seam: policy, eager materialization,
+/// embedder wiring, and value codecs are applied once, while callers retain
+/// [`ExecuteOutcome`] for structured serialization or legacy rendering.
+#[allow(clippy::result_large_err)]
+fn execute_cypher_inner(
+    kg: &KnowledgeGraph,
+    query: &str,
+    params: HashMap<String, Value>,
+    value_codecs: Option<&[ValueCodec]>,
+) -> std::result::Result<ExecuteOutcome, CypherRunError> {
+    // MCP rejects mutations regardless of read-only graph mode. Pre-parse so
+    // the policy failure remains distinct from an engine execution failure.
+    let (_, is_mutation) =
+        kglite::api::cypher::parse_with_mutation_check(query).map_err(CypherRunError::Engine)?;
+    if is_mutation {
+        return Err(CypherRunError::MutationNotAllowed);
+    }
+
+    // Eager rows are required by both the legacy formatters and structured
+    // routes. The embedder and codecs match the pre-extraction execution path.
+    let mut opts = kglite::api::session::ExecuteOptions::eager(&params);
+    opts.embedder = kg.embedder().cloned();
+    opts.value_codecs = value_codecs;
+    kglite::api::session::execute_read(kg.dir(), query, &opts).map_err(CypherRunError::Engine)
+}
+
 /// Run a Cypher query against the given KnowledgeGraph snapshot. Picks
 /// between read and write paths based on `is_mutation_query`; on success
 /// returns the rendered tool body (CSV when `FORMAT CSV` is in the
@@ -1053,46 +1262,17 @@ fn cypher_tool_error(e: &str) -> String {
 fn run_cypher_inner(
     kg: &KnowledgeGraph,
     query: &str,
-    params: std::collections::HashMap<String, Value>,
+    params: HashMap<String, Value>,
     value_codecs: Option<&[ValueCodec]>,
     csv_http: Option<&crate::csv_http::CsvHttpConfig>,
-) -> Result<String, String> {
-    // Phase E.3 — delegate to kglite::api::session for the canonical
-    // pipeline (parse → validate → rewrite_text_score (+embed) →
-    // optimize → mutation-gate → execute). The mcp-server still
-    // owns mutation policy (reject) + CSV output formatting.
-
-    // MCP rejects mutations regardless of read-only graph mode:
-    // mutation Cypher through the MCP surface is a deliberate policy
-    // restriction (agents should use the CLI for graph edits). Pre-
-    // parse to catch this cleanly before session::execute_read errors.
-    let (pre_parsed, is_mutation) =
-        kglite::api::cypher::parse_with_mutation_check(query).map_err(|e| e.to_string())?;
-    if is_mutation {
-        return Err(
-            "mutation Cypher (CREATE/SET/DELETE/REMOVE/MERGE, and schema DDL such as \
-             CREATE INDEX / DROP INDEX / CREATE CONSTRAINT / DROP CONSTRAINT) is not \
-             allowed through the MCP cypher_query tool. Use the kglite CLI for graph \
-             edits. SHOW INDEXES and SHOW CONSTRAINTS are reads and are accepted."
-                .to_string(),
-        );
-    }
-    let output_csv = pre_parsed.output_format == kglite::api::cypher::OutputFormat::Csv;
-
-    // Eager rows — MCP output formatters (CSV / 15-row preview)
-    // need materialized results; no lazy materializer at this layer.
-    // Embedder is plumbed when the active graph has one wired (for
-    // `text_score()` queries); otherwise None.
-    let mut opts = kglite::api::session::ExecuteOptions::eager(&params);
-    opts.embedder = kg.embedder().cloned();
-    // extensions.value_codecs: decode query-side literals bound to a codec'd
-    // property + encode result columns. None/empty → no transform.
-    opts.value_codecs = value_codecs;
-    // `KgError`'s Display already prefixes `Cypher execution error: …`; take it
-    // verbatim (a second `Cypher execution error:` here is the reported stutter).
+) -> std::result::Result<String, String> {
     let outcome =
-        kglite::api::session::execute_read(kg.dir(), query, &opts).map_err(|e| e.to_string())?;
-    render_cypher_output(&outcome.result, output_csv, csv_http)
+        execute_cypher_inner(kg, query, params, value_codecs).map_err(|error| error.to_string())?;
+    render_cypher_output(
+        &outcome.result,
+        outcome.output_format == cypher::OutputFormat::Csv,
+        csv_http,
+    )
 }
 
 /// Render a `CypherResult` for the MCP text surface: CSV (inline or via the
@@ -1545,13 +1725,7 @@ fn run_cypher_tool(
     value_codecs: Option<&[ValueCodec]>,
     csv_http: Option<&crate::csv_http::CsvHttpConfig>,
 ) -> String {
-    match run_cypher_inner(
-        &graph.kg,
-        query,
-        std::collections::HashMap::new(),
-        value_codecs,
-        csv_http,
-    ) {
+    match run_cypher_inner(&graph.kg, query, HashMap::new(), value_codecs, csv_http) {
         // Compact identity footer so a query result self-identifies its
         // graph (agents often go straight to cypher_query without a prior
         // graph_overview, where a stale active root would otherwise hide).
@@ -1580,13 +1754,7 @@ fn run_cypher_write(
         kglite::api::cypher::parse_with_mutation_check(query).map_err(|e| e.to_string())?;
     if !is_mutation {
         // Read on a writable server — same path as the read-only tool.
-        return run_cypher_inner(
-            &active.kg,
-            query,
-            std::collections::HashMap::new(),
-            value_codecs,
-            csv_http,
-        );
+        return run_cypher_inner(&active.kg, query, HashMap::new(), value_codecs, csv_http);
     }
     let output_csv = pre_parsed.output_format == kglite::api::cypher::OutputFormat::Csv;
     let params = std::collections::HashMap::new();
@@ -1963,6 +2131,11 @@ mod tests {
             );
             let note = state.rebuild_error_note().expect("error recorded");
             assert!(note.contains("STALE"), "note flags staleness: {note}");
+            let failure = state
+                .workspace_rebuild_failure()
+                .expect("typed failure snapshot recorded");
+            assert_eq!(failure.reason.code(), "rebuild_failed");
+            assert_eq!(failure.retry_limit, MAX_CONSECUTIVE_REBUILD_FAILURES);
         }
 
         // Failure #cap: stop retrying (marker not restored) — the stale
@@ -1978,6 +2151,11 @@ mod tests {
             note.contains(&format!("{MAX_CONSECUTIVE_REBUILD_FAILURES} consecutive")),
             "note reports the failure count: {note}"
         );
+        let failure = state
+            .workspace_rebuild_failure()
+            .expect("hot-fail snapshot recorded");
+        assert_eq!(failure.reason, WorkspaceRebuildFailureReason::HotFail);
+        assert_eq!(failure.reason.code(), "hot_fail");
         // With no marker, further tool calls are no-ops (no retry storm).
         state.ensure_workspace_graph_fresh();
 
@@ -1998,6 +2176,104 @@ mod tests {
             "successful rebuild must clear the recorded failure"
         );
         assert!(read_lock(&state.pending_rebuild).is_none());
+    }
+
+    #[test]
+    fn concurrent_freshness_call_waits_for_installed_generation() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc, Barrier,
+        };
+
+        fn generation(outcome: ExecuteOutcome) -> i64 {
+            match outcome.result.rows.first().and_then(|row| row.first()) {
+                Some(Value::Int64(value)) => *value,
+                value => panic!("expected integer generation marker, got {value:?}"),
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let rebuild_started = Arc::new(Barrier::new(2));
+        let release_rebuild = Arc::new(Barrier::new(2));
+        let hooks = Arc::new(WorkspaceGraphHooks {
+            build: Box::new({
+                let calls = calls.clone();
+                let rebuild_started = rebuild_started.clone();
+                let release_rebuild = release_rebuild.clone();
+                move |_| {
+                    let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    if call == 2 {
+                        rebuild_started.wait();
+                        release_rebuild.wait();
+                    }
+                    let mut graph = new_dir_graph_in_mode(StorageMode::Memory, None)
+                        .map_err(|error| error.to_string())?;
+                    let params = HashMap::new();
+                    let options = kglite::api::session::ExecuteOptions::eager(&params);
+                    kglite::api::session::execute_mut(
+                        &mut graph,
+                        &format!("CREATE (:Generation {{value: {call}}})"),
+                        &options,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    Ok(WorkspaceGraphResult::new(Arc::new(graph)))
+                }
+            }),
+            is_relevant: Box::new(|_| true),
+        });
+        let state = GraphState::new(Some(WorkspaceGraphMode::LocalWorkspace))
+            .with_workspace_graph(Some(hooks));
+        state
+            .build_workspace_graph(Path::new("/workspace/current"), None)
+            .expect("install generation one");
+        state.tag_workspace_graph_dirty();
+
+        let first_state = state.clone();
+        let first = std::thread::spawn(move || {
+            first_state
+                .execute_cypher_read(
+                    "MATCH (g:Generation) RETURN g.value AS generation",
+                    HashMap::new(),
+                )
+                .expect("first caller queries rebuilt graph")
+        });
+        rebuild_started.wait();
+
+        let (second_result_tx, second_result_rx) = mpsc::channel();
+        let second_state = state.clone();
+        let second = std::thread::spawn(move || {
+            let outcome = second_state
+                .execute_cypher_read(
+                    "MATCH (g:Generation) RETURN g.value AS generation",
+                    HashMap::new(),
+                )
+                .expect("second caller queries rebuilt graph");
+            second_result_tx
+                .send(generation(outcome))
+                .expect("report second result");
+        });
+
+        // Observe the second caller inside the gate's waiter set. This is not
+        // a scheduler/sleep assertion: release happens only after the caller
+        // is known to be blocked behind the in-flight rebuild.
+        state.rebuild_gate.wait_for_waiter();
+        assert!(
+            matches!(second_result_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "second caller must not execute against generation one"
+        );
+        release_rebuild.wait();
+
+        assert_eq!(
+            generation(first.join().expect("first freshness caller joins")),
+            2
+        );
+        second.join().expect("second freshness caller joins");
+        assert_eq!(
+            second_result_rx.recv().expect("second generation result"),
+            2,
+            "second caller sees the generation installed by the first caller"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "only one rebuild occurs");
     }
 
     #[test]
@@ -2223,6 +2499,146 @@ mod tests {
         );
     }
 
+    fn state_with_active(active: ActiveGraph) -> GraphState {
+        let state = GraphState::default();
+        *write_lock(&state.inner) = Some(active);
+        state
+    }
+
+    #[test]
+    fn structured_cypher_execution_preserves_outcome_before_legacy_rendering() {
+        let state = state_with_active(fresh_active());
+        let query = "UNWIND range(1, 16) AS n RETURN n";
+
+        let outcome = state
+            .execute_cypher_read(query, HashMap::new())
+            .unwrap_or_else(|error| panic!("structured execution failed: {error}"));
+        assert_eq!(outcome.result.columns, vec!["n"]);
+        assert_eq!(outcome.result.rows.len(), 16, "all eager rows are retained");
+        assert!(matches!(
+            outcome.result.rows.first().and_then(|row| row.first()),
+            Some(Value::Int64(1))
+        ));
+        assert!(matches!(
+            outcome.result.rows.last().and_then(|row| row.first()),
+            Some(Value::Int64(16))
+        ));
+
+        assert_eq!(
+            state.run_cypher_template(query, &serde_json::Map::new(), None),
+            "16 row(s) (showing first 15):\n\
+             n\n\
+             1\n\
+             2\n\
+             3\n\
+             4\n\
+             5\n\
+             6\n\
+             7\n\
+             8\n\
+             9\n\
+             10\n\
+             11\n\
+             12\n\
+             13\n\
+             14\n\
+             15\n"
+        );
+    }
+
+    #[test]
+    fn legacy_cypher_template_golden_outputs_survive_structured_seam() {
+        let state = state_with_active(fresh_active());
+        let mut args = serde_json::Map::new();
+        args.insert("label".into(), serde_json::json!("Ada"));
+        args.insert("count".into(), serde_json::json!(7));
+
+        assert_eq!(
+            state.run_cypher_template("RETURN $label AS label, $count AS count", &args, None,),
+            "1 row(s):\nlabel\tcount\n\"Ada\"\t7\n"
+        );
+        assert_eq!(
+            state.run_cypher_template(
+                "MATCH (n:Missing) RETURN n.id AS id",
+                &serde_json::Map::new(),
+                None,
+            ),
+            "No results."
+        );
+        assert_eq!(
+            state.run_cypher_template(
+                "RETURN 'Ada' AS name, 7 AS count FORMAT CSV",
+                &serde_json::Map::new(),
+                None,
+            ),
+            "name,count\nAda,7\n"
+        );
+        assert_eq!(
+            state
+                .run_cypher_template("CREATE (:Forbidden {id: 1})", &serde_json::Map::new(), None,),
+            format!("Cypher error: {MUTATION_NOT_ALLOWED}")
+        );
+        assert_eq!(
+            GraphState::default().run_cypher_template(
+                "RETURN 1 AS n",
+                &serde_json::Map::new(),
+                None,
+            ),
+            NO_GRAPH
+        );
+    }
+
+    #[test]
+    fn structured_cypher_execution_retains_engine_error_taxonomy() {
+        let state = state_with_active(fresh_active());
+        let error = match state.execute_cypher_read("RETURN @", HashMap::new()) {
+            Err(CypherRunError::Engine(error)) => error,
+            Err(other) => panic!("expected typed engine error, got {other}"),
+            Ok(_) => panic!("invalid syntax unexpectedly executed"),
+        };
+        assert_eq!(error.code(), kglite::api::KgErrorCode::CypherSyntax);
+        assert_eq!(
+            state.run_cypher_template("RETURN @", &serde_json::Map::new(), None),
+            error.to_string(),
+            "legacy syntax text remains the engine's exact rendered message"
+        );
+    }
+
+    #[test]
+    fn structured_cypher_execution_preserves_value_codecs() {
+        use kglite::api::cypher::{CodecKind, StoredType};
+
+        let mut active = fresh_active();
+        write(&mut active, "CREATE (:Entity {id: 42})", None).expect("seed entity");
+        let state = GraphState::default().with_value_codecs(Some(Arc::new(vec![ValueCodec {
+            property: "id".into(),
+            kind: CodecKind::Prefix {
+                prefix: "Q".into(),
+                stored_type: StoredType::Int,
+            },
+        }])));
+        *write_lock(&state.inner) = Some(active);
+
+        let outcome = state
+            .execute_cypher_read(
+                "MATCH (n:Entity {id: 'Q42'}) RETURN n.id AS id",
+                HashMap::new(),
+            )
+            .unwrap_or_else(|error| panic!("codec query failed: {error}"));
+        assert!(matches!(
+            outcome.result.rows.first().and_then(|row| row.first()),
+            Some(Value::String(value)) if value == "Q42"
+        ));
+        assert_eq!(
+            state.run_cypher_template(
+                "MATCH (n:Entity {id: 'Q42'}) RETURN n.id AS id",
+                &serde_json::Map::new(),
+                None,
+            ),
+            "1 row(s):\nid\n\"Q42\"\n"
+        );
+    }
+
     #[test]
     fn single_rev_via_revs_reads_as_snapshot_and_dedups() {
         let dir = std::env::temp_dir().join(format!("kgl_singlerev_{}", std::process::id()));
@@ -2345,19 +2761,26 @@ mod tests {
         // (indistinguishable from a no-op match) — it acknowledges the write.
         let mut a = fresh_active();
         let out = write(&mut a, "CREATE (:Task {id:'t1'})", None).unwrap();
-        assert!(out.starts_with("OK:"), "expected write ack, got: {out}");
-        assert!(out.contains("node(s) created"), "got: {out}");
-        // The ack stamps the running engine version (stale-server footgun).
-        assert!(
-            out.contains(&format!("[engine {}]", env!("CARGO_PKG_VERSION"))),
-            "ack should carry the engine version, got: {out}"
+        assert_eq!(
+            out,
+            format!(
+                "OK: 1 node(s) created. [engine {}]",
+                env!("CARGO_PKG_VERSION")
+            ),
+            "write ACK is a legacy text contract"
         );
         // SET acks too.
         let out = write(&mut a, "MATCH (t:Task{id:'t1'}) SET t.status='done'", None).unwrap();
-        assert!(out.contains("property(ies) set"), "got: {out}");
+        assert_eq!(
+            out,
+            format!(
+                "OK: 1 property(ies) set. [engine {}]",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
         // A read that matches nothing still says "No results" (distinct signal).
         let out = write(&mut a, "MATCH (x:Nope) RETURN x", None).unwrap();
-        assert!(out.contains("No results"), "got: {out}");
+        assert_eq!(out, "No results.");
     }
 
     #[test]

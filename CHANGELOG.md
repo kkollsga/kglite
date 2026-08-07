@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before querying.** After a relevant filesystem change, `tools[].cypher`
   previously served the stale active graph until a different graph tool
   triggered the lazy rebuild.
+- **Concurrent MCP reads now wait for an in-flight workspace graph rebuild.**
+  A second request could previously query the old graph while another request
+  prepared and installed the refreshed generation.
 
 ## [0.15.7] - 2026-08-06
 
