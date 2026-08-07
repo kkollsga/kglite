@@ -830,6 +830,30 @@ class TestYamlManifest:
         finally:
             client.shutdown()
 
+    def test_recipe_tools_list_and_run_with_identical_structured_fallback(self, graph_with_manifest: Path):
+        client = _spawn(["--graph", str(graph_with_manifest)])
+        try:
+            listing = client.call_tool("list_recipe_queries", {"recipe": "smoke"})
+            result = client.call_tool(
+                "run_recipe_query",
+                {
+                    "recipe": "smoke",
+                    "query": "count_people",
+                    "variables": {},
+                },
+            )
+        finally:
+            client.shutdown()
+
+        for envelope in (listing, result):
+            assert envelope["structuredContent"] == json.loads(_text_content(envelope))
+        assert listing["structuredContent"]["recipes"][0]["query_count"] == 1
+        assert result["structuredContent"]["result"] == {
+            "columns": ["people"],
+            "rows": [[4]],
+            "row_count": 1,
+        }
+
     def test_bare_overview_adds_prefix_then_catalog_hint(self, graph_with_manifest: Path):
         client = _spawn(["--graph", str(graph_with_manifest)])
         try:
@@ -1427,6 +1451,30 @@ class TestSelftest:
         assert rc == 0, out
         assert "Selftest PASSED" in out
         assert "workspace activation" in out
+
+    def test_nonempty_recipe_catalog_reports_both_routes(self, graph_fixture: Path, tmp_path: Path):
+        manifest = tmp_path / "recipes_mcp.yaml"
+        manifest.write_text(
+            "name: Recipe Selftest\n"
+            "extensions:\n"
+            "  cypher_recipes:\n"
+            "    smoke:\n"
+            "      description: Selftest operations.\n"
+            "      queries:\n"
+            "        count_people:\n"
+            "          description: Count Person nodes.\n"
+            "          parameters:\n"
+            "            type: object\n"
+            "            properties: {}\n"
+            "            required: []\n"
+            "            additionalProperties: false\n"
+            "          cypher: MATCH (p:Person) RETURN count(p) AS people ORDER BY people\n",
+            encoding="utf-8",
+        )
+        rc, out = _run_selftest(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
+        assert rc == 0, out
+        assert "recipe catalog tools" in out
+        assert "list_recipe_queries + run_recipe_query present" in out
 
 
 # ── Cleanup safety: ensure no orphaned binaries ───────────────────────────

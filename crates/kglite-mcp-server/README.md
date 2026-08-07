@@ -73,6 +73,8 @@ Reach for the **Python script** when you want the YAML-manifest
 - **[MCP servers guide](https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html)**
   — protocol details, manifest schema, skill conventions. Python-flavored
   but the protocol details apply to both implementations.
+- **[Named Cypher recipe catalogs](https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html#extensions-cypher-recipes-grouped-structured-read-queries)**
+  — strict manifest configuration and structured list/run contracts.
 - **[kglite Rust API](https://docs.rs/kglite)** — for embedders.
 
 ## License

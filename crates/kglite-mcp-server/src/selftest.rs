@@ -295,6 +295,46 @@ pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
         ));
     }
 
+    // A non-empty recipe catalog is a two-route ownership unit. Probe the
+    // live registry rather than trusting that successful manifest parsing
+    // implies both tools were installed.
+    let recipe_catalog_configured = manifest
+        .as_ref()
+        .and_then(|manifest| manifest.extensions.get("cypher_recipes"))
+        .and_then(Value::as_object)
+        .is_some_and(|catalog| !catalog.is_empty());
+    let recipe_tools = (has("list_recipe_queries"), has("run_recipe_query"));
+    if recipe_catalog_configured {
+        if recipe_tools == (true, true) {
+            checks.push((
+                "recipe catalog tools",
+                Check::Pass("list_recipe_queries + run_recipe_query present".into()),
+            ));
+        } else {
+            checks.push((
+                "recipe catalog tools",
+                Check::Fail(format!(
+                    "configured catalog is missing {}{}",
+                    if recipe_tools.0 {
+                        ""
+                    } else {
+                        "list_recipe_queries "
+                    },
+                    if recipe_tools.1 {
+                        ""
+                    } else {
+                        "run_recipe_query"
+                    },
+                )),
+            ));
+        }
+    } else if recipe_tools != (false, false) {
+        checks.push((
+            "recipe catalog tools",
+            Check::Fail("recipe routes registered without a non-empty catalog".into()),
+        ));
+    }
+
     // 3. github tools — informational (honest listing: present iff a token is
     //    reachable), never a hard failure.
     let gh: Vec<&str> = ["github_issues", "github_api", "screen_stargazers"]
@@ -313,9 +353,10 @@ pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
         ));
     }
 
-    // 4. activation — local-workspace. The `workspace.root` is a *wide sandbox
-    //    boundary* that agents narrow with `set_root_dir` at runtime; it is
-    //    never built as a unit. So the selftest must NOT `set_root_dir(root)` —
+    // 4. activation — local-workspace. The `workspace.root` can be a wide
+    //    starting root that agents narrow with `set_root_dir` at runtime; it
+    //    is never built as a unit. (`sandbox_root`, when configured, owns the
+    //    containment boundary.) So the selftest must NOT `set_root_dir(root)` —
     //    for a broad root (the documented code-review archetype) that builds a
     //    code_tree over the whole tree, which is unbounded work and hangs the
     //    handshake. Registration-only by default; a real build+hydrate check is

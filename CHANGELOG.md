@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Boot-validated Cypher recipe catalogs for MCP agents.** Manifests can
+  declare grouped, parameterized read-only operations under
+  `extensions.cypher_recipes`; non-empty catalogs expose
+  `list_recipe_queries` and `run_recipe_query` with progressive
+  `graph_overview` discovery, strict variables, structured success/error
+  envelopes, stale-graph rejection, and a 200-row all-or-error payload cap.
+
 ### Fixed
 
 - **Manifest-declared MCP Cypher tools now refresh watched workspace graphs

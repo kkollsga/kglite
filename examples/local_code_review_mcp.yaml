@@ -6,11 +6,11 @@
 #
 # What it is: point the server at a directory tree on disk, and it builds an
 # in-memory code-tree graph (functions, classes, calls, imports, docs) that an
-# agent explores with graph_overview() + cypher_query(). `set_root_dir(path)`
-# swaps the active root at any time (rebuild fires lazily on the next graph
-# tool call); `watch: true` re-tags the graph dirty when a code file under the
-# active root changes. The graph lives only for the server's lifetime — it's
-# never written to disk.
+# agent explores with graph_overview(), exact named recipe queries, and raw
+# cypher_query(). `set_root_dir(path)` swaps the active root at any time
+# (rebuild fires lazily on the next graph tool call); `watch: true` re-tags the
+# graph dirty when a code file under the active root changes. The graph lives
+# only for the server's lifetime — it's never written to disk.
 #
 # Verify it after editing: `kglite-mcp-server --selftest --mcp-config THIS.yaml`
 # drives a live handshake and prints green/red per capability.
@@ -36,11 +36,12 @@ skills:
 instructions: |
   Local code-graph workspace for reviewing any directory on disk.
 
-  PRIMARY TOOLS: graph_overview + cypher_query. For any structural question —
-  where is X defined, what calls what, which types/properties exist, counts,
-  multi-hop paths — call graph_overview first, then cypher_query. Use grep /
-  read_source ONLY for literal text search (error strings, comments, config
-  keys), never to rediscover structure the graph already encodes.
+  PRIMARY TOOLS: graph_overview + run_recipe_query + cypher_query. A bare
+  graph_overview reports whether a named query catalog is present. Use the
+  code_review recipe only for its exact Function-scoped operations; use raw
+  cypher_query for every broader or differently scoped structural question.
+  Use grep / read_source ONLY for literal text search (error strings,
+  comments, config keys), never to rediscover structure the graph encodes.
 
   Workflow:
     1. set_root_dir('/abs/path/to/repo')          — switch active root + build graph
@@ -72,3 +73,66 @@ workspace:
   # target (not the wide root) and fire lazily on the next tool call, so a wide
   # boundary stays cheap. Boot build is deferred until the first set_root_dir.
   watch: true
+
+# Boot-validated, read-only shortcuts for the exact first-pass Function
+# questions in `local_code_review_mcp.skills/initial_code_review.md`. The YAML
+# declares operations only; the colocated skill owns sequencing and fallback.
+extensions:
+  cypher_recipes:
+    code_review:
+      description: Exact Function-scoped operations for an initial code review.
+      queries:
+        resolve_function:
+          description: Resolve Function nodes with exactly the supplied qualified_name.
+          parameters:
+            type: object
+            properties:
+              qualified_name:
+                type: string
+                description: Fully qualified Function name.
+            required: [qualified_name]
+            additionalProperties: false
+          cypher: |
+            MATCH (target:Function)
+            WHERE target.qualified_name = $qualified_name
+            RETURN target.qualified_name AS qualified_name,
+                   target.file_path AS file_path,
+                   target.line_number AS line_number
+            ORDER BY qualified_name, file_path, line_number
+
+        direct_callers:
+          description: Return Function nodes with a direct Function-to-Function CALLS edge to the target Function.
+          parameters:
+            type: object
+            properties:
+              qualified_name:
+                type: string
+                description: Fully qualified target Function name.
+            required: [qualified_name]
+            additionalProperties: false
+          cypher: |
+            MATCH (caller:Function)-[:CALLS]->(target:Function)
+            WHERE target.qualified_name = $qualified_name
+            RETURN DISTINCT caller.qualified_name AS qualified_name,
+                            caller.file_path AS file_path,
+                            caller.line_number AS line_number
+            ORDER BY qualified_name, file_path, line_number
+
+        affected_tests:
+          description: Return test Function nodes reaching the target Function through CALLS paths of length 1..5; this is not comprehensive impact analysis.
+          parameters:
+            type: object
+            properties:
+              qualified_name:
+                type: string
+                description: Fully qualified target Function name.
+            required: [qualified_name]
+            additionalProperties: false
+          cypher: |
+            MATCH (test:Function)-[:CALLS*1..5]->(target:Function)
+            WHERE target.qualified_name = $qualified_name
+              AND test.is_test = true
+            RETURN DISTINCT test.qualified_name AS qualified_name,
+                            test.file_path AS file_path,
+                            test.line_number AS line_number
+            ORDER BY qualified_name, file_path, line_number

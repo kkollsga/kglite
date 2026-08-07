@@ -317,6 +317,120 @@ Manifest Cypher tools cap output at 15 rows / 2k chars. For full
 result exports, agents use the bundled `cypher_query` with
 `FORMAT CSV`.
 
+### `extensions.cypher_recipes` — grouped, structured read queries
+
+Recipe catalogs group exact, repeated, read-only Cypher operations behind two
+stable tools instead of registering one top-level tool per query:
+
+- `list_recipe_queries(recipe?)` — omit `recipe` for compact catalog
+  summaries; provide it to disclose that recipe's query descriptions and
+  parameter schemas. Stored Cypher is never returned by the listing tool.
+- `run_recipe_query(recipe, query, variables, include_cypher=false)` — run one
+  exact operation with strictly validated variables. `variables` is always
+  required; parameter-free queries receive `{}`.
+
+A non-empty catalog adds this hint to a bare `graph_overview()` response:
+
+```xml
+<query-catalog recipes="1" queries="3"
+  list-tool="list_recipe_queries" run-tool="run_recipe_query"/>
+```
+
+That is progressive discovery, not a catalog dump. If a domain skill already
+names an operation, call `run_recipe_query` directly. Otherwise list compact
+summaries once, inspect only a plausible recipe, and use it only when its
+documented scope is an exact match. Focused `graph_overview(...)` calls omit
+the hint.
+
+Each recipe and query has a description. Every query declares a closed root
+parameter schema and parameterized Cypher:
+
+```yaml
+extensions:
+  cypher_recipes:
+    code_review:
+      description: Exact Function-scoped operations for an initial code review.
+      queries:
+        direct_callers:
+          description: Return Function nodes with a direct Function-to-Function CALLS edge to the target Function.
+          parameters:
+            type: object
+            properties:
+              qualified_name: {type: string}
+            required: [qualified_name]
+            additionalProperties: false
+          cypher: |
+            MATCH (caller:Function)-[:CALLS]->(target:Function)
+            WHERE target.qualified_name = $qualified_name
+            RETURN DISTINCT caller.qualified_name AS qualified_name,
+                            caller.file_path AS file_path
+            ORDER BY qualified_name, file_path
+```
+
+The full three-query code-review example, including its resolve-first domain
+skill, is
+[`examples/local_code_review_mcp.yaml`](https://github.com/kkollsga/kglite/blob/main/examples/local_code_review_mcp.yaml).
+Catalogs are immutable after boot. KGLite parses every stored query, requires
+an exact match between `$parameters`, root `properties`, and `required`, and
+rejects mutations, `EXPLAIN`, `PROFILE`, `FORMAT CSV`, and `LOAD CSV`.
+Supported schema keywords are deliberately limited to `type`, `properties`,
+`required`, `items`, `enum`, `minimum`, `maximum`, `minItems`, `maxItems`,
+`additionalProperties`, and `description`; unsupported keywords fail boot.
+`type` may be a supported type name or an array such as
+`[string, "null"]`. Integer values must fit KGLite's signed 64-bit range.
+
+Successful execution returns MCP `structuredContent`; the text content is the
+same serialized JSON for clients that only expose text:
+
+```json
+{
+  "recipe": "code_review",
+  "query": "direct_callers",
+  "result": {
+    "columns": ["qualified_name", "file_path"],
+    "rows": [["pkg::caller", "src/caller.rs"]],
+    "row_count": 1
+  }
+}
+```
+
+Columns plus positional rows are canonical. With `include_cypher=true`, the
+response adds both the stored parameterized `cypher` and its separate
+`parameters` map; both are omitted when false. The pairing also applies to
+runtime errors after the recipe/query has been resolved.
+
+An empty successful result (`rows: []`, `row_count: 0`) only means the stored
+operation matched no rows. It cannot by itself distinguish a missing target
+from an existing target with no matching relationships. Entity-oriented
+recipes therefore provide a `resolve_*` query, and their domain skill must run
+that preflight before interpreting an empty neighborhood. In the example,
+`resolve_function` is mandatory before `direct_callers` or `affected_tests`.
+
+Recipe payloads are all-or-error: up to 200 returned rows are returned in
+full; 201 or more return `result_limit_exceeded` with exact `details.limit`
+and `details.observed_count`, and no partial result. This bounds the MCP return
+payload, not intermediate query work. A literal stored `LIMIT 200` is reserved
+and rejected because it would disguise overflow as a complete result. Other
+semantic limits must genuinely define the named operation. Example and
+bundled queries use explicit `ORDER BY`; without it, a third-party query's row
+order is undefined.
+
+Errors use structured envelopes with stable codes: `invalid_request`,
+`unknown_recipe`, `unknown_query`, `invalid_variables`, `no_active_graph`,
+`stale_graph`, `query_failed`, and `result_limit_exceeded`. A `stale_graph`
+response is a hard failure and contains no graph data; fix the reported
+workspace rebuild problem before retrying. `query_failed.details.cause`
+contains a stable category, the closest KGLite error code, safe message, and
+position when available. Multi-revision misuse and an unknown revision use
+the distinct `multi_revision_graph_required` and `unknown_revision`
+categories rather than collapsing into a generic execution failure.
+
+Recipes are narrow convenience operations. Use raw `cypher_query` for broader
+entity kinds, different relationships, deeper/unbounded paths, or any question
+that does not exactly match a stored operation. Use `FORMAT CSV` through raw
+Cypher (optionally with `extensions.csv_http_server`) for large exports;
+recipe queries intentionally reject CSV mode.
+
 ### `extensions.embedder` — semantic search inside Cypher
 
 Wire bge-m3 (or any fastembed-catalog model) so `text_score()` works
@@ -858,6 +972,7 @@ the discriminator for `--graph` / `--workspace` / `--watch` /
 > you adopt client roots.
 | `builtins.temp_cleanup: on_overview` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `extensions.embedder` | ✓ | ✓ (per active repo) | ✓ | — (no graph) | — |
+| `extensions.cypher_recipes` | ✓ | ✓ (per active repo) | ✓ | registers discovery/run tools, but execution needs an active graph | registers discovery/run tools, but execution needs an active graph |
 | `extensions.csv_http_server` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `extensions.value_codecs` | ✓ | ✓ | ✓ | — (no graph) | — |
 | `extensions.<other>` (passthrough) | parsed, opaque to framework | parsed, opaque | parsed, opaque | parsed, opaque | parsed, opaque |
@@ -886,6 +1001,7 @@ will my agent see?"
 | `set_root_dir` | `workspace.kind: local` only | **Unbounded unless `workspace.sandbox_root` is set** (kglite 0.15.5+, mcp-methods 0.4.3+). Without that key a swap may point the server at any readable directory; `workspace.root` is the *starting* root, not a boundary. |
 | `github_issues` / `github_api` | `GITHUB_TOKEN` (or `GH_TOKEN`) reachable at boot | Token loaded from process env, walk-up `.env`, or explicit `env_file:`. Tools are registered together; never one without the other. |
 | Manifest `tools[].cypher` entries | the manifest declares them AND the mode supports cypher (anything but `--source-root` and bare) | Tool names cannot collide with the built-ins above. |
+| `list_recipe_queries` / `run_recipe_query` | `extensions.cypher_recipes` is a non-empty valid catalog | Both fixed names register together. Listing works without a graph; running requires an active, fresh graph. |
 
 ### Tool response formats
 
@@ -900,6 +1016,7 @@ across patch releases — they're tagged below per stability. Manifest
 | `cypher_query FORMAT CSV` with `csv_http_server` | `FORMAT CSV: <N> row(s) written to <url>\nFetch with: curl <url>` | Stable. |
 | `cypher_query FORMAT CSV` without `csv_http_server` | Inline CSV body. | Stable. |
 | `cypher_query` errors | `Cypher error: <engine message>` | Stable. |
+| `list_recipe_queries` / `run_recipe_query` | Structured JSON success/error envelope in MCP `structuredContent`; text fallback is the same serialized JSON. | Stable v1 contract. |
 | `graph_overview` | XML schema (see `describe()` output) — types / connections / cypher panes depending on args. | Stable; the XML shape is the canonical agent-facing format. |
 | `read_source` | First line: `<path>  (lines X-Y of Z)`, body lines: `   <lineno>: <text>`. Truncation footer when `max_chars` trips: `... (truncated)`. | Stable. |
 | `read_source` (path errors) | `Error: path '<path>' does not exist or access denied.` | Stable. |
@@ -947,6 +1064,19 @@ as a test failure on the next CI run.
 [schema-cypher-recipes]: https://github.com/kkollsga/kglite/blob/main/docs/schemas/extensions/cypher_recipes.json
 [schema-embedder]: https://github.com/kkollsga/kglite/blob/main/docs/schemas/extensions/embedder.json
 [schema-value-codecs]: https://github.com/kkollsga/kglite/blob/main/docs/schemas/extensions/value_codecs.json
+
+#### `extensions.cypher_recipes`
+
+A mapping from recipe identifier to `{description, queries}`. Each query is a
+mapping with exactly `description`, `parameters`, and `cypher`. Identifiers
+match `^[A-Za-z_][A-Za-z0-9_]*$`; descriptions and Cypher must contain a
+non-whitespace character; every recipe has at least one query. An absent or
+empty catalog disables both recipe tools.
+
+`parameters` uses the strict closed root schema described in the grouped,
+structured read-query section above. Catalog validation happens at server
+boot and any violation exits before MCP serving starts. The schema file is
+[`docs/schemas/extensions/cypher_recipes.json`][schema-cypher-recipes].
 
 #### `extensions.embedder`
 

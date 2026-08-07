@@ -172,6 +172,45 @@ def test_legacy_manifest_cypher_docs_do_not_claim_schema_validation() -> None:
     assert "does not validate that schema" in describe
 
 
+def test_recipe_query_docs_cover_automation_and_domain_boundaries() -> None:
+    guide = (REPO_ROOT / "docs/python/guides/mcp-servers.md").read_text(encoding="utf-8")
+    example = (REPO_ROOT / "examples/local_code_review_mcp.yaml").read_text(encoding="utf-8")
+    skill = (REPO_ROOT / "examples/local_code_review_mcp.skills/initial_code_review.md").read_text(encoding="utf-8")
+
+    for contract in (
+        "list_recipe_queries",
+        "run_recipe_query",
+        "parameter-free queries receive `{}`",
+        "rows: []",
+        "include_cypher=true",
+        "result_limit_exceeded",
+        "details.observed_count",
+        "literal stored `LIMIT 200`",
+        "stale_graph",
+        "query_failed.details.cause",
+        "multi_revision_graph_required",
+        "unknown_revision",
+        "ORDER BY",
+        "FORMAT CSV",
+    ):
+        assert contract in guide, contract
+
+    assert example.count("        resolve_function:") == 1
+    assert example.count("        direct_callers:") == 1
+    assert example.count("        affected_tests:") == 1
+    assert example.count("required: [qualified_name]") == 3
+    assert example.count("additionalProperties: false") == 3
+    assert example.count("ORDER BY qualified_name, file_path, line_number") == 3
+    assert "LIMIT 200" not in example
+
+    resolve = skill.index('query="resolve_function"')
+    callers = skill.index("call `direct_callers` and `affected_tests`")
+    assert resolve < callers
+    assert "Do not interpret empty caller or test rows" in skill
+    assert "use raw" in skill
+    assert "`cypher_query`" in skill
+
+
 def test_pre_014_persistence_is_never_documented_as_readable() -> None:
     active = "\n".join(path.read_text(encoding="utf-8") for path in _active_markdown())
     retired = (
