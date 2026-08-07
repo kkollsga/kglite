@@ -15,7 +15,7 @@ mod wire;
 #[cfg(test)]
 mod result_tests;
 
-pub(crate) use config::{RecipeCatalog, RecipeQueryDefinition};
+pub(crate) use config::{CatalogSummary, RecipeCatalog, RecipeQueryDefinition};
 pub(crate) use errors::RecipeErrorEnvelope;
 pub(crate) use result::{list_recipe_queries, run_recipe_query};
 pub(crate) use routes::{

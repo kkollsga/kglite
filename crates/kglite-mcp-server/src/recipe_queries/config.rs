@@ -62,6 +62,13 @@ impl RecipeCatalog {
         }
     }
 
+    /// Discovery dimensions only when route registration is enabled.
+    /// Absent and explicitly empty manifests both compile to an empty catalog
+    /// and therefore contribute no overview hint.
+    pub(crate) fn discovery_summary(&self) -> Option<CatalogSummary> {
+        (!self.is_empty()).then(|| self.summary())
+    }
+
     pub(crate) fn recipes(&self) -> impl ExactSizeIterator<Item = &RecipeDefinition> {
         self.recipes.values()
     }
@@ -259,10 +266,13 @@ mod tests {
 
     #[test]
     fn absent_and_empty_catalogs_are_disabled() {
-        assert!(RecipeCatalog::from_manifest_value(None).unwrap().is_empty());
-        assert!(RecipeCatalog::from_manifest_value(Some(&json!({})))
-            .unwrap()
-            .is_empty());
+        let absent = RecipeCatalog::from_manifest_value(None).unwrap();
+        assert!(absent.is_empty());
+        assert_eq!(absent.discovery_summary(), None);
+
+        let empty = RecipeCatalog::from_manifest_value(Some(&json!({}))).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.discovery_summary(), None);
     }
 
     #[test]
@@ -273,11 +283,11 @@ mod tests {
         ));
         let parsed = RecipeCatalog::from_manifest_value(Some(&raw)).unwrap();
         assert_eq!(
-            parsed.summary(),
-            CatalogSummary {
+            parsed.discovery_summary(),
+            Some(CatalogSummary {
                 recipe_count: 1,
                 query_count: 1
-            }
+            })
         );
         let recipe = parsed.get("code_review").unwrap();
         assert_eq!(recipe.name, "code_review");

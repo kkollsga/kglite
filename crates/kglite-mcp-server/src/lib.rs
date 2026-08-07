@@ -1088,15 +1088,15 @@ async fn run_async(
     // Recipe definitions are configuration, not per-call input. Compile the
     // deliberately small schema subset and validate every stored query once
     // at boot so later route handlers can share one immutable catalog.
-    let recipe_catalog = match manifest.as_ref() {
+    let recipe_catalog = Arc::new(match manifest.as_ref() {
         Some(manifest) => recipe_queries::RecipeCatalog::from_manifest_value(
             manifest.extensions.get("cypher_recipes"),
         )
         .context("extensions.cypher_recipes parse failed")?,
         None => recipe_queries::RecipeCatalog::default(),
-    };
-    if !recipe_catalog.is_empty() {
-        let summary = recipe_catalog.summary();
+    });
+    let recipe_catalog_summary = recipe_catalog.discovery_summary();
+    if let Some(summary) = recipe_catalog_summary {
         tracing::info!(
             recipes = summary.recipe_count,
             queries = summary.query_count,
@@ -1252,6 +1252,12 @@ async fn run_async(
         &mut server,
         graph_state.clone(),
         builtins,
+        tools::OverviewDecorations {
+            prefix: manifest
+                .as_ref()
+                .and_then(|manifest| manifest.overview_prefix.clone()),
+            catalog: recipe_catalog_summary,
+        },
         csv_http_arc.clone(),
     );
     code_source::register(
@@ -1291,7 +1297,7 @@ async fn run_async(
         &graph_state,
         manifest.as_ref(),
         &csv_http_arc,
-        Arc::new(recipe_catalog),
+        recipe_catalog,
         domain_tools,
     )?;
 

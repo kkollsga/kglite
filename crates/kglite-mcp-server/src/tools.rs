@@ -30,6 +30,8 @@ use kglite::api::{Embedder, KgError, KnowledgeGraph, Value};
 use mcp_methods::server::McpServer;
 use serde::{Deserialize, Serialize};
 
+use crate::recipe_queries::CatalogSummary;
+
 const NO_GRAPH: &str =
     "No active graph. Pass --graph X.kgl, or activate one via repo_management('org/repo').";
 
@@ -1496,6 +1498,16 @@ struct OverviewArgs {
     pub cypher: Option<DetailSelection>,
 }
 
+impl OverviewArgs {
+    /// Whether the caller requested the compact inventory with no focused
+    /// pane. This deliberately treats explicit `false` and empty lists as
+    /// focused calls: only an argument-free request gets sticky discovery
+    /// text or triggers temporary-file cleanup.
+    fn is_bare(&self) -> bool {
+        self.types.is_none() && self.connections.is_none() && self.cypher.is_none()
+    }
+}
+
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 struct SaveGraphArgs {}
 
@@ -1560,10 +1572,74 @@ pub struct Builtins {
     pub temp_dir: Option<std::path::PathBuf>,
 }
 
+/// Immutable MCP-layer additions to the bare `graph_overview` response.
+///
+/// These describe the deployment, not the active graph, so they are captured
+/// by the route at boot instead of entering [`GraphState`] or core
+/// `describe()`.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OverviewDecorations {
+    pub(crate) prefix: Option<String>,
+    pub(crate) catalog: Option<CatalogSummary>,
+}
+
+impl OverviewDecorations {
+    fn render(&self, body: String, is_bare: bool) -> String {
+        if !is_bare {
+            return body;
+        }
+
+        let mut rendered = String::new();
+        if let Some(prefix) = self.prefix.as_deref() {
+            append_overview_section(&mut rendered, prefix);
+        }
+        append_overview_section(&mut rendered, &body);
+        if let Some(summary) = self.catalog {
+            append_overview_section(
+                &mut rendered,
+                &format!(
+                    "<query-catalog recipes=\"{}\" queries=\"{}\" \
+                     list-tool=\"list_recipe_queries\" run-tool=\"run_recipe_query\"/>",
+                    summary.recipe_count, summary.query_count
+                ),
+            );
+        }
+        rendered
+    }
+}
+
+fn append_overview_section(rendered: &mut String, section: &str) {
+    if section.is_empty() {
+        return;
+    }
+    if !rendered.is_empty() && !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    rendered.push_str(section);
+}
+
+/// Apply bare-overview side effects and return the shared bare predicate for
+/// response decoration. Keeping both decisions behind this function prevents
+/// cleanup and sticky discovery from drifting onto different call shapes.
+fn prepare_overview(
+    args: &OverviewArgs,
+    cleanup_temp: bool,
+    temp_dir: Option<&std::path::Path>,
+) -> bool {
+    let is_bare = args.is_bare();
+    if cleanup_temp && is_bare {
+        if let Some(dir) = temp_dir {
+            wipe_temp_dir(dir);
+        }
+    }
+    is_bare
+}
+
 pub fn register(
     server: &mut McpServer,
     state: GraphState,
     builtins: Builtins,
+    overview_decorations: OverviewDecorations,
     csv_http: Option<Arc<crate::csv_http::CsvHttpConfig>>,
 ) {
     let s = state.clone();
@@ -1647,18 +1723,11 @@ pub fn register(
          returns the inventory; pass types=[...] / connections=true|[...] / \
          cypher=true|[...] for drill-down.",
         move |args| {
-            if cleanup_temp
-                && args.types.is_none()
-                && args.connections.is_none()
-                && args.cypher.is_none()
-            {
-                if let Some(dir) = temp_dir.as_deref() {
-                    wipe_temp_dir(dir);
-                }
-            }
+            let is_bare = prepare_overview(&args, cleanup_temp, temp_dir.as_deref());
             s.ensure_workspace_graph_fresh();
             let body = s.with_active(|g| run_overview(g, &args));
-            s.with_rebuild_warning(body)
+            let body = s.with_rebuild_warning(body);
+            overview_decorations.render(body, is_bare)
         },
     );
     if builtins.save_graph {
@@ -1941,6 +2010,150 @@ fn run_save(graph: &mut ActiveGraph) -> String {
 mod tests {
     use super::*;
     use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
+
+    fn catalog_summary() -> CatalogSummary {
+        CatalogSummary {
+            recipe_count: 2,
+            query_count: 5,
+        }
+    }
+
+    #[test]
+    fn overview_bare_predicate_requires_an_argument_free_call() {
+        assert!(OverviewArgs::default().is_bare());
+        assert!(!OverviewArgs {
+            types: Some(Vec::new()),
+            ..OverviewArgs::default()
+        }
+        .is_bare());
+        assert!(!OverviewArgs {
+            connections: Some(DetailSelection::Enabled(false)),
+            ..OverviewArgs::default()
+        }
+        .is_bare());
+        assert!(!OverviewArgs {
+            connections: Some(DetailSelection::Topics(Vec::new())),
+            ..OverviewArgs::default()
+        }
+        .is_bare());
+        assert!(!OverviewArgs {
+            cypher: Some(DetailSelection::Enabled(false)),
+            ..OverviewArgs::default()
+        }
+        .is_bare());
+        assert!(!OverviewArgs {
+            cypher: Some(DetailSelection::Topics(Vec::new())),
+            ..OverviewArgs::default()
+        }
+        .is_bare());
+    }
+
+    #[test]
+    fn overview_decorations_render_prefix_body_and_catalog_in_order() {
+        let decorations = OverviewDecorations {
+            prefix: Some("operator prefix\n".to_string()),
+            catalog: Some(catalog_summary()),
+        };
+        let body = "<active_graph/>\n<schema/>".to_string();
+
+        assert_eq!(
+            decorations.render(body.clone(), true),
+            "operator prefix\n\
+             <active_graph/>\n\
+             <schema/>\n\
+             <query-catalog recipes=\"2\" queries=\"5\" list-tool=\"list_recipe_queries\" run-tool=\"run_recipe_query\"/>"
+        );
+        assert_eq!(
+            decorations.render(body.clone(), false),
+            body,
+            "focused overviews must remain byte-for-byte unchanged"
+        );
+        assert_eq!(
+            OverviewDecorations::default().render(body.clone(), true),
+            body,
+            "absent prefix and catalog must preserve the legacy body"
+        );
+        assert_eq!(
+            OverviewDecorations {
+                prefix: Some("prefix only".to_string()),
+                catalog: None,
+            }
+            .render("body".to_string(), true),
+            "prefix only\nbody"
+        );
+        assert_eq!(
+            OverviewDecorations {
+                prefix: None,
+                catalog: Some(catalog_summary()),
+            }
+            .render("body".to_string(), true),
+            "body\n<query-catalog recipes=\"2\" queries=\"5\" list-tool=\"list_recipe_queries\" run-tool=\"run_recipe_query\"/>"
+        );
+    }
+
+    #[test]
+    fn bare_overview_decorations_include_no_active_graph_body() {
+        let decorations = OverviewDecorations {
+            prefix: Some("operator prefix".to_string()),
+            catalog: Some(catalog_summary()),
+        };
+        let rendered = decorations.render(NO_GRAPH.to_string(), true);
+
+        assert!(rendered.starts_with("operator prefix\nNo active graph."));
+        assert!(rendered.ends_with(
+            "<query-catalog recipes=\"2\" queries=\"5\" list-tool=\"list_recipe_queries\" run-tool=\"run_recipe_query\"/>"
+        ));
+    }
+
+    #[test]
+    fn temp_cleanup_uses_the_same_bare_predicate_as_decorations() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cleanup_dir = temp.path().join("temp");
+        std::fs::create_dir(&cleanup_dir).expect("cleanup dir");
+
+        let focused_calls = [
+            OverviewArgs {
+                types: Some(Vec::new()),
+                ..OverviewArgs::default()
+            },
+            OverviewArgs {
+                connections: Some(DetailSelection::Enabled(false)),
+                ..OverviewArgs::default()
+            },
+            OverviewArgs {
+                cypher: Some(DetailSelection::Topics(Vec::new())),
+                ..OverviewArgs::default()
+            },
+        ];
+        for (index, args) in focused_calls.iter().enumerate() {
+            let marker = cleanup_dir.join(format!("focused-{index}"));
+            std::fs::write(&marker, "keep").expect("focused marker");
+            assert!(!prepare_overview(args, true, Some(&cleanup_dir)));
+            assert!(marker.exists(), "focused call must not clean temp files");
+        }
+
+        let retained = cleanup_dir.join("cleanup-disabled");
+        std::fs::write(&retained, "keep").expect("disabled marker");
+        assert!(prepare_overview(
+            &OverviewArgs::default(),
+            false,
+            Some(&cleanup_dir)
+        ));
+        assert!(retained.exists(), "disabled cleanup must retain temp files");
+
+        assert!(prepare_overview(
+            &OverviewArgs::default(),
+            true,
+            Some(&cleanup_dir)
+        ));
+        assert_eq!(
+            std::fs::read_dir(&cleanup_dir)
+                .expect("read cleanup dir")
+                .count(),
+            0,
+            "bare call cleans every accumulated entry"
+        );
+    }
 
     #[test]
     fn workspace_graph_hooks_unify_builds_and_own_relevance() {

@@ -768,6 +768,23 @@ class TestYamlManifest:
         manifest = tmp_path / "demo_mcp.yaml"
         manifest.write_text(
             "name: Demo Smoke Test\n"
+            "overview_prefix: |\n"
+            "  smoke overview prefix\n"
+            "builtins:\n"
+            "  temp_cleanup: on_overview\n"
+            "extensions:\n"
+            "  cypher_recipes:\n"
+            "    smoke:\n"
+            "      description: Smoke-test recipe operations.\n"
+            "      queries:\n"
+            "        count_people:\n"
+            "          description: Count Person nodes.\n"
+            "          parameters:\n"
+            "            type: object\n"
+            "            properties: {}\n"
+            "            required: []\n"
+            "            additionalProperties: false\n"
+            "          cypher: MATCH (p:Person) RETURN count(p) AS people ORDER BY people\n"
             "tools:\n"
             "  - name: people_in_city\n"
             "    description: Find Person nodes whose city matches the parameter.\n"
@@ -803,6 +820,52 @@ class TestYamlManifest:
             assert "Dave" not in text
         finally:
             client.shutdown()
+
+    def test_bare_overview_adds_prefix_then_catalog_hint(self, graph_with_manifest: Path):
+        client = _spawn(["--graph", str(graph_with_manifest)])
+        try:
+            text = _text_content(client.call_tool("graph_overview"))
+        finally:
+            client.shutdown()
+
+        prefix = text.index("smoke overview prefix")
+        active_graph = text.index("<active_graph")
+        catalog = text.index(
+            '<query-catalog recipes="1" queries="1" list-tool="list_recipe_queries" run-tool="run_recipe_query"/>'
+        )
+        assert prefix < active_graph < catalog
+
+    def test_focused_overview_has_no_prefix_hint_or_cleanup(self, graph_with_manifest: Path):
+        temp_dir = graph_with_manifest.parent / "temp"
+        temp_dir.mkdir()
+        marker = temp_dir / "keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+        client = _spawn(["--graph", str(graph_with_manifest)])
+        try:
+            focused = _text_content(client.call_tool("graph_overview", {"types": []}))
+            assert marker.exists(), "focused overview must not run temp cleanup"
+            bare = _text_content(client.call_tool("graph_overview"))
+        finally:
+            client.shutdown()
+
+        assert "smoke overview prefix" not in focused
+        assert "<query-catalog" not in focused
+        assert not marker.exists(), "bare overview must run temp cleanup"
+        assert "smoke overview prefix" in bare
+        assert "<query-catalog" in bare
+
+    def test_no_active_graph_still_exposes_bare_discovery(self, graph_with_manifest: Path):
+        manifest = graph_with_manifest.with_name("demo_mcp.yaml")
+        client = _spawn(["--mcp-config", str(manifest)])
+        try:
+            text = _text_content(client.call_tool("graph_overview"))
+        finally:
+            client.shutdown()
+
+        assert text.startswith("smoke overview prefix\nNo active graph.")
+        assert text.endswith(
+            '<query-catalog recipes="1" queries="1" list-tool="list_recipe_queries" run-tool="run_recipe_query"/>'
+        )
 
 
 # ── Test: workspace.kind: local (new in 0.3.22) ───────────────────────────
