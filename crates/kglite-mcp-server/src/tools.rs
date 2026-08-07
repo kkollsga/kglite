@@ -51,6 +51,20 @@ pub(crate) enum CypherRunError {
     Engine(KgError),
 }
 
+/// Failure from a structured read that refuses to serve known-stale workspace
+/// evidence.
+///
+/// The ordinary [`CypherRunError`] remains intact inside `Cypher`: callers can
+/// still distinguish no graph from a concrete [`KgError`] without parsing a
+/// rendered message. Only recipe-style evidence reads opt into this stricter
+/// freshness contract; legacy text tools retain their warning-and-continue
+/// behavior.
+#[derive(Debug)]
+pub(crate) enum StrictCypherReadError {
+    StaleGraph(WorkspaceRebuildFailureSnapshot),
+    Cypher(CypherRunError),
+}
+
 impl fmt::Display for CypherRunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1192,6 +1206,33 @@ impl GraphState {
         let guard = read_lock(&self.inner);
         let active = guard.as_ref().ok_or(CypherRunError::NoActiveGraph)?;
         execute_cypher_inner(&active.kg, query, params, self.value_codecs())
+    }
+
+    /// Execute read-only Cypher only when the current workspace graph is known
+    /// fresh.
+    ///
+    /// Freshness is ensured exactly once. A remaining typed rebuild failure is
+    /// returned before the active graph is borrowed or the query is parsed, so
+    /// stale data can never escape through a structured evidence route. The
+    /// query then executes directly against the installed generation while its
+    /// read guard is held; calling [`Self::execute_cypher_read`] here would
+    /// incorrectly run freshness handling a second time.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn execute_cypher_read_strict(
+        &self,
+        query: &str,
+        params: HashMap<String, Value>,
+    ) -> std::result::Result<ExecuteOutcome, StrictCypherReadError> {
+        self.ensure_workspace_graph_fresh();
+        if let Some(failure) = self.workspace_rebuild_failure() {
+            return Err(StrictCypherReadError::StaleGraph(failure));
+        }
+        let guard = read_lock(&self.inner);
+        let active = guard
+            .as_ref()
+            .ok_or(StrictCypherReadError::Cypher(CypherRunError::NoActiveGraph))?;
+        execute_cypher_inner(&active.kg, query, params, self.value_codecs())
+            .map_err(StrictCypherReadError::Cypher)
     }
 }
 
@@ -2602,6 +2643,26 @@ mod tests {
             error.to_string(),
             "legacy syntax text remains the engine's exact rendered message"
         );
+    }
+
+    #[test]
+    fn strict_cypher_execution_preserves_no_graph_and_engine_taxonomy() {
+        assert!(matches!(
+            GraphState::default().execute_cypher_read_strict("RETURN 1", HashMap::new()),
+            Err(StrictCypherReadError::Cypher(CypherRunError::NoActiveGraph))
+        ));
+
+        let state = state_with_active(fresh_active());
+        let error = match state.execute_cypher_read_strict("RETURN @", HashMap::new()) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid Cypher unexpectedly executed"),
+        };
+        match error {
+            StrictCypherReadError::Cypher(CypherRunError::Engine(error)) => {
+                assert_eq!(error.code(), kglite::api::KgErrorCode::CypherSyntax);
+            }
+            other => panic!("expected typed engine error, got {other:?}"),
+        }
     }
 
     #[test]
