@@ -20,9 +20,10 @@
 
 name: Code Review
 
-# Load a sibling `.env` so GITHUB_TOKEN (and any embedder keys) are visible.
-# The github tools are hidden at boot when no token is reachable.
-env_file: ../.env
+# Environment discovery already walks upward for a `.env`; the GitHub tools
+# are simply hidden when no token is reachable. To pin a different file,
+# uncomment this with a path that exists (relative paths resolve from here):
+# env_file: /abs/path/to/your/.env
 
 # Bundled kglite methodology + framework defaults inject into matching tool
 # descriptions (graph-first sequencing, code-graph hygiene skills).
