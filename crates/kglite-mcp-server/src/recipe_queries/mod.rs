@@ -7,6 +7,7 @@
 mod config;
 mod errors;
 mod result;
+mod routes;
 mod schema;
 mod validation;
 mod wire;
@@ -14,14 +15,14 @@ mod wire;
 #[cfg(test)]
 mod result_tests;
 
-pub(crate) use config::{CatalogSummary, RecipeCatalog, RecipeDefinition, RecipeQueryDefinition};
+pub(crate) use config::{RecipeCatalog, RecipeQueryDefinition};
 pub(crate) use errors::RecipeErrorEnvelope;
 pub(crate) use result::{list_recipe_queries, run_recipe_query};
-pub(crate) use schema::ParameterSchema;
-pub(crate) use validation::{VariableIssue, VariableIssueKind, VariablesValidationError};
-pub(crate) use wire::{
-    ListRecipeQueriesArgs, ListRecipeQueriesOutput, RunRecipeQueryArgs, RunRecipeQueryOutput,
+pub(crate) use routes::{
+    register_recipe_query_routes, LIST_RECIPE_QUERIES_TOOL, RUN_RECIPE_QUERY_TOOL,
 };
+pub(crate) use schema::ParameterSchema;
+pub(crate) use validation::{VariableIssueKind, VariablesValidationError};
 
 /// Maximum rows the structured recipe route may return in one MCP payload.
 ///

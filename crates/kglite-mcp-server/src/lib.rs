@@ -518,6 +518,7 @@ fn register_extension_tools(
     graph_state: &GraphState,
     manifest: Option<&Manifest>,
     csv_http: &Option<Arc<csv_http::CsvHttpConfig>>,
+    recipe_catalog: Arc<recipe_queries::RecipeCatalog>,
     domain_tools: Option<Box<DomainToolRegistrar>>,
 ) -> Result<()> {
     if let Some(manifest) = manifest {
@@ -530,6 +531,12 @@ fn register_extension_tools(
     }
     register_domain_tools(server, graph_state.clone(), domain_tools)
         .context("downstream domain-tool registration failed")?;
+    let registered =
+        recipe_queries::register_recipe_query_routes(server, graph_state.clone(), recipe_catalog)
+            .context("Cypher recipe route registration failed")?;
+    if registered > 0 {
+        tracing::info!(count = registered, "Cypher recipe routes registered");
+    }
     if let Some(manifest) = manifest {
         apply_bundled_tool_overrides(server, manifest)
             .context("manifest bundled-tool override failed")?;
@@ -553,6 +560,34 @@ fn apply_bundled_tool_overrides(server: &mut McpServer, manifest: &Manifest) -> 
         .collect();
     if overrides.is_empty() {
         return Ok(());
+    }
+
+    for override_ in &overrides {
+        let owns_fixed_recipe_route = [
+            recipe_queries::LIST_RECIPE_QUERIES_TOOL,
+            recipe_queries::RUN_RECIPE_QUERY_TOOL,
+        ]
+        .contains(&override_.name.as_str());
+        if owns_fixed_recipe_route && (override_.hidden || override_.rename.is_some()) {
+            anyhow::bail!(
+                "fixed Cypher recipe route {:?} cannot be hidden or renamed",
+                override_.name
+            );
+        }
+        if let Some(rename) = override_.rename.as_deref() {
+            if [
+                recipe_queries::LIST_RECIPE_QUERIES_TOOL,
+                recipe_queries::RUN_RECIPE_QUERY_TOOL,
+            ]
+            .contains(&rename)
+                && rename != override_.name
+            {
+                anyhow::bail!(
+                    "manifest bundled-tool route {:?} cannot be renamed onto fixed Cypher recipe route {rename:?}",
+                    override_.name
+                );
+            }
+        }
     }
 
     let router = server.tool_router_mut();
@@ -1256,6 +1291,7 @@ async fn run_async(
         &graph_state,
         manifest.as_ref(),
         &csv_http_arc,
+        Arc::new(recipe_catalog),
         domain_tools,
     )?;
 
@@ -1965,6 +2001,12 @@ Use the registered domain tool.
 mod bundled_override_tests {
     use super::*;
     use rmcp::model::CallToolRequestParams;
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+    use serde_json::json;
+
+    #[derive(Default, Deserialize, JsonSchema)]
+    struct CollisionArgs {}
 
     fn load_manifest(yaml: &str) -> (tempfile::TempDir, Manifest) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2031,6 +2073,152 @@ mod bundled_override_tests {
         let error = apply_bundled_tool_overrides(&mut server, &collision)
             .expect_err("rename collision must fail");
         assert!(error.to_string().contains("conflicts"));
+    }
+
+    fn recipe_catalog() -> Arc<recipe_queries::RecipeCatalog> {
+        Arc::new(
+            recipe_queries::RecipeCatalog::from_manifest_value(Some(&json!({
+                "review": {
+                    "description": "Review operations.",
+                    "queries": {
+                        "lookup": {
+                            "description": "Look up one value.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "required": [],
+                                "additionalProperties": false
+                            },
+                            "cypher": "RETURN 1 AS value"
+                        }
+                    }
+                }
+            })))
+            .expect("valid recipe catalog"),
+        )
+    }
+
+    #[test]
+    fn recipe_routes_allow_description_only_overrides() {
+        let (_dir, manifest) = load_manifest(
+            "tools:\n  - bundled: run_recipe_query\n    description: Domain recipe runner.\n",
+        );
+        let mut server = McpServer::new(ServerOptions::default());
+        recipe_queries::register_recipe_query_routes(
+            &mut server,
+            GraphState::default(),
+            recipe_catalog(),
+        )
+        .expect("register recipe routes");
+
+        apply_bundled_tool_overrides(&mut server, &manifest).expect("description override");
+
+        assert_eq!(
+            server
+                .tool_router_mut()
+                .get(recipe_queries::RUN_RECIPE_QUERY_TOOL)
+                .and_then(|tool| tool.description.as_deref()),
+            Some("Domain recipe runner.")
+        );
+    }
+
+    #[test]
+    fn fixed_recipe_routes_reject_hide_rename_and_rename_onto() {
+        for yaml in [
+            "tools:\n  - bundled: list_recipe_queries\n    hidden: true\n",
+            "tools:\n  - bundled: run_recipe_query\n    rename: domain_recipe_runner\n",
+        ] {
+            let (_dir, manifest) = load_manifest(yaml);
+            let mut server = McpServer::new(ServerOptions::default());
+            recipe_queries::register_recipe_query_routes(
+                &mut server,
+                GraphState::default(),
+                recipe_catalog(),
+            )
+            .expect("register recipe routes");
+            let error = apply_bundled_tool_overrides(&mut server, &manifest)
+                .expect_err("fixed route ownership must be stable");
+            assert!(error.to_string().contains("cannot be hidden or renamed"));
+        }
+
+        let (_dir, manifest) =
+            load_manifest("tools:\n  - bundled: ping\n    rename: run_recipe_query\n");
+        let mut server = McpServer::new(ServerOptions::default());
+        let error = apply_bundled_tool_overrides(&mut server, &manifest)
+            .expect_err("another route cannot claim a fixed recipe name");
+        assert!(error.to_string().contains("cannot be renamed onto"));
+    }
+
+    #[test]
+    fn recipe_registration_detects_legacy_manifest_owner_after_it_registers() {
+        let (_dir, manifest) = load_manifest(
+            "tools:\n  - name: run_recipe_query\n    description: Legacy owner.\n    cypher: RETURN 1 AS value\n",
+        );
+        let mut server = McpServer::new(ServerOptions::default());
+
+        let error = register_extension_tools(
+            &mut server,
+            &GraphState::default(),
+            Some(&manifest),
+            &None,
+            recipe_catalog(),
+            None,
+        )
+        .expect_err("legacy owner must block recipe registration");
+
+        assert!(format!("{error:#}").contains(recipe_queries::RUN_RECIPE_QUERY_TOOL));
+        assert_eq!(
+            server
+                .tool_router_mut()
+                .get(recipe_queries::RUN_RECIPE_QUERY_TOOL)
+                .and_then(|tool| tool.description.as_deref()),
+            Some("Legacy owner.")
+        );
+        assert!(
+            !server
+                .tool_router_mut()
+                .map
+                .contains_key(recipe_queries::LIST_RECIPE_QUERIES_TOOL),
+            "atomic recipe registration must not add the other fixed route"
+        );
+    }
+
+    #[test]
+    fn recipe_registration_detects_domain_owner_after_it_registers() {
+        let mut server = McpServer::new(ServerOptions::default());
+        let domain_tools: Box<DomainToolRegistrar> = Box::new(|registry| {
+            registry.register_typed_tool::<CollisionArgs, _>(
+                recipe_queries::LIST_RECIPE_QUERIES_TOOL,
+                "Domain owner.",
+                |_| "owned".to_string(),
+            )
+        });
+
+        let error = register_extension_tools(
+            &mut server,
+            &GraphState::default(),
+            None,
+            &None,
+            recipe_catalog(),
+            Some(domain_tools),
+        )
+        .expect_err("domain owner must block recipe registration");
+
+        assert!(format!("{error:#}").contains(recipe_queries::LIST_RECIPE_QUERIES_TOOL));
+        assert_eq!(
+            server
+                .tool_router_mut()
+                .get(recipe_queries::LIST_RECIPE_QUERIES_TOOL)
+                .and_then(|tool| tool.description.as_deref()),
+            Some("Domain owner.")
+        );
+        assert!(
+            !server
+                .tool_router_mut()
+                .map
+                .contains_key(recipe_queries::RUN_RECIPE_QUERY_TOOL),
+            "atomic recipe registration must not add the other fixed route"
+        );
     }
 }
 
