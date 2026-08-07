@@ -1003,6 +1003,9 @@ impl GraphState {
         args: &serde_json::Map<String, serde_json::Value>,
         csv_http: Option<&crate::csv_http::CsvHttpConfig>,
     ) -> String {
+        // The lazy rebuild may replace the active graph, so it must finish
+        // before this legacy text path takes its read guard.
+        self.ensure_workspace_graph_fresh();
         let guard = read_lock(&self.inner);
         let Some(active) = guard.as_ref() else {
             return NO_GRAPH.to_string();

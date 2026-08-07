@@ -112,3 +112,53 @@ pub fn register_cypher_tools(
     }
     Ok(count)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{WorkspaceGraphHooks, WorkspaceGraphMode, WorkspaceGraphResult};
+    use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn manifest_cypher_runner_rebuilds_a_dirty_workspace_before_querying() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let builds = Arc::new(AtomicUsize::new(0));
+        let hooks = WorkspaceGraphHooks {
+            build: Box::new({
+                let builds = builds.clone();
+                move |_| {
+                    let generation = builds.fetch_add(1, Ordering::SeqCst) + 1;
+                    let mut graph = new_dir_graph_in_mode(StorageMode::Memory, None)
+                        .map_err(|error| error.to_string())?;
+                    let params = std::collections::HashMap::new();
+                    let options = kglite::api::session::ExecuteOptions::eager(&params);
+                    kglite::api::session::execute_mut(
+                        &mut graph,
+                        &format!("CREATE (:Marker {{generation: {generation}}})"),
+                        &options,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    Ok(WorkspaceGraphResult::new(Arc::new(graph)))
+                }
+            }),
+            is_relevant: Box::new(|_| true),
+        };
+        let state = GraphState::new(Some(WorkspaceGraphMode::LocalWorkspace))
+            .with_workspace_graph(Some(Arc::new(hooks)));
+        state
+            .build_workspace_graph(workspace.path(), None)
+            .expect("install initial workspace graph");
+        let runner = make_runner(state.clone(), None);
+
+        state.tag_workspace_graph_dirty();
+        let output = runner(
+            "MATCH (n:Marker) RETURN n.generation AS generation",
+            &Map::new(),
+        )
+        .expect("run manifest Cypher tool");
+
+        assert_eq!(builds.load(Ordering::SeqCst), 2, "dirty graph was rebuilt");
+        assert_eq!(output, "1 row(s):\ngeneration\n2\n");
+    }
+}
