@@ -81,6 +81,34 @@ fn collect_node_types(m: &MatchClause) -> Vec<String> {
     types
 }
 
+/// Return the distinct parameter names referenced by Cypher source.
+///
+/// Names are returned in first-appearance order. Parameter-looking text inside
+/// quoted string literals or `//` comments is ignored because collection goes
+/// through the canonical Cypher tokenizer. This performs lexical validation;
+/// callers that also need the query AST should parse the query separately.
+// KgError deliberately carries structured context; boxing it would change the public result type.
+#[allow(clippy::result_large_err)]
+pub fn parameter_names(query: &str) -> Result<Vec<String>, crate::error::KgError> {
+    let positioned = tokenizer::tokenize_cypher_with_positions(query).map_err(|message| {
+        crate::error::KgError::CypherSyntax {
+            message,
+            line: None,
+            col: None,
+        }
+    })?;
+
+    let mut names = Vec::new();
+    for (token, _) in positioned.tokens {
+        if let tokenizer::CypherToken::Parameter(name) = token {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    Ok(names)
+}
+
 /// Parse a query and classify whether it mutates the graph. Returns
 /// `(parsed, is_mutation)`. Convenience for the "every binding
 /// pre-parses to check mutation status before applying its
@@ -159,5 +187,53 @@ pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result:
         profile: None,
         diagnostics: None,
         lazy: None,
+    }
+}
+
+#[cfg(test)]
+mod parameter_name_tests {
+    use crate::api::cypher::parameter_names;
+    use crate::error::{KgError, KgErrorCode};
+
+    #[test]
+    fn ignores_comments_and_string_literals() {
+        let query = r#"
+            MATCH (n)
+            WHERE n.name = $name
+              AND n.note = 'literal $ignored'
+              AND n.other = "$also_ignored"
+            // $commented_out
+            RETURN n
+        "#;
+
+        assert_eq!(parameter_names(query).unwrap(), ["name"]);
+    }
+
+    #[test]
+    fn deduplicates_in_first_appearance_order() {
+        let query = "RETURN $second, $first, $second, $third, $first";
+
+        assert_eq!(
+            parameter_names(query).unwrap(),
+            ["second", "first", "third"]
+        );
+    }
+
+    #[test]
+    fn finds_parameters_in_nested_expressions() {
+        let query = "RETURN coalesce($fallback, {items: [$first, {value: $second}]})";
+
+        assert_eq!(
+            parameter_names(query).unwrap(),
+            ["fallback", "first", "second"]
+        );
+    }
+
+    #[test]
+    fn invalid_parameter_syntax_is_a_typed_cypher_error() {
+        let error = parameter_names("RETURN $").unwrap_err();
+
+        assert!(matches!(error, KgError::CypherSyntax { .. }));
+        assert_eq!(error.code(), KgErrorCode::CypherSyntax);
     }
 }
