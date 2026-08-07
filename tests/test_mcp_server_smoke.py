@@ -226,6 +226,14 @@ class McpClient:
             raise RuntimeError(f"tools/list errored: {resp['error']}")
         return resp["result"]["tools"]
 
+    def list_prompts(self) -> list[dict[str, Any]]:
+        rid = self._allocate_id()
+        self._send({"jsonrpc": "2.0", "id": rid, "method": "prompts/list"})
+        resp = self._recv(rid)
+        if "error" in resp:
+            raise RuntimeError(f"prompts/list errored: {resp['error']}")
+        return resp["result"]["prompts"]
+
     def call_tool(self, name: str, arguments: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         rid = self._allocate_id()
         self._send(
@@ -768,6 +776,7 @@ class TestYamlManifest:
         manifest = tmp_path / "demo_mcp.yaml"
         manifest.write_text(
             "name: Demo Smoke Test\n"
+            "skills: true\n"
             "overview_prefix: |\n"
             "  smoke overview prefix\n"
             "builtins:\n"
@@ -866,6 +875,39 @@ class TestYamlManifest:
         assert text.endswith(
             '<query-catalog recipes="1" queries="1" list-tool="list_recipe_queries" run-tool="run_recipe_query"/>'
         )
+
+    def test_present_catalog_exposes_recipe_prompt_and_injects_referenced_tools(self, graph_with_manifest: Path):
+        client = _spawn(["--graph", str(graph_with_manifest)])
+        try:
+            prompts = {prompt["name"] for prompt in client.list_prompts()}
+            tools = {tool["name"]: (tool.get("description") or "") for tool in client.list_tools()}
+        finally:
+            client.shutdown()
+
+        assert "recipe_queries" in prompts
+        for name in ("list_recipe_queries", "run_recipe_query", "cypher_query"):
+            assert "mcp-skill:recipe_queries" in tools[name], name
+        injected = " ".join(tools["run_recipe_query"].split())
+        assert "fall back to raw `cypher_query`" in injected
+
+    def test_absent_and_empty_catalogs_expose_no_recipe_skill(self, graph_with_manifest: Path):
+        for label, catalog_yaml in (
+            ("absent", ""),
+            ("empty", "extensions:\n  cypher_recipes: {}\n"),
+        ):
+            manifest = graph_with_manifest.parent / f"{label}_mcp.yaml"
+            manifest.write_text(f"name: {label}\nskills: true\n{catalog_yaml}", encoding="utf-8")
+            client = _spawn(["--graph", str(graph_with_manifest), "--mcp-config", str(manifest)])
+            try:
+                prompts = {prompt["name"] for prompt in client.list_prompts()}
+                tools = {tool["name"]: (tool.get("description") or "") for tool in client.list_tools()}
+            finally:
+                client.shutdown()
+
+            assert "recipe_queries" not in prompts
+            assert "list_recipe_queries" not in tools
+            assert "run_recipe_query" not in tools
+            assert "mcp-skill:recipe_queries" not in tools["cypher_query"]
 
 
 # ── Test: workspace.kind: local (new in 0.3.22) ───────────────────────────

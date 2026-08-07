@@ -987,6 +987,25 @@ If a broad first tool-search surfaces only grep/read_source, search your tool re
 'graph_overview' and load those before falling back to grep — a discovery miss does not mean the graph \
 path is unavailable.";
 
+const RECIPE_QUERIES_SKILL: &str = include_str!("../skills/recipe_queries.md");
+
+/// Add recipe methodology only when the validated catalog will register its
+/// fixed routes. The skill's `tool_registered: run_recipe_query` predicate is
+/// a second guard evaluated against the final visible tool set.
+fn add_recipe_query_skill(
+    registry: SkillRegistry,
+    catalog_summary: Option<recipe_queries::CatalogSummary>,
+) -> SkillRegistry {
+    if catalog_summary.is_some() {
+        registry.add_bundled(BundledSkill {
+            name: "recipe_queries",
+            body: RECIPE_QUERIES_SKILL,
+        })
+    } else {
+        registry
+    }
+}
+
 /// Fold [`DISCOVERY_STEER`] into `options.instructions` for the two
 /// workspace modes. Appends (preserving any manifest `instructions:`) or
 /// sets it when none exists; bails when the text already mentions the
@@ -1303,12 +1322,10 @@ async fn run_async(
 
     let _watch_handle = spawn_mode_watcher(&mode, &graph_state)?;
 
-    // 0.9.31: SkillRegistry wiring. Bundled methodology for kglite's
-    // four custom tools (cypher_query / graph_overview / save_graph /
-    // read_code_source) plus framework defaults (grep / read_source /
-    // list_source / github_issues / repo_management), composed with
-    // the operator-side project layer and any operator-declared
-    // domain skill packs. The predicate evaluator gates
+    // SkillRegistry wiring. Bundled methodology for KGLite's custom tools,
+    // the optional recipe catalog, and framework defaults is composed with
+    // the operator-side project layer and any operator-declared domain skill
+    // packs. The predicate evaluator gates
     // `read_code_source` on `graph_has_node_type: [Function, Class]`
     // so it stays out of prompts/list when the active graph isn't a
     // code-tree (legal-corpus / o&g / etc. deployments).
@@ -1319,7 +1336,7 @@ async fn run_async(
         // binary became the one MCP server. `cargo publish` only packages
         // files inside the crate dir, so they must live here (not behind a
         // `../../../kglite/...` `include_str!` path).
-        let registry_result = SkillRegistry::new()
+        let registry = SkillRegistry::new()
             .add_bundled(BundledSkill {
                 name: "cypher_query",
                 body: include_str!("../skills/cypher_query.md"),
@@ -1352,7 +1369,8 @@ async fn run_async(
             .add_bundled(BundledSkill {
                 name: "code_graph_views",
                 body: include_str!("../skills/code_graph_views.md"),
-            })
+            });
+        let registry_result = add_recipe_query_skill(registry, recipe_catalog_summary)
             .merge_framework_defaults()
             .auto_detect_project_layer(&m.yaml_path)
             .layer_dirs(&m.skills, &m.yaml_path)
@@ -1863,6 +1881,165 @@ mod cli_contract_tests {
         let error = Cli::try_parse_from(["kglite-mcp-server", "--trust-tools"])
             .expect_err("removed no-op flag must not parse");
         assert!(error.to_string().contains("--trust-tools"));
+    }
+}
+
+#[cfg(test)]
+mod recipe_skill_tests {
+    use super::*;
+    use mcp_methods::server::{SkillSource, SkillsSource};
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+    use serde_json::json;
+
+    #[derive(Default, Deserialize, JsonSchema)]
+    struct EmptyArgs {}
+
+    fn catalog(raw: Option<&serde_json::Value>) -> recipe_queries::RecipeCatalog {
+        recipe_queries::RecipeCatalog::from_manifest_value(raw).expect("valid catalog")
+    }
+
+    fn present_catalog() -> recipe_queries::RecipeCatalog {
+        catalog(Some(&json!({
+            "review": {
+                "description": "Review operations.",
+                "queries": {
+                    "lookup": {
+                        "description": "Look up one value.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                            "additionalProperties": false
+                        },
+                        "cypher": "RETURN 1 AS value"
+                    }
+                }
+            }
+        })))
+    }
+
+    fn resolved_recipe_skills(
+        summary: Option<recipe_queries::CatalogSummary>,
+        source: &SkillsSource,
+    ) -> mcp_methods::server::ResolvedRegistry {
+        add_recipe_query_skill(SkillRegistry::new(), summary)
+            .layer_dirs(source, std::path::Path::new("manifest.yaml"))
+            .expect("configure skill layers")
+            .finalise()
+            .expect("resolve recipe skill")
+    }
+
+    fn bundled_source() -> SkillsSource {
+        SkillsSource::Sources(vec![SkillSource::Bundled])
+    }
+
+    #[test]
+    fn recipe_skill_is_conditionally_bundled_for_present_catalog_only() {
+        let source = bundled_source();
+        let absent = catalog(None);
+        let empty_value = json!({});
+        let empty = catalog(Some(&empty_value));
+        let present = present_catalog();
+
+        for summary in [absent.discovery_summary(), empty.discovery_summary()] {
+            let registry = resolved_recipe_skills(summary, &source);
+            assert!(!registry
+                .skill_names()
+                .iter()
+                .any(|name| name == "recipe_queries"));
+        }
+        let registry = resolved_recipe_skills(present.discovery_summary(), &source);
+        assert!(registry
+            .skill_names()
+            .iter()
+            .any(|name| name == "recipe_queries"));
+
+        let disabled = resolved_recipe_skills(present.discovery_summary(), &SkillsSource::Disabled);
+        assert!(
+            disabled.is_empty(),
+            "a present catalog must not bypass the manifest skills opt-in"
+        );
+    }
+
+    #[test]
+    fn recipe_skill_contract_names_direct_discovery_preflight_and_raw_fallback() {
+        let source = bundled_source();
+        let registry = resolved_recipe_skills(present_catalog().discovery_summary(), &source);
+        let skill = registry.get("recipe_queries").expect("recipe skill");
+
+        assert_eq!(
+            skill.frontmatter.references_tools,
+            ["list_recipe_queries", "run_recipe_query", "cypher_query"]
+        );
+        let applies = skill
+            .frontmatter
+            .applies_when
+            .as_ref()
+            .expect("tool registration gate");
+        assert_eq!(
+            applies.tool_registered.as_deref(),
+            Some(recipe_queries::RUN_RECIPE_QUERY_TOOL)
+        );
+        assert_eq!(applies.extension_enabled, None);
+        let body = skill.body.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(body.contains("Do not call `list_recipe_queries` first"));
+        assert!(body.contains("domain skill already selected the"));
+        assert!(body.contains("call `list_recipe_queries()` once"));
+        assert!(body.contains("exactly matches the requested scope"));
+        assert!(body.contains("mandatory `resolve_*` preflight"));
+        assert!(body.contains("fall back to raw `cypher_query`"));
+    }
+
+    #[test]
+    fn tool_registered_gate_beats_truthy_empty_extension_and_injects_all_references() {
+        let source = bundled_source();
+        let registry = resolved_recipe_skills(present_catalog().discovery_summary(), &source);
+        let mut without_route = McpServer::new(ServerOptions {
+            extensions: serde_json::Map::from_iter([("cypher_recipes".to_string(), json!({}))]),
+            ..ServerOptions::default()
+        });
+        serve_prompts(&registry, &mut without_route);
+        assert!(
+            without_route
+                .prompt_router_mut()
+                .list_all()
+                .iter()
+                .all(|prompt| prompt.name != "recipe_queries"),
+            "an empty extension mapping is truthy but must not activate the skill"
+        );
+
+        let registry = resolved_recipe_skills(present_catalog().discovery_summary(), &source);
+        let mut with_routes = McpServer::new(ServerOptions::default());
+        for name in [
+            recipe_queries::LIST_RECIPE_QUERIES_TOOL,
+            recipe_queries::RUN_RECIPE_QUERY_TOOL,
+            "cypher_query",
+        ] {
+            with_routes.register_typed_tool::<EmptyArgs, _>(name, "base", |_| "ok".to_string());
+        }
+        serve_prompts(&registry, &mut with_routes);
+
+        assert!(with_routes
+            .prompt_router_mut()
+            .list_all()
+            .iter()
+            .any(|prompt| prompt.name == "recipe_queries"));
+        for name in [
+            recipe_queries::LIST_RECIPE_QUERIES_TOOL,
+            recipe_queries::RUN_RECIPE_QUERY_TOOL,
+            "cypher_query",
+        ] {
+            let description = with_routes
+                .tool_router_mut()
+                .get(name)
+                .and_then(|tool| tool.description.as_deref())
+                .expect("tool description");
+            assert!(
+                description.contains("mcp-skill:recipe_queries"),
+                "{name} missing recipe methodology injection"
+            );
+        }
     }
 }
 
