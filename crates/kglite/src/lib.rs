@@ -422,6 +422,7 @@ pub mod api {
         pub use crate::graph::languages::cypher::planner::mark_lazy_eligibility;
         pub use crate::graph::languages::cypher::planner::schema_check::validate_schema;
         pub use crate::graph::languages::cypher::planner::simplification::rewrite_text_score;
+        pub use crate::graph::languages::cypher::query_features;
         pub use crate::graph::languages::cypher::result::{
             materialise_lazy, materialise_lazy_range, materialise_lazy_row, CypherResult,
             LazyResultDescriptor,
@@ -432,6 +433,7 @@ pub mod api {
         /// `session::ExecuteOptions::value_codecs`. See `value_codec` module
         /// docs for the safety model.
         pub use crate::graph::languages::cypher::value_codec::{CodecKind, StoredType, ValueCodec};
+        pub use crate::graph::languages::cypher::QueryFeatures;
         // Specific Cypher-pipeline items a binding implementing a native
         // `cypher()` method (the wheel) reaches. Exposed INDIVIDUALLY — not as
         // whole `ast`/`executor`/`parser`/`result` submodules — so the rest of

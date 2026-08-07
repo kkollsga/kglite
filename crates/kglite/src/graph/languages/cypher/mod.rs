@@ -109,6 +109,58 @@ pub fn parameter_names(query: &str) -> Result<Vec<String>, crate::error::KgError
     Ok(names)
 }
 
+/// Security- and transport-relevant facts derived from one parsed query.
+///
+/// Bindings use this narrow summary to enforce policies without exposing or
+/// duplicating the internal clause AST. Literal limits are collected from the
+/// full query tree (including set-operation branches and `CALL {}` bodies) in
+/// source traversal order; parameterized or computed limits are not literals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryFeatures {
+    pub is_mutation: bool,
+    pub explain: bool,
+    pub profile: bool,
+    pub format_csv: bool,
+    pub has_load_csv: bool,
+    pub literal_limits: Vec<i64>,
+}
+
+/// Parse Cypher once and return the policy-relevant query features.
+// KgError deliberately carries structured context; boxing it would change the public result type.
+#[allow(clippy::result_large_err)]
+pub fn query_features(query: &str) -> Result<QueryFeatures, crate::error::KgError> {
+    let parsed = parse_cypher(query)?;
+    let mut features = QueryFeatures {
+        is_mutation: is_mutation_query(&parsed),
+        explain: false,
+        profile: false,
+        format_csv: false,
+        has_load_csv: false,
+        literal_limits: Vec::new(),
+    };
+    collect_query_features(&parsed, &mut features);
+    Ok(features)
+}
+
+fn collect_query_features(query: &CypherQuery, features: &mut QueryFeatures) {
+    features.explain |= query.explain;
+    features.profile |= query.profile;
+    features.format_csv |= query.output_format == OutputFormat::Csv;
+    for clause in &query.clauses {
+        match clause {
+            Clause::LoadCsv(_) => features.has_load_csv = true,
+            Clause::Limit(limit) => {
+                if let Expression::Literal(Value::Int64(value)) = &limit.count {
+                    features.literal_limits.push(*value);
+                }
+            }
+            Clause::CallSubquery { body, .. } => collect_query_features(body, features),
+            Clause::Union(union) => collect_query_features(&union.query, features),
+            _ => {}
+        }
+    }
+}
+
 /// Parse a query and classify whether it mutates the graph. Returns
 /// `(parsed, is_mutation)`. Convenience for the "every binding
 /// pre-parses to check mutation status before applying its
@@ -235,5 +287,44 @@ mod parameter_name_tests {
 
         assert!(matches!(error, KgError::CypherSyntax { .. }));
         assert_eq!(error.code(), KgErrorCode::CypherSyntax);
+    }
+}
+
+#[cfg(test)]
+mod query_feature_tests {
+    use crate::api::cypher::query_features;
+
+    #[test]
+    fn reports_top_level_modes_and_mutation() {
+        let explain = query_features("EXPLAIN RETURN 1 FORMAT CSV").unwrap();
+        assert!(explain.explain);
+        assert!(explain.format_csv);
+        assert!(!explain.profile);
+        assert!(!explain.is_mutation);
+
+        let mutation = query_features("CREATE (:Thing)").unwrap();
+        assert!(mutation.is_mutation);
+    }
+
+    #[test]
+    fn reports_load_csv_without_matching_string_or_comment_text() {
+        let load = query_features("LOAD CSV FROM 'rows.csv' AS row RETURN row").unwrap();
+        assert!(load.has_load_csv);
+
+        let ordinary = query_features("// LOAD CSV\nRETURN 'LOAD CSV' AS text").unwrap();
+        assert!(!ordinary.has_load_csv);
+    }
+
+    #[test]
+    fn collects_only_literal_limits_across_the_query_tree() {
+        let features = query_features(
+            "CALL { RETURN 1 AS n LIMIT 10 } RETURN n LIMIT $outer \
+             UNION ALL RETURN 2 AS n LIMIT 200",
+        )
+        .unwrap();
+        assert_eq!(features.literal_limits, [10, 200]);
+
+        let lookalikes = query_features("RETURN 'LIMIT 200' AS text").unwrap();
+        assert!(lookalikes.literal_limits.is_empty());
     }
 }

@@ -50,6 +50,7 @@ mod code_source;
 mod csv_http;
 mod cypher_tools;
 mod explore;
+mod recipe_queries;
 mod selftest;
 mod tools;
 mod value_codecs;
@@ -1048,6 +1049,25 @@ async fn run_async(
     validate_mode_paths(&mode, &cli)?;
 
     let manifest = load_manifest(&cli, &mode).context("manifest load failed")?;
+
+    // Recipe definitions are configuration, not per-call input. Compile the
+    // deliberately small schema subset and validate every stored query once
+    // at boot so later route handlers can share one immutable catalog.
+    let recipe_catalog = match manifest.as_ref() {
+        Some(manifest) => recipe_queries::RecipeCatalog::from_manifest_value(
+            manifest.extensions.get("cypher_recipes"),
+        )
+        .context("extensions.cypher_recipes parse failed")?,
+        None => recipe_queries::RecipeCatalog::default(),
+    };
+    if !recipe_catalog.is_empty() {
+        let summary = recipe_catalog.summary();
+        tracing::info!(
+            recipes = summary.recipe_count,
+            queries = summary.query_count,
+            "Cypher recipe catalog validated"
+        );
+    }
 
     // Manifest `workspace.kind: local` wins over CLI flags — promote before
     // mode-specific binding so the rest of boot sees `Mode::LocalWorkspace`.

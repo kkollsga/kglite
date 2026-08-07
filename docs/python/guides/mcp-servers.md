@@ -933,6 +933,7 @@ block lives under [`docs/schemas/extensions/`][schemas-dir] in the
 repo:
 
 - [`csv_http_server.json`][schema-csv]
+- [`cypher_recipes.json`][schema-cypher-recipes]
 - [`embedder.json`][schema-embedder]
 - [`value_codecs.json`][schema-value-codecs]
 
@@ -943,6 +944,7 @@ as a test failure on the next CI run.
 
 [schemas-dir]: https://github.com/kkollsga/kglite/tree/main/docs/schemas/extensions
 [schema-csv]: https://github.com/kkollsga/kglite/blob/main/docs/schemas/extensions/csv_http_server.json
+[schema-cypher-recipes]: https://github.com/kkollsga/kglite/blob/main/docs/schemas/extensions/cypher_recipes.json
 [schema-embedder]: https://github.com/kkollsga/kglite/blob/main/docs/schemas/extensions/embedder.json
 [schema-value-codecs]: https://github.com/kkollsga/kglite/blob/main/docs/schemas/extensions/value_codecs.json
 
