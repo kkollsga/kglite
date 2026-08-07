@@ -2,7 +2,7 @@
 
 A `tools[].cypher` entry that wraps a parameterised query as a
 first-class MCP tool. The agent sees `find_decisions_by_year` as a
-regular tool with a JSON-Schema-validated `year` argument.
+regular tool whose published MCP input schema describes a `year` argument.
 
 ## Manifest
 
@@ -57,9 +57,10 @@ The agent calls `find_decisions_by_year` with a typed argument:
 {"name": "find_decisions_by_year", "arguments": {"year": 2024}}
 ```
 
-The MCP client validates `year` against the schema (rejects strings,
-floats outside `1900..2100`) before the tool dispatch reaches
-kglite. The Cypher template runs as
+The tool schema tells MCP clients that `year` is a required integer between
+`1900` and `2100`. Whether a client validates that schema before dispatch is
+client-dependent; KGLite's legacy manifest-tool path publishes the schema but
+does not enforce it. The Cypher template runs as
 
 ```cypher
 MATCH (d:CourtDecision) WHERE d.year = $year
@@ -92,15 +93,12 @@ reference docs).
 
 ## Failure modes
 
-- **Boot**: a `$param` in the template not present in
-  `parameters.properties` fails with
-  `ERROR: <path>: cypher tool 'find_decisions_by_year': cypher references $params [...] not declared in parameters.properties`.
-- **Boot**: a malformed JSON Schema (missing `type`, unknown
-  type-flavour) fails with `ERROR: <path>: cypher tool 'X':
-  invalid parameters schema: ...`.
-- **Runtime**: the MCP client rejects a value that doesn't match the
-  schema before the tool dispatches; the agent sees a structured
-  error, not a Cypher error.
-- **Runtime**: a Cypher engine error (graph mutation in read-only
+- **Client-dependent**: an MCP client may reject a value that does not match
+  the published schema before dispatch. Raw callers can bypass client-side
+  validation.
+- **Runtime**: a missing `$param`, an incompatible value, or a Cypher engine
+  error (graph mutation in read-only
   mode, syntax error in the template) surfaces as
   `Cypher error: <engine message>` in the response body.
+- **Boot**: KGLite does not validate the legacy `parameters:` schema or compare
+  its properties with the template's `$param` references.

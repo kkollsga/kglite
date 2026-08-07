@@ -1987,9 +1987,10 @@ tools:
 ]]></yaml>
       <effect>
         Registers `similar_sessions(session_id, top_k=5)` as an MCP tool.
-        $param refs are validated at server startup against the JSON Schema
-        — typos fail boot, not first agent call. Output capped at 15 rows;
-        use cypher_query for FORMAT CSV exports.
+        The parameters object is published as the MCP input schema; KGLite
+        binds supplied values by name but does not validate that schema or
+        cross-check $param refs at boot. Output capped at 15 rows; use
+        cypher_query for FORMAT CSV exports.
       </effect>
     </cypher_tools>
 

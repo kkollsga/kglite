@@ -306,15 +306,12 @@ tools:
 
 The agent sees `similar_sessions(session_id, top_k=5)` as a regular
 MCP tool. Param names in the Cypher (`$session_id`, `$top_k`) bind
-to the JSON Schema properties at call time.
-
-**Validation runs at server startup**, not at agent call time:
-
-- Every `$param` in the Cypher must appear in `parameters.properties`
-- The schema itself must be valid JSON Schema (Draft 2020-12)
-
-Typos surface at boot with a clear error pointing at the yaml file —
-not 30 seconds into a conversation.
+to same-named values in the call arguments. The `parameters:` object is
+published as the tool's MCP input schema so clients can construct calls.
+KGLite does not validate that schema or compare it with the template's
+`$param` references at boot, and it does not perform JSON Schema validation
+when dispatching a call. Missing or incompatible values surface through the
+normal Cypher execution error response.
 
 Manifest Cypher tools cap output at 15 rows / 2k chars. For full
 result exports, agents use the bundled `cypher_query` with
@@ -408,8 +405,6 @@ startup with a non-zero exit code. The recurring ones:
 |---|---|---|
 | `ERROR: <path>: unknown top-level keys: ['foo']` | Typo or unsupported key in manifest. | Compare against the [top-level field list](#top-level-fields). |
 | `ERROR: <path>: source root './data' resolves to '/abs/.../data' which is not an existing directory` | The path is relative-to-yaml; it didn't land on a real directory. | Check the path; create the directory; or use `source_roots:` if you have multiple. |
-| `ERROR: <path>: cypher tool 'foo': cypher references $params ['bar'] not declared in parameters.properties` | A `$param` in the Cypher template isn't in the JSON Schema. | Add it under `parameters.properties` (and to `required:` if it's mandatory). |
-| `ERROR: <path>: cypher tool 'foo': invalid parameters schema: ...` | The `parameters:` block isn't valid JSON Schema (Draft 2020-12). | Check `type`, nested types in `properties`, and `required:` list. |
 | `ERROR: --mcp-config path does not exist: <path>` | Explicit `--mcp-config` value points at a missing file. | Check the path. Sibling auto-detect is `<basename>_mcp.yaml`. |
 | `ERROR: extensions.value_codecs ... is not bijective` | A `map` codec has two keys mapping to the same value, so encode is ambiguous. | Make the `map:` one-to-one. |
 | `ERROR: value_codecs[i].match ... is not a valid regex` | A `regex` codec's `match` doesn't compile. | Fix the regex (anchor it for a full match). |
@@ -1078,19 +1073,17 @@ JSON value of `args[$name]` becomes a typed value at the
 construction. The agent supplies values per the JSON Schema; kglite
 binds them in-engine.
 
-**JSON Schema flavour** — `parameters:` accepts the subset of
-JSON Schema (draft 2020-12) that the MCP SDK supports for tool
-input. Practically: `type`, `properties`, `required`, `default`,
-`description`, `enum`, `items` (for arrays), `minimum`/`maximum`,
-`minLength`/`maxLength`, `pattern`. Nested objects work; bring the
-schema's complexity in proportion to the tool's parameter
-complexity.
+**JSON Schema publication** — `parameters:` is published unchanged as the
+tool's MCP input schema. Use a root `type: object` schema with `properties`
+and `required` so MCP clients can describe and construct calls consistently.
+KGLite does not validate the schema at boot or enforce it at dispatch; client
+behavior varies, and callers can send arguments without client-side
+validation.
 
-**Parameter validation** — the MCP client enforces schema validation
-before the tool is dispatched. A type mismatch (string supplied for
-an `integer` field) raises an MCP-level error before
-`graph.cypher()` runs; the agent receives a structured tool error
-rather than a Cypher error.
+**Parameter binding** — every supplied argument is passed to KGLite as a
+named Cypher parameter. Values are bound in the engine and never interpolated
+into query text. A missing `$param`, an incompatible value, or another query
+problem surfaces through the normal Cypher error response.
 
 **Tool errors** — if `graph.cypher()` raises, the response body is
 `Cypher error: <engine message>` (the same envelope as
@@ -1102,9 +1095,10 @@ template (or `$_csv_format` if you want to gate it on a parameter),
 and the tool's output follows the same inline-vs-URL behaviour
 documented under "Tool response formats."
 
-**Boot-time validation** — every `$param` named in the template
-must appear in `parameters.properties`. Mismatch fails at boot,
-not at agent call time.
+**Boot-time behavior** — the legacy manifest-tool path does not parse the
+template, compare `$param` names with `parameters.properties`, or validate the
+JSON Schema. Those problems are observed only if a client validates the
+published schema or when the template executes.
 
 Worked examples — see the `docs/python/examples/manifest_*.md` pages
 (`manifest_cypher_tool`, `manifest_value_codecs`, `manifest_with_embedder`,

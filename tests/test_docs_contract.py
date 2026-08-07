@@ -150,6 +150,28 @@ def test_retired_documentation_contracts_do_not_return() -> None:
     assert 'feature=\\"FOREACH\\"' not in topics
 
 
+def test_legacy_manifest_cypher_docs_do_not_claim_schema_validation() -> None:
+    active_docs = "\n".join(
+        (REPO_ROOT / relative).read_text(encoding="utf-8")
+        for relative in (
+            "docs/python/guides/mcp-servers.md",
+            "docs/python/examples/manifest_cypher_tool.md",
+        )
+    )
+    describe = (REPO_ROOT / "crates/kglite/src/graph/introspection/describe.rs").read_text(encoding="utf-8")
+    retired = (
+        "Validation runs at server startup",
+        "$param refs are validated at server startup",
+        "JSON-Schema-validated `year` argument",
+        "cypher references $params",
+        "invalid parameters schema",
+        "client enforces schema validation",
+    )
+    assert not [claim for claim in retired if claim in active_docs or claim in describe]
+    assert "published as the tool's MCP input schema" in active_docs
+    assert "does not validate that schema" in describe
+
+
 def test_pre_014_persistence_is_never_documented_as_readable() -> None:
     active = "\n".join(path.read_text(encoding="utf-8") for path in _active_markdown())
     retired = (

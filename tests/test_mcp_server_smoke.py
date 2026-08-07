@@ -774,9 +774,13 @@ class TestYamlManifest:
             "    cypher: |\n"
             "      MATCH (p:Person {city: $city}) RETURN p.title AS name ORDER BY name\n"
             "    parameters:\n"
-            "      city:\n"
-            "        type: string\n"
-            "        description: City name to filter by.\n",
+            "      type: object\n"
+            "      properties:\n"
+            "        city:\n"
+            "          type: string\n"
+            "          description: City name to filter by.\n"
+            "      required: [city]\n"
+            "      additionalProperties: false\n",
             encoding="utf-8",
         )
         return kgl
