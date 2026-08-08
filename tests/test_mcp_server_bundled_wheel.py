@@ -267,10 +267,9 @@ def test_selftest_wide_local_workspace_does_not_build_root(tmp_path: Path) -> No
     assert "--selftest-path" in out
 
 
-def test_selftest_path_builds_representative_subdir(tmp_path: Path) -> None:
-    """`--selftest-path <subdir>` opts into a real build + hydration against a
-    small representative directory (the way to verify a local-workspace build
-    without touching the wide root)."""
+def test_selftest_path_without_producer_fails_hydration(tmp_path: Path) -> None:
+    """The KGLite-only wheel has no workspace graph producer, so an explicit
+    activation may resolve the path but must fail the real hydration gate."""
     manifest, _root, small = _write_wide_local_workspace(tmp_path)
     proc = subprocess.run(
         [
@@ -289,7 +288,7 @@ def test_selftest_path_builds_representative_subdir(tmp_path: Path) -> None:
         timeout=60,
     )
     out = proc.stdout.decode(errors="replace") + proc.stderr.decode(errors="replace")
-    assert proc.returncode == 0, out
-    assert "Selftest PASSED" in out
-    assert "graph hydrates" in out
-    assert "count(n)" in out  # a real cypher round-trip ran
+    assert proc.returncode != 0, out
+    assert "✓ workspace activation" in out
+    assert "✗ graph hydrates: No active graph" in out
+    assert "Selftest FAILED" in out

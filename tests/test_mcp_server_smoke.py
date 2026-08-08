@@ -1422,6 +1422,16 @@ def _run_selftest(args: list[str], timeout_s: float = 60.0) -> tuple[int, str]:
     return proc.returncode, out
 
 
+def _write_local_workspace_manifest(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a tiny local workspace and its MCP manifest."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "demo.py").write_text("def greet(name):\n    return name\n", encoding="utf-8")
+    manifest = tmp_path / "ws_mcp.yaml"
+    manifest.write_text(f"name: WS Selftest\nworkspace:\n  kind: local\n  root: {ws}\n", encoding="utf-8")
+    return manifest, ws
+
+
 class TestSelftest:
     """`--selftest` re-spawns the binary with the operator's flags, drives a
     real MCP handshake, and prints green/red per capability — the positive
@@ -1442,15 +1452,33 @@ class TestSelftest:
         assert "Selftest FAILED" in out
 
     def test_local_workspace_passes(self, tmp_path: Path):
-        ws = tmp_path / "ws"
-        ws.mkdir()
-        (ws / "demo.py").write_text("def greet(name):\n    return name\n", encoding="utf-8")
-        manifest = tmp_path / "ws_mcp.yaml"
-        manifest.write_text(f"name: WS Selftest\nworkspace:\n  kind: local\n  root: {ws}\n", encoding="utf-8")
+        manifest, _ws = _write_local_workspace_manifest(tmp_path)
         rc, out = _run_selftest(["--mcp-config", str(manifest)])
         assert rc == 0, out
         assert "Selftest PASSED" in out
         assert "workspace activation" in out
+
+    def test_missing_explicit_selftest_path_fails_activation(self, tmp_path: Path):
+        manifest, ws = _write_local_workspace_manifest(tmp_path)
+        missing = ws / "does_not_exist"
+
+        rc, out = _run_selftest(["--selftest-path", str(missing), "--mcp-config", str(manifest)])
+
+        assert rc != 0, out
+        assert "✗ workspace activation" in out
+        assert "Path does not exist or is not a directory" in out
+        assert "– graph hydrates" in out
+        assert "Selftest FAILED" in out
+
+    def test_explicit_path_without_builder_fails_hydration(self, tmp_path: Path):
+        manifest, ws = _write_local_workspace_manifest(tmp_path)
+
+        rc, out = _run_selftest(["--selftest-path", str(ws), "--mcp-config", str(manifest)])
+
+        assert rc != 0, out
+        assert "✓ workspace activation" in out
+        assert "✗ graph hydrates: No active graph" in out
+        assert "Selftest FAILED" in out
 
     def test_nonempty_recipe_catalog_reports_both_routes(self, graph_fixture: Path, tmp_path: Path):
         manifest = tmp_path / "recipes_mcp.yaml"

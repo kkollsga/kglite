@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP selftests now require positive activation and hydration evidence.**
+  Missing workspace paths and absent active graphs can no longer pass merely
+  because their tool failures arrived in a successful MCP response envelope.
 - **Manifest-declared MCP Cypher tools now refresh watched workspace graphs
   before querying.** After a relevant filesystem change, `tools[].cypher`
   previously served the stale active graph until a different graph tool

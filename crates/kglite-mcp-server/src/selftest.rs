@@ -180,6 +180,55 @@ fn call_text(result: &Value) -> (String, bool) {
     (text, is_error)
 }
 
+/// Require the success shape of an MCP tool-call envelope before interpreting
+/// its human-readable payload. Tool handlers can report typed failures as
+/// ordinary text content, so callers must additionally validate the payload's
+/// positive contract rather than treating `isError == false` as success.
+fn successful_call_text(result: &Value) -> std::result::Result<String, String> {
+    let (text, is_error) = call_text(result);
+    let trimmed = text.trim();
+    if is_error {
+        return Err(if trimmed.is_empty() {
+            "tool returned isError without diagnostic text".into()
+        } else {
+            snippet(trimmed)
+        });
+    }
+    if trimmed.is_empty() {
+        return Err("tool returned no text".into());
+    }
+    Ok(text)
+}
+
+/// Match the three documented positive `set_root_dir` outcomes.
+///
+/// Other successful MCP envelopes can contain negative operational outcomes
+/// such as a missing path, superseded request, or abandoned refresh. Those
+/// must remain red in a deployment selftest.
+fn activation_succeeded(text: &str) -> bool {
+    let Some(line) = text.lines().find(|line| !line.trim().is_empty()) else {
+        return false;
+    };
+    let line = line.trim();
+    (line.starts_with("Cloned '")
+        || line.starts_with("Updated '")
+        || line.starts_with("Activated (already up to date) '"))
+        && line.contains("' at ")
+}
+
+/// Parse the exact one-row scalar projection emitted by
+/// `MATCH (n) RETURN count(n) AS n`.
+fn hydration_count(text: &str) -> Option<u64> {
+    let mut lines = text.lines().filter_map(|line| {
+        let line = line.trim();
+        (!line.is_empty()).then_some(line)
+    });
+    if lines.next()? != "1 row(s):" || lines.next()? != "n" {
+        return None;
+    }
+    lines.next()?.parse().ok()
+}
+
 /// Truncate a probe detail so multi-line tool output stays a one-liner.
 fn snippet(text: &str) -> String {
     let line = text
@@ -374,19 +423,22 @@ pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
                 "tools/call",
                 json!({"name": "set_root_dir", "arguments": {"path": path.to_string_lossy()}}),
             )?;
-            let (text, is_error) = call_text(&r);
-            if is_error || text.to_lowercase().contains("failed") {
-                checks.push(("workspace activation", Check::Fail(snippet(&text))));
-            } else {
-                local_activated = true;
-                checks.push((
-                    "workspace activation",
-                    Check::Pass(format!(
-                        "set_root_dir({}) → {}",
-                        path.display(),
-                        snippet(&text)
-                    )),
-                ));
+            match successful_call_text(&r) {
+                Ok(text) if activation_succeeded(&text) => {
+                    local_activated = true;
+                    checks.push((
+                        "workspace activation",
+                        Check::Pass(format!(
+                            "set_root_dir({}) → {}",
+                            path.display(),
+                            snippet(&text)
+                        )),
+                    ));
+                }
+                Ok(text) => {
+                    checks.push(("workspace activation", Check::Fail(snippet(&text))));
+                }
+                Err(detail) => checks.push(("workspace activation", Check::Fail(detail))),
             }
         } else {
             checks.push((
@@ -423,11 +475,14 @@ pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
                 "tools/call",
                 json!({"name": "cypher_query", "arguments": {"query": "MATCH (n) RETURN count(n) AS n"}}),
             )?;
-            let (text, is_error) = call_text(&r);
-            if is_error {
-                Check::Fail(snippet(&text))
-            } else {
-                Check::Pass(format!("MATCH (n) RETURN count(n) → {}", snippet(&text)))
+            match successful_call_text(&r) {
+                Ok(text) => match hydration_count(&text) {
+                    Some(count) => {
+                        Check::Pass(format!("MATCH (n) RETURN count(n) → {count} node(s)"))
+                    }
+                    None => Check::Fail(snippet(&text)),
+                },
+                Err(detail) => Check::Fail(detail),
             }
         }
     };
@@ -472,5 +527,70 @@ fn report(checks: Vec<(&str, Check)>) -> Result<()> {
         Ok(())
     } else {
         bail!("Selftest FAILED — {failed} check(s) did not pass (see above).");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_result(text: Option<&str>, is_error: bool) -> Value {
+        let content =
+            text.map_or_else(Vec::new, |text| vec![json!({"type": "text", "text": text})]);
+        json!({"content": content, "isError": is_error})
+    }
+
+    #[test]
+    fn call_envelope_requires_nonerror_text() {
+        assert_eq!(
+            successful_call_text(&tool_result(Some("ok"), false)).as_deref(),
+            Ok("ok")
+        );
+        assert!(successful_call_text(&tool_result(Some("bad input"), true)).is_err());
+        assert!(successful_call_text(&tool_result(Some("  \n"), false)).is_err());
+        assert!(successful_call_text(&tool_result(None, false)).is_err());
+    }
+
+    #[test]
+    fn activation_requires_a_positive_contract() {
+        for text in [
+            "Cloned 'local/ws' at /tmp/ws.",
+            "Updated 'local/ws' at /tmp/ws.",
+            "Activated (already up to date) 'local/ws' at /tmp/ws.",
+        ] {
+            assert!(activation_succeeded(text), "expected success for {text:?}");
+        }
+
+        for text in [
+            "Path does not exist or is not a directory: /missing",
+            "set_root_dir failed: parse error",
+            "Activation request 1 for 'local/ws' was superseded by request 2.",
+            "Refresh request for 'local/ws' was abandoned.",
+            "No active graph.",
+            "",
+        ] {
+            assert!(!activation_succeeded(text), "expected failure for {text:?}");
+        }
+    }
+
+    #[test]
+    fn hydration_requires_the_exact_count_projection() {
+        assert_eq!(
+            hydration_count("1 row(s):\nn\n0\n<active_graph path=\"x.kgl\"/>"),
+            Some(0)
+        );
+        assert_eq!(hydration_count("1 row(s):\nn\n42"), Some(42));
+
+        for text in [
+            "No active graph. Pass --graph X.kgl.",
+            "No results.",
+            "2 row(s):\nn\n1\n2",
+            "1 row(s):\ncount\n1",
+            "1 row(s):\nn\nnot-a-number",
+            "1 row(s):\nn\n-1",
+            "Cypher query failed: unknown variable",
+        ] {
+            assert_eq!(hydration_count(text), None, "expected failure for {text:?}");
+        }
     }
 }
