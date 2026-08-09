@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The writable Bolt server now takes the cross-process graph writer lease.**
+  `kglite-bolt-server` opened its `--graph` without one, so a second writable
+  server — or a concurrent `kglite` CLI write, MCP server or `kglite.open()` —
+  could load the same path and silently overwrite the other's work at save
+  time. The lease is now acquired *before* the graph is read and held until
+  shutdown; a contended start fails immediately naming the holding process
+  instead of serving. `--readonly` servers take no lease and still start
+  alongside a live writer.
 - **Negative numeric literals now parse in MATCH inline property maps.**
   `MATCH (n {temp: -1})` and `-[r:DELTA {change: -1.5}]->` raised
   `Pattern parse error: Expected value, got Dash`; the sign is now lexed as

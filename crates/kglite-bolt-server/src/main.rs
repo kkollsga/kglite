@@ -14,15 +14,17 @@ use boltr::server::BoltServer;
 use clap::{Parser, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
-use kglite::api::io::{open_or_create_graph, OpenDisposition};
+use kglite::api::io::OpenDisposition;
 use kglite::api::session::CsvImportPolicy;
 use kglite::api::storage::StorageMode;
 
 use crate::backend::{KgliteBackend, ServerIdentity};
+use crate::startup::start_graph;
 
 mod auth;
 mod backend;
 mod error_map;
+mod startup;
 mod value_adapter;
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -234,11 +236,15 @@ async fn serve() -> Result<()> {
         .map(StorageMode::parse)
         .transpose()
         .map_err(|e| anyhow::anyhow!(e))?;
-    let opened = open_or_create_graph(&cli.graph, create_mode)
-        .with_context(|| format!("opening or creating {}", cli.graph.display()))?;
-    let dir_arc = opened.graph;
+    let started = start_graph(&cli.graph, create_mode, cli.readonly, &mut |_| {})?;
+    // Bind the lease for the whole of `serve`. `_writer_lease` rather than
+    // `_`: a bare `_` drops it here, releasing write ownership before the
+    // first client connects. It is released by this binding going out of
+    // scope, i.e. after `BoltServer::serve` returns at shutdown.
+    let _writer_lease = started.writer_lease;
+    let dir_arc = started.graph;
     tracing::info!(
-        disposition = match opened.disposition {
+        disposition = match started.disposition {
             OpenDisposition::Opened => "opened",
             OpenDisposition::Created => "created",
         },

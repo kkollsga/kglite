@@ -36,6 +36,11 @@ documented Cypher dialect against the loaded `.kgl` graph.
   writers whose snapshots become stale see
   `Neo.ClientError.Transaction.ConflictDetected`. Retry on the
   client side.
+- **Cross-process writer lease** — a writable server takes the
+  graph's exclusive writer lease before it reads the path and holds
+  it until shutdown, so a second writer (server, CLI, MCP server or
+  `kglite.open()`) is refused at startup by name instead of
+  overwriting its work at save time. `--readonly` takes no lease.
 - **Zero PyO3 in the binary** — no libpython link, no Python
   runtime required. `cargo tree -p kglite-bolt-server | rg
   pyo3` returns empty.

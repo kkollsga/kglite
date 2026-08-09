@@ -102,6 +102,14 @@ switched automatically.
   or multi-tenant clients.
 - Use `--readonly` for analytical replicas and agent connections that do not
   need writes.
+- One writable server per graph. A server started without `--readonly` takes
+  the same cross-process writer lease as `kglite.open()` *before* it reads the
+  graph, and holds it until shutdown, so a second writable server — or a CLI
+  write, MCP server, or `kglite.open()` on that path — fails at startup naming
+  the holding process instead of racing it to overwrite at save time. The
+  refusal is immediate rather than a wait, so a supervisor's restart policy
+  governs the retry. `--readonly` servers take no lease and start alongside a
+  live writer.
 - Back up the complete graph before upgrades; see
   [Import and Export](../python/guides/import-export.md).
 - Use release benchmarks/CI reports for performance claims; this operator page
