@@ -47,6 +47,23 @@ plan-cache policy must not regress. It repeats one point-lookup against a graph
 that is never written, so every round after the first is a cache *hit*: it
 measures the hit path itself.
 
+────────────────────────────────────────────────────────────────────────────
+The cell that measures the damage rather than the overhead
+────────────────────────────────────────────────────────────────────────────
+
+Per-statement overhead is the *small* half of this defect. The large half is
+that the cache is **process-global and 512 entries**, so a writer's dead
+entries evict every other graph's live read plans — and that is not visible in
+any single-graph cell, because a write also bumps its own graph's version and
+would invalidate its own read plans regardless of eviction.
+
+``test_bench_read_hit_survives_another_graphs_write_burst`` is the cell that
+sees it: a reader graph's warm plan, a *different* graph's 600-write burst, then
+the same read. The burst cannot invalidate the reader by version (different
+`graph_id`, untouched version) — it can only *evict*. So the cell is a direct
+probe of cache composition, and the gap it measures is the full miss-vs-hit gap
+(~0.7 µs, ~38 %), far outside this file's ~3 % run-to-run noise.
+
 Nothing here is in the ``make bench-check`` tracked set (that gate runs
 ``tests/benchmarks/test_bench_core.py`` only, ``Makefile:85``), so this file
 cannot perturb it.
@@ -219,3 +236,48 @@ def test_bench_repeated_read_uncacheable_control(benchmark, read_graphs, size):
         graph.cypher("MATCH (n:Item {id: 0}) RETURN n.name", params={"unused_probe": 1})
 
     benchmark.pedantic(read, rounds=ROUNDS, iterations=1, warmup_rounds=WARMUP_ROUNDS)
+
+
+#: Entries a burst must insert to be sure it has pushed a specific earlier entry
+#: out of the 512-slot FIFO. 600 leaves margin for the entries this file's other
+#: cells hold at the same time.
+BURST_WRITES = 600
+
+
+@pytest.fixture(scope="module")
+def burst_graph() -> KnowledgeGraph:
+    """A small graph used only as a *writer*, never read from.
+
+    Small on purpose: the burst is eviction pressure, not a measurement, and it
+    runs `BURST_WRITES` times per round.
+    """
+    return _base_graph(1_000)
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("size", SIZES)
+def test_bench_read_hit_survives_another_graphs_write_burst(benchmark, read_graphs, burst_graph, size):
+    """A reader's warm plan, then 600 writes **on a different graph**.
+
+    ⚠ The two graphs are the whole point and are not interchangeable with one
+    graph. A write bumps its own graph's version, so a same-graph burst would
+    invalidate the reader's plan by *key* and the cell could never distinguish
+    invalidation from eviction. Across graphs, `graph_id` differs and the
+    reader's version never moves — the only way its plan can disappear is the
+    512-entry FIFO throwing it out to make room for entries the writer will
+    never read back.
+
+    The burst runs in `pedantic`'s untimed `setup`, so what is timed is one
+    read: a **miss** if the writer evicted the plan, a **hit** if it did not.
+    Expect the full miss-vs-hit gap between the two worlds, not a few percent.
+    """
+    reader = read_graphs[size]
+
+    def burst():
+        for _ in range(BURST_WRITES):
+            burst_graph.cypher("CREATE (:Note {body: 'x'})")
+
+    def read():
+        reader.cypher("MATCH (n:Item {id: 0}) RETURN n.name")
+
+    benchmark.pedantic(read, setup=burst, rounds=ROUNDS, iterations=1, warmup_rounds=WARMUP_ROUNDS)

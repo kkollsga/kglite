@@ -20,6 +20,16 @@
 //!   that happen to share a `version` (e.g. both freshly loaded at version 0)
 //!   can never collide on each other's plans.
 //!
+//! ## Reads only
+//!
+//! `session::execute::prepare` inserts a plan only for a **non-mutating**
+//! statement. A mutation bumps `version` right after its plan would be stored,
+//! so the entry is unreachable to that writer forever — a serial writer
+//! measured 0 hits in 600 identical writes while filling this whole cache with
+//! its own dead entries and evicting other graphs' live read plans. The
+//! *lookup* is not skipped (classification does not exist yet at that point in
+//! `prepare`; see the comment there), it is simply a guaranteed miss.
+//!
 //! Only **param-less, codec-free, no-disabled-passes, non-`text_score`**
 //! queries are cached (see `session::execute::prepare`): with those excluded,
 //! the optimized plan is a pure function of `(query, graph state)`, and

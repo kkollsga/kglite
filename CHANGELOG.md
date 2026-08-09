@@ -47,6 +47,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A write loop no longer evicts every other graph's cached query plan.** The
+  optimized-plan cache is process-global and holds 512 entries, and every
+  `CREATE`/`SET`/`DELETE`/`REMOVE`/`MERGE` used to store its plan under a key
+  containing the graph version that the same statement then bumped — so the
+  entry could never be read back, and 600 writes were enough to cycle the whole
+  cache through entries nobody could use. A graph being written to now stores no
+  plan: writes are marginally faster (a single-node `CREATE` 1.333 → 1.292 µs,
+  a `SET` 3.166 → 2.959 µs at 100k nodes), and a *reader* whose plan used to be
+  evicted by an unrelated writer keeps it (3.125 → 2.375 µs, -24%). Read plans
+  are cached exactly as before. The one behaviour given up is deliberate: two
+  transactions forked from the same version, or a retry of a write that failed
+  before the version bump, previously reused a cached plan and now re-plan.
 - **A corrupt or unrecognised storage mode in a saved graph is now refused by
   name.** A `.kgl` claiming a mode this build does not know, one claiming
   `disk` (a disk graph is a directory, never a portable file), or a disk

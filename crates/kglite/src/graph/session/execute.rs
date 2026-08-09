@@ -649,7 +649,30 @@ fn prepare(
     // Cache the ready-to-execute plan. Only when `params` stayed empty — a
     // `text_score()` rewrite injects embedding params, making the plan
     // call-specific, so those are never cached (and thus never hit above).
-    if cacheable && params.is_empty() {
+    //
+    // And only for **reads**. A mutation's key carries the graph version, and
+    // a successful mutation bumps that version immediately after this insert
+    // (`bump_version`), so the entry is stale the instant it lands: measured
+    // at 600 identical serial writes → 600 insertions, **0 hits**, 88
+    // evictions, and a shared 512-entry cache left entirely full of entries
+    // only the writer could ever have reached. Skipping the insert costs a
+    // writer nothing and stops a write loop evicting every *other* graph's
+    // live read plans out of a process-global cache.
+    //
+    // Two shapes did reuse a cached mutation plan and deliberately no longer
+    // do: transactions forked from one base version (same `graph_id` +
+    // `version`), and a retry of a mutation that errored before
+    // `bump_version`. Both are same-version replays — a narrow window traded
+    // for a per-write cost every serial writer pays. See
+    // `session::plan_cache_cost_tests`, which pins both directions.
+    //
+    // The **lookup** above deliberately stays. `prepare` runs before anything
+    // has parsed the query, so this classification does not exist yet there,
+    // and buying it early means a `parse_cypher_cached` AST clone (~700 ns per
+    // its own module docs) on the read-hit path that the plan cache exists to
+    // keep at ~1.9 us. With no mutation ever inserted, a mutation's lookup is
+    // a guaranteed miss: one shared read lock and one hash, and nothing more.
+    if cacheable && params.is_empty() && !cypher::is_mutation_query(&plan) {
         cypher::plan_cache::insert(
             graph.graph_id(),
             graph.version(),
