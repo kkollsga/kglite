@@ -16,6 +16,15 @@ same 22 checks so they stay comparable.
 message when its toolchain is absent rather than silently passing. The JS suite
 runs wherever `node` and `npm` exist; the Java suite needs a JDK 17+ and Maven.
 CI installs both (`.github/workflows/ci.yml`, job `bolt-driver-conformance`).
+
+**Fetching the driver is not part of the test.** Both suites download their
+driver first — npm registry, Maven Central — and an outage there is not
+evidence about this server. `scripts/conformance_resolution.py` retries that
+step with bounded backoff and, if a recognized outage survives the budget,
+marks the skip so `scripts/assert_conformance_ran.py` reports INFRASTRUCTURE
+(exit 2) rather than PRODUCT (exit 1). Both are still failures — see that
+module for why no path here can end in a green job that tested nothing.
+Execution itself is never retried.
 """
 
 from __future__ import annotations
@@ -25,6 +34,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -34,6 +44,18 @@ from tests.conftest import (
     _build_bolt_fixture_graph,
     _spawn_bolt_server,
     _teardown_bolt_server,
+)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+
+from conformance_resolution import (  # noqa: E402
+    MAVEN_NETWORK_SIGNATURES,
+    MAVEN_RESOLUTION_SIGNATURES,
+    NPM_OUTAGE_SIGNATURES,
+    StepRunner,
+    SuiteOutcome,
+    infrastructure_skip_reason,
+    run_conformance_suite,
 )
 
 pytestmark = pytest.mark.bolt
@@ -95,51 +117,77 @@ def _require(tool: str, install_hint: str) -> str:
     return path
 
 
+def _demand_success(outcome: SuiteOutcome, label: str, resolver: str) -> None:
+    """Turn a suite outcome into the right kind of red.
+
+    Three of the four states end the test here; only `passed` returns. The
+    order matters: an outage is announced with the marker the assert script
+    keys on, an unrecognized resolution failure gets an ordinary skip (hard
+    red, deliberately unchanged), and a failing suite is a plain assertion —
+    the shape a driver disagreement has always had.
+    """
+    if outcome.status == "infrastructure":
+        pytest.skip(infrastructure_skip_reason(label, outcome))
+    if outcome.status == "unresolved":
+        pytest.skip(
+            f"{resolver} could not fetch the {label} conformance driver, and the failure "
+            f"matches no known registry/network signature (offline?):\n{outcome.report}"
+        )
+    assert outcome.ok, f"{label} driver conformance failed:\n{outcome.report}"
+
+
 # ---------------------------------------------------------------------------
 # JavaScript
 # ---------------------------------------------------------------------------
 
 
-def _ensure_js_dependencies() -> None:
-    """Install `neo4j-driver` into `tests/conformance/js/node_modules`.
+def _js_resolution_step() -> StepRunner | None:
+    """`npm install` for `tests/conformance/js/node_modules`, or None if warm.
 
-    `node_modules` is gitignored and pruned by `make prune-dev`, per the
-    dev-cleanliness rule that every path the tooling writes outside git needs a
-    bound and an owner.
+    A populated `node_modules` is not an outage and must not spend a retry
+    attempt, hence None. The directory is gitignored and pruned by
+    `make prune-dev`, per the dev-cleanliness rule that every path the tooling
+    writes outside git needs a bound and an owner.
     """
     if (JS_DIR / "node_modules" / "neo4j-driver").exists():
-        return
+        return None
     npm = _require("npm", "https://nodejs.org (or `brew install node`)")
-    result = subprocess.run(
-        [npm, "install", "--no-audit", "--no-fund", "--loglevel=error"],
-        cwd=JS_DIR,
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
-    if result.returncode != 0:
-        pytest.skip(
-            "npm install failed for the JS conformance suite (offline?):\n"
-            f"{result.stdout[-2000:]}\n{result.stderr[-2000:]}"
+
+    def install(_attempt: int) -> tuple[int, str]:
+        result = subprocess.run(
+            [npm, "install", "--no-audit", "--no-fund", "--loglevel=error"],
+            cwd=JS_DIR,
+            capture_output=True,
+            text=True,
+            timeout=600,
         )
+        return result.returncode, f"{result.stdout[-2000:]}\n{result.stderr[-2000:]}"
+
+    return install
 
 
 def test_javascript_driver_conformance(bolt_url: str) -> None:
     node = _require("node", "https://nodejs.org (or `brew install node`)")
-    _ensure_js_dependencies()
+    resolve = _js_resolution_step()
 
-    result = subprocess.run(
-        [node, "conformance.mjs", bolt_url],
-        cwd=JS_DIR,
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
-    report = f"{result.stdout}\n{result.stderr}"
-    assert result.returncode == 0, f"JavaScript driver conformance failed:\n{report}"
-    passed = result.stdout.count("PASS ")
+    def execute(_attempt: int) -> tuple[int, str]:
+        result = subprocess.run(
+            [node, "conformance.mjs", bolt_url],
+            cwd=JS_DIR,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        return result.returncode, f"{result.stdout}\n{result.stderr}"
+
+    # No execution signatures: once the driver is installed, `node` talks only
+    # to this server, so every failure it reports is about this server.
+    outcome = run_conformance_suite(resolve, execute, resolution_signatures=NPM_OUTAGE_SIGNATURES)
+    _demand_success(outcome, "JavaScript", "npm")
+
+    passed = outcome.report.count("PASS ")
     assert passed == EXPECTED_CHECKS, (
-        f"expected {EXPECTED_CHECKS} JS checks, saw {passed} — did the suite stop early?\n{report}"
+        f"expected {EXPECTED_CHECKS} JS checks, saw {passed} — did the suite stop early?\n{outcome.report}"
     )
 
 
@@ -176,34 +224,83 @@ def _require_jdk(minimum: int = 17) -> None:
         pytest.skip(f"JDK {minimum}+ required by the conformance pom, found {blob}")
 
 
+def _maven(mvn: str, env: dict[str, str], *goals: str, timeout: int) -> tuple[int, str]:
+    """One Maven invocation against the repo-local, gitignored `.m2` cache.
+
+    Keeping downloads under `tests/conformance/java/.m2` rather than the
+    developer's `~/.m2` is what lets `make prune-dev` own them, and what lets
+    CI cache exactly this suite's dependencies.
+    """
+    result = subprocess.run(
+        [mvn, "-B", "-q", "--no-transfer-progress", f"-Dmaven.repo.local={JAVA_DIR / '.m2'}", *goals],
+        cwd=JAVA_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    return result.returncode, f"{result.stdout[-8000:]}\n{result.stderr[-4000:]}"
+
+
+def _java_resolution_step(mvn: str, env: dict[str, str]) -> StepRunner:
+    """The step inside the retry loop: download, execute nothing.
+
+    `dependency:go-offline` fetches the driver and the plugins and runs no
+    tests, which is the whole reason retrying it is safe — a retry cannot
+    re-run, or mask, a conformance result. Module-level rather than a closure
+    so a test without Maven can assert exactly that (see
+    `tests/test_conformance_resolution.py`).
+    """
+
+    def resolve(_attempt: int) -> tuple[int, str]:
+        return _maven(mvn, env, "dependency:go-offline", timeout=1800)
+
+    return resolve
+
+
+def _java_execution_step(mvn: str, env: dict[str, str], bolt_uri: str) -> StepRunner:
+    """The suite itself, run once, against the server under test."""
+
+    def execute(_attempt: int) -> tuple[int, str]:
+        return _maven(mvn, env, f"-Dkglite.bolt.uri={bolt_uri}", "test", timeout=1800)
+
+    return execute
+
+
 def test_java_driver_conformance(bolt_url_neo4j_compat: str) -> None:
     _require_jdk()
     mvn = _require("mvn", "`brew install maven` or apt install maven")
 
     env = dict(os.environ)
-    # Keep Maven's downloads inside the repo-local, gitignored cache rather
-    # than polluting the developer's ~/.m2 — `make prune-dev` owns it.
     env.setdefault("MAVEN_OPTS", "-Xmx512m")
-    result = subprocess.run(
-        [
-            mvn,
-            "-B",
-            "-q",
-            "--no-transfer-progress",
-            f"-Dmaven.repo.local={JAVA_DIR / '.m2'}",
-            f"-Dkglite.bolt.uri={bolt_url_neo4j_compat}",
-            "test",
-        ],
-        cwd=JAVA_DIR,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=1800,
+    resolve = _java_resolution_step(mvn, env)
+    execute = _java_execution_step(mvn, env, bolt_url_neo4j_compat)
+
+    outcome = run_conformance_suite(
+        resolve,
+        execute,
+        # Resolution runs alone, so transport-level errors can only come from
+        # the resolver: both tiers apply.
+        resolution_signatures=(*MAVEN_RESOLUTION_SIGNATURES, *MAVEN_NETWORK_SIGNATURES),
+        # Execution output also carries the *driver's* errors, and the Neo4j
+        # Java driver says "Connection refused" when this server dies mid-suite
+        # — a product failure in a network failure's words. Only phrases Maven
+        # itself emits for a resolution failure are consulted here.
+        execution_signatures=MAVEN_RESOLUTION_SIGNATURES,
     )
-    report = f"{result.stdout[-8000:]}\n{result.stderr[-4000:]}"
-    if result.returncode != 0 and "Could not resolve dependencies" in report:
-        pytest.skip(f"Maven could not fetch the Java driver (offline?):\n{report}")
-    assert result.returncode == 0, f"Java driver conformance failed:\n{report}"
+    if outcome.status == "unresolved":
+        # `dependency:go-offline` is finicky in ways `test` is not (a profile it
+        # cannot pre-resolve, an optional plugin). An unrecognized failure here
+        # therefore falls through to the real run, which is authoritative — this
+        # can only turn a would-be skip into a genuine result, never the reverse.
+        outcome = run_conformance_suite(
+            None,
+            execute,
+            resolution_signatures=(),
+            execution_signatures=MAVEN_RESOLUTION_SIGNATURES,
+        )
+    _demand_success(outcome, "Java", "Maven")
+    report = outcome.report
 
     # Surefire's XML report is the authoritative count — `-q` suppresses the
     # per-test console lines, so parsing stdout would under-report.

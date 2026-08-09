@@ -550,6 +550,30 @@ def test_bolt_driver_conformance_installs_both_toolchains() -> None:
     assert "-rs" in args, "the conformance run does not pass -rs, so skips would be invisible"
 
 
+def test_bolt_conformance_outage_classification_cannot_be_swallowed() -> None:
+    """`assert_conformance_ran.py` distinguishes an infrastructure outage (exit
+    2) from a product failure (exit 1) — both red, and neither may be tolerated
+    into green.
+
+    The distinction is only safe while the step that reports it can still fail
+    the job. `continue-on-error` at either the step or the *job* level would
+    make it decorative: the annotation would still print and the run would go
+    green having tested no driver at all. That is the shape this whole job
+    exists to prevent, so it is asserted rather than assumed.
+    """
+    job = _ci_job("bolt-driver-conformance")
+    command = "python scripts/assert_conformance_ran.py conformance.xml"
+    _assert_runs(job, command)
+    assert _step_running(job, command).get("continue-on-error") is None, (
+        "the conformance assertion tolerates failure — an outage or a skipped suite would read as green"
+    )
+    assert job.get("continue-on-error") is None, (
+        "bolt-driver-conformance tolerates failure at the job level, which makes every gate inside it decorative"
+    )
+    tolerated = [step for step in _steps(job) if step.get("continue-on-error") is True]
+    assert tolerated == [], "no step in the conformance job may tolerate failure"
+
+
 # --- the publish workflows --------------------------------------------------
 # This file guarded ci.yml only, so the publish workflows — the ones that
 # actually decide what reaches PyPI and crates.io — had no local gate at all.
