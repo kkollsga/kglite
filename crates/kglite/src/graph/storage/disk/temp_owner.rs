@@ -56,12 +56,6 @@ impl<T> TrackedOwner<T> {
             label,
         }
     }
-
-    /// Consume the wrapper and return the inner value, giving up tracking.
-    #[allow(dead_code)]
-    pub(crate) fn into_inner(self) -> T {
-        self.value
-    }
 }
 
 impl<T> Deref for TrackedOwner<T> {

@@ -145,13 +145,6 @@
       "nesting": 4
     },
     {
-      "path": "crates/kglite/src/graph/core/pattern_matching/parser.rs",
-      "qualified_name": "crate::tokenize",
-      "lines": 210,
-      "branches": 53,
-      "nesting": 6
-    },
-    {
       "path": "crates/kglite/src/graph/core/traversal.rs",
       "qualified_name": "crate::make_traversal_full",
       "lines": 218,
