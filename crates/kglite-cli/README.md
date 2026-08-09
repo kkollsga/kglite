@@ -17,13 +17,17 @@ The main `kglite` wheel embeds this crate's Rust library and exposes the same
 command through a thin console-script shim. `kglite-cli` remains the standalone
 libpython-free binary distribution; install one route or the other.
 
-Install the bundled code-review skill for Codex and Claude Code:
+The code-review Agent Skill is installed by
+[codingest](https://github.com/kkollsga/codingest), which also builds the code
+graphs the skill queries:
 
 ```console
-$ kglite skill install
-# one host, or project scope:
-$ kglite skill install --host codex --project
+$ codingest skill install
 ```
+
+An earlier `kglite skill install` placed a CLI-managed copy of the skill;
+`codingest skill install` removes that managed copy as part of installing its
+own. An unmanaged copy is left untouched.
 
 ## Use
 
@@ -114,7 +118,6 @@ dot-commands run on Enter. Tab completes dot-commands and the graph's labels.
 
 Non-interactive commands:
 
-- `skill install|uninstall [--host codex|claude] [--project] [--dry-run]` — manage the bundled code-review Agent Skill
 - `query <graph.kgl> <cypher> [--format table|csv|json]` — run a read-only Cypher query
 - `write <graph.kgl> <cypher> [--format table|csv|json] [--save]` — run a write-capable Cypher statement
 - `write --write-scope A,B --git-sha <sha> --modified-by <actor>` — restrict writes and stamp provenance on `auto_timestamp` types

@@ -25,19 +25,20 @@ one environment because they provide the same `kglite` command name.
 
 ## Code-Review Skill
 
-Install the bundled Agent Skill for both Codex and Claude Code:
+The code-review Agent Skill ships with
+[codingest](https://github.com/kkollsga/codingest), the project that builds the
+code graphs it queries:
 
 ```bash
-kglite skill install
+codingest skill install
 ```
 
-Use `--host codex` or `--host claude` to choose one, `--project` for repository
-scope, and `--dry-run` to inspect destinations. Re-running replaces the managed
-artifact idempotently; `kglite skill uninstall` removes only directories marked
-as CLI-managed.
+A copy installed by the earlier `kglite skill install` is migrated
+automatically: `codingest skill install` removes the CLI-managed legacy
+directory when it installs its own, and leaves an unmanaged copy alone.
 
-The skill drives the CLI directly. Build a working-tree graph, or a graph that
-spans a committed base and head revision:
+The skill still drives this CLI for querying. Build a working-tree graph, or a
+graph that spans a committed base and head revision:
 
 ```bash
 # Code-graph builds moved to the codingest project (its CLI builds the .kgl):

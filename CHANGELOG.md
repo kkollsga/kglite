@@ -45,6 +45,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A second request could previously query the old graph while another request
   prepared and installed the refreshed generation.
 
+### Removed
+
+- **`kglite skill install` / `kglite skill uninstall` are gone.** The
+  code-review Agent Skill is installed by
+  [codingest](https://github.com/kkollsga/codingest), which also builds the
+  code graphs the skill queries: run `codingest skill install` instead. It
+  removes a CLI-managed legacy copy from an earlier `kglite skill install` as
+  part of installing its own, and leaves an unmanaged copy untouched. The
+  bundled skill assets ship with codingest and are no longer compiled into the
+  `kglite` CLI or the wheel.
+
 ## [0.15.7] - 2026-08-06
 
 ### Changed

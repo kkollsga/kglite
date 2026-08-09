@@ -12,7 +12,6 @@ mod format;
 mod helper;
 mod migrate;
 mod repl;
-mod skill;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -52,11 +51,6 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Install or remove the bundled code-review skill for an agent host.
-    Skill {
-        #[command(subcommand)]
-        command: skill::SkillCommand,
-    },
     /// Run a read-only Cypher query against a `.kgl` graph and print the result.
     Query {
         /// Path to the `.kgl` file.
@@ -247,9 +241,6 @@ where
 {
     let cli = Cli::parse_from(args);
 
-    if let Some(Command::Skill { command }) = &cli.command {
-        return skill::run(command);
-    }
     if let Some(Command::Query {
         graph,
         query,

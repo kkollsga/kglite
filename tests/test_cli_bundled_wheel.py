@@ -23,11 +23,17 @@ def test_python_module_launcher_forwards_help_to_rust() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "skill" in result.stdout
-    assert "skill" in result.stdout
+    assert "query" in result.stdout
+    assert "session" in result.stdout
+    assert "skill" not in result.stdout
 
 
-def test_python_module_launcher_runs_skill_dry_run(tmp_path: Path) -> None:
+def test_wheel_cli_installs_no_skill(tmp_path: Path) -> None:
+    """`kglite skill install` moved to codingest — the wheel must not honor it.
+
+    `HOME` points at `tmp_path`, so a surviving installer leaves evidence on
+    disk and the assertion fails on behaviour, not only on the exit code.
+    """
     env = {**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)}
     result = subprocess.run(
         [
@@ -36,16 +42,17 @@ def test_python_module_launcher_runs_skill_dry_run(tmp_path: Path) -> None:
             "kglite.cli",
             "skill",
             "install",
-            "--dry-run",
             "--host",
             "codex",
         ],
+        input="",
         capture_output=True,
         text=True,
         timeout=30,
         check=False,
         env=env,
     )
-    assert result.returncode == 0, result.stderr
-    assert str(tmp_path / ".codex" / "skills" / "kglite-code-review") in result.stdout
+    assert result.returncode != 0, result.stdout
+    assert "kglite-code-review" not in result.stdout
     assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".claude").exists()

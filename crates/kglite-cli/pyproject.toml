@@ -4,12 +4,12 @@ build-backend = "maturin"
 
 [project]
 name = "kglite-cli"
-description = "Pure-Rust KGLite CLI: Cypher shell and offline code-review skill installer."
+description = "Pure-Rust KGLite CLI: an interactive Cypher shell for .kgl knowledge graphs."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.8"
-keywords = ["cypher", "code-review", "agent-skill", "knowledge-graph", "kglite"]
+keywords = ["cypher", "repl", "shell", "knowledge-graph", "kglite"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
