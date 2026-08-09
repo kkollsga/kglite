@@ -171,9 +171,11 @@ def test_concurrent_write_save_serializes(tmp_path):
 
     rows = kglite.load(str(p)).cypher("MATCH (t:Task) RETURN t.id AS id ORDER BY id").to_dicts()
     assert rows == [{"id": "a"}, {"id": "b"}]
-    # The sibling file persists so every contender locks the same inode; only
-    # the OS advisory lock is released. Its text is diagnostic, not liveness.
-    assert (tmp_path / "shared.kgl.lock").read_text(encoding="utf-8").startswith("pid=")
+    # The sibling lock file persists so every contender locks the same inode;
+    # only the OS advisory lock is released. The human-readable holder record
+    # lives in the `.lock-owner` sidecar; its text is diagnostic, not liveness.
+    assert (tmp_path / "shared.kgl.lock").exists()
+    assert (tmp_path / "shared.kgl.lock-owner").read_text(encoding="utf-8").startswith("pid=")
 
 
 def test_ready_set_subcommand(tmp_path):
