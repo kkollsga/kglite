@@ -333,9 +333,14 @@ pub mod api {
         pub use crate::graph::io::ntriples::{
             load_ntriples, Cancelled, NTriplesConfig, ProgressEvent, ProgressSink, ProgressValue,
         };
+        /// `open_or_create_graph` treats its mode as a *creation default* and
+        /// never touches an existing graph's own mode;
+        /// `open_or_create_graph_in_mode` treats it as the caller's explicit
+        /// request and converts (or refuses) on an existing graph too. A
+        /// binding that took the mode from a user wants the latter.
         pub use crate::graph::io::open::{
-            open_or_create_graph, GraphFileIdentity, GraphWriterLease, OpenDisposition,
-            OpenGraphResult,
+            open_or_create_graph, open_or_create_graph_in_mode, GraphFileIdentity,
+            GraphWriterLease, OpenDisposition, OpenGraphResult,
         };
         /// General-purpose RDF loader (Turtle / N-Triples / N-Quads /
         /// TriG). Gated behind the `rdf` Cargo feature.

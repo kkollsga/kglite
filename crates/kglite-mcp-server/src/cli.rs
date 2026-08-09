@@ -27,10 +27,13 @@ pub(crate) struct Cli {
     #[arg(long, conflicts_with_all = ["workspace", "watch", "source_root"])]
     pub(crate) graph: Option<PathBuf>,
 
-    /// Create a fresh, empty `--graph` in this storage mode (`memory`,
-    /// `mapped`, or `disk`) when its path does not exist — opt-in, so a typo'd
-    /// path fails fast instead of silently serving an empty graph. Ignored
-    /// when the graph already exists (its saved mode is auto-detected).
+    /// Storage mode (`memory`, `mapped`, or `disk`), applied whether or not
+    /// `--graph` exists. A missing path is created in this mode — opt-in, so a
+    /// typo'd path fails fast instead of silently serving an empty graph — and
+    /// an existing graph saved in a different mode is *converted* to it
+    /// (memory ⇄ mapped). A disk graph is a directory rather than a file, so
+    /// converting into or out of disk mode has no in-place form and is refused
+    /// at boot. Omit the flag to serve whatever mode the graph recorded.
     #[arg(long)]
     pub(crate) storage: Option<String>,
 
@@ -168,7 +171,9 @@ pub(crate) fn load_manifest(cli: &Cli, mode: &Mode) -> Result<Option<Manifest>, 
 /// Fail fast on bad mode-specific path arguments before any expensive setup.
 pub(crate) fn validate_mode_paths(mode: &Mode, cli: &Cli) -> Result<()> {
     if let Mode::Graph { .. } = mode {
-        // Validate --storage up front (only used when creating a new graph).
+        // Validate --storage up front. It applies to both branches — creating a
+        // missing graph in that mode, or converting an existing one to it — so
+        // an unknown spelling must fail before any of that, not inside it.
         if let Some(s) = &cli.storage {
             StorageMode::parse(s).map_err(|e| anyhow::anyhow!(e))?;
         }

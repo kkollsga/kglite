@@ -24,7 +24,11 @@ kglite-mcp-server --graph /data/new.kgl --storage memory --writable
 
 `--writable` enables mutation and the `load_graph`, `create_graph`, and
 `save_graph_as` lifecycle tools. `--storage memory|mapped|disk` is required when
-the `--graph` target does not yet exist; it does not convert an existing graph.
+the `--graph` target does not yet exist, and on an existing graph it *converts*:
+a memory-saved graph booted with `--storage mapped` comes up mapped. A disk
+graph is a directory rather than a file, so converting into or out of disk mode
+has no in-place form and is refused at boot naming `enable_disk_mode()`. Omit
+the flag to serve whatever mode the graph recorded.
 Keep read-only mode for untrusted agents and scope filesystem access with
 manifest `source_root`/`source_roots`.
 

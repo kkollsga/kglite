@@ -53,10 +53,13 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     graph: PathBuf,
 
-    /// Create a fresh, empty graph in this storage mode (`memory`, `mapped`,
-    /// or `disk`) when `--graph` does not exist — opt-in, so a typo'd path
-    /// fails fast instead of silently serving an empty graph. Ignored when
-    /// `--graph` already exists (its saved mode is auto-detected).
+    /// Storage mode (`memory`, `mapped`, or `disk`), applied whether or not
+    /// `--graph` exists. A missing path is created in this mode — opt-in, so a
+    /// typo'd path fails fast instead of silently serving an empty graph — and
+    /// an existing graph saved in a different mode is *converted* to it
+    /// (memory ⇄ mapped). A disk graph is a directory rather than a file, so
+    /// converting into or out of disk mode has no in-place form and is refused
+    /// at startup. Omit the flag to serve whatever mode the graph recorded.
     #[arg(long)]
     storage: Option<String>,
 
@@ -153,18 +156,6 @@ struct Cli {
     tls_key: Option<PathBuf>,
 }
 
-/// The effective storage mode of a loaded graph, for startup logging.
-fn storage_mode_str(g: &kglite::api::DirGraph) -> &'static str {
-    use kglite::api::GraphRead;
-    if g.graph.is_disk() {
-        "disk"
-    } else if g.graph.is_mapped() {
-        "mapped"
-    } else {
-        "memory"
-    }
-}
-
 /// Environment variable mirroring `--neo4j-compat`.
 const NEO4J_COMPAT_ENV: &str = "KGLITE_BOLT_NEO4J_COMPAT";
 
@@ -226,17 +217,19 @@ async fn serve() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Exists → load (auto-detect saved mode). Absent → error by default
-    // (a missing `.kgl` is almost always a typo), unless `--storage` opts in
-    // to creating a fresh graph (serve-and-build), mirroring the Python wheel's
-    // `kglite.open(path, storage=...)` and the C ABI's create-in-mode.
-    let create_mode = cli
+    // Exists → load in the mode the checkpoint recorded. Absent → error by
+    // default (a missing `.kgl` is almost always a typo), unless `--storage`
+    // opts in to creating a fresh graph (serve-and-build). An explicit
+    // `--storage` on an existing graph is a conversion request, honoured or
+    // refused — never dropped. Mirrors the wheel's `kglite.open(path,
+    // storage=...)` exactly.
+    let requested_mode = cli
         .storage
         .as_deref()
         .map(StorageMode::parse)
         .transpose()
         .map_err(|e| anyhow::anyhow!(e))?;
-    let started = start_graph(&cli.graph, create_mode, cli.readonly, &mut |_| {})?;
+    let started = start_graph(&cli.graph, requested_mode, cli.readonly, &mut |_| {})?;
     // Bind the lease for the whole of `serve`. `_writer_lease` rather than
     // `_`: a bare `_` drops it here, releasing write ownership before the
     // first client connects. It is released by this binding going out of
@@ -248,7 +241,12 @@ async fn serve() -> Result<()> {
             OpenDisposition::Opened => "opened",
             OpenDisposition::Created => "created",
         },
-        storage = storage_mode_str(&dir_arc),
+        storage = kglite::api::storage::live_storage_mode(&dir_arc).as_str(),
+        // Present only when `--storage` moved an existing graph off the mode it
+        // was saved in. Logged because an operator who does not see the switch
+        // cannot tell it from the flag being ignored, which is the failure this
+        // path used to have.
+        converted_from = started.converted_from.map(StorageMode::as_str),
         "graph ready; constructing Bolt server"
     );
 

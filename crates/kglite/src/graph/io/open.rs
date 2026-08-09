@@ -10,7 +10,9 @@ use fs2::FileExt;
 
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::io::file::load_file;
-use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+use crate::graph::storage::mode::{
+    convert_dir_graph_to_mode, live_storage_mode, new_dir_graph_in_mode, StorageMode,
+};
 
 /// How [`open_or_create_graph`] obtained the returned graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +28,12 @@ pub struct OpenGraphResult {
     /// Identity verified stable across an existing-path load, or captured
     /// immediately after creating a new path-backed graph.
     pub identity: GraphFileIdentity,
+    /// The mode the graph was in *before* an explicit request converted it, and
+    /// `None` when nothing was converted — which is every open through
+    /// [`open_or_create_graph`], and every request that already matched.
+    /// Operators are told when a server changed the mode under them; a silent
+    /// conversion is as hard to notice as a silently ignored flag.
+    pub converted_from: Option<StorageMode>,
 }
 
 /// Cross-process writer ownership for a graph path. Both sidecars are
@@ -373,6 +381,7 @@ pub fn open_or_create_graph(
                 graph,
                 disposition: OpenDisposition::Opened,
                 identity,
+                converted_from: None,
             });
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -394,7 +403,49 @@ pub fn open_or_create_graph(
         graph: Arc::new(graph),
         disposition: OpenDisposition::Created,
         identity: GraphFileIdentity::capture(path)?,
+        converted_from: None,
     })
+}
+
+/// Open or create at `path`, honouring `requested` on **both** branches: a
+/// missing path is created in it, and an existing graph that came back in a
+/// different mode is converted to it.
+///
+/// This is the entry point for a caller who took a mode from its user — the
+/// servers' `--storage`, the wheel's `storage=`. [`open_or_create_graph`] is
+/// the one for a caller whose mode is only a *creation default*, like the CLI's
+/// `memory`: there, converting an existing graph would silently undo the mode
+/// its checkpoint recorded, which is the defect this whole seam exists to stop.
+///
+/// A conversion is reported through [`OpenGraphResult::converted_from`] rather
+/// than performed silently, and the graph is converted in place — the returned
+/// `Arc` is the only reference at this point, and the switch moves the topology
+/// rather than copying it, so no second copy of the graph is ever live.
+/// Requests that have no conversion (either disk direction) fail here with the
+/// reason and the alternative named, instead of serving a mode nobody asked
+/// for.
+pub fn open_or_create_graph_in_mode(
+    path: &Path,
+    requested: Option<StorageMode>,
+) -> io::Result<OpenGraphResult> {
+    let mut opened = open_or_create_graph(path, requested)?;
+    let Some(requested) = requested else {
+        return Ok(opened);
+    };
+    if opened.disposition == OpenDisposition::Created {
+        return Ok(opened);
+    }
+    let current = live_storage_mode(&opened.graph);
+    if current == requested {
+        return Ok(opened);
+    }
+    convert_dir_graph_to_mode(
+        crate::graph::handle::make_dir_graph_mut(&mut opened.graph),
+        requested,
+    )
+    .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+    opened.converted_from = Some(current);
+    Ok(opened)
 }
 
 #[cfg(test)]

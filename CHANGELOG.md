@@ -25,6 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   portable modes wrap the same graph structure, so the switch changes the
   backend and the column-spill policy, not the data. Previously the only route
   to a mapped graph was to rebuild it from the original source.
+- **The servers' `--storage` now applies to an existing graph too.**
+  `kglite-bolt-server` and `kglite-mcp-server` used to parse the flag and drop
+  it whenever `--graph` already existed: an operator who wrote
+  `--storage mapped` in a unit file got a memory server and no message. It now
+  means the same thing on both branches — create a missing graph in that mode,
+  convert an existing one to it — matching `kglite.open(path, storage=...)`.
+  The Bolt startup log records `converted_from` when a conversion happened, and
+  a disk request on a `.kgl` (or a portable request on a disk directory) fails
+  startup naming `enable_disk_mode()` instead of serving a mode nobody asked
+  for. Omitting the flag serves whatever mode the graph recorded.
 - **Workspace graph producers now receive filtered filesystem changes.** Lazy
   watcher rebuild requests distinguish full builds from deterministic,
   deduplicated changed-path hints while still returning a complete graph.

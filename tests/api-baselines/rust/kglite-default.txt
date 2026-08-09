@@ -1164,6 +1164,7 @@ pub kglite::api::io::NTriplesConfig::predicates: core::option::Option<std::colle
 pub kglite::api::io::NTriplesConfig::progress: core::option::Option<alloc::boxed::Box<dyn kglite::api::io::ProgressSink>>
 pub kglite::api::io::NTriplesConfig::verbose: bool
 pub struct kglite::api::io::OpenGraphResult
+pub kglite::api::io::OpenGraphResult::converted_from: core::option::Option<kglite::api::storage::StorageMode>
 pub kglite::api::io::OpenGraphResult::disposition: kglite::api::io::OpenDisposition
 pub kglite::api::io::OpenGraphResult::graph: alloc::sync::Arc<kglite::api::DirGraph>
 pub kglite::api::io::OpenGraphResult::identity: kglite::api::io::GraphFileIdentity
@@ -1193,6 +1194,7 @@ pub fn kglite::api::io::load_file(path: &str) -> core::io::error::Result<alloc::
 pub fn kglite::api::io::load_kgl_bytes(data: &[u8]) -> core::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
 pub fn kglite::api::io::load_ntriples(graph: &mut kglite::api::DirGraph, path: &str, config: &kglite::api::io::NTriplesConfig) -> core::result::Result<kglite::graph::io::ntriples::NTriplesStats, alloc::string::String>
 pub fn kglite::api::io::open_or_create_graph(path: &std::path::Path, create_mode: core::option::Option<kglite::api::storage::StorageMode>) -> core::io::error::Result<kglite::api::io::OpenGraphResult>
+pub fn kglite::api::io::open_or_create_graph_in_mode(path: &std::path::Path, requested: core::option::Option<kglite::api::storage::StorageMode>) -> core::io::error::Result<kglite::api::io::OpenGraphResult>
 pub fn kglite::api::io::pass_a_scan(source: &kglite::api::storage::DiskGraph, spec: &kglite::api::io::SubsetSpec) -> kglite::graph::mutation::subgraph_streaming::PassAResult
 pub fn kglite::api::io::pass_a_scan_to_file(source: &kglite::api::storage::DiskGraph, spec: &kglite::api::io::SubsetSpec, kept_edges_path: &std::path::Path) -> core::result::Result<kglite::graph::mutation::subgraph_streaming::PassAFileResult, alloc::string::String>
 pub fn kglite::api::io::prepare_save(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>)

@@ -27,6 +27,95 @@ fn lifecycle_create_mutate_save_load() {
     let _ = std::fs::remove_file(&p);
 }
 
+// ── `--storage` on an existing graph ────────────────────────────────────────
+//
+// Same contract as the wheel's `kglite.open(path, storage=...)` and the Bolt
+// server's `--storage`: no request means the checkpoint decides, an explicit
+// portable request converts, and a disk request on a `.kgl` is refused with
+// the core reason rather than dropped. The dropped-flag shape is the one this
+// crate has already had to fix twice elsewhere (`storage=` on `open()`,
+// `from_blueprint(save=True)`), so it gets a test here rather than a comment.
+
+/// The mode the active graph is actually running on.
+fn active_mode(state: &GraphState) -> String {
+    state.with_active(|active| {
+        kglite::api::storage::live_storage_mode(active.kg.dir())
+            .as_str()
+            .to_string()
+    })
+}
+
+/// Seed a saved graph at `path` in `mode`, then release it.
+fn seed(path: &std::path::Path, mode: StorageMode) {
+    let state = GraphState::default();
+    state.create_in_mode(path, mode).unwrap();
+    state.save_as(path).unwrap();
+}
+
+#[test]
+fn open_without_a_requested_mode_serves_what_the_checkpoint_recorded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("recorded.kgl");
+    seed(&p, StorageMode::Mapped);
+
+    let state = GraphState::default();
+    state.open_or_create(&p, None).unwrap();
+    assert_eq!(active_mode(&state), "mapped");
+}
+
+#[test]
+fn explicit_portable_mode_converts_an_existing_graph() {
+    for (recorded, requested, want) in [
+        (StorageMode::Memory, StorageMode::Mapped, "mapped"),
+        (StorageMode::Mapped, StorageMode::Memory, "memory"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("convert.kgl");
+        seed(&p, recorded);
+
+        let state = GraphState::default();
+        state.open_or_create(&p, Some(requested)).unwrap();
+        assert_eq!(
+            active_mode(&state),
+            want,
+            "an explicit --storage must be applied, not dropped"
+        );
+    }
+}
+
+#[test]
+fn explicit_matching_mode_is_accepted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("agree.kgl");
+    seed(&p, StorageMode::Mapped);
+
+    let state = GraphState::default();
+    state.open_or_create(&p, Some(StorageMode::Mapped)).unwrap();
+    assert_eq!(active_mode(&state), "mapped");
+}
+
+#[test]
+fn disk_request_on_a_portable_graph_is_refused_with_the_core_reason() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("disk-request.kgl");
+    seed(&p, StorageMode::Memory);
+
+    let state = GraphState::default();
+    let error = state
+        .open_or_create(&p, Some(StorageMode::Disk))
+        .expect_err("a disk request on a .kgl must not be silently ignored")
+        .to_string();
+    assert!(
+        error.contains("enable_disk_mode()") && error.contains("directory"),
+        "the refusal must carry the core reason and remedy: {error}"
+    );
+
+    // The refused open must leave the path openable — its lease is released.
+    let after = GraphState::default();
+    after.open_or_create(&p, None).unwrap();
+    assert_eq!(active_mode(&after), "memory");
+}
+
 #[test]
 fn path_backed_active_graph_retains_writer_lease() {
     let tmp = tempfile::tempdir().unwrap();

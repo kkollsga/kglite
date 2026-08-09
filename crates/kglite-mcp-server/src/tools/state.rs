@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::Result;
 use kglite::api::cypher::ValueCodec;
 use kglite::api::introspection::compute_schema;
-use kglite::api::io::{open_or_create_graph, GraphWriterLease, OpenDisposition};
+use kglite::api::io::{open_or_create_graph_in_mode, GraphWriterLease, OpenDisposition};
 use kglite::api::storage::StorageMode;
 use kglite::api::{Embedder, KnowledgeGraph};
 
@@ -140,10 +140,20 @@ impl GraphState {
         self.open_or_create(path, Some(mode)).map(|_| ())
     }
 
+    /// Open the graph at `path` — or create it when the path is absent — and
+    /// bind it as the active graph.
+    ///
+    /// `requested_mode` means the same thing on both branches: create a missing
+    /// graph in it, and convert an existing one to it. `None` — no `--storage`,
+    /// and the `load_graph` tool's case — means the checkpoint decides, exactly
+    /// as `kglite.open(path)` does. A request with no conversion (either disk
+    /// direction) fails with the core reason rather than binding a graph in a
+    /// mode nobody asked for: a flag that is parsed and then dropped is the
+    /// defect shape this crate has already had to fix twice.
     pub fn open_or_create(
         &self,
         path: &Path,
-        create_mode: Option<StorageMode>,
+        requested_mode: Option<StorageMode>,
     ) -> Result<OpenDisposition> {
         let reuse_existing = read_lock(&self.inner)
             .as_ref()
@@ -156,7 +166,7 @@ impl GraphState {
                     .map_err(|e| anyhow::anyhow!("kglite writer lease failed: {e}"))?,
             )
         };
-        let opened = open_or_create_graph(path, create_mode)
+        let opened = open_or_create_graph_in_mode(path, requested_mode)
             .map_err(|e| anyhow::anyhow!("kglite graph open/create failed: {e}"))?;
         let kg = KnowledgeGraph::from_arc(opened.graph);
         let mut guard = write_lock(&self.inner);

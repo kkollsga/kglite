@@ -12,20 +12,29 @@ cargo install kglite-bolt-server
 kglite-bolt-server --graph /data/app.kgl
 ```
 
-An existing `.kgl` or disk-graph directory is auto-detected. A missing path is
-an error unless creation is explicit:
+An existing `.kgl` opens in the storage mode it was saved in; a disk-graph
+directory opens disk-backed. A missing path is an error unless creation is
+explicit:
 
 ```bash
 kglite-bolt-server --graph /data/new.kgl --storage memory
 # --storage mapped|disk selects the other creation modes
 ```
 
+`--storage` on an *existing* graph is a conversion request, not a no-op: a
+memory-saved graph served with `--storage mapped` is converted to mapped before
+the listener binds, and the startup log records `converted_from`. A disk graph
+is a directory rather than a file, so converting into or out of disk mode has no
+in-place form — those requests fail startup naming `enable_disk_mode()` instead
+of serving a mode nobody asked for. Omit the flag to serve whatever the graph
+recorded.
+
 Important options (run `--help` on the installed version for the authority):
 
 | Option | Purpose |
 |---|---|
 | `--bind`, `--port` | listener, default `127.0.0.1:7687` |
-| `--storage memory|mapped|disk` | create a missing graph; ignored for existing graphs |
+| `--storage memory|mapped|disk` | create a missing graph in this mode, or convert an existing one to it (memory ⇄ mapped; disk directions refused) |
 | `--readonly` | reject mutations at execution |
 | `--auth none|basic`, `--auth-user`, `--auth-pass` | Bolt LOGON policy |
 | `--idle-timeout`, `--max-sessions`, `--max-message-size` | resource bounds |
