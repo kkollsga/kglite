@@ -1404,7 +1404,7 @@ impl KnowledgeGraph {
             );
             let mut groups: HashMap<String, usize> = HashMap::new();
             for idx in nodes {
-                if let Some(node) = self.inner.get_node(idx) {
+                if let Some(node) = self.inner.node_view(idx) {
                     let resolved = self
                         .inner
                         .resolve_alias(node.node_type_str(&self.inner.interner), property);

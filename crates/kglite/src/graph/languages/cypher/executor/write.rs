@@ -765,11 +765,11 @@ fn execute_create(
                     // Endpoint types — needed for both the schema-lock check
                     // and the connection-type metadata upsert below.
                     let src_type = graph
-                        .get_node(actual_source)
+                        .node_view(actual_source)
                         .map(|n| n.get_node_type_ref(&graph.interner).to_string())
                         .unwrap_or_default();
                     let tgt_type = graph
-                        .get_node(actual_target)
+                        .node_view(actual_target)
                         .map(|n| n.get_node_type_ref(&graph.interner).to_string())
                         .unwrap_or_default();
 
@@ -1072,7 +1072,7 @@ fn ensure_type_metadata(
     // graph.graph ends before the upsert below takes &mut.
     let sample_props: HashMap<String, String> = {
         let _arena_guard = graph.graph.begin_query();
-        match graph.graph.node_weight(sample_node_idx) {
+        match graph.graph.node_view(sample_node_idx) {
             Some(node) => {
                 // Fast path: if the type's metadata already covers every property
                 // key on this node, there is nothing to add. The common case
@@ -1084,14 +1084,16 @@ fn ensure_type_metadata(
                 if let Some(existing) = graph.node_type_metadata.get(node_type) {
                     if !existing.is_empty()
                         && node
-                            .property_iter(&graph.interner)
+                            .property_pairs_named(&graph.interner)
+                            .iter()
                             .all(|(k, _)| existing.contains_key(k))
                     {
                         return;
                     }
                 }
-                node.property_iter(&graph.interner)
-                    .map(|(k, v)| (k.to_string(), value_type_name(v)))
+                node.property_pairs_named(&graph.interner)
+                    .into_iter()
+                    .map(|(k, v)| (k, value_type_name(&v)))
                     .collect()
             }
             None => return,
@@ -1203,6 +1205,59 @@ fn finish_node_property_write(
 
     if write.property != "updated_at" && graph.auto_timestamp_for(write.node_type) {
         nodes_to_stamp.insert(write.node_idx, write.node_type.to_string());
+    }
+}
+
+/// Every property key currently set on `variable`'s binding — the clear-list
+/// for `SET n = {…}` / `SET r = {…}`.
+///
+/// Extracted from `execute_set` (D1 Phase 1) so the accessor migration does not
+/// push that function past its size cap.
+fn existing_property_keys(
+    graph: &crate::graph::dir_graph::DirGraph,
+    row: &ResultRow,
+    variable: &str,
+) -> Vec<String> {
+    // Arena guard: node_weight/edge_weight materialize on the disk backend
+    // (protocol in disk/graph.rs); scoped so the borrow ends before the
+    // caller's &mut.
+    let _arena_guard = graph.graph.begin_query();
+    if let Some(node_idx) = row.node_bindings.get(variable) {
+        let mut keys: Vec<String> = graph
+            .graph
+            .node_view(*node_idx)
+            .map(|node| {
+                node.properties_cloned(&graph.interner)
+                    .into_keys()
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The *inline* title field, not `NodeView::title()`: on a columnar node
+        // it is the mapped-mode Null sentinel, so resolving it would add `name`
+        // to the clear-list on saved graphs where today it is absent. A real
+        // memory-vs-mapped parity gap, but closing it is a behaviour change,
+        // not a re-route.
+        if graph
+            .graph
+            .node_view(*node_idx)
+            .is_some_and(|node| !matches!(node.data().title, Value::Null))
+            && !keys.iter().any(|key| key == "name" || key == "title")
+        {
+            keys.push("name".to_string());
+        }
+        keys
+    } else if let Some(edge) = row.edge_bindings.get(variable) {
+        graph
+            .graph
+            .edge_weight(edge.edge_index)
+            .map(|edge| {
+                edge.properties_cloned(&graph.interner)
+                    .into_keys()
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
     }
 }
 
@@ -1326,7 +1381,7 @@ fn execute_set(
                     // &mut mutation below.
                     let (old_value, node_type_str) = {
                         let _arena_guard = graph.graph.begin_query();
-                        match graph.get_node(*node_idx) {
+                        match graph.node_view(*node_idx) {
                             Some(node) => {
                                 let nt = node.get_node_type_ref(&graph.interner).to_string();
                                 // For `name` (the canonical title-alias name in
@@ -1341,11 +1396,14 @@ fn execute_set(
                                 // index auto-maintenance consistent with how
                                 // those indexes were populated.
                                 let old = match property.as_str() {
+                                    // `title()`, not the raw inline field:
+                                    // these indexes are built from
+                                    // `get_node_title`.
                                     "name" => node
                                         .get_field_ref("name")
                                         .map(Cow::into_owned)
-                                        .or_else(|| Some(node.title.clone())),
-                                    "title" => Some(node.title.clone()),
+                                        .or_else(|| Some(node.title().into_owned())),
+                                    "title" => Some(node.title().into_owned()),
                                     _ => node.get_field_ref(property).map(Cow::into_owned),
                                 };
                                 (old, nt)
@@ -1491,41 +1549,7 @@ fn execute_set(
                         // Arena guard: node_weight/edge_weight materialize on
                         // the disk backend (protocol in disk/graph.rs); scoped
                         // so the borrow ends before execute_remove's &mut.
-                        let existing_keys: Vec<String> = {
-                            let _arena_guard = graph.graph.begin_query();
-                            if let Some(node_idx) = row.node_bindings.get(variable) {
-                                let mut keys: Vec<String> = graph
-                                    .graph
-                                    .node_weight(*node_idx)
-                                    .map(|node| {
-                                        node.properties_cloned(&graph.interner)
-                                            .into_keys()
-                                            .collect()
-                                    })
-                                    .unwrap_or_default();
-                                if graph
-                                    .graph
-                                    .node_weight(*node_idx)
-                                    .is_some_and(|node| !matches!(node.title, Value::Null))
-                                    && !keys.iter().any(|key| key == "name" || key == "title")
-                                {
-                                    keys.push("name".to_string());
-                                }
-                                keys
-                            } else if let Some(edge) = row.edge_bindings.get(variable) {
-                                graph
-                                    .graph
-                                    .edge_weight(edge.edge_index)
-                                    .map(|edge| {
-                                        edge.properties_cloned(&graph.interner)
-                                            .into_keys()
-                                            .collect()
-                                    })
-                                    .unwrap_or_default()
-                            } else {
-                                Vec::new()
-                            }
-                        };
+                        let existing_keys = existing_property_keys(graph, row, variable);
                         let removals: Vec<RemoveItem> = existing_keys
                             .into_iter()
                             .filter(|key| {
@@ -1592,7 +1616,7 @@ fn execute_set(
                             let _arena_guard = graph.graph.begin_query();
                             graph
                                 .graph
-                                .node_weight(node_idx)
+                                .node_view(node_idx)
                                 .map(|n| n.node_type_str(&graph.interner).to_string())
                         };
                         if let Some(nt) = nt {
@@ -1769,7 +1793,7 @@ fn execute_delete(
             if has_edges {
                 let name = graph
                     .graph
-                    .node_weight(node_idx)
+                    .node_view(node_idx)
                     .map(|n| {
                         n.get_field_ref("name")
                             .or_else(|| n.get_field_ref("title"))
@@ -1878,7 +1902,7 @@ fn execute_remove(
 
                     // Read node_type before mutable borrow (for index update)
                     let node_type_str = graph
-                        .get_node(*node_idx)
+                        .node_view(*node_idx)
                         .map(|n| n.get_node_type_ref(&graph.interner).to_string())
                         .unwrap_or_default();
 
@@ -2131,7 +2155,7 @@ fn try_match_merge_pattern(
                 // If variable is already bound from prior MATCH, it's already matched
                 if let Some(ref var) = node_pat.variable {
                     if let Some(&existing_idx) = row.node_bindings.get(var) {
-                        if graph.graph.node_weight(existing_idx).is_some() {
+                        if graph.graph.node_view(existing_idx).is_some() {
                             let mut result_row = ResultRow::new();
                             result_row.node_bindings.insert(var.clone(), existing_idx);
                             return Ok(Some(result_row));
@@ -2167,7 +2191,7 @@ fn try_match_merge_pattern(
 
                 // Helper: verify a candidate node matches all expected properties
                 let node_matches_all = |idx: NodeIndex, props: &[(&str, Value)]| -> bool {
-                    if let Some(node) = graph.graph.node_weight(idx) {
+                    if let Some(node) = graph.graph.node_view(idx) {
                         props.iter().all(|(key, expected)| {
                             let value = if *key == "name" || *key == "title" {
                                 node.get_field_ref("title")

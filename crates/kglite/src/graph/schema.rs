@@ -1281,7 +1281,7 @@ impl CurrentSelection {
         let _arena_guard = graph.graph.begin_query();
         self.current_node_indices()
             .next()
-            .and_then(|idx| graph.graph.node_weight(idx))
+            .and_then(|idx| graph.graph.node_view(idx))
             .map(|node| node.node_type_str(&graph.interner).to_string())
     }
 }
@@ -1945,17 +1945,6 @@ impl NodeData {
     #[inline]
     pub fn has_property(&self, key: &str) -> bool {
         self.properties.contains(InternedKey::from_str(key))
-    }
-
-    /// True when properties live in a per-type column store (disk/mapped
-    /// backends). For `Columnar`, `property_iter` yields nothing — callers
-    /// that need the full property set must consult the type metadata and
-    /// read each value through the backend-specific path. For `Map` /
-    /// `Compact` (the in-memory backend) `property_iter` already yields
-    /// every present property, so the metadata fall-back is unnecessary.
-    #[inline]
-    pub(crate) fn properties_are_columnar(&self) -> bool {
-        matches!(self.properties, PropertyStorage::Columnar { .. })
     }
 
     /// Clone all properties into a new HashMap<String, Value> (for export/interop).

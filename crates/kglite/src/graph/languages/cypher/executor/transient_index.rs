@@ -104,7 +104,7 @@ impl TransientEqIndex {
         }
         let mut by_value: HashMap<Value, Vec<NodeIndex>> = HashMap::with_capacity(nodes.len());
         for idx in nodes {
-            if let Some(node) = graph.graph.node_weight(idx) {
+            if let Some(node) = graph.graph.node_view(idx) {
                 let val = resolve_node_property(node, property, graph);
                 if !matches!(val, Value::Null) {
                     by_value.entry(val).or_default().push(idx);
@@ -126,7 +126,7 @@ impl TransientEqIndex {
             ProbeResolution::Projected(var) => row.projected.get(var.as_str()).cloned()?,
             ProbeResolution::NodeProp { var, prop } => {
                 let idx = row.node_bindings.get(var.as_str())?;
-                let node = graph.graph.node_weight(*idx)?;
+                let node = graph.graph.node_view(*idx)?;
                 resolve_node_property(node, prop, graph)
             }
         };

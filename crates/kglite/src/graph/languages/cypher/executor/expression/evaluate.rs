@@ -330,7 +330,7 @@ impl<'a> CypherExecutor<'a> {
                 Ok(self
                     .graph
                     .graph
-                    .node_weight(node_index)
+                    .node_view(node_index)
                     .map(|node| resolve_node_property(node, property, self.graph))
                     .unwrap_or(Value::Null))
             }
@@ -400,7 +400,7 @@ impl<'a> CypherExecutor<'a> {
         let Some(&node_index) = row.node_bindings.get(variable) else {
             return Ok(Value::Null);
         };
-        let Some(node) = self.graph.graph.node_weight(node_index) else {
+        let Some(node) = self.graph.graph.node_view(node_index) else {
             return Ok(Value::Null);
         };
 
@@ -508,7 +508,7 @@ impl<'a> CypherExecutor<'a> {
         Some(
             row.node_bindings
                 .get(variable)
-                .and_then(|node_index| self.graph.graph.node_weight(*node_index))
+                .and_then(|node_index| self.graph.graph.node_view(*node_index))
                 .map(|node| {
                     Value::String(node.get_node_type_ref(&self.graph.interner).to_string())
                 })

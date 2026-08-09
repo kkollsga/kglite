@@ -5,8 +5,8 @@
 use super::super::ast::*;
 use super::super::result::*;
 use crate::datatypes::values::Value;
-use crate::graph::schema::{soft_alias_fallback, DirGraph, NodeData, SoftAliasFallback};
-use crate::graph::storage::GraphRead;
+use crate::graph::schema::{soft_alias_fallback, DirGraph, SoftAliasFallback};
+use crate::graph::storage::{GraphRead, NodeView};
 use std::collections::{HashMap, HashSet};
 
 // Re-export the ast aggregate helpers so downstream code can refer to them
@@ -367,7 +367,7 @@ pub(super) fn evaluate_comparison(
 
 /// Resolve a node property, returning an owned Value directly.
 /// Uses `get_property_value()` to avoid Cow wrapping/unwrapping overhead.
-pub fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> Value {
+pub fn resolve_node_property(node: NodeView<'_>, property: &str, graph: &DirGraph) -> Value {
     let node_type_str = node.node_type_str(&graph.interner);
     let resolved = graph.resolve_alias(node_type_str, property);
     resolve_node_property_resolved(node, resolved, graph)
@@ -381,7 +381,11 @@ pub fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) 
 /// two `String`-keyed HashMap lookups are the dominant per-row cost on
 /// alias-bearing graphs. Results are identical to `resolve_node_property`
 /// for any non-alias property.
-pub fn resolve_node_property_unaliased(node: &NodeData, property: &str, graph: &DirGraph) -> Value {
+pub fn resolve_node_property_unaliased(
+    node: NodeView<'_>,
+    property: &str,
+    graph: &DirGraph,
+) -> Value {
     resolve_node_property_resolved(node, property, graph)
 }
 
@@ -391,7 +395,7 @@ pub fn resolve_node_property_unaliased(node: &NodeData, property: &str, graph: &
 /// soft-alias fallbacks, and spatial virtual properties. `node_type_str` is
 /// resolved lazily — only the soft-alias / spatial branches need it.
 #[inline]
-fn resolve_node_property_resolved(node: &NodeData, resolved: &str, graph: &DirGraph) -> Value {
+fn resolve_node_property_resolved(node: NodeView<'_>, resolved: &str, graph: &DirGraph) -> Value {
     match resolved {
         "id" => node.id().into_owned(),
         "title" => node.title().into_owned(),
@@ -473,7 +477,7 @@ pub fn resolve_edge_property(graph: &DirGraph, edge: &EdgeBinding, property: &st
 }
 
 /// Convert a NodeData to a representative Value (title string)
-pub(super) fn node_to_map_value(node: &NodeData) -> Value {
+pub(super) fn node_to_map_value(node: NodeView<'_>) -> Value {
     node.title().into_owned()
 }
 
@@ -517,7 +521,7 @@ pub(crate) fn materialize_node_value(
 ) -> Option<crate::datatypes::values::NodeValue> {
     use crate::datatypes::values::NodeValue;
     use std::collections::BTreeMap;
-    let node = graph.graph.node_weight(idx)?;
+    let node = graph.graph.node_view(idx)?;
     let node_type = node.node_type_str(&graph.interner).to_string();
     let mut properties: BTreeMap<String, Value> = BTreeMap::new();
     // Include the three virtual builtins so consumers always see
@@ -530,9 +534,7 @@ pub(crate) fn materialize_node_value(
     // "type" wins over the structural type string (KG-1), matching what
     // `n.type` resolves to via `resolve_node_property_resolved`. `id` and
     // `title` are genuine virtuals — the canonical identity always wins —
-    // so only `type` gets the stored-shadow check. `get_property_value` is
-    // a point lookup that works on every backend (incl. the columnar one,
-    // where `property_iter` below yields nothing).
+    // so only `type` gets the stored-shadow check.
     if let Some(stored) = node.get_property_value("type") {
         properties.insert("type".to_string(), stored);
     }
@@ -540,20 +542,25 @@ pub(crate) fn materialize_node_value(
     // (updated_at, …) are engine metadata, not user data — omit them from the
     // materialised value so they stay out of keys()/properties()/RETURN n[.*]
     // (direct `n.updated_at` still resolves via the property path).
-    for (key, val) in node.property_iter(&graph.interner) {
+    // Complete for every storage variant: `NodeView` enumeration reads the
+    // node's column store on saved graphs, where `NodeData::property_iter`
+    // used to yield nothing (D1 defect 1). The columnar completion pass
+    // further down stays — it recovers schema-declared properties that the
+    // row itself does not carry.
+    for (key, val) in node.property_pairs_named(&graph.interner) {
         if key == "id"
             || key == "title"
             || key == "type"
-            || crate::graph::schema::is_reserved_provenance_key(key)
+            || crate::graph::schema::is_reserved_provenance_key(&key)
         {
             continue;
         }
-        properties.insert(key.to_string(), val.clone());
+        properties.insert(key, val);
     }
     // Cross-backend property completion.
     //
-    // For the in-memory backend (`Map` / `Compact`) `property_iter` above
-    // already yields every stored property. The ONE thing it can't yield is
+    // The loop above yields every stored property on every backend. The ONE
+    // thing it cannot yield is
     // a column the loader hoisted out of `properties` into the dedicated
     // `id` / `title` fields: when `add_nodes` is given a `unique_id_field` /
     // `node_title_field` whose name isn't literally "id"/"title", that
@@ -574,11 +581,10 @@ pub(crate) fn materialize_node_value(
         graph.id_field_aliases.get(&node_type),
         || node.id().into_owned(),
     );
-    // For the columnar backend (disk/mapped) the values live in the per-type
-    // column store, NOT in NodeData, so `property_iter` yields nothing. Use
-    // `node_type_metadata` as the "which properties does this type have"
-    // schema and read each through `resolve_node_property` (which knows the
-    // backend-specific access path).
+    // Columnar completion: a property the *type* declares but this row does
+    // not carry as a stored column (a spatial virtual, an alias) is recovered
+    // from `node_type_metadata` through `resolve_node_property`. Keys the loop
+    // above already inserted are skipped, so this only ever adds.
     if node.properties_are_columnar() {
         if let Some(type_meta) = graph.get_node_type_metadata(&node_type) {
             for prop_name in type_meta.keys() {

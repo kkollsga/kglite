@@ -265,7 +265,7 @@ impl<'a> CypherExecutor<'a> {
     /// or `latitude`+`longitude` / `lat`+`lon`). Inference fires only as a fallback
     /// — explicit configs always win.
     pub(super) fn build_node_spatial_data(&self, idx: NodeIndex) -> Option<NodeSpatialData> {
-        let node = self.graph.graph.node_weight(idx)?;
+        let node = self.graph.graph.node_view(idx)?;
         let node_type = node.node_type_str(&self.graph.interner);
 
         if let Some(config) = self.graph.get_spatial_config(node_type) {
@@ -339,7 +339,10 @@ impl<'a> CypherExecutor<'a> {
     /// `graph.spatial_configs` — registration via the explicit API is still
     /// the canonical surface; inference only avoids the unhelpful
     /// "no spatial config" error when the data is sitting right there.
-    fn infer_spatial_data(&self, node: &crate::graph::schema::NodeData) -> Option<NodeSpatialData> {
+    fn infer_spatial_data(
+        &self,
+        node: crate::graph::storage::NodeView<'_>,
+    ) -> Option<NodeSpatialData> {
         const GEOMETRY_FIELDS: &[&str] = &["wkt_geometry", "geometry", "geom", "wkt"];
         const LOCATION_FIELDS: &[(&str, &str)] = &[("latitude", "longitude"), ("lat", "lon")];
 
@@ -506,7 +509,7 @@ impl<'a> CypherExecutor<'a> {
                             // Fall through to full materialization for spatial
                             // virtual properties (location, geometry, etc.)
                             if self.graph.get_spatial_config(type_str).is_some() {
-                                if let Some(node) = self.graph.graph.node_weight(idx) {
+                                if let Some(node) = self.graph.graph.node_view(idx) {
                                     return Ok(resolve_node_property(node, property, self.graph));
                                 }
                             }
@@ -523,7 +526,7 @@ impl<'a> CypherExecutor<'a> {
             // name is `property` verbatim, so we skip `resolve_alias`'s two
             // String-keyed HashMap lookups (the per-row hot cost) and read
             // the property directly.
-            if let Some(node) = self.graph.graph.node_weight(idx) {
+            if let Some(node) = self.graph.graph.node_view(idx) {
                 if self.property_might_be_alias(property) {
                     return Ok(resolve_node_property(node, property, self.graph));
                 }
@@ -550,7 +553,7 @@ impl<'a> CypherExecutor<'a> {
             // NodeRef in projected → resolve the actual node property
             if let Value::NodeRef(idx) = val {
                 let node_idx = petgraph::graph::NodeIndex::new(*idx as usize);
-                if let Some(node) = self.graph.graph.node_weight(node_idx) {
+                if let Some(node) = self.graph.graph.node_view(node_idx) {
                     return Ok(resolve_node_property(node, property, self.graph));
                 }
                 return Ok(Value::Null);

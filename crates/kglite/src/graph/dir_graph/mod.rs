@@ -723,7 +723,7 @@ impl DirGraph {
             // on memory/mapped backends.
             let _guard = self.graph.begin_query();
             for node_idx in node_indices.iter() {
-                if let Some(node) = self.graph.node_weight(node_idx) {
+                if let Some(node) = self.graph.node_view(node_idx) {
                     let node_id = node.id().into_owned();
                     if !matches!(node_id, Value::UniqueId(_)) {
                         all_unique_id = false;
@@ -912,12 +912,12 @@ impl DirGraph {
         let _guard = self.graph.begin_query();
         let mut counts: HashMap<(InternedKey, InternedKey, InternedKey), usize> = HashMap::new();
         for (src_idx, tgt_idx, conn_key) in self.graph.edge_endpoint_keys() {
-            let src_type = match self.graph.node_weight(src_idx) {
-                Some(n) => n.node_type,
+            let src_type = match self.graph.node_type_of(src_idx) {
+                Some(t) => t,
                 None => continue,
             };
-            let tgt_type = match self.graph.node_weight(tgt_idx) {
-                Some(n) => n.node_type,
+            let tgt_type = match self.graph.node_type_of(tgt_idx) {
+                Some(t) => t,
                 None => continue,
             };
             *counts.entry((src_type, conn_key, tgt_type)).or_insert(0) += 1;
@@ -1050,6 +1050,18 @@ impl DirGraph {
         self.graph.node_weight(index)
     }
 
+    /// The authoritative read route for a node's properties — delegates to the
+    /// storage backend, which resolves the node's column store.
+    ///
+    /// Prefer this to [`DirGraph::get_node`] for any property read. Reaching
+    /// into `NodeData` reads one replica of a columnar type's store; a
+    /// `NodeView` reads the one the backend answers with. See
+    /// `storage/node_view.rs`.
+    #[inline]
+    pub fn node_view(&self, index: NodeIndex) -> Option<crate::graph::storage::NodeView<'_>> {
+        self.graph.node_view(index)
+    }
+
     pub fn get_node_mut(&mut self, index: NodeIndex) -> Option<&mut NodeData> {
         self.graph.node_weight_mut(index)
     }
@@ -1151,7 +1163,7 @@ impl DirGraph {
             // the replace_with below.
             let _guard = self.graph.begin_query();
             for node_idx in self.graph.node_indices() {
-                if let Some(node) = self.graph.node_weight(node_idx) {
+                if let Some(node) = self.graph.node_view(node_idx) {
                     let type_str = node.node_type_str(&self.interner).to_string();
                     new_type_indices
                         .entry(type_str)

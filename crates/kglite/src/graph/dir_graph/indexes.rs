@@ -647,7 +647,7 @@ impl DirGraph {
             // which must run under a DiskQueryGuard (arena protocol in
             // disk/graph.rs). No-op on memory/mapped backends.
             let _guard = self.graph.begin_query();
-            let node = match self.graph.node_weight(node_idx) {
+            let node = match self.graph.node_view(node_idx) {
                 Some(n) => n,
                 None => return,
             };
@@ -676,7 +676,7 @@ impl DirGraph {
         let comp_updates: Vec<(CompositeIndexKey, CompositeValue)> = {
             // Arena guard: see prop_updates block above.
             let _guard = self.graph.begin_query();
-            let node = match self.graph.node_weight(node_idx) {
+            let node = match self.graph.node_view(node_idx) {
                 Some(n) => n,
                 None => return,
             };
@@ -818,7 +818,7 @@ impl DirGraph {
         // disk/graph.rs); no-op on memory/mapped backends.
         let current_props: HashMap<String, Value> = {
             let _guard = self.graph.begin_query();
-            match self.graph.node_weight(node_idx) {
+            match self.graph.node_view(node_idx) {
                 Some(node) => node.properties_cloned(&self.interner),
                 None => return,
             }

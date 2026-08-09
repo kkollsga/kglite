@@ -74,7 +74,7 @@ impl DirGraph {
         let _arena_guard = self.graph.begin_query();
         let mut seen: std::collections::HashSet<Value> = std::collections::HashSet::new();
         for idx in nodes.iter() {
-            if let Some(node) = self.get_node(idx) {
+            if let Some(node) = self.node_view(idx) {
                 if let Some(val) = node.get_property(property) {
                     seen.insert(val.into_owned());
                 }

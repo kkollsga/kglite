@@ -762,7 +762,7 @@ impl<'a> CypherExecutor<'a> {
             // Check target node inline properties — bail to slow path
             // for non-trivial matchers (EqualsParam, EqualsVar, etc.)
             if let Some(ref props) = other_node.properties {
-                if let Some(nd) = self.graph.graph.node_weight(other_idx) {
+                if let Some(nd) = self.graph.graph.node_view(other_idx) {
                     let mut all_match = true;
                     // Resolve aliases against the target node's type so
                     // `{id: 20}` / `{nid: 'Q76'}` / `{label: 'X'}` /

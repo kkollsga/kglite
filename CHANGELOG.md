@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A saved graph no longer exports empty node properties.** GraphML
+  (`to_graphml`) and D3-JSON (`to_d3_json`) emitted every node with *zero*
+  properties once the graph had been saved (or otherwise converted to columnar
+  storage) — the property count was right, the property set was empty. The same
+  read shape also blanked the property statistics and node samples in
+  `describe()`, dropped every property from `add_properties`' copy-from-ancestor
+  modes and from `connect`'s property collection, and made `statistics()` /
+  `calculate()` expressions evaluate against an empty object on a saved graph.
+  All of these now read through the storage backend, which resolves the node's
+  column store.
+
+### Changed
+
+- **Rust API**: node property reads have a single authoritative route,
+  `kglite::api::NodeView`, obtained from `GraphRead::node_view(idx)` or
+  `DirGraph::node_view(idx)`. `GraphRead` gains `node_view`,
+  `node_row_properties`, `node_property_keys`, `node_has_property` and
+  `node_property_count`; unlike `NodeData::property_iter`, every enumeration on
+  `NodeView` is complete for columnar rows. `discover_property_keys_from_data`,
+  `discover_property_keys_excluding`, `cypher::resolve_node_property` and the
+  three `fluent::node_*` temporal predicates now take `NodeView` instead of
+  `&NodeData`; pass `graph.node_view(idx)` (or `NodeView::from(&node_data)`)
+  where you passed a `&NodeData` before.
+
 ## [0.15.8] - 2026-08-09
 
 ### Added

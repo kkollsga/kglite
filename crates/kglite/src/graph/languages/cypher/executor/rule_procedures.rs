@@ -504,7 +504,7 @@ pub(super) fn execute_type_domain_violation(
             continue;
         }
         let src = er.source();
-        let actual_type = match graph.graph.node_weight(src) {
+        let actual_type = match graph.graph.node_view(src) {
             Some(n) => n.node_type_str(&graph.interner),
             None => continue,
         };
@@ -541,7 +541,7 @@ pub(super) fn execute_type_range_violation(
             continue;
         }
         let tgt = er.target();
-        let actual_type = match graph.graph.node_weight(tgt) {
+        let actual_type = match graph.graph.node_view(tgt) {
             Some(n) => n.node_type_str(&graph.interner),
             None => continue,
         };
@@ -610,7 +610,7 @@ pub(super) fn execute_null_property(
 
     let mut rows = Vec::new();
     for nidx in nodes.iter() {
-        let node = match graph.graph.node_weight(nidx) {
+        let node = match graph.graph.node_view(nidx) {
             Some(n) => n,
             None => continue,
         };
@@ -678,7 +678,7 @@ pub(super) fn execute_kg_knn(
     let mut heap: BinaryHeap<Entry> = BinaryHeap::with_capacity(nodes.len());
     let config = graph.get_spatial_config(&target_type);
     for nidx in nodes.iter() {
-        let node = match graph.graph.node_weight(nidx) {
+        let node = match graph.graph.node_view(nidx) {
             Some(n) => n,
             None => continue,
         };
@@ -892,7 +892,7 @@ pub(super) fn execute_outline(
         .find(|&i| {
             graph
                 .graph
-                .node_weight(i)
+                .node_view(i)
                 .map(|n| n.id().as_ref() == root_id)
                 .unwrap_or(false)
         })
@@ -930,7 +930,7 @@ pub(super) fn execute_outline(
         if depth < max_depth {
             let this_id = graph
                 .graph
-                .node_weight(nidx)
+                .node_view(nidx)
                 .map(|n| n.id().into_owned())
                 .unwrap_or(Value::Null);
             for er in graph.graph.edges_directed(nidx, Direction::Outgoing) {
@@ -947,7 +947,7 @@ pub(super) fn execute_outline(
 }
 
 fn title_of(graph: &DirGraph, nidx: NodeIndex) -> Option<String> {
-    let nd = graph.graph.node_weight(nidx)?;
+    let nd = graph.graph.node_view(nidx)?;
     match nd.title().as_ref() {
         Value::String(s) => Some(s.clone()),
         Value::Null => None,
@@ -956,7 +956,7 @@ fn title_of(graph: &DirGraph, nidx: NodeIndex) -> Option<String> {
 }
 
 fn id_of(graph: &DirGraph, nidx: NodeIndex) -> Option<String> {
-    let nd = graph.graph.node_weight(nidx)?;
+    let nd = graph.graph.node_view(nidx)?;
     match nd.id().as_ref() {
         Value::String(s) => Some(s.clone()),
         Value::Null => None,

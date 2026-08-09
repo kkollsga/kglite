@@ -40,7 +40,7 @@ fn validate_nodes(
     for (node_type, node_schema) in &schema.node_schemas {
         if let Some(node_indices) = graph.type_indices.get(node_type) {
             for node_idx in node_indices.iter() {
-                if let Some(node) = graph.get_node(node_idx) {
+                if let Some(node) = graph.node_view(node_idx) {
                     errors.extend(validate_single_node(node, node_type, node_schema));
                 }
             }
@@ -64,7 +64,7 @@ fn validate_nodes(
 
 /// Validate a single node against its schema
 fn validate_single_node(
-    node: &crate::graph::schema::NodeData,
+    node: crate::graph::storage::NodeView<'_>,
     node_type: &str,
     schema: &NodeSchemaDefinition,
 ) -> Vec<ValidationError> {
@@ -199,7 +199,7 @@ fn validate_connections(
 
 /// Get node type and title from a node index
 fn get_node_info(graph: &DirGraph, node_idx: petgraph::graph::NodeIndex) -> (String, String) {
-    match graph.get_node(node_idx) {
+    match graph.node_view(node_idx) {
         Some(node) => {
             let node_title = node.title();
             let title_str = match &*node_title {

@@ -397,7 +397,7 @@ impl KnowledgeGraph {
                     .iter()
                     .filter_map(|&idx| {
                         self.inner
-                            .get_node(idx)
+                            .node_view(idx)
                             .and_then(|node| node.get_field_ref("id"))
                             .map(|id| py_out::value_to_py(py, &id).unwrap_or_else(|_| py.None()))
                     })
@@ -640,7 +640,7 @@ impl KnowledgeGraph {
             for component in components {
                 let comp_list = PyList::empty(py);
                 for &node_idx in &component {
-                    if let Some(node) = self.inner.get_node(node_idx) {
+                    if let Some(node) = self.inner.node_view(node_idx) {
                         let node_title = node.title();
                         let title_str = match &*node_title {
                             Value::String(s) => s.as_str(),
@@ -662,7 +662,7 @@ impl KnowledgeGraph {
             for component in components {
                 let comp_list = PyList::empty(py);
                 for &node_idx in &component {
-                    if let Some(node) = self.inner.get_node(node_idx) {
+                    if let Some(node) = self.inner.node_view(node_idx) {
                         let node_dict = PyDict::new(py);
                         node_dict.set_item(key_type, node.node_type_str(&self.inner.interner))?;
                         let node_title = node.title();

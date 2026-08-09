@@ -65,7 +65,7 @@ pub fn add_properties(
     for lvl_idx in 0..level_count {
         if let Some(level) = selection.get_level(lvl_idx) {
             for node_idx in level.iter_node_indices() {
-                if let Some(node) = graph.get_node(node_idx) {
+                if let Some(node) = graph.node_view(node_idx) {
                     type_to_level
                         .entry(node.node_type_str(&graph.interner).to_string())
                         .or_insert(lvl_idx);
@@ -153,15 +153,17 @@ pub fn add_properties(
                     None => continue,
                 };
 
-                let ancestor_node = match graph.graph.node_weight(ancestor_idx) {
+                let ancestor_node = match graph.graph.node_view(ancestor_idx) {
                     Some(n) => n,
                     None => continue,
                 };
 
                 match spec {
                     PropertySpec::CopyAll => {
-                        for (k, v) in ancestor_node.property_iter(&graph.interner) {
-                            props_to_set.insert(k.to_string(), v.clone());
+                        // Complete for columnar storage: `property_iter`
+                        // yielded nothing on a saved graph (D1 defect 1).
+                        for (k, v) in ancestor_node.property_pairs_named(&graph.interner) {
+                            props_to_set.insert(k, v);
                         }
                     }
                     PropertySpec::CopyList(prop_names) => {
@@ -312,8 +314,8 @@ fn compute_spatial_property(
     ancestor_idx: NodeIndex,
     spatial_fn: &str,
 ) -> Option<Value> {
-    let leaf_node = graph.get_node(leaf_idx)?;
-    let ancestor_node = graph.get_node(ancestor_idx)?;
+    let leaf_node = graph.node_view(leaf_idx)?;
+    let ancestor_node = graph.node_view(ancestor_idx)?;
     let leaf_spatial = graph.get_spatial_config(leaf_node.node_type_str(&graph.interner));
     let ancestor_spatial = graph.get_spatial_config(ancestor_node.node_type_str(&graph.interner));
 
@@ -354,7 +356,7 @@ fn compute_spatial_property(
 }
 
 fn resolve_location(
-    node: &crate::graph::schema::NodeData,
+    node: crate::graph::storage::NodeView<'_>,
     spatial_config: Option<&crate::graph::schema::SpatialConfig>,
 ) -> Option<(f64, f64)> {
     let sc = spatial_config?;
@@ -380,7 +382,7 @@ fn resolve_location(
 }
 
 fn resolve_geometry(
-    node: &crate::graph::schema::NodeData,
+    node: crate::graph::storage::NodeView<'_>,
     spatial_config: Option<&crate::graph::schema::SpatialConfig>,
 ) -> Option<geo::geometry::Geometry<f64>> {
     let sc = spatial_config?;
@@ -438,7 +440,7 @@ fn add_properties_aggregate(
                         if let Some(ancestor_idx) =
                             walk_to_ancestor(target_idx, target_level, source_level, parent_maps)
                         {
-                            if let Some(ancestor_node) = graph.get_node(ancestor_idx) {
+                            if let Some(ancestor_node) = graph.node_view(ancestor_idx) {
                                 for prop_name in props {
                                     if let Some(val) = ancestor_node.get_property(prop_name) {
                                         updates
@@ -458,12 +460,12 @@ fn add_properties_aggregate(
                         if let Some(ancestor_idx) =
                             walk_to_ancestor(target_idx, target_level, source_level, parent_maps)
                         {
-                            if let Some(ancestor_node) = graph.graph.node_weight(ancestor_idx) {
-                                for (k, v) in ancestor_node.property_iter(&graph.interner) {
-                                    updates
-                                        .entry(target_idx)
-                                        .or_default()
-                                        .insert(k.to_string(), v.clone());
+                            if let Some(ancestor_node) = graph.graph.node_view(ancestor_idx) {
+                                // Complete for columnar storage: the previous
+                                // `property_iter` route copied *nothing* from a
+                                // saved graph's ancestor node (D1 defect 1).
+                                for (k, v) in ancestor_node.property_pairs_named(&graph.interner) {
+                                    updates.entry(target_idx).or_default().insert(k, v);
                                 }
                             }
                         }
@@ -495,7 +497,7 @@ fn add_properties_aggregate(
                                 leaf_indices
                                     .iter()
                                     .filter_map(|&idx| {
-                                        graph.get_node(idx).and_then(|n| {
+                                        graph.node_view(idx).and_then(|n| {
                                             n.get_property(prop)
                                                 .as_deref()
                                                 .and_then(mg_value_to_f64)
@@ -546,7 +548,7 @@ fn add_properties_aggregate(
                                     source_level,
                                     parent_maps,
                                 ) {
-                                    if let Some(ancestor_node) = graph.get_node(ancestor_idx) {
+                                    if let Some(ancestor_node) = graph.node_view(ancestor_idx) {
                                         if let Some(val) = ancestor_node.get_property(source_expr) {
                                             updates
                                                 .entry(target_idx)

@@ -498,7 +498,7 @@ mod tests {
         g.graph
             .node_indices()
             .filter(|&n| {
-                g.get_node(n)
+                g.node_view(n)
                     .is_some_and(|nd| nd.node_type_str(&g.interner) == label)
             })
             .count()
@@ -560,10 +560,10 @@ mod tests {
             .graph
             .node_indices()
             .find(|&n| {
-                g.get_node(n)
+                g.node_view(n)
                     .is_some_and(|nd| nd.node_type_str(&g.interner) == "Folder")
             })
-            .and_then(|n| g.get_node(n).map(|nd| nd.title().into_owned()));
+            .and_then(|n| g.node_view(n).map(|nd| nd.title().into_owned()));
         assert_eq!(folder_title, Some(Value::String("All Tables".to_string())));
     }
 

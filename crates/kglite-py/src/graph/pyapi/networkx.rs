@@ -71,7 +71,7 @@ impl KnowledgeGraph {
 
         // Build nodes. Node key = id (the canonical per-mode integer/string).
         for idx in graph.graph.node_indices() {
-            let Some(node) = graph.graph.node_weight(idx) else {
+            let Some(node) = graph.graph.node_view(idx) else {
                 continue;
             };
             let key = value_to_py(py, &node.id())?;

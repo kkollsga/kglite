@@ -190,7 +190,7 @@ impl KnowledgeGraph {
                 if let Some(level) = new_kg.cursor.selection.get_level_mut(level_idx) {
                     for nodes in level.selections.values_mut() {
                         nodes.retain(|&idx| {
-                            if let Some(node) = self.inner.graph.node_weight(idx) {
+                            if let Some(node) = self.inner.graph.node_view(idx) {
                                 kglite_core::api::fluent::node_passes_context(
                                     node,
                                     config,
@@ -457,7 +457,7 @@ impl KnowledgeGraph {
         if let Some(level) = new_kg.cursor.selection.get_level_mut(current_level) {
             for children in level.selections.values_mut() {
                 children.retain(|&idx| {
-                    if let Some(node) = self.inner.graph.node_weight(idx) {
+                    if let Some(node) = self.inner.graph.node_view(idx) {
                         kglite_core::api::fluent::node_is_temporally_valid(node, &config, &ref_date)
                     } else {
                         false
@@ -544,7 +544,7 @@ impl KnowledgeGraph {
         if let Some(level) = new_kg.cursor.selection.get_level_mut(current_level) {
             for children in level.selections.values_mut() {
                 children.retain(|&idx| {
-                    if let Some(node) = self.inner.graph.node_weight(idx) {
+                    if let Some(node) = self.inner.graph.node_view(idx) {
                         kglite_core::api::fluent::node_overlaps_range(
                             node,
                             &config,
@@ -762,9 +762,9 @@ impl KnowledgeGraph {
     fn to_df(&self, py: Python<'_>, include_type: bool, include_id: bool) -> PyResult<Py<PyAny>> {
         let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
                                                          // Collect nodes from the current selection
-        let mut nodes_data: Vec<(&str, &kglite_core::api::NodeData)> = Vec::new();
+        let mut nodes_data: Vec<(&str, kglite_core::api::NodeView<'_>)> = Vec::new();
         for node_idx in self.cursor.selection.current_node_indices() {
-            if let Some(node) = self.inner.get_node(node_idx) {
+            if let Some(node) = self.inner.node_view(node_idx) {
                 nodes_data.push((node.node_type_str(&self.inner.interner), node));
             }
         }
@@ -785,7 +785,7 @@ impl KnowledgeGraph {
         }
 
         // Fast path: use TypeSchema for key discovery when all nodes share a type
-        let discover = |nodes: &Vec<(&str, &kglite_core::api::NodeData)>| {
+        let discover = |nodes: &Vec<(&str, kglite_core::api::NodeView<'_>)>| {
             kglite_core::api::discover_property_keys_excluding(
                 nodes,
                 &self.inner.interner,
@@ -904,7 +904,7 @@ impl KnowledgeGraph {
         let mut buf = String::with_capacity(show * 200);
 
         for (i, &idx) in node_indices.iter().take(show).enumerate() {
-            if let Some(node) = self.inner.get_node(idx) {
+            if let Some(node) = self.inner.node_view(idx) {
                 if i > 0 {
                     buf.push('\n');
                 }
@@ -915,7 +915,7 @@ impl KnowledgeGraph {
                     format_value(&node.id()),
                 ));
                 // Sort property keys for deterministic output
-                let mut keys: Vec<&str> = node.property_keys(&self.inner.interner).collect();
+                let mut keys: Vec<&str> = node.property_keys(&self.inner.interner);
                 keys.sort();
                 for key in keys {
                     if let Some(val) = node.get_property(key) {
@@ -973,7 +973,7 @@ impl KnowledgeGraph {
 
         // Helper: format a single node as Type(val1, val2, ...)
         let fmt_node = |idx: NodeIndex| -> String {
-            let node = match self.inner.get_node(idx) {
+            let node = match self.inner.node_view(idx) {
                 Some(n) => n,
                 None => return "?".to_string(),
             };
@@ -1154,7 +1154,7 @@ impl KnowledgeGraph {
             let result = PyList::empty(py);
 
             for node_idx in self.cursor.selection.current_node_indices() {
-                if let Some(node) = self.inner.get_node(node_idx) {
+                if let Some(node) = self.inner.node_view(node_idx) {
                     result.append(py_out::value_to_py(py, &node.id())?)?;
                 }
             }
@@ -1198,7 +1198,7 @@ impl KnowledgeGraph {
         };
 
         // Get the node data
-        let node = match self.inner.get_node(node_idx) {
+        let node = match self.inner.node_view(node_idx) {
             Some(n) => n,
             None => return Ok(None),
         };
@@ -1450,7 +1450,7 @@ impl KnowledgeGraph {
         let file_idx = if let Some(indices) = self.inner.type_indices.get("File") {
             indices.iter().find(|idx| {
                 self.inner
-                    .get_node(*idx)
+                    .node_view(*idx)
                     .map(|n| *n.id() == file_id)
                     .unwrap_or(false)
             })
@@ -1481,7 +1481,7 @@ impl KnowledgeGraph {
             if edge.weight().connection_type != kglite_core::api::InternedKey::from_str("DEFINES") {
                 continue;
             }
-            if let Some(node) = self.inner.get_node(edge.target()) {
+            if let Some(node) = self.inner.node_view(edge.target()) {
                 let node_type = node.get_node_type_ref(&self.inner.interner).to_string();
                 let name = match &*node.title() {
                     Value::String(s) => s.clone(),

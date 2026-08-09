@@ -168,7 +168,7 @@ pub fn get_subgraph_stats(
 
     // Count node types
     for &node_idx in &nodes {
-        if let Some(node) = source.graph.node_weight(node_idx) {
+        if let Some(node) = source.graph.node_view(node_idx) {
             *node_types
                 .entry(node.node_type_str(&source.interner).to_string())
                 .or_insert(0) += 1;

@@ -49,7 +49,7 @@ impl DirGraph {
             dst_store.model_id = src_store.model_id.clone();
 
             for &src_idx in src_store.node_to_slot.keys() {
-                let Some(src_node) = src.graph.node_weight(NodeIndex::new(src_idx)) else {
+                let Some(src_node) = src.graph.node_view(NodeIndex::new(src_idx)) else {
                     vectors_skipped += 1;
                     continue;
                 };

@@ -71,7 +71,7 @@ pub(super) fn execute_affected_tests(
     };
     let mut path_to_idx: HashMap<String, NodeIndex> = HashMap::new();
     for nidx in file_idx.iter() {
-        if let Some(node) = graph.graph.node_weight(nidx) {
+        if let Some(node) = graph.graph.node_view(nidx) {
             if let Value::String(s) = node.id().as_ref() {
                 path_to_idx.insert(s.clone(), nidx);
             }
@@ -117,7 +117,7 @@ pub(super) fn execute_affected_tests(
         if *depth == 0 {
             continue;
         }
-        let node = match graph.graph.node_weight(*nidx) {
+        let node = match graph.graph.node_view(*nidx) {
             Some(n) => n,
             None => continue,
         };

@@ -227,7 +227,7 @@ pub(super) fn compute_neighbors_schema_sampled(
     let g = &graph.graph;
     for node_idx in node_indices.iter().take(sample_count) {
         for edge_ref in g.edges_directed(node_idx, Direction::Outgoing) {
-            if let Some(target_node) = graph.get_node(edge_ref.target()) {
+            if let Some(target_node) = graph.node_view(edge_ref.target()) {
                 let key = (
                     edge_ref
                         .weight()
@@ -239,7 +239,7 @@ pub(super) fn compute_neighbors_schema_sampled(
             }
         }
         for edge_ref in g.edges_directed(node_idx, Direction::Incoming) {
-            if let Some(source_node) = graph.get_node(edge_ref.source()) {
+            if let Some(source_node) = graph.node_view(edge_ref.source()) {
                 let key = (
                     edge_ref
                         .weight()

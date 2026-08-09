@@ -97,7 +97,7 @@ pub fn resolve_noderefs(graph: &GraphBackend, rows: &mut [Vec<Value>]) {
         for val in row.iter_mut() {
             if let Value::NodeRef(idx) = val {
                 let node_idx = petgraph::graph::NodeIndex::new(*idx as usize);
-                if let Some(node) = graph.node_weight(node_idx) {
+                if let Some(node) = graph.node_view(node_idx) {
                     *val = node.title().into_owned();
                 } else {
                     *val = Value::Null;

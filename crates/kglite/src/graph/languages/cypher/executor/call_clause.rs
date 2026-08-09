@@ -1072,7 +1072,7 @@ impl<'a> CypherExecutor<'a> {
 
             for (i, &idx) in node_indices.iter().enumerate() {
                 self.check_interrupt_periodic(i)?;
-                if let Some(node) = self.graph.graph.node_weight(idx) {
+                if let Some(node) = self.graph.graph.node_view(idx) {
                     let mut vals = Vec::with_capacity(prop_names.len());
                     let mut all_present = true;
                     for prop in prop_names {
@@ -1142,7 +1142,7 @@ impl<'a> CypherExecutor<'a> {
 
             for (i, &idx) in node_indices.iter().enumerate() {
                 self.check_interrupt_periodic(i)?;
-                if let Some(node) = self.graph.graph.node_weight(idx) {
+                if let Some(node) = self.graph.graph.node_view(idx) {
                     // Try spatial config for this node type
                     if let Some(config) = self
                         .graph
@@ -1514,7 +1514,7 @@ impl<'a> CypherExecutor<'a> {
                             if let Some(val) = row.projected.get(col) {
                                 val.clone()
                             } else if let Some(&idx) = row.node_bindings.get(col) {
-                                if let Some(node) = self.graph.graph.node_weight(idx) {
+                                if let Some(node) = self.graph.graph.node_view(idx) {
                                     node_to_map_value(node)
                                 } else {
                                     Value::Null
@@ -1824,7 +1824,7 @@ pub(super) fn compute_property_stats(
     let mut seen = HashSet::new();
     for (node_count, node_idx) in indices.iter().enumerate() {
         executor.check_interrupt_periodic(node_count)?;
-        let Some(node) = graph.graph.node_weight(node_idx) else {
+        let Some(node) = graph.graph.node_view(node_idx) else {
             continue;
         };
         match node.get_field_ref(prop_name) {

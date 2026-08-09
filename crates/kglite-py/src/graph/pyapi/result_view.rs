@@ -16,7 +16,7 @@ use crate::graph::languages::cypher::{
 };
 use crate::graph::pyapi::result_table::format_table;
 use kglite_core::api::algorithms::CentralityResult;
-use kglite_core::api::{DirGraph, NodeData};
+use kglite_core::api::DirGraph;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySlice};
 use pyo3::IntoPyObjectExt;
@@ -247,7 +247,7 @@ impl ResultView {
             .into_iter()
             .take(limit)
             .filter_map(|r| {
-                graph.get_node(r.node_idx).map(|node| {
+                graph.node_view(r.node_idx).map(|node| {
                     vec![
                         PreProcessedValue::Plain(Value::String(
                             node.node_type_str(&graph.interner).to_string(),
@@ -277,7 +277,7 @@ impl ResultView {
     /// stored property of the same name would repeat the column and shadow the
     /// canonical value.
     fn discover_property_keys(
-        nodes: &[&NodeData],
+        nodes: &[kglite_core::api::NodeView<'_>],
         interner: &kglite_core::api::StringInterner,
     ) -> Vec<String> {
         let mut seen: HashSet<&str> = HashSet::new();
@@ -302,16 +302,16 @@ impl ResultView {
         node_indices: &[petgraph::graph::NodeIndex],
     ) -> Self {
         let _arena_guard = graph.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
-        let nodes_vec: Vec<&NodeData> = node_indices
+        let nodes_vec: Vec<kglite_core::api::NodeView<'_>> = node_indices
             .iter()
-            .filter_map(|&idx| graph.get_node(idx))
+            .filter_map(|&idx| graph.node_view(idx))
             .collect();
 
         // Compute union of property keys.
         // Fast path: if all nodes share a type, use TypeSchema (O(1) key discovery).
         let prop_keys: Vec<String> = if nodes_vec.len() > 50 {
-            let first_type = nodes_vec[0].node_type;
-            let all_same_type = nodes_vec.iter().all(|n| n.node_type == first_type);
+            let first_type = nodes_vec[0].node_type();
+            let all_same_type = nodes_vec.iter().all(|n| n.node_type() == first_type);
             if all_same_type {
                 let first_type_str = graph.interner.resolve(first_type);
                 if let Some(schema) = graph.type_schemas.get(first_type_str) {

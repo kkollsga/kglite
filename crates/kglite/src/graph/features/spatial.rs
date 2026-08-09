@@ -54,7 +54,7 @@ pub fn within_bounds(
     let mut matching_nodes = Vec::new();
 
     for node_idx in nodes {
-        if let Some(node) = graph.graph.node_weight(node_idx) {
+        if let Some(node) = graph.graph.node_view(node_idx) {
             if let Some((lat, lon)) = node_location(node, lat_field, lon_field, geom_fallback) {
                 if lat >= min_lat && lat <= max_lat && lon >= min_lon && lon <= max_lon {
                     matching_nodes.push(node_idx);
@@ -108,7 +108,7 @@ pub fn near_point(
     let mut matching_nodes = Vec::new();
 
     for node_idx in nodes {
-        if let Some(node) = graph.graph.node_weight(node_idx) {
+        if let Some(node) = graph.graph.node_view(node_idx) {
             if let Some((lat, lon)) = node_location(node, lat_field, lon_field, geom_fallback) {
                 // Simple Euclidean distance in degrees
                 let d_lat = lat - center_lat;
@@ -162,7 +162,7 @@ pub fn near_point_m(
     let mut matching_nodes = Vec::new();
 
     for node_idx in nodes {
-        if let Some(node) = graph.graph.node_weight(node_idx) {
+        if let Some(node) = graph.graph.node_view(node_idx) {
             if let Some((lat, lon)) = node_location(node, lat_field, lon_field, geom_fallback) {
                 let distance = geodesic_distance(center_lat, center_lon, lat, lon);
                 if distance <= max_distance_m {
@@ -495,7 +495,7 @@ pub fn contains_point(
     let mut matching_nodes = Vec::new();
 
     for node_idx in nodes {
-        if let Some(node) = graph.graph.node_weight(node_idx) {
+        if let Some(node) = graph.graph.node_view(node_idx) {
             let wkt_value = node.get_property(geometry_field);
 
             if let Some(Value::String(wkt_str)) = wkt_value.as_deref() {
@@ -549,7 +549,7 @@ pub fn intersects_geometry(
     let mut matching_nodes = Vec::new();
 
     for node_idx in nodes {
-        if let Some(node) = graph.graph.node_weight(node_idx) {
+        if let Some(node) = graph.graph.node_view(node_idx) {
             let wkt_value = node.get_property(geometry_field);
 
             if let Some(Value::String(wkt_str)) = wkt_value.as_deref() {
@@ -618,7 +618,7 @@ fn value_to_f64(value: &Value) -> Option<f64> {
 /// Extract (lat, lon) from a node, trying lat/lon fields first,
 /// then falling back to the centroid of a WKT geometry field.
 pub(crate) fn node_location(
-    node: &crate::graph::schema::NodeData,
+    node: crate::graph::storage::NodeView<'_>,
     lat_field: &str,
     lon_field: &str,
     geom_fallback: Option<&str>,
@@ -673,7 +673,7 @@ pub fn calculate_centroid(
     let mut count = 0;
 
     for node_idx in nodes {
-        if let Some(node) = graph.graph.node_weight(node_idx) {
+        if let Some(node) = graph.graph.node_view(node_idx) {
             if let Some((lat, lon)) = node_location(node, lat_field, lon_field, geom_fallback) {
                 sum_lat += lat;
                 sum_lon += lon;
@@ -717,7 +717,7 @@ pub fn get_bounds(
     let mut found_any = false;
 
     for node_idx in nodes {
-        if let Some(node) = graph.graph.node_weight(node_idx) {
+        if let Some(node) = graph.graph.node_view(node_idx) {
             if let Some((lat, lon)) = node_location(node, lat_field, lon_field, geom_fallback) {
                 min_lat = min_lat.min(lat);
                 max_lat = max_lat.max(lat);

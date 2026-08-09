@@ -1,6 +1,6 @@
 // src/graph/statistics.rs
 use crate::datatypes::values::Value;
-use crate::graph::schema::{CurrentSelection, DirGraph, NodeData};
+use crate::graph::schema::{CurrentSelection, DirGraph};
 use petgraph::graph::NodeIndex;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -89,7 +89,7 @@ pub fn calculate_grouped_property_stats(
     let _arena_guard = graph.graph.begin_query();
     let mut grouped_values: HashMap<String, Vec<f64>> = HashMap::new();
     for index in collect_selected_nodes(selection, level_index) {
-        let Some(node) = graph.get_node(index) else {
+        let Some(node) = graph.node_view(index) else {
             continue;
         };
         let node_type = node.node_type_str(&graph.interner);
@@ -174,7 +174,7 @@ pub struct PropertyStats {
 impl PropertyStats {
     fn new(parent_idx: Option<NodeIndex>, graph: &DirGraph, property: &str) -> Self {
         let (parent_type, parent_title, parent_id) = parent_idx
-            .and_then(|idx| graph.get_node(idx))
+            .and_then(|idx| graph.node_view(idx))
             .map(|node| {
                 (
                     Some(node.node_type_str(&graph.interner).to_string()),
@@ -249,7 +249,7 @@ fn calculate_stats_for_nodes(
     let mut seen_types = HashSet::new();
 
     for &node_idx in nodes {
-        if let Some(node) = graph.get_node(node_idx) {
+        if let Some(node) = graph.node_view(node_idx) {
             if let Some(value) = get_node_property(node, property) {
                 match &*value {
                     Value::Null => continue,
@@ -325,7 +325,10 @@ fn try_convert_to_float(value: &Value) -> Option<f64> {
     }
 }
 
-fn get_node_property<'a>(node: &'a NodeData, property: &str) -> Option<Cow<'a, Value>> {
+fn get_node_property<'a>(
+    node: crate::graph::storage::NodeView<'a>,
+    property: &str,
+) -> Option<Cow<'a, Value>> {
     node.get_property(property)
 }
 

@@ -2,10 +2,9 @@
 use crate::datatypes::values::FilterCondition;
 use crate::datatypes::values::Value;
 use crate::graph::schema::{
-    CurrentSelection, DirGraph, InternedKey, NodeData, SelectionOperation, SpatialConfig,
-    TemporalConfig,
+    CurrentSelection, DirGraph, InternedKey, SelectionOperation, SpatialConfig, TemporalConfig,
 };
-use crate::graph::storage::GraphRead;
+use crate::graph::storage::{GraphRead, NodeView};
 use chrono::NaiveDate;
 use geo::geometry::Geometry;
 use petgraph::graph::NodeIndex;
@@ -727,7 +726,7 @@ fn resolve_geometry_field<'a>(
 }
 
 /// Extract a parsed WKT geometry from a node's properties.
-fn node_geometry(node: &NodeData, geom_field: &str) -> Option<Geometry<f64>> {
+fn node_geometry(node: NodeView<'_>, geom_field: &str) -> Option<Geometry<f64>> {
     match node.get_property(geom_field).as_deref() {
         Some(Value::String(wkt)) => crate::graph::features::spatial::parse_wkt(wkt).ok(),
         _ => None,
@@ -735,7 +734,7 @@ fn node_geometry(node: &NodeData, geom_field: &str) -> Option<Geometry<f64>> {
 }
 
 /// Extract (lat, lon) from a node using SpatialConfig (location fields + geometry centroid fallback).
-fn node_lat_lon(node: &NodeData, spatial_config: Option<&SpatialConfig>) -> Option<(f64, f64)> {
+fn node_lat_lon(node: NodeView<'_>, spatial_config: Option<&SpatialConfig>) -> Option<(f64, f64)> {
     let sc = spatial_config?;
     if let Some((ref lat_f, ref lon_f)) = sc.location {
         if let Some((lat, lon)) = extract_lat_lon(node, lat_f, lon_f) {
@@ -757,7 +756,7 @@ fn node_lat_lon(node: &NodeData, spatial_config: Option<&SpatialConfig>) -> Opti
 /// - Closest/Geometry: also resolve to geometry centroid as a point
 ///   (actual geometry usage is handled by the caller)
 fn resolve_node_point(
-    node: &NodeData,
+    node: NodeView<'_>,
     spatial_config: Option<&SpatialConfig>,
     resolve: Option<SpatialResolve>,
     geometry_field_override: Option<&str>,
@@ -781,7 +780,7 @@ fn resolve_node_point(
 
 /// Get the parsed geometry for a node (for resolve='geometry' or 'closest' mode).
 fn resolve_node_geom(
-    node: &NodeData,
+    node: NodeView<'_>,
     spatial_config: Option<&SpatialConfig>,
     geometry_field_override: Option<&str>,
 ) -> Option<Geometry<f64>> {
@@ -790,7 +789,7 @@ fn resolve_node_geom(
     node_geometry(node, geom_field)
 }
 
-fn extract_lat_lon(node: &NodeData, lat_field: &str, lon_field: &str) -> Option<(f64, f64)> {
+fn extract_lat_lon(node: NodeView<'_>, lat_field: &str, lon_field: &str) -> Option<(f64, f64)> {
     let lat = node
         .get_property(lat_field)
         .as_deref()
@@ -825,7 +824,7 @@ fn get_source_info(
         return Err("No source nodes for comparison traversal".into());
     }
     let source_type = graph
-        .get_node(source_nodes[0])
+        .node_view(source_nodes[0])
         .map(|n| n.node_type_str(&graph.interner).to_string())
         .ok_or("Cannot determine source node type")?;
     Ok((source_nodes, source_type))
@@ -915,7 +914,7 @@ fn spatial_contains_traversal(
         HashMap::with_capacity(source_nodes.len());
 
     for &src_idx in &source_nodes {
-        let src_node = match graph.get_node(src_idx) {
+        let src_node = match graph.node_view(src_idx) {
             Some(n) => n,
             None => continue,
         };
@@ -929,7 +928,7 @@ fn spatial_contains_traversal(
 
         let mut matched = Vec::new();
         for &tgt_idx in &target_candidates {
-            let tgt_node = match graph.get_node(tgt_idx) {
+            let tgt_node = match graph.node_view(tgt_idx) {
                 Some(n) => n,
                 None => continue,
             };
@@ -1023,7 +1022,7 @@ fn spatial_intersects_traversal(
         HashMap::with_capacity(source_nodes.len());
 
     for &src_idx in &source_nodes {
-        let src_node = match graph.get_node(src_idx) {
+        let src_node = match graph.node_view(src_idx) {
             Some(n) => n,
             None => continue,
         };
@@ -1034,7 +1033,7 @@ fn spatial_intersects_traversal(
 
         let mut matched = Vec::new();
         for &tgt_idx in &target_candidates {
-            let tgt_node = match graph.get_node(tgt_idx) {
+            let tgt_node = match graph.node_view(tgt_idx) {
                 Some(n) => n,
                 None => continue,
             };
@@ -1143,7 +1142,7 @@ fn distance_point_mode(
     // Pre-compute target points
     let mut target_locs: Vec<TargetLoc> = Vec::with_capacity(target_candidates.len());
     for &tgt_idx in target_candidates {
-        if let Some(tgt_node) = graph.get_node(tgt_idx) {
+        if let Some(tgt_node) = graph.node_view(tgt_idx) {
             if let Some((lat, lon)) =
                 resolve_node_point(tgt_node, target_spatial, resolve, geometry_field)
             {
@@ -1160,7 +1159,7 @@ fn distance_point_mode(
         HashMap::with_capacity(source_nodes.len());
 
     for &src_idx in source_nodes {
-        let src_node = match graph.get_node(src_idx) {
+        let src_node = match graph.node_view(src_idx) {
             Some(n) => n,
             None => continue,
         };
@@ -1217,7 +1216,7 @@ fn distance_closest_mode(
         HashMap::with_capacity(source_nodes.len());
 
     for &src_idx in source_nodes {
-        let src_node = match graph.get_node(src_idx) {
+        let src_node = match graph.node_view(src_idx) {
             Some(n) => n,
             None => continue,
         };
@@ -1237,7 +1236,7 @@ fn distance_closest_mode(
 
         let mut matched = Vec::new();
         for &tgt_idx in target_candidates {
-            let tgt_node = match graph.get_node(tgt_idx) {
+            let tgt_node = match graph.node_view(tgt_idx) {
                 Some(n) => n,
                 None => continue,
             };
@@ -1440,8 +1439,8 @@ fn cluster_traversal(
             .into_iter()
             .filter(|&idx| {
                 graph
-                    .get_node(idx)
-                    .map(|n| n.node_type == InternedKey::from_str(tt))
+                    .node_view(idx)
+                    .map(|n| n.node_type() == InternedKey::from_str(tt))
                     .unwrap_or(false)
             })
             .collect()
@@ -1455,7 +1454,7 @@ fn cluster_traversal(
 
     // Check if features are spatial (latitude, longitude) — use haversine distance matrix
     let source_type = graph
-        .get_node(nodes[0])
+        .node_view(nodes[0])
         .map(|n| n.node_type_str(&graph.interner).to_string())
         .unwrap_or_default();
     let spatial_cfg = graph.get_spatial_config(&source_type);
@@ -1474,7 +1473,7 @@ fn cluster_traversal(
     // Extract feature matrix
     let mut feature_matrix: Vec<Vec<f64>> = Vec::with_capacity(nodes.len());
     for &idx in &nodes {
-        let node = graph.get_node(idx).unwrap();
+        let node = graph.node_view(idx).unwrap();
         let mut row = Vec::with_capacity(features.len());
         for feat in features {
             let val = node
@@ -1616,7 +1615,7 @@ pub fn get_children_properties(
         for (&parent_opt, children) in &level.selections {
             if let Some(parent) = parent_opt {
                 // Get parent title
-                let parent_title = if let Some(node) = graph.get_node(parent) {
+                let parent_title = if let Some(node) = graph.node_view(parent) {
                     match node.get_field_ref("title").as_deref() {
                         Some(Value::String(s)) => s.clone(),
                         _ => format!("node_{}", parent.index()),
@@ -1629,7 +1628,7 @@ pub fn get_children_properties(
                 let mut values_list = Vec::new();
 
                 for &child_idx in children {
-                    if let Some(node) = graph.get_node(child_idx) {
+                    if let Some(node) = graph.node_view(child_idx) {
                         let value = match node.get_field_ref(property).as_deref() {
                             Some(Value::String(s)) => s.clone(),
                             Some(Value::Int64(i)) => i.to_string(),

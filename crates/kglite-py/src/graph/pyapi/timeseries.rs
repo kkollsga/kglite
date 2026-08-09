@@ -136,7 +136,7 @@ impl KnowledgeGraph {
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Update config channels list
-        if let Some(node) = graph.graph.node_weight(node_idx) {
+        if let Some(node) = graph.graph.node_view(node_idx) {
             let nt = node.node_type_str(&graph.interner).to_string();
             if let Some(config) = graph.timeseries_configs.get_mut(&nt) {
                 if !config.channels.contains(&channel_name) {

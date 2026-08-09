@@ -407,7 +407,7 @@ impl<'a> CypherExecutor<'a> {
             let current_type = self
                 .graph
                 .graph
-                .node_weight(idx)?
+                .node_view(idx)?
                 .node_type_str(&self.graph.interner);
             if current_type != node_type || node_to_row.insert(idx.index(), row_index).is_some() {
                 return None;
@@ -522,7 +522,7 @@ impl<'a> CypherExecutor<'a> {
             Some(&idx) => idx,
             None => return Ok(None),
         };
-        let node_type = match self.graph.graph.node_weight(first_idx) {
+        let node_type = match self.graph.graph.node_view(first_idx) {
             Some(node) => node.node_type_str(&self.graph.interner).to_string(),
             None => return Ok(None),
         };

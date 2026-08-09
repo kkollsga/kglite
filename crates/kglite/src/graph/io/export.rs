@@ -65,7 +65,7 @@ pub fn to_graphml(
 
     // Export nodes
     for &idx in &node_indices {
-        if let Some(node) = graph.graph.node_weight(idx) {
+        if let Some(node) = graph.graph.node_view(idx) {
             xml.push_str(&format!("    <node id=\"n{}\">\n", idx.index()));
             xml.push_str(&format!(
                 "      <data key=\"node_type\">{}</data>\n",
@@ -81,8 +81,14 @@ pub fn to_graphml(
             ));
 
             // Serialize properties as JSON
+            // D1 defect 1: this read used to be `node.property_iter(..)`,
+            // which yields *nothing* for `PropertyStorage::Columnar` while
+            // `property_count()` reports the real count — so every node of a
+            // saved graph got an empty `{}` here. `NodeView` enumeration is
+            // complete for every storage variant.
             if node.property_count() > 0 {
-                let props_json = properties_to_json(node.property_iter(&graph.interner));
+                let props_json =
+                    properties_to_json_owned(node.property_pairs_named(&graph.interner));
                 xml.push_str(&format!(
                     "      <data key=\"node_properties\">{}</data>\n",
                     escape_xml(&props_json)
@@ -176,7 +182,7 @@ pub fn to_d3_json(
     // Build nodes array
     let mut nodes_json = Vec::with_capacity(node_indices.len());
     for &idx in &node_indices {
-        if let Some(node) = graph.graph.node_weight(idx) {
+        if let Some(node) = graph.graph.node_view(idx) {
             let mut obj = String::from("{");
             obj.push_str(&format!("\"id\":{},", json_value(&node.id())));
             obj.push_str(&format!(
@@ -185,10 +191,12 @@ pub fn to_d3_json(
             ));
             obj.push_str(&format!("\"title\":{}", json_value(&node.title())));
 
-            // Add select properties (not all to keep output clean)
-            for (key, value) in node.property_iter(&graph.interner) {
+            // Add select properties (not all to keep output clean).
+            // D1 defect 1: `property_iter` yielded nothing for columnar
+            // (saved) graphs, silently dropping every property here.
+            for (key, value) in node.property_pairs_named(&graph.interner) {
                 if key != "id" && key != "title" && key != "type" {
-                    obj.push_str(&format!(",{}:{}", json_string(key), json_value(value)));
+                    obj.push_str(&format!(",{}:{}", json_string(&key), json_value(&value)));
                 }
             }
 
@@ -298,7 +306,7 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
     // Export nodes
     xml.push_str("    <nodes>\n");
     for &idx in &node_indices {
-        if let Some(node) = graph.graph.node_weight(idx) {
+        if let Some(node) = graph.graph.node_view(idx) {
             let title_str = crate::datatypes::values::raw_string(&node.title());
             xml.push_str(&format!(
                 "      <node id=\"{}\" label=\"{}\">\n",
@@ -387,7 +395,7 @@ pub fn to_text(graph: &DirGraph) -> String {
     // Nodes, grouped by type (sorted), then by id.
     let mut by_type: BTreeMap<String, Vec<petgraph::graph::NodeIndex>> = BTreeMap::new();
     for idx in g.node_indices() {
-        if let Some(node) = g.node_weight(idx) {
+        if let Some(node) = g.node_view(idx) {
             by_type
                 .entry(node.node_type_str(&graph.interner).to_string())
                 .or_default()
@@ -396,13 +404,13 @@ pub fn to_text(graph: &DirGraph) -> String {
     }
     for (ntype, mut idxs) in by_type {
         idxs.sort_by_key(|&i| {
-            g.node_weight(i)
+            g.node_view(i)
                 .map(|n| raw_string(&n.id()))
                 .unwrap_or_default()
         });
         out.push_str(&format!("# {} ({} node(s))\n", ntype, idxs.len()));
         for i in idxs {
-            let Some(node) = g.node_weight(i) else {
+            let Some(node) = g.node_view(i) else {
                 continue;
             };
             let (id, title) = (raw_string(&node.id()), raw_string(&node.title()));
@@ -435,12 +443,12 @@ pub fn to_text(graph: &DirGraph) -> String {
     // Edges, sorted by (type, source_id, target_id).
     let mut edges: Vec<(String, String, String, String)> = Vec::new();
     for src in g.node_indices() {
-        let Some(src_node) = g.node_weight(src) else {
+        let Some(src_node) = g.node_view(src) else {
             continue;
         };
         let src_id = raw_string(&src_node.id());
         for e in g.edges(src) {
-            let Some(tgt_node) = g.node_weight(e.target()) else {
+            let Some(tgt_node) = g.node_view(e.target()) else {
                 continue;
             };
             let w = e.weight();
@@ -503,7 +511,7 @@ pub fn to_csv(
     // Build nodes CSV
     let mut nodes_csv = String::from("id,type,title\n");
     for &idx in &node_indices {
-        if let Some(node) = graph.graph.node_weight(idx) {
+        if let Some(node) = graph.graph.node_view(idx) {
             nodes_csv.push_str(&format!(
                 "{},{},{}\n",
                 idx.index(),
@@ -569,7 +577,7 @@ fn node_property_columns(
 ) -> (Vec<String>, BTreeMap<String, String>) {
     let mut prop_names: BTreeSet<String> = BTreeSet::new();
     for &idx in indices {
-        if let Some(node) = graph.graph.node_weight(idx) {
+        if let Some(node) = graph.graph.node_view(idx) {
             for key in node.property_keys(&graph.interner) {
                 if crate::graph::handle::is_canonical_node_column(key) {
                     continue;
@@ -583,7 +591,7 @@ fn node_property_columns(
     let mut prop_types: BTreeMap<String, String> = BTreeMap::new();
     for col in &prop_cols {
         for &idx in indices {
-            if let Some(node) = graph.graph.node_weight(idx) {
+            if let Some(node) = graph.graph.node_view(idx) {
                 if let Some(val) = node.get_property(col) {
                     if !matches!(*val, Value::Null) {
                         prop_types.insert(col.clone(), value_type_name(&val));
@@ -624,7 +632,7 @@ pub fn to_csv_dir(
     // type_name → Vec<NodeIndex>
     let mut nodes_by_type: BTreeMap<String, Vec<petgraph::graph::NodeIndex>> = BTreeMap::new();
     for &idx in &node_indices {
-        if let Some(node) = graph.graph.node_weight(idx) {
+        if let Some(node) = graph.graph.node_view(idx) {
             nodes_by_type
                 .entry(node.node_type_str(&graph.interner).to_string())
                 .or_default()
@@ -707,7 +715,7 @@ pub fn to_csv_dir(
 
         // Rows
         for &idx in indices {
-            if let Some(node) = graph.graph.node_weight(idx) {
+            if let Some(node) = graph.graph.node_view(idx) {
                 csv.push_str(&escape_csv(&crate::datatypes::values::raw_string(
                     &node.id(),
                 )));
@@ -784,12 +792,12 @@ pub fn to_csv_dir(
         // Detect source and target types (use first edge)
         let source_type = edges
             .first()
-            .and_then(|e| graph.graph.node_weight(e.source_idx))
+            .and_then(|e| graph.graph.node_view(e.source_idx))
             .map(|n| n.node_type_str(&graph.interner).to_string())
             .unwrap_or_default();
         let target_type = edges
             .first()
-            .and_then(|e| graph.graph.node_weight(e.target_idx))
+            .and_then(|e| graph.graph.node_view(e.target_idx))
             .map(|n| n.node_type_str(&graph.interner).to_string())
             .unwrap_or_default();
 
@@ -805,22 +813,22 @@ pub fn to_csv_dir(
         for edge in edges {
             let source_id = graph
                 .graph
-                .node_weight(edge.source_idx)
+                .node_view(edge.source_idx)
                 .map(|n| crate::datatypes::values::raw_string(&n.id()))
                 .unwrap_or_default();
             let src_type = graph
                 .graph
-                .node_weight(edge.source_idx)
+                .node_view(edge.source_idx)
                 .map(|n| n.node_type_str(&graph.interner).to_string())
                 .unwrap_or_default();
             let target_id = graph
                 .graph
-                .node_weight(edge.target_idx)
+                .node_view(edge.target_idx)
                 .map(|n| crate::datatypes::values::raw_string(&n.id()))
                 .unwrap_or_default();
             let tgt_type = graph
                 .graph
-                .node_weight(edge.target_idx)
+                .node_view(edge.target_idx)
                 .map(|n| n.node_type_str(&graph.interner).to_string())
                 .unwrap_or_default();
 
@@ -1112,3 +1120,18 @@ fn properties_to_json<'a>(properties: impl Iterator<Item = (&'a str, &'a Value)>
         .collect();
     format!("{{{}}}", pairs.join(","))
 }
+
+/// Owned-pair variant, for node reads that resolve through a
+/// [`NodeView`](crate::graph::storage::NodeView) — columnar values are
+/// constructed on read, so they cannot be handed out as `&Value`.
+fn properties_to_json_owned(properties: Vec<(String, Value)>) -> String {
+    let pairs: Vec<String> = properties
+        .into_iter()
+        .map(|(k, v)| format!("{}:{}", json_string(&k), json_value(&v)))
+        .collect();
+    format!("{{{}}}", pairs.join(","))
+}
+
+#[cfg(test)]
+#[path = "export_tests.rs"]
+mod export_tests;

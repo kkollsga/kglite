@@ -3,7 +3,7 @@ use crate::datatypes::values::Value;
 use crate::graph::core::statistics::{get_parent_child_pairs, ParentChildPair};
 use crate::graph::features::equations::{AggregateType, Evaluator, Expr, Parser};
 use crate::graph::introspection::reporting::CalculationOperationReport; // Remove unused OperationReport import
-use crate::graph::schema::{CurrentSelection, DirGraph, NodeData, StringInterner};
+use crate::graph::schema::{CurrentSelection, DirGraph, StringInterner};
 use crate::graph::storage::lookups::TypeLookup;
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
@@ -36,7 +36,7 @@ fn cache_parent_titles(
                 (
                     idx,
                     graph
-                        .get_node(idx)
+                        .node_view(idx)
                         .and_then(|node| node.get_field_ref("title"))
                         .and_then(|v| v.as_string()),
                 )
@@ -128,7 +128,7 @@ pub fn process_equation(
             if !level.is_empty() {
                 // Get a sample node to determine node type
                 if let Some(sample_node_idx) = level.iter_node_indices().next() {
-                    if let Some(sample_node) = graph.get_node(sample_node_idx) {
+                    if let Some(sample_node) = graph.node_view(sample_node_idx) {
                         let node_type = sample_node.node_type_str(&graph.interner);
 
                         // Check if schema node exists for this type
@@ -143,7 +143,7 @@ pub fn process_equation(
                         let schema_title = Value::String(node_type.to_string());
 
                         if let Some(schema_idx) = schema_lookup.check_title(&schema_title) {
-                            if let Some(schema_node) = graph.get_node(schema_idx) {
+                            if let Some(schema_node) = graph.node_view(schema_idx) {
                                 // Validate each variable against schema properties
                                 // Don't check reserved field names like 'id', 'title', 'type'
                                 for var in &variables {
@@ -152,11 +152,8 @@ pub fn process_equation(
                                         && var != "type"
                                         && !schema_node.has_property(var)
                                     {
-                                        let available = schema_node
-                                            .property_keys(&graph.interner)
-                                            .map(|k| k.to_string())
-                                            .collect::<Vec<String>>()
-                                            .join(", ");
+                                        let available =
+                                            schema_node.property_keys(&graph.interner).join(", ");
                                         return Err(format!(
                                             "Property '{}' does not exist on '{}' nodes. Available properties: {}",
                                             var, node_type, available
@@ -221,7 +218,7 @@ pub fn process_equation(
         for result in &results {
             if let Some(parent_idx) = result.parent_idx {
                 // Verify the parent node exists in the graph
-                if graph.get_node(parent_idx).is_some() {
+                if graph.node_view(parent_idx).is_some() {
                     nodes_to_update.push((Some(parent_idx), result.value.clone()));
                 }
             }
@@ -240,7 +237,7 @@ pub fn process_equation(
                 // Direct HashMap lookup instead of linear search
                 if let Some(&result) = result_map.get(&node_idx) {
                     // Verify node exists in the graph - IMPORTANT: Must check here
-                    if graph.get_node(node_idx).is_some() {
+                    if graph.node_view(node_idx).is_some() {
                         nodes_to_update.push((Some(node_idx), result.value.clone()));
                     }
                 }
@@ -354,7 +351,7 @@ pub fn evaluate_equation(
                     .iter()
                     .filter_map(|&node_idx| {
                         graph
-                            .get_node(node_idx)
+                            .node_view(node_idx)
                             .map(|n| convert_node_to_object(n, &graph.interner))
                     })
                     .collect();
@@ -408,7 +405,7 @@ pub fn evaluate_equation(
 
         nodes
             .iter()
-            .map(|&node_idx| match graph.get_node(node_idx) {
+            .map(|&node_idx| match graph.node_view(node_idx) {
                 Some(node) => {
                     let title = node.get_field_ref("title").and_then(|v| v.as_string());
                     let obj = convert_node_to_object(node, &graph.interner);
@@ -555,31 +552,32 @@ fn has_aggregation(expr: &Expr) -> bool {
     }
 }
 
-fn convert_node_to_object(node: &NodeData, interner: &StringInterner) -> HashMap<String, Value> {
+/// Project a node's properties into a calculation object.
+///
+/// Reads through [`NodeView`](crate::graph::storage::NodeView): the previous
+/// `property_iter` route yielded **nothing** for columnar storage, so every
+/// `statistics()` / `calculate()` expression over a saved graph evaluated
+/// against an empty object (D1 defect 1).
+fn convert_node_to_object(
+    node: crate::graph::storage::NodeView<'_>,
+    interner: &StringInterner,
+) -> HashMap<String, Value> {
     // Pre-allocate HashMap with exact capacity to avoid reallocations
     let mut object = HashMap::with_capacity(node.property_count());
 
-    // Process all properties - avoid clone for simple Copy-like types
-    for (key, value) in node.property_iter(interner) {
+    for (key, value) in node.property_pairs_named(interner) {
         let new_value = match value {
-            // Directly construct new values for simple numeric types (avoids Clone overhead)
-            Value::Int64(n) => Value::Int64(*n),
-            Value::Float64(n) => Value::Float64(*n),
-            Value::UniqueId(n) => Value::UniqueId(*n),
-            Value::Boolean(b) => Value::Boolean(*b),
-            Value::Null => Value::Null,
             Value::String(s) => {
                 // Try to parse as number for calculations
                 if let Ok(num) = s.parse::<f64>() {
                     Value::Float64(num)
                 } else {
-                    Value::String(s.clone())
+                    Value::String(s)
                 }
             }
-            // DateTime and any future types need clone
-            _ => value.clone(),
+            other => other,
         };
-        object.insert(key.to_string(), new_value);
+        object.insert(key, new_value);
     }
 
     object
@@ -615,7 +613,7 @@ pub fn count_nodes_by_parent(
             parent_idx: pair.parent,
             parent_title: pair.parent.and_then(|idx| {
                 graph
-                    .get_node(idx)
+                    .node_view(idx)
                     .and_then(|node| node.get_field_ref("title"))
                     .and_then(|v| v.as_string())
             }),
@@ -649,7 +647,7 @@ pub fn store_count_results(
         for result in &counts {
             if let Some(parent_idx) = result.parent_idx {
                 // Verify the parent node exists in the graph
-                if graph.get_node(parent_idx).is_some() {
+                if graph.node_view(parent_idx).is_some() {
                     nodes_to_update.push((Some(parent_idx), result.value.clone()));
                 } else {
                     errors.push(format!(
@@ -670,7 +668,7 @@ pub fn store_count_results(
 
             // Apply the count to each node in the level
             for node_idx in level.iter_node_indices() {
-                if graph.get_node(node_idx).is_some() {
+                if graph.node_view(node_idx).is_some() {
                     nodes_to_update.push((Some(node_idx), Value::Int64(count as i64)));
                 } else {
                     errors.push(format!("Node index {:?} not found in graph", node_idx));

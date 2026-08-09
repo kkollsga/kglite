@@ -70,7 +70,7 @@ pub fn get_nodes(
         let mut direct_nodes = Vec::new();
         for &index in idx {
             if let Some(node_idx) = NodeIndex::new(index).into() {
-                if let Some(node) = graph.get_node(node_idx) {
+                if let Some(node) = graph.node_view(node_idx) {
                     let node_info = node.to_node_info(&graph.interner);
                     direct_nodes.push(node_info);
                     if let Some(max) = max_nodes {
@@ -115,7 +115,7 @@ pub fn get_nodes(
     if selection_is_empty && !has_query_operations {
         let mut all_nodes = Vec::new();
         for node_idx in GraphRead::node_indices(&graph.graph) {
-            if let Some(node) = graph.get_node(node_idx) {
+            if let Some(node) = graph.node_view(node_idx) {
                 let node_info = node.to_node_info(&graph.interner);
                 all_nodes.push(node_info);
                 if let Some(max) = max_nodes {
@@ -146,7 +146,7 @@ pub fn get_nodes(
             let mut nodes = Vec::new();
 
             for &child_idx in children {
-                if let Some(node) = graph.get_node(child_idx) {
+                if let Some(node) = graph.node_view(child_idx) {
                     let node_info = node.to_node_info(&graph.interner);
                     nodes.push(node_info);
                     if let Some(max) = max_nodes {
@@ -160,7 +160,7 @@ pub fn get_nodes(
             // Always create an entry for the parent, even if nodes is empty
             let (parent_title, parent_id, parent_type) = match parent {
                 Some(p) => {
-                    if let Some(node) = graph.get_node(*p) {
+                    if let Some(node) = graph.node_view(*p) {
                         (
                             node.get_field_ref("title")
                                 .as_deref()
@@ -229,7 +229,7 @@ pub fn get_property_values(
                         .iter()
                         .map(|&prop| {
                             graph
-                                .get_node(idx)
+                                .node_view(idx)
                                 .and_then(|node| node.get_field_ref(prop))
                                 .map(Cow::into_owned)
                                 .unwrap_or(Value::Null)
@@ -241,7 +241,7 @@ pub fn get_property_values(
             // Get parent title even if there are no children
             let parent_title = match parent {
                 Some(p) => {
-                    if let Some(node) = graph.get_node(*p) {
+                    if let Some(node) = graph.node_view(*p) {
                         if let Some(Value::String(title)) = node.get_field_ref("title").as_deref() {
                             title.clone()
                         } else {
@@ -300,7 +300,7 @@ pub fn get_unique_values(
                 let mut unique_values = std::collections::HashSet::new();
 
                 for &idx in &filtered_children {
-                    if let Some(node) = graph.get_node(idx) {
+                    if let Some(node) = graph.node_view(idx) {
                         if let Some(value) = node.get_field_ref(property) {
                             unique_values.insert(value.into_owned());
                         }
@@ -309,7 +309,7 @@ pub fn get_unique_values(
 
                 let parent_title = match parent {
                     Some(p) => {
-                        if let Some(node) = graph.get_node(*p) {
+                        if let Some(node) = graph.node_view(*p) {
                             if let Some(Value::String(title)) =
                                 node.get_field_ref("title").as_deref()
                             {
@@ -344,7 +344,7 @@ pub fn get_unique_values(
                 };
 
                 for &idx in &filtered_children {
-                    if let Some(node) = graph.get_node(idx) {
+                    if let Some(node) = graph.node_view(idx) {
                         if let Some(value) = node.get_field_ref(property) {
                             all_unique_values.insert(value.into_owned());
                         }
@@ -482,7 +482,7 @@ pub fn get_connections(
             let mut level_connections = Vec::new();
 
             for node_idx in children {
-                if let Some(node) = graph.get_node(node_idx) {
+                if let Some(node) = graph.node_view(node_idx) {
                     let node_title = node.title();
                     let title_str = match &*node_title {
                         Value::String(s) => s.clone(),
@@ -497,7 +497,7 @@ pub fn get_connections(
                         .graph
                         .edges_directed(node_idx, petgraph::Direction::Incoming)
                     {
-                        if let Some(source_node) = graph.get_node(edge_ref.source()) {
+                        if let Some(source_node) = graph.node_view(edge_ref.source()) {
                             let edge_data = edge_ref.weight();
                             let node_props = if include_node_properties {
                                 Some(source_node.properties_cloned(&graph.interner))
@@ -525,7 +525,7 @@ pub fn get_connections(
                         .graph
                         .edges_directed(node_idx, petgraph::Direction::Outgoing)
                     {
-                        if let Some(target_node) = graph.get_node(edge_ref.target()) {
+                        if let Some(target_node) = graph.node_view(edge_ref.target()) {
                             let edge_data = edge_ref.weight();
                             let node_props = if include_node_properties {
                                 Some(target_node.properties_cloned(&graph.interner))
@@ -566,7 +566,7 @@ pub fn get_connections(
             } else {
                 match parent {
                     Some(p) => {
-                        if let Some(node) = graph.get_node(p) {
+                        if let Some(node) = graph.node_view(p) {
                             (
                                 node.get_field_ref("title")
                                     .as_deref()

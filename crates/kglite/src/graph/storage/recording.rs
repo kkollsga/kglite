@@ -191,7 +191,7 @@ pub fn resolve_ops(
     for op in raw {
         match op {
             RawOp::UpsertNode(idx) => {
-                if let Some(nd) = graph.node_weight(*idx) {
+                if let Some(nd) = graph.node_view(*idx) {
                     out.push(MutationOp::UpsertNode {
                         node_type: nd.node_type_str(interner).to_string(),
                         id: nd.id().into_owned(),
@@ -265,7 +265,7 @@ fn logical_node(
     idx: NodeIndex,
     interner: &StringInterner,
 ) -> Option<(String, Value)> {
-    let nd = graph.node_weight(idx)?;
+    let nd = graph.node_view(idx)?;
     Some((nd.node_type_str(interner).to_string(), nd.id().into_owned()))
 }
 

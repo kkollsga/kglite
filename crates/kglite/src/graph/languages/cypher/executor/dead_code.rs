@@ -91,7 +91,7 @@ pub(super) fn execute_dead_code(
     const PUBLIC_VIS: &[&str] = &["pub", "public", "export", "exported"];
     let mut rows = Vec::new();
     for nidx in funcs.iter() {
-        let node = match graph.graph.node_weight(nidx) {
+        let node = match graph.graph.node_view(nidx) {
             Some(n) => n,
             None => continue,
         };

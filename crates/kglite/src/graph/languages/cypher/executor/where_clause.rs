@@ -251,7 +251,7 @@ impl<'a> CypherExecutor<'a> {
                     Some(&idx) => idx,
                     None => return false,
                 };
-                let node = match graph.graph.node_weight(idx) {
+                let node = match graph.graph.node_view(idx) {
                     Some(n) => n,
                     None => return false,
                 };
@@ -313,7 +313,7 @@ impl<'a> CypherExecutor<'a> {
                     Some(&idx) => idx,
                     None => return false,
                 };
-                let node_type = match graph.graph.node_weight(idx) {
+                let node_type = match graph.graph.node_view(idx) {
                     Some(n) => n.node_type_str(&graph.interner),
                     None => return false,
                 };
@@ -465,7 +465,7 @@ impl<'a> CypherExecutor<'a> {
         result_set.rows.iter().find_map(|row| {
             row.node_bindings
                 .get(variable)
-                .and_then(|&idx| self.graph.graph.node_weight(idx))
+                .and_then(|&idx| self.graph.graph.node_view(idx))
                 .map(|node| node.node_type_str(&self.graph.interner).to_string())
         })
     }
@@ -567,7 +567,7 @@ impl<'a> CypherExecutor<'a> {
                 // its primary type OR a secondary label. Unbound (OPTIONAL
                 // MATCH) or non-node bindings are false.
                 if let Some(&idx) = row.node_bindings.get(variable) {
-                    if self.graph.graph.node_weight(idx).is_some() {
+                    if self.graph.graph.node_view(idx).is_some() {
                         let key = crate::graph::schema::InternedKey::from_str(label);
                         return Ok(Some(self.graph.node_has_label(idx, key)));
                     }

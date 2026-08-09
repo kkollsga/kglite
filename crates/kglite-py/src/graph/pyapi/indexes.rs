@@ -209,7 +209,7 @@ impl KnowledgeGraph {
 
         let result_list = pyo3::types::PyList::empty(py);
         for idx in hits {
-            let Some(node) = backend.node_weight(idx) else {
+            let Some(node) = backend.node_view(idx) else {
                 continue;
             };
             let dict = PyDict::new(py);

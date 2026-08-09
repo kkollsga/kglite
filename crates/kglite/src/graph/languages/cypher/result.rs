@@ -366,7 +366,7 @@ fn materialise_lazy_row_inner(
                 if let Some(&node_idx) = pending_row.node_bindings.get(variable) {
                     graph
                         .graph
-                        .node_weight(node_idx)
+                        .node_view(node_idx)
                         .map(|node| {
                             super::executor::helpers::resolve_node_property(node, property, graph)
                         })

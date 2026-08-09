@@ -83,7 +83,7 @@ pub fn find_code_entities(
             continue;
         };
         for index in indices.iter() {
-            let Some(node) = dir.get_node(index) else {
+            let Some(node) = dir.node_view(index) else {
                 continue;
             };
             // `title` is a primary NodeData field, not an ordinary property.
@@ -155,7 +155,7 @@ pub fn code_entity_context(
             CodeContextLookup::Ambiguous(matches.into_iter().map(|(_, info)| info).collect())
         };
     };
-    let Some(target_node) = dir.get_node(target_idx) else {
+    let Some(target_node) = dir.node_view(target_idx) else {
         return CodeContextLookup::NotFound;
     };
 
@@ -248,7 +248,7 @@ pub fn code_entity_context(
                 let nodes = indices
                     .into_iter()
                     .filter(|index| seen.insert(*index))
-                    .filter_map(|index| dir.get_node(index))
+                    .filter_map(|index| dir.node_view(index))
                     .map(|node| node.to_node_info(&dir.interner))
                     .collect();
                 (edge_type, nodes)
@@ -299,7 +299,7 @@ pub fn resolve_code_entity(
     for nt in &types_to_search {
         if let Some(indices) = dir.type_indices.get(nt) {
             for idx in indices.iter() {
-                if let Some(node) = dir.get_node(idx) {
+                if let Some(node) = dir.node_view(idx) {
                     if *node.id() == name_val {
                         return (Some(idx), Vec::new());
                     }
@@ -316,7 +316,7 @@ pub fn resolve_code_entity(
         for nt in &types_to_search {
             if let Some(indices) = dir.type_indices.get(nt) {
                 for idx in indices.iter() {
-                    if let Some(node) = dir.get_node(idx) {
+                    if let Some(node) = dir.node_view(idx) {
                         if let Value::String(qn) = &*node.id() {
                             if qn.ends_with(&suffix) {
                                 matches.push((idx, node.to_node_info(&dir.interner)));
@@ -338,7 +338,7 @@ pub fn resolve_code_entity(
     for nt in &types_to_search {
         if let Some(indices) = dir.type_indices.get(nt) {
             for idx in indices.iter() {
-                if let Some(node) = dir.get_node(idx) {
+                if let Some(node) = dir.node_view(idx) {
                     let name_match = node
                         .get_field_ref("name")
                         .map(|v| *v == name_val)
@@ -385,7 +385,7 @@ pub fn infer_selection_node_type(
     // in disk/graph.rs); no-op on memory/mapped.
     let _arena_guard = dir.graph.begin_query();
     dir.graph
-        .node_weight(first_idx)
+        .node_view(first_idx)
         .map(|n| n.node_type_str(&dir.interner).to_string())
 }
 
@@ -426,7 +426,7 @@ pub fn is_canonical_node_column(key: &str) -> bool {
 /// excluded, so appending the result to the exporter's leading identity
 /// columns always yields a header with unique names.
 pub fn discover_property_keys_from_data(
-    nodes: &[(&str, &crate::graph::schema::NodeData)],
+    nodes: &[(&str, crate::graph::storage::NodeView<'_>)],
     interner: &crate::graph::schema::StringInterner,
 ) -> Vec<String> {
     discover_property_keys_excluding(nodes, interner, &CANONICAL_NODE_COLUMNS)
@@ -440,7 +440,7 @@ pub fn discover_property_keys_from_data(
 /// collision, so a stored property under that name is real user data and must
 /// survive.
 pub fn discover_property_keys_excluding(
-    nodes: &[(&str, &crate::graph::schema::NodeData)],
+    nodes: &[(&str, crate::graph::storage::NodeView<'_>)],
     interner: &crate::graph::schema::StringInterner,
     excluded: &[&str],
 ) -> Vec<String> {
@@ -480,7 +480,7 @@ pub fn source_location(dir: &Arc<DirGraph>, name: &str, node_type: Option<&str>)
     let (resolved, matches) = resolve_code_entity(dir, name, node_type);
 
     if let Some(target_idx) = resolved {
-        let node = match dir.get_node(target_idx) {
+        let node = match dir.node_view(target_idx) {
             Some(n) => n,
             None => return SourceLookup::NotFound,
         };
@@ -737,13 +737,13 @@ mod boundary_lift_tests {
         Arc::new(graph)
     }
 
-    fn nodes_of(graph: &DirGraph) -> Vec<(&str, &crate::graph::schema::NodeData)> {
+    fn nodes_of(graph: &DirGraph) -> Vec<(&str, crate::graph::storage::NodeView<'_>)> {
         graph
             .graph
             .node_indices()
             .filter_map(|idx| {
                 graph
-                    .get_node(idx)
+                    .node_view(idx)
                     .map(|n| (n.node_type_str(&graph.interner), n))
             })
             .collect()

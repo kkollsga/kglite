@@ -212,7 +212,7 @@ pub fn export_embeddings_to_file(
         for &node_index in &store.slot_to_node {
             if let Some(node) = graph
                 .graph
-                .node_weight(petgraph::graph::NodeIndex::new(node_index))
+                .node_view(petgraph::graph::NodeIndex::new(node_index))
             {
                 if let Some(embedding) = store.get_embedding(node_index) {
                     let hash = store.text_hashes.get(&node_index).copied();

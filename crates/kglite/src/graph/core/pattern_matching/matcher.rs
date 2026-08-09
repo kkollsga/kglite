@@ -709,7 +709,7 @@ impl<'a> PatternExecutor<'a> {
         // If variable is pre-bound, return only that node (if it matches filters)
         if let Some(ref var) = pattern.variable {
             if let Some(&idx) = self.pre_bindings.get(var) {
-                if let Some(node) = self.graph.graph.node_weight(idx) {
+                if let Some(node) = self.graph.graph.node_view(idx) {
                     if let Some(ref node_type) = pattern.node_type {
                         let primary_key = InternedKey::from_str(node_type);
                         let labels = self.graph.node_labels(idx);
@@ -1282,7 +1282,7 @@ impl<'a> PatternExecutor<'a> {
         }
 
         // In-memory path: node_weight() is cheap (pointer chase, no allocation)
-        if let Some(node) = self.graph.graph.node_weight(idx) {
+        if let Some(node) = self.graph.graph.node_view(idx) {
             for (key, matcher) in props {
                 let resolved = self
                     .graph
@@ -1300,10 +1300,7 @@ impl<'a> PatternExecutor<'a> {
                     && resolved != "label"
                 {
                     if let PropertyMatcher::Equals(Value::String(target)) = matcher {
-                        match node
-                            .properties
-                            .str_prop_eq(InternedKey::from_str(resolved), target)
-                        {
+                        match node.str_prop_eq(InternedKey::from_str(resolved), target) {
                             Some(true) => continue,
                             Some(false) => return false,
                             None => return false,
@@ -2150,7 +2147,7 @@ impl<'a> PatternExecutor<'a> {
         if self.lightweight {
             return MatchBinding::NodeRef(idx);
         }
-        if let Some(node) = self.graph.graph.node_weight(idx) {
+        if let Some(node) = self.graph.graph.node_view(idx) {
             let node_title = node.title();
             let title_str = match &*node_title {
                 Value::String(s) => s.clone(),

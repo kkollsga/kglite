@@ -748,7 +748,7 @@ pub fn kglite::api::cypher::parse_cypher(input: &str) -> core::result::Result<kg
 pub fn kglite::api::cypher::parse_with_mutation_check(query: &str) -> core::result::Result<(kglite::api::cypher::CypherQuery, bool), kglite::error::KgError>
 pub fn kglite::api::cypher::query_features(query: &str) -> core::result::Result<kglite::api::cypher::QueryFeatures, kglite::error::KgError>
 pub fn kglite::api::cypher::resolve_edge_property(graph: &kglite::api::DirGraph, edge: &kglite::api::cypher::EdgeBinding, property: &str) -> kglite::datatypes::values::Value
-pub fn kglite::api::cypher::resolve_node_property(node: &kglite::api::NodeData, property: &str, graph: &kglite::api::DirGraph) -> kglite::datatypes::values::Value
+pub fn kglite::api::cypher::resolve_node_property(node: kglite::api::NodeView<'_>, property: &str, graph: &kglite::api::DirGraph) -> kglite::datatypes::values::Value
 pub fn kglite::api::cypher::rewrite_text_score(query: &mut kglite::api::cypher::CypherQuery, params: &std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> core::result::Result<kglite::api::cypher::planner::simplification::TextScoreRewrite, alloc::string::String>
 pub fn kglite::api::cypher::validate_schema(query: &kglite::api::cypher::CypherQuery, graph: &kglite::api::DirGraph) -> core::result::Result<(), kglite::api::cypher::planner::schema_check::SchemaError>
 pub mod kglite::api::durable
@@ -1048,9 +1048,9 @@ pub fn kglite::api::fluent::make_comparison_traversal(graph: &kglite::api::DirGr
 pub fn kglite::api::fluent::make_traversal(graph: &kglite::api::DirGraph, selection: &mut kglite::api::CurrentSelection, connection_type: alloc::string::String, level_index: core::option::Option<usize>, direction: core::option::Option<alloc::string::String>, filter_target: core::option::Option<&std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::FilterCondition>>, filter_connection: core::option::Option<&std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::FilterCondition>>, sort_target: core::option::Option<&alloc::vec::Vec<(alloc::string::String, bool)>>, max_nodes: core::option::Option<usize>, new_level: core::option::Option<bool>, temporal_filter: core::option::Option<&kglite::api::fluent::TemporalEdgeFilter>, target_type: core::option::Option<&[alloc::string::String]>) -> core::result::Result<(), alloc::string::String>
 pub fn kglite::api::fluent::near_point(graph: &kglite::api::DirGraph, selection: &kglite::api::CurrentSelection, lat_field: &str, lon_field: &str, center_lat: f64, center_lon: f64, max_distance: f64, geom_fallback: core::option::Option<&str>) -> core::result::Result<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>, alloc::string::String>
 pub fn kglite::api::fluent::near_point_m(graph: &kglite::api::DirGraph, selection: &kglite::api::CurrentSelection, lat_field: &str, lon_field: &str, center_lat: f64, center_lon: f64, max_distance_m: f64, geom_fallback: core::option::Option<&str>) -> core::result::Result<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>, alloc::string::String>
-pub fn kglite::api::fluent::node_is_temporally_valid(node: &kglite::api::NodeData, config: &kglite::api::TemporalConfig, reference: &chrono::naive::date::NaiveDate) -> bool
-pub fn kglite::api::fluent::node_overlaps_range(node: &kglite::api::NodeData, config: &kglite::api::TemporalConfig, start: &chrono::naive::date::NaiveDate, end: &chrono::naive::date::NaiveDate) -> bool
-pub fn kglite::api::fluent::node_passes_context(node: &kglite::api::NodeData, config: &kglite::api::TemporalConfig, context: &kglite::api::TemporalContext) -> bool
+pub fn kglite::api::fluent::node_is_temporally_valid(node: kglite::api::NodeView<'_>, config: &kglite::api::TemporalConfig, reference: &chrono::naive::date::NaiveDate) -> bool
+pub fn kglite::api::fluent::node_overlaps_range(node: kglite::api::NodeView<'_>, config: &kglite::api::TemporalConfig, start: &chrono::naive::date::NaiveDate, end: &chrono::naive::date::NaiveDate) -> bool
+pub fn kglite::api::fluent::node_passes_context(node: kglite::api::NodeView<'_>, config: &kglite::api::TemporalConfig, context: &kglite::api::TemporalContext) -> bool
 pub fn kglite::api::fluent::offset_nodes(graph: &kglite::api::DirGraph, selection: &mut kglite::api::CurrentSelection, n: usize) -> core::result::Result<(), alloc::string::String>
 pub fn kglite::api::fluent::parse_pattern(input: &str) -> core::result::Result<kglite::graph::core::pattern_matching::pattern::Pattern, alloc::string::String>
 pub fn kglite::api::fluent::process_equation(graph: &mut kglite::api::DirGraph, selection: &kglite::api::CurrentSelection, expression: &str, level_index: core::option::Option<usize>, store_as: core::option::Option<&str>, aggregate_connections: core::option::Option<bool>) -> core::result::Result<kglite::api::fluent::EvaluationResult, alloc::string::String>
@@ -2146,6 +2146,7 @@ pub fn kglite::api::DirGraph::lookup_by_id_normalized(&self, node_type: &str, id
 pub fn kglite::api::DirGraph::lookup_by_id_readonly(&self, node_type: &str, id: &kglite::datatypes::values::Value) -> core::option::Option<petgraph::graph_impl::NodeIndex>
 pub fn kglite::api::DirGraph::maybe_spill_columns(&mut self)
 pub fn kglite::api::DirGraph::new() -> Self
+pub fn kglite::api::DirGraph::node_view(&self, index: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeView<'_>>
 pub fn kglite::api::DirGraph::populate_index_keys(&mut self)
 pub fn kglite::api::DirGraph::rebuild_indices_from_keys(&mut self)
 pub fn kglite::api::DirGraph::rebuild_type_indices(&mut self)
@@ -2359,6 +2360,8 @@ pub fn kglite::api::NodeData::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> co
 impl core::marker::StructuralPartialEq for kglite::api::NodeData
 impl serde_core::ser::Serialize for kglite::api::NodeData
 pub fn kglite::api::NodeData::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'a> core::convert::From<&'a kglite::api::NodeData> for kglite::api::NodeView<'a>
+pub fn kglite::api::NodeView<'a>::from(data: &'a kglite::api::NodeData) -> Self
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::NodeData
 pub fn kglite::api::NodeData::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub struct kglite::api::NodeInfo
@@ -2410,6 +2413,38 @@ impl serde_core::ser::Serialize for kglite::datatypes::values::NodeValue
 pub fn kglite::datatypes::values::NodeValue::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for kglite::datatypes::values::NodeValue
 pub fn kglite::datatypes::values::NodeValue::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub struct kglite::api::NodeView<'a>
+impl<'a> kglite::api::NodeView<'a>
+pub fn kglite::api::NodeView<'a>::contains(&self, key: kglite::api::InternedKey) -> bool
+pub fn kglite::api::NodeView<'a>::data(&self) -> &'a kglite::api::NodeData
+pub fn kglite::api::NodeView<'a>::field_contains_ci(&self, field: &str, needle_lower: &str) -> bool
+pub fn kglite::api::NodeView<'a>::field_starts_with_ci(&self, field: &str, prefix_lower: &str) -> bool
+pub fn kglite::api::NodeView<'a>::get(&self, key: kglite::api::InternedKey) -> core::option::Option<alloc::borrow::Cow<'a, kglite::datatypes::values::Value>>
+pub fn kglite::api::NodeView<'a>::get_field_ref(&self, field: &str) -> core::option::Option<alloc::borrow::Cow<'a, kglite::datatypes::values::Value>>
+pub fn kglite::api::NodeView<'a>::get_node_type_ref<'i>(&self, interner: &'i kglite::api::StringInterner) -> &'i str
+pub fn kglite::api::NodeView<'a>::get_property(&self, key: &str) -> core::option::Option<alloc::borrow::Cow<'a, kglite::datatypes::values::Value>>
+pub fn kglite::api::NodeView<'a>::get_property_value(&self, key: &str) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::NodeView<'a>::get_value(&self, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::NodeView<'a>::has_property(&self, key: &str) -> bool
+pub fn kglite::api::NodeView<'a>::id(&self) -> alloc::borrow::Cow<'a, kglite::datatypes::values::Value>
+pub fn kglite::api::NodeView<'a>::node_type(&self) -> kglite::api::InternedKey
+pub fn kglite::api::NodeView<'a>::node_type_str<'i>(&self, interner: &'i kglite::api::StringInterner) -> &'i str
+pub fn kglite::api::NodeView<'a>::properties_are_columnar(&self) -> bool
+pub fn kglite::api::NodeView<'a>::properties_cloned(&self, interner: &kglite::api::StringInterner) -> std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
+pub fn kglite::api::NodeView<'a>::property_count(&self) -> usize
+pub fn kglite::api::NodeView<'a>::property_keys(&self, interner: &'a kglite::api::StringInterner) -> alloc::vec::Vec<&'a str>
+pub fn kglite::api::NodeView<'a>::property_pairs(&self) -> alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>
+pub fn kglite::api::NodeView<'a>::property_pairs_named(&self, interner: &kglite::api::StringInterner) -> alloc::vec::Vec<(alloc::string::String, kglite::datatypes::values::Value)>
+pub fn kglite::api::NodeView<'a>::str_prop_eq(&self, key: kglite::api::InternedKey, target: &str) -> core::option::Option<bool>
+pub fn kglite::api::NodeView<'a>::title(&self) -> alloc::borrow::Cow<'a, kglite::datatypes::values::Value>
+pub fn kglite::api::NodeView<'a>::to_node_info(&self, interner: &kglite::api::StringInterner) -> kglite::api::NodeInfo
+impl core::fmt::Debug for kglite::api::NodeView<'_>
+pub fn kglite::api::NodeView<'_>::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::clone::Clone for kglite::api::NodeView<'a>
+pub fn kglite::api::NodeView<'a>::clone(&self) -> kglite::api::NodeView<'a>
+impl<'a> core::convert::From<&'a kglite::api::NodeData> for kglite::api::NodeView<'a>
+pub fn kglite::api::NodeView<'a>::from(data: &'a kglite::api::NodeData) -> Self
+impl<'a> core::marker::Copy for kglite::api::NodeView<'a>
 pub struct kglite::api::PathValue
 pub kglite::api::PathValue::nodes: alloc::vec::Vec<kglite::datatypes::values::NodeValue>
 pub kglite::api::PathValue::rels: alloc::vec::Vec<kglite::datatypes::values::RelValue>
@@ -2594,9 +2629,14 @@ pub fn kglite::api::GraphRead::neighbors_directed(&self, idx: petgraph::graph_im
 pub fn kglite::api::GraphRead::neighbors_undirected(&self, idx: petgraph::graph_impl::NodeIndex) -> Self::NeighborsIter
 pub fn kglite::api::GraphRead::node_bound(&self) -> usize
 pub fn kglite::api::GraphRead::node_count(&self) -> usize
+pub fn kglite::api::GraphRead::node_has_property(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> bool
 pub fn kglite::api::GraphRead::node_indices(&self) -> Self::NodeIndicesIter
 pub fn kglite::api::GraphRead::node_labels_of(&self, idx: petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<kglite::api::InternedKey>
+pub fn kglite::api::GraphRead::node_property_count(&self, idx: petgraph::graph_impl::NodeIndex) -> usize
+pub fn kglite::api::GraphRead::node_property_keys(&self, idx: petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<kglite::api::InternedKey>
+pub fn kglite::api::GraphRead::node_row_properties(&self, idx: petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>
 pub fn kglite::api::GraphRead::node_type_of(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::InternedKey>
+pub fn kglite::api::GraphRead::node_view(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeView<'_>>
 pub fn kglite::api::GraphRead::node_weight(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&kglite::api::NodeData>
 pub fn kglite::api::GraphRead::reset_arenas(&self)
 pub fn kglite::api::GraphRead::sources_for_conn_type_bounded(&self, _conn_type: kglite::api::InternedKey, _max: core::option::Option<usize>) -> core::option::Option<alloc::vec::Vec<u32>>
@@ -2773,8 +2813,8 @@ pub fn kglite::api::durable::RecordingGraph<G>::node_weight(&self, idx: petgraph
 pub fn kglite::api::durable::RecordingGraph<G>::reset_arenas(&self)
 pub fn kglite::api::durable::RecordingGraph<G>::sources_for_conn_type_bounded(&self, conn_type: kglite::api::InternedKey, max: core::option::Option<usize>) -> core::option::Option<alloc::vec::Vec<u32>>
 pub fn kglite::api::durable::RecordingGraph<G>::str_prop_eq(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, target: &str) -> core::option::Option<bool>
-pub fn kglite::api::discover_property_keys_excluding(nodes: &[(&str, &kglite::api::NodeData)], interner: &kglite::api::StringInterner, excluded: &[&str]) -> alloc::vec::Vec<alloc::string::String>
-pub fn kglite::api::discover_property_keys_from_data(nodes: &[(&str, &kglite::api::NodeData)], interner: &kglite::api::StringInterner) -> alloc::vec::Vec<alloc::string::String>
+pub fn kglite::api::discover_property_keys_excluding(nodes: &[(&str, kglite::api::NodeView<'_>)], interner: &kglite::api::StringInterner, excluded: &[&str]) -> alloc::vec::Vec<alloc::string::String>
+pub fn kglite::api::discover_property_keys_from_data(nodes: &[(&str, kglite::api::NodeView<'_>)], interner: &kglite::api::StringInterner) -> alloc::vec::Vec<alloc::string::String>
 pub fn kglite::api::explore_markdown(dir: &kglite::api::DirGraph, query: &str, opts: &kglite::api::ExploreOptions, source_roots: &[std::path::PathBuf]) -> alloc::string::String
 pub fn kglite::api::graphgen(cfg: &kglite::graphgen::GraphGenConfig, out_dir: &std::path::Path) -> core::io::error::Result<kglite::graphgen::GraphGenStats>
 pub fn kglite::api::infer_selection_node_type(selection: &kglite::api::CowSelection, dir: &alloc::sync::Arc<kglite::api::DirGraph>) -> core::option::Option<alloc::string::String>

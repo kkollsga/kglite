@@ -579,7 +579,7 @@ impl<'a> CypherExecutor<'a> {
                     continue;
                 }
                 let key = if !self.graph.graph.is_disk() {
-                    let node = self.graph.graph.node_weight(node_idx);
+                    let node = self.graph.graph.node_view(node_idx);
                     direct_group_properties
                         .iter()
                         .map(|(property, pre_resolved)| match node {

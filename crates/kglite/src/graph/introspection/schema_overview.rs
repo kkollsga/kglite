@@ -2,7 +2,7 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::constraints::ConstraintKind;
-use crate::graph::schema::{DirGraph, InternedKey, NodeData};
+use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::GraphRead;
 use petgraph::Direction;
 use std::collections::{HashMap, HashSet};
@@ -118,12 +118,12 @@ pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStat
             });
         entry.count += 1;
 
-        if let Some(source_node) = graph.get_node(edge_ref.source()) {
+        if let Some(source_node) = graph.node_view(edge_ref.source()) {
             entry
                 .sources
                 .insert(source_node.node_type_str(&graph.interner).to_string());
         }
-        if let Some(target_node) = graph.get_node(edge_ref.target()) {
+        if let Some(target_node) = graph.node_view(edge_ref.target()) {
             entry
                 .targets
                 .insert(target_node.node_type_str(&graph.interner).to_string());
@@ -761,6 +761,76 @@ pub(super) fn value_display_compact(v: &Value, truncate_at: Option<usize>) -> St
 /// `max_values`: include `values` list when unique count ≤ this threshold (0 = never).
 /// `sample_size`: when Some(n), sample n evenly-spaced nodes instead of scanning all.
 ///   Sampled non_null counts are scaled to the full population.
+/// Per-property accumulator for [`compute_property_stats`].
+///
+/// `value_set` is capped at `value_cap` so a high-cardinality property does not
+/// clone every value; when capped, `unique` is a lower bound and `values` is
+/// reported as `None`.
+struct PropAccum {
+    non_null: usize,
+    value_set: HashSet<Value>,
+    value_cap: usize,
+    first_type: Option<&'static str>,
+}
+
+impl PropAccum {
+    fn new(cap: usize) -> Self {
+        Self {
+            non_null: 0,
+            value_set: HashSet::new(),
+            value_cap: cap,
+            first_type: None,
+        }
+    }
+
+    fn add(&mut self, v: &Value) {
+        if !is_null_value(v) {
+            self.non_null += 1;
+            if self.value_set.len() < self.value_cap {
+                self.value_set.insert(v.clone());
+            }
+            if self.first_type.is_none() {
+                self.first_type = Some(value_type_name(v));
+            }
+        }
+    }
+}
+
+/// Single pass over `scan_indices`, folding id / title / every stored property
+/// into `accum`.
+///
+/// Reads through [`NodeView`](crate::graph::storage::NodeView): the previous
+/// `NodeData::property_iter` route yielded **nothing** for columnar storage, so
+/// on a saved graph this pass contributed no values at all and the stats
+/// degraded to whatever the `type_schemas` pre-seed supplied — keys with a zero
+/// non-null count (D1 defect 1).
+fn accumulate_property_values(
+    graph: &DirGraph,
+    scan_indices: &[petgraph::graph::NodeIndex],
+    value_cap: usize,
+    accum: &mut HashMap<String, PropAccum>,
+) {
+    for &idx in scan_indices {
+        let Some(node) = graph.node_view(idx) else {
+            continue;
+        };
+        accum
+            .entry("id".to_string())
+            .or_insert_with(|| PropAccum::new(value_cap))
+            .add(&node.id());
+        accum
+            .entry("title".to_string())
+            .or_insert_with(|| PropAccum::new(value_cap))
+            .add(&node.title());
+        for (key, value) in node.property_pairs_named(&graph.interner) {
+            accum
+                .entry(key)
+                .or_insert_with(|| PropAccum::new(value_cap))
+                .add(&value);
+        }
+    }
+}
+
 pub fn compute_property_stats(
     graph: &DirGraph,
     node_type: &str,
@@ -787,34 +857,6 @@ pub fn compute_property_stats(
     } else {
         usize::MAX // still need unique counts even when not reporting values
     };
-
-    struct PropAccum {
-        non_null: usize,
-        value_set: HashSet<Value>,
-        value_cap: usize,
-        first_type: Option<&'static str>,
-    }
-    impl PropAccum {
-        fn new(cap: usize) -> Self {
-            Self {
-                non_null: 0,
-                value_set: HashSet::new(),
-                value_cap: cap,
-                first_type: None,
-            }
-        }
-        fn add(&mut self, v: &Value) {
-            if !is_null_value(v) {
-                self.non_null += 1;
-                if self.value_set.len() < self.value_cap {
-                    self.value_set.insert(v.clone());
-                }
-                if self.first_type.is_none() {
-                    self.first_type = Some(value_type_name(v));
-                }
-            }
-        }
-    }
 
     // Determine which nodes to scan (all or sampled)
     let (scan_indices, sample_count): (Vec<petgraph::graph::NodeIndex>, usize) = match sample_size {
@@ -849,24 +891,7 @@ pub fn compute_property_stats(
         }
     }
 
-    for &idx in &scan_indices {
-        if let Some(node) = graph.get_node(idx) {
-            accum
-                .entry("id".to_string())
-                .or_insert_with(|| PropAccum::new(value_cap))
-                .add(&node.id());
-            accum
-                .entry("title".to_string())
-                .or_insert_with(|| PropAccum::new(value_cap))
-                .add(&node.title());
-            for (key, value) in node.property_iter(&graph.interner) {
-                accum
-                    .entry(key.to_string())
-                    .or_insert_with(|| PropAccum::new(value_cap))
-                    .add(value);
-            }
-        }
-    }
+    accumulate_property_values(graph, &scan_indices, value_cap, &mut accum);
 
     // When sampling, scale non_null counts to the full population
     let scale_factor = if sample_count < total_nodes && sample_count > 0 {
@@ -980,7 +1005,7 @@ pub fn compute_neighbors_schema(
     let g = &graph.graph;
     for node_idx in node_indices.iter() {
         for edge_ref in g.edges_directed(node_idx, Direction::Outgoing) {
-            if let Some(target_node) = graph.get_node(edge_ref.target()) {
+            if let Some(target_node) = graph.node_view(edge_ref.target()) {
                 let key = (
                     edge_ref
                         .weight()
@@ -992,7 +1017,7 @@ pub fn compute_neighbors_schema(
             }
         }
         for edge_ref in g.edges_directed(node_idx, Direction::Incoming) {
-            if let Some(source_node) = graph.get_node(edge_ref.source()) {
+            if let Some(source_node) = graph.node_view(edge_ref.source()) {
                 let key = (
                     edge_ref
                         .weight()
@@ -1047,8 +1072,8 @@ pub fn compute_all_neighbors_schemas(graph: &DirGraph) -> HashMap<String, Neighb
     let g = &graph.graph;
     for edge_ref in g.edge_references() {
         if let (Some(source), Some(target)) = (
-            graph.get_node(edge_ref.source()),
-            graph.get_node(edge_ref.target()),
+            graph.node_view(edge_ref.source()),
+            graph.node_view(edge_ref.target()),
         ) {
             let conn_type = edge_ref
                 .weight()
@@ -1106,11 +1131,17 @@ pub fn compute_all_neighbors_schemas(graph: &DirGraph) -> HashMap<String, Neighb
 }
 
 /// Return first N nodes of a type for quick inspection.
+///
+/// Yields [`NodeView`]s, not `&NodeData`: a bare `NodeData` reference hands the
+/// caller one replica of a columnar type's column store, which is how the
+/// sample block in `describe()` came to enumerate zero properties for saved
+/// graphs. The returned views borrow the disk arena, so they must be consumed
+/// inside the caller's read pass.
 pub fn compute_sample<'a>(
     graph: &'a DirGraph,
     node_type: &str,
     n: usize,
-) -> Result<Vec<&'a NodeData>, String> {
+) -> Result<Vec<crate::graph::storage::NodeView<'a>>, String> {
     // Arena guard: disk-backed node/edge reads materialize into the query
     // arena (protocol in disk/graph.rs); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
@@ -1121,7 +1152,7 @@ pub fn compute_sample<'a>(
 
     let mut result = Vec::with_capacity(n.min(node_indices.len()));
     for idx in node_indices.iter().take(n) {
-        if let Some(node) = graph.get_node(idx) {
+        if let Some(node) = graph.node_view(idx) {
             result.push(node);
         }
     }

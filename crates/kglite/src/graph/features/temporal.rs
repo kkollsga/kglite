@@ -3,7 +3,7 @@
 // Shared temporal validity helpers for filtering nodes and edges by date.
 
 use crate::datatypes::values::Value;
-use crate::graph::schema::{InternedKey, NodeData, TemporalConfig};
+use crate::graph::schema::{InternedKey, TemporalConfig};
 use chrono::NaiveDate;
 
 /// Check if a set of properties is temporally valid at a reference date.
@@ -41,7 +41,7 @@ pub fn is_temporally_valid(
 ///
 /// Uses `get_field_ref()` which checks id, title, and properties.
 pub fn node_is_temporally_valid(
-    node: &NodeData,
+    node: crate::graph::storage::NodeView<'_>,
     config: &TemporalConfig,
     reference: &NaiveDate,
 ) -> bool {
@@ -99,7 +99,7 @@ pub fn overlaps_range(
 ///
 /// Uses `get_field_ref()` which checks id, title, and properties.
 pub fn node_overlaps_range(
-    node: &NodeData,
+    node: crate::graph::storage::NodeView<'_>,
     config: &TemporalConfig,
     start: &NaiveDate,
     end: &NaiveDate,
@@ -175,7 +175,7 @@ pub fn overlaps_range_multi(
 /// Dispatches to `node_is_temporally_valid` (Today/At) or `node_overlaps_range` (During).
 /// Returns `true` for `All` (no filtering).
 pub fn node_passes_context(
-    node: &NodeData,
+    node: crate::graph::storage::NodeView<'_>,
     config: &TemporalConfig,
     context: &crate::graph::TemporalContext,
 ) -> bool {

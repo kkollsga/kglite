@@ -451,7 +451,7 @@ mod tests {
     fn prop(g: &mut DirGraph, id: i64, key: &str) -> Option<Value> {
         let idx = g.lookup_by_id("Person", &Value::Int64(id))?;
         g.graph
-            .node_weight(idx)
+            .node_view(idx)
             .and_then(|n| n.get_field_ref(key).map(|c| c.into_owned()))
     }
 

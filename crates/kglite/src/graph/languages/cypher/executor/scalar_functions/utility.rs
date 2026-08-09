@@ -80,7 +80,7 @@ impl<'a> CypherExecutor<'a> {
                 };
 
                 // Per-row: look up node type → embedding store → compute similarity
-                let node_type = match self.graph.graph.node_weight(node_idx) {
+                let node_type = match self.graph.graph.node_view(node_idx) {
                     Some(n) => n.node_type_str(&self.graph.interner),
                     None => return Ok(Some(Value::Null)),
                 };
@@ -268,7 +268,7 @@ impl<'a> CypherExecutor<'a> {
                         )
                     }
                 };
-                let node_type = match self.graph.graph.node_weight(node_idx) {
+                let node_type = match self.graph.graph.node_view(node_idx) {
                     Some(n) => n.node_type_str(&self.graph.interner),
                     None => return Ok(Some(Value::Null)),
                 };

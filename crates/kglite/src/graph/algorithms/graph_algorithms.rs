@@ -145,7 +145,7 @@ fn node_passes_via_filter(
     match via_types {
         None => true,
         Some(types) => {
-            if let Some(node_data) = graph.graph.node_weight(node) {
+            if let Some(node_data) = graph.graph.node_view(node) {
                 types.contains(node_data.node_type_str(&graph.interner))
             } else {
                 false
@@ -1668,7 +1668,7 @@ pub fn get_node_info(graph: &DirGraph, node_idx: NodeIndex) -> Option<PathNodeIn
                                                   // arena, which must run under a DiskQueryGuard (arena protocol in
                                                   // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
-    let node = graph.get_node(node_idx)?;
+    let node = graph.node_view(node_idx)?;
     let node_title = node.title();
     let title_str = match &*node_title {
         Value::String(s) => s.clone(),

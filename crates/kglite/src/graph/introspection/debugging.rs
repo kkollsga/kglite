@@ -150,7 +150,7 @@ pub fn get_selection_string(graph: &DirGraph, selection: &CurrentSelection) -> S
         for (parent, children) in level.iter_groups() {
             match parent {
                 Some(parent_idx) => {
-                    if let Some(parent_node) = graph.get_node(*parent_idx) {
+                    if let Some(parent_node) = graph.node_view(*parent_idx) {
                         let parent_title = parent_node.title();
                         let title_str = match &*parent_title {
                             Value::String(s) => s.clone(),
@@ -169,7 +169,7 @@ pub fn get_selection_string(graph: &DirGraph, selection: &CurrentSelection) -> S
 
             // Add children info with node type if available
             if !children.is_empty() {
-                let first_child = graph.get_node(children[0]);
+                let first_child = graph.node_view(children[0]);
                 let child_type = first_child.map(|node| node.node_type_str(&graph.interner));
 
                 let indices: Vec<String> = children

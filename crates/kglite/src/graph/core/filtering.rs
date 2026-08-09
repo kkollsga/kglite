@@ -234,7 +234,7 @@ fn filter_nodes_by_conditions(
         .iter()
         .filter_map(|&idx| {
             graph
-                .get_node(idx)
+                .node_view(idx)
                 .map(|n| n.node_type_str(&graph.interner))
         })
         .collect();
@@ -428,7 +428,7 @@ fn filter_nodes_by_conditions(
     nodes
         .into_iter()
         .filter(|&idx| {
-            if let Some(node) = graph.get_node(idx) {
+            if let Some(node) = graph.node_view(idx) {
                 conditions.iter().all(|(key, condition)| {
                     let value = field_cache.entry((idx, key.as_str())).or_insert_with(|| {
                         // Resolve alias: original column name → canonical field
@@ -486,7 +486,7 @@ fn build_sort_keys(
     nodes
         .iter()
         .map(|&idx| {
-            let node = graph.get_node(idx);
+            let node = graph.node_view(idx);
             let keys = sort_fields
                 .iter()
                 .map(|(field, _)| node.and_then(|n| n.get_field_ref(field).map(Cow::into_owned)))
@@ -801,7 +801,7 @@ pub fn filter_nodes_any(
     }
 
     let matches_any = |idx: NodeIndex| -> bool {
-        if let Some(node) = graph.get_node(idx) {
+        if let Some(node) = graph.node_view(idx) {
             condition_sets.iter().any(|conditions| {
                 conditions.iter().all(|(key, condition)| {
                     let resolved = graph.resolve_alias(node.node_type_str(&graph.interner), key);

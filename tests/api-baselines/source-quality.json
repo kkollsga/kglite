@@ -112,7 +112,7 @@
     {
       "path": "crates/kglite/src/graph/core/calculations.rs",
       "qualified_name": "crate::process_equation",
-      "lines": 242,
+      "lines": 239,
       "branches": 38,
       "nesting": 9
     },
@@ -392,8 +392,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
       "qualified_name": "crate::execute_set",
-      "lines": 479,
-      "branches": 64,
+      "lines": 448,
+      "branches": 61,
       "nesting": 8
     },
     {

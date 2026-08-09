@@ -76,7 +76,7 @@ pub(super) fn execute_rev_diff(
     let mut hits: Vec<(NodeIndex, &'static str)> = Vec::new();
 
     for &nidx in &candidates {
-        let Some(node) = graph.graph.node_weight(nidx) else {
+        let Some(node) = graph.graph.node_view(nidx) else {
             continue;
         };
         let Some(Value::List(revs)) = node.get_property_value("revs") else {
@@ -129,7 +129,7 @@ pub(super) fn execute_rev_diff(
     // Emit one row per hit, sorted (bucket, qualified_name) for determinism.
     let mut rows: Vec<(String, String, ResultRow)> = Vec::with_capacity(hits.len());
     for (nidx, bucket) in hits {
-        let Some(node) = graph.graph.node_weight(nidx) else {
+        let Some(node) = graph.graph.node_view(nidx) else {
             continue;
         };
         let node_type = node.node_type_str(&graph.interner).to_string();

@@ -63,7 +63,7 @@ impl KnowledgeGraph {
                     .map(|indices| {
                         indices.iter().any(|idx| {
                             g.graph
-                                .node_weight(idx)
+                                .node_view(idx)
                                 .map(|n| n.has_property(text_column))
                                 .unwrap_or(false)
                         })
@@ -346,12 +346,7 @@ impl KnowledgeGraph {
             let pandas = py.import("pandas")?;
             let records: Vec<Py<PyAny>> = results
                 .iter()
-                .filter_map(|r| {
-                    self.inner
-                        .graph
-                        .node_weight(r.node_idx)
-                        .map(|node| (r, node))
-                })
+                .filter_map(|r| self.inner.graph.node_view(r.node_idx).map(|node| (r, node)))
                 .map(|(r, node)| -> PyResult<Py<PyAny>> {
                     let dict = PyDict::new(py);
                     dict.set_item("id", py_out::value_to_py(py, &node.id())?)?;
@@ -381,7 +376,7 @@ impl KnowledgeGraph {
         // Return as list of dicts
         let py_list = PyList::empty(py);
         for r in &results {
-            if let Some(node) = self.inner.graph.node_weight(r.node_idx) {
+            if let Some(node) = self.inner.graph.node_view(r.node_idx) {
                 let dict = PyDict::new(py);
                 dict.set_item("id", py_out::value_to_py(py, &node.id())?)?;
                 if want("title") {
@@ -600,7 +595,7 @@ impl KnowledgeGraph {
                 None => continue,
             };
             for nidx in type_indices.iter() {
-                let node = match self.inner.graph.node_weight(nidx) {
+                let node = match self.inner.graph.node_view(nidx) {
                     Some(n) => n,
                     None => continue,
                 };
@@ -877,7 +872,7 @@ impl KnowledgeGraph {
 
             for (&node_index, &_slot) in &store.node_to_slot {
                 if let Some(embedding) = store.get_embedding(node_index) {
-                    if let Some(node) = self.inner.graph.node_weight(NodeIndex::new(node_index)) {
+                    if let Some(node) = self.inner.graph.node_view(NodeIndex::new(node_index)) {
                         let py_id = py_out::value_to_py(py, &node.id())?;
                         let py_vec = PyList::new(py, embedding)?;
                         result.set_item(py_id, py_vec)?;
@@ -904,7 +899,7 @@ impl KnowledgeGraph {
             .unwrap_or_default();
 
         for node_idx in &nodes {
-            let node = match self.inner.graph.node_weight(*node_idx) {
+            let node = match self.inner.graph.node_view(*node_idx) {
                 Some(n) => n,
                 None => continue,
             };
@@ -1100,7 +1095,7 @@ impl KnowledgeGraph {
 
         let changed_mode = mode == "changed";
         for &node_idx in &node_indices {
-            if let Some(node) = self.inner.graph.node_weight(node_idx) {
+            if let Some(node) = self.inner.graph.node_view(node_idx) {
                 match node.get_property(text_column).as_deref() {
                     Some(crate::datatypes::values::Value::String(s)) if !s.is_empty() => {
                         let hash = kglite_core::api::storage::EmbeddingStore::text_hash(s);

@@ -475,7 +475,7 @@ mod tests {
     /// Find a node index whose `uri` property equals `uri`.
     fn node_idx_by_uri(graph: &DirGraph, uri: &str) -> Option<petgraph::graph::NodeIndex> {
         for idx in GraphRead::node_indices(&graph.graph) {
-            let node = GraphRead::node_weight(&graph.graph, idx).unwrap();
+            let node = GraphRead::node_view(&graph.graph, idx).unwrap();
             if let Some(v) = node.get_property("uri") {
                 if matches!(v.as_ref(), Value::String(s) if s == uri) {
                     return Some(idx);
@@ -488,7 +488,7 @@ mod tests {
     /// Find a node by its `uri` property and return (node_type, props clone).
     fn find_by_uri(graph: &DirGraph, uri: &str) -> Option<(String, HashMap<String, Value>)> {
         let idx = node_idx_by_uri(graph, uri)?;
-        let node = GraphRead::node_weight(&graph.graph, idx).unwrap();
+        let node = GraphRead::node_view(&graph.graph, idx).unwrap();
         let node_type = node.node_type_str(&graph.interner).to_string();
         let props = node.properties_cloned(&graph.interner);
         Some((node_type, props))
@@ -496,7 +496,7 @@ mod tests {
 
     fn title_of(graph: &DirGraph, uri: &str) -> Option<String> {
         let idx = node_idx_by_uri(graph, uri)?;
-        let node = GraphRead::node_weight(&graph.graph, idx).unwrap();
+        let node = GraphRead::node_view(&graph.graph, idx).unwrap();
         match node.title().into_owned() {
             Value::String(s) => Some(s),
             _ => None,
@@ -580,7 +580,7 @@ ex:carol rdf:type foaf:Person, foaf:Agent .
         // The blank node materialised with a `uri` starting `_:`.
         let mut found = false;
         for idx in GraphRead::node_indices(&graph.graph) {
-            let node = GraphRead::node_weight(&graph.graph, idx).unwrap();
+            let node = GraphRead::node_view(&graph.graph, idx).unwrap();
             if let Some(v) = node.get_property("uri") {
                 if let Value::String(s) = v.as_ref() {
                     if s.starts_with("_:") {

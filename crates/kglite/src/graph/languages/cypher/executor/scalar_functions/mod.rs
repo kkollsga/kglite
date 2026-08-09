@@ -206,7 +206,7 @@ impl<'a> CypherExecutor<'a> {
         let node = self
             .graph
             .graph
-            .node_weight(*node_idx)
+            .node_view(*node_idx)
             .ok_or("ts_*(): node not found in graph")?;
         let node_type_str = node.node_type_str(&self.graph.interner);
         let config = self

@@ -163,7 +163,7 @@ pub fn extend_graph(
     let mut label_carriers: Vec<(String, Value, Vec<String>)> = Vec::new();
 
     for idx in source.graph.node_indices() {
-        let Some(node) = source.graph.node_weight(idx) else {
+        let Some(node) = source.graph.node_view(idx) else {
             continue;
         };
         let node_type = node.node_type_str(&source.interner).to_string();
@@ -218,7 +218,7 @@ pub fn extend_graph(
         incoming_names.extend(edge.properties_cloned(&source.interner).into_keys());
         if let Some((src_idx, tgt_idx)) = source.graph.edge_endpoints(edge_idx) {
             for idx in [src_idx, tgt_idx] {
-                if let Some(node) = source.graph.node_weight(idx) {
+                if let Some(node) = source.graph.node_view(idx) {
                     incoming_names.push(node.node_type_str(&source.interner).to_string());
                 }
             }
@@ -309,8 +309,8 @@ pub fn extend_graph(
         };
         let conn_type = edge.connection_type_str(&source.interner).to_string();
         let (Some(src_node), Some(tgt_node)) = (
-            source.graph.node_weight(src_idx),
-            source.graph.node_weight(tgt_idx),
+            source.graph.node_view(src_idx),
+            source.graph.node_view(tgt_idx),
         ) else {
             continue;
         };

@@ -92,7 +92,7 @@ impl<'a> CypherExecutor<'a> {
                     // id(n) returns KGLite's logical node id. Accept a bound
                     // variable, NodeRef, or materialised node value.
                     if let Some(idx) = self.node_arg_index(arg, row) {
-                        if let Some(node) = self.graph.graph.node_weight(idx) {
+                        if let Some(node) = self.graph.graph.node_view(idx) {
                             return Ok(Some(resolve_node_property(node, "id", self.graph)));
                         }
                     }

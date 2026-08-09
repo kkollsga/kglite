@@ -1158,7 +1158,7 @@ pub(crate) fn detach_delete_nodes(
     {
         let _guard = graph.graph.begin_query();
         for &node_idx in nodes_to_delete {
-            if let Some(node) = graph.graph.node_weight(node_idx) {
+            if let Some(node) = graph.graph.node_view(node_idx) {
                 let node_type = node.get_node_type_ref(&graph.interner).to_string();
                 let node_id = node.id().into_owned();
                 doomed_ids
@@ -1529,7 +1529,7 @@ pub fn create_connections(
     for lvl_idx in 0..level_count {
         if let Some(level) = selection.get_level(lvl_idx) {
             for node_idx in level.iter_node_indices() {
-                if let Some(node) = graph.get_node(node_idx) {
+                if let Some(node) = graph.node_view(node_idx) {
                     type_to_level
                         .entry(node.node_type_str(&graph.interner).to_string())
                         .or_insert(lvl_idx);
@@ -1666,7 +1666,7 @@ pub fn create_connections(
                 // disk backend (protocol in disk/graph.rs); scoped so the
                 // borrow ends before the batch's &mut graph calls.
                 let _arena_guard = graph.graph.begin_query();
-                if let Some(node) = graph.get_node(target_idx) {
+                if let Some(node) = graph.node_view(target_idx) {
                     detected_target_type = Some(node.node_type_str(&graph.interner).to_string());
                 }
             }
@@ -1675,7 +1675,7 @@ pub fn create_connections(
                 if detected_source_type.is_none() {
                     // Arena guard: scoped read (see above).
                     let _arena_guard = graph.graph.begin_query();
-                    if let Some(node) = graph.get_node(source_idx) {
+                    if let Some(node) = graph.node_view(source_idx) {
                         detected_source_type =
                             Some(node.node_type_str(&graph.interner).to_string());
                     }
@@ -1690,12 +1690,12 @@ pub fn create_connections(
                     let mut props = HashMap::new();
                     // Add source and target node properties
                     for &node_idx in &[source_idx, target_idx] {
-                        if let Some(node) = graph.graph.node_weight(node_idx) {
+                        if let Some(node) = graph.graph.node_view(node_idx) {
                             let nt = node.node_type_str(&graph.interner);
                             if let Some(requested_props) = prop_spec.get(nt) {
                                 if requested_props.is_empty() {
-                                    for (k, v) in node.property_iter(&graph.interner) {
-                                        props.insert(k.to_string(), v.clone());
+                                    for (k, v) in node.property_pairs_named(&graph.interner) {
+                                        props.insert(k, v);
                                     }
                                 } else {
                                     for prop_name in requested_props {
@@ -2093,7 +2093,7 @@ mod id_index_tests {
         .unwrap();
 
         let idx = g.lookup_by_id("Task", &Value::Int64(1)).unwrap();
-        let node = g.graph.node_weight(idx).unwrap();
+        let node = g.graph.node_view(idx).unwrap();
         // Agent-owned fields preserved; new field added.
         assert_eq!(
             node.get_field_ref("status").as_deref(),

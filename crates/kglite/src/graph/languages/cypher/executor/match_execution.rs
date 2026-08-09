@@ -53,13 +53,13 @@ impl<'a> CypherExecutor<'a> {
                             let val = row
                                 .node_bindings
                                 .get(var)
-                                .and_then(|idx| self.graph.graph.node_weight(*idx))
+                                .and_then(|idx| self.graph.graph.node_view(*idx))
                                 .map(|node| helpers::resolve_node_property(node, prop, self.graph))
                                 .or_else(|| match row.projected.get(var) {
                                     Some(Value::NodeRef(i)) => self
                                         .graph
                                         .graph
-                                        .node_weight(petgraph::graph::NodeIndex::new(*i as usize))
+                                        .node_view(petgraph::graph::NodeIndex::new(*i as usize))
                                         .map(|n| {
                                             helpers::resolve_node_property(n, prop, self.graph)
                                         }),

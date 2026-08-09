@@ -617,7 +617,7 @@ fn write_connections_detail(
         xml.push_str("    <samples>\n");
         for sample in &acc.samples {
             let src_label = graph
-                .get_node(sample.src_idx)
+                .node_view(sample.src_idx)
                 .map(|n| {
                     format!(
                         "{}:{}",
@@ -627,7 +627,7 @@ fn write_connections_detail(
                 })
                 .unwrap_or_default();
             let tgt_label = graph
-                .get_node(sample.tgt_idx)
+                .node_view(sample.tgt_idx)
                 .map(|n| {
                     format!(
                         "{}:{}",
@@ -1207,10 +1207,10 @@ fn write_type_detail(
                 );
                 // Include up to 4 non-null custom properties
                 let mut prop_count = 0;
-                let mut sorted_props: Vec<(&str, &Value)> =
-                    node.property_iter(&graph.interner).collect();
-                sorted_props.sort_by_key(|(k, _)| *k);
-                for (k, v) in sorted_props {
+                // NodeView enumeration is complete for columnar rows.
+                let mut sorted_props = node.property_pairs_named(&graph.interner);
+                sorted_props.sort_by(|a, b| a.0.cmp(&b.0));
+                for (k, v) in sorted_props.iter().map(|(k, v)| (k.as_str(), v)) {
                     // Skip nulls and uninformative `false` booleans: the latter
                     // are mostly the cross-language frontend flags
                     // (flutter_build, is_ffi, …) that would otherwise crowd the

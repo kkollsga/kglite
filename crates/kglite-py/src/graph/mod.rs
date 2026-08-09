@@ -627,7 +627,7 @@ impl KnowledgeGraph {
             }
         };
 
-        let node = self.inner.get_node(target_idx).ok_or_else(|| {
+        let node = self.inner.node_view(target_idx).ok_or_else(|| {
             crate::error_py::kg_to_pyerr(crate::error::KgError::Internal {
                 message: "resolved code entity disappeared before projection".to_string(),
                 location: "graph/mod.rs::source_one",
@@ -875,7 +875,7 @@ pub(crate) fn centrality_results_to_py_dict(
     let scores_dict = PyDict::new(py);
 
     for result in results.into_iter().take(limit) {
-        if let Some(node) = graph.get_node(result.node_idx) {
+        if let Some(node) = graph.node_view(result.node_idx) {
             let id_py = py_out::value_to_py(py, &node.id())?;
             scores_dict.set_item(id_py, result.score)?;
         }
@@ -901,7 +901,7 @@ pub(crate) fn centrality_results_to_dataframe(
     let mut scores: Vec<f64> = Vec::with_capacity(limit);
 
     for result in results.into_iter().take(limit) {
-        if let Some(node) = graph.get_node(result.node_idx) {
+        if let Some(node) = graph.node_view(result.node_idx) {
             types.push(node.node_type_str(&graph.interner));
             let node_title = node.title();
             let title_str = match &*node_title {
@@ -950,7 +950,7 @@ pub(crate) fn community_results_to_py(
     for (comm_id, members) in &grouped {
         let member_list = PyList::empty(py);
         for &node_idx in members {
-            if let Some(node) = graph.get_node(node_idx) {
+            if let Some(node) = graph.node_view(node_idx) {
                 let node_dict = PyDict::new(py);
                 node_dict.set_item(key_type, node.node_type_str(&graph.interner))?;
                 let node_title = node.title();

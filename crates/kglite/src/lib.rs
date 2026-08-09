@@ -111,6 +111,16 @@ pub mod api {
     /// iterator-returning methods), so consumers take `&impl GraphRead`,
     /// never `&dyn`. Lifted for cross-binding read access (roadmap Piece 1).
     pub use crate::graph::storage::GraphRead;
+    /// The authoritative read handle for one node's properties.
+    ///
+    /// A `&NodeData` is one *replica* of a columnar type's column store;
+    /// `NodeView` is the store the storage backend answers with, and its
+    /// enumeration methods are complete for every storage variant (unlike
+    /// `NodeData::property_iter`, which yields nothing for columnar rows).
+    /// Obtain one from `GraphRead::node_view` / `DirGraph::node_view`; do not
+    /// hold it across a `Python::attach` boundary — resolve to owned values
+    /// first. See `crates/kglite/src/graph/storage/node_view.rs`.
+    pub use crate::graph::storage::NodeView;
     /// The temporal query context (`At` / `During` / `Today` / `All`) — the
     /// as-of filter a binding's cursor carries for temporal-validity
     /// auto-filtering. Lifted in roadmap Piece 4.

@@ -27,8 +27,8 @@ impl TypeLookup {
         let _guard = graph.begin_query();
         // Single pass through the graph
         for i in graph.node_indices() {
-            if let Some(node_data) = graph.node_weight(i) {
-                if node_data.node_type == InternedKey::from_str(&node_type) {
+            if let Some(node_data) = graph.node_view(i) {
+                if node_data.node_type() == InternedKey::from_str(&node_type) {
                     uid_to_index.insert(node_data.id().into_owned(), i);
                     title_to_index.insert(node_data.title().into_owned(), i);
                 }
@@ -107,13 +107,13 @@ impl CombinedTypeLookup {
         let _guard = graph.begin_query();
         // Single pass through graph - collect both source and target if different types
         for idx in graph.node_indices() {
-            if let Some(node_data) = graph.node_weight(idx) {
-                if node_data.node_type == InternedKey::from_str(&source_type) {
+            if let Some(node_data) = graph.node_view(idx) {
+                if node_data.node_type() == InternedKey::from_str(&source_type) {
                     source_uid_to_index.insert(node_data.id().into_owned(), idx);
                 }
                 // Also collect target type in same pass (if different from source)
                 if let Some(ref mut target_map) = target_uid_to_index_map {
-                    if node_data.node_type == InternedKey::from_str(&target_type) {
+                    if node_data.node_type() == InternedKey::from_str(&target_type) {
                         target_map.insert(node_data.id().into_owned(), idx);
                     }
                 }

@@ -194,7 +194,7 @@ fn lexical_search(dir: &DirGraph, query: &str, max_entities: usize) -> Vec<Hit> 
             continue;
         };
         for nidx in idx_ref.iter() {
-            let Some(node) = dir.graph.node_weight(nidx) else {
+            let Some(node) = dir.graph.node_view(nidx) else {
                 continue;
             };
             let title = crate::datatypes::values::raw_string(&node.title());
@@ -311,7 +311,7 @@ fn traverse(dir: &DirGraph, seeds: &[Hit], max_depth: usize) -> Vec<Hit> {
         if seed_set.contains(&nidx) {
             continue;
         }
-        let Some(node) = dir.graph.node_weight(nidx) else {
+        let Some(node) = dir.graph.node_view(nidx) else {
             continue;
         };
         let kind = node.get_node_type_ref(&dir.interner).to_string();

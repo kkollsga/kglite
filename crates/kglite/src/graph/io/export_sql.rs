@@ -256,7 +256,7 @@ fn node_properties(graph: &DirGraph, idx: NodeIndex) -> BTreeMap<String, Value> 
     // dropping it would be silent data loss.
     if graph
         .graph
-        .node_weight(idx)
+        .node_view(idx)
         .and_then(|node| node.get_property_value("type"))
         .is_none()
     {
@@ -275,7 +275,7 @@ fn nodes_by_type(
 ) -> BTreeMap<String, Vec<(String, NodeIndex)>> {
     let mut grouped: BTreeMap<String, Vec<(String, NodeIndex)>> = BTreeMap::new();
     for &idx in indices {
-        if let Some(node) = graph.graph.node_weight(idx) {
+        if let Some(node) = graph.graph.node_view(idx) {
             let type_name = node.node_type_str(&graph.interner).to_string();
             grouped
                 .entry(type_name)
@@ -306,7 +306,7 @@ fn edges_by_type(graph: &DirGraph, indices: &[NodeIndex]) -> BTreeMap<String, Ve
     let exported: BTreeSet<NodeIndex> = indices.iter().copied().collect();
     let mut grouped: BTreeMap<String, Vec<EdgeRow>> = BTreeMap::new();
     for &source in indices {
-        let Some(source_node) = graph.graph.node_weight(source) else {
+        let Some(source_node) = graph.graph.node_view(source) else {
             continue;
         };
         let source_type = source_node.node_type_str(&graph.interner).to_string();
@@ -316,7 +316,7 @@ fn edges_by_type(graph: &DirGraph, indices: &[NodeIndex]) -> BTreeMap<String, Ve
             if !exported.contains(&target) {
                 continue;
             }
-            let Some(target_node) = graph.graph.node_weight(target) else {
+            let Some(target_node) = graph.graph.node_view(target) else {
                 continue;
             };
             let weight = edge.weight();
@@ -462,7 +462,7 @@ pub fn to_sqlite_dump(
         let rows: Vec<(Vec<Value>, BTreeMap<String, Value>)> = nodes
             .iter()
             .map(|(_, idx)| {
-                let node = graph.graph.node_weight(*idx);
+                let node = graph.graph.node_view(*idx);
                 let identity = vec![
                     node.map(|n| n.id().into_owned()).unwrap_or(Value::Null),
                     node.map(|n| n.title().into_owned()).unwrap_or(Value::Null),
