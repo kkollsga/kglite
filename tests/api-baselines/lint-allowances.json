@@ -13,7 +13,7 @@
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-mcp-server/src/tools.rs::fn:run_cypher_write:fn run_cypher_write( active: &mut ActiveGraph, query: &str, write_scope: Option<&[String]>, git_sha: Option<&str>, modified_by: Option<&str>, value_codecs: Option<&[ValueCodec]>, csv_http: Option<&crate::csv_http::CsvHttpConfig>, ) -> Result<String, String>::clippy::too_many_arguments",
+      "identity": "crates/kglite-mcp-server/src/tools/runners.rs::fn:run_cypher_write:pub(crate) fn run_cypher_write( active: &mut ActiveGraph, query: &str, write_scope: Option<&[String]>, git_sha: Option<&str>, modified_by: Option<&str>, value_codecs: Option<&[ValueCodec]>, csv_http: Option<&crate::csv_http::CsvHttpConfig>, ) -> Result<String, String>::clippy::too_many_arguments",
       "classification": "boundary"
     },
     {

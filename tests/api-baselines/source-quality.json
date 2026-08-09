@@ -47,13 +47,6 @@
   },
   "function_exceptions": [
     {
-      "path": "crates/kglite-mcp-server/src/lib.rs",
-      "qualified_name": "crate::run_async",
-      "lines": 291,
-      "branches": 31,
-      "nesting": 3
-    },
-    {
       "path": "crates/kglite-py/src/datatypes/py_in.rs",
       "qualified_name": "crate::convert_pandas_series",
       "lines": 193,

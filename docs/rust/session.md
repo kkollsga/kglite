@@ -89,5 +89,5 @@ exposing that mode.
 - `api::session` — supported public re-exports.
 - `crates/kglite-py/src/graph/pyapi/` — Python wrapper.
 - `crates/kglite-bolt-server/src/backend.rs` — Bolt wrapper.
-- `crates/kglite-mcp-server/src/tools.rs` — MCP wrapper.
+- `crates/kglite-mcp-server/src/tools/` — MCP wrapper.
 - [C ABI](c-abi.md) — non-Rust handle/status contract.

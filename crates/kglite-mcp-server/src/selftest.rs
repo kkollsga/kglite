@@ -31,6 +31,8 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
+use mcp_methods::server::Manifest;
+
 use super::{load_manifest, pick_mode, promote_local_workspace, Cli, Mode};
 
 /// How long to wait for any single JSON-RPC response before declaring the
@@ -243,20 +245,10 @@ fn snippet(text: &str) -> String {
     }
 }
 
-/// Entry point for `--selftest`. `argv` is the full original argv (program
-/// name in `[0]`); `cli` is the already-parsed view used to re-derive the
-/// mode so the harness knows how to activate and what to expect.
-pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
-    // Re-derive the mode exactly as boot does, so we activate correctly and
-    // set the right expectations. Manifest load is best-effort here: if it
-    // fails, the child hits the same error and `initialize` reports red.
-    let mode = pick_mode(cli);
-    let manifest = load_manifest(cli, &mode).ok().flatten();
-    let mode = promote_local_workspace(mode.clone(), manifest.as_ref()).unwrap_or(mode);
-
-    // Child argv = our argv minus the program name and the selftest-only flags
-    // (`--selftest`, and `--selftest-path <val>` in both space and `=` forms) —
-    // the child is a real server and clap would reject those unknown flags.
+/// Child argv = our argv minus the program name and the selftest-only flags
+/// (`--selftest`, and `--selftest-path <val>` in both space and `=` forms) —
+/// the child is a real server and clap would reject those unknown flags.
+fn child_argv(argv: &[OsString]) -> Vec<OsString> {
     let mut child_args: Vec<OsString> = Vec::new();
     let mut skip_next = false;
     for a in argv.iter().skip(1) {
@@ -274,17 +266,17 @@ pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
         }
         child_args.push(a.clone());
     }
+    child_args
+}
 
-    println!(
-        "kglite-mcp-server --selftest  (mode: {})",
-        mode_label(&mode)
-    );
-    println!("  spawning child server for a live MCP handshake …\n");
+/// Whether the live `tools/list` registry carries this tool name.
+fn registered(names: &[String], name: &str) -> bool {
+    names.iter().any(|x| x == name)
+}
 
-    let mut rpc = Rpc::spawn(&child_args)?;
-    let mut checks: Vec<(&str, Check)> = Vec::new();
-
-    // 1. initialize — if this fails there's nothing more to probe.
+/// 1. initialize. Returns `false` when the handshake failed — there is nothing
+///    more to probe against a child that never came up.
+fn check_initialize(rpc: &mut Rpc, checks: &mut Vec<(&'static str, Check)>) -> Result<bool> {
     let init = rpc.request(
         "initialize",
         json!({
@@ -305,27 +297,18 @@ pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
                 "server initializes",
                 Check::Pass(format!("serverInfo.name = {name}")),
             ));
+            Ok(true)
         }
         Err(e) => {
             checks.push(("server initializes", Check::Fail(e.to_string())));
-            return report(checks);
+            Ok(false)
         }
     }
+}
 
-    // 2. tools/list — the graph tools must be present in every mode.
-    let tools = rpc.request("tools/list", json!({}))?;
-    let names: Vec<String> = tools
-        .get("tools")
-        .and_then(Value::as_array)
-        .map(|ts| {
-            ts.iter()
-                .filter_map(|t| t.get("name").and_then(Value::as_str).map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let has = |n: &str| names.iter().any(|x| x == n);
-
-    if has("cypher_query") && has("graph_overview") {
+/// 2. tools/list — the graph tools must be present in every mode.
+fn check_graph_tools(names: &[String], checks: &mut Vec<(&'static str, Check)>) {
+    if registered(names, "cypher_query") && registered(names, "graph_overview") {
         checks.push((
             "graph tools registered",
             Check::Pass(format!(
@@ -338,21 +321,29 @@ pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
             "graph tools registered",
             Check::Fail(format!(
                 "missing {}{}(if a code-mode client only sees grep/read_source, search the registry for 'cypher')",
-                if has("cypher_query") { "" } else { "cypher_query " },
-                if has("graph_overview") { "" } else { "graph_overview " },
+                if registered(names, "cypher_query") { "" } else { "cypher_query " },
+                if registered(names, "graph_overview") { "" } else { "graph_overview " },
             )),
         ));
     }
+}
 
-    // A non-empty recipe catalog is a two-route ownership unit. Probe the
-    // live registry rather than trusting that successful manifest parsing
-    // implies both tools were installed.
+/// A non-empty recipe catalog is a two-route ownership unit. Probe the live
+/// registry rather than trusting that successful manifest parsing implies both
+/// tools were installed.
+fn check_recipe_tools(
+    manifest: Option<&Manifest>,
+    names: &[String],
+    checks: &mut Vec<(&'static str, Check)>,
+) {
     let recipe_catalog_configured = manifest
-        .as_ref()
         .and_then(|manifest| manifest.extensions.get("cypher_recipes"))
         .and_then(Value::as_object)
         .is_some_and(|catalog| !catalog.is_empty());
-    let recipe_tools = (has("list_recipe_queries"), has("run_recipe_query"));
+    let recipe_tools = (
+        registered(names, "list_recipe_queries"),
+        registered(names, "run_recipe_query"),
+    );
     if recipe_catalog_configured {
         if recipe_tools == (true, true) {
             checks.push((
@@ -383,12 +374,14 @@ pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
             Check::Fail("recipe routes registered without a non-empty catalog".into()),
         ));
     }
+}
 
-    // 3. github tools — informational (honest listing: present iff a token is
-    //    reachable), never a hard failure.
+/// 3. github tools — informational (honest listing: present iff a token is
+///    reachable), never a hard failure.
+fn check_github_tools(names: &[String], checks: &mut Vec<(&'static str, Check)>) {
     let gh: Vec<&str> = ["github_issues", "github_api", "screen_stargazers"]
         .into_iter()
-        .filter(|t| has(t))
+        .filter(|t| registered(names, t))
         .collect();
     if gh.is_empty() {
         checks.push((
@@ -401,19 +394,29 @@ pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
             Check::Pass(format!("present: {}", gh.join(", "))),
         ));
     }
+}
 
-    // 4. activation — local-workspace. The `workspace.root` can be a wide
-    //    starting root that agents narrow with `set_root_dir` at runtime; it
-    //    is never built as a unit. (`sandbox_root`, when configured, owns the
-    //    containment boundary.) So the selftest must NOT `set_root_dir(root)` —
-    //    for a broad root (the documented code-review archetype) that builds a
-    //    code_tree over the whole tree, which is unbounded work and hangs the
-    //    handshake. Registration-only by default; a real build+hydrate check is
-    //    opt-in via `--selftest-path <subdir>` pointed at a small representative
-    //    directory.
+/// 4. activation — local-workspace. The `workspace.root` can be a wide
+///    starting root that agents narrow with `set_root_dir` at runtime; it
+///    is never built as a unit. (`sandbox_root`, when configured, owns the
+///    containment boundary.) So the selftest must NOT `set_root_dir(root)` —
+///    for a broad root (the documented code-review archetype) that builds a
+///    code_tree over the whole tree, which is unbounded work and hangs the
+///    handshake. Registration-only by default; a real build+hydrate check is
+///    opt-in via `--selftest-path <subdir>` pointed at a small representative
+///    directory.
+///
+/// Returns whether a graph was actually built, which gates the hydration probe.
+fn check_local_activation(
+    rpc: &mut Rpc,
+    cli: &Cli,
+    mode: &Mode,
+    names: &[String],
+    checks: &mut Vec<(&'static str, Check)>,
+) -> Result<bool> {
     let mut local_activated = false;
-    if let Mode::LocalWorkspace { .. } = &mode {
-        if !has("set_root_dir") {
+    if let Mode::LocalWorkspace { .. } = mode {
+        if !registered(names, "set_root_dir") {
             checks.push((
                 "workspace activation",
                 Check::Fail("set_root_dir tool not registered for local-workspace mode".into()),
@@ -451,9 +454,12 @@ pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
             ));
         }
     }
+    Ok(local_activated)
+}
 
-    // 5. graph hydrates — a real cypher_query round-trip.
-    let hydrate = match &mode {
+/// 5. graph hydrates — a real cypher_query round-trip.
+fn check_hydration(rpc: &mut Rpc, mode: &Mode, local_activated: bool) -> Result<Check> {
+    Ok(match mode {
         // github workspace needs a repo_management clone (network) to hydrate —
         // out of scope for a fast selftest.
         Mode::Workspace { .. } => Check::Skip(
@@ -485,7 +491,52 @@ pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
                 Err(detail) => Check::Fail(detail),
             }
         }
-    };
+    })
+}
+
+/// Entry point for `--selftest`. `argv` is the full original argv (program
+/// name in `[0]`); `cli` is the already-parsed view used to re-derive the
+/// mode so the harness knows how to activate and what to expect.
+pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
+    // Re-derive the mode exactly as boot does, so we activate correctly and
+    // set the right expectations. Manifest load is best-effort here: if it
+    // fails, the child hits the same error and `initialize` reports red.
+    let mode = pick_mode(cli);
+    let manifest = load_manifest(cli, &mode).ok().flatten();
+    let mode = promote_local_workspace(mode.clone(), manifest.as_ref()).unwrap_or(mode);
+
+    let child_args = child_argv(argv);
+
+    println!(
+        "kglite-mcp-server --selftest  (mode: {})",
+        mode_label(&mode)
+    );
+    println!("  spawning child server for a live MCP handshake …\n");
+
+    let mut rpc = Rpc::spawn(&child_args)?;
+    let mut checks: Vec<(&str, Check)> = Vec::new();
+
+    if !check_initialize(&mut rpc, &mut checks)? {
+        return report(checks);
+    }
+
+    let tools = rpc.request("tools/list", json!({}))?;
+    let names: Vec<String> = tools
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|ts| {
+            ts.iter()
+                .filter_map(|t| t.get("name").and_then(Value::as_str).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    check_graph_tools(&names, &mut checks);
+    check_recipe_tools(manifest.as_ref(), &names, &mut checks);
+    check_github_tools(&names, &mut checks);
+
+    let local_activated = check_local_activation(&mut rpc, cli, &mode, &names, &mut checks)?;
+    let hydrate = check_hydration(&mut rpc, &mode, local_activated)?;
     checks.push(("graph hydrates", hydrate));
 
     report(checks)
