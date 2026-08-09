@@ -305,7 +305,7 @@ The optimiser pipeline lives at `crates/kglite/src/graph/languages/cypher/planne
 4. **Add a query** to `tests/test_cypher_differential.py::DIFFERENTIAL_QUERIES` exercising the trigger shape. Passes not in the corpus aren't trusted.
 5. **Bisect divergences** with `scripts/cypher_pass_bisect.py` before assuming a query is wrong.
 
-The differential corpus is *the* mechanism preventing silent correctness regressions — every fix to an optimiser bug lands its triggering query into the corpus as part of the fix commit.
+The differential corpus catches **optimizer divergence** — a pass producing a different result from the unoptimised path — so every fix to an optimiser bug lands its triggering query into the corpus as part of the fix commit. It cannot see a defect the two paths *share*: an executor or parser bug returns the same wrong answer with the passes on and off, and the comparison stays green. Those need absolute golden expected-value tests.
 
 ## Performance protocol
 
