@@ -66,7 +66,7 @@ Wikidata scale where you want the OS to page data in lazily.
 | If your graph is… | …and you want | Use | `open()` crash safety |
 |---|---|---|---|
 | Up to a few million nodes | Lowest latency, simplest setup | **memory** (default) | Per-commit WAL, on by default |
-| Large but you still query it interactively | RAM headroom without giving up typed-lookup speed | **mapped** | Per-commit WAL on the creating `open()`; a reopened `.kgl` comes back as **memory** (see below) |
+| Large but you still query it interactively | RAM headroom without giving up typed-lookup speed | **mapped** | Per-commit WAL; a mapped-saved `.kgl` reopens mapped (see below) |
 | 100 M+ nodes / won't fit in RAM | Lazy, page-on-demand access to a huge graph | **disk** | **No WAL** — durability is your `save()` calls |
 
 When in doubt, stay in-memory; switch only once you hit a real RAM
@@ -85,18 +85,32 @@ it is *your* `save()` calls, not the engine, that decide how much a crash can
 cost. Pick `disk` for its scale, not because a graph outgrew RAM; `mapped`
 covers that case with the guarantee intact. See {doc}`guides/durable-apps`.
 
-**`storage=` selects a backend only when a graph is *created*.** The mode is
-not recorded in a saved graph, so `kglite.open(path, storage="mapped")` builds
-a mapped graph on the call that creates `path` and loads a **memory** graph on
-every call after that — a `.kgl` checkpoint always loads as `memory`, and a
-disk graph (a directory) always loads as `disk`. Rather than ignore the
-argument, `open()` raises `kglite.ArgumentError` when the requested mode disagrees with
-what the load produced; omit `storage=` to accept whatever the file provides.
-There is no saved-graph-to-mapped conversion: to get a mapped graph from data
-you have already saved, construct `KnowledgeGraph(storage="mapped")` and
-re-ingest from the original source. This matters most for benchmarks — a
-create-then-reopen script that passed `storage="mapped"` on both runs was
-previously measuring the memory backend twice.
+**A saved graph records its storage mode, and reopening honours it.** A `.kgl`
+written by a mapped graph comes back mapped; one written by a memory graph
+comes back memory; a disk graph is a directory and always opens `disk`. That
+holds with no `storage=` argument at all — the file decides. Checkpoints
+written before kglite recorded the mode carry no record and keep loading as
+`memory`, exactly as they always did.
+
+**`storage=` on an existing path is a conversion request.** `kglite.open(path,
+storage="mapped")` on a memory-saved graph switches the loaded graph onto the
+mapped backend — the same nodes, edges and rows, with property columns moving
+to mmap from the next consolidation onward — and the next `save()` records the
+new mode, so the graph stays mapped from then on. `storage="memory"` on a
+mapped-saved graph converts the other way. Neither costs a re-ingest, and
+neither copies the graph.
+
+The two **disk** directions have no in-place conversion, because a disk graph
+*is* its directory (CSR + mmap) rather than a payload a portable backend could
+adopt. `open()` raises `kglite.ArgumentError` naming the alternative —
+`enable_disk_mode()` to move a loaded graph onto disk storage, or opening the
+`.kgl` rather than the directory to get an in-memory one — instead of ignoring
+the argument. Omit `storage=` to accept whatever the file provides.
+
+This matters most for benchmarks: a create-then-reopen script that passes
+`storage="mapped"` on both runs now measures the mapped backend both times.
+Before the mode was recorded it silently measured the memory backend on every
+run after the first.
 
 **Statement rollback is cheap in memory and mapped mode, expensive on disk.**
 One mutating Cypher statement is atomic: if it fails partway through, the graph

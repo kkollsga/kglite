@@ -17,20 +17,8 @@
 
 use super::{invalid_data, FileMetadata};
 use crate::graph::dir_graph::DirGraph;
-use crate::graph::storage::mode::StorageMode;
-use crate::graph::storage::GraphRead;
+use crate::graph::storage::mode::{live_storage_mode, StorageMode};
 use std::io;
-
-/// The storage mode `graph` is in right now — the value a save records.
-pub(super) fn live_storage_mode(graph: &DirGraph) -> StorageMode {
-    if graph.graph.is_disk() {
-        StorageMode::Disk
-    } else if graph.graph.is_mapped() {
-        StorageMode::Mapped
-    } else {
-        StorageMode::Memory
-    }
-}
 
 /// The `storage_mode` value a save writes, or `None` for the memory baseline
 /// (omitted from the JSON — see the field's doc comment in `file.rs`).

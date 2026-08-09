@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A saved graph now records its storage mode, and reopening honours it.** A
+  `.kgl` written by a mapped graph comes back mapped — from `kglite.open(path)`,
+  `kglite.load(path)`, the CLI and the servers alike — with no `storage=`
+  argument anywhere. A memory-saved graph still comes back memory, and a
+  checkpoint written before the mode was recorded carries no record and loads as
+  memory exactly as it always did. `graph_info()` gained a `storage_mode` key
+  (`"memory"` / `"mapped"` / `"disk"`) so a caller can confirm which backend an
+  open actually landed on.
+- **`storage=` on an existing path now converts instead of refusing.**
+  `kglite.open(path, storage="mapped")` on a memory-saved graph switches the
+  loaded graph onto the mapped backend — same nodes, edges and rows, no
+  re-ingest and no copy of the topology — and the next `save()` records the new
+  mode. `storage="memory"` on a mapped-saved graph converts the other way. Both
+  portable modes wrap the same graph structure, so the switch changes the
+  backend and the column-spill policy, not the data. Previously the only route
+  to a mapped graph was to rebuild it from the original source.
 - **Workspace graph producers now receive filtered filesystem changes.** Lazy
   watcher rebuild requests distinguish full builds from deterministic,
   deduplicated changed-path hints while still returning a complete graph.
@@ -21,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A corrupt or unrecognised storage mode in a saved graph is now refused by
+  name.** A `.kgl` claiming a mode this build does not know, one claiming
+  `disk` (a disk graph is a directory, never a portable file), or a disk
+  directory whose `metadata.json` claims a portable mode all fail the load with
+  an error naming the offending value, instead of silently loading as memory.
+  The two disk *conversion* directions refuse structurally for the same reason,
+  naming `enable_disk_mode()` as the alternative.
 - **The writable Bolt server now takes the cross-process graph writer lease.**
   `kglite-bolt-server` opened its `--graph` without one, so a second writable
   server — or a concurrent `kglite` CLI write, MCP server or `kglite.open()` —

@@ -261,15 +261,18 @@ fn from_bytes(py: Python<'_>, data: &[u8]) -> PyResult<KnowledgeGraph> {
 /// bare `save()` (or the context-manager auto-save-on-close) writes back to
 /// it without re-specifying the target.
 ///
-/// `storage` (`"mapped"` / `"disk"`) applies only when *creating* a new graph.
-/// Opening an existing path uses the mode the load produces, which is not
-/// necessarily the mode that wrote it: a `.kgl` checkpoint records no storage
-/// mode, so it always loads as `"memory"`, while a disk graph is a directory
-/// and always loads as `"disk"`. Passing a `storage=` that disagrees with the
-/// loaded backend raises `kglite.ArgumentError` rather than being ignored — a
-/// silently-downgraded mode is indistinguishable from success, and in
-/// particular `open(path, storage="mapped")` gives a genuinely mapped graph
-/// only on the call that *creates* the file.
+/// `storage` (`"mapped"` / `"disk"`) selects the backend for a graph being
+/// *created*, and requests one for a graph being opened. An existing path opens
+/// in the mode its checkpoint recorded — a `.kgl` written by a mapped graph
+/// comes back mapped, one written by a memory graph (or by a kglite old enough
+/// not to record the mode) comes back `"memory"`, and a disk graph is a
+/// directory and always opens `"disk"`.
+/// Passing `storage=` on top of that *converts*: memory ⇄ mapped is an explicit
+/// backend switch on the loaded graph, and the next `save()` records the new
+/// mode. The two disk directions have no in-place conversion (a disk graph is a
+/// directory, not a file) and raise `kglite.ArgumentError` naming the
+/// alternative, rather than being ignored — a silently-downgraded mode is
+/// indistinguishable from success.
 ///
 /// **Durability differs between the two ways to build a graph, and the
 /// difference is structural.** `kglite.open()` attaches a WAL sidecar next to
@@ -428,34 +431,27 @@ fn open(
     } else {
         KnowledgeGraph::construct(storage, Some(&path))?
     };
-    // An existing path is *loaded*, and the load decides the backend — so a
-    // `storage=` that disagrees with what came back cannot be honoured. Refuse
-    // instead of ignoring it: silently handing back a different mode than the
-    // caller asked for is indistinguishable from success, and has already
-    // invalidated at least one mapped-vs-memory comparison where both arms
-    // unknowingly ran on the memory backend.
+    // An existing path is *loaded*, and the load already honours the mode the
+    // checkpoint recorded. A `storage=` that still disagrees is an explicit
+    // request to change the mode, so convert to it — and when the conversion is
+    // structurally impossible (either disk direction), refuse rather than hand
+    // back a mode the caller did not ask for, which is indistinguishable from
+    // success and has already invalidated one mapped-vs-memory comparison.
     if existed {
         if let Some(requested) = requested_mode {
-            let actual = actual_storage_mode(&kg);
+            let actual = kglite_core::api::storage::live_storage_mode(&kg.inner);
             if requested != actual {
-                // `ArgumentError`, matching `KnowledgeGraph(storage="invalid")`
-                // and the parse failure above — one error class for one kwarg.
-                // (The neighbouring disk-plus-`durable` refusal raises
-                // `ValueError`; that is about `durable=`, not about this.)
-                let message = format!(
-                    "cannot open existing graph {path:?} with storage={:?}: it loaded as {:?}. \
-                     `storage=` selects a backend for a graph being *created*; an existing \
-                     path is loaded, and the load decides the backend. A `.kgl` checkpoint \
-                     does not record which mode wrote it, so loading one always yields \
-                     'memory'; a disk graph is a directory and always yields 'disk'. {} \
-                     To accept whatever the file provides, omit `storage=`.",
-                    requested.as_str(),
-                    actual.as_str(),
-                    storage_mode_remedy(requested),
-                );
-                return Err(crate::error_py::kg_to_pyerr(
-                    crate::error::KgError::Argument(message),
-                ));
+                convert_open_graph_to_mode(&mut kg, requested).map_err(|reason| {
+                    // `ArgumentError`, matching `KnowledgeGraph(storage="invalid")`
+                    // and the parse failure above — one error class for one kwarg.
+                    // (The neighbouring disk-plus-`durable` refusal raises
+                    // `ValueError`; that is about `durable=`, not about this.)
+                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
+                        "cannot open existing graph {path:?} with storage={:?}: {reason} \
+                         To accept whatever the file provides, omit `storage=`.",
+                        requested.as_str(),
+                    )))
+                })?;
             }
         }
     }
@@ -477,44 +473,21 @@ fn open(
     Ok(kg)
 }
 
-/// The storage mode `kg` actually ended up in, for comparison against a
-/// caller's `storage=` request.
-fn actual_storage_mode(kg: &KnowledgeGraph) -> kglite_core::api::storage::StorageMode {
-    use kglite_core::api::storage::StorageMode;
-    use kglite_core::api::GraphRead;
-    if kg.inner.graph.is_disk() {
-        StorageMode::Disk
-    } else if kg.inner.graph.is_mapped() {
-        StorageMode::Mapped
-    } else {
-        StorageMode::Memory
-    }
-}
-
-/// The actionable half of the "mode cannot be honoured on open" error: what to
-/// do instead, per requested mode.
+/// Switch a just-opened graph to the mode the caller asked for.
 ///
-/// `mapped` is the blunt one. There is no load-into-an-existing-graph call and
-/// no saved-graph-to-mapped conversion, so the only route is to build a mapped
-/// graph and re-ingest from the original source data. That is worth saying
-/// plainly rather than implying a conversion exists.
-fn storage_mode_remedy(requested: kglite_core::api::storage::StorageMode) -> &'static str {
-    use kglite_core::api::storage::StorageMode;
-    match requested {
-        StorageMode::Mapped => {
-            "Mapped mode cannot be recovered from a saved graph: build one with \
-             `kglite.KnowledgeGraph(storage=\"mapped\")` and re-ingest from your source data, \
-             or delete the path and let this call create it."
-        }
-        StorageMode::Disk => {
-            "To move a loaded graph onto disk storage, call `g.enable_disk_mode()` after \
-             opening it, or delete the path and let this call create it."
-        }
-        StorageMode::Memory => {
-            "To get a memory-backed graph, open a `.kgl` file rather than a disk-graph \
-             directory."
-        }
-    }
+/// Thin by design: the transition itself, and the reason a disk direction has
+/// no transition to make, both live in `kglite::api::storage`, so the
+/// bolt/mcp servers convert and refuse on exactly the same terms. What stays
+/// here is the binding's part — reaching through the `Arc`, and letting the
+/// caller's error class own the message.
+fn convert_open_graph_to_mode(
+    kg: &mut KnowledgeGraph,
+    requested: kglite_core::api::storage::StorageMode,
+) -> Result<(), String> {
+    kglite_core::api::storage::convert_dir_graph_to_mode(
+        kglite_core::api::make_dir_graph_mut(&mut kg.inner),
+        requested,
+    )
 }
 
 /// Turn `kg` into a durable graph: replay any WAL frames committed since

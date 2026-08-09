@@ -431,6 +431,34 @@ mod tests {
         assert!(disk_path.is_dir());
     }
 
+    /// A no-argument open honours what the checkpoint recorded. `create_mode`
+    /// is about a *missing* path, so it must not be what decides this — the
+    /// file is.
+    #[test]
+    fn existing_graph_opens_in_the_mode_it_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("mapped.kgl");
+        let mut mapped = Arc::new(
+            crate::graph::storage::mode::new_dir_graph_in_mode(StorageMode::Mapped, None).unwrap(),
+        );
+        crate::graph::io::file::save_graph(&mut mapped, &path.to_string_lossy()).unwrap();
+
+        let opened = open_or_create_graph(&path, None).unwrap();
+        assert_eq!(opened.disposition, OpenDisposition::Opened);
+        assert!(
+            opened.graph.graph.is_mapped(),
+            "a mapped-saved checkpoint must reopen mapped with no storage argument at all"
+        );
+
+        // …and a memory-saved one still comes back memory, whatever the
+        // creation mode says.
+        let memory_path = tmp.path().join("memory.kgl");
+        let mut memory = Arc::new(DirGraph::new());
+        crate::graph::io::file::save_graph(&mut memory, &memory_path.to_string_lossy()).unwrap();
+        let opened = open_or_create_graph(&memory_path, Some(StorageMode::Mapped)).unwrap();
+        assert!(!opened.graph.graph.is_mapped());
+    }
+
     #[test]
     fn existing_graph_is_loaded_regardless_of_create_mode() {
         let tmp = tempfile::tempdir().unwrap();

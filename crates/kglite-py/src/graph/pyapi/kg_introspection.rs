@@ -239,6 +239,9 @@ impl KnowledgeGraph {
     ///         - 'type_count': Number of distinct node types
     ///         - 'property_index_count': Number of single-property indexes
     ///         - 'composite_index_count': Number of composite indexes
+    ///         - 'storage_mode': 'memory', 'mapped' or 'disk' — the backend the
+    ///           graph is actually running on, which for an opened graph is the
+    ///           mode its checkpoint recorded
     ///
     /// Example:
     ///     ```python
@@ -261,6 +264,13 @@ impl KnowledgeGraph {
             dict.set_item("format_version", self.inner.save_metadata.format_version)?;
             dict.set_item("library_version", &self.inner.save_metadata.library_version)?;
             dict.set_item("user_schema_version", self.inner.user_schema_version)?;
+            // Which backend this graph is actually on. Load-bearing since a
+            // checkpoint records its mode: this is how a caller confirms the
+            // reopen (or a `storage=` conversion) landed where they expected.
+            dict.set_item(
+                "storage_mode",
+                kglite_core::api::storage::live_storage_mode(&self.inner).as_str(),
+            )?;
             // Columnar memory info
             let heap_bytes: usize = self
                 .inner

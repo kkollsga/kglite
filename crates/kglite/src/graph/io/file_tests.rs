@@ -750,6 +750,86 @@ mod atomic_save_tests {
         assert_eq!(load_kgl_bytes(&bytes).unwrap().graph.node_count(), 3);
     }
 
+    /// Every `Doc` row, in id order — the value equality a mode switch must
+    /// preserve. Read through Cypher so the assertion goes the whole way from
+    /// the backend to a materialized row rather than poking at storage.
+    fn doc_rows(graph: &DirGraph) -> Vec<Vec<Value>> {
+        let params = std::collections::HashMap::new();
+        crate::graph::session::execute_read(
+            graph,
+            "MATCH (n:Doc) RETURN n.id, n.title ORDER BY n.id",
+            &crate::graph::session::ExecuteOptions::eager(&params),
+        )
+        .expect("Doc read")
+        .result
+        .rows
+    }
+
+    #[test]
+    fn mapped_saved_file_reopens_mapped_with_identical_rows() {
+        // The mode a checkpoint recorded is the mode it comes back in — the
+        // whole point of recording it. A mapped-saved graph that reopened as
+        // memory is what silently invalidated a mapped-vs-memory comparison.
+        let saved = tiny_graph_in_mode(crate::graph::storage::mode::StorageMode::Mapped, 4);
+        let loaded = load_kgl_bytes(&saved_bytes(&saved)).unwrap();
+        assert!(
+            loaded.graph.is_mapped(),
+            "a mapped-saved .kgl must reopen mapped, not memory"
+        );
+        assert_eq!(
+            loaded.memory_limit,
+            Some(0),
+            "the reopened graph must carry mapped mode's spill policy, not just its backend"
+        );
+        assert_eq!(
+            doc_rows(&loaded),
+            doc_rows(&saved),
+            "rows must be identical"
+        );
+    }
+
+    #[test]
+    fn a_converted_graph_saves_and_reopens_in_its_new_mode() {
+        // The conversion has to survive the round trip, or `storage="mapped"`
+        // on an existing file would silently revert on the next reopen — the
+        // original defect one level down.
+        let mut graph = tiny_graph(3);
+        let before = doc_rows(&graph);
+        crate::graph::storage::mode::convert_dir_graph_to_mode(
+            Arc::make_mut(&mut graph),
+            crate::graph::storage::mode::StorageMode::Mapped,
+        )
+        .unwrap();
+
+        let reloaded = load_kgl_bytes(&saved_bytes(&graph)).unwrap();
+        assert!(reloaded.graph.is_mapped(), "the new mode must be persisted");
+        assert_eq!(doc_rows(&reloaded), before);
+    }
+
+    #[test]
+    fn memory_saved_and_pre_field_files_still_reopen_as_memory() {
+        let memory_saved = tiny_graph(3);
+        let loaded = load_kgl_bytes(&saved_bytes(&memory_saved)).unwrap();
+        assert!(!loaded.graph.is_mapped() && !loaded.graph.is_disk());
+        assert_eq!(loaded.memory_limit, None);
+        assert_eq!(doc_rows(&loaded), doc_rows(&memory_saved));
+
+        // A file written before the field existed carries no key at all, and
+        // must keep landing in memory rather than inheriting anything.
+        let stripped = rewrite_metadata_json(
+            &saved_bytes(&tiny_graph_in_mode(
+                crate::graph::storage::mode::StorageMode::Mapped,
+                3,
+            )),
+            |raw| {
+                raw.as_object_mut().unwrap().remove("storage_mode");
+            },
+        );
+        let old = load_kgl_bytes(&stripped).expect("an older .kgl must still load");
+        assert!(!old.graph.is_mapped(), "an unrecorded mode means memory");
+        assert_eq!(old.graph.node_count(), 3);
+    }
+
     #[test]
     fn mapped_save_records_the_mapped_mode() {
         let graph = tiny_graph_in_mode(crate::graph::storage::mode::StorageMode::Mapped, 4);
@@ -764,11 +844,9 @@ mod atomic_save_tests {
             "a mapped graph must record the mode that wrote the checkpoint"
         );
 
-        // Stage-1 contract: the mode is *recorded*, not yet honoured. The load
-        // still materialises a memory graph and every row survives.
-        let loaded = load_kgl_bytes(&bytes).unwrap();
-        assert_eq!(loaded.graph.node_count(), 4);
-        assert!(!loaded.graph.is_mapped());
+        // The recorded key is what the reopen reads back (asserted end-to-end
+        // in `mapped_saved_file_reopens_mapped_with_identical_rows`).
+        assert_eq!(load_kgl_bytes(&bytes).unwrap().graph.node_count(), 4);
     }
 
     #[test]

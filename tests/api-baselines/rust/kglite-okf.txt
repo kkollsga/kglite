@@ -1699,6 +1699,8 @@ impl serde_core::ser::Serialize for kglite::api::storage::TypeLookup
 pub fn kglite::api::storage::TypeLookup::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::storage::TypeLookup
 pub fn kglite::api::storage::TypeLookup::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub fn kglite::api::storage::convert_dir_graph_to_mode(graph: &mut kglite::api::DirGraph, requested: kglite::api::storage::StorageMode) -> core::result::Result<(), alloc::string::String>
+pub fn kglite::api::storage::live_storage_mode(graph: &kglite::api::DirGraph) -> kglite::api::storage::StorageMode
 pub fn kglite::api::storage::new_dir_graph_in_mode(mode: kglite::api::storage::StorageMode, path: core::option::Option<&std::path::Path>) -> core::result::Result<kglite::api::DirGraph, alloc::string::String>
 pub mod kglite::api::timeseries
 pub enum kglite::api::timeseries::DatePrecision

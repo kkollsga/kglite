@@ -2472,13 +2472,18 @@ fn load_portable_columnar(
     let (metadata, mut sections) =
         parse_portable_metadata(buf, format_name, metadata_len, metadata_start)?;
     // Resolved before a section is decompressed, so an unplaceable mode fails
-    // before the expensive part. Honouring a recorded `mapped` is not
-    // implemented: the payload always deserializes into a memory backend
-    // (`GraphBackend`'s Deserialize), so every `.kgl` still opens in memory.
-    let _recorded_mode = metadata.portable_storage_mode()?;
+    // before the expensive part.
+    let recorded_mode = metadata.portable_storage_mode()?;
     let (mut dir_graph, plan) = decode_portable_topology(codec, &mut sections, metadata)?;
     load_portable_columns(codec, &mut dir_graph, &mut sections, &plan.columns)?;
     load_portable_optional_sections(codec, core_version, &mut dir_graph, &mut sections, &plan)?;
+    // Honour the recorded mode. The payload always deserializes into a memory
+    // backend (`GraphBackend`'s Deserialize), so a mapped-saved checkpoint is
+    // swapped onto the mapped backend here — after the graph is complete, and
+    // by moving the topology rather than copying it. Memory (and a file that
+    // recorded nothing) is already what the decode produced, so it is a no-op.
+    crate::graph::storage::mode::convert_dir_graph_to_mode(&mut dir_graph, recorded_mode)
+        .map_err(io::Error::other)?;
     Ok(Arc::new(dir_graph))
 }
 

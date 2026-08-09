@@ -597,6 +597,11 @@ def load(path: str) -> KnowledgeGraph:
     Returns:
         A new KnowledgeGraph with the loaded data.
 
+    The graph comes back in the storage mode its checkpoint recorded: a
+    mapped-saved ``.kgl`` loads mapped, while one saved by a memory graph — or
+    by a kglite old enough not to record the mode — loads in memory. Use
+    :func:`open` with ``storage=`` to ask for a different mode.
+
     The returned graph remembers ``path``, so a later bare ``save()`` writes
     back to it. See :func:`open` for load-or-create semantics, or
     :func:`open_session` to load directly as a thread-safe ``Session``.
@@ -754,16 +759,28 @@ def open(
         path: Path to a ``.kgl`` file or a disk-mode directory. Loaded if it
             exists, otherwise created on first ``save()`` (or immediately, for
             ``storage="disk"``, which materializes the directory).
-        storage: Storage mode for a *newly created* graph (``"mapped"`` /
-            ``"disk"``). Opening an existing path uses the mode the load
-            produces, which is not necessarily the mode that wrote it: a
-            ``.kgl`` checkpoint records no storage mode, so it always loads as
-            ``"memory"``; a disk graph is a directory and always loads as
-            ``"disk"``. A ``storage=`` that disagrees with the loaded backend
-            raises :class:`kglite.ArgumentError` rather than being ignored, so
-            ``open(path, storage="mapped")`` yields a genuinely mapped graph
-            only on the call that *creates* the file, and says so on every call
-            after that. Omit ``storage=`` to accept whatever the file provides.
+        storage: Storage mode (``"memory"`` / ``"mapped"`` / ``"disk"``) — the
+            backend for a graph being *created*, and a request for one being
+            opened.
+
+            An existing path opens in the mode its checkpoint **recorded**: a
+            ``.kgl`` saved by a mapped graph comes back mapped, one saved by a
+            memory graph, or saved by a kglite old enough not to record the
+            mode at all) comes back ``"memory"``, and a disk graph is a
+            directory and always opens ``"disk"``. So ``open(path,
+            storage="mapped")`` now yields a genuinely mapped graph on *every*
+            call, not only the one that creates the file.
+
+            Passing ``storage=`` for a different mode **converts**: memory ⇄
+            mapped switches the backend on the loaded graph — same nodes, edges
+            and rows; it changes where property columns live from the next
+            consolidation onward — and the next ``save()`` records the new mode.
+            The two disk directions have no in-place conversion (a disk graph is
+            a directory, not a file), so they raise
+            :class:`kglite.ArgumentError` naming the alternative
+            (``enable_disk_mode()``) rather than being ignored — a
+            silently-downgraded mode is indistinguishable from success. Omit
+            ``storage=`` to accept whatever the file provides.
 
             Note the durability asymmetry between the two ways to build a
             graph, which is structural rather than incidental: ``open()``
@@ -2527,6 +2544,11 @@ class KnowledgeGraph:
                 - ``type_count``: Number of distinct node types
                 - ``property_index_count``: Number of single-property indexes
                 - ``composite_index_count``: Number of composite indexes
+                - ``storage_mode``: ``"memory"``, ``"mapped"`` or ``"disk"`` — the
+                  backend the graph is actually running on. For a graph opened
+                  from a path this is the mode its checkpoint recorded, so it is
+                  how you confirm a reopen (or a ``storage=`` conversion) landed
+                  where you expected
                 - ``format_version``: ``.kgl`` on-disk layout version (engine-owned)
                 - ``library_version``: kglite version that last saved the graph
                 - ``user_schema_version``: your data-model revision (see

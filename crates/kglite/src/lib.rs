@@ -363,7 +363,13 @@ pub mod api {
         /// a [`StorageMode`] and build a fresh graph in that backend. Shared by
         /// the wheel (`storage='mapped'/'disk'`), the bolt/mcp servers
         /// (`--storage`), and the C ABI (`kglite_graph_new_in_mode`).
-        pub use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+        /// `live_storage_mode` answers "which mode is this graph actually in?"
+        /// — the classification every binding needs after an open — and
+        /// `convert_dir_graph_to_mode` is the explicit switch between the two
+        /// portable backends, refusing the disk directions structurally.
+        pub use crate::graph::storage::mode::{
+            convert_dir_graph_to_mode, live_storage_mode, new_dir_graph_in_mode, StorageMode,
+        };
         pub use crate::graph::storage::MappedGraph;
     }
 
