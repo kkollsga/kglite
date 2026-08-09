@@ -80,6 +80,7 @@ pub fn new_dir_graph_in_mode(mode: StorageMode, path: Option<&Path>) -> Result<D
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::storage::disk::temp_owner::{TempGraphDir, TrackedOwner};
     use crate::graph::storage::GraphRead;
 
     #[test]
@@ -111,10 +112,17 @@ mod tests {
 
     #[test]
     fn disk_mode_creates_at_path() {
-        let tmp = std::env::temp_dir().join(format!("kgl_mode_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        let g = new_dir_graph_in_mode(StorageMode::Disk, Some(&tmp)).unwrap();
+        let tmp = TempGraphDir::new();
+        let g = TrackedOwner::new(
+            "disk-mode DirGraph",
+            new_dir_graph_in_mode(StorageMode::Disk, Some(tmp.path())).unwrap(),
+        );
+        tmp.watch(&g);
         assert!(g.graph.is_disk());
-        let _ = std::fs::remove_dir_all(&tmp);
+        // The graph's mmaps must go before the directory does; `remove_now`
+        // asserts it rather than relying on Unix tolerating an unlink of a
+        // still-mapped file.
+        drop(g);
+        tmp.remove_now();
     }
 }

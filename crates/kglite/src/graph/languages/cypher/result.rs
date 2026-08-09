@@ -566,17 +566,45 @@ fn csv_value(buf: &mut String, val: &Value) {
 mod lazy_materialisation_tests {
     use super::*;
     use crate::graph::session::{execute_mut, execute_read, ExecuteOptions};
+    use crate::graph::storage::disk::temp_owner::TempGraphDir;
     use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
     use std::collections::HashMap;
     use std::sync::{Arc, Barrier};
 
-    fn graph_in_mode(
-        mode: StorageMode,
-    ) -> (crate::graph::dir_graph::DirGraph, Option<tempfile::TempDir>) {
-        let temp = (mode == StorageMode::Disk)
-            .then(tempfile::tempdir)
-            .transpose()
-            .unwrap();
+    /// Fixture graph plus the temp directory it maps into (disk mode only).
+    ///
+    /// Field order is the contract: `graph` is declared first, so it drops
+    /// first, and `temp`'s guard then asserts that no handle survived. The
+    /// previous `(DirGraph, Option<TempDir>)` tuple had the opposite drop
+    /// order — bindings in a `let (graph, _temp) = …` pattern drop
+    /// right-to-left, so the directory was destroyed while the disk backend
+    /// still held mmaps into it. On Unix that unlink is silent, so nothing
+    /// failed; `TempGraphDir` makes the ordering itself the assertion.
+    struct GraphFixture {
+        graph: Arc<crate::graph::dir_graph::DirGraph>,
+        /// Held only for its `Drop`: it asserts the graph above is gone.
+        _temp: Option<TempGraphDir>,
+    }
+
+    impl GraphFixture {
+        fn graph(&self) -> &crate::graph::dir_graph::DirGraph {
+            &self.graph
+        }
+
+        /// A counted handle for the concurrency test. `watch_arc` probes the
+        /// `Arc`'s strong count, so a clone outliving the directory — leaked
+        /// into a thread, or held by a stray binding — fails the test.
+        fn shared(&self) -> Arc<crate::graph::dir_graph::DirGraph> {
+            Arc::clone(&self.graph)
+        }
+
+        fn graph_mut(&mut self) -> &mut crate::graph::dir_graph::DirGraph {
+            Arc::get_mut(&mut self.graph).expect("fixture graph has outstanding clones")
+        }
+    }
+
+    fn graph_in_mode(mode: StorageMode) -> GraphFixture {
+        let temp = (mode == StorageMode::Disk).then(TempGraphDir::new);
         let mut graph = new_dir_graph_in_mode(mode, temp.as_ref().map(|dir| dir.path())).unwrap();
         let params = HashMap::new();
         execute_mut(
@@ -586,7 +614,11 @@ mod lazy_materialisation_tests {
             &ExecuteOptions::eager(&params),
         )
         .expect("fixture CREATE");
-        (graph, temp)
+        let graph = Arc::new(graph);
+        if let Some(dir) = temp.as_ref() {
+            dir.watch_arc("disk-mode DirGraph", &graph);
+        }
+        GraphFixture { graph, _temp: temp }
     }
 
     fn execute_lazy(graph: &crate::graph::dir_graph::DirGraph) -> LazyResultDescriptor {
@@ -601,78 +633,85 @@ mod lazy_materialisation_tests {
     #[test]
     fn lazy_matches_eager_across_storage_modes() {
         for mode in [StorageMode::Memory, StorageMode::Mapped, StorageMode::Disk] {
-            let (graph, _temp) = graph_in_mode(mode);
+            let fixture = graph_in_mode(mode);
+            let graph = fixture.graph();
             let params = HashMap::new();
             let eager = execute_read(
-                &graph,
+                graph,
                 "MATCH (n:Person) RETURN n.name, n.age",
                 &ExecuteOptions::eager(&params),
             )
             .expect("eager read")
             .result
             .rows;
-            let descriptor = execute_lazy(&graph);
-            assert_eq!(materialise_lazy(&descriptor, &graph).unwrap(), eager);
+            let descriptor = execute_lazy(graph);
+            assert_eq!(materialise_lazy(&descriptor, graph).unwrap(), eager);
         }
     }
 
     #[test]
     fn invalid_index_wrong_graph_and_stale_snapshot_are_typed_errors() {
-        let (mut graph, _temp) = graph_in_mode(StorageMode::Memory);
-        let descriptor = execute_lazy(&graph);
+        let mut fixture = graph_in_mode(StorageMode::Memory);
+        let descriptor = execute_lazy(fixture.graph());
         assert!(matches!(
-            materialise_lazy_row(&descriptor, &graph, descriptor.len()),
+            materialise_lazy_row(&descriptor, fixture.graph(), descriptor.len()),
             Err(crate::error::KgError::InvalidArgument { ref argument, .. }) if argument == "index"
         ));
 
-        let (other, _other_temp) = graph_in_mode(StorageMode::Memory);
+        let other = graph_in_mode(StorageMode::Memory);
         assert!(matches!(
-            materialise_lazy(&descriptor, &other),
+            materialise_lazy(&descriptor, other.graph()),
             Err(crate::error::KgError::InvalidArgument { ref argument, .. }) if argument == "graph"
         ));
 
-        graph.bump_version();
+        fixture.graph_mut().bump_version();
         assert!(matches!(
-            materialise_lazy(&descriptor, &graph),
+            materialise_lazy(&descriptor, fixture.graph()),
             Err(crate::error::KgError::InvalidArgument { ref argument, .. }) if argument == "graph"
         ));
     }
 
     #[test]
     fn lazy_range_materialises_subset_and_rejects_invalid_bounds() {
-        let (graph, _temp) = graph_in_mode(StorageMode::Memory);
-        let descriptor = execute_lazy(&graph);
+        let fixture = graph_in_mode(StorageMode::Memory);
+        let graph = fixture.graph();
+        let descriptor = execute_lazy(graph);
         assert_eq!(
-            materialise_lazy_range(&descriptor, &graph, 1..2).unwrap(),
+            materialise_lazy_range(&descriptor, graph, 1..2).unwrap(),
             vec![vec![Value::String("Bob".into()), Value::Int64(25)]]
         );
         assert!(matches!(
-            materialise_lazy_range(&descriptor, &graph, 0..3),
+            materialise_lazy_range(&descriptor, graph, 0..3),
             Err(crate::error::KgError::InvalidArgument { ref argument, .. }) if argument == "range"
         ));
     }
 
     #[test]
     fn disk_lazy_access_survives_executor_drop_and_intervening_query() {
-        let (graph, _temp) = graph_in_mode(StorageMode::Disk);
-        let descriptor = execute_lazy(&graph);
+        let fixture = graph_in_mode(StorageMode::Disk);
+        let graph = fixture.graph();
+        let descriptor = execute_lazy(graph);
         let params = HashMap::new();
         execute_read(
-            &graph,
+            graph,
             "MATCH (n:Person) RETURN count(n)",
             &ExecuteOptions::eager(&params),
         )
         .expect("intervening query");
         assert_eq!(
-            materialise_lazy_row(&descriptor, &graph, 0).unwrap(),
+            materialise_lazy_row(&descriptor, graph, 0).unwrap(),
             vec![Value::String("Alice".into()), Value::Int64(30)]
         );
     }
 
     #[test]
     fn concurrent_disk_lazy_reads_remain_exact() {
-        let (graph, _temp) = graph_in_mode(StorageMode::Disk);
-        let graph = Arc::new(graph);
+        let fixture = graph_in_mode(StorageMode::Disk);
+        // Counted handle, not an incidental re-bind: `watch_arc` fails the
+        // test if any clone (including one left in a thread) outlives the
+        // temp directory, so this test's safety no longer rests on the
+        // accident of a later `let` shadowing the fixture binding.
+        let graph = fixture.shared();
         let descriptor = Arc::new(execute_lazy(&graph));
         let barrier = Arc::new(Barrier::new(3));
 

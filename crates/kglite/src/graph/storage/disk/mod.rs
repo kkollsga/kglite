@@ -18,6 +18,9 @@ pub mod graph_property_index;
 pub mod id_index;
 pub mod property_index;
 pub mod segment_summary;
+/// Test-only drop-order seam for temp dirs backing a live disk/mapped graph.
+#[cfg(test)]
+pub(crate) mod temp_owner;
 pub mod type_index;
 
 /// Delete a scratch file that the caller has just finished with, tolerating an

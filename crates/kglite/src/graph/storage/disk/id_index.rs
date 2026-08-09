@@ -839,6 +839,7 @@ pub fn write_id_indices_bin(
 #[cfg(test)]
 mod validation_tests {
     use super::*;
+    use crate::graph::storage::disk::temp_owner::{TempGraphDir, TrackedOwner};
 
     fn integer_fixture(type_key: u64, pairs: &[(u32, u32)]) -> Vec<u8> {
         let data_offset = HEADER_BYTES + DIR_ENTRY_BYTES;
@@ -864,10 +865,33 @@ mod validation_tests {
         bytes
     }
 
-    fn load(bytes: &[u8], interner: &StringInterner) -> std::io::Result<Option<IdIndexBase>> {
-        let temp = tempfile::tempdir().unwrap();
+    /// A loaded [`IdIndexBase`] together with the temp directory its `mmap`
+    /// points into. Field order is the contract: `base` drops before `temp`,
+    /// and `temp`'s guard asserts it.
+    ///
+    /// The previous helper returned the base alone, so the `TempDir` local
+    /// was dropped the moment `load` returned and every assertion below ran
+    /// against an unlinked inode — valid on Unix, and therefore silent.
+    struct LoadedIndex {
+        base: TrackedOwner<IdIndexBase>,
+        /// Held only for its `Drop`: it asserts `base` above is gone.
+        _temp: TempGraphDir,
+    }
+
+    impl LoadedIndex {
+        fn base(&self) -> &IdIndexBase {
+            &self.base
+        }
+    }
+
+    fn load(bytes: &[u8], interner: &StringInterner) -> std::io::Result<Option<LoadedIndex>> {
+        let temp = TempGraphDir::new();
         std::fs::write(temp.path().join("id_indices.bin"), bytes).unwrap();
-        IdIndexBase::load_from(temp.path(), interner)
+        let Some(base) = IdIndexBase::load_from(temp.path(), interner)? else {
+            return Ok(None);
+        };
+        let base = temp.own("IdIndexBase", base);
+        Ok(Some(LoadedIndex { base, _temp: temp }))
     }
 
     fn assert_invalid(bytes: &[u8], interner: &StringInterner) {
@@ -882,9 +906,10 @@ mod validation_tests {
     fn integer_fixture_reads_canonical_little_endian_bytes() {
         let mut interner = StringInterner::new();
         let key = interner.get_or_intern("Person").as_u64();
-        let base = load(&integer_fixture(key, &[(7, 70), (42, 420)]), &interner)
+        let loaded = load(&integer_fixture(key, &[(7, 70), (42, 420)]), &interner)
             .unwrap()
             .unwrap();
+        let base = loaded.base();
         assert_eq!(
             base.lookup("Person", &Value::UniqueId(7)),
             Some(NodeIndex::new(70))
@@ -1007,10 +1032,10 @@ mod validation_tests {
         interner.get_or_intern("Person");
         let stale = InternedKey::from_str("NeverInterned").as_u64();
 
-        let base = load(&integer_fixture(stale, &[]), &interner)
+        let loaded = load(&integer_fixture(stale, &[]), &interner)
             .expect("a stale empty entry must not fail the load")
             .unwrap();
-        assert!(!base.contains("NeverInterned"));
+        assert!(!loaded.base().contains("NeverInterned"));
 
         // The General variant is what a type with no rows actually produced:
         // `num_entries` is 0, but the Postcard payload of an empty map is not.
@@ -1024,10 +1049,10 @@ mod validation_tests {
         bytes[40] = 1;
         bytes[64..72].copy_from_slice(&(blob.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&blob);
-        let base = load(&bytes, &interner)
+        let loaded = load(&bytes, &interner)
             .expect("a stale empty General entry must not fail the load")
             .unwrap();
-        assert!(!base.contains("NeverInterned"));
+        assert!(!loaded.base().contains("NeverInterned"));
     }
 
     /// The writer resolves names against the interner it is handed, so it can

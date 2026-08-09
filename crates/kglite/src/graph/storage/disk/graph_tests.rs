@@ -5,6 +5,7 @@ use crate::graph::schema::{EdgeData, InternedKey, NodeData, StringInterner};
 use crate::graph::storage::backend::GraphBackend;
 use crate::graph::storage::disk::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints};
 use crate::graph::storage::disk::graph_persist::{concat_segment_csrs, SegmentCsr};
+use crate::graph::storage::disk::temp_owner::{TempGraphDir, TrackedOwner};
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use crate::graph::storage::{GraphRead, GraphWrite};
 use crate::graph::DirGraph;
@@ -580,9 +581,14 @@ fn second_disk_writer_is_rejected_before_mutation() {
 
 #[test]
 fn failed_graph_save_keeps_dirty_state_and_withholds_root_metadata() {
-    let mut graph = DirGraph::new();
+    // `target` must be declared before `graph`: reverse-declaration drop
+    // order then destroys the graph (and its mappings into `target`) first.
+    // `TempGraphDir` asserts that ordering instead of trusting it — on Unix a
+    // still-mapped file can be unlinked without complaint.
+    let target = TempGraphDir::new();
+    let mut graph = TrackedOwner::new("disk-mode DirGraph", DirGraph::new());
+    target.watch(&graph);
     graph.enable_disk_mode().unwrap();
-    let target = TempDir::new().unwrap();
     let blocked_generations = target.path().join("generations");
     std::fs::write(&blocked_generations, b"not a directory").unwrap();
 

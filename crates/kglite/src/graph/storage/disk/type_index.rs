@@ -622,6 +622,7 @@ pub fn write_type_indices_bin(
 #[cfg(test)]
 mod validation_tests {
     use super::*;
+    use crate::graph::storage::disk::temp_owner::{TempGraphDir, TrackedOwner};
 
     fn fixture(type_key: u64, nodes: &[u32]) -> Vec<u8> {
         let data_offset = HEADER_BYTES + DIR_ENTRY_BYTES;
@@ -640,21 +641,52 @@ mod validation_tests {
         bytes
     }
 
-    fn load(bytes: &[u8], interner: &StringInterner) -> std::io::Result<Option<TypeIndexBase>> {
-        let temp = tempfile::tempdir().unwrap();
+    /// A loaded [`TypeIndexBase`] together with the temp directory its
+    /// `mmap` points into. Field order is the contract: `base` drops before
+    /// `temp`, and `temp`'s guard asserts it.
+    ///
+    /// The previous helper returned the base alone, so the `TempDir` local
+    /// was dropped the moment `load` returned and every assertion below ran
+    /// against an unlinked inode — valid on Unix, and therefore silent.
+    struct LoadedIndex {
+        base: TrackedOwner<TypeIndexBase>,
+        /// Held only for its `Drop`: it asserts `base` above is gone.
+        _temp: TempGraphDir,
+    }
+
+    impl LoadedIndex {
+        fn base(&self) -> &TypeIndexBase {
+            &self.base
+        }
+    }
+
+    // `load(...).unwrap_err()` needs `Debug` on the success type; the guard
+    // and the mmap-backed base have nothing useful to print.
+    impl std::fmt::Debug for LoadedIndex {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("LoadedIndex")
+        }
+    }
+
+    fn load(bytes: &[u8], interner: &StringInterner) -> std::io::Result<Option<LoadedIndex>> {
+        let temp = TempGraphDir::new();
         std::fs::write(temp.path().join("type_indices.bin"), bytes).unwrap();
-        TypeIndexBase::load_from(temp.path(), interner)
+        let Some(base) = TypeIndexBase::load_from(temp.path(), interner)? else {
+            return Ok(None);
+        };
+        let base = temp.own("TypeIndexBase", base);
+        Ok(Some(LoadedIndex { base, _temp: temp }))
     }
 
     #[test]
     fn valid_little_endian_fixture_round_trips() {
         let mut interner = StringInterner::new();
         let key = interner.get_or_intern("Person").as_u64();
-        let base = load(&fixture(key, &[1, 7, 42]), &interner)
+        let loaded = load(&fixture(key, &[1, 7, 42]), &interner)
             .unwrap()
             .unwrap();
         assert_eq!(
-            base.materialize("Person").unwrap(),
+            loaded.base().materialize("Person").unwrap(),
             vec![NodeIndex::new(1), NodeIndex::new(7), NodeIndex::new(42)]
         );
     }

@@ -728,33 +728,56 @@ impl PropertyIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::storage::disk::temp_owner::{TempGraphDir, TrackedOwner};
 
-    static TMP_DIR_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    /// Fixture directory for the property-index tests.
+    ///
+    /// Previously this was a hand-built `env::temp_dir()` path that was
+    /// created and never removed, leaking one directory per test per run.
+    /// It now wraps [`TempGraphDir`], which removes the directory and — via
+    /// [`TmpDir::own`] — asserts that every `PropertyIndex` mapped into it
+    /// (the struct holds `MmapBytes`) is dropped first.
+    ///
+    /// `Deref<Target = Path>` keeps every `&dir` / `dir.join(..)` call site
+    /// unchanged.
+    struct TmpDir(TempGraphDir);
 
-    fn tmp_dir() -> PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "kglite_prop_idx_{}_{}",
-            std::process::id(),
-            TMP_DIR_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        ));
-        fs::create_dir_all(&p).unwrap();
-        p
+    impl TmpDir {
+        /// Wrap an index built in this directory so the guard can assert it
+        /// is dropped before the directory is removed.
+        fn own<T>(&self, label: &'static str, value: T) -> TrackedOwner<T> {
+            self.0.own(label, value)
+        }
+    }
+
+    impl std::ops::Deref for TmpDir {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    fn tmp_dir() -> TmpDir {
+        TmpDir(TempGraphDir::new())
     }
 
     #[test]
     fn equality_lookup_finds_single_match() {
         let dir = tmp_dir();
-        let idx = PropertyIndex::build(
-            &dir,
-            "Human",
-            "label",
-            vec![
-                ("Alice".into(), 1),
-                ("Bob".into(), 2),
-                ("Charlie".into(), 3),
-            ],
-        )
-        .unwrap();
+        let idx = dir.own(
+            "PropertyIndex",
+            PropertyIndex::build(
+                &dir,
+                "Human",
+                "label",
+                vec![
+                    ("Alice".into(), 1),
+                    ("Bob".into(), 2),
+                    ("Charlie".into(), 3),
+                ],
+            )
+            .unwrap(),
+        );
         assert_eq!(idx.lookup_eq_str("Bob"), vec![NodeIndex::new(2)]);
         assert_eq!(idx.lookup_eq_str("Alice"), vec![NodeIndex::new(1)]);
         assert!(idx.lookup_eq_str("Missing").is_empty());
@@ -763,18 +786,21 @@ mod tests {
     #[test]
     fn equality_lookup_returns_all_duplicates() {
         let dir = tmp_dir();
-        let idx = PropertyIndex::build(
-            &dir,
-            "Human",
-            "label",
-            vec![
-                ("Alice".into(), 1),
-                ("Alice".into(), 7),
-                ("Alice".into(), 4),
-                ("Bob".into(), 2),
-            ],
-        )
-        .unwrap();
+        let idx = dir.own(
+            "PropertyIndex",
+            PropertyIndex::build(
+                &dir,
+                "Human",
+                "label",
+                vec![
+                    ("Alice".into(), 1),
+                    ("Alice".into(), 7),
+                    ("Alice".into(), 4),
+                    ("Bob".into(), 2),
+                ],
+            )
+            .unwrap(),
+        );
         let hits = idx.lookup_eq_str("Alice");
         assert_eq!(
             hits,
@@ -785,18 +811,21 @@ mod tests {
     #[test]
     fn prefix_lookup_respects_limit_and_sort_order() {
         let dir = tmp_dir();
-        let idx = PropertyIndex::build(
-            &dir,
-            "Human",
-            "label",
-            vec![
-                ("Oslo".into(), 10),
-                ("Ottawa".into(), 11),
-                ("Oxford".into(), 12),
-                ("Paris".into(), 13),
-            ],
-        )
-        .unwrap();
+        let idx = dir.own(
+            "PropertyIndex",
+            PropertyIndex::build(
+                &dir,
+                "Human",
+                "label",
+                vec![
+                    ("Oslo".into(), 10),
+                    ("Ottawa".into(), 11),
+                    ("Oxford".into(), 12),
+                    ("Paris".into(), 13),
+                ],
+            )
+            .unwrap(),
+        );
         let hits = idx.lookup_prefix_str("O", 10);
         assert_eq!(
             hits,
@@ -820,9 +849,12 @@ mod tests {
             )
             .unwrap();
         } // drop: flush to disk
-        let reopened = PropertyIndex::open(&dir, "Human", "label")
-            .unwrap()
-            .expect("index files should be present");
+        let reopened = dir.own(
+            "PropertyIndex",
+            PropertyIndex::open(&dir, "Human", "label")
+                .unwrap()
+                .expect("index files should be present"),
+        );
         assert_eq!(reopened.lookup_eq_str("Bob"), vec![NodeIndex::new(2)]);
         assert_eq!(reopened.len(), 2);
     }
@@ -853,9 +885,12 @@ mod tests {
             .unwrap();
         }
         for (index, (node_type, property)) in cases.into_iter().enumerate() {
-            let opened = PropertyIndex::open(&dir, node_type, property)
-                .unwrap()
-                .unwrap();
+            let opened = dir.own(
+                "PropertyIndex",
+                PropertyIndex::open(&dir, node_type, property)
+                    .unwrap()
+                    .unwrap(),
+            );
             assert_eq!(
                 opened.lookup_eq_str(&format!("value-{index}")),
                 vec![NodeIndex::new(index)]
@@ -918,9 +953,12 @@ mod tests {
         fs::write(&legacy.0, legacy_meta).unwrap();
         fs::remove_file(&current.0).unwrap();
 
-        let opened = PropertyIndex::open(&dir, "Human", "label")
-            .unwrap()
-            .unwrap();
+        let opened = dir.own(
+            "PropertyIndex",
+            PropertyIndex::open(&dir, "Human", "label")
+                .unwrap()
+                .unwrap(),
+        );
         assert_eq!(opened.lookup_eq_str("Alice"), vec![NodeIndex::new(7)]);
         assert!(scan_data_dir(&dir).unwrap().is_empty());
     }
@@ -1023,7 +1061,10 @@ mod tests {
     #[test]
     fn empty_index_lookup_returns_empty() {
         let dir = tmp_dir();
-        let idx = PropertyIndex::build(&dir, "Human", "label", Vec::new()).unwrap();
+        let idx = dir.own(
+            "PropertyIndex",
+            PropertyIndex::build(&dir, "Human", "label", Vec::new()).unwrap(),
+        );
         assert!(idx.lookup_eq_str("anything").is_empty());
         assert!(idx.lookup_prefix_str("x", 10).is_empty());
     }
