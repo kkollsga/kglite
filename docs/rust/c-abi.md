@@ -44,11 +44,11 @@ validation, and any returned error string is Rust-owned until freed with
 
 ## Opaque handles
 
-`KgliteGraph`, `KgliteSession`, `KgliteCypherResult`, and `KgliteEmbedder` are
-opaque. Create/load them only through exported constructors and release them
-with their matching `*_free` function. Null-safe free functions simplify error
-paths. Never copy/dereference the structs or free Rust memory with the host
-allocator.
+`KgliteGraph`, `KgliteSession`, `KgliteCypherResult`, `KgliteEmbedder`, and
+`KgliteWriterLease` are opaque. Create/load them only through exported
+constructors and release them with their matching `*_free` function. Null-safe
+free functions simplify error paths. Never copy/dereference the structs or free
+Rust memory with the host allocator.
 
 ## Lifecycle and persistence
 
@@ -56,6 +56,15 @@ The header exposes:
 
 - graph creation by storage mode, `.kgl`/RDF loading, graph generation, and
   blueprint construction;
+- `kglite_open_or_create_graph_in_mode`, which opens or creates a path in an
+  explicit mode (null mode = honour what the checkpoint recorded) and reports
+  any conversion through `out_converted_from`;
+- `kglite_writer_lease_acquire` / `kglite_writer_lease_free`. **Any caller that
+  may save to a path must hold the lease across the whole read-modify-save
+  interval; readers take none.** Two processes that both open, mutate, and save
+  one path each publish a complete snapshot and the later one silently wins, so
+  locking at save time is already too late. `timeout_ms = 0` fails fast, and a
+  refusal (`KGLITE_STATUS_CODE_WRITER_LEASE_HELD`) names the holding process;
 - atomic/durable save, byte serialization, and schema JSON;
 - session construction plus read/mutation execution with timeout/row budgets;
 - read and mutation batches, including atomic edge batches;

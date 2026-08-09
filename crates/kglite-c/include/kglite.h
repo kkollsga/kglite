@@ -87,6 +87,19 @@ enum KgliteStatusCode
    * can't proceed; check your call site.
    */
   KGLITE_STATUS_CODE_NULL_POINTER = 101,
+  /**
+   * Another process (or another un-freed handle in this one) holds the
+   * cross-process writer lease for that graph path, so
+   * [`kglite_writer_lease_acquire`](crate::kglite_writer_lease_acquire)
+   * gave up. The error message names the holder. Retriable as-is, which
+   * is why it is its own code rather than a `FileIo`: "wait and try
+   * again" and "the disk is broken" call for opposite reactions, and a
+   * binding cannot tell them apart by string-matching a message.
+   *
+   * Appended (not renumbered) to keep the existing discriminants stable
+   * across this ABI major version.
+   */
+  KGLITE_STATUS_CODE_WRITER_LEASE_HELD = 102,
 };
 #if __STDC_VERSION__ >= 202311L
 typedef enum KgliteStatusCode KgliteStatusCode;
@@ -156,6 +169,16 @@ typedef struct KgliteSession {
 typedef struct KgliteGraph {
   uint8_t _opaque[0];
 } KgliteGraph;
+
+/**
+ * Opaque handle for a held writer lease. See
+ * [`KgliteGraph`](crate::KgliteGraph) for the rationale on the empty
+ * `#[repr(C)]` facade pattern — cbindgen renders only a forward
+ * declaration; the actual state lives in [`LeaseState`].
+ */
+typedef struct KgliteWriterLease {
+  uint8_t _opaque[0];
+} KgliteWriterLease;
 
 /**
  * Opaque handle for a Cypher result. See
@@ -645,6 +668,147 @@ KgliteStatusCode kglite_compute_schema_json(struct KgliteGraph *graph,
                                             const char **out_error_msg);
 
 /**
+ * Take the cross-process single-writer lease for a graph path.
+ *
+ * **The contract: any caller that may `save` to a path must hold this lease
+ * across the whole read-modify-save interval. Readers need none.** The
+ * window that loses a writer's work is open-to-save, not save itself — two
+ * processes that both load a graph, both mutate, and both save produce two
+ * complete snapshots, and the second one published wins outright, silently.
+ * Locking at save time is already too late to notice. Acquire before the
+ * open, free after the save.
+ *
+ * The lease is a pair of sidecar files next to `path` (`<path>.lock` holds
+ * the OS lock, `<path>.lock-owner` records who has it). The OS releases the
+ * lock when the holding process exits — including on a crash — so a lock
+ * file left behind is not a stale lease, and deleting it does not release
+ * anything.
+ *
+ * # Arguments
+ *
+ * - `path` (in, borrowed): UTF-8 graph path, null-terminated. The path need
+ *   not exist yet; a caller creating a new graph takes the lease first.
+ * - `timeout_ms` (in): how long to keep retrying a contended lease. **`0`
+ *   is fail-fast** — return immediately if someone else holds it, which is
+ *   what a server wants at startup and a request path wants always (a
+ *   blocked-for-30s open is a worse failure than a clear error). A caller
+ *   that genuinely wants to queue passes a budget, or retries around the
+ *   error itself.
+ * - `out_lease` (out, owned): set to the lease handle on success; the caller
+ *   MUST free it with [`kglite_writer_lease_free`]. Null on failure.
+ * - `out_error_msg` (out, owned): owned error message on failure (free via
+ *   [`kglite_free_string`](crate::kglite_free_string)); null on success. On
+ *   `KGLITE_STATUS_CODE_WRITER_LEASE_HELD` the message names the holding
+ *   process (pid, and when it took the lease).
+ *
+ * # Errors
+ *
+ * - `KGLITE_ERR_NULL_POINTER` — `path` or `out_lease` is null
+ * - `KGLITE_ERR_INVALID_UTF8` — `path` isn't valid UTF-8
+ * - `KGLITE_STATUS_CODE_WRITER_LEASE_HELD` — someone else holds it; the
+ *   message names them. Retriable as-is.
+ * - `KGLITE_ERR_FILE_IO` / `KGLITE_ERR_FILE_NOT_FOUND` — the lock sidecar
+ *   could not be created (unwritable or missing parent directory)
+ *
+ * # Safety
+ *
+ * `path` must be a null-terminated UTF-8 string; `out_lease` a valid
+ * writable `*mut KgliteWriterLease` slot; `out_error_msg` null or a valid
+ * writable slot.
+ */
+
+KgliteStatusCode kglite_writer_lease_acquire(const char *path,
+                                             uint64_t timeout_ms,
+                                             struct KgliteWriterLease **out_lease,
+                                             const char **out_error_msg);
+
+/**
+ * Release a writer lease and free its handle. Idempotent on null (no-op).
+ *
+ * This is the whole release protocol: there is no separate "unlock" call.
+ * A handle that is never freed holds the lease for the life of the process —
+ * the C-side shape of the Rust `Drop` that backs it — so a binding should
+ * tie this call to its own deterministic teardown (`close()`, try-with-
+ * resources, `defer`), not to a finalizer that may never run.
+ *
+ * # Safety
+ *
+ * `lease` must be either null or a pointer previously returned by
+ * [`kglite_writer_lease_acquire`] and not yet freed. Calling twice on the
+ * same pointer is UB.
+ */
+ void kglite_writer_lease_free(struct KgliteWriterLease *lease);
+
+/**
+ * Open the graph at `path`, creating it when the path is absent, honouring
+ * `mode` on **both** branches: a missing path is created in it, and an
+ * existing graph that came back in a different mode is converted to it.
+ *
+ * This is the entry point for a binding that took a mode from *its* user
+ * (the servers' `--storage`, the wheel's `storage=`). Pass `mode` null to
+ * leave the decision to the graph: an existing checkpoint reopens in the
+ * mode it recorded, and a missing path is an error rather than a silent
+ * creation in some default. That asymmetry is deliberate — a mode argument
+ * that also silently converted an existing graph would undo what the
+ * checkpoint recorded, and a null one that silently created a graph would
+ * turn a typo'd path into an empty database.
+ *
+ * A conversion is *reported*, through `out_converted_from`, never performed
+ * silently — a silent conversion is as hard to notice as a silently ignored
+ * flag. Conversions with no in-place transition (either disk direction) fail
+ * with the reason and the alternative named.
+ *
+ * This function makes a lifecycle decision, **not** a write-ownership
+ * promise. A caller that may later save to `path` must hold
+ * [`kglite_writer_lease_acquire`]'s lease across the read-modify-save
+ * interval; a read-only caller should not take one.
+ *
+ * # Arguments
+ *
+ * - `path` (in, borrowed): UTF-8 graph path (a `.kgl` file or a disk-graph
+ *   directory), null-terminated.
+ * - `mode` (in, borrowed, may be null): `"memory"` (alias `"default"`),
+ *   `"mapped"`, or `"disk"` — the same mode vocabulary as
+ *   [`kglite_graph_new_in_mode`](crate::kglite_graph_new_in_mode) and
+ *   Python's `storage=`. **Null means unspecified**, the C spelling of "no
+ *   mode argument at all".
+ * - `out_graph` (out, owned): the opened / created graph on success (free
+ *   via [`kglite_graph_free`](crate::kglite_graph_free), or hand to
+ *   [`kglite_session_new`](crate::kglite_session_new)); null on failure.
+ * - `out_converted_from` (out, owned, may be null): set to the mode the
+ *   graph was in *before* an explicit `mode` converted it (`"memory"` /
+ *   `"mapped"` / `"disk"`) — free via
+ *   [`kglite_free_string`](crate::kglite_free_string). **Null when nothing
+ *   was converted**, which is every open that already matched, every
+ *   creation, and every unspecified-mode open.
+ * - `out_error_msg` (out, owned): owned error message on failure; null on
+ *   success.
+ *
+ * # Errors
+ *
+ * - `KGLITE_ERR_NULL_POINTER` — `path` or `out_graph` is null
+ * - `KGLITE_ERR_INVALID_UTF8` — `path` / `mode` isn't valid UTF-8
+ * - `KGLITE_ERR_FILE_NOT_FOUND` — the path is absent and `mode` was null,
+ *   so there was no mode to create it in
+ * - `KGLITE_ERR_INVALID_ARGUMENT` — unknown mode string, or a conversion
+ *   that cannot happen in place (either disk direction)
+ * - `KGLITE_ERR_FILE_FORMAT` / `KGLITE_ERR_FILE_IO` — as
+ *   [`kglite_load_file`](crate::kglite_load_file)
+ *
+ * # Safety
+ *
+ * `path` must be a null-terminated UTF-8 string; `mode` null or the same;
+ * `out_graph` a valid writable `*mut KgliteGraph` slot; `out_converted_from`
+ * and `out_error_msg` null or valid writable slots.
+ */
+
+KgliteStatusCode kglite_open_or_create_graph_in_mode(const char *path,
+                                                     const char *mode,
+                                                     struct KgliteGraph **out_graph,
+                                                     const char **out_converted_from,
+                                                     const char **out_error_msg);
+
+/**
  * Return the column names as a JSON array string:
  * `["col1", "col2", ...]`.
  *
@@ -957,7 +1121,9 @@ KgliteStatusCode kglite_create_edges_batch(struct KgliteSession *session,
  * `Internal`). Useful for REST/gRPC bindings.
  *
  * Returns 0 for `Ok` and 500 for C-ABI-only codes (`InvalidUtf8`
- * = 400 / bad request from caller, `NullPointer` = 400).
+ * = 400 / bad request from caller, `NullPointer` = 400,
+ * `WriterLeaseHeld` = 409 / conflict, retriable as-is — the same
+ * mapping core gives `TransactionConflict`, the other lost-race code).
  */
  uint16_t kglite_status_code_http_status(KgliteStatusCode code);
 

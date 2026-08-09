@@ -290,7 +290,7 @@ pub unsafe extern "C" fn kglite_load_file(
 /// plus a human-readable message. `load_file` returns `io::Error`
 /// regardless of the underlying cause; we sniff the `kind` to
 /// pick the right C-side code.
-fn classify_io_error(err: &std::io::Error) -> (KgliteStatusCode, String) {
+pub(crate) fn classify_io_error(err: &std::io::Error) -> (KgliteStatusCode, String) {
     let code = match err.kind() {
         std::io::ErrorKind::NotFound => KgliteStatusCode::FileNotFound,
         std::io::ErrorKind::InvalidData => KgliteStatusCode::FileFormat,

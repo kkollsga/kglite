@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The C ABI gained the writer lease.** `kglite_writer_lease_acquire` /
+  `kglite_writer_lease_free` expose the cross-process single-writer lease
+  (`KgliteWriterLease`) that the wheel's `kglite.open(..., lock=True)`, the CLI
+  and the MCP server already take, so a non-Rust binding can hold write
+  ownership of a path across its whole read-modify-save interval instead of
+  racing another process to publish a snapshot. `timeout_ms = 0` is fail-fast;
+  a refusal returns the new `KGLITE_STATUS_CODE_WRITER_LEASE_HELD` (409 as an
+  HTTP status, retriable) with a message naming the holding process and when it
+  took the lease. Freeing the handle releases the lease; never freeing it holds
+  it until the process exits.
+- **The C ABI gained the mode-aware open.**
+  `kglite_open_or_create_graph_in_mode` opens or creates a graph at a path and
+  honours the storage mode on both branches — a missing path is created in it,
+  an existing graph in a different mode is converted to it, and a conversion
+  with no in-place transition is refused with the reason named. Passing a null
+  mode means unspecified: the graph comes back in the mode its checkpoint
+  recorded. A conversion is reported through the new `out_converted_from`
+  out-parameter rather than performed silently. Previously the C boundary could
+  only `kglite_load_file` an existing graph or create an empty one, with no way
+  to express "open this in this mode".
+
 ### Fixed
 
 - **A columnar `SET` / `REMOVE` no longer re-points every node of the type.**

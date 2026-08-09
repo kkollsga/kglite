@@ -18,6 +18,8 @@
 //! - [`status`] — `KgliteStatusCode` enum + `KgErrorCode` mapping.
 //! - [`strings`] — owned-out-string allocation + `kglite_free_string`.
 //! - [`graph`] — `KgliteGraph` opaque handle + load/save/free.
+//! - [`open`] — `KgliteWriterLease` opaque handle + mode-aware
+//!   open-or-create.
 //! - [`session`] — `KgliteSession` opaque handle + execute_read /
 //!   execute_mut.
 //! - [`result`] — `KgliteCypherResult` opaque handle + JSON accessors.
@@ -31,6 +33,7 @@ pub mod alloc;
 pub mod embedder;
 mod ffi;
 pub mod graph;
+pub mod open;
 pub mod result;
 pub mod session;
 pub mod status;
@@ -44,6 +47,7 @@ pub use abi::*;
 pub use alloc::*;
 pub use embedder::*;
 pub use graph::*;
+pub use open::*;
 pub use result::*;
 pub use session::*;
 pub use status::*;

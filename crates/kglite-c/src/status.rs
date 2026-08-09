@@ -66,6 +66,17 @@ pub enum KgliteStatusCode {
     /// A required pointer argument was null. The function
     /// can't proceed; check your call site.
     NullPointer = 101,
+    /// Another process (or another un-freed handle in this one) holds the
+    /// cross-process writer lease for that graph path, so
+    /// [`kglite_writer_lease_acquire`](crate::kglite_writer_lease_acquire)
+    /// gave up. The error message names the holder. Retriable as-is, which
+    /// is why it is its own code rather than a `FileIo`: "wait and try
+    /// again" and "the disk is broken" call for opposite reactions, and a
+    /// binding cannot tell them apart by string-matching a message.
+    ///
+    /// Appended (not renumbered) to keep the existing discriminants stable
+    /// across this ABI major version.
+    WriterLeaseHeld = 102,
 }
 
 impl KgliteStatusCode {
@@ -99,11 +110,13 @@ impl KgliteStatusCode {
 
     /// Reverse: C-ABI code → `KgErrorCode` so the helper accessors
     /// can delegate. Returns `None` for `Ok` and the C-ABI-only
-    /// codes (`InvalidUtf8`, `NullPointer`) which have no
-    /// `KgErrorCode` counterpart.
+    /// codes (`InvalidUtf8`, `NullPointer`, `WriterLeaseHeld`) which
+    /// have no `KgErrorCode` counterpart.
     pub(crate) fn to_kg_error_code(self) -> Option<KgErrorCode> {
         Some(match self {
-            Self::Ok | Self::InvalidUtf8 | Self::NullPointer => return None,
+            Self::Ok | Self::InvalidUtf8 | Self::NullPointer | Self::WriterLeaseHeld => {
+                return None
+            }
             Self::CypherSyntax => KgErrorCode::CypherSyntax,
             Self::CypherTimeout => KgErrorCode::CypherTimeout,
             Self::CypherExecution => KgErrorCode::CypherExecution,
@@ -141,6 +154,7 @@ pub extern "C" fn kglite_status_code_name(code: KgliteStatusCode) -> *const c_ch
             KgliteStatusCode::Ok => return std::ptr::null(),
             KgliteStatusCode::InvalidUtf8 => "InvalidUtf8",
             KgliteStatusCode::NullPointer => "NullPointer",
+            KgliteStatusCode::WriterLeaseHeld => "WriterLeaseHeld",
             other => match other.to_kg_error_code() {
                 Some(kg) => kg.as_str(),
                 None => return std::ptr::null(),
@@ -172,12 +186,15 @@ pub extern "C" fn kglite_status_code_neo4j_status(code: KgliteStatusCode) -> *co
 /// `Internal`). Useful for REST/gRPC bindings.
 ///
 /// Returns 0 for `Ok` and 500 for C-ABI-only codes (`InvalidUtf8`
-/// = 400 / bad request from caller, `NullPointer` = 400).
+/// = 400 / bad request from caller, `NullPointer` = 400,
+/// `WriterLeaseHeld` = 409 / conflict, retriable as-is — the same
+/// mapping core gives `TransactionConflict`, the other lost-race code).
 #[no_mangle]
 pub extern "C" fn kglite_status_code_http_status(code: KgliteStatusCode) -> u16 {
     crate::ffi::value_boundary(500, || match code {
         KgliteStatusCode::Ok => 0,
         KgliteStatusCode::InvalidUtf8 | KgliteStatusCode::NullPointer => 400,
+        KgliteStatusCode::WriterLeaseHeld => 409,
         other => match other.to_kg_error_code() {
             Some(kg) => kg.http_status_code(),
             None => 500,
@@ -233,5 +250,29 @@ mod tests {
             500
         );
         assert_eq!(kglite_status_code_http_status(KgliteStatusCode::Ok), 0);
+    }
+
+    /// The boundary-only codes have no `KgErrorCode` to delegate to, so each
+    /// accessor answers for them directly — and must keep answering, since a
+    /// binding routes on exactly these three.
+    #[test]
+    fn boundary_only_codes_have_their_own_accessors() {
+        for (code, name, http) in [
+            (KgliteStatusCode::InvalidUtf8, "InvalidUtf8", 400),
+            (KgliteStatusCode::NullPointer, "NullPointer", 400),
+            // 409, not 500: a held lease is a retriable conflict, and a
+            // binding that saw a 5xx here would surface an outage instead of
+            // a wait-and-retry.
+            (KgliteStatusCode::WriterLeaseHeld, "WriterLeaseHeld", 409),
+        ] {
+            let named = kglite_status_code_name(code);
+            assert!(!named.is_null(), "{name} must name itself");
+            let text = unsafe { std::ffi::CStr::from_ptr(named) }.to_str().unwrap();
+            assert_eq!(text, name);
+            unsafe { crate::kglite_free_string(named) };
+            assert_eq!(kglite_status_code_http_status(code), http, "{name}");
+            // No Neo4j wire code exists for a boundary-only failure.
+            assert!(kglite_status_code_neo4j_status(code).is_null(), "{name}");
+        }
     }
 }

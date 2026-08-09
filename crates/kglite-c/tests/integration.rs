@@ -16,10 +16,12 @@ use kglite_c::{
     kglite_create_edges_batch, kglite_cypher_result_columns_json, kglite_cypher_result_free,
     kglite_cypher_result_row_count, kglite_cypher_result_rows_json, kglite_free_bytes,
     kglite_free_string, kglite_graph_free, kglite_graph_from_bytes, kglite_graph_new,
-    kglite_graph_to_bytes, kglite_load_file, kglite_save_graph_durable, kglite_session_execute_mut,
-    kglite_session_execute_mut_batch, kglite_session_execute_mut_opts, kglite_session_execute_read,
+    kglite_graph_to_bytes, kglite_load_file, kglite_open_or_create_graph_in_mode,
+    kglite_save_graph_durable, kglite_session_execute_mut, kglite_session_execute_mut_batch,
+    kglite_session_execute_mut_opts, kglite_session_execute_read,
     kglite_session_execute_read_batch, kglite_session_execute_read_opts, kglite_session_free,
-    kglite_session_new, KgliteCypherResult, KgliteGraph, KgliteSession, KgliteStatusCode,
+    kglite_session_new, kglite_writer_lease_acquire, kglite_writer_lease_free, KgliteCypherResult,
+    KgliteGraph, KgliteSession, KgliteStatusCode, KgliteWriterLease,
 };
 
 #[cfg(feature = "fastembed")]
@@ -777,6 +779,90 @@ fn embedder_free_is_null_safe() {
     unsafe { kglite_embedder_free(std::ptr::null_mut()) };
 }
 
+/// The embedder's write cycle end to end: take the lease, open-or-create in an
+/// explicit mode, mutate, save, release. The lease has to cover the whole
+/// read-modify-save interval — this asserts it is still refusing a second
+/// writer at the moment the save lands, and grants one immediately after the
+/// handle is freed.
+#[test]
+fn writer_lease_covers_the_open_mutate_save_interval() {
+    let dir = std::env::temp_dir().join(format!("kglite_c_lease_e2e_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("owned.kgl");
+    let path_c = CString::new(path.to_str().unwrap()).unwrap();
+
+    let mut lease: *mut KgliteWriterLease = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    let rc =
+        unsafe { kglite_writer_lease_acquire(path_c.as_ptr(), 0, &mut lease, &mut err as *mut _) };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    assert!(!lease.is_null());
+
+    let mode = CString::new("memory").unwrap();
+    let mut graph: *mut KgliteGraph = std::ptr::null_mut();
+    let mut converted: *const c_char = std::ptr::null();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_open_or_create_graph_in_mode(
+            path_c.as_ptr(),
+            mode.as_ptr(),
+            &mut graph as *mut _,
+            &mut converted as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    assert!(!graph.is_null() && converted.is_null());
+
+    // A second writer is still refused at save time — the interval the lease
+    // exists to cover.
+    let mut contender: *mut KgliteWriterLease = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_writer_lease_acquire(path_c.as_ptr(), 0, &mut contender, &mut err as *mut _)
+    };
+    assert_eq!(rc, KgliteStatusCode::WriterLeaseHeld);
+    assert!(contender.is_null() && !err.is_null());
+    unsafe { kglite_free_string(err) };
+
+    let mut err: *const c_char = std::ptr::null();
+    assert_eq!(
+        unsafe { kglite_c::kglite_save_graph(graph, path_c.as_ptr(), &mut err) },
+        KgliteStatusCode::Ok
+    );
+    unsafe { kglite_graph_free(graph) };
+    unsafe { kglite_writer_lease_free(lease) };
+
+    // Released — the next writer gets it, and reopening honours what was saved.
+    let mut next: *mut KgliteWriterLease = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    assert_eq!(
+        unsafe { kglite_writer_lease_acquire(path_c.as_ptr(), 0, &mut next, &mut err as *mut _) },
+        KgliteStatusCode::Ok
+    );
+    unsafe { kglite_writer_lease_free(next) };
+
+    let mut reopened: *mut KgliteGraph = std::ptr::null_mut();
+    let mut converted: *const c_char = std::ptr::null();
+    let mut err: *const c_char = std::ptr::null();
+    assert_eq!(
+        unsafe {
+            kglite_open_or_create_graph_in_mode(
+                path_c.as_ptr(),
+                std::ptr::null(),
+                &mut reopened as *mut _,
+                &mut converted as *mut _,
+                &mut err as *mut _,
+            )
+        },
+        KgliteStatusCode::Ok
+    );
+    assert!(converted.is_null());
+    unsafe { kglite_graph_free(reopened) };
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Regression: a failing `kglite_blueprint_build` must null BOTH out-params
 /// (graph + report), so a caller that frees the report on error doesn't free
 /// an uninitialized/wild pointer (segfault / heap corruption).
@@ -962,6 +1048,27 @@ fn fallible_exports_clear_all_outputs_before_validation() {
     let rc = unsafe { kglite_graph_from_bytes(std::ptr::null(), 0, &mut graph, &mut error) };
     assert_eq!(rc, KgliteStatusCode::NullPointer);
     assert!(graph.is_null() && error.is_null());
+
+    graph = sentinel_ptr.cast();
+    json = sentinel_cstr;
+    error = sentinel_cstr;
+    let rc = unsafe {
+        kglite_open_or_create_graph_in_mode(
+            std::ptr::null(),
+            std::ptr::null(),
+            &mut graph,
+            &mut json,
+            &mut error,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(graph.is_null() && json.is_null() && error.is_null());
+
+    let mut lease = sentinel_ptr.cast::<KgliteWriterLease>();
+    error = sentinel_cstr;
+    let rc = unsafe { kglite_writer_lease_acquire(std::ptr::null(), 0, &mut lease, &mut error) };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(lease.is_null() && error.is_null());
 
     json = sentinel_cstr;
     error = sentinel_cstr;
