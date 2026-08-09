@@ -12,11 +12,22 @@ use crate::tools::*;
 /// Engine failures retain their [`KgError`] so structured MCP routes can use
 /// the stable error taxonomy without parsing rendered prose. Text-oriented
 /// legacy tools convert this error only at their compatibility boundary.
+///
+/// [`KgError`] is boxed so this error — returned by the server's hottest read
+/// seam — stays small enough to travel in a `Result` without bloating every
+/// success path.
 #[derive(Debug)]
 pub(crate) enum CypherRunError {
     NoActiveGraph,
     MutationNotAllowed,
-    Engine(KgError),
+    Engine(Box<KgError>),
+}
+
+impl CypherRunError {
+    /// Wrap an engine failure, matching `map_err(CypherRunError::engine)` use.
+    pub(crate) fn engine(error: KgError) -> Self {
+        Self::Engine(Box::new(error))
+    }
 }
 
 /// Failure from a structured read that refuses to serve known-stale workspace

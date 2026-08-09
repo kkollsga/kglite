@@ -42,7 +42,6 @@ impl GraphState {
     /// that guard then remains held for the complete eager execution. This is
     /// the shared entry point for automation-safe structured MCP routes. It
     /// intentionally performs no text rendering or result postprocessing.
-    #[allow(clippy::result_large_err)]
     pub(crate) fn execute_cypher_read(
         &self,
         query: &str,
@@ -63,7 +62,6 @@ impl GraphState {
     /// query then executes directly against the installed generation while its
     /// read guard is held; calling [`Self::execute_cypher_read`] here would
     /// incorrectly run freshness handling a second time.
-    #[allow(clippy::result_large_err)]
     pub(crate) fn execute_cypher_read_strict(
         &self,
         query: &str,
@@ -97,7 +95,6 @@ pub(crate) fn json_to_value(v: &serde_json::Value) -> Value {
 /// This is the canonical MCP execution seam: policy, eager materialization,
 /// embedder wiring, and value codecs are applied once, while callers retain
 /// [`ExecuteOutcome`] for structured serialization or legacy rendering.
-#[allow(clippy::result_large_err)]
 pub(crate) fn execute_cypher_inner(
     kg: &KnowledgeGraph,
     query: &str,
@@ -107,7 +104,7 @@ pub(crate) fn execute_cypher_inner(
     // MCP rejects mutations regardless of read-only graph mode. Pre-parse so
     // the policy failure remains distinct from an engine execution failure.
     let (_, is_mutation) =
-        kglite::api::cypher::parse_with_mutation_check(query).map_err(CypherRunError::Engine)?;
+        kglite::api::cypher::parse_with_mutation_check(query).map_err(CypherRunError::engine)?;
     if is_mutation {
         return Err(CypherRunError::MutationNotAllowed);
     }
@@ -117,7 +114,7 @@ pub(crate) fn execute_cypher_inner(
     let mut opts = kglite::api::session::ExecuteOptions::eager(&params);
     opts.embedder = kg.embedder().cloned();
     opts.value_codecs = value_codecs;
-    kglite::api::session::execute_read(kg.dir(), query, &opts).map_err(CypherRunError::Engine)
+    kglite::api::session::execute_read(kg.dir(), query, &opts).map_err(CypherRunError::engine)
 }
 
 /// Run a Cypher query against the given KnowledgeGraph snapshot. Picks

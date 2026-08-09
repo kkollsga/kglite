@@ -184,12 +184,15 @@ impl SchemaNode {
 
         validate_keyword_applicability(
             &types,
-            !properties.is_empty() || map.contains_key("properties"),
-            map.contains_key("required"),
-            map.contains_key("additionalProperties"),
-            items.is_some(),
-            minimum.is_some() || maximum.is_some(),
-            min_items.is_some() || max_items.is_some(),
+            &KeywordPresence {
+                object: !properties.is_empty()
+                    || map.contains_key("properties")
+                    || map.contains_key("required")
+                    || map.contains_key("additionalProperties"),
+                items: items.is_some(),
+                numeric_bounds: minimum.is_some() || maximum.is_some(),
+                item_bounds: min_items.is_some() || max_items.is_some(),
+            },
             path,
         )?;
 
@@ -376,27 +379,29 @@ fn parse_usize_keyword(
         .transpose()
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Which keyword groups a compiled schema mapping actually declared.
+struct KeywordPresence {
+    object: bool,
+    items: bool,
+    numeric_bounds: bool,
+    item_bounds: bool,
+}
+
 fn validate_keyword_applicability(
     types: &BTreeSet<ValueType>,
-    has_properties: bool,
-    has_required: bool,
-    has_additional: bool,
-    has_items: bool,
-    has_numeric_bounds: bool,
-    has_item_bounds: bool,
+    present: &KeywordPresence,
     path: &str,
 ) -> Result<()> {
-    if (has_properties || has_required || has_additional) && !types.contains(&ValueType::Object) {
+    if present.object && !types.contains(&ValueType::Object) {
         bail!("{path} uses object keywords without type object");
     }
-    if has_items && !types.contains(&ValueType::Array) {
+    if present.items && !types.contains(&ValueType::Array) {
         bail!("{path}.items requires type array");
     }
-    if has_item_bounds && !types.contains(&ValueType::Array) {
+    if present.item_bounds && !types.contains(&ValueType::Array) {
         bail!("{path} uses minItems/maxItems without type array");
     }
-    if has_numeric_bounds
+    if present.numeric_bounds
         && !types.contains(&ValueType::Number)
         && !types.contains(&ValueType::Integer)
     {

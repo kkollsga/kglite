@@ -96,7 +96,7 @@ pub(crate) fn run_recipe_query(
             RunRecipeQueryOutput::Error(RecipeErrorEnvelope::no_active_graph(&args, query))
         }
         Err(StrictCypherReadError::Cypher(CypherRunError::Engine(error))) => {
-            RunRecipeQueryOutput::Error(RecipeErrorEnvelope::query_failed(&args, query, error))
+            RunRecipeQueryOutput::Error(RecipeErrorEnvelope::query_failed(&args, query, *error))
         }
         Err(StrictCypherReadError::Cypher(CypherRunError::MutationNotAllowed)) => {
             // Boot validation forbids this, but retain a typed failure if a

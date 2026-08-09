@@ -50,7 +50,10 @@ pub(crate) enum RecipeErrorCode {
 pub(crate) struct RecipeErrorEnvelope {
     code: RecipeErrorCode,
     message: String,
-    details: RecipeErrorDetails,
+    /// Boxed so the envelope stays small enough to travel by value through
+    /// `Result` and the untagged output enums. `Box` is transparent to both
+    /// `serde` and `schemars`, so the emitted JSON and schema are unchanged.
+    details: Box<RecipeErrorDetails>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cypher: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -140,9 +143,9 @@ impl RecipeErrorEnvelope {
         Self {
             code: RecipeErrorCode::InvalidRequest,
             message: "Recipe tool request is invalid.".to_string(),
-            details: RecipeErrorDetails::InvalidRequest(InvalidRequestDetails {
+            details: Box::new(RecipeErrorDetails::InvalidRequest(InvalidRequestDetails {
                 reason: reason.into(),
-            }),
+            })),
             cypher: None,
             parameters: None,
         }
@@ -152,7 +155,9 @@ impl RecipeErrorEnvelope {
         Self {
             code: RecipeErrorCode::UnknownRecipe,
             message: format!("Unknown recipe {recipe:?}."),
-            details: RecipeErrorDetails::UnknownRecipe(UnknownRecipeDetails { recipe }),
+            details: Box::new(RecipeErrorDetails::UnknownRecipe(UnknownRecipeDetails {
+                recipe,
+            })),
             cypher: None,
             parameters: None,
         }
@@ -162,7 +167,10 @@ impl RecipeErrorEnvelope {
         Self {
             code: RecipeErrorCode::UnknownQuery,
             message: format!("Unknown query {query:?} in recipe {recipe:?}."),
-            details: RecipeErrorDetails::UnknownQuery(UnknownQueryDetails { recipe, query }),
+            details: Box::new(RecipeErrorDetails::UnknownQuery(UnknownQueryDetails {
+                recipe,
+                query,
+            })),
             cypher: None,
             parameters: None,
         }
@@ -188,13 +196,15 @@ impl RecipeErrorEnvelope {
         Self {
             code: RecipeErrorCode::InvalidVariables,
             message: "Recipe query variables do not match the declared schema.".to_string(),
-            details: RecipeErrorDetails::InvalidVariables(InvalidVariablesDetails {
-                recipe: args.recipe.clone(),
-                query: args.query.clone(),
-                missing,
-                unknown,
-                issues,
-            }),
+            details: Box::new(RecipeErrorDetails::InvalidVariables(
+                InvalidVariablesDetails {
+                    recipe: args.recipe.clone(),
+                    query: args.query.clone(),
+                    missing,
+                    unknown,
+                    issues,
+                },
+            )),
             cypher,
             parameters,
         }
@@ -208,10 +218,10 @@ impl RecipeErrorEnvelope {
         Self {
             code: RecipeErrorCode::NoActiveGraph,
             message: "No active graph is available for the recipe query.".to_string(),
-            details: RecipeErrorDetails::Query(QueryIdentityDetails {
+            details: Box::new(RecipeErrorDetails::Query(QueryIdentityDetails {
                 recipe: args.recipe.clone(),
                 query: args.query.clone(),
-            }),
+            })),
             cypher,
             parameters,
         }
@@ -227,7 +237,7 @@ impl RecipeErrorEnvelope {
             code: RecipeErrorCode::StaleGraph,
             message: "Workspace graph rebuild failed; no stale recipe data was returned."
                 .to_string(),
-            details: RecipeErrorDetails::StaleGraph(StaleGraphDetails {
+            details: Box::new(RecipeErrorDetails::StaleGraph(StaleGraphDetails {
                 recipe: args.recipe.clone(),
                 query: args.query.clone(),
                 reason: failure.reason.code().to_string(),
@@ -239,7 +249,7 @@ impl RecipeErrorEnvelope {
                 retry_limit: failure.retry_limit,
                 recovery: "Fix the workspace build failure or trigger a new relevant filesystem event, then retry."
                     .to_string(),
-            }),
+            })),
             cypher,
             parameters,
         }
@@ -262,11 +272,11 @@ impl RecipeErrorEnvelope {
         Self {
             code: RecipeErrorCode::QueryFailed,
             message: "Recipe query execution failed.".to_string(),
-            details: RecipeErrorDetails::QueryFailed(QueryFailedDetails {
+            details: Box::new(RecipeErrorDetails::QueryFailed(QueryFailedDetails {
                 recipe: args.recipe.clone(),
                 query: args.query.clone(),
                 cause,
-            }),
+            })),
             cypher,
             parameters,
         }
@@ -283,12 +293,12 @@ impl RecipeErrorEnvelope {
             message: format!(
                 "Recipe query returned {observed_count} rows, exceeding the {RECIPE_RESULT_ROW_LIMIT}-row MCP payload limit."
             ),
-            details: RecipeErrorDetails::ResultLimitExceeded(ResultLimitExceededDetails {
+            details: Box::new(RecipeErrorDetails::ResultLimitExceeded(ResultLimitExceededDetails {
                 recipe: args.recipe.clone(),
                 query: args.query.clone(),
                 limit: RECIPE_RESULT_ROW_LIMIT,
                 observed_count,
-            }),
+            })),
             cypher,
             parameters,
         }
