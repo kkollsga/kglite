@@ -35,7 +35,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 /// queries at a stable version; 512 comfortably covers it. (Larger than the
 /// parse cache because each graph-version generation gets its own entries; old
 /// generations age out via FIFO as the working set re-populates post-mutation.)
-const CACHE_CAPACITY: usize = 512;
+pub(crate) const CACHE_CAPACITY: usize = 512;
 
 /// `(graph_id, version, lazy_eligible, query_hash)`. `lazy_eligible` is part of
 /// the key because the cached plan is stored **post lazy-marking** (so a hit is
@@ -80,7 +80,10 @@ fn hash_query(query: &str) -> u64 {
 pub fn get(graph_id: u64, version: u64, lazy: bool, query: &str) -> Option<Arc<CypherQuery>> {
     let key = (graph_id, version, lazy, hash_query(query));
     let guard = cache().read().expect("plan_cache RwLock poisoned");
-    guard.map.get(&key).map(Arc::clone)
+    let hit = guard.map.get(&key).map(Arc::clone);
+    #[cfg(test)]
+    instrumentation::record_lookup(hit.is_some());
+    hit
 }
 
 /// Cache `plan` (the optimized AST, already lazy-marked for `lazy`) for `query`
@@ -94,11 +97,165 @@ pub fn insert(graph_id: u64, version: u64, lazy: bool, query: &str, plan: Arc<Cy
     if guard.map.len() >= CACHE_CAPACITY {
         if let Some(oldest) = guard.order.pop_front() {
             guard.map.remove(&oldest);
+            #[cfg(test)]
+            instrumentation::record_eviction();
         }
     }
     guard.order.push_back(key);
     guard.map.insert(key, plan);
+    #[cfg(test)]
+    instrumentation::record_insertion();
 }
+
+/// Test-only event counters, split by the kind of statement whose `prepare()`
+/// caused the event.
+///
+/// **Why the caller kind cannot simply be passed in.** `prepare()` looks the
+/// plan up *before* anything has parsed the query, so at lookup time nobody
+/// knows whether the statement mutates; `is_mutation_query` runs on the
+/// prepared plan, one line later in `execute_read` / `execute_mut`. So events
+/// are buffered per in-flight `prepare()` and attributed retroactively by
+/// [`classify_pending`] once the caller knows. A `prepare()` that ends in an
+/// error never classifies, and its buffered events are folded into
+/// [`CallerStats::unclassified`] by the next [`begin_prepare`] rather than
+/// silently landing in the next statement's bucket.
+///
+/// **Why thread-local and not global.** The cache is process-wide, but `cargo
+/// test` runs cases on separate threads: a global counter would interleave
+/// unrelated tests and force every counter-reading case onto one lock. Every
+/// event is recorded on the thread that caused it, so per-thread totals are
+/// exactly "what this test did". Cross-thread interference in the *map* is a
+/// non-issue for the same reason the cache is sound at all — `graph_id` is
+/// process-unique, so no other test's entries share a key.
+#[cfg(test)]
+pub mod instrumentation {
+    use std::cell::Cell;
+
+    #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct CacheStats {
+        /// Calls to [`super::get`].
+        pub lookups: u64,
+        /// Subset of `lookups` that returned a plan.
+        pub hits: u64,
+        /// Entries actually added by [`super::insert`] (a benign-race duplicate
+        /// key returns early and is not counted).
+        pub insertions: u64,
+        /// FIFO evictions forced by those insertions.
+        pub evictions: u64,
+    }
+
+    const EMPTY: CacheStats = CacheStats {
+        lookups: 0,
+        hits: 0,
+        insertions: 0,
+        evictions: 0,
+    };
+
+    impl CacheStats {
+        fn add(self, other: CacheStats) -> CacheStats {
+            CacheStats {
+                lookups: self.lookups + other.lookups,
+                hits: self.hits + other.hits,
+                insertions: self.insertions + other.insertions,
+                evictions: self.evictions + other.evictions,
+            }
+        }
+    }
+
+    #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct CallerStats {
+        /// Events caused by a statement that turned out to be a read.
+        pub read: CacheStats,
+        /// Events caused by a statement that turned out to be a mutation.
+        pub mutation: CacheStats,
+        /// Events from a `prepare()` that never reached classification — an
+        /// error before `is_mutation_query`, or a direct `get`/`insert` call
+        /// from a `plan_cache` unit test.
+        pub unclassified: CacheStats,
+    }
+
+    thread_local! {
+        /// Events of the `prepare()` currently in flight on this thread.
+        static PENDING: Cell<CacheStats> = const { Cell::new(EMPTY) };
+        static TOTALS: Cell<CallerStats> = const {
+            Cell::new(CallerStats { read: EMPTY, mutation: EMPTY, unclassified: EMPTY })
+        };
+    }
+
+    fn bump(f: impl FnOnce(&mut CacheStats)) {
+        PENDING.with(|pending| {
+            let mut stats = pending.get();
+            f(&mut stats);
+            pending.set(stats);
+        });
+    }
+
+    pub(super) fn record_lookup(hit: bool) {
+        bump(|stats| {
+            stats.lookups += 1;
+            stats.hits += u64::from(hit);
+        });
+    }
+
+    pub(super) fn record_insertion() {
+        bump(|stats| stats.insertions += 1);
+    }
+
+    pub(super) fn record_eviction() {
+        bump(|stats| stats.evictions += 1);
+    }
+
+    fn take_pending() -> CacheStats {
+        PENDING.with(|pending| pending.replace(EMPTY))
+    }
+
+    /// Open a fresh attribution window. Any events still buffered belong to a
+    /// `prepare()` that errored out before classifying, so they are banked as
+    /// `unclassified` instead of contaminating this statement.
+    pub fn begin_prepare() {
+        let leftover = take_pending();
+        if leftover != EMPTY {
+            TOTALS.with(|totals| {
+                let mut all = totals.get();
+                all.unclassified = all.unclassified.add(leftover);
+                totals.set(all);
+            });
+        }
+    }
+
+    /// Attribute the in-flight `prepare()`'s events now that the caller has
+    /// classified the statement.
+    pub fn classify_pending(is_mutation: bool) {
+        let pending = take_pending();
+        TOTALS.with(|totals| {
+            let mut all = totals.get();
+            if is_mutation {
+                all.mutation = all.mutation.add(pending);
+            } else {
+                all.read = all.read.add(pending);
+            }
+            totals.set(all);
+        });
+    }
+
+    /// Zero this thread's counters, including any unclassified in-flight events.
+    pub fn reset() {
+        take_pending();
+        TOTALS.with(|totals| totals.set(CallerStats::default()));
+    }
+
+    /// This thread's classified totals since the last [`reset`].
+    pub fn totals() -> CallerStats {
+        TOTALS.with(|totals| totals.get())
+    }
+}
+
+/// Serializes every test whose assertion depends on cache *contents*. The
+/// cache is a process-wide singleton, so one test's [`clear_for_tests`] (or a
+/// capacity test's 600 inserts) would otherwise evict another's entry between
+/// its insert and its assert. Shared with `session::plan_cache_cost_tests`.
+#[cfg(test)]
+pub static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 pub fn clear_for_tests() {
@@ -120,11 +277,6 @@ pub fn entry_count_for_tests() -> usize {
 mod tests {
     use super::*;
     use crate::graph::languages::cypher::parser::parse_cypher;
-    use std::sync::Mutex;
-
-    // The cache is a process-wide singleton; serialize the cases so one
-    // test's `clear_for_tests()` can't wipe another's entries mid-assert.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn plan(q: &str) -> Arc<CypherQuery> {
         Arc::new(parse_cypher(q).expect("parse"))

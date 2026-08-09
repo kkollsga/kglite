@@ -50,6 +50,8 @@ pub use self::execute::{execute_mut, execute_read, ExecuteOptions, ExecuteOutcom
 pub use self::transaction::{CommitOutcome, Session, Transaction};
 
 pub(crate) mod execute;
+#[cfg(test)]
+mod plan_cache_cost_tests;
 pub(crate) mod transaction;
 
 use crate::datatypes::Value;

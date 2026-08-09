@@ -251,6 +251,10 @@ pub fn execute_read(
 ) -> Result<ExecuteOutcome, KgError> {
     let (parsed, params, encode_plan) = prepare(graph, query, opts)?;
     let is_mutation = cypher::is_mutation_query(&parsed);
+    // Attribute the plan-cache events `prepare` just caused, now that the
+    // statement kind is known. Test-only; see `plan_cache::instrumentation`.
+    #[cfg(test)]
+    cypher::plan_cache::instrumentation::classify_pending(is_mutation);
 
     // EXPLAIN: render plan rows, skip execution.
     if parsed.explain {
@@ -353,6 +357,9 @@ pub fn execute_mut(
 ) -> Result<ExecuteOutcome, KgError> {
     let (parsed, params, encode_plan) = prepare(graph, query, opts)?;
     let is_mutation = cypher::is_mutation_query(&parsed);
+    // See the identical call in `execute_read`. Test-only.
+    #[cfg(test)]
+    cypher::plan_cache::instrumentation::classify_pending(is_mutation);
 
     // EXPLAIN never executes the mutation. Return before collision preflight,
     // disk promotion, or an atomic rollback checkpoint so inspecting a write
@@ -558,6 +565,10 @@ fn prepare(
     query: &str,
     opts: &ExecuteOptions<'_>,
 ) -> Result<PreparedQuery, KgError> {
+    // Open a plan-cache attribution window for this statement. Test-only; the
+    // caller closes it with `classify_pending` once it knows `is_mutation`.
+    #[cfg(test)]
+    cypher::plan_cache::instrumentation::begin_prepare();
     // Plan cache: a param-less, codec-free, no-disabled-passes query against an
     // unchanged graph reuses its fully-optimized plan, skipping parse + validate
     // + optimize. Keyed on (graph_id, version) so any mutation invalidates it
