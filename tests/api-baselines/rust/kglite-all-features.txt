@@ -1391,6 +1391,7 @@ pub fn kglite::api::session::Session::commit(&self, tx: kglite::api::session::Tr
 pub fn kglite::api::session::Session::from_arc(graph: alloc::sync::Arc<kglite::api::DirGraph>) -> Self
 pub fn kglite::api::session::Session::new(graph: kglite::api::DirGraph) -> Self
 pub fn kglite::api::session::Session::rollback(&self, _tx: kglite::api::session::Transaction)
+pub fn kglite::api::session::Session::save(&self, path: &str, fsync: bool) -> core::result::Result<(), alloc::string::String>
 pub fn kglite::api::session::Session::snapshot(&self) -> alloc::sync::Arc<kglite::api::DirGraph>
 pub fn kglite::api::session::Session::transact<T, E>(&self, operation: impl core::ops::function::FnOnce(&mut kglite::api::DirGraph) -> core::result::Result<T, E>) -> core::result::Result<T, E>
 pub fn kglite::api::session::Session::version(&self) -> u64

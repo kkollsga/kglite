@@ -1083,6 +1083,58 @@ KgliteStatusCode kglite_create_edges_batch(struct KgliteSession *session,
                                            const char **out_error_msg);
 
 /**
+ * Checkpoint a session's graph to `path` — the save half of the
+ * open / mutate / save cycle.
+ *
+ * [`kglite_session_new`] takes ownership of the graph handle, so a graph
+ * mutated through
+ * [`kglite_session_execute_mut`](crate::kglite_session_execute_mut) can only
+ * be persisted from the session that now holds it; this is that call.
+ * [`kglite_save_graph`](crate::kglite_save_graph) remains the entry point
+ * for a graph handle that has *not* been moved into a session.
+ *
+ * **The lease contract: a caller that saves must hold the writer lease
+ * across the whole open / mutate / save interval, not merely at this call.**
+ * Take it with
+ * [`kglite_writer_lease_acquire`](crate::kglite_writer_lease_acquire) before
+ * opening, free it after saving. Two processes that both open one path, both
+ * mutate, and both save each write a complete snapshot and the later one
+ * wins outright and silently — locking only at save time is already too late
+ * to notice. Read-only sessions take no lease.
+ *
+ * The save writes through the session's own graph, so it never copies the
+ * graph to checkpoint it, and it is serialized against concurrent
+ * `execute_mut` calls on the same session: the file is a consistent
+ * point-in-time image. Readers holding a result from before the save are
+ * unaffected.
+ *
+ * `fsync` != 0 is the durable default: atomic temp+rename plus a file and
+ * parent-directory flush, so the checkpoint survives power loss. `fsync` ==
+ * 0 is the fast, **non-durable** opt-out — still never a torn file, but the
+ * bytes may not survive an OS crash. The storage mode is written from the
+ * graph being saved, so reopening with
+ * [`kglite_open_or_create_graph_in_mode`](crate::kglite_open_or_create_graph_in_mode)
+ * and a null mode brings the graph back in the mode it was saved in.
+ *
+ * # Errors
+ *
+ * - `KGLITE_ERR_NULL_POINTER` — `session` or `path` is null
+ * - `KGLITE_ERR_INVALID_UTF8` — `path` isn't valid UTF-8
+ * - `KGLITE_ERR_FILE_IO` — the write failed
+ *
+ * # Safety
+ *
+ * `session` must be a valid handle from [`kglite_session_new`], not yet
+ * freed; `path` a null-terminated UTF-8 string; `out_error_msg` null or a
+ * valid writable slot.
+ */
+
+KgliteStatusCode kglite_session_save(struct KgliteSession *session,
+                                     const char *path,
+                                     uint8_t fsync,
+                                     const char **out_error_msg);
+
+/**
  * Free a session handle. Idempotent on null (no-op).
  *
  * # Safety

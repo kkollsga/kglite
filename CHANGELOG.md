@@ -29,6 +29,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out-parameter rather than performed silently. Previously the C boundary could
   only `kglite_load_file` an existing graph or create an empty one, with no way
   to express "open this in this mode".
+- **The C ABI can now save a graph it mutated.** `kglite_session_new` takes
+  ownership of the graph handle, and every save entry point required one, so a
+  binding could open-and-mutate or open-and-save but never open-mutate-save —
+  the cycle the writer lease exists to protect. `kglite_session_save` closes
+  it, with the same `fsync` durability choice as
+  `kglite_save_graph_durable` and the same mode-aware dispatch, so a
+  checkpoint reopens in the mode it was written in.
+- **`Session::save` (Rust API).** Persists a session's graph through the
+  session's own `Arc` under its lock. Saving a `Session::snapshot()` cannot do
+  this: a save mutates the graph it writes (save metadata, index keys,
+  columnar consolidation), so a snapshot clone hands `Arc::make_mut` a shared
+  pointer and deep-copies every node, edge and index on every checkpoint. Any
+  binding that holds a `Session` — the Bolt server, the C ABI, a future
+  JVM/Go binding — now has a no-copy checkpoint, which was previously
+  unreachable outside the engine because the session's `Arc` is private.
 
 ### Fixed
 

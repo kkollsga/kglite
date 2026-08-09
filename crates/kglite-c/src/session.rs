@@ -641,6 +641,87 @@ pub unsafe extern "C" fn kglite_create_edges_batch(
     )
 }
 
+/// Checkpoint a session's graph to `path` — the save half of the
+/// open / mutate / save cycle.
+///
+/// [`kglite_session_new`] takes ownership of the graph handle, so a graph
+/// mutated through
+/// [`kglite_session_execute_mut`](crate::kglite_session_execute_mut) can only
+/// be persisted from the session that now holds it; this is that call.
+/// [`kglite_save_graph`](crate::kglite_save_graph) remains the entry point
+/// for a graph handle that has *not* been moved into a session.
+///
+/// **The lease contract: a caller that saves must hold the writer lease
+/// across the whole open / mutate / save interval, not merely at this call.**
+/// Take it with
+/// [`kglite_writer_lease_acquire`](crate::kglite_writer_lease_acquire) before
+/// opening, free it after saving. Two processes that both open one path, both
+/// mutate, and both save each write a complete snapshot and the later one
+/// wins outright and silently — locking only at save time is already too late
+/// to notice. Read-only sessions take no lease.
+///
+/// The save writes through the session's own graph, so it never copies the
+/// graph to checkpoint it, and it is serialized against concurrent
+/// `execute_mut` calls on the same session: the file is a consistent
+/// point-in-time image. Readers holding a result from before the save are
+/// unaffected.
+///
+/// `fsync` != 0 is the durable default: atomic temp+rename plus a file and
+/// parent-directory flush, so the checkpoint survives power loss. `fsync` ==
+/// 0 is the fast, **non-durable** opt-out — still never a torn file, but the
+/// bytes may not survive an OS crash. The storage mode is written from the
+/// graph being saved, so reopening with
+/// [`kglite_open_or_create_graph_in_mode`](crate::kglite_open_or_create_graph_in_mode)
+/// and a null mode brings the graph back in the mode it was saved in.
+///
+/// # Errors
+///
+/// - `KGLITE_ERR_NULL_POINTER` — `session` or `path` is null
+/// - `KGLITE_ERR_INVALID_UTF8` — `path` isn't valid UTF-8
+/// - `KGLITE_ERR_FILE_IO` — the write failed
+///
+/// # Safety
+///
+/// `session` must be a valid handle from [`kglite_session_new`], not yet
+/// freed; `path` a null-terminated UTF-8 string; `out_error_msg` null or a
+/// valid writable slot.
+#[no_mangle]
+pub unsafe extern "C" fn kglite_session_save(
+    session: *mut KgliteSession,
+    path: *const c_char,
+    fsync: u8,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || {},
+        || {
+            if session.is_null() || path.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let session_state = unsafe { SessionState::from_handle(session) };
+            // `Session::save` reaches the session's own Arc under its lock —
+            // the only no-copy route, since saving a `snapshot()` would find a
+            // second strong reference and deep-clone the whole graph.
+            match session_state.inner.save(path_str, fsync != 0) {
+                Ok(()) => KgliteStatusCode::Ok,
+                Err(message) => {
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&message);
+                        }
+                    }
+                    KgliteStatusCode::FileIo
+                }
+            }
+        },
+    )
+}
+
 /// Free a session handle. Idempotent on null (no-op).
 ///
 /// # Safety
@@ -934,6 +1015,36 @@ mod tests {
             "failed batch must be atomic — no partial edges"
         );
 
+        unsafe { kglite_session_free(session) };
+    }
+
+    #[test]
+    fn session_save_rejects_null_arguments() {
+        let mut error: *const c_char = std::ptr::NonNull::<c_char>::dangling().as_ptr();
+        let status =
+            unsafe { kglite_session_save(std::ptr::null_mut(), std::ptr::null(), 1, &mut error) };
+        assert_eq!(status, KgliteStatusCode::NullPointer);
+        assert!(
+            error.is_null(),
+            "the error slot must be reset before validation"
+        );
+    }
+
+    /// A failed checkpoint has to reach the caller as an error with a message,
+    /// not a silent success — the one outcome that would let a binding report
+    /// "saved" for data that is not on disk.
+    #[test]
+    fn session_save_surfaces_a_write_failure() {
+        let session = new_test_session();
+        exec_mut(session, "CREATE (:T {id: 1})");
+        // A path whose parent directory does not exist: the write cannot
+        // succeed, and the engine's message says why.
+        let path = CString::new("/nonexistent-kglite-c-dir/inner/graph.kgl").unwrap();
+        let mut error: *const c_char = std::ptr::null();
+        let status = unsafe { kglite_session_save(session, path.as_ptr(), 0, &mut error) };
+        assert_eq!(status, KgliteStatusCode::FileIo);
+        assert!(!error.is_null(), "a failed save must explain itself");
+        unsafe { crate::kglite_free_string(error) };
         unsafe { kglite_session_free(session) };
     }
 

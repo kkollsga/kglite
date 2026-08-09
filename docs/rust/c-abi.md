@@ -64,8 +64,18 @@ The header exposes:
   interval; readers take none.** Two processes that both open, mutate, and save
   one path each publish a complete snapshot and the later one silently wins, so
   locking at save time is already too late. `timeout_ms = 0` fails fast, and a
-  refusal (`KGLITE_STATUS_CODE_WRITER_LEASE_HELD`) names the holding process;
+  refusal (`KGLITE_STATUS_CODE_WRITER_LEASE_HELD`) names the holding process.
+  The full write cycle is: acquire the lease → `kglite_open_or_create_graph_in_mode`
+  → `kglite_session_new` → `kglite_session_execute_mut` → `kglite_session_save`
+  → free the session → free the lease;
 - atomic/durable save, byte serialization, and schema JSON;
+- `kglite_session_save`, the checkpoint for a graph that has been moved into a
+  session. `kglite_session_new` takes ownership of the graph handle, so a graph
+  mutated through `kglite_session_execute_mut` is persisted from the session
+  rather than from the (now-consumed) graph handle; `kglite_save_graph` stays
+  the entry point for a graph that was never moved into one. The save writes
+  through the session's own graph — it never copies the graph to checkpoint it
+  — and is serialized against concurrent mutations on that session;
 - session construction plus read/mutation execution with timeout/row budgets;
 - read and mutation batches, including atomic edge batches;
 - JSON result metadata/rows, memory statistics, and embedder binding.

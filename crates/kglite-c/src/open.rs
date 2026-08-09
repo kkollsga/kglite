@@ -650,6 +650,109 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The whole embedder cycle, in the order a binding runs it: take the
+    /// lease, open in an explicit mode, write through a session, save, and
+    /// reopen with no mode argument. Both halves of what a save must carry
+    /// are asserted on the *reopened* graph — the rows, and the storage mode
+    /// the checkpoint recorded, which an unspecified-mode reopen has to
+    /// honour.
+    #[test]
+    fn open_mutate_save_reopen_preserves_rows_and_recorded_mode() {
+        use crate::session::{kglite_session_free, kglite_session_new, kglite_session_save};
+
+        let dir = case_dir("round_trip");
+        let path = dir.join("cycle.kgl");
+        let path_c = CString::new(path.to_str().unwrap()).unwrap();
+
+        let (status, lease, err) = acquire(&path, 0);
+        assert_eq!(status, KgliteStatusCode::Ok, "{err:?}");
+
+        let Opened {
+            status,
+            graph,
+            converted_from: converted,
+            error: err,
+        } = open_in_mode(&path, Some("mapped"));
+        assert_eq!(status, KgliteStatusCode::Ok, "{err:?}");
+        assert!(converted.is_none());
+
+        let mut session = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { kglite_session_new(graph, &mut session) },
+            KgliteStatusCode::Ok
+        );
+        let create = CString::new("CREATE (:Kept {id: 7, title: 'seven'})").unwrap();
+        let mut result = std::ptr::null_mut();
+        let mut error: *const c_char = std::ptr::null();
+        assert_eq!(
+            unsafe {
+                crate::session::kglite_session_execute_mut(
+                    session,
+                    create.as_ptr(),
+                    std::ptr::null(),
+                    &mut result,
+                    &mut error,
+                )
+            },
+            KgliteStatusCode::Ok
+        );
+        unsafe { crate::kglite_cypher_result_free(result) };
+
+        let mut error: *const c_char = std::ptr::null();
+        let status = unsafe { kglite_session_save(session, path_c.as_ptr(), 1, &mut error) };
+        assert_eq!(status, KgliteStatusCode::Ok, "{:?}", take_string(error));
+        unsafe { kglite_session_free(session) };
+        unsafe { kglite_writer_lease_free(lease) };
+
+        // Reopen with no mode argument at all: the rows must be there, and the
+        // graph must come back mapped because that is what the checkpoint
+        // recorded — a save that wrote the mode from somewhere other than the
+        // graph it saved would come back memory here.
+        let Opened {
+            status,
+            graph,
+            converted_from: converted,
+            error: err,
+        } = open_in_mode(&path, None);
+        assert_eq!(status, KgliteStatusCode::Ok, "{err:?}");
+        assert!(converted.is_none());
+        assert_eq!(
+            handle_mode(graph),
+            StorageMode::Mapped,
+            "the saved checkpoint must still record the mode it was written in"
+        );
+
+        let mut session = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { kglite_session_new(graph, &mut session) },
+            KgliteStatusCode::Ok
+        );
+        let query = CString::new("MATCH (n:Kept) RETURN n.title AS title").unwrap();
+        let mut result = std::ptr::null_mut();
+        let mut error: *const c_char = std::ptr::null();
+        assert_eq!(
+            unsafe {
+                crate::session::kglite_session_execute_read(
+                    session,
+                    query.as_ptr(),
+                    std::ptr::null(),
+                    &mut result,
+                    &mut error,
+                )
+            },
+            KgliteStatusCode::Ok
+        );
+        let rows = unsafe { crate::kglite_cypher_result_rows_json(result) };
+        assert_eq!(
+            take_string(rows).as_deref(),
+            Some(r#"[{"title":"seven"}]"#),
+            "the mutation made through the session must be in the saved file"
+        );
+        unsafe { crate::kglite_cypher_result_free(result) };
+        unsafe { kglite_session_free(session) };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn open_in_mode_rejects_null_and_non_utf8_arguments() {
         let mut graph: *mut KgliteGraph = std::ptr::null_mut();

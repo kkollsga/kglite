@@ -144,6 +144,38 @@ impl Session {
         Ok(value)
     }
 
+    /// Checkpoint the session's current graph to `path`.
+    ///
+    /// Routes through the shared [`save_graph_with`](crate::graph::io::file::save_graph_with)
+    /// dispatch, so mode-aware save (disk directory vs `.kgl`), atomic
+    /// temp+rename, the recorded storage mode, and the `fsync` barrier behave
+    /// exactly as they do for a binding that owns its `Arc<DirGraph>`
+    /// directly.
+    ///
+    /// **This exists because saving through [`snapshot`](Self::snapshot)
+    /// cannot be done cheaply.** A save *mutates* the graph it writes — save
+    /// metadata, index keys, columnar consolidation — so a caller holding a
+    /// snapshot clone hands `Arc::make_mut` a shared pointer and deep-clones
+    /// every node, edge and index on every checkpoint. The session's own Arc
+    /// is behind a private mutex, so only the session can reach the
+    /// unique-owner path; a binding that holds a `Session` has no other route
+    /// to a no-copy save.
+    ///
+    /// The session lock is held for the write, which is what makes the
+    /// checkpoint a consistent point-in-time image: concurrent writers and
+    /// *new* snapshots wait, while readers already holding a snapshot are
+    /// unaffected. The save is not a semantic mutation and does not bump the
+    /// graph version, so an in-flight OCC transaction is undisturbed.
+    ///
+    /// This is a persistence decision, not a write-ownership claim. A caller
+    /// that may publish to `path` must hold its own
+    /// [`GraphWriterLease`](crate::graph::io::open::GraphWriterLease) across
+    /// the whole open/mutate/save interval.
+    pub fn save(&self, path: &str, fsync: bool) -> Result<(), String> {
+        let mut guard = self.graph.lock().unwrap_or_else(|p| p.into_inner());
+        crate::graph::io::file::save_graph_with(&mut guard, path, fsync)
+    }
+
     /// Begin a new read-write transaction. The snapshot is taken
     /// immediately; the working copy is deferred until the first
     /// mutation (see [`Transaction::working_mut`]).
@@ -442,6 +474,45 @@ mod tests {
             backend_clone_count(),
             0,
             "terminal preflighted DELETE must not clone the graph"
+        );
+    }
+
+    /// The property the whole method exists for: a checkpoint writes through
+    /// the session's own Arc. Asserted with the backend clone counter rather
+    /// than by inspecting the file, because a snapshot-based save produces a
+    /// byte-identical file — it just copies the entire graph to get there,
+    /// silently, on every save.
+    #[test]
+    fn save_writes_through_the_sessions_own_graph_without_cloning() {
+        use crate::graph::session::execute::{execute_mut, execute_read, ExecuteOptions};
+        use crate::graph::storage::backend::{backend_clone_count, reset_backend_clone_count};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checkpoint.kgl");
+        let path_str = path.to_string_lossy().into_owned();
+        let params = std::collections::HashMap::new();
+        let opts = ExecuteOptions::eager(&params);
+
+        let session = Session::new(empty_graph());
+        execute_mut(&mut session.write(), "CREATE (:N {id: 1})", &opts).unwrap();
+
+        reset_backend_clone_count();
+        session.save(&path_str, false).unwrap();
+        assert_eq!(
+            backend_clone_count(),
+            0,
+            "a checkpoint must write through the Session's own Arc; saving a \
+             snapshot() clone deep-clones every node, edge and index"
+        );
+
+        // …and the file carries the write, so the no-clone path is not a
+        // no-op path.
+        let reloaded = crate::graph::io::file::load_file(&path_str).unwrap();
+        let outcome = execute_read(&reloaded, "MATCH (n:N) RETURN n.id AS id", &opts).unwrap();
+        assert_eq!(
+            outcome.result.rows.len(),
+            1,
+            "the checkpoint must contain the node created before it"
         );
     }
 

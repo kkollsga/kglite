@@ -20,8 +20,8 @@ use kglite_c::{
     kglite_save_graph_durable, kglite_session_execute_mut, kglite_session_execute_mut_batch,
     kglite_session_execute_mut_opts, kglite_session_execute_read,
     kglite_session_execute_read_batch, kglite_session_execute_read_opts, kglite_session_free,
-    kglite_session_new, kglite_writer_lease_acquire, kglite_writer_lease_free, KgliteCypherResult,
-    KgliteGraph, KgliteSession, KgliteStatusCode, KgliteWriterLease,
+    kglite_session_new, kglite_session_save, kglite_writer_lease_acquire, kglite_writer_lease_free,
+    KgliteCypherResult, KgliteGraph, KgliteSession, KgliteStatusCode, KgliteWriterLease,
 };
 
 #[cfg(feature = "fastembed")]
@@ -815,6 +815,30 @@ fn writer_lease_covers_the_open_mutate_save_interval() {
     assert_eq!(rc, KgliteStatusCode::Ok);
     assert!(!graph.is_null() && converted.is_null());
 
+    // Mutate through a session — which takes ownership of the graph handle,
+    // so the checkpoint below has to come from the session.
+    let mut session: *mut KgliteSession = std::ptr::null_mut();
+    assert_eq!(
+        unsafe { kglite_session_new(graph, &mut session as *mut _) },
+        KgliteStatusCode::Ok
+    );
+    let create = CString::new("CREATE (:Owned {id: 1, title: 'kept'})").unwrap();
+    let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    assert_eq!(
+        unsafe {
+            kglite_session_execute_mut(
+                session,
+                create.as_ptr(),
+                std::ptr::null(),
+                &mut result,
+                &mut err,
+            )
+        },
+        KgliteStatusCode::Ok
+    );
+    unsafe { kglite_cypher_result_free(result) };
+
     // A second writer is still refused at save time — the interval the lease
     // exists to cover.
     let mut contender: *mut KgliteWriterLease = std::ptr::null_mut();
@@ -828,10 +852,10 @@ fn writer_lease_covers_the_open_mutate_save_interval() {
 
     let mut err: *const c_char = std::ptr::null();
     assert_eq!(
-        unsafe { kglite_c::kglite_save_graph(graph, path_c.as_ptr(), &mut err) },
+        unsafe { kglite_session_save(session, path_c.as_ptr(), 1, &mut err) },
         KgliteStatusCode::Ok
     );
-    unsafe { kglite_graph_free(graph) };
+    unsafe { kglite_session_free(session) };
     unsafe { kglite_writer_lease_free(lease) };
 
     // Released — the next writer gets it, and reopening honours what was saved.
@@ -859,7 +883,34 @@ fn writer_lease_covers_the_open_mutate_save_interval() {
         KgliteStatusCode::Ok
     );
     assert!(converted.is_null());
-    unsafe { kglite_graph_free(reopened) };
+
+    // The mutation made through the session is in the file.
+    let mut session: *mut KgliteSession = std::ptr::null_mut();
+    unsafe { kglite_session_new(reopened, &mut session as *mut _) };
+    let query = CString::new("MATCH (n:Owned) RETURN n.title AS title").unwrap();
+    let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    assert_eq!(
+        unsafe {
+            kglite_session_execute_read(
+                session,
+                query.as_ptr(),
+                std::ptr::null(),
+                &mut result,
+                &mut err,
+            )
+        },
+        KgliteStatusCode::Ok
+    );
+    let rows = unsafe { kglite_cypher_result_rows_json(result) };
+    assert_eq!(
+        unsafe { CStr::from_ptr(rows).to_str().unwrap() },
+        r#"[{"title":"kept"}]"#,
+        "the session's checkpoint must contain the mutation"
+    );
+    unsafe { kglite_free_string(rows) };
+    unsafe { kglite_cypher_result_free(result) };
+    unsafe { kglite_session_free(session) };
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1069,6 +1120,11 @@ fn fallible_exports_clear_all_outputs_before_validation() {
     let rc = unsafe { kglite_writer_lease_acquire(std::ptr::null(), 0, &mut lease, &mut error) };
     assert_eq!(rc, KgliteStatusCode::NullPointer);
     assert!(lease.is_null() && error.is_null());
+
+    error = sentinel_cstr;
+    let rc = unsafe { kglite_session_save(std::ptr::null_mut(), std::ptr::null(), 1, &mut error) };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(error.is_null());
 
     json = sentinel_cstr;
     error = sentinel_cstr;
