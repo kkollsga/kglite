@@ -2,6 +2,8 @@
 
 use crate::datatypes::values::Value;
 use std::collections::HashMap;
+use std::iter::Peekable;
+use std::str::Chars;
 
 use super::pattern::{
     EdgeDirection, EdgePattern, NodePattern, Pattern, PatternElement, PropertyMatcher,
@@ -34,6 +36,77 @@ pub enum Token {
     FloatLit(f64),
     BoolLit(bool),
     Parameter(String), // $param_name
+}
+
+/// Lex one numeric literal, with the sign (if any) already consumed by the
+/// caller and reported through `negative`.
+///
+/// Accepts `12`, `1.5` and the leading-dot form `.5` (normalised to `0.5`),
+/// and stops before a `..` range operator so `*1..3` still lexes as
+/// `IntLit(1) DotDot IntLit(3)`.
+///
+/// The sign is folded into the string that is parsed, never applied
+/// afterwards: `-9223372036854775808` is `i64::MIN`, but its magnitude alone
+/// does not fit in an `i64`, so a parse-then-negate lexer would reject it.
+fn lex_number(chars: &mut Peekable<Chars<'_>>, negative: bool) -> Result<Token, String> {
+    let mut num_str = String::new();
+    if negative {
+        num_str.push('-');
+    }
+    let mut has_dot = false;
+    if chars.peek() == Some(&'.') {
+        // Leading-dot float: `.5` → `0.5`
+        chars.next();
+        num_str.push_str("0.");
+        has_dot = true;
+    }
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_digit() {
+            num_str.push(c);
+            chars.next();
+        } else if c == '.' && !has_dot {
+            // Peek ahead to check if this is '..' (range operator).
+            // Clone the iterator to peek ahead without consuming.
+            let mut peek_chars = chars.clone();
+            peek_chars.next(); // skip the first '.'
+            if peek_chars.peek() == Some(&'.') {
+                // This is '..', stop here and don't include the dot
+                break;
+            }
+            // It's a decimal point for a float
+            has_dot = true;
+            num_str.push(c);
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    if has_dot {
+        Ok(Token::FloatLit(
+            num_str
+                .parse()
+                .map_err(|_| format!("Invalid float: {}", num_str))?,
+        ))
+    } else {
+        Ok(Token::IntLit(
+            num_str
+                .parse()
+                .map_err(|_| format!("Invalid integer: {}", num_str))?,
+        ))
+    }
+}
+
+/// Does a `-` at the current position open a signed numeric literal?
+/// True only when a digit, or a `.` followed by a digit, comes next —
+/// structural dashes in a pattern are always followed by `[`, `>`, `(`,
+/// `<` or another `-`, so an edge is never mistaken for a number.
+fn opens_signed_number(chars: &Peekable<Chars<'_>>) -> bool {
+    let mut ahead = chars.clone();
+    match ahead.next() {
+        Some(c) if c.is_ascii_digit() => true,
+        Some('.') => ahead.next().is_some_and(|c| c.is_ascii_digit()),
+        _ => false,
+    }
 }
 
 pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
@@ -78,8 +151,14 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 chars.next();
             }
             '-' => {
-                tokens.push(Token::Dash);
                 chars.next();
+                if opens_signed_number(&chars) {
+                    // Negative inline-map literal, e.g. `{temp: -1}`. The
+                    // sign belongs to the number, not to a structural dash.
+                    tokens.push(lex_number(&mut chars, true)?);
+                } else {
+                    tokens.push(Token::Dash);
+                }
             }
             '>' => {
                 tokens.push(Token::GreaterThan);
@@ -99,25 +178,17 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             }
             '.' => {
                 // Check for '..' (range operator)
-                chars.next();
-                if chars.peek() == Some(&'.') {
+                let mut ahead = chars.clone();
+                ahead.next();
+                if ahead.peek() == Some(&'.') {
+                    chars.next();
                     chars.next();
                     tokens.push(Token::DotDot);
-                } else if chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+                } else if ahead.peek().is_some_and(|c| c.is_ascii_digit()) {
                     // It's a float starting with '.'
-                    let mut num_str = String::from("0.");
-                    while let Some(&c) = chars.peek() {
-                        if c.is_ascii_digit() {
-                            num_str.push(c);
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    tokens.push(Token::FloatLit(
-                        num_str.parse().map_err(|_| format!("Invalid float: {}", num_str))?
-                    ));
+                    tokens.push(lex_number(&mut chars, false)?);
                 } else {
+                    chars.next();
                     // Lone '.' — property access in an inline-map value,
                     // e.g. `MATCH (b {id: prior.id})`. `parse_properties`
                     // consumes the `ident . ident` sequence as a correlated
@@ -153,38 +224,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 tokens.push(Token::StringLit(s));
             }
             c if c.is_ascii_digit() => {
-                let mut num_str = String::new();
-                let mut has_dot = false;
-                while let Some(&c) = chars.peek() {
-                    if c.is_ascii_digit() {
-                        num_str.push(c);
-                        chars.next();
-                    } else if c == '.' && !has_dot {
-                        // Peek ahead to check if this is '..' (range operator)
-                        // Clone the iterator to peek ahead without consuming
-                        let mut peek_chars = chars.clone();
-                        peek_chars.next(); // skip the first '.'
-                        if peek_chars.peek() == Some(&'.') {
-                            // This is '..', stop here and don't include the dot
-                            break;
-                        }
-                        // It's a decimal point for a float
-                        has_dot = true;
-                        num_str.push(c);
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
-                if has_dot {
-                    tokens.push(Token::FloatLit(
-                        num_str.parse().map_err(|_| format!("Invalid float: {}", num_str))?
-                    ));
-                } else {
-                    tokens.push(Token::IntLit(
-                        num_str.parse().map_err(|_| format!("Invalid integer: {}", num_str))?
-                    ));
-                }
+                tokens.push(lex_number(&mut chars, false)?);
             }
             '`' => {
                 // Backtick-quoted identifier: `programming language`
@@ -578,6 +618,19 @@ impl Parser {
     fn parse_var_length(&mut self) -> Result<(usize, usize), String> {
         self.expect(&Token::Star)?;
 
+        // The tokenizer folds a sign into the number it precedes, so `*-1`
+        // arrives here as `IntLit(-1)`. An `as usize` cast would turn that
+        // into a near-`usize::MAX` hop bound; reject it instead.
+        fn hop_count(n: i64) -> Result<usize, String> {
+            usize::try_from(n).map_err(|_| {
+                format!(
+                    "Invalid hop count {} in variable-length path: hop counts must not be \
+                     negative. Examples: *2, *1..3, *..5, *1..",
+                    n
+                )
+            })
+        }
+
         const DEFAULT_MAX_HOPS: usize = 10; // Reasonable limit to prevent runaway queries
 
         // Check what follows the *
@@ -585,7 +638,7 @@ impl Parser {
             Some(Token::IntLit(_)) => {
                 // *N or *N..M or *N..
                 let min = if let Some(Token::IntLit(n)) = self.advance().cloned() {
-                    n as usize
+                    hop_count(n)?
                 } else {
                     return Err("Expected integer after '*' for variable-length path. Examples: *2, *1..3, *..5, *1..".to_string());
                 };
@@ -596,7 +649,7 @@ impl Parser {
                                     // Check for max
                     if let Some(Token::IntLit(_)) = self.peek() {
                         let max = if let Some(Token::IntLit(n)) = self.advance().cloned() {
-                            n as usize
+                            hop_count(n)?
                         } else {
                             return Err("Expected max hop count after '..'. Examples: *1..3 (1 to 3 hops), *2.. (2 or more hops)".to_string());
                         };
@@ -623,7 +676,7 @@ impl Parser {
                 // *..M means 1 to M
                 self.advance(); // consume ..
                 let max = if let Some(Token::IntLit(n)) = self.advance().cloned() {
-                    n as usize
+                    hop_count(n)?
                 } else {
                     return Err(
                         "Expected max hop count after '*..'. Example: *..3 means up to 3 hops"
@@ -708,12 +761,33 @@ impl Parser {
     }
 
     /// Parse a value (string, int, float, bool)
+    ///
+    /// The tokenizer folds a sign that is adjacent to its digits into the
+    /// literal (`{x: -1}` → `IntLit(-1)`). A separated sign only reaches
+    /// here from the EXISTS-subquery pattern re-serializer, which joins
+    /// tokens with a space (`{x: - 1}`), so the `Dash` arm negates the
+    /// following literal. A literal that is *already* negative there means
+    /// a doubled sign (`--1`, `- -1`) and stays an error.
     fn parse_value(&mut self) -> Result<Value, String> {
         match self.advance().cloned() {
             Some(Token::StringLit(s)) => Ok(Value::String(s)),
             Some(Token::IntLit(i)) => Ok(Value::Int64(i)),
             Some(Token::FloatLit(f)) => Ok(Value::Float64(f)),
             Some(Token::BoolLit(b)) => Ok(Value::Boolean(b)),
+            Some(Token::Dash) => match self.advance().cloned() {
+                Some(Token::IntLit(i)) if i >= 0 => Ok(Value::Int64(-i)),
+                Some(Token::FloatLit(f)) if !f.is_sign_negative() => Ok(Value::Float64(-f)),
+                Some(token) => Err(format!(
+                    "Expected a numeric literal after '-' in an inline map value \
+                     (e.g. {{temp: -1}}), got {:?}",
+                    token
+                )),
+                None => Err(
+                    "Expected a numeric literal after '-' in an inline map value \
+                     (e.g. {temp: -1}), got end of input"
+                        .to_string(),
+                ),
+            },
             Some(token) => Err(format!("Expected value, got {:?}", token)),
             None => Err("Expected value, got end of input".to_string()),
         }
@@ -1022,5 +1096,138 @@ mod tests {
         // `(a)-(b)` is not a pattern edge (a lone dash is subtraction in
         // expression positions and invalid in patterns).
         assert!(parse_pattern("(a)-(b)").is_err());
+    }
+
+    // Negative inline-map literals: `MATCH (n {x: -1})`.
+
+    fn node_props(pattern_str: &str) -> HashMap<String, PropertyMatcher> {
+        let pattern = parse_pattern(pattern_str).unwrap();
+        match &pattern.elements[0] {
+            PatternElement::Node(np) => np.properties.clone().expect("node properties"),
+            _ => panic!("Expected node pattern"),
+        }
+    }
+
+    fn edge_props(pattern_str: &str) -> HashMap<String, PropertyMatcher> {
+        let pattern = parse_pattern(pattern_str).unwrap();
+        match &pattern.elements[1] {
+            PatternElement::Edge(ep) => ep.properties.clone().expect("edge properties"),
+            _ => panic!("Expected edge pattern"),
+        }
+    }
+
+    fn equals(props: &HashMap<String, PropertyMatcher>, key: &str) -> Value {
+        match props.get(key) {
+            Some(PropertyMatcher::Equals(v)) => v.clone(),
+            other => panic!("Expected an Equals matcher for {}, got {:?}", key, other),
+        }
+    }
+
+    #[test]
+    fn test_parse_negative_int_in_node_map() {
+        let props = node_props("(n:Reading {temp: -1})");
+        assert_eq!(equals(&props, "temp"), Value::Int64(-1));
+    }
+
+    #[test]
+    fn test_parse_negative_float_in_node_map() {
+        let props = node_props("(n:Reading {delta: -1.5})");
+        assert_eq!(equals(&props, "delta"), Value::Float64(-1.5));
+    }
+
+    #[test]
+    fn test_parse_negative_literals_in_edge_map() {
+        let props = edge_props("(a:P)-[r:DELTA {temp: -1, change: -1.5}]->(b:P)");
+        assert_eq!(equals(&props, "temp"), Value::Int64(-1));
+        assert_eq!(equals(&props, "change"), Value::Float64(-1.5));
+    }
+
+    #[test]
+    fn test_tokenize_signed_int_is_one_literal() {
+        // The sign must be consumed as part of the literal. Lexing the
+        // magnitude first and negating afterwards cannot represent
+        // i64::MIN — 9223372036854775808 does not fit in an i64 — so this
+        // is the test that catches a parse-positive-then-negate fix.
+        let tokens = tokenize("{x: -9223372036854775808}").unwrap();
+        assert!(
+            tokens.contains(&Token::IntLit(i64::MIN)),
+            "expected a single IntLit(i64::MIN) token, got {:?}",
+            tokens
+        );
+        assert!(
+            !tokens.contains(&Token::Dash),
+            "sign left unconsumed: {:?}",
+            tokens
+        );
+    }
+
+    #[test]
+    fn test_parse_i64_min_in_node_map() {
+        let props = node_props("(n:Reading {temp: -9223372036854775808})");
+        assert_eq!(equals(&props, "temp"), Value::Int64(i64::MIN));
+    }
+
+    #[test]
+    fn test_parse_negative_literal_with_space_after_dash() {
+        // The EXISTS-subquery pattern re-serializer joins tokens with a
+        // space, so a negative literal reaches this parser as `- 1`.
+        let props = node_props("( n:Reading { temp : - 1 , delta : - 1.5 } )");
+        assert_eq!(equals(&props, "temp"), Value::Int64(-1));
+        assert_eq!(equals(&props, "delta"), Value::Float64(-1.5));
+    }
+
+    #[test]
+    fn test_parse_malformed_dash_values_still_rejected() {
+        for bad in [
+            "(n:Reading {temp: -})",
+            "(n:Reading {temp: --1})",
+            "(n:Reading {temp: - -1})",
+            "(n:Reading {temp: -'x'})",
+        ] {
+            assert!(
+                parse_pattern(bad).is_err(),
+                "expected {} to stay a parse error",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn test_negative_hop_counts_rejected() {
+        // The tokenizer folds the sign into the literal, so the hop-count
+        // parser must reject it rather than cast it to a huge usize.
+        for bad in [
+            "(a)-[:K*-1]->(b)",
+            "(a)-[:K*1..-3]->(b)",
+            "(a)-[:K*..-3]->(b)",
+        ] {
+            let err = parse_pattern(bad).unwrap_err();
+            assert!(
+                err.contains("hop count"),
+                "expected a hop-count error for {}, got: {}",
+                bad,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_structural_dash_unaffected_by_negative_literals() {
+        // A relationship whose dashes are structural still parses, including
+        // when both endpoints and the edge carry negative inline literals.
+        let pattern =
+            parse_pattern("(a:P {temp: -1})-[r:DELTA {change: -1.5}]->(b:P {temp: -2})").unwrap();
+        assert_eq!(pattern.elements.len(), 3);
+        match &pattern.elements[1] {
+            PatternElement::Edge(ep) => {
+                assert_eq!(ep.direction, EdgeDirection::Outgoing);
+                assert_eq!(ep.connection_type, Some("DELTA".to_string()));
+                assert_eq!(ep.var_length, None);
+            }
+            _ => panic!("Expected edge pattern"),
+        }
+        // Bare and incoming forms keep their structural dashes.
+        assert_eq!(parse_pattern("(a)-->(b)").unwrap().elements.len(), 3);
+        assert_eq!(parse_pattern("(a)<-[:K]-(b)").unwrap().elements.len(), 3);
     }
 }

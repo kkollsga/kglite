@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Negative numeric literals now parse in MATCH inline property maps.**
+  `MATCH (n {temp: -1})` and `-[r:DELTA {change: -1.5}]->` raised
+  `Pattern parse error: Expected value, got Dash`; the sign is now lexed as
+  part of the literal (so `-9223372036854775808` reaches `i64::MIN`) and
+  negative variable-length hop counts are rejected with a clear message.
 - **MCP selftests now require positive activation and hydration evidence.**
   Missing workspace paths and absent active graphs can no longer pass merely
   because their tool failures arrived in a successful MCP response envelope.

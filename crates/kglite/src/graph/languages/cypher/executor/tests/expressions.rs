@@ -556,3 +556,92 @@ fn test_expression_to_string_parameter() {
     let expr = Expression::Parameter("foo".to_string());
     assert_eq!(expression_to_string(&expr), "$foo");
 }
+
+// ========================================================================
+// Negative literals in MATCH inline property maps
+// ========================================================================
+
+/// Run a query end to end against `graph`, returning its result set.
+fn run_query(graph: &mut DirGraph, query: &str) -> CypherResult {
+    let parsed = parser::parse_cypher(query).unwrap();
+    execute_mutable(
+        graph,
+        &parsed,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap_or_else(|e| panic!("query failed: {query}\n  error: {e}"))
+}
+
+fn readings_graph() -> DirGraph {
+    let mut graph = DirGraph::new();
+    run_query(
+        &mut graph,
+        "CREATE (a:Reading {label: 'cold', temp: -1, delta: -1.5}),
+                (b:Reading {label: 'warm', temp: 1, delta: 1.5})",
+    );
+    run_query(
+        &mut graph,
+        "MATCH (a:Reading {label: 'cold'}), (b:Reading {label: 'warm'})
+         CREATE (a)-[:DELTA {change: -1.5, steps: -2}]->(b)",
+    );
+    graph
+}
+
+#[test]
+fn test_match_node_map_negative_int_literal() {
+    let mut graph = readings_graph();
+    let result = run_query(
+        &mut graph,
+        "MATCH (r:Reading {temp: -1}) RETURN r.label AS label",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], Value::String("cold".to_string()));
+}
+
+#[test]
+fn test_match_node_map_negative_float_literal() {
+    let mut graph = readings_graph();
+    let result = run_query(
+        &mut graph,
+        "MATCH (r:Reading {delta: -1.5}) RETURN r.label AS label",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], Value::String("cold".to_string()));
+}
+
+#[test]
+fn test_match_relationship_map_negative_literals() {
+    let mut graph = readings_graph();
+    let result = run_query(
+        &mut graph,
+        "MATCH (a:Reading)-[d:DELTA {change: -1.5, steps: -2}]->(b:Reading)
+         RETURN b.label AS label",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], Value::String("warm".to_string()));
+}
+
+#[test]
+fn test_exists_subquery_pattern_negative_literal() {
+    // The EXISTS pattern re-serializer joins tokens with spaces, so this
+    // exercises the `- 1` form rather than the adjacent `-1` form.
+    let mut graph = readings_graph();
+    let result = run_query(
+        &mut graph,
+        "MATCH (r:Reading) WHERE EXISTS { (r)-[:DELTA {steps: -2}]->() }
+         RETURN r.label AS label",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], Value::String("cold".to_string()));
+}
+
+#[test]
+fn test_match_map_negative_literal_no_false_positives() {
+    let mut graph = readings_graph();
+    let result = run_query(
+        &mut graph,
+        "MATCH (r:Reading {temp: -2}) RETURN r.label AS label",
+    );
+    assert_eq!(result.rows.len(), 0);
+}

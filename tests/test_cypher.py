@@ -2428,6 +2428,24 @@ def test_inline_map_value_accepts_node_property_expression():
     assert rows == [{"id": "a1"}]
 
 
+def test_inline_map_value_accepts_negative_literals():
+    """An inline-map value may be a negative numeric literal, on nodes and
+    on relationships. Regression: `MATCH (n {x: -1})` raised
+    "Pattern parse error: Expected value, got Dash"."""
+    g = KnowledgeGraph()
+    g.cypher(
+        "CREATE (a:Reading {label: 'cold', temp: -1, delta: -1.5}), "
+        "(b:Reading {label: 'warm', temp: 1, delta: 1.5}) "
+        "CREATE (a)-[:DELTA {change: -1.5}]->(b)"
+    )
+    assert g.cypher("MATCH (r:Reading {temp: -1}) RETURN r.label AS label").to_list() == [{"label": "cold"}]
+    assert g.cypher("MATCH (r:Reading {delta: -1.5}) RETURN r.label AS label").to_list() == [{"label": "cold"}]
+    assert g.cypher("MATCH (:Reading)-[:DELTA {change: -1.5}]->(b:Reading) RETURN b.label AS label").to_list() == [
+        {"label": "warm"}
+    ]
+    assert g.cypher("MATCH (r:Reading {temp: -2}) RETURN r.label AS label").to_list() == []
+
+
 class TestMapSubscriptAccess:
     """BUG (0.10.14): `RETURN {x: 1}['x']` raised "Index must be an integer".
 
