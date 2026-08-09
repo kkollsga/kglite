@@ -579,10 +579,12 @@ impl DiskGraph {
                 id,
                 title,
                 node_type: node_type_key,
-                properties: crate::graph::schema::PropertyStorage::Columnar {
-                    store: Arc::clone(store),
-                    row_id: slot.row_id,
-                },
+                properties: crate::graph::schema::PropertyStorage::Columnar(
+                    crate::graph::storage::property_storage::ColumnarRow::new(
+                        Arc::clone(store),
+                        slot.row_id,
+                    ),
+                ),
             }
         } else {
             NodeData {
@@ -735,7 +737,7 @@ impl DiskGraph {
 
         // Extract row_id from property storage if columnar, else use slot index
         let row_id = match &data.properties {
-            crate::graph::schema::PropertyStorage::Columnar { row_id, .. } => *row_id,
+            crate::graph::schema::PropertyStorage::Columnar(row) => row.row_id(),
             _ => self.node_slot_len() as u32,
         };
 
@@ -786,10 +788,9 @@ impl DiskGraph {
             title: title_val,
             node_type: node_type_key,
             properties: if let Some(s) = store {
-                crate::graph::schema::PropertyStorage::Columnar {
-                    store: s,
-                    row_id: slot.row_id,
-                }
+                crate::graph::schema::PropertyStorage::Columnar(
+                    crate::graph::storage::property_storage::ColumnarRow::new(s, slot.row_id),
+                )
             } else {
                 crate::graph::schema::PropertyStorage::Map(HashMap::new())
             },

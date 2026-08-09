@@ -2330,27 +2330,15 @@ pub kglite::api::NodeData::node_type: kglite::api::InternedKey
 pub kglite::api::NodeData::title: kglite::datatypes::values::Value
 impl kglite::api::NodeData
 pub fn kglite::api::NodeData::clear_property(&mut self, key: &str) -> core::option::Option<kglite::datatypes::values::Value>
-pub fn kglite::api::NodeData::field_contains_ci(&self, field: &str, needle_lower: &str) -> bool
-pub fn kglite::api::NodeData::field_starts_with_ci(&self, field: &str, prefix_lower: &str) -> bool
-pub fn kglite::api::NodeData::get_field_ref(&self, field: &str) -> core::option::Option<alloc::borrow::Cow<'_, kglite::datatypes::values::Value>>
-pub fn kglite::api::NodeData::get_node_type_ref<'a>(&self, interner: &'a kglite::api::StringInterner) -> &'a str
-pub fn kglite::api::NodeData::get_property(&self, key: &str) -> core::option::Option<alloc::borrow::Cow<'_, kglite::datatypes::values::Value>>
-pub fn kglite::api::NodeData::get_property_value(&self, key: &str) -> core::option::Option<kglite::datatypes::values::Value>
-pub fn kglite::api::NodeData::has_property(&self, key: &str) -> bool
 pub fn kglite::api::NodeData::id(&self) -> alloc::borrow::Cow<'_, kglite::datatypes::values::Value>
 pub fn kglite::api::NodeData::new(id: kglite::datatypes::values::Value, title: kglite::datatypes::values::Value, node_type: alloc::string::String, properties: std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>, interner: &mut kglite::api::StringInterner) -> Self
 pub fn kglite::api::NodeData::new_compact(id: kglite::datatypes::values::Value, title: kglite::datatypes::values::Value, node_type: alloc::string::String, properties: std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>, interner: &mut kglite::api::StringInterner, schema: &alloc::sync::Arc<kglite::graph::schema::TypeSchema>) -> Self
 pub fn kglite::api::NodeData::new_compact_preinterned(id: kglite::datatypes::values::Value, title: kglite::datatypes::values::Value, node_type: kglite::api::InternedKey, properties: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>, schema: &alloc::sync::Arc<kglite::graph::schema::TypeSchema>) -> Self
 pub fn kglite::api::NodeData::new_preinterned(id: kglite::datatypes::values::Value, title: kglite::datatypes::values::Value, node_type: kglite::api::InternedKey, properties: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>) -> Self
 pub fn kglite::api::NodeData::node_type_str<'a>(&self, interner: &'a kglite::api::StringInterner) -> &'a str
-pub fn kglite::api::NodeData::properties_cloned(&self, interner: &kglite::api::StringInterner) -> std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
-pub fn kglite::api::NodeData::property_count(&self) -> usize
-pub fn kglite::api::NodeData::property_iter<'a>(&'a self, interner: &'a kglite::api::StringInterner) -> impl core::iter::traits::iterator::Iterator<Item = (&'a str, &'a kglite::datatypes::values::Value)> + 'a
-pub fn kglite::api::NodeData::property_keys<'a>(&'a self, interner: &'a kglite::api::StringInterner) -> impl core::iter::traits::iterator::Iterator<Item = &'a str> + 'a
 pub fn kglite::api::NodeData::remove_property(&mut self, key: &str) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::NodeData::set_property(&mut self, key: &str, value: kglite::datatypes::values::Value, interner: &mut kglite::api::StringInterner)
 pub fn kglite::api::NodeData::title(&self) -> alloc::borrow::Cow<'_, kglite::datatypes::values::Value>
-pub fn kglite::api::NodeData::to_node_info(&self, interner: &kglite::api::StringInterner) -> kglite::api::NodeInfo
 impl core::clone::Clone for kglite::api::NodeData
 pub fn kglite::api::NodeData::clone(&self) -> kglite::api::NodeData
 impl core::cmp::PartialEq for kglite::api::NodeData

@@ -1453,10 +1453,9 @@ fn execute_set(
                     let columnar_row_id = {
                         let _arena_guard = graph.graph.begin_query();
                         match graph.graph.node_weight(*node_idx).map(|n| &n.properties) {
-                            Some(crate::graph::schema::PropertyStorage::Columnar {
-                                row_id,
-                                ..
-                            }) => Some(*row_id),
+                            Some(crate::graph::schema::PropertyStorage::Columnar(row)) => {
+                                Some(row.row_id())
+                            }
                             _ => None,
                         }
                     };
@@ -1645,8 +1644,8 @@ fn execute_set(
             let columnar_row_id = {
                 let _arena_guard = graph.graph.begin_query();
                 match graph.graph.node_weight(*node_idx).map(|n| &n.properties) {
-                    Some(crate::graph::schema::PropertyStorage::Columnar { row_id, .. }) => {
-                        Some(*row_id)
+                    Some(crate::graph::schema::PropertyStorage::Columnar(row)) => {
+                        Some(row.row_id())
                     }
                     _ => None,
                 }
@@ -1946,10 +1945,9 @@ fn execute_remove(
                         let columnar_row_id = {
                             let _arena_guard = graph.graph.begin_query();
                             match graph.graph.node_weight(*node_idx).map(|n| &n.properties) {
-                                Some(crate::graph::schema::PropertyStorage::Columnar {
-                                    row_id,
-                                    ..
-                                }) => Some(*row_id),
+                                Some(crate::graph::schema::PropertyStorage::Columnar(row)) => {
+                                    Some(row.row_id())
+                                }
                                 _ => None,
                             }
                         };

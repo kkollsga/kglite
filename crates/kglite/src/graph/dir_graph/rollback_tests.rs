@@ -98,7 +98,7 @@ fn sorted_props(props: &HashMap<String, Value>) -> Vec<(String, String)> {
 fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
     let mut nodes = Vec::new();
     for idx in graph.graph.node_indices().collect::<Vec<_>>() {
-        let Some(node) = graph.graph.node_weight(idx) else {
+        let Some(node) = graph.graph.node_view(idx) else {
             continue;
         };
         let mut labels: Vec<String> = graph
@@ -225,12 +225,15 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
 
     let mut columnar_handles: Vec<(usize, bool)> = Vec::new();
     for idx in graph.graph.node_indices().collect::<Vec<_>>() {
+        // Deliberately the raw `NodeData`: this fingerprint is *about* the
+        // node-held handle's identity, which is exactly what `NodeView` hides.
         let Some(node) = graph.graph.node_weight(idx) else {
             continue;
         };
-        let PropertyStorage::Columnar { store, .. } = &node.properties else {
+        let PropertyStorage::Columnar(row) = &node.properties else {
             continue;
         };
+        let store = row.node_handle();
         let node_type = node.node_type_str(&graph.interner);
         let matches_master = graph
             .column_stores
@@ -1085,7 +1088,7 @@ fn fork_detection_is_a_no_op_while_nodes_hold_strong_handles() {
         .find(|i| {
             graph
                 .graph
-                .node_weight(*i)
+                .node_view(*i)
                 .and_then(|n| n.get_property_value("qty"))
                 .map(|v| v == crate::datatypes::Value::Int64(1))
                 .unwrap_or(false)
@@ -1103,7 +1106,7 @@ fn fork_detection_is_a_no_op_while_nodes_hold_strong_handles() {
     // Read back THROUGH the per-node handle, not through the master. If the
     // first write had failed to register the type, no sweep would run and this
     // handle would still point at the pre-clause allocation serving qty = 1.
-    let node = graph.graph.node_weight(idx).expect("node still present");
+    let node = graph.graph.node_view(idx).expect("node still present");
     assert_eq!(
         node.get_property_value("qty"),
         Some(crate::datatypes::Value::Int64(222)),
@@ -1150,7 +1153,7 @@ fn every_node_shares_the_master_column_store_handle() {
         .node_indices()
         .filter(
             |idx| match graph.graph.node_weight(*idx).map(|n| &n.properties) {
-                Some(PropertyStorage::Columnar { store, .. }) => Arc::ptr_eq(store, master),
+                Some(PropertyStorage::Columnar(row)) => Arc::ptr_eq(row.node_handle(), master),
                 _ => false,
             },
         )

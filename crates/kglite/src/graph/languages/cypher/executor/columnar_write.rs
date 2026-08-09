@@ -155,10 +155,8 @@ pub(super) fn refresh_columnar_node_handles(
             // bookkeeping, not a logical mutation — must not be captured by the
             // WAL recorder (the actual write was recorded in the fast path).
             if let Some(node) = GraphWrite::node_weight_mut_silent(&mut graph.graph, idx) {
-                if let crate::graph::schema::PropertyStorage::Columnar { store, .. } =
-                    &mut node.properties
-                {
-                    *store = Arc::clone(&new_master);
+                if let crate::graph::schema::PropertyStorage::Columnar(row) = &mut node.properties {
+                    row.repoint(Arc::clone(&new_master));
                 }
             }
         }

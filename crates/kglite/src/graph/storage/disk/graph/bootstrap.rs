@@ -240,7 +240,7 @@ impl DiskGraph {
             let idx = NodeIndex::new(i);
             if let Some(node) = graph.node_weight(idx) {
                 let row_id = match &node.properties {
-                    crate::graph::schema::PropertyStorage::Columnar { row_id, .. } => *row_id,
+                    crate::graph::schema::PropertyStorage::Columnar(row) => row.row_id(),
                     _ => i as u32,
                 };
                 node_slots.try_push(DiskNodeSlot {

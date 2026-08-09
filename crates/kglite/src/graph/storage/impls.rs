@@ -97,30 +97,30 @@ macro_rules! impl_heap_graph_read {
                 self.inner().node_weight(idx)
             }
 
+            // These four resolve through `NodeView` rather than reading
+            // `NodeData` directly, so the heap backends have exactly **one**
+            // store-resolution point (`NodeView::from_node_data`) — the thing
+            // D1 Phase 3 re-points, and the thing Phase 2's poison hook
+            // intercepts. `NodeView` is `Copy` and its constructor is one match
+            // on the storage variant, so this is the same work as before.
             #[inline]
             fn get_node_property(&self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
-                self.inner()
-                    .node_weight(idx)
-                    .and_then(|nd| nd.properties.get_value(key))
+                self.node_view(idx).and_then(|v| v.get_value(key))
             }
 
             #[inline]
             fn get_node_id(&self, idx: NodeIndex) -> Option<Value> {
-                self.inner().node_weight(idx).map(|nd| nd.id().into_owned())
+                self.node_view(idx).map(|v| v.id().into_owned())
             }
 
             #[inline]
             fn get_node_title(&self, idx: NodeIndex) -> Option<Value> {
-                self.inner()
-                    .node_weight(idx)
-                    .map(|nd| nd.title().into_owned())
+                self.node_view(idx).map(|v| v.title().into_owned())
             }
 
             #[inline]
             fn str_prop_eq(&self, idx: NodeIndex, key: InternedKey, target: &str) -> Option<bool> {
-                self.inner()
-                    .node_weight(idx)
-                    .and_then(|nd| nd.properties.str_prop_eq(key, target))
+                self.node_view(idx).and_then(|v| v.str_prop_eq(key, target))
             }
 
             #[inline]

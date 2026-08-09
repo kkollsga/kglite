@@ -31,7 +31,7 @@ use petgraph::graph::NodeIndex;
 
 use super::DirGraph;
 use crate::datatypes::values::Value;
-use crate::graph::schema::{InternedKey, NodeData, PropertyStorage};
+use crate::graph::schema::{ColumnarRow, InternedKey, NodeData, PropertyStorage};
 use crate::graph::storage::{GraphRead, GraphWrite};
 
 impl DirGraph {
@@ -99,10 +99,7 @@ impl DirGraph {
                 id,
                 title,
                 node_type: node_type_key,
-                properties: PropertyStorage::Columnar {
-                    store: store_arc,
-                    row_id,
-                },
+                properties: PropertyStorage::Columnar(ColumnarRow::new(store_arc, row_id)),
             };
             let idx = GraphWrite::add_node(&mut self.graph, node_data);
             GraphWrite::update_row_id(&mut self.graph, idx, row_id);

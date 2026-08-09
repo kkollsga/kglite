@@ -7,9 +7,10 @@
 use crate::datatypes::values::Value;
 use crate::graph::constraints::{NamedConstraint, UniqueConstraintKey};
 use crate::graph::schema::{
-    CompositeIndexKey, CompositeValue, ConnectionTypeInfo, ConnectivityTriple, EdgeData,
-    EmbeddingStore, GraphBackend, IndexKey, InternedKey, NodeData, PropertyStorage, SaveMetadata,
-    SchemaDefinition, SpatialConfig, StringInterner, TemporalConfig, TypeIdIndex, TypeSchema,
+    ColumnarRow, CompositeIndexKey, CompositeValue, ConnectionTypeInfo, ConnectivityTriple,
+    EdgeData, EmbeddingStore, GraphBackend, IndexKey, InternedKey, NodeData, PropertyStorage,
+    SaveMetadata, SchemaDefinition, SpatialConfig, StringInterner, TemporalConfig, TypeIdIndex,
+    TypeSchema,
 };
 use crate::graph::storage::disk::id_index::IdIndexStore;
 use crate::graph::storage::disk::type_index::TypeIndexStore;
@@ -1351,7 +1352,8 @@ impl DirGraph {
                 .node_indices()
                 .filter_map(|idx| self.graph.node_weight(idx))
                 .any(|n| match &n.properties {
-                    PropertyStorage::Columnar { store, row_id } => {
+                    PropertyStorage::Columnar(row) => {
+                        let (store, row_id) = (row.node_handle(), &row.row_id());
                         let type_str = n.node_type_str(interner);
                         match column_stores.get(type_str) {
                             Some(graph_store) => {
@@ -1457,22 +1459,16 @@ impl DirGraph {
                     // the old column store. For Compact/Map nodes, use node.id/title.
                     // Always push id and title. For Columnar nodes, try old store first,
                     // fall back to node fields. For Compact/Map, use node fields directly.
-                    let id_val = if let PropertyStorage::Columnar {
-                        store: old_store,
-                        row_id: old_row,
-                    } = &node.properties
-                    {
+                    let id_val = if let PropertyStorage::Columnar(row) = &node.properties {
+                        let (old_store, old_row) = (row.node_handle(), &row.row_id());
                         old_store
                             .get_id(*old_row)
                             .unwrap_or_else(|| node.id.clone())
                     } else {
                         node.id.clone()
                     };
-                    let title_val = if let PropertyStorage::Columnar {
-                        store: old_store,
-                        row_id: old_row,
-                    } = &node.properties
-                    {
+                    let title_val = if let PropertyStorage::Columnar(row) = &node.properties {
+                        let (old_store, old_row) = (row.node_handle(), &row.row_id());
                         // Prefer a non-null inline `node.title` override. Every
                         // in-place title write (Cypher `SET n.title`, add_nodes
                         // update/replace, connection-title updates) sets the
@@ -1516,10 +1512,9 @@ impl DirGraph {
                         PropertyStorage::Map(map) => {
                             map.iter().map(|(&k, v)| (k, v.clone())).collect()
                         }
-                        PropertyStorage::Columnar {
-                            store: old_store,
-                            row_id,
-                        } => old_store.row_properties(*row_id),
+                        PropertyStorage::Columnar(row) => {
+                            row.node_handle().row_properties(row.row_id())
+                        }
                     };
 
                     let row_id = store.push_row(&pairs);
@@ -1583,10 +1578,8 @@ impl DirGraph {
             if let Some(store) = arc_stores.get(node_type) {
                 for (&idx, &row_id) in type_row_ids {
                     if let Some(node) = self.graph.node_weight_mut(idx) {
-                        node.properties = PropertyStorage::Columnar {
-                            store: Arc::clone(store),
-                            row_id,
-                        };
+                        node.properties =
+                            PropertyStorage::Columnar(ColumnarRow::new(Arc::clone(store), row_id));
                         // id/title were pushed into the store's reserved
                         // __id__/__title__ columns in the first pass, so the
                         // inline copies are now redundant. Null them to the
@@ -1612,8 +1605,8 @@ impl DirGraph {
         let node_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
         for node_idx in node_indices {
             let node = self.graph.node_weight_mut(node_idx).unwrap();
-            if let PropertyStorage::Columnar { store, row_id } = &node.properties {
-                let rid = *row_id;
+            if let PropertyStorage::Columnar(row) = &node.properties {
+                let (store, rid) = (row.node_handle(), row.row_id());
                 let pairs = store.row_properties(rid);
                 // row_properties() excludes the reserved __id__/__title__
                 // columns, so a null-sentinel node (set by enable_columnar /

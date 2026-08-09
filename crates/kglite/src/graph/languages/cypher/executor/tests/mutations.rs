@@ -24,7 +24,7 @@ fn test_create_single_node() {
     assert_eq!(graph.graph.node_count(), 1);
     let node = graph
         .graph
-        .node_weight(petgraph::graph::NodeIndex::new(0))
+        .node_view(petgraph::graph::NodeIndex::new(0))
         .unwrap();
     assert_eq!(
         node.get_field_ref("name").as_deref(),
@@ -91,7 +91,7 @@ fn test_create_node_with_properties() {
     assert_eq!(result.stats.as_ref().unwrap().nodes_created, 1);
     let node = graph
         .graph
-        .node_weight(petgraph::graph::NodeIndex::new(0))
+        .node_view(petgraph::graph::NodeIndex::new(0))
         .unwrap();
     assert_eq!(
         node.get_field_ref("price").as_deref(),
@@ -207,7 +207,7 @@ fn test_create_with_params() {
     assert_eq!(result.stats.as_ref().unwrap().nodes_created, 1);
     let node = graph
         .graph
-        .node_weight(petgraph::graph::NodeIndex::new(0))
+        .node_view(petgraph::graph::NodeIndex::new(0))
         .unwrap();
     assert_eq!(
         node.get_field_ref("name").as_deref(),
@@ -251,7 +251,7 @@ fn test_set_property() {
     // Verify property was updated
     let node = graph
         .graph
-        .node_weight(petgraph::graph::NodeIndex::new(0))
+        .node_view(petgraph::graph::NodeIndex::new(0))
         .unwrap();
     assert_eq!(
         node.get_field_ref("age").as_deref(),
@@ -275,7 +275,7 @@ fn test_set_title() {
     // title is accessed via "name" or "title"
     let node = graph
         .graph
-        .node_weight(petgraph::graph::NodeIndex::new(0))
+        .node_view(petgraph::graph::NodeIndex::new(0))
         .unwrap();
     assert_eq!(
         node.get_field_ref("name").as_deref(),
@@ -314,7 +314,7 @@ fn test_set_expression() {
 
     let node = graph
         .graph
-        .node_weight(petgraph::graph::NodeIndex::new(0))
+        .node_view(petgraph::graph::NodeIndex::new(0))
         .unwrap();
     assert_eq!(
         node.get_field_ref("age").as_deref(),
@@ -468,7 +468,7 @@ fn test_remove_property() {
 
     let node = graph
         .graph
-        .node_weight(petgraph::graph::NodeIndex::new(0))
+        .node_view(petgraph::graph::NodeIndex::new(0))
         .unwrap();
     assert_eq!(node.get_field_ref("age").as_deref(), None);
 }
@@ -583,7 +583,7 @@ fn test_merge_on_match_set() {
 
     let node = graph
         .graph
-        .node_weight(petgraph::graph::NodeIndex::new(0))
+        .node_view(petgraph::graph::NodeIndex::new(0))
         .unwrap();
     assert_eq!(
         node.get_field_ref("visits").as_deref(),

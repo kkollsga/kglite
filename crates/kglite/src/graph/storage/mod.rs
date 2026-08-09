@@ -29,6 +29,9 @@ pub mod mode;
 pub mod node_view;
 pub mod overflow;
 mod packed_codec;
+#[cfg(test)]
+pub mod poison;
+pub mod property_storage;
 pub mod type_build_meta;
 pub mod undo;
 

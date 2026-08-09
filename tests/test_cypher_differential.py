@@ -2477,6 +2477,177 @@ def test_mutation_optimized_matches_naive(name: str, query: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Columnar (saved-graph) write shapes
+# ---------------------------------------------------------------------------
+#
+# Every corpus above runs on a *fresh* graph, whose nodes hold row storage
+# (`Map` / `Compact`). The moment a graph is saved it converts to per-type
+# column stores and keeps that shape for the rest of its life — so the write
+# paths a real deployment exercises are the columnar ones, and until D1 none of
+# them were in this corpus.
+#
+# The shapes here are the ones the D1 programme touches
+# (`dev-docs/plans/d1-column-store-ownership.md`): a multi-row `SET` and
+# `REMOVE` against a saved type (which write through the per-type master store
+# and then re-point every node's handle), `MERGE … ON MATCH SET` over several
+# rows (one `execute_set` per row), and `SET n = {…}` (which enumerates the
+# node's existing keys before clearing them). `SET n.name` is kept separate
+# because a title-aliased property is *not* in the store — it takes the
+# node-private copy-on-write route instead, which is a different code path with
+# different failure modes.
+#
+# These assert more than the other mutation corpora: alongside rows and post-
+# statement counts, a **probe query reads the written values back**. A columnar
+# write that lands in the master but never reaches the nodes (or vice versa)
+# produces identical counts and identical returned rows, and is only visible on
+# the next read.
+COLUMNAR_MUTATION_QUERIES: list[tuple[str, str, str]] = [
+    (
+        "columnar_set_multi_row",
+        "MATCH (p:Person) SET p.bucket = 'x' RETURN count(p) AS n",
+        "MATCH (p:Person) RETURN p.person_id AS pid, p.bucket AS bucket ORDER BY pid",
+    ),
+    (
+        "columnar_set_single_row",
+        "MATCH (p:Person {person_id: 1}) SET p.age = 99 RETURN p.age AS age",
+        "MATCH (p:Person) RETURN p.person_id AS pid, p.age AS age ORDER BY pid",
+    ),
+    (
+        "columnar_remove_multi_row",
+        "MATCH (p:Person) REMOVE p.city RETURN count(p) AS n",
+        "MATCH (p:Person) RETURN p.person_id AS pid, p.city AS city ORDER BY pid",
+    ),
+    (
+        "columnar_remove_single_row",
+        "MATCH (p:Person {person_id: 2}) REMOVE p.age RETURN p.person_id AS pid",
+        "MATCH (p:Person) RETURN p.person_id AS pid, p.age AS age ORDER BY pid",
+    ),
+    (
+        "columnar_set_map_merge",
+        "MATCH (p:Person {person_id: 1}) SET p += {age: 99, active: true} RETURN p.age AS age",
+        "MATCH (p:Person) RETURN p.person_id AS pid, p.age AS age, p.active AS active ORDER BY pid",
+    ),
+    (
+        # `SET n = {…}` enumerates the node's existing property keys to clear
+        # them — the path that read an empty key set on a saved graph before D1.
+        "columnar_set_map_replace",
+        "MATCH (p:Person {person_id: 1}) SET p = {name: 'A', age: 99} RETURN p.age AS age",
+        "MATCH (p:Person) RETURN p.person_id AS pid, p.age AS age, p.city AS city ORDER BY pid",
+    ),
+    (
+        # One `execute_set` per matched row: R rows, R clauses.
+        "columnar_merge_on_match_set_multi_row",
+        "MATCH (p:Person) WITH collect(p.person_id) AS ids UNWIND ids AS pid "
+        "MERGE (q:Person {person_id: pid}) ON MATCH SET q.touched = true RETURN count(q) AS n",
+        "MATCH (p:Person) RETURN p.person_id AS pid, p.touched AS touched ORDER BY pid",
+    ),
+    (
+        "columnar_merge_on_match_set_single_row",
+        "MERGE (p:Person {person_id: 1}) ON MATCH SET p.touched = true RETURN p.touched AS t",
+        "MATCH (p:Person) RETURN p.person_id AS pid, p.touched AS touched ORDER BY pid",
+    ),
+    (
+        # `name` is the title alias, so it lives in the node's title field and
+        # not in the store — the node-private `Arc::make_mut` route.
+        "columnar_set_title_alias_multi_row",
+        "MATCH (p:Person) SET p.name = 'Same' RETURN count(p) AS n",
+        "MATCH (p:Person) RETURN p.person_id AS pid, p.name AS name ORDER BY pid",
+    ),
+    (
+        "columnar_set_then_remove_same_property",
+        "MATCH (p:Person) SET p.tmp = 1 REMOVE p.tmp RETURN count(p) AS n",
+        "MATCH (p:Person) RETURN p.person_id AS pid, p.tmp AS tmp ORDER BY pid",
+    ),
+]
+
+
+def _build_columnar_mutation_graph() -> kglite.KnowledgeGraph:
+    """`_build_mutation_graph()` in the shape a saved graph takes.
+
+    `enable_columnar()` is what `save()` calls, and nothing but an explicit
+    `disable_columnar()` undoes it — so "has been saved once" is a permanent
+    property of a live graph and every later write runs in this shape.
+    """
+    g = _build_mutation_graph()
+    g.enable_columnar()
+    return g
+
+
+@pytest.mark.differential
+def test_columnar_mutation_fixture_is_actually_columnar() -> None:
+    """Non-vacuity guard for the corpus below.
+
+    If `enable_columnar()` ever stopped converting the fixture, every case in
+    `COLUMNAR_MUTATION_QUERIES` would silently become a second run of
+    `MUTATION_QUERIES` and prove nothing about columnar storage.
+    """
+    fresh = _build_mutation_graph()
+    assert fresh.graph_info()["columnar_total_rows"] == 0, (
+        "the row-storage fixture must own no column-store rows, or the "
+        "comparison arm below is comparing two columnar graphs"
+    )
+    columnar = _build_columnar_mutation_graph()
+    assert columnar.graph_info()["columnar_total_rows"] == 3, (
+        "enable_columnar() must move all three Person rows into a column store"
+    )
+
+
+@pytest.mark.differential
+@pytest.mark.parametrize(
+    "name,query,probe",
+    COLUMNAR_MUTATION_QUERIES,
+    ids=[entry[0] for entry in COLUMNAR_MUTATION_QUERIES],
+)
+def test_columnar_mutation_optimized_matches_naive(name: str, query: str, probe: str) -> None:
+    """Optimized and naive must agree on a *saved* graph — in the returned
+    rows, in the post-statement counts, and in what a later read observes."""
+    g_opt = _build_columnar_mutation_graph()
+    rows_opt = _normalize(g_opt.cypher(query).to_list())
+    nodes_opt = g_opt.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"]
+    edges_opt = g_opt.cypher("MATCH ()-[r]->() RETURN count(r) AS c").to_list()[0]["c"]
+    probe_opt = _normalize(g_opt.cypher(probe).to_list())
+
+    g_naive = _build_columnar_mutation_graph()
+    rows_naive = _normalize(g_naive.cypher(query, disable_optimizer=True).to_list())
+    nodes_naive = g_naive.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"]
+    edges_naive = g_naive.cypher("MATCH ()-[r]->() RETURN count(r) AS c").to_list()[0]["c"]
+    probe_naive = _normalize(g_naive.cypher(probe, disable_optimizer=True).to_list())
+
+    assert rows_opt == rows_naive, f"Columnar `{name}` rows: opt={rows_opt}, naive={rows_naive}"
+    assert nodes_opt == nodes_naive, f"Columnar `{name}` node count: opt={nodes_opt}, naive={nodes_naive}"
+    assert edges_opt == edges_naive, f"Columnar `{name}` edge count: opt={edges_opt}, naive={edges_naive}"
+    assert probe_opt == probe_naive, f"Columnar `{name}` post-write read: opt={probe_opt}, naive={probe_naive}"
+
+
+@pytest.mark.differential
+@pytest.mark.parametrize(
+    "name,query,probe",
+    COLUMNAR_MUTATION_QUERIES,
+    ids=[entry[0] for entry in COLUMNAR_MUTATION_QUERIES],
+)
+def test_columnar_mutation_matches_row_storage(name: str, query: str, probe: str) -> None:
+    """The same write must produce the same observable on a saved graph as on a
+    fresh one.
+
+    This is the arm that catches a columnar write landing in one replica of the
+    type's column store and not the other: optimized-vs-naive agrees whenever
+    *both* paths lose the write, so it cannot see that class on its own.
+    """
+    g_row = _build_mutation_graph()
+    rows_row = _normalize(g_row.cypher(query).to_list())
+    probe_row = _normalize(g_row.cypher(probe).to_list())
+
+    g_col = _build_columnar_mutation_graph()
+    rows_col = _normalize(g_col.cypher(query).to_list())
+    probe_col = _normalize(g_col.cypher(probe).to_list())
+
+    assert rows_col == rows_row, f"Columnar `{name}` rows differ from row storage: {rows_col} vs {rows_row}"
+    assert probe_col == probe_row, (
+        f"Columnar `{name}` post-write read differs from row storage: {probe_col} vs {probe_row}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Constraint DDL sequences
 # ---------------------------------------------------------------------------
 #

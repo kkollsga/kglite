@@ -13,6 +13,7 @@ use crate::graph::schema::{CowSelection, DirGraph, InternedKey};
 use crate::graph::storage::disk::csr::{PendingEdge, TOMBSTONE_EDGE};
 use crate::graph::storage::disk::graph::DiskGraph;
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
+use crate::graph::storage::property_storage::ColumnarRow;
 use std::path::Path;
 
 /// Canonical streaming-filter spec. The fluent chain
@@ -826,10 +827,10 @@ pub fn save_subset_streaming_disk(
                 id: Value::Null,
                 title: Value::Null,
                 node_type: type_key,
-                properties: PropertyStorage::Columnar {
-                    store: Arc::clone(&placeholder_arc),
-                    row_id: dest_row_id,
-                },
+                properties: PropertyStorage::Columnar(ColumnarRow::new(
+                    Arc::clone(&placeholder_arc),
+                    dest_row_id,
+                )),
             };
             crate::graph::storage::GraphWrite::add_node(&mut dest.graph, new_node_data);
             if let Some(t) = t3 {

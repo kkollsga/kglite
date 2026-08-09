@@ -69,7 +69,23 @@ impl<'a> NodeView<'a> {
     #[inline]
     pub(crate) fn from_node_data(data: &'a NodeData) -> Self {
         let store = match &data.properties {
-            PropertyStorage::Columnar { store, row_id } => Some((&**store, *row_id)),
+            PropertyStorage::Columnar(row) => {
+                // Test-only: when a type's store is poisoned, resolve through
+                // the *authoritative* replica rather than the node's handle —
+                // the D1 Phase-2 gate that tells a migrated caller apart from
+                // one still reading `NodeData` directly. Compiles to nothing
+                // outside the test harness.
+                #[cfg(test)]
+                if let Some(authoritative) =
+                    crate::graph::storage::poison::authoritative(data.node_type)
+                {
+                    return NodeView {
+                        data,
+                        store: Some((authoritative, row.row_id())),
+                    };
+                }
+                Some((row.store(), row.row_id()))
+            }
             _ => None,
         };
         NodeView { data, store }
@@ -273,7 +289,7 @@ impl<'a> NodeView<'a> {
                         })
                     })
                     .collect(),
-                PropertyStorage::Columnar { .. } => unreachable!("store resolved above"),
+                PropertyStorage::Columnar(_) => unreachable!("store resolved above"),
             },
         }
     }

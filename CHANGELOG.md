@@ -32,6 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   three `fluent::node_*` temporal predicates now take `NodeView` instead of
   `&NodeData`; pass `graph.node_view(idx)` (or `NodeView::from(&node_data)`)
   where you passed a `&NodeData` before.
+- **Rust API**: `NodeData`'s property readers are removed — `get_property`,
+  `get_property_value`, `get_field_ref`, `property_keys`, `property_iter`,
+  `property_count`, `has_property`, `properties_cloned`, `to_node_info`,
+  `get_node_type_ref`, `field_contains_ci`, `field_starts_with_ci`. Every one of
+  them read the node's own replica of a columnar type's column store, and
+  `property_iter` silently yielded nothing there. Use `NodeView`, whose methods
+  carry the same names and are complete for every storage variant:
+  `graph.node_view(idx)` instead of `graph.get_node(idx)`. `NodeData` keeps
+  `id()`, `title()` and `node_type_str()`.
 
 ## [0.15.8] - 2026-08-09
 

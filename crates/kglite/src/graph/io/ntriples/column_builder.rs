@@ -16,6 +16,7 @@ use crate::graph::storage::mapped::column_store::{
     ColRef, FixedColumnMeta, MmapColumnStore, Region, StrColumnMeta,
 };
 use crate::graph::storage::memory::property_log::PropertyLogReader;
+use crate::graph::storage::property_storage::ColumnarRow;
 use crate::graph::storage::type_build_meta::{ColType, TypeBuildMeta};
 use crate::graph::storage::{GraphRead, GraphWrite};
 use memmap2::MmapMut;
@@ -607,7 +608,7 @@ fn link_column_rows(graph: &mut DirGraph, row_ids: &[(NodeIndex, u32)], verbose:
                 None => continue,
             };
             if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
-                node.properties = PropertyStorage::Columnar { store, row_id };
+                node.properties = PropertyStorage::Columnar(ColumnarRow::new(store, row_id));
                 linked += 1;
             }
         }

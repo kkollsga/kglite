@@ -610,7 +610,7 @@ mod maintenance_tests {
             .unwrap()
             .iter()
             .map(|idx| {
-                let n = g.graph.node_weight(idx).unwrap();
+                let n = g.graph.node_view(idx).unwrap();
                 let age = n
                     .get_property("age")
                     .map(|c| match c.as_ref() {
@@ -632,7 +632,7 @@ mod maintenance_tests {
             .unwrap()
             .iter()
             .map(|idx| {
-                let n = g.graph.node_weight(idx).unwrap();
+                let n = g.graph.node_view(idx).unwrap();
                 let age = n
                     .get_property("age")
                     .map(|c| match c.as_ref() {
@@ -663,9 +663,16 @@ mod maintenance_tests {
 
         // Verify properties still work
         let idx = g.type_indices.get("Person").unwrap().get(0).unwrap();
-        let node = g.graph.node_weight(idx).unwrap();
-        assert!(matches!(node.properties, PropertyStorage::Compact { .. }));
-        assert!(node.get_property("age").is_some());
+        assert!(matches!(
+            g.graph.node_weight(idx).unwrap().properties,
+            PropertyStorage::Compact { .. }
+        ));
+        assert!(g
+            .graph
+            .node_view(idx)
+            .unwrap()
+            .get_property("age")
+            .is_some());
     }
 
     #[test]
@@ -683,7 +690,11 @@ mod maintenance_tests {
         // Update existing property
         node.set_property("age", Value::Int64(99), &mut g.interner);
         assert_eq!(
-            node.get_property("age").map(|c| c.into_owned()),
+            g.graph
+                .node_view(idx)
+                .unwrap()
+                .get_property("age")
+                .map(|c| c.into_owned()),
             Some(Value::Int64(99))
         );
     }
@@ -698,10 +709,10 @@ mod maintenance_tests {
         g.enable_columnar();
 
         let idx = g.type_indices.get("Person").unwrap().get(0).unwrap();
-        let node = g.graph.node_weight(idx).unwrap();
+        let node = g.graph.node_view(idx).unwrap();
 
         assert_eq!(node.property_count(), 1); // just "age"
-        let keys: Vec<&str> = node.property_keys(&g.interner).collect();
+        let keys: Vec<&str> = node.property_keys(&g.interner);
         assert_eq!(keys, vec!["age"]);
     }
 
@@ -736,7 +747,7 @@ mod maintenance_tests {
             )
             .unwrap()
         };
-        let node0 = graph2.node_weight(NodeIndex::new(0)).unwrap();
+        let node0 = graph2.node_view(NodeIndex::new(0)).unwrap();
 
         // Properties should survive the round-trip
         assert!(node0.get_property("age").is_some());

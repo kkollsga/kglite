@@ -3,6 +3,7 @@ use crate::datatypes::Value;
 use crate::graph::schema::{
     DirGraph, EdgeData, InternedKey, NodeData, PropertyStorage, PROVISIONAL_KEY,
 };
+use crate::graph::storage::property_storage::ColumnarRow;
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::Direction;
@@ -404,8 +405,8 @@ impl BatchProcessor {
             if let Some(indices) = graph.type_indices.get(node_type) {
                 for idx in indices.iter() {
                     if let Some(node) = GraphWrite::node_weight_mut_silent(&mut graph.graph, idx) {
-                        if let PropertyStorage::Columnar { row_id, .. } = &node.properties {
-                            let rid = *row_id;
+                        if let PropertyStorage::Columnar(row) = &node.properties {
+                            let rid = row.row_id();
                             node.properties = PropertyStorage::Map(HashMap::new());
                             deferred_columnar.push((idx, node_type.clone(), rid));
                         }
@@ -460,10 +461,7 @@ impl BatchProcessor {
         for (node_idx, node_type, row_id) in deferred_columnar {
             let arc_store = graph.column_stores.get(&node_type).unwrap().clone();
             if let Some(node) = GraphWrite::node_weight_mut_silent(&mut graph.graph, node_idx) {
-                node.properties = PropertyStorage::Columnar {
-                    store: arc_store,
-                    row_id,
-                };
+                node.properties = PropertyStorage::Columnar(ColumnarRow::new(arc_store, row_id));
             }
             GraphWrite::update_row_id(&mut graph.graph, node_idx, row_id);
         }
@@ -658,7 +656,7 @@ impl BatchProcessor {
                     node.properties.insert(k, v);
                 }
                 // Promote: a real-row upsert clears the stub marker.
-                if node.properties.get(provisional_key).is_some() {
+                if node.properties.contains_own_key(provisional_key) {
                     node.properties.insert(provisional_key, Value::Null);
                 }
             }

@@ -56,7 +56,7 @@ fn master_qty(graph: &DirGraph) -> Option<Value> {
 fn node_qty(graph: &DirGraph) -> Option<Value> {
     graph
         .lookup_by_id_readonly("Item", &Value::Int64(1))
-        .and_then(|i| graph.graph.node_weight(i))
+        .and_then(|i| graph.graph.node_view(i))
         .and_then(|n| n.get_property("qty"))
         .map(|v| v.into_owned())
 }
@@ -118,7 +118,7 @@ fn remove_over_many_rows_clears_every_node() {
     for id in 1..=3 {
         let value = graph
             .lookup_by_id_readonly("Item", &Value::Int64(id))
-            .and_then(|i| graph.graph.node_weight(i))
+            .and_then(|i| graph.graph.node_view(i))
             .and_then(|n| n.get_property("qty"))
             .map(|v| v.into_owned());
         assert_eq!(value, None, "node {id} kept its removed property");
@@ -128,7 +128,7 @@ fn remove_over_many_rows_clears_every_node() {
     for id in 1..=3 {
         let value = graph
             .lookup_by_id_readonly("Item", &Value::Int64(id))
-            .and_then(|i| graph.graph.node_weight(i))
+            .and_then(|i| graph.graph.node_view(i))
             .and_then(|n| n.get_property("qty"))
             .map(|v| v.into_owned());
         assert_eq!(value, None, "node {id} resurrected its removed property");

@@ -27,6 +27,7 @@ use crate::graph::schema::{
     SpatialConfig, StringInterner, StripPropertiesGuard, TemporalConfig,
 };
 use crate::graph::storage::column_store::ColumnStore;
+use crate::graph::storage::property_storage::ColumnarRow;
 use crate::graph::storage::{GraphRead, GraphWrite};
 // This module no longer constructs `KnowledgeGraph` directly.
 // `load_file` / `load_disk_dir` / `load_v5` return
@@ -2378,10 +2379,8 @@ fn attach_portable_column_stores(dir_graph: &mut DirGraph) {
             let Some(node) = dir_graph.graph.node_weight_mut(node_idx) else {
                 continue;
             };
-            node.properties = PropertyStorage::Columnar {
-                store: Arc::clone(store),
-                row_id: row_id as u32,
-            };
+            node.properties =
+                PropertyStorage::Columnar(ColumnarRow::new(Arc::clone(store), row_id as u32));
             if has_id_title {
                 node.id = Value::Null;
                 node.title = Value::Null;

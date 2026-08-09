@@ -23,6 +23,25 @@
 //!    `held_reader_forces_a_whole_graph_copy`. Phase 3 flips these; a failure
 //!    before then means an unintended ownership change.
 //!
+//! # Phase 2 — the mutation-proof gate
+//!
+//! Phase 1 re-routed every caller; Phase 2 makes that irreversible. Two layers:
+//!
+//! - **Compile-time.** A columnar node's store handle lives behind
+//!   `ColumnarRow`, whose `store` field is private to `graph::storage`, and the
+//!   `NodeData` property readers Phase 1 emptied are deleted. New code
+//!   *cannot* express a direct-route read; it fails to compile. The two named
+//!   escapes (`ColumnarRow::node_handle` / `::repoint`) are pinned site-for-site
+//!   by `the_node_handle_escape_has_exactly_the_phase_3_call_sites`, so the
+//!   remaining direct-route set is an enumerated work list rather than a
+//!   guess.
+//! - **Runtime**, for what the compiler cannot see: a caller that *could* have
+//!   used the accessors but reads a `NodeData` it already holds. `poison_*`
+//!   makes the node handle and the backend's store disagree — exactly as
+//!   Phase 3 will — and one named test per caller class asserts the class
+//!   observes the authoritative value. Each was shown red by reverting that
+//!   one call site; see the commit body.
+//!
 //! # Why the divergence tests do not just assert "the master wins"
 //!
 //! On HEAD the node handle *is* the read route on memory/mapped
@@ -39,7 +58,9 @@ use crate::datatypes::{DataFrame, Value};
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::schema::{InternedKey, PropertyStorage};
 use crate::graph::session::{execute_mut, execute_read, ExecuteOptions};
-use crate::graph::storage::GraphRead;
+use crate::graph::storage::column_store::ColumnStore;
+use crate::graph::storage::poison::{self, PoisonGuard};
+use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::NodeIndex;
 
 const N: i64 = 4;
@@ -117,7 +138,7 @@ fn node_of(graph: &DirGraph, id: i64) -> NodeIndex {
 
 fn node_row_id(graph: &DirGraph, idx: NodeIndex) -> Option<u32> {
     match graph.graph.node_weight(idx).map(|n| &n.properties) {
-        Some(PropertyStorage::Columnar { row_id, .. }) => Some(*row_id),
+        Some(PropertyStorage::Columnar(row)) => Some(row.row_id()),
         _ => None,
     }
 }
@@ -126,7 +147,7 @@ fn node_row_id(graph: &DirGraph, idx: NodeIndex) -> Option<u32> {
 fn node_shares_master(graph: &DirGraph, idx: NodeIndex) -> bool {
     let master = graph.column_stores.get("Item").expect("master store");
     match graph.graph.node_weight(idx).map(|n| &n.properties) {
-        Some(PropertyStorage::Columnar { store, .. }) => Arc::ptr_eq(store, master),
+        Some(PropertyStorage::Columnar(row)) => Arc::ptr_eq(row.node_handle(), master),
         _ => false,
     }
 }
@@ -485,7 +506,7 @@ fn spill_forks_the_master_and_reclaims_nothing_today() {
          the mapped master) and close D1 defect 2."
     );
     let node_store_is_mapped = match graph.graph.node_weight(idx).map(|n| &n.properties) {
-        Some(PropertyStorage::Columnar { store, .. }) => store.is_mapped(),
+        Some(PropertyStorage::Columnar(row)) => row.node_handle().is_mapped(),
         _ => panic!("node must still be columnar"),
     };
     assert!(
@@ -566,5 +587,455 @@ fn property_ndv_counts_columnar_rows() {
         graph.property_ndv("Item", "c0"),
         Some(N as usize),
         "property_ndv must see a columnar type's distinct values"
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 2 — the mutation-proof gate
+// ══════════════════════════════════════════════════════════════════════════
+
+// ── The poison primitive ──────────────────────────────────────────────────
+
+/// Make the node-held handle and the backend's store disagree, the way D1
+/// Phase 3 will, and install the backend's store as the authoritative route.
+///
+/// Three steps, mirroring `storage/poison.rs`:
+/// 1. every node of `node_type` is re-pointed at a **stale** private clone;
+/// 2. `edit` writes the truth into the type's **master** store only;
+/// 3. the post-write master becomes the authoritative read route.
+///
+/// A caller that reads through `NodeView` / `GraphRead` sees the truth. One
+/// that reads a `NodeData` it already holds sees the stale replica. The guard
+/// restores normal resolution on drop — bind it, never `let _ = …`.
+fn poison_row(
+    graph: &mut DirGraph,
+    node_type: &str,
+    edit: impl FnOnce(&mut ColumnStore),
+) -> PoisonGuard {
+    let master_arc = Arc::clone(
+        graph
+            .column_stores
+            .get(node_type)
+            .expect("type must be columnar, or the poison is a no-op"),
+    );
+    let stale = Arc::new((*master_arc).clone());
+
+    let indices: Vec<NodeIndex> = graph
+        .type_indices
+        .get(node_type)
+        .map(|set| set.iter().collect())
+        .unwrap_or_default();
+    assert!(
+        !indices.is_empty(),
+        "no nodes of type {node_type} to poison"
+    );
+    for idx in indices {
+        if let Some(node) = GraphWrite::node_weight_mut_silent(&mut graph.graph, idx) {
+            if let PropertyStorage::Columnar(row) = &mut node.properties {
+                row.repoint(Arc::clone(&stale));
+            }
+        }
+    }
+
+    let master = Arc::make_mut(graph.column_stores.get_mut(node_type).unwrap());
+    edit(master);
+
+    // Leaked because `NodeView` hands out `&ColumnStore` borrows; one snapshot
+    // per poison call is bounded by the number of tests here.
+    let leaked: &'static ColumnStore = Box::leak(Box::new(master.clone()));
+    poison::install(InternedKey::from_str(node_type), leaked)
+}
+
+/// Poison one row's property column.
+fn poison_property(
+    graph: &mut DirGraph,
+    node_type: &str,
+    row_id: u32,
+    key: &str,
+    value: Value,
+) -> PoisonGuard {
+    let ikey = graph.interner.get_or_intern(key);
+    poison_row(graph, node_type, move |store| {
+        assert!(
+            store.set(row_id, ikey, &value, None),
+            "master write must land, or the poison proves nothing"
+        );
+    })
+}
+
+/// Poison one row's `__title__` column.
+fn poison_title(graph: &mut DirGraph, node_type: &str, row_id: u32, value: Value) -> PoisonGuard {
+    poison_row(graph, node_type, move |store| {
+        assert!(
+            store.set_title(row_id, &value),
+            "master title write must land, or the poison proves nothing"
+        );
+    })
+}
+
+/// The value the node's **own** handle still reports — the stale replica.
+fn stale_node_route(graph: &DirGraph, idx: NodeIndex, key: &str) -> Option<Value> {
+    match graph.graph.node_weight(idx).map(|n| &n.properties) {
+        Some(PropertyStorage::Columnar(row)) => row
+            .node_handle()
+            .get(row.row_id(), InternedKey::from_str(key)),
+        _ => None,
+    }
+}
+
+/// Fixture: a saved graph with row 0 (`id: 1`) poisoned so its authoritative
+/// `c0` is `TRUTH` while its node handle still says `c0-1`.
+fn poisoned_fixture() -> (DirGraph, NodeIndex, PoisonGuard) {
+    let mut graph = seeded_columnar();
+    let idx = node_of(&graph, 1);
+    let row_id = node_row_id(&graph, idx).expect("columnar node");
+    let guard = poison_property(
+        &mut graph,
+        "Item",
+        row_id,
+        "c0",
+        Value::String("TRUTH".into()),
+    );
+    (graph, idx, guard)
+}
+
+/// **Non-vacuity.** The poison must actually split the two routes; if it did
+/// not, every class test below would pass by accident.
+#[test]
+fn poison_makes_the_node_route_and_the_authoritative_route_disagree() {
+    let (graph, idx, _guard) = poisoned_fixture();
+    assert_eq!(
+        graph.node_view(idx).unwrap().get_property_value("c0"),
+        Some(Value::String("TRUTH".into())),
+        "the accessor route must see the authoritative value"
+    );
+    assert_eq!(
+        stale_node_route(&graph, idx, "c0"),
+        Some(Value::String("c0-1".into())),
+        "the node's own handle must still hold the stale replica — without this \
+         the poison is a no-op and every class test below is vacuous"
+    );
+}
+
+/// The guard must restore normal resolution, or poison would leak across tests.
+#[test]
+fn dropping_the_poison_guard_restores_node_handle_resolution() {
+    let mut graph = seeded_columnar();
+    let idx = node_of(&graph, 1);
+    let row_id = node_row_id(&graph, idx).unwrap();
+    {
+        let _guard = poison_property(
+            &mut graph,
+            "Item",
+            row_id,
+            "c0",
+            Value::String("TRUTH".into()),
+        );
+        assert_eq!(
+            graph.node_view(idx).unwrap().get_property_value("c0"),
+            Some(Value::String("TRUTH".into()))
+        );
+    }
+    assert_eq!(
+        graph.node_view(idx).unwrap().get_property_value("c0"),
+        Some(Value::String("c0-1".into())),
+        "resolution must fall back to the node handle once the guard is dropped"
+    );
+}
+
+// ── One named test per caller class ───────────────────────────────────────
+
+/// **R1 — pattern matcher filter.** `MATCH (n:Item {c0: …})` resolves the
+/// authoritative value, so the inline-property filter finds the poisoned row
+/// and not the stale one.
+#[test]
+fn r1_matcher_property_filter_reads_the_authoritative_store() {
+    let (graph, _idx, _guard) = poisoned_fixture();
+    assert_eq!(
+        read_one(&graph, "MATCH (n:Item {c0: 'TRUTH'}) RETURN n.id"),
+        Value::Int64(1),
+        "the matcher's property filter must see the authoritative value"
+    );
+    assert_eq!(
+        read_one(&graph, "MATCH (n:Item {c0: 'c0-1'}) RETURN n.id"),
+        Value::Null,
+        "the matcher must not match the stale replica"
+    );
+}
+
+/// **R3 — WHERE / expression resolution.**
+#[test]
+fn r3_where_clause_reads_the_authoritative_store() {
+    let (graph, _idx, _guard) = poisoned_fixture();
+    assert_eq!(
+        read_one(&graph, "MATCH (n:Item) WHERE n.c0 = 'TRUTH' RETURN n.id"),
+        Value::Int64(1)
+    );
+    assert_eq!(
+        read_one(&graph, "MATCH (n:Item) WHERE n.id = 1 RETURN n.c0"),
+        Value::String("TRUTH".into())
+    );
+}
+
+/// **R4 — projection / whole-node materialisation.**
+#[test]
+fn r4_whole_node_projection_reads_the_authoritative_store() {
+    let (graph, _idx, _guard) = poisoned_fixture();
+    match read_one(&graph, "MATCH (n:Item) WHERE n.id = 1 RETURN n") {
+        Value::Node(nv) => assert_eq!(
+            nv.properties.get("c0"),
+            Some(&Value::String("TRUTH".into())),
+            "RETURN n must carry the authoritative value"
+        ),
+        other => panic!("expected a node value, got {other:?}"),
+    }
+}
+
+/// **R8 — index build funnel (`read_indexed`).** A property index built after
+/// the poison buckets the row under its authoritative value.
+#[test]
+fn r8_property_index_build_reads_the_authoritative_store() {
+    let (mut graph, idx, _guard) = poisoned_fixture();
+    graph.create_index("Item", "c0");
+    let bucket = graph
+        .property_indices
+        .get(&("Item".to_string(), "c0".to_string()))
+        .expect("index must exist");
+    assert_eq!(
+        bucket.get(&Value::String("TRUTH".into())),
+        Some(&vec![idx]),
+        "the built index must bucket the row under its authoritative value"
+    );
+    assert!(
+        !bucket.contains_key(&Value::String("c0-1".into())),
+        "the built index must not carry the stale replica's value"
+    );
+}
+
+/// **R9 — incremental index maintenance.** The incremental updater
+/// (`update_property_indices_for_add`) bypasses `read_indexed`, so it gets its
+/// own arm: it must agree with the rebuild above.
+#[test]
+fn r9_incremental_index_maintenance_reads_the_authoritative_store() {
+    let mut graph = seeded_columnar();
+    let idx = node_of(&graph, 1);
+    let row_id = node_row_id(&graph, idx).unwrap();
+    // Build the index *before* the poison, from the pre-poison values.
+    graph.create_index("Item", "c0");
+    let _guard = poison_property(
+        &mut graph,
+        "Item",
+        row_id,
+        "c0",
+        Value::String("TRUTH".into()),
+    );
+
+    graph.update_property_indices_for_add("Item", idx);
+
+    let bucket = graph
+        .property_indices
+        .get(&("Item".to_string(), "c0".to_string()))
+        .expect("index must exist");
+    assert!(
+        bucket
+            .get(&Value::String("TRUTH".into()))
+            .is_some_and(|members| members.contains(&idx)),
+        "incremental maintenance must file the row under its authoritative \
+         value, or it disagrees with a rebuilt index"
+    );
+}
+
+/// **R11 — constraint gates.** Declaring a unique constraint validates the
+/// existing rows through `read_indexed`; with two rows sharing an
+/// authoritative `c0`, the declaration must be rejected.
+#[test]
+fn r11_unique_constraint_gate_reads_the_authoritative_store() {
+    let mut graph = seeded_columnar();
+    let idx = node_of(&graph, 1);
+    let row_id = node_row_id(&graph, idx).unwrap();
+    // Collide row 0 with row 1's value (`c0-2`) in the master only.
+    let _guard = poison_property(
+        &mut graph,
+        "Item",
+        row_id,
+        "c0",
+        Value::String("c0-2".into()),
+    );
+
+    let params = HashMap::new();
+    let opts = ExecuteOptions::eager(&params);
+    let result = execute_mut(
+        &mut graph,
+        "CREATE CONSTRAINT FOR (i:Item) REQUIRE i.c0 IS UNIQUE",
+        &opts,
+    );
+    assert!(
+        result.is_err(),
+        "the constraint gate must see the authoritative duplicate and reject; \
+         reading the stale node handles would show four distinct values"
+    );
+}
+
+/// **R12 — planner statistics.** `property_ndv` bypasses `read_indexed`, so it
+/// gets its own arm: the collision above must drop the distinct count.
+#[test]
+fn r12_property_ndv_reads_the_authoritative_store() {
+    let mut graph = seeded_columnar();
+    let idx = node_of(&graph, 1);
+    let row_id = node_row_id(&graph, idx).unwrap();
+    let _guard = poison_property(
+        &mut graph,
+        "Item",
+        row_id,
+        "c0",
+        Value::String("c0-2".into()),
+    );
+    assert_eq!(
+        graph.property_ndv("Item", "c0"),
+        Some(N as usize - 1),
+        "property_ndv must count the authoritative values; reading the stale \
+         node handles would still report {N} distinct"
+    );
+}
+
+/// **R13a — export.** The D3-JSON exporter enumerates a node's properties.
+#[test]
+fn r13_export_reads_the_authoritative_store() {
+    let (graph, _idx, _guard) = poisoned_fixture();
+    let json = crate::graph::io::export::to_d3_json(&graph, None).unwrap();
+    assert_eq!(
+        extract_json_c0(&json),
+        Value::String("TRUTH".into()),
+        "D3-JSON export must carry the authoritative value"
+    );
+}
+
+/// **R13b — introspection statistics.** Asserted on `compute_property_stats`
+/// directly rather than on the rendered `describe()` XML: the XML mentions a
+/// value in several places, so a substring check there cannot tell which
+/// producer supplied it, and a mutation of the stats accumulator left it green.
+#[test]
+fn r13_property_stats_read_the_authoritative_store() {
+    let (graph, _idx, _guard) = poisoned_fixture();
+    let stats = crate::graph::introspection::schema_overview::compute_property_stats(
+        &graph, "Item", 32, None,
+    )
+    .expect("property stats");
+    let c0 = stats
+        .iter()
+        .find(|p| p.property_name == "c0")
+        .expect("c0 must appear in the property stats");
+    let values = c0.values.as_ref().expect("small-cardinality values");
+    assert!(
+        values.contains(&Value::String("TRUTH".into())),
+        "property stats must observe the authoritative value; got {values:?}"
+    );
+    assert!(
+        !values.contains(&Value::String("c0-1".into())),
+        "property stats must not observe the stale replica; got {values:?}"
+    );
+}
+
+/// **R14 — binding-layer readers.** `session::resolve_noderefs` is public API,
+/// runs after the executor returns and holds only a `&GraphBackend`.
+#[test]
+fn r14_resolve_noderefs_reads_the_authoritative_store() {
+    let mut graph = seeded_columnar();
+    let idx = node_of(&graph, 1);
+    let row_id = node_row_id(&graph, idx).unwrap();
+    let _guard = poison_title(
+        &mut graph,
+        "Item",
+        row_id,
+        Value::String("TRUE-TITLE".into()),
+    );
+
+    let mut rows = vec![vec![Value::NodeRef(idx.index() as u32)]];
+    crate::graph::session::resolve_noderefs(&graph.graph, &mut rows);
+    assert_eq!(
+        rows[0][0],
+        Value::String("TRUE-TITLE".into()),
+        "resolve_noderefs must resolve the authoritative title"
+    );
+}
+
+// ── The compile-time gate's enumerated escape list ────────────────────────
+
+/// The **only** two ways to reach a node's own store handle outside
+/// `graph::storage`, and the exact set of call sites, file by file.
+///
+/// This *is* the D1 Phase-3 work list for the node-held handle: when the
+/// `store` field is deleted, these are the sites that must change, and there
+/// are no others because nothing else can express the read.
+const NODE_HANDLE_ESCAPE_SITES: &[(&str, usize)] = &[
+    // W8 — `enable_columnar` drift check + rebuild, `disable_columnar` restore.
+    ("graph/dir_graph/mod.rs", 5),
+    // W10 — the rollback restore arm re-points nodes at the pre-statement store.
+    ("graph/dir_graph/rollback.rs", 1),
+    // W5 — the end-of-clause refresh sweep.
+    ("graph/languages/cypher/executor/columnar_write.rs", 1),
+    // Tests that are *about* handle identity, and must be rewritten (not
+    // deleted) when the handle goes — see the plan's Phase 3 step 5.
+    ("graph/dir_graph/rollback_tests.rs", 2),
+    ("graph/storage/column_ownership_tests.rs", 4),
+];
+
+/// Pins [`NODE_HANDLE_ESCAPE_SITES`] against the source tree.
+///
+/// Fails on a **new** call site (someone re-opened the direct route) and on a
+/// **removed** one (Phase 3 landed, or coverage was lost) — so it cannot rot in
+/// either direction. Update the table in the same change that moves a site.
+#[test]
+fn the_node_handle_escape_has_exactly_the_phase_3_call_sites() {
+    use std::collections::BTreeMap;
+
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found: BTreeMap<String, usize> = BTreeMap::new();
+
+    // Split so this detector does not match its own source line — otherwise
+    // the file's count would include the scanner and drift every time this
+    // function is edited.
+    let read_escape = concat!(".node_", "handle()");
+    let write_escape = concat!(".re", "point(");
+
+    fn walk(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        needles: (&str, &str),
+        found: &mut BTreeMap<String, usize>,
+    ) {
+        for entry in std::fs::read_dir(dir).expect("readable source dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                walk(&path, root, needles, found);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path).expect("readable source file");
+                let hits = text.matches(needles.0).count() + text.matches(needles.1).count();
+                if hits > 0 {
+                    let rel = path
+                        .strip_prefix(root)
+                        .expect("under src")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(rel).or_insert(0) += hits;
+                }
+            }
+        }
+    }
+    walk(&src, &src, (read_escape, write_escape), &mut found);
+
+    let expected: BTreeMap<String, usize> = NODE_HANDLE_ESCAPE_SITES
+        .iter()
+        .map(|(f, n)| ((*f).to_string(), *n))
+        .collect();
+
+    assert_eq!(
+        found, expected,
+        "\nThe node-held column-store handle is reachable from a set of call \
+         sites that no longer matches the D1 Phase-3 work list.\n\
+         - A NEW entry means the direct route was re-opened: read through \
+           `NodeView` / `GraphRead` instead.\n\
+         - A MISSING or smaller entry means a Phase-3 site was removed: update \
+           `NODE_HANDLE_ESCAPE_SITES` in the same change.\n"
     );
 }

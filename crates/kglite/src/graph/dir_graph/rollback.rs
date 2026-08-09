@@ -539,10 +539,10 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
                 .unwrap_or_default();
             for idx in members {
                 if let Some(node) = GraphWrite::node_weight_mut_silent(&mut graph.graph, idx) {
-                    if let crate::graph::schema::PropertyStorage::Columnar { store, .. } =
+                    if let crate::graph::schema::PropertyStorage::Columnar(row) =
                         &mut node.properties
                     {
-                        *store = Arc::clone(&prior);
+                        row.repoint(Arc::clone(&prior));
                     }
                 }
             }
