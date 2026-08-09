@@ -189,8 +189,8 @@
     {
       "path": "crates/kglite/src/graph/io/file.rs",
       "qualified_name": "crate::load_disk_dir",
-      "lines": 363,
-      "branches": 66,
+      "lines": 338,
+      "branches": 60,
       "nesting": 6
     },
     {

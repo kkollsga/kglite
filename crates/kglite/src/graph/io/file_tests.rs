@@ -10,16 +10,15 @@ mod atomic_save_tests {
     use crate::graph::storage::{GraphRead, GraphWrite};
     use petgraph::graph::NodeIndex;
 
-    /// Build a tiny columnar in-memory graph ready for `write_kgl*`.
-    fn tiny_graph(n: i64) -> Arc<DirGraph> {
-        let mut g = DirGraph::new();
+    /// Add `n` `Doc` nodes to an existing graph, whatever backend it is in.
+    fn fill_docs(g: &mut DirGraph, n: i64) {
         let rows: Vec<Vec<Value>> = (1..=n)
             .map(|i| vec![Value::Int64(i), Value::String(format!("t{i}"))])
             .collect();
         let df =
             DataFrame::from_cypher_rows(vec!["id".to_string(), "title".to_string()], rows).unwrap();
         crate::graph::mutation::maintain::add_nodes(
-            &mut g,
+            g,
             df,
             "Doc".to_string(),
             "id".to_string(),
@@ -27,10 +26,21 @@ mod atomic_save_tests {
             None,
         )
         .unwrap();
+    }
+
+    /// Stamp + consolidate a filled graph so it is ready for `write_kgl*`.
+    fn ready_for_save(g: DirGraph) -> Arc<DirGraph> {
         let mut arc = Arc::new(g);
         prepare_save(&mut arc);
         Arc::make_mut(&mut arc).enable_columnar();
         arc
+    }
+
+    /// Build a tiny columnar in-memory graph ready for `write_kgl*`.
+    fn tiny_graph(n: i64) -> Arc<DirGraph> {
+        let mut g = DirGraph::new();
+        fill_docs(&mut g, n);
+        ready_for_save(g)
     }
 
     #[test]
@@ -689,6 +699,206 @@ mod atomic_save_tests {
             loaded.graph.node_count(),
             3,
             "the rest of the graph must be unaffected"
+        );
+    }
+
+    // ── recorded storage mode ───────────────────────────────────────────────
+    //
+    // A saved graph records the storage mode that wrote it, so a later open can
+    // tell a mapped checkpoint from a memory one. Three properties are asserted
+    // below: the mode is written for every portable-capable mode, a file that
+    // predates the field still loads (memory, the established fallback), and an
+    // unrecognised value is refused **by name** rather than quietly becoming
+    // memory — a silent fallback would hand back a graph in a mode nobody asked
+    // for, which is indistinguishable from success.
+
+    /// Parse the metadata JSON out of a v5 buffer, so a test can assert on the
+    /// bytes actually written rather than on a round-tripped struct.
+    fn metadata_json_of(buf: &[u8]) -> serde_json::Value {
+        assert_eq!(&buf[..4], &V5_MAGIC);
+        let len = u32::from_le_bytes(buf[9..13].try_into().unwrap()) as usize;
+        serde_json::from_slice(&buf[13..13 + len]).expect("metadata is JSON")
+    }
+
+    /// Build a tiny columnar graph in `mode`, ready for `write_kgl*`.
+    fn tiny_graph_in_mode(mode: crate::graph::storage::mode::StorageMode, n: i64) -> Arc<DirGraph> {
+        let mut g = crate::graph::storage::mode::new_dir_graph_in_mode(mode, None)
+            .expect("portable-capable mode creates without a path");
+        fill_docs(&mut g, n);
+        ready_for_save(g)
+    }
+
+    fn saved_bytes(graph: &Arc<DirGraph>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        write_kgl_to(graph, &mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn memory_save_omits_the_storage_mode_key() {
+        // Memory is the baseline: it writes no key at all, exactly like
+        // `user_schema_version` at 0. That is what keeps a memory `.kgl`
+        // byte-identical to one written before the field existed (and keeps the
+        // save-determinism digest stable), and it is why an absent key means
+        // memory on the read side.
+        let bytes = saved_bytes(&tiny_graph(3));
+        let raw = metadata_json_of(&bytes);
+        assert!(
+            raw.get("storage_mode").is_none(),
+            "a memory graph must not emit the key at all, got {raw}"
+        );
+        assert_eq!(load_kgl_bytes(&bytes).unwrap().graph.node_count(), 3);
+    }
+
+    #[test]
+    fn mapped_save_records_the_mapped_mode() {
+        let graph = tiny_graph_in_mode(crate::graph::storage::mode::StorageMode::Mapped, 4);
+        assert!(
+            graph.graph.is_mapped(),
+            "mapped is a portable-capable mode and must reach write_kgl in that mode"
+        );
+        let bytes = saved_bytes(&graph);
+        assert_eq!(
+            metadata_json_of(&bytes)["storage_mode"],
+            serde_json::json!("mapped"),
+            "a mapped graph must record the mode that wrote the checkpoint"
+        );
+
+        // Stage-1 contract: the mode is *recorded*, not yet honoured. The load
+        // still materialises a memory graph and every row survives.
+        let loaded = load_kgl_bytes(&bytes).unwrap();
+        assert_eq!(loaded.graph.node_count(), 4);
+        assert!(!loaded.graph.is_mapped());
+    }
+
+    #[test]
+    fn durable_mapped_save_still_records_the_mapped_mode() {
+        // `open(path, storage="mapped", durable=True)` is the shape the storage
+        // guide recommends, and it saves through a `Recording`-wrapped backend.
+        // The wrapper is transparent to the mode, so the checkpoint must still
+        // say `mapped` — recording `memory` here would send the graph back as a
+        // memory graph on every later reopen.
+        let mut g = crate::graph::storage::mode::new_dir_graph_in_mode(
+            crate::graph::storage::mode::StorageMode::Mapped,
+            None,
+        )
+        .unwrap();
+        // Wrap exactly as `setup_durable` does, so the seam under test is real.
+        let inner = std::mem::replace(&mut g.graph, crate::graph::schema::GraphBackend::new());
+        g.graph = crate::graph::schema::GraphBackend::Recording(Box::new(
+            crate::graph::storage::recording::RecordingGraph::new(inner),
+        ));
+        fill_docs(&mut g, 2);
+        let graph = ready_for_save(g);
+        assert!(graph.graph.is_mapped());
+        assert_eq!(
+            metadata_json_of(&saved_bytes(&graph))["storage_mode"],
+            serde_json::json!("mapped"),
+            "the durability wrapper must not hide the mode underneath it"
+        );
+    }
+
+    #[test]
+    fn file_without_storage_mode_loads_as_memory() {
+        // Simulates a `.kgl` written by a build predating the field: the key is
+        // simply not there. It must load cleanly as memory — the established
+        // fallback — never an error.
+        let bytes = saved_bytes(&tiny_graph_in_mode(
+            crate::graph::storage::mode::StorageMode::Mapped,
+            4,
+        ));
+        let stripped = rewrite_metadata_json(&bytes, |raw| {
+            let object = raw.as_object_mut().expect("metadata is a JSON object");
+            assert!(
+                object.remove("storage_mode").is_some(),
+                "the mapped graph should have written the key"
+            );
+        });
+        let loaded = load_kgl_bytes(&stripped).expect("an older .kgl must still load");
+        assert_eq!(loaded.graph.node_count(), 4);
+        assert!(!loaded.graph.is_mapped());
+
+        // An explicitly recorded `memory` is equally legitimate — this build
+        // omits it, but the vocabulary is shared with every other binding and a
+        // reader must accept the spelled-out form.
+        let explicit = rewrite_metadata_json(&bytes, |raw| {
+            raw["storage_mode"] = serde_json::json!("memory");
+        });
+        assert_eq!(load_kgl_bytes(&explicit).unwrap().graph.node_count(), 4);
+    }
+
+    #[test]
+    fn unrecognised_storage_mode_is_refused_by_name() {
+        let bytes = saved_bytes(&tiny_graph(2));
+        let corrupt = rewrite_metadata_json(&bytes, |raw| {
+            raw["storage_mode"] = serde_json::json!("qubit");
+        });
+        let error = load_kgl_bytes(&corrupt)
+            .err()
+            .expect("an unknown storage mode must not silently load as memory");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        let text = error.to_string();
+        assert!(
+            text.contains("qubit") && text.contains("storage mode"),
+            "the error must name the value it rejected: {text}"
+        );
+    }
+
+    #[test]
+    fn portable_file_claiming_disk_mode_is_refused() {
+        // A disk graph is a directory, never a portable file: `save_disk`
+        // refuses a non-disk backend and `GraphBackend`'s serializer refuses the
+        // disk arm outright, so no writer can produce this. A file that claims
+        // it anyway is corrupt and must not be reinterpreted as a portable one.
+        let bytes = saved_bytes(&tiny_graph(2));
+        let corrupt = rewrite_metadata_json(&bytes, |raw| {
+            raw["storage_mode"] = serde_json::json!("disk");
+        });
+        let error = load_kgl_bytes(&corrupt)
+            .err()
+            .expect("a portable file claiming disk mode must be refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        let text = error.to_string();
+        assert!(
+            text.contains("disk") && text.contains("director"),
+            "the error must say a disk graph is a directory: {text}"
+        );
+    }
+
+    #[test]
+    fn disk_directory_records_disk_mode_and_refuses_a_portable_claim() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_str().unwrap();
+        let mut graph = DirGraph::new();
+        fill_docs(&mut graph, 3);
+        graph.enable_disk_mode().unwrap();
+        graph.save_disk(path).unwrap();
+
+        let snapshot = crate::graph::storage::disk::generation::resolve_snapshot(root.path())
+            .unwrap()
+            .snapshot_dir;
+        let meta_path = snapshot.join("metadata.json");
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+        assert_eq!(
+            raw["storage_mode"],
+            serde_json::json!("disk"),
+            "a disk directory must record the mode that wrote it"
+        );
+        assert_eq!(load_file(path).unwrap().graph.node_count(), 3);
+
+        // The symmetric guard: a disk directory whose metadata claims a portable
+        // mode is corrupt — no writer can produce it, and loading it anyway
+        // would mean trusting a file that contradicts its own layout.
+        let mut mutated = raw.clone();
+        mutated["storage_mode"] = serde_json::json!("mapped");
+        std::fs::write(&meta_path, serde_json::to_vec(&mutated).unwrap()).unwrap();
+        let error = load_file(path)
+            .err()
+            .expect("a disk directory claiming a portable mode must be refused");
+        assert!(
+            error.to_string().contains("mapped"),
+            "the error must name the value it rejected: {error}"
         );
     }
 }

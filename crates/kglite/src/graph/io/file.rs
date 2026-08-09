@@ -147,6 +147,16 @@ pub(crate) struct FileMetadata {
     /// Auto-vacuum threshold (None = disabled, default Some(0.3))
     #[serde(default = "crate::graph::dir_graph::default_auto_vacuum_threshold")]
     auto_vacuum_threshold: Option<f64>,
+    /// The storage mode that wrote this file, in the cross-binding vocabulary
+    /// `StorageMode::as_str` owns. Additive and *invisible at the memory
+    /// baseline*, exactly like `user_schema_version` and `checkpoint_lsn`
+    /// below: `skip_serializing_if` omits the key for a memory graph, so the
+    /// overwhelmingly common save stays byte-for-byte what it was before this
+    /// field existed — which is what keeps the `test_phase4_parity` golden
+    /// digest stable. Never read the raw value: the `storage_mode` submodule
+    /// owns what a reader may conclude from it, absent key included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    storage_mode: Option<String>,
     /// Parent types: child_type → parent_type. Determines which types are
     /// "core" vs "supporting" in describe() output.
     #[serde(default)]
@@ -268,6 +278,7 @@ impl FileMetadata {
             id_field_aliases: graph.id_field_aliases.clone(),
             title_field_aliases: graph.title_field_aliases.clone(),
             auto_vacuum_threshold: graph.auto_vacuum_threshold,
+            storage_mode: recorded_storage_mode_tag(graph),
             parent_types: graph.parent_types.clone(),
             graph_instructions: graph.graph_instructions.clone(),
             user_schema_version: graph.user_schema_version,
@@ -401,10 +412,14 @@ pub(crate) fn strip_heavy_metadata(meta: &mut FileMetadata) {
 // fast-load codecs live in a submodule (split out of this file for the
 // production-source file cap); re-exported here so caller paths stay stable.
 mod metadata_sidecars;
+// What a save records about its own storage mode, and what a load may conclude
+// from it (`storage_mode` in the metadata above).
+mod storage_mode;
 pub(crate) use metadata_sidecars::{
     read_connection_type_metadata_bin, read_node_type_metadata_bin,
     write_connection_type_metadata_bin, write_node_type_metadata_bin,
 };
+use storage_mode::recorded_storage_mode_tag;
 
 // ─── type_indices.bin.zst (0.8.13 fast-load) ─────────────────────────────────
 //
@@ -1756,33 +1771,8 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
 
     let mut graph = DirGraph::new();
 
-    // Load DirGraph metadata. The two heavy HashMap fields
-    // (`node_type_metadata`, `connection_type_metadata`) come from
-    // dedicated binary sidecars (0.8.28+) when present — they cost
-    // 4-5 s of JSON parse on slice-built Wikidata graphs with 30K-50K
-    // types, vs <100 ms in the binary form. Older graphs keep the
-    // fields embedded in metadata.json and are picked up by the
-    // standard JSON parse below.
     let t = stage_timer();
-    if dir.join("metadata.json").exists() {
-        let meta_bytes = std::fs::read(dir.join("metadata.json"))?;
-        let mut meta: FileMetadata = serde_json::from_slice(&meta_bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        if let Some(ntm) = read_node_type_metadata_bin(dir)? {
-            meta.node_type_metadata = ntm;
-        }
-        if let Some(ctm) = read_connection_type_metadata_bin(dir)? {
-            meta.connection_type_metadata = ctm;
-        }
-        // Skip the cartesian-product derive of `type_connectivity` at
-        // load time — on slice-built graphs with populated source/target
-        // sets it clones tens of millions of String triples (4-15 s).
-        // The cache is lazy-populated on first `describe()` access via
-        // the existing `compute_type_connectivity` fallback (see
-        // `introspection/describe.rs`); read sites that miss the cache
-        // already fall through to bounded edge scans.
-        meta.apply_to_with(&mut graph, false);
-    }
+    apply_disk_metadata(dir, &mut graph)?;
     log_stage("metadata_json", t);
 
     // Load interner. Current `interner.bin.zst` carries a codec frame and
@@ -2098,6 +2088,41 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     log_stage("load_disk_dir_total", _load_t);
 
     Ok(Arc::new(graph))
+}
+
+/// Read a disk graph's `metadata.json` and apply it to `graph`. A directory
+/// without the file is legitimate (nothing to apply).
+///
+/// The two heavy HashMap fields (`node_type_metadata`,
+/// `connection_type_metadata`) come from dedicated binary sidecars (0.8.28+)
+/// when present — they cost 4-5 s of JSON parse on slice-built Wikidata graphs
+/// with 30K-50K types, vs <100 ms in the binary form. Older graphs keep the
+/// fields embedded in metadata.json and are picked up by the JSON parse here.
+fn apply_disk_metadata(dir: &std::path::Path, graph: &mut DirGraph) -> io::Result<()> {
+    if !dir.join("metadata.json").exists() {
+        return Ok(());
+    }
+    let meta_bytes = std::fs::read(dir.join("metadata.json"))?;
+    let mut meta: FileMetadata = serde_json::from_slice(&meta_bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    // The directory is the graph, so the mode is not in doubt — but a recorded
+    // value that disagrees with it, or one this build cannot recognise, is
+    // corruption and must fail here rather than be ignored.
+    meta.validate_disk_storage_mode()?;
+    if let Some(ntm) = read_node_type_metadata_bin(dir)? {
+        meta.node_type_metadata = ntm;
+    }
+    if let Some(ctm) = read_connection_type_metadata_bin(dir)? {
+        meta.connection_type_metadata = ctm;
+    }
+    // Skip the cartesian-product derive of `type_connectivity` at load time —
+    // on slice-built graphs with populated source/target sets it clones tens of
+    // millions of String triples (4-15 s). The cache is lazy-populated on first
+    // `describe()` access via the existing `compute_type_connectivity` fallback
+    // (see `introspection/describe.rs`); read sites that miss the cache already
+    // fall through to bounded edge scans.
+    meta.apply_to_with(graph, false);
+    Ok(())
 }
 
 /// Load `columns/<type>/columns.zst` sidecars into `graph.column_stores`.
@@ -2446,6 +2471,11 @@ fn load_portable_columnar(
     }
     let (metadata, mut sections) =
         parse_portable_metadata(buf, format_name, metadata_len, metadata_start)?;
+    // Resolved before a section is decompressed, so an unplaceable mode fails
+    // before the expensive part. Honouring a recorded `mapped` is not
+    // implemented: the payload always deserializes into a memory backend
+    // (`GraphBackend`'s Deserialize), so every `.kgl` still opens in memory.
+    let _recorded_mode = metadata.portable_storage_mode()?;
     let (mut dir_graph, plan) = decode_portable_topology(codec, &mut sections, metadata)?;
     load_portable_columns(codec, &mut dir_graph, &mut sections, &plan.columns)?;
     load_portable_optional_sections(codec, core_version, &mut dir_graph, &mut sections, &plan)?;
