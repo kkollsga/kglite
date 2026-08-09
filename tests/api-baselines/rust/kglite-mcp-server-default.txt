@@ -1,4 +1,15 @@
 pub mod kglite_mcp_server
+#[non_exhaustive] pub enum kglite_mcp_server::WorkspaceGraphChanges
+pub kglite_mcp_server::WorkspaceGraphChanges::Changed(alloc::vec::Vec<std::path::PathBuf>)
+pub kglite_mcp_server::WorkspaceGraphChanges::Full
+impl core::clone::Clone for kglite_mcp_server::WorkspaceGraphChanges
+pub fn kglite_mcp_server::WorkspaceGraphChanges::clone(&self) -> kglite_mcp_server::WorkspaceGraphChanges
+impl core::cmp::Eq for kglite_mcp_server::WorkspaceGraphChanges
+impl core::cmp::PartialEq for kglite_mcp_server::WorkspaceGraphChanges
+pub fn kglite_mcp_server::WorkspaceGraphChanges::eq(&self, other: &kglite_mcp_server::WorkspaceGraphChanges) -> bool
+impl core::fmt::Debug for kglite_mcp_server::WorkspaceGraphChanges
+pub fn kglite_mcp_server::WorkspaceGraphChanges::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite_mcp_server::WorkspaceGraphChanges
 #[non_exhaustive] pub enum kglite_mcp_server::WorkspaceGraphMode
 pub kglite_mcp_server::WorkspaceGraphMode::LocalWorkspace
 pub kglite_mcp_server::WorkspaceGraphMode::Watch
@@ -51,6 +62,7 @@ pub fn kglite_mcp_server::WorkspaceGraphRelevance<'a>::mode(&self) -> kglite_mcp
 pub fn kglite_mcp_server::WorkspaceGraphRelevance<'a>::path(&self) -> &'a std::path::Path
 pub struct kglite_mcp_server::WorkspaceGraphRequest
 impl kglite_mcp_server::WorkspaceGraphRequest
+pub fn kglite_mcp_server::WorkspaceGraphRequest::changes(&self) -> &kglite_mcp_server::WorkspaceGraphChanges
 pub fn kglite_mcp_server::WorkspaceGraphRequest::mode(&self) -> kglite_mcp_server::WorkspaceGraphMode
 pub fn kglite_mcp_server::WorkspaceGraphRequest::revisions(&self) -> core::option::Option<&[alloc::string::String]>
 pub fn kglite_mcp_server::WorkspaceGraphRequest::root(&self) -> &std::path::Path

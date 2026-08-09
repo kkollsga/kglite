@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Workspace graph producers now receive filtered filesystem changes.** Lazy
+  watcher rebuild requests distinguish full builds from deterministic,
+  deduplicated changed-path hints while still returning a complete graph.
 - **Boot-validated Cypher recipe catalogs for MCP agents.** Manifests can
   declare grouped, parameterized read-only operations under
   `extensions.cypher_recipes`; non-empty catalogs expose

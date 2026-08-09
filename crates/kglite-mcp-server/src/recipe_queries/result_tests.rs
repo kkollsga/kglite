@@ -276,7 +276,7 @@ fn known_stale_workspace_returns_no_recipe_data() {
     let missing_root = workspace.path().to_path_buf();
     drop(workspace);
     assert!(!missing_root.exists());
-    state.tag_workspace_graph_dirty();
+    state.tag_workspace_graph_dirty(&[missing_root.join("deleted.rs")]);
 
     let result = run_recipe_query(&state, &catalog("RETURN $name AS name"), args(true))
         .into_call_tool_result();

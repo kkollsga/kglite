@@ -151,7 +151,7 @@ mod tests {
             .expect("install initial workspace graph");
         let runner = make_runner(state.clone(), None);
 
-        state.tag_workspace_graph_dirty();
+        state.tag_workspace_graph_dirty(&[workspace.path().join("changed.rs")]);
         let output = runner(
             "MATCH (n:Marker) RETURN n.generation AS generation",
             &Map::new(),
