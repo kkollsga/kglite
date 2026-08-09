@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.8] - 2026-08-09
+
 ### Added
 
 - **A saved graph now records its storage mode, and reopening honours it.** A
@@ -44,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `list_recipe_queries` and `run_recipe_query` with progressive
   `graph_overview` discovery, strict variables, structured success/error
   envelopes, stale-graph rejection, and a 200-row all-or-error payload cap.
+- **Rust API additions** for the storage-mode feature:
+  `kglite::api::io::open_or_create_graph_in_mode`,
+  `kglite::api::storage::{live_storage_mode, convert_dir_graph_to_mode}`, and a
+  new `OpenGraphResult::converted_from` field. The added field is a
+  semver-major change for code constructing `OpenGraphResult` with a struct
+  literal (documented breaking change, shipped in a patch per project policy).
 
 ### Fixed
 
