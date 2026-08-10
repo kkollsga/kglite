@@ -204,8 +204,12 @@ never routinely:**
   release-time/explicit maintenance operation, not a routine phase gate. Pins
   live in `tests/api-baselines/rust-api-profiles.json`.
 - Perf-sensitive paths (`core/pattern_matching/`, `cypher/executor/`, storage
-  hot paths) → `make bench-check` **on an otherwise-idle machine** — a capture
-  taken right after heavy builds reads +4–10% hot across the board.
+  hot paths) → `make bench-check` **under whatever load the machine has** —
+  don't wait for an idle machine and don't defer the check because a build is
+  running. A capture taken right after heavy builds reads +4–10% hot across the
+  board, and that is precisely what the unchanged-path control cells measure:
+  read the verdict against its controls, take two agreeing runs, and retake once
+  when a verdict lands near its threshold.
 - Run `scripts/check_packaged_features.sh` locally only after changing package
   metadata, feature wiring, or the packaged-consumer fixture. Never run local
   `cargo package` verify sweeps across the workspace; CI + `cargo publish`
@@ -244,7 +248,7 @@ binding. The essentials:
   gets them free via `cypher_query`. Direct `kglite::api::*` is only for what
   Cypher can't express: the pipeline itself, lifecycle (`load_file`/
   `save_graph`/`from_blueprint`), error types/codes, embedder registration,
-  storage config, dataset loaders.
+  storage config.
 - **Use-case test before lifting.** Ask "who calls this, in what query?" Drop
   load-time validation, data-smell introspection, and sugar over existing fns.
 - **Core is sync; bindings own async.** `execute_read`/`execute_mut` run to
@@ -326,7 +330,7 @@ Each pass through a file should leave it more compartmentalised than you found i
 
 The optimiser pipeline lives at `crates/kglite/src/graph/languages/cypher/planner/mod.rs` as `const PASSES: &[(&str, PassFn)]` — single source of truth for order and naming. When adding or changing a pass:
 
-1. **Implement** in the appropriate sub-module (`fusion.rs`, `simplification.rs`, …) or a new file for fresh concerns.
+1. **Implement** in the appropriate sub-module (`fusion/`, `simplification.rs`, …) or a new file for fresh concerns.
 2. **Register** in `PASSES` with a unique stable name (user-facing via `disabled_passes=[...]`).
 3. **Doc-comment** the wrapper fn: precondition, pattern matched, rewrite, why-bail.
 4. **Add a query** to `tests/test_cypher_differential.py::DIFFERENTIAL_QUERIES` exercising the trigger shape. Passes not in the corpus aren't trusted.
@@ -347,13 +351,19 @@ Before any perf-related change:
    - `--benchmark-warmup=on --benchmark-warmup-iterations=20`.
    - 30-second sleep between baseline and comparison runs (thermal settle).
    - Re-measure twice on the suspect commit. If runs disagree, you're seeing variance, not a regression.
+   - **Retake any verdict that lands near its threshold.** A pass at 19% or a failure at 21% against a 20% gate is a coin-flip on machine load; one confirmation run settles which it was. A verdict far from its threshold needs no retake.
 6. **In-memory is the gate.** Disk-mode benchmarks are nice-to-have but never at the cost of in-memory.
 7. **Cumulative drift is gated too.** The per-release 20% gates recapture their
    baseline every release, so slow drift (~10%/release) never trips them.
    `make bench-anchor` compares the newest per-release baseline against the one
    ~3 releases back at +30% — run at release time (wired into the release
    skill). Per-release baseline files in `tests/benchmarks/baselines/` are the
-   longitudinal record; never delete them.
+   longitudinal record; never delete them. Because they are compared *across
+   sessions*, every longitudinal capture (per-release baselines, `bench-anchor`
+   inputs) notes the machine state it was taken under — metadata in the release
+   commit or the capture record, never a gate on taking it. The 0.15.7 baseline
+   was captured hot, nothing said so, and `bench-anchor` read the resulting
+   offset as real drift.
 8. **Read the distribution, and cross-check the instrument** (2026-08):
    - A **30×+ median-to-max spread on a deterministic operation** is a rare
      expensive branch, not noise. Distribution shape is a diagnostic — chase
@@ -365,6 +375,14 @@ Before any perf-related change:
      before believing it. A `WHERE` clause silently disqualifying the lazy path
      was invisible to either route alone and showed up only as disagreement
      between them; a single measurement cannot detect its own instrument bug.
+9. **Run benchmarks under the load the machine has** (relaxed 2026-08-09). The
+   old "otherwise-idle machine" precondition cost far more in stalled work and
+   stretched development time than it ever bought in precision — waiting for
+   quiet is not a step. Measure now, under whatever else is running, and accept
+   the wider uncertainty: the control cells in item 8 are the drift meter, two
+   agreeing runs are the confirmation, and a threshold-adjacent verdict gets one
+   retake. The one thing machine load still changes is the *record* — see item 7
+   for longitudinal captures.
 
 ## Key patterns
 
@@ -382,7 +400,7 @@ Before any perf-related change:
 1. `crates/kglite-py/src/graph/pyapi/*.rs` — implementation.
 2. `kglite/__init__.pyi` — type stub + docstring.
 3. `crates/kglite/src/graph/introspection/*.rs` — `describe()` output, if agent-facing.
-4. `crates/kglite-mcp-server/src/tools.rs` — MCP tool wrapper, if agent-facing.
+4. `crates/kglite-mcp-server/src/tools/` — MCP tool wrapper, if agent-facing (router wiring in `tools/register.rs`; the pre-split `tools.rs` monolith is gone).
 5. `CHANGELOG.md` `[Unreleased]` — user-visible changes only.
 
 ## Documentation
@@ -424,7 +442,7 @@ one-line `## Status (kglite, <date>): …` footer to substantive work-items
 before moving, so `inbox/read/` carries the resolution record.
 
 **Route to the party who can act.** A note only belongs in another project's
-inbox (e.g. `../mcp-servers/inbox/`, `../mcp-methods/inbox/`) if it carries an
+inbox (e.g. `../mcp-methods/inbox/`, `../../mcp-servers/inbox/`) if it carries an
 *actionable* task for them. If there's nothing for them to do, don't file it —
 their `unread/` should hold only things that need their action.
 
@@ -597,5 +615,5 @@ When a plan has Steps 1 / 2 / 3 / …:
    `ci.yml` cancels superseded in-flight PR runs, so a follow-up push is
    cheap, but the habit should still be batching, with a final push covering
    the completed plan.
-6. **End with a perf gate.** Before the final release commit, run new + existing benchmarks per the Performance protocol above. Record numbers in the release commit message or `[x.y.z]` CHANGELOG block. Fix regressions before the release commit, not in a follow-up.
+6. **End with a perf gate — only if the plan touched perf-sensitive paths** (`core/pattern_matching/`, `cypher/executor/`, storage hot paths). Then run new + existing benchmarks per the Performance protocol above before the final release commit, and record the numbers in the release commit message or `[x.y.z]` CHANGELOG block. Fix regressions before the release commit, not in a follow-up. A plan that touched none of those paths skips this — CI's Linux perf gate and the release-time baseline capture cover it.
 7. **Final commit is the version bump + CHANGELOG promotion.** No earlier phase touches `Cargo.toml`. User pushes once.
