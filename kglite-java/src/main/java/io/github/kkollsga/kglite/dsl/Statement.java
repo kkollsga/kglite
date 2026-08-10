@@ -27,9 +27,10 @@ public interface Statement {
     String cypher();
 
     /**
-     * The parameters the text refers to, keyed {@code p0}…{@code pN} in the order they appear in
-     * the text. The map is complete: this DSL has no caller-named parameters, so nothing needs to
-     * be merged in before execution.
+     * The parameters the text refers to, in the order they appear in it: {@code p0}…{@code pN} for
+     * every value a builder parameterised, plus whatever names a {@link Raw} fragment declared for
+     * itself. The map is complete either way — nothing has to be merged in before execution, and
+     * the two namespaces cannot collide because a raw fragment may not claim {@code p<digits>}.
      *
      * <p>Emits: nothing further — this is the accessor for the values already collected.
      *

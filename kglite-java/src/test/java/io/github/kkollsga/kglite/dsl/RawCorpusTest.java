@@ -59,9 +59,8 @@ class RawCorpusTest {
         List<Corpus.Entry> entries = Corpus.entries();
         long readHalf = count(entries, Corpus.Expressibility.READ_HALF);
         long writeHalf = count(entries, Corpus.Expressibility.WRITE_HALF);
-        long later = count(entries, Corpus.Expressibility.V1_LATER);
         long outOfV1 = count(entries, Corpus.Expressibility.OUT_OF_V1);
-        long expressible = readHalf + writeHalf + later;
+        long expressible = readHalf + writeHalf;
 
         // The rule as written before the corpus was collected: fewer than 20 in 30 expressible
         // means the clause set is wrong and must be re-scoped before an emitter is written.
@@ -81,9 +80,21 @@ class RawCorpusTest {
                 "the write half must carry a representative statement per clause, has "
                         + writeHalf);
 
+        // WITH shipped with a stop rule attached — do not ship a builder for shapes the engine
+        // does not hold. The corpus is where that verification lives permanently: every shape the
+        // builder can emit runs here raw, so a dialect change to WITH surfaces as a red raw-route
+        // test naming the shape rather than as a builder emitting Cypher that no longer works.
+        long withStages = entries.stream()
+                .filter(entry -> entry.cypher().contains(" WITH "))
+                .filter(entry -> entry.dsl() != null)
+                .count();
+        assertTrue(withStages >= 7,
+                "the narrow WITH must keep its executed evidence in the corpus, has "
+                        + withStages);
+
         System.out.println("corpus census: " + entries.size() + " entries — "
                 + readHalf + " read-half, " + writeHalf + " write-half, "
-                + later + " later v1 clauses, " + outOfV1 + " deliberately outside v1");
+                + outOfV1 + " deliberately outside v1, " + withStages + " using WITH");
     }
 
     private static long count(List<Corpus.Entry> entries, Corpus.Expressibility bucket) {

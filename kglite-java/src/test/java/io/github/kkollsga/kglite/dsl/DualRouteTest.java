@@ -93,7 +93,7 @@ class DualRouteTest {
                 .count();
         assertEquals(expressible, covered,
                 "every read-half and write-half entry must run through both routes");
-        assertTrue(covered >= 40, "the dual-route gate must cover at least 40 statements");
+        assertTrue(covered >= 60, "the dual-route gate must cover at least 60 statements");
         assertTrue(expressibleEntries().anyMatch(entry -> entry.route() == Corpus.Route.WRITE),
                 "the write half must be covered by this gate, not only the read half");
     }

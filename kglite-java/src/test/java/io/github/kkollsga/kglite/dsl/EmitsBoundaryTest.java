@@ -41,8 +41,8 @@ class EmitsBoundaryTest {
     /** Types whose public methods contribute to the emitted query, and so must name productions. */
     private static final Set<String> BUILDERS = new TreeSet<>(Set.of(
             "Cypher", "Expr", "Condition", "Node", "Rel", "Path", "Property",
-            "MatchStep", "WhereStep", "ReturnStep", "OrderStep", "SkipStep", "Statement",
-            "UpdatingStep", "MergeStep", "MergeMatchStep", "UnwindStep"));
+            "MatchStep", "WhereStep", "WithStep", "ReturnStep", "OrderStep", "SkipStep",
+            "Statement", "UpdatingStep", "MergeStep", "MergeMatchStep", "UnwindStep"));
 
     /**
      * Types that carry no production of their own, with the reason each is exempt.
@@ -57,11 +57,14 @@ class EmitsBoundaryTest {
      *   <li>{@code Pattern} and {@code Variable} are marker interfaces with no methods at all, and
      *       {@code WriteStatement} adds none to {@code Statement} — it only fixes which entry
      *       point {@code on(graph)} takes, which {@code Statement.on} already names.
+     *   <li>{@code Raw} declares no methods of its own: it is what {@code Cypher.raw} returns, and
+     *       that method names the production ("the fragment, verbatim"). Everything callable on it
+     *       is inherited from {@code Expr} and {@code Condition}, which are audited above.
      * </ul>
      */
     private static final Set<String> EXEMPT = new TreeSet<>(Set.of(
             "Ident", "Projection", "SortItem", "Pattern",
-            "Assignment", "Variable", "WriteStatement"));
+            "Assignment", "Variable", "WriteStatement", "Raw"));
 
     /** Object's contract, not this DSL's surface. */
     private static final Set<String> OBJECT_OVERRIDES = Set.of("equals", "hashCode", "toString");

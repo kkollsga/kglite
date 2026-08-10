@@ -29,6 +29,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Without it the JPMS module name was derived from the file name, so
   `requires kglite` bound to whatever JAR happened to be called that, and the
   derived name changed if the artifact was ever renamed.
+- **The Java binding applies several statements as one atomic unit.**
+  `graph.beginTransaction()` returns an `AutoCloseable` `Transaction`:
+  `add(cypher[, params])` stages a statement, `commit()` runs the whole batch in
+  one engine transaction and returns the per-statement rows in staging order,
+  and `rollback()` — or simply closing without committing — discards it having
+  executed nothing. If any statement fails, none of the batch reaches the graph
+  and `commit()` throws that statement's engine status; *which* statement failed
+  is not reported, because the ABI's batch call carries a status and a message
+  and no index. It runs over the C ABI's existing
+  `kglite_session_execute_mut_batch`, so no ABI surface was added. Four
+  differences from a JDBC transaction are documented rather than blurred:
+  statements are staged, so Java cannot branch on an intermediate result
+  (read-your-writes still holds *inside* the engine, and a staged `MATCH` sees a
+  staged `CREATE`); `commit()` publishes to the session, not to disk, and
+  `save(Path)` is still the only thing that persists; the batch holds the
+  session's write lock for its whole duration, so a *new* `query()` waits while
+  a large one commits; and there is no cross-process transaction — the writer
+  lease remains the only cross-process mechanism, and it is advisory. A
+  transaction is confined to the thread that began it, an empty `commit()` makes
+  no engine call at all, and closing the graph makes an open transaction's
+  `commit()` throw rather than touch a freed session.
+- **A Cypher query builder ships inside the Java JAR**
+  (`io.github.kkollsga.kglite.dsl`), at the same version as the engine it emits
+  for. `import static io.github.kkollsga.kglite.dsl.Cypher.*;` is the only
+  import: from there the step types offer only the continuations the grammar
+  allows, so an out-of-order clause is a compile error. It covers `MATCH` /
+  `OPTIONAL MATCH` (node, relationship and path patterns), the whole `WHERE`
+  predicate set, `WITH` as project-aggregate-filter, `RETURN` with `DISTINCT`,
+  the aggregates (`count`/`collect`/`sum`/`avg`/`min`/`max`) and the structural
+  functions (`properties`/`labels`/`id`/`type`), `ORDER BY` / `SKIP` / `LIMIT`,
+  and `CREATE`, `MERGE` (+ `ON CREATE SET` / `ON MATCH SET`), `SET` (including
+  `+= $map`), `REMOVE`, `DELETE`, `DETACH DELETE` and the `UNWIND $rows` batch
+  form. `stmt.cypher()` and `stmt.params()` are exactly what will run;
+  `stmt.on(graph)` picks `cypher()` or `query()` from the statement's own type,
+  so the binding's most-documented footgun is unreachable through it, and
+  `stmt.on(tx)` stages the same statement into a transaction instead. A caller
+  *value* can only ever become a parameter — no method anywhere takes Cypher
+  text in a value position — and an *identifier* is validated where it is
+  constructed, so caller data cannot become syntax on this route. Rows come back
+  as `List<Map<String, Object>>`, identical to the raw route: there is no typed
+  row, no object mapping, and no `returning(node)` while `RETURN n` still
+  crosses the ABI as a debug string.
+- **The Java DSL has a three-tier escape hatch, so what it does not model it
+  hands back rather than blocks.** `Cypher.raw(fragment[, params])` is an
+  expression or predicate usable anywhere either belongs;
+  `Cypher.rawClause(fragment[, params])` and the `rawClause` on the chain are a
+  whole clause, at the start of a statement or in the middle of its pipeline;
+  and `cypher()`/`params()` hand the finished text to `query()`/`cypher()` for
+  full drop-out. Procedures, graph algorithms, vector search, subqueries,
+  `UNION`, DDL, scalar functions, `CASE`, map projections and variable-length
+  paths reach the engine this way, deliberately — a builder adds nothing where
+  the string is already the best Java for the job. A raw fragment's own named
+  parameters are emitted unchanged (the emitter's `$p<digits>` namespace is
+  reserved and a fragment claiming it is refused when built). **The fragment
+  itself is emitted verbatim, so it is the one path where injection safety is
+  the caller's responsibility**, and it is documented as such rather than
+  implied to be covered: keep the fragment a constant and put every varying
+  value in the parameter map.
 
 ### Changed
 
@@ -113,6 +171,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   project ships over can carry. Measured in release mode against an
   identically-shaped wrapping twin, the checked path costs 3.667 ns/op versus
   3.648 (+0.5 %, ~0.02 ns) — below the cost of the surrounding value clone.
+- **`close()` on the Java `KnowledgeGraph` and `WriterLease` could free the
+  same native handle twice**, although both documented themselves as
+  idempotent. Two threads closing at once each saw a non-null pointer and each
+  called the ABI's `_free`; a call already in flight could also use a pointer
+  another thread had just freed, and a thread that never synchronized with the
+  closer could keep reading a stale one indefinitely. Both now hold their
+  pointer in a shared guard: a call takes a read lock and makes the native call
+  with it held, `close()` takes the write lock, so it waits out every in-flight
+  call, frees exactly once under any interleaving, and is a no-op afterwards; a
+  call arriving after it throws `IllegalStateException` instead of touching
+  freed memory. Concurrent calls stay concurrent — the threading guarantees are
+  unchanged — and the one interleaving a read/write lock cannot serve, closing
+  from inside a call on the same thread, reports an `IllegalStateException`
+  rather than deadlocking.
 
 ## [0.15.9] - 2026-08-10
 

@@ -28,11 +28,15 @@ import java.util.Map;
  * the property that makes injection through this route structurally impossible rather than
  * carefully avoided.
  *
- * <p>What the DSL covers is the read half of the clause set that is both common and easy to
- * assemble wrongly by hand. Everything else — graph algorithms, vector search, procedure calls,
- * subqueries, DDL — stays on the raw {@code cypher}/{@code query} route, where the string
- * <em>is</em> the best Java for the job. See {@code CYPHER.md} for what the dialect supports; this
- * DSL never restates a clause's semantics, it only names the production each method emits.
+ * <p>What the DSL covers is the clause set that is both common and easy to assemble wrongly by
+ * hand: {@code MATCH}/{@code OPTIONAL MATCH}, {@code WHERE}, the narrow {@code WITH},
+ * {@code RETURN} with ordering and paging, and the updating clauses including the {@code UNWIND}
+ * batch form. Everything else — graph algorithms, vector search, procedure calls, subqueries, DDL,
+ * scalar functions — reaches the engine through {@link #raw(String, Map)},
+ * {@link #rawClause(String, Map)}, or the plain {@code cypher}/{@code query} route with
+ * {@link Statement#cypher()} in hand. The string <em>is</em> the best Java for those, which is why
+ * they earn no builder. See {@code CYPHER.md} for what the dialect supports; this DSL never
+ * restates a clause's semantics, it only names the production each method emits.
  */
 public final class Cypher {
 
@@ -146,6 +150,107 @@ public final class Cypher {
             copy.add(Values.check(row));
         }
         return new UnwindStep(new Ast.Unwind(List.copyOf(copy), Ident.variable("row")));
+    }
+
+    /**
+     * Cypher this DSL does not model, written out and emitted verbatim — the expression-level
+     * escape hatch.
+     *
+     * <p>Usable anywhere an expression or a predicate is: {@code where(raw("size(p.title) > 3"))},
+     * {@code returning(raw("toUpper(p.title)").as("name"))},
+     * {@code orderBy(raw("p.age % 10").desc())}. Everything the engine can do that v1 has no
+     * builder for — scalar functions, {@code CASE}, map projections, arithmetic, vector scoring —
+     * arrives this way, and the statement stays a statement: it still renders, still routes, still
+     * runs.
+     *
+     * <p><b>Read {@link Raw} before using it.</b> The text here is emitted as given, so this is the
+     * one place where the DSL's injection property is the caller's responsibility rather than a
+     * structural guarantee. Use {@link #raw(String, Map)} for anything that varies.
+     *
+     * <p>Emits: the fragment, verbatim
+     *
+     * @param fragment the Cypher text
+     * @return the expression, usable as a predicate too
+     * @throws IllegalArgumentException if the fragment is empty or refers to the emitter's own
+     *     {@code $p<digits>} parameter namespace
+     */
+    public static Raw raw(String fragment) {
+        return raw(fragment, Map.of());
+    }
+
+    /**
+     * Cypher this DSL does not model, with the values it refers to travelling as parameters.
+     *
+     * <p>This is the spelling to reach for. The fragment stays a constant in your source and every
+     * value that varies goes through the map, so the escape hatch keeps the property the rest of
+     * the DSL has:
+     *
+     * <pre>{@code
+     * where(raw("size(p.title) > $min", Map.of("min", minimumLength)))
+     * // MATCH (p:Person) WHERE size(p.title) > $min RETURN …, with {min=3}
+     * }</pre>
+     *
+     * <p>The names are yours and are emitted unchanged; the emitter's {@code p<digits>} namespace
+     * is refused, and a name the fragment never refers to is refused too, because that is a typo
+     * rather than an intention.
+     *
+     * <p>Emits: the fragment, verbatim
+     *
+     * @param fragment the Cypher text
+     * @param params the parameters the fragment refers to, by the names it uses
+     * @return the expression, usable as a predicate too
+     * @throws IllegalArgumentException if the fragment is empty, refers to {@code $p<digits>}, or
+     *     declares a parameter that is not a Cypher identifier, claims the emitter's namespace, or
+     *     is never referred to by the fragment
+     */
+    public static Raw raw(String fragment, Map<String, Object> params) {
+        String checked = RawFragment.text(fragment, "raw");
+        return new Ast.RawExpr(checked, RawFragment.params(checked, params, "raw"));
+    }
+
+    /**
+     * Opens a statement with a whole clause this DSL does not model — the clause-level escape
+     * hatch, in the position that needs it most.
+     *
+     * <p>A procedure call is the case: {@code CALL pagerank() YIELD node, score} has no assembly
+     * problem and no user-value position, so it earns no builder, but it does have to come first.
+     *
+     * <pre>{@code
+     * rawClause("CALL pagerank() YIELD node, score")
+     *         .returning(alias("score").as("score"))
+     *         .orderBy(alias("score").desc())
+     *         .limit(3);
+     * // CALL pagerank() YIELD node, score RETURN score AS score ORDER BY score DESC LIMIT $p0
+     * }</pre>
+     *
+     * <p>Emits: the fragment, verbatim
+     *
+     * @param fragment the Cypher clause text
+     * @return the next chain step
+     * @throws IllegalArgumentException under the same rules as {@link #raw(String)}
+     */
+    public static WhereStep rawClause(String fragment) {
+        return rawClause(fragment, Map.of());
+    }
+
+    /**
+     * Opens a statement with a whole clause this DSL does not model, parameterised.
+     *
+     * <p>Emits: the fragment, verbatim
+     *
+     * @param fragment the Cypher clause text
+     * @param params the parameters the fragment refers to, by the names it uses
+     * @return the next chain step
+     * @throws IllegalArgumentException under the same rules as {@link #raw(String, Map)}
+     */
+    public static WhereStep rawClause(String fragment, Map<String, Object> params) {
+        return ReadingQuery.opening(rawStage(fragment, params));
+    }
+
+    /** The shared construction, so the chain's {@code rawClause} validates identically. */
+    static Ast.RawStage rawStage(String fragment, Map<String, Object> params) {
+        String checked = RawFragment.text(fragment, "rawClause");
+        return new Ast.RawStage(checked, RawFragment.params(checked, params, "rawClause"));
     }
 
     /**

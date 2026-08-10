@@ -72,7 +72,7 @@ public final class Node implements Pattern {
 
     /**
      * Adds an inline property whose value is an <em>expression</em> rather than data — in v1, a
-     * field of the current {@code UNWIND} row.
+     * field of the current {@code UNWIND} row or an alias carried by a {@code WITH}.
      *
      * <p>Separate from {@link #withProperty(String, Object)} rather than an overload of it: an
      * overload would make {@code withProperty("k", null)} ambiguous, and keeping the two apart is
@@ -82,7 +82,8 @@ public final class Node implements Pattern {
      * <p>Emits: {@code (<variable>:<Label> {<key>: <expression>})}
      *
      * @param key the property key
-     * @param expression the value expression, from {@link UnwindStep#field(String)}
+     * @param expression the value expression, from {@link UnwindStep#field(String)} or
+     *     {@link Cypher#alias(String)}
      * @return a new node pattern carrying the property
      * @throws IllegalArgumentException if the key is not representable, is already present, or the
      *     expression is {@code null}

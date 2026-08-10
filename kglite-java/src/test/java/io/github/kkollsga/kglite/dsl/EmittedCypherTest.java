@@ -59,8 +59,8 @@ class EmittedCypherTest {
         assertTrue(uncovered.isEmpty(),
                 "these entries claim to be expressible by the v1 clause set but carry no "
                         + "statement: " + uncovered);
-        assertTrue(expressibleEntries().count() >= 40,
-                "the emitted-Cypher gate must cover at least 40 statements");
+        assertTrue(expressibleEntries().count() >= 60,
+                "the emitted-Cypher gate must cover at least 60 statements");
     }
 
     /**
@@ -167,6 +167,97 @@ class EmittedCypherTest {
         Statement distinctAliases = match(person)
                 .returning(person.prop("id").as("v"), person.prop("title").as("w"));
         assertEquals("MATCH (p:Person) RETURN p.id AS v, p.title AS w", distinctAliases.cypher());
+    }
+
+    @Test
+    @DisplayName("a WITH stage projects, deduplicates and filters, and its aliases must be distinct")
+    void withStagesProjectAndFilter() {
+        Node person = node("Person").named("p");
+
+        // DISTINCT is a token of the clause, so the two spellings must not render alike — the
+        // mutation this catches is a renderer that dropped it, which stays valid Cypher and
+        // quietly returns duplicate rows to every following stage.
+        Statement plain = match(person)
+                .with(person.prop("city").as("city"))
+                .returning(alias("city").as("city"));
+        Statement deduplicated = match(person)
+                .withDistinct(person.prop("city").as("city"))
+                .returning(alias("city").as("city"));
+        assertEquals("MATCH (p:Person) WITH p.city AS city RETURN city AS city", plain.cypher());
+        assertEquals("MATCH (p:Person) WITH DISTINCT p.city AS city RETURN city AS city",
+                deduplicated.cypher());
+        assertNotEquals(plain.cypher(), deduplicated.cypher());
+
+        // A WHERE attaches to the stage it follows, whether that stage matched or projected.
+        assertEquals("MATCH (p:Person) WHERE p.age > $p0 WITH p.city AS city, count(p) AS n "
+                        + "WHERE n > $p1 RETURN city AS city",
+                match(person)
+                        .where(person.prop("age").gt(30))
+                        .with(person.prop("city").as("city"), count(person.ref()).as("n"))
+                        .where(alias("n").gt(1))
+                        .returning(alias("city").as("city"))
+                        .cypher());
+
+        // Duplicate aliases are rejected in a WITH for a sharper reason than in a RETURN: the
+        // lost column is missing from the scope every following stage reads, not only from the
+        // output. The message names the clause so the two cases are distinguishable.
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class,
+                () -> match(person).with(
+                        person.prop("id").as("v"),
+                        person.prop("title").as("v")));
+        assertTrue(thrown.getMessage().contains("duplicate WITH alias \"v\""), thrown.getMessage());
+    }
+
+    /**
+     * The escape hatch is the one place caller text is emitted unchanged, so the checks around it
+     * are about the machinery, not the text: a fragment must not reach into the emitter's own
+     * parameter namespace, and a declared parameter must be one the fragment actually uses.
+     */
+    @Test
+    @DisplayName("a raw fragment keeps its own parameters and cannot touch the emitter's namespace")
+    void rawFragmentsCarryTheirOwnParameters() {
+        Node person = node("Person").named("p");
+
+        // The generated numbering is unaffected by a raw fragment's own names: the LIMIT below is
+        // still $p0, because the two namespaces are counted separately.
+        Statement mixed = match(person)
+                .where(Cypher.raw("size(p.title) > $min", Map.of("min", 2)))
+                .returning(person.prop("title").as("name"))
+                .limit(2);
+        assertEquals("MATCH (p:Person) WHERE size(p.title) > $min RETURN p.title AS name "
+                + "LIMIT $p0", mixed.cypher());
+        assertEquals(List.of("min", "p0"), List.copyOf(mixed.params().keySet()));
+
+        // Empty, and a fragment reaching into the emitter's namespace.
+        assertThrows(IllegalArgumentException.class, () -> Cypher.raw(" "));
+        assertTrue(assertThrows(IllegalArgumentException.class,
+                        () -> Cypher.raw("p.age > $p0")).getMessage().contains("namespace"));
+        assertTrue(assertThrows(IllegalArgumentException.class,
+                        () -> Cypher.raw("p.age > $q", Map.of("p0", 1)))
+                .getMessage().contains("namespace"));
+
+        // A declared parameter the fragment never refers to is a typo, and $min must not be
+        // satisfied by $min2 — the reference check matches whole names.
+        assertTrue(assertThrows(IllegalArgumentException.class,
+                        () -> Cypher.raw("size(p.title) > $min", Map.of("mim", 2)))
+                .getMessage().contains("never refers to $mim"));
+        assertThrows(IllegalArgumentException.class,
+                () -> Cypher.raw("size(p.title) > $min2", Map.of("min", 2)));
+
+        // One name, one value, per statement: agreeing repeats are fine, disagreeing ones are the
+        // case where the emitted text and the parameter map would describe different queries.
+        Statement repeated = match(person)
+                .where(Cypher.raw("size(p.title) > $min", Map.of("min", 2)))
+                .returning(Cypher.raw("size(p.title) - $min", Map.of("min", 2)).as("over"));
+        assertEquals("MATCH (p:Person) WHERE size(p.title) > $min "
+                + "RETURN size(p.title) - $min AS over", repeated.cypher());
+        assertEquals(Map.of("min", 2), repeated.params());
+        assertTrue(assertThrows(IllegalArgumentException.class,
+                        () -> match(person)
+                                .where(Cypher.raw("size(p.title) > $min", Map.of("min", 2)))
+                                .returning(Cypher.raw("size(p.title) - $min", Map.of("min", 3))
+                                        .as("over")))
+                .getMessage().contains("bound twice"));
     }
 
     @Test

@@ -205,6 +205,203 @@ behaviour, and each one is what a JDBC-shaped reading of `commit()` gets wrong:
    outright and silently. The `WriterLease` below is the cross-process
    mechanism, it is advisory, and nothing here changes that.
 
+## The Cypher DSL
+
+A query builder for the clauses that are easy to assemble wrongly by hand,
+bundled in the same jar at the same version — so there is no DSL-versus-engine
+skew to manage. `import static io.github.kkollsga.kglite.dsl.Cypher.*;` is the
+only import it needs; from there the step types offer just the continuations the
+grammar allows, so an out-of-order clause is a compile error rather than a
+runtime one.
+
+It compiles to Cypher and nothing else. `stmt.cypher()` is the text,
+`stmt.params()` the values, and `stmt.on(graph)` runs it through the entry point
+the statement's own **type** picks — so the `cypher`-versus-`query` choice above
+is one a DSL caller cannot get wrong. `stmt.on(tx)` stages it into a transaction
+instead. Statements are immutable and safe to hold in a static field.
+
+```java
+import static io.github.kkollsga.kglite.dsl.Cypher.*;
+
+import io.github.kkollsga.kglite.*;
+import io.github.kkollsga.kglite.dsl.*;
+import java.util.List;
+import java.util.Map;
+
+void main() {
+    try (KnowledgeGraph graph = KnowledgeGraph.createInMemory()) {
+
+        // WRITE. A write statement routes itself to cypher(); there is no choice to get wrong.
+        create(node("Person")
+                .withProperty("id", 1)
+                .withProperty("title", "Ada")
+                .withProperty("age", 36)
+                .withProperty("city", "London")).on(graph);
+
+        // ...and one statement writes many rows: the list travels as a single parameter.
+        UnwindStep rows = unwind(List.of(
+                Map.of("id", 2, "title", "Bob", "age", 41, "city", "Paris"),
+                Map.of("id", 3, "title", "Cy", "age", 29, "city", "London")));
+        rows.create(node("Person")
+                .withPropertyFrom("id", rows.field("id"))
+                .withPropertyFrom("title", rows.field("title"))
+                .withPropertyFrom("age", rows.field("age"))
+                .withPropertyFrom("city", rows.field("city"))).on(graph);
+
+        // TRANSACTION. The same statements, staged and applied atomically at commit().
+        Node p = node("Person").named("p");
+        try (Transaction tx = graph.beginTransaction()) {
+            match(p.withProperty("id", 1)).set(p.prop("age").to(37)).on(tx);
+            create(node("Person")
+                    .withProperty("id", 4)
+                    .withProperty("title", "Dee")
+                    .withProperty("age", 29)
+                    .withProperty("city", "London")).on(tx);
+            tx.commit();
+        }
+
+        // READ. The text and the values are always inspectable.
+        Statement adults = match(p)
+                .where(p.prop("age").ge(30))
+                .returning(p.prop("title").as("name"), p.prop("age").as("age"))
+                .orderBy(alias("age").desc());
+
+        System.out.println(adults.cypher());
+        System.out.println(adults.params());
+        for (Map<String, Object> row : adults.on(graph)) {
+            System.out.println(row.get("name") + " " + row.get("age"));
+        }
+
+        // AGGREGATE. WITH projects, aggregates and filters; grouping is implicit in the
+        // columns that are not aggregated — here, city.
+        Statement crowded = match(p)
+                .with(p.prop("city").as("city"), count(p.ref()).as("n"))
+                .where(alias("n").gt(1))
+                .returning(alias("city").as("city"), alias("n").as("n"))
+                .orderBy(alias("city").asc());
+
+        System.out.println(crowded.cypher());
+        System.out.println(crowded.on(graph));
+    }
+}
+```
+
+```console
+$ java --enable-native-access=ALL-UNNAMED -cp kglite.jar DslQuickstart.java
+MATCH (p:Person) WHERE p.age >= $p0 RETURN p.title AS name, p.age AS age ORDER BY age DESC
+{p0=30}
+Bob 41
+Ada 37
+MATCH (p:Person) WITH p.city AS city, count(p) AS n WHERE n > $p0 RETURN city AS city, n AS n ORDER BY city ASC
+[{city=London, n=3}]
+```
+
+**What it covers.** `MATCH` / `OPTIONAL MATCH` with node, relationship and path
+patterns; the whole `WHERE` predicate set (`= <> < > <= >=`, `AND`/`OR`/`NOT`,
+`IN`, `STARTS WITH` / `ENDS WITH` / `CONTAINS`, `=~`, `IS [NOT] NULL`); `WITH`
+as project-aggregate-filter; `RETURN` with `DISTINCT`, the aggregates
+(`count`/`collect`/`sum`/`avg`/`min`/`max`) and the structural functions
+(`properties`/`labels`/`id`/`type`); `ORDER BY` / `SKIP` / `LIMIT`; and the
+updating clauses `CREATE`, `MERGE` (+ `ON CREATE SET` / `ON MATCH SET`), `SET`
+(including `+= $map`), `REMOVE`, `DELETE`, `DETACH DELETE`, plus the
+`UNWIND $rows` batch form.
+
+**Three things worth knowing.**
+
+- **A value can only ever be a parameter.** No method anywhere takes Cypher text
+  in a value position, so a value cannot become syntax; identifiers — the one
+  place caller text does reach the query string — are validated where they are
+  constructed, and a backtick is rejected outright because this dialect has no
+  escape for one and quoting it anyway is a working injection. The single
+  exception is `raw`, below, and it is deliberate.
+- **Emission is deterministic, and it is part of the tested contract.** One
+  rendering style, values numbered `$p0…$pN` in emission order, nothing
+  rewritten. Every statement in the test corpus is asserted character for
+  character *and* run against the engine beside its hand-written twin.
+- **There is no `returning(node)`.** For the reason in [Values](#values) —
+  `RETURN p` crosses the ABI as a debug string — the DSL offers `p.prop("…")`,
+  `p.properties()`, `p.labels()`, `p.id()` and `r.type()` instead, all of which
+  return real values. It becomes a pure addition when the ABI grows a node
+  shape.
+
+Rows stay `List<Map<String, Object>>`, identical to the raw route. There is no
+typed row and no object mapping: see [Scope](#scope).
+
+### The escape hatch
+
+What the DSL does not model, it hands back rather than blocks. Three tiers, in
+increasing order of drop-out — and everything the engine can do that has no
+builder (procedures, graph algorithms, vector search, subqueries, `UNION`, DDL,
+scalar functions, `CASE`, map projections, variable-length paths) arrives
+through one of them:
+
+```java
+import static io.github.kkollsga.kglite.dsl.Cypher.*;
+
+import io.github.kkollsga.kglite.*;
+import io.github.kkollsga.kglite.dsl.*;
+import java.util.List;
+import java.util.Map;
+
+void main() {
+    try (KnowledgeGraph graph = KnowledgeGraph.createInMemory()) {
+        graph.cypher("CREATE (:Person {id: 1, title: 'Ada'})");
+        graph.cypher("CREATE (:Person {id: 2, title: 'Bob'})");
+        graph.cypher("CREATE (:Person {id: 3, title: 'Cy'})");
+
+        Node p = node("Person").named("p");
+
+        // TIER 1 — an expression the DSL does not model. The fragment is a constant in this
+        // source; everything that varies goes through the parameter map, under its own name.
+        Statement shouted = match(p)
+                .where(raw("size(p.title) > $min", Map.of("min", 2)))
+                .returning(raw("toUpper(p.title)").as("name"))
+                .orderBy(alias("name").asc());
+
+        System.out.println(shouted.cypher());
+        System.out.println(shouted.params());
+        System.out.println(shouted.on(graph));
+
+        // TIER 2 — a whole clause. A procedure call has to come first, so the clause hatch
+        // opens a statement as well as extending one.
+        Statement ranked = rawClause("CALL pagerank() YIELD node, score")
+                .returning(count(alias("score")).as("n"));
+
+        System.out.println(ranked.cypher());
+        System.out.println(ranked.on(graph));
+
+        // TIER 3 — take the text and run it yourself. Nothing is hidden, so nothing traps you.
+        String text = shouted.cypher() + " LIMIT 1";
+        List<Map<String, Object>> rows = graph.query(text, shouted.params());
+        System.out.println(rows);
+    }
+}
+```
+
+```console
+$ java --enable-native-access=ALL-UNNAMED -cp kglite.jar DslEscapeHatch.java
+MATCH (p:Person) WHERE size(p.title) > $min RETURN toUpper(p.title) AS name ORDER BY name ASC
+{min=2}
+[{name=ADA}, {name=BOB}]
+CALL pagerank() YIELD node, score RETURN count(score) AS n
+[{n=3}]
+[{name=ADA}]
+```
+
+A raw fragment keeps its own parameter names and they are emitted unchanged;
+the emitter's `$p<digits>` namespace is reserved, so a fragment that refers to
+one, or names a parameter that way, is refused when you build it — as is a
+declared parameter the fragment never uses.
+
+**The injection property is scoped to the non-raw paths, and that is a real
+limit.** A raw fragment is emitted exactly as written: build one by
+concatenating something a user supplied and you have written the injection the
+rest of the DSL exists to prevent. Java cannot tell a literal from a
+concatenation, so nothing here can check it for you. Keep the fragment constant,
+put every varying value in the map. The test suite proves the boundary sits
+exactly there: the same hostile string is inert in every modelled position and
+deletes the graph when it arrives as raw.
+
 ## Durability, and the writer lease
 
 **`save(Path)` is the only thing that persists anything.** `open()` loads a
@@ -302,18 +499,31 @@ Same engine as the Python package and the CLI — same Cypher, same `.kgl` files
 same performance. What differs is the shell around it: **Python is the richest
 one** (fluent API, dataset loaders, embedders, introspection helpers), and this
 binding is deliberately the lean one. Its entire surface is open/create, `cypher`
-/ `query`, `save`, `close`, transactions, the writer lease and error mapping.
-That is not a staging post; it is the design. A per-query capability needs no
-Java change, because it arrives through Cypher.
+/ `query`, `save`, `close`, transactions, the writer lease, error mapping, and
+the Cypher DSL that builds the text those two methods take. That is not a
+staging post; it is the design. A per-query capability needs no Java change,
+because it arrives through Cypher.
 
-There is no ORM and no Spring integration — third parties can build those on
-top; they are not this project's maintenance surface.
+**The DSL is a query builder, not a second API.** Every one of its methods names
+the Cypher production it emits — that rule is enforced by a test, so the surface
+cannot quietly grow past it — and it adds no concept of its own: no verb that
+does not correspond to a clause, no query it can express that the string route
+cannot. Rows come back exactly as `query()` returns them. It exists for one
+reason, which is that assembling `MATCH`/`WHERE`/`MERGE` by hand is both
+error-prone and injection-prone; where it is neither, the string stays the best
+Java for the job and the DSL hands you the [escape hatch](#the-escape-hatch)
+instead of growing a method.
 
-**Expansions happen on demand.** The first designated one — multi-statement
-transactions over the C ABI's existing `kglite_session_execute_mut_batch` — has
-shipped; see [Transactions](#transactions). The next two are gated on a named
-use case rather than scheduled: a stateful transaction handle (needed only to
-branch in Java on an intermediate result) and a batch call reporting *which*
+There is no ORM, no object mapping, no typed rows and no Spring integration —
+third parties can build those on top; they are not this project's maintenance
+surface, and the DSL is not a step toward them.
+
+**Expansions happen on demand.** The two designated ones have shipped:
+multi-statement transactions over the C ABI's existing
+`kglite_session_execute_mut_batch` (see [Transactions](#transactions)) and the
+bundled DSL (see [The Cypher DSL](#the-cypher-dsl)). The next two are gated on a
+named use case rather than scheduled: a stateful transaction handle (needed only
+to branch in Java on an intermediate result) and a batch call reporting *which*
 statement failed. Open an issue if you want either — that is what moves it.
 
 ## Pre-22 JVMs: the Bolt sidecar

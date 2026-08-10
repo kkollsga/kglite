@@ -20,12 +20,12 @@ import java.util.Map;
 final class WriteQuery implements MergeStep, MergeMatchStep {
 
     private final Ast.Unwind unwind;
-    private final List<Ast.MatchStage> stages;
+    private final List<Ast.ReadStage> stages;
     private final List<Ast.WriteClause> clauses;
     private final Renderer.Rendered rendered;
 
     private WriteQuery(
-            Ast.Unwind unwind, List<Ast.MatchStage> stages, List<Ast.WriteClause> clauses) {
+            Ast.Unwind unwind, List<Ast.ReadStage> stages, List<Ast.WriteClause> clauses) {
         this.unwind = unwind;
         this.stages = List.copyOf(stages);
         this.clauses = List.copyOf(clauses);
@@ -38,7 +38,7 @@ final class WriteQuery implements MergeStep, MergeMatchStep {
     }
 
     /** A statement whose updating clause follows matching stages, or none at all. */
-    static WriteQuery after(List<Ast.MatchStage> stages, Ast.WriteClause clause) {
+    static WriteQuery after(List<Ast.ReadStage> stages, Ast.WriteClause clause) {
         return new WriteQuery(null, stages, List.of(clause));
     }
 

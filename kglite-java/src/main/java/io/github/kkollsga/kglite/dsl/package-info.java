@@ -11,7 +11,9 @@
  *   <li><b>Values are only ever parameters.</b> No method anywhere accepts a Cypher fragment in a
  *       value position, so a value cannot become syntax. Identifiers, the one place caller text
  *       does reach the query string, are validated at construction by
- *       {@link io.github.kkollsga.kglite.dsl.Ident}.
+ *       {@link io.github.kkollsga.kglite.dsl.Ident}. The single exception is the deliberate one:
+ *       {@link io.github.kkollsga.kglite.dsl.Raw}, where the text is the caller's and so is the
+ *       responsibility.
  *   <li><b>Emission is deterministic.</b> One rendering style, one parameter namespace
  *       ({@code $p0}…{@code $pN} in emission order), no rewriting. The emitted text is part of the
  *       tested contract, not an implementation detail.
@@ -21,6 +23,22 @@
  *       streaming — is out of scope for this wrapper entirely, and a request to expose an engine
  *       capability is an engine item, not a DSL method.
  * </ul>
+ *
+ * <p><b>What the package does not model, it hands back rather than blocks.</b> Three tiers, in
+ * increasing order of drop-out:
+ *
+ * <ol>
+ *   <li>{@link io.github.kkollsga.kglite.dsl.Cypher#raw(String, java.util.Map)} — an expression or
+ *       predicate written out longhand, usable anywhere either belongs, with its own named
+ *       parameters.
+ *   <li>{@link io.github.kkollsga.kglite.dsl.Cypher#rawClause(String, java.util.Map)} and the
+ *       {@code rawClause} on the chain — a whole clause, at the start of a statement or in the
+ *       middle of its pipeline.
+ *   <li>{@link io.github.kkollsga.kglite.dsl.Statement#cypher()} and
+ *       {@link io.github.kkollsga.kglite.dsl.Statement#params()} — take the text, edit it, and call
+ *       {@code KnowledgeGraph.query}/{@code cypher} yourself. Nothing is hidden, so nothing traps
+ *       you.
+ * </ol>
  *
  * <p>A statement runs itself, against either of two targets:
  * {@link io.github.kkollsga.kglite.dsl.Statement#on(io.github.kkollsga.kglite.KnowledgeGraph)}

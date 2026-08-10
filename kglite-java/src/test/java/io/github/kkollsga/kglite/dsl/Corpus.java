@@ -18,6 +18,8 @@ import static io.github.kkollsga.kglite.dsl.Cypher.min;
 import static io.github.kkollsga.kglite.dsl.Cypher.node;
 import static io.github.kkollsga.kglite.dsl.Cypher.not;
 import static io.github.kkollsga.kglite.dsl.Cypher.or;
+import static io.github.kkollsga.kglite.dsl.Cypher.raw;
+import static io.github.kkollsga.kglite.dsl.Cypher.rawClause;
 import static io.github.kkollsga.kglite.dsl.Cypher.rel;
 import static io.github.kkollsga.kglite.dsl.Cypher.sum;
 import static io.github.kkollsga.kglite.dsl.Cypher.unwind;
@@ -71,8 +73,6 @@ final class Corpus {
         READ_HALF,
         /** Expressible by the write half, and carrying the {@link Statement} that proves it. */
         WRITE_HALF,
-        /** Inside the v1 clause set, but a later phase's clauses ({@code WITH}). */
-        V1_LATER,
         /** Deliberately outside v1: the clause earns no builder, or the shape is a known wart. */
         OUT_OF_V1,
     }
@@ -891,16 +891,204 @@ final class Corpus {
                 "the batch upsert: one row matches an existing person, the other creates one"));
 
         // -----------------------------------------------------------------------------------
-        // Inside the v1 clause set, but the clauses of a later phase. Raw-route only for now.
+        // WITH, in the narrow form v1 models: project, optionally aggregate, optionally filter.
+        // Every shape below was executed against the engine before the builder was written; the
+        // stop rule attached to this clause was "if these do not hold on the engine, do not ship
+        // a builder that emits them", and all of them held.
         // -----------------------------------------------------------------------------------
 
-        entries.add(writeLater(
+        entries.add(read(
+                "with_project_and_filter",
+                "MATCH (p:Person) WITH p.title AS name, p.age AS age WHERE age > $p0 "
+                        + "RETURN name AS name ORDER BY name ASC",
+                params("p0", 30),
+                match(PERSON)
+                        .with(PERSON.prop("title").as("name"), PERSON.prop("age").as("age"))
+                        .where(alias("age").gt(30))
+                        .returning(alias("name").as("name"))
+                        .orderBy(alias("name").asc()),
+                rows(row("name", "Ada"), row("name", "Bob")),
+                "the plain projection: the following stages see the aliases and nothing else"));
+
+        entries.add(read(
                 "with_aggregate_filter",
                 "MATCH (p:Person) WITH p.city AS city, count(p) AS n WHERE n > $p0 "
                         + "RETURN city AS city, n AS n ORDER BY city ASC",
                 params("p0", 1),
+                match(PERSON)
+                        .with(PERSON.prop("city").as("city"), count(PERSON.ref()).as("n"))
+                        .where(alias("n").gt(1))
+                        .returning(alias("city").as("city"), alias("n").as("n"))
+                        .orderBy(alias("city").asc()),
                 rows(row("city", "London", "n", 2L)),
-                "WITH is in the v1 clause set in its narrow project-aggregate-filter form"));
+                "filtering on an aggregate — the one thing RETURN cannot do, and the reason the "
+                        + "narrow WITH earns its place. Grouping is implicit: city is the key "
+                        + "because it is the column that is not aggregated"));
+
+        entries.add(read(
+                "with_then_match",
+                "MATCH (c:Company) WITH c AS c MATCH (p:Person)-[:WORKS_AT]->(c) "
+                        + "RETURN c.title AS company, count(p) AS n ORDER BY company ASC",
+                Map.of(),
+                match(COMPANY)
+                        .with(COMPANY.ref().as("c"))
+                        .match(PERSON.to(rel("WORKS_AT"), anyNode().named("c")))
+                        .returning(COMPANY.prop("title").as("company"),
+                                count(PERSON.ref()).as("n"))
+                        .orderBy(alias("company").asc()),
+                rows(row("company", "Acme", "n", 2L), row("company", "Globex", "n", 1L)),
+                "a pattern variable carried through the projection and matched against again"));
+
+        entries.add(read(
+                "with_distinct_then_match",
+                "MATCH (p:Person) WITH DISTINCT p.city AS city MATCH (c:Company {city: city}) "
+                        + "RETURN c.title AS company ORDER BY company ASC",
+                Map.of(),
+                match(PERSON)
+                        .withDistinct(PERSON.prop("city").as("city"))
+                        .match(node("Company").named("c").withPropertyFrom("city", alias("city")))
+                        .returning(COMPANY.prop("title").as("company"))
+                        .orderBy(alias("company").asc()),
+                rows(row("company", "Acme"), row("company", "Globex")),
+                "deduplicating mid-pipeline, which RETURN DISTINCT cannot do because it is the "
+                        + "last clause; the carried alias is then an inline pattern value"));
+
+        entries.add(read(
+                "with_chained",
+                "MATCH (p:Person) WITH p.city AS city, count(p) AS n WITH city AS city, n AS n "
+                        + "WHERE n > $p0 RETURN city AS city ORDER BY city ASC",
+                params("p0", 1),
+                match(PERSON)
+                        .with(PERSON.prop("city").as("city"), count(PERSON.ref()).as("n"))
+                        .with(alias("city").as("city"), alias("n").as("n"))
+                        .where(alias("n").gt(1))
+                        .returning(alias("city").as("city"))
+                        .orderBy(alias("city").asc()),
+                rows(row("city", "London")),
+                "two projections in one pipeline: the second sees only what the first named"));
+
+        entries.add(read(
+                "with_optional_match_aggregate",
+                "MATCH (c:Company) WITH c AS c OPTIONAL MATCH (p:Person)-[:WORKS_AT]->(c) "
+                        + "WITH c.title AS company, count(p) AS n WHERE n > $p0 "
+                        + "RETURN company AS company, n AS n ORDER BY company ASC",
+                params("p0", 0),
+                match(COMPANY)
+                        .with(COMPANY.ref().as("c"))
+                        .optionalMatch(PERSON.to(rel("WORKS_AT"), anyNode().named("c")))
+                        .with(COMPANY.prop("title").as("company"), count(PERSON.ref()).as("n"))
+                        .where(alias("n").gt(0))
+                        .returning(alias("company").as("company"), alias("n").as("n"))
+                        .orderBy(alias("company").asc()),
+                rows(row("company", "Acme", "n", 2L), row("company", "Globex", "n", 1L)),
+                "the full narrow pipeline: carry, optionally match, aggregate, filter"));
+
+        entries.add(write(
+                "with_filter_then_set",
+                "MATCH (p:Person) WITH p AS p WHERE p.age > $p0 SET p.seen = $p1",
+                params("p0", 30, "p1", true),
+                match(PERSON)
+                        .with(PERSON.ref().as("p"))
+                        .where(PERSON.prop("age").gt(30))
+                        .set(PERSON.prop("seen").to(true)),
+                "MATCH (p:Person) WHERE p.seen = true RETURN count(p) AS n",
+                rows(row("n", 2L)),
+                "an updating clause after a projection: the write half reaches through a WITH, "
+                        + "which is why WithStep carries the updating clauses too"));
+
+        // -----------------------------------------------------------------------------------
+        // The escape hatch. These entries are the ones that make "outside v1" not mean
+        // "unreachable": each is a shape the clause set deliberately refuses to model, expressed
+        // through raw and still running as one built statement, on both routes.
+        // -----------------------------------------------------------------------------------
+
+        entries.add(read(
+                "raw_expression_projection",
+                "MATCH (p:Person) RETURN toUpper(p.title) AS name ORDER BY name ASC",
+                Map.of(),
+                match(PERSON)
+                        .returning(raw("toUpper(p.title)").as("name"))
+                        .orderBy(alias("name").asc()),
+                rows(row("name", "ADA"), row("name", "BOB"), row("name", "CY"),
+                        row("name", "DEE")),
+                "scalar functions earn no builder — there is nothing to assemble and no value "
+                        + "position to protect — so this is what the expression hatch is for"));
+
+        entries.add(read(
+                "raw_predicate_with_parameter",
+                "MATCH (p:Person) WHERE size(p.title) > $min RETURN p.title AS name "
+                        + "ORDER BY name ASC",
+                params("min", 2),
+                match(PERSON)
+                        .where(raw("size(p.title) > $min", map("min", 2)))
+                        .returning(PERSON.prop("title").as("name"))
+                        .orderBy(alias("name").asc()),
+                rows(row("name", "Ada"), row("name", "Bob"), row("name", "Dee")),
+                "the hatch is parameterisable, so the fragment stays a constant and the value "
+                        + "that varies still travels as data"));
+
+        entries.add(read(
+                "raw_predicate_composed_with_built_one",
+                "MATCH (p:Person) WHERE p.age > $p0 AND (size(p.title) > $min) "
+                        + "RETURN p.title AS name ORDER BY name ASC",
+                params("p0", 20, "min", 2),
+                match(PERSON)
+                        .where(PERSON.prop("age").gt(20)
+                                .and(raw("size(p.title) > $min", map("min", 2))))
+                        .returning(PERSON.prop("title").as("name"))
+                        .orderBy(alias("name").asc()),
+                rows(row("name", "Ada"), row("name", "Bob"), row("name", "Dee")),
+                "a raw predicate composes with a built one, keeps its own parameter name, and is "
+                        + "parenthesised as an operand because the DSL cannot see its precedence"));
+
+        entries.add(read(
+                "raw_clause_opening_a_statement",
+                "CALL pagerank() YIELD node, score RETURN count(score) AS n",
+                Map.of(),
+                rawClause("CALL pagerank() YIELD node, score")
+                        .returning(count(alias("score")).as("n")),
+                rows(row("n", 6L)),
+                "a procedure call has no assembly problem, so it earns no builder — but it has to "
+                        + "come first, which is why the clause hatch also opens a statement"));
+
+        entries.add(read(
+                "raw_clause_mid_pipeline",
+                "MATCH (p:Person) WITH p AS p ORDER BY p.age DESC LIMIT 2 RETURN p.title AS name "
+                        + "ORDER BY name ASC",
+                Map.of(),
+                match(PERSON)
+                        .with(PERSON.ref().as("p"))
+                        .rawClause("ORDER BY p.age DESC LIMIT 2")
+                        .returning(PERSON.prop("title").as("name"))
+                        .orderBy(alias("name").asc()),
+                rows(row("name", "Ada"), row("name", "Bob")),
+                "mid-pipeline ordering and paging is exactly what the narrow WITH refuses to "
+                        + "model, and exactly what the clause hatch is for"));
+
+        entries.add(read(
+                "raw_clause_with_parameter",
+                "UNWIND $wanted AS wanted MATCH (p:Person {id: wanted}) RETURN p.title AS name "
+                        + "ORDER BY name ASC",
+                params("wanted", List.of(1, 3)),
+                rawClause("UNWIND $wanted AS wanted", map("wanted", List.of(1, 3)))
+                        .match(node("Person").named("p").withPropertyFrom("id", alias("wanted")))
+                        .returning(PERSON.prop("title").as("name"))
+                        .orderBy(alias("name").asc()),
+                rows(row("name", "Ada"), row("name", "Cy")),
+                "an UNWIND that is not a batch write, with its list as a named parameter"));
+
+        entries.add(write(
+                "raw_predicate_on_the_write_route",
+                "MATCH (p:Person) WHERE size(p.title) > $min SET p.long = $p0",
+                params("min", 2, "p0", true),
+                match(PERSON)
+                        .where(raw("size(p.title) > $min", map("min", 2)))
+                        .set(PERSON.prop("long").to(true)),
+                "MATCH (p:Person) WHERE p.long = true RETURN count(p) AS n",
+                rows(row("n", 3L)),
+                "the hatch does not change which entry point a statement takes: this is still a "
+                        + "write, still routed by its type, and the two parameter namespaces still "
+                        + "coexist"));
 
         // -----------------------------------------------------------------------------------
         // Deliberately outside v1. These are why the census is a census and not a formality.
@@ -1008,16 +1196,6 @@ final class Corpus {
     private static Statement unwindMerge() {
         UnwindStep rows = unwind(List.of(map("id", 1), map("id", 9)));
         return rows.merge(node("Person").withPropertyFrom("id", rows.field("id")));
-    }
-
-    private static Entry writeLater(
-            String name,
-            String cypher,
-            Map<String, Object> params,
-            List<Map<String, Object>> expected,
-            String note) {
-        return new Entry(name, Fixture.PEOPLE, Route.READ, cypher, params, null, expected, null,
-                null, Expressibility.V1_LATER, note);
     }
 
     private static Entry outOfV1(

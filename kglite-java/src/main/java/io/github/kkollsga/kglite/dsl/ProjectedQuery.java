@@ -12,7 +12,7 @@ import java.util.Map;
  */
 final class ProjectedQuery implements ReturnStep, OrderStep, SkipStep {
 
-    private final List<Ast.MatchStage> stages;
+    private final List<Ast.ReadStage> stages;
     private final boolean distinct;
     private final List<Projection> projections;
     private final List<SortItem> sorts;
@@ -21,7 +21,7 @@ final class ProjectedQuery implements ReturnStep, OrderStep, SkipStep {
     private final Renderer.Rendered rendered;
 
     ProjectedQuery(
-            List<Ast.MatchStage> stages,
+            List<Ast.ReadStage> stages,
             boolean distinct,
             List<Projection> projections,
             List<SortItem> sorts,

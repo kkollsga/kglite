@@ -14,7 +14,7 @@ import java.util.List;
  * operand. The result is unambiguous without depending on the dialect's precedence table.
  */
 public sealed interface Condition
-        permits Ast.Comparison, Ast.NullCheck, Ast.Not, Ast.And, Ast.Or {
+        permits Raw, Ast.Comparison, Ast.NullCheck, Ast.Not, Ast.And, Ast.Or {
 
     /**
      * Conjunction with another predicate.

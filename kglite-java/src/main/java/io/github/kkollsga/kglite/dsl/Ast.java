@@ -1,6 +1,7 @@
 package io.github.kkollsga.kglite.dsl;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * The immutable AST nodes behind the public sealed interfaces.
@@ -21,6 +22,22 @@ final class Ast {
 
     /** A reference to a {@code RETURN} alias, legal in {@code ORDER BY}. */
     record AliasRef(Ident alias) implements Expr {}
+
+    /**
+     * Caller-written Cypher, emitted verbatim in an expression or predicate position.
+     *
+     * @param fragment the text, checked by {@link RawFragment}
+     * @param params the parameters it refers to, by their own names
+     */
+    record RawExpr(String fragment, Map<String, Object> params) implements Raw {}
+
+    /**
+     * Caller-written Cypher, emitted verbatim as a whole clause of the reading pipeline.
+     *
+     * @param fragment the text, checked by {@link RawFragment}
+     * @param params the parameters it refers to, by their own names
+     */
+    record RawStage(String fragment, Map<String, Object> params) implements ReadStage {}
 
     /**
      * A function call this DSL knows how to emit.
@@ -56,6 +73,14 @@ final class Ast {
     record Or(List<Condition> operands) implements Condition {}
 
     /**
+     * One stage of the reading pipeline, before the terminal {@code RETURN} or updating clause.
+     *
+     * <p>Sealed so the renderer's switch is exhaustive: a stage kind the renderer was never taught
+     * about is a compile error.
+     */
+    sealed interface ReadStage permits MatchStage, WithStage, RawStage {}
+
+    /**
      * One reading stage: a {@code MATCH} or {@code OPTIONAL MATCH} with its optional
      * {@code WHERE}.
      *
@@ -63,7 +88,41 @@ final class Ast {
      * @param patterns the comma-joined patterns
      * @param where the stage's predicate, or {@code null}
      */
-    record MatchStage(boolean optional, List<Pattern> patterns, Condition where) {}
+    record MatchStage(boolean optional, List<Pattern> patterns, Condition where)
+            implements ReadStage {}
+
+    /**
+     * One {@code WITH} stage: project (aggregating or not), then optionally filter.
+     *
+     * @param distinct whether {@code DISTINCT} follows the keyword
+     * @param projections the aliased columns the following stages see
+     * @param where the stage's predicate, or {@code null}
+     */
+    record WithStage(boolean distinct, List<Projection> projections, Condition where)
+            implements ReadStage {}
+
+    /**
+     * A copy of a stage carrying a predicate — how {@code where(...)} attaches to whichever stage
+     * was opened last, matching or projecting.
+     *
+     * @param stage the stage the predicate belongs to
+     * @param predicate the predicate
+     * @return the stage with its {@code WHERE}
+     */
+    static ReadStage filtered(ReadStage stage, Condition predicate) {
+        return switch (stage) {
+            case MatchStage match ->
+                    new MatchStage(match.optional(), match.patterns(), predicate);
+            case WithStage with -> new WithStage(with.distinct(), with.projections(), predicate);
+            // Unreachable through the public step types: a raw clause hands back a step that
+            // offers no where(), because this DSL cannot know what the fragment bound or whether
+            // the dialect even accepts a WHERE after it. Kept so a future step-interface change
+            // fails loudly rather than emitting a predicate attached to arbitrary text.
+            case RawStage raw -> throw new IllegalStateException(
+                    "a WHERE cannot be attached to the raw clause \"" + raw.fragment()
+                            + "\": put the filtering inside the fragment");
+        };
+    }
 
     // ---- the writing half ---------------------------------------------------------------
 

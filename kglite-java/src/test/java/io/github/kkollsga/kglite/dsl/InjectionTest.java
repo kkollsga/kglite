@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.kkollsga.kglite.KgliteException;
 import io.github.kkollsga.kglite.KnowledgeGraph;
 import java.util.ArrayList;
 import java.util.List;
@@ -322,6 +323,91 @@ class InjectionTest {
             assertEquals(2, rows.size(), "the quoted key is a key, not a clause");
             assertEquals(2L, countOf(graph, "MATCH (n:Person) RETURN count(n) AS c"),
                     "nothing was deleted");
+        }
+    }
+
+    /**
+     * The control that scopes the guarantee: the boundary sits <em>exactly</em> at
+     * {@link Cypher#raw}, and nowhere earlier.
+     *
+     * <p>Everything above shows hostile text is inert through the modelled surface. That is only
+     * half the claim worth publishing, because the DSL also ships an escape hatch that emits
+     * caller text verbatim — and a reader who took "injection is structurally impossible" as
+     * unconditional would be wrong in exactly one place. So this test takes one string, walks it
+     * through every position the DSL models (refused or quoted inertly, never syntax), and then
+     * puts the same string through the hatch and watches it delete the graph.
+     *
+     * <p>It is a positive control in both directions. If the modelled surface ever lets the string
+     * through, the first half goes red; if {@code raw} ever started escaping — quietly turning the
+     * documented "this is your responsibility" into a promise the DSL cannot keep for every
+     * dialect — the second half goes red and the docs get revisited deliberately.
+     */
+    @Test
+    @DisplayName("positive control: raw is the only path a hostile string survives as syntax")
+    void rawIsTheOnlyPathThatCarriesCallerText() {
+        String exploit = "DETACH DELETE p //";
+        // The same attack with a closing parenthesis, which pattern positions cannot represent at
+        // all — the two spellings cover both halves of the identifier policy.
+        String closer = "Person) DETACH DELETE n //";
+        Node person = node("Person").named("p");
+
+        // 1. The modelled surface. A pattern identifier is either refused outright...
+        assertThrows(IllegalArgumentException.class, () -> node(closer));
+        assertThrows(IllegalArgumentException.class, () -> Cypher.rel(closer));
+        assertThrows(IllegalArgumentException.class, () -> node("Person").named(closer));
+
+        // ...or quoted into one identifier, which is a label nothing has, not a clause.
+        assertEquals("MATCH (n:`" + exploit + "`) RETURN count(n) AS c",
+                match(node(exploit).named("n"))
+                        .returning(count(node(exploit).named("n").ref()).as("c"))
+                        .cypher());
+
+        // Property keys and aliases take it too, and quote it the same way.
+        assertEquals("MATCH (p:Person) RETURN p.`" + exploit + "` AS `" + exploit + "`",
+                match(person).returning(person.prop(exploit).as(exploit)).cypher());
+
+        // ...and a value position never puts it in the text at all.
+        Statement asValue = match(person)
+                .where(person.prop("title").eq(exploit))
+                .returning(count(person.ref()).as("c"));
+        assertEquals("MATCH (p:Person) WHERE p.title = $p0 RETURN count(p) AS c",
+                asValue.cypher());
+        assertEquals(Map.of("p0", exploit), asValue.params());
+
+        // The hatch does not leak backwards either: a Raw is a query element, so it is refused
+        // where data belongs rather than serialised as a parameter value.
+        assertThrows(IllegalArgumentException.class,
+                () -> person.prop("title").eq(Cypher.raw("p.title")));
+
+        // 2. The hatch. The same string is now the query, character for character.
+        Statement viaClause = match(person)
+                .rawClause(exploit)
+                .returning(count(person.ref()).as("c"));
+        assertEquals("MATCH (p:Person) " + exploit + " RETURN count(p) AS c", viaClause.cypher());
+        Statement viaExpression = match(person)
+                .where(Cypher.raw("p.id > 0 " + exploit))
+                .returning(count(person.ref()).as("c"));
+        assertEquals("MATCH (p:Person) WHERE p.id > 0 " + exploit + " RETURN count(p) AS c",
+                viaExpression.cypher());
+
+        // The routing guard is still in the way of a read that mutates — a second line of defence
+        // that is worth knowing about and is not the guarantee being scoped here.
+        try (KnowledgeGraph graph = graphWithASecret()) {
+            KgliteException refused = assertThrows(KgliteException.class, () -> viaClause.on(graph));
+            assertEquals("InvalidArgument", refused.statusName());
+            assertEquals(2L, countOf(graph, "MATCH (n:Person) RETURN count(n) AS c"));
+        }
+
+        // ...and on the write route, which is where a caller who built the fragment from user
+        // input would end up, it does exactly what it says.
+        for (Statement statement : List.of(viaClause, viaExpression)) {
+            try (KnowledgeGraph graph = graphWithASecret()) {
+                graph.cypher(statement.cypher(), statement.params());
+                assertEquals(0L, countOf(graph, "MATCH (n:Person) RETURN count(n) AS c"),
+                        "raw no longer carries caller text to the engine unchanged — the "
+                                + "documented scope of this DSL's injection property has moved, "
+                                + "so revisit Raw's javadoc and the README section with it");
+            }
         }
     }
 

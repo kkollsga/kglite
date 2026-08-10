@@ -4,6 +4,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * The one renderer. There is no pretty-printing mode and no plug-point: a second rendering style
@@ -23,6 +24,10 @@ import java.util.Map;
  *   <li>Nothing is rewritten. Inline pattern properties stay inline, a predicate stays in its
  *       {@code WHERE}, and no {@code OR} chain becomes an {@code IN}. A DSL that optimises is a
  *       DSL whose emitted-equality tests encode planner behaviour.
+ *   <li>A raw fragment is copied out character for character, and the parameters it names keep
+ *       their names — the fragment refers to them, so renumbering them would break the text being
+ *       copied. Nothing about a fragment is inspected, escaped or repaired; see {@link Raw} for
+ *       what that means for the injection property.
  * </ul>
  */
 final class Renderer {
@@ -39,10 +44,17 @@ final class Renderer {
     private final StringBuilder out = new StringBuilder();
     private final Map<String, Object> params = new LinkedHashMap<>();
 
+    /**
+     * The next {@code p<n>} to hand out. Counted separately from {@code params.size()} because a
+     * raw fragment's own named parameters share that map: numbering off the map's size would leave
+     * gaps in the generated sequence as soon as one appeared.
+     */
+    private int generated;
+
     private Renderer() {}
 
     static Rendered render(
-            List<Ast.MatchStage> stages,
+            List<Ast.ReadStage> stages,
             boolean distinct,
             List<Projection> projections,
             List<SortItem> sorts,
@@ -64,7 +76,7 @@ final class Renderer {
      * @return the finished rendering
      */
     static Rendered render(
-            Ast.Unwind unwind, List<Ast.MatchStage> stages, List<Ast.WriteClause> clauses) {
+            Ast.Unwind unwind, List<Ast.ReadStage> stages, List<Ast.WriteClause> clauses) {
         Renderer renderer = new Renderer();
         if (unwind != null) {
             renderer.out.append("UNWIND ");
@@ -81,7 +93,7 @@ final class Renderer {
     }
 
     private void statement(
-            List<Ast.MatchStage> stages,
+            List<Ast.ReadStage> stages,
             boolean distinct,
             List<Projection> projections,
             List<SortItem> sorts,
@@ -92,12 +104,7 @@ final class Renderer {
         if (distinct) {
             out.append("DISTINCT ");
         }
-        for (int i = 0; i < projections.size(); i++) {
-            separate(i);
-            Projection projection = projections.get(i);
-            expression(projection.expression());
-            out.append(" AS ").append(projection.aliasIdent().rendered());
-        }
+        projections(projections);
         if (!sorts.isEmpty()) {
             out.append(" ORDER BY ");
             for (int i = 0; i < sorts.size(); i++) {
@@ -117,15 +124,43 @@ final class Renderer {
         }
     }
 
-    private void stages(List<Ast.MatchStage> stages) {
-        for (Ast.MatchStage stage : stages) {
+    private void stages(List<Ast.ReadStage> stages) {
+        for (Ast.ReadStage stage : stages) {
             space();
-            out.append(stage.optional() ? "OPTIONAL MATCH " : "MATCH ");
-            patterns(stage.patterns());
-            if (stage.where() != null) {
-                out.append(" WHERE ");
-                condition(stage.where());
+            switch (stage) {
+                case Ast.MatchStage match -> {
+                    out.append(match.optional() ? "OPTIONAL MATCH " : "MATCH ");
+                    patterns(match.patterns());
+                    filter(match.where());
+                }
+                case Ast.WithStage with -> {
+                    out.append("WITH ");
+                    if (with.distinct()) {
+                        out.append("DISTINCT ");
+                    }
+                    projections(with.projections());
+                    filter(with.where());
+                }
+                case Ast.RawStage rawStage -> raw(rawStage.fragment(), rawStage.params());
             }
+        }
+    }
+
+    /** The stage's {@code WHERE}, if it has one. */
+    private void filter(Condition where) {
+        if (where != null) {
+            out.append(" WHERE ");
+            condition(where);
+        }
+    }
+
+    /** The {@code <expression> AS <alias>} list shared by {@code WITH} and {@code RETURN}. */
+    private void projections(List<Projection> projections) {
+        for (int i = 0; i < projections.size(); i++) {
+            separate(i);
+            Projection projection = projections.get(i);
+            expression(projection.expression());
+            out.append(" AS ").append(projection.aliasIdent().rendered());
         }
     }
 
@@ -292,6 +327,7 @@ final class Renderer {
             }
             case Ast.And and -> junction(and.operands(), " AND ");
             case Ast.Or or -> junction(or.operands(), " OR ");
+            case Ast.RawExpr rawExpr -> raw(rawExpr.fragment(), rawExpr.params());
         }
     }
 
@@ -304,9 +340,17 @@ final class Renderer {
         }
     }
 
-    /** Wraps a composite operand and leaves a simple one bare, so precedence never matters. */
+    /**
+     * Wraps a composite operand and leaves a simple one bare, so precedence never matters.
+     *
+     * <p>A raw fragment counts as composite. This DSL cannot see inside it, so a fragment that is
+     * itself a disjunction would otherwise bind to the surrounding {@code AND} by the dialect's
+     * precedence table rather than as the single operand the caller passed.
+     */
     private void operand(Condition condition) {
-        boolean composite = condition instanceof Ast.And || condition instanceof Ast.Or;
+        boolean composite = condition instanceof Ast.And
+                || condition instanceof Ast.Or
+                || condition instanceof Raw;
         if (composite) {
             out.append('(');
         }
@@ -336,13 +380,39 @@ final class Renderer {
                 }
                 out.append(')');
             }
+            case Ast.RawExpr rawExpr -> raw(rawExpr.fragment(), rawExpr.params());
         }
     }
 
     /** Allocates the next {@code $p<n>} and records its value. The only route a value has. */
     private void parameter(Object value) {
-        String name = "p" + params.size();
+        String name = "p" + generated++;
         params.put(name, value);
         out.append('$').append(name);
+    }
+
+    /**
+     * Emits caller-written text verbatim and merges the parameters it names.
+     *
+     * <p>The names are the caller's and are never renumbered — the fragment refers to them by name,
+     * so renaming them would break the very text this method is copying. They cannot collide with
+     * the emitter's own namespace because {@link RawFragment} refuses a name matching
+     * {@code p<digits>}. Two fragments naming the same parameter agree or the statement is refused:
+     * one name means one value in one statement, and silently keeping the last write would make the
+     * emitted text and the parameter map disagree about what the query asked for.
+     */
+    private void raw(String fragment, Map<String, Object> fragmentParams) {
+        out.append(fragment);
+        for (Map.Entry<String, Object> entry : fragmentParams.entrySet()) {
+            String name = entry.getKey();
+            Object value = entry.getValue();
+            if (params.containsKey(name) && !Objects.equals(params.get(name), value)) {
+                throw new IllegalArgumentException(
+                        "raw parameter \"" + name + "\" is bound twice in one statement, to "
+                                + params.get(name) + " and " + value
+                                + ". A parameter name means one value; use two names.");
+            }
+            params.put(name, value);
+        }
     }
 }
