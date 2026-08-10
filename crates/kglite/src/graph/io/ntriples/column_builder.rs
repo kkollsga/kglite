@@ -580,19 +580,24 @@ fn link_column_rows(graph: &mut DirGraph, row_ids: &[(NodeIndex, u32)], verbose:
     } else if GraphRead::is_mapped(&graph.graph) {
         // Snapshot the Arc<ColumnStore> per type once so the inner loop
         // only does a HashMap lookup; avoids a clone on every node.
-        let type_name_by_key: HashMap<InternedKey, String> = graph
-            .column_stores
-            .keys()
-            .filter_map(|t| graph.interner.try_resolve_to_key(t).map(|k| (k, t.clone())))
+        let named = graph.column_stores_by_name();
+        let type_name_by_key: HashMap<InternedKey, String> = named
+            .iter()
+            .filter_map(|(t, _)| {
+                graph
+                    .interner
+                    .try_resolve_to_key(t)
+                    .map(|k| (k, t.to_string()))
+            })
             .collect();
         let stores_snapshot: HashMap<
             String,
             Arc<crate::graph::storage::column_store::ColumnStore>,
-        > = graph
-            .column_stores
+        > = named
             .iter()
-            .map(|(t, s)| (t.clone(), Arc::clone(s)))
+            .map(|(t, s)| (t.to_string(), Arc::clone(s)))
             .collect();
+        drop(named);
         let mut linked = 0u64;
         for &(node_idx, row_id) in row_ids {
             let type_key = match GraphRead::node_type_of(&graph.graph, node_idx) {
@@ -603,12 +608,11 @@ fn link_column_rows(graph: &mut DirGraph, row_ids: &[(NodeIndex, u32)], verbose:
                 Some(n) => n,
                 None => continue,
             };
-            let store = match stores_snapshot.get(type_name) {
-                Some(s) => Arc::clone(s),
-                None => continue,
-            };
+            if !stores_snapshot.contains_key(type_name) {
+                continue;
+            }
             if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
-                node.properties = PropertyStorage::Columnar(ColumnarRow::new(store, row_id));
+                node.properties = PropertyStorage::Columnar(ColumnarRow::new(row_id));
                 linked += 1;
             }
         }
@@ -1381,15 +1385,13 @@ fn assemble_column_stores(
                 .type_schemas
                 .insert(type_name.clone(), Arc::new(schema));
         }
-        graph
-            .column_stores
-            .insert(type_name.clone(), Arc::new(store));
+        graph.install_column_store(type_name, Arc::new(store));
     }
 
     if verbose {
         eplog!(
             "  Phase 1b: assembled {} column stores ({:.1}s)",
-            graph.column_stores.len(),
+            graph.column_store_count(),
             assemble_start.elapsed().as_secs_f64(),
         );
     }

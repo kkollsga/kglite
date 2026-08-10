@@ -320,6 +320,27 @@ impl<G: GraphRead> GraphRead for RecordingGraph<G> {
         Self: 'a;
 
     #[inline]
+    fn column_store(
+        &self,
+        type_key: crate::graph::schema::InternedKey,
+    ) -> Option<&std::sync::Arc<crate::graph::storage::column_store::ColumnStore>> {
+        self.inner.column_store(type_key)
+    }
+
+    fn column_stores_iter(
+        &self,
+    ) -> Box<
+        dyn Iterator<
+                Item = (
+                    crate::graph::schema::InternedKey,
+                    &std::sync::Arc<crate::graph::storage::column_store::ColumnStore>,
+                ),
+            > + '_,
+    > {
+        self.inner.column_stores_iter()
+    }
+
+    #[inline]
     fn node_count(&self) -> usize {
         self.inner.node_count()
     }
@@ -564,6 +585,109 @@ impl<G: GraphRead> GraphRead for RecordingGraph<G> {
 // ─────────────────────────────────────────────────────────────────────
 
 impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
+    // ── Column-store ownership: delegated, never recorded ──
+    //
+    // Installing or replacing a type's store is storage bookkeeping — the
+    // logical mutation is the property write that follows, and recording the
+    // install as well would replay it twice.
+    #[inline]
+    fn install_column_store(
+        &mut self,
+        type_key: crate::graph::schema::InternedKey,
+        store: std::sync::Arc<crate::graph::storage::column_store::ColumnStore>,
+    ) {
+        self.inner.install_column_store(type_key, store);
+    }
+
+    #[inline]
+    fn column_store_mut(
+        &mut self,
+        type_key: crate::graph::schema::InternedKey,
+    ) -> Option<&mut std::sync::Arc<crate::graph::storage::column_store::ColumnStore>> {
+        self.inner.column_store_mut(type_key)
+    }
+
+    #[inline]
+    fn take_column_store(
+        &mut self,
+        type_key: crate::graph::schema::InternedKey,
+    ) -> Option<std::sync::Arc<crate::graph::storage::column_store::ColumnStore>> {
+        self.inner.take_column_store(type_key)
+    }
+
+    #[inline]
+    fn clear_column_stores(&mut self) {
+        self.inner.clear_column_stores();
+    }
+
+    // ── Node property writes: recorded, like `node_weight_mut` ──
+    //
+    // These *are* logical mutations. Recording an `UpsertNode` placeholder and
+    // resolving the node's final state at flush matches what `node_weight_mut`
+    // does, and is what keeps a columnar `SET` in the WAL now that it no longer
+    // passes through `node_weight_mut` at all.
+    #[inline]
+    fn set_node_property(
+        &mut self,
+        idx: NodeIndex,
+        key: crate::graph::schema::InternedKey,
+        value: Value,
+    ) {
+        if self.inner.node_weight(idx).is_some() {
+            self.ops.push(RawOp::UpsertNode(idx));
+        }
+        self.inner.set_node_property(idx, key, value);
+    }
+
+    #[inline]
+    fn set_node_property_if_absent(
+        &mut self,
+        idx: NodeIndex,
+        key: crate::graph::schema::InternedKey,
+        value: Value,
+    ) {
+        if self.inner.node_weight(idx).is_some() {
+            self.ops.push(RawOp::UpsertNode(idx));
+        }
+        self.inner.set_node_property_if_absent(idx, key, value);
+    }
+
+    #[inline]
+    fn remove_node_property(
+        &mut self,
+        idx: NodeIndex,
+        key: crate::graph::schema::InternedKey,
+    ) -> Option<Value> {
+        if self.inner.node_weight(idx).is_some() {
+            self.ops.push(RawOp::UpsertNode(idx));
+        }
+        self.inner.remove_node_property(idx, key)
+    }
+
+    #[inline]
+    fn clear_node_property(
+        &mut self,
+        idx: NodeIndex,
+        key: crate::graph::schema::InternedKey,
+    ) -> Option<Value> {
+        if self.inner.node_weight(idx).is_some() {
+            self.ops.push(RawOp::UpsertNode(idx));
+        }
+        self.inner.clear_node_property(idx, key)
+    }
+
+    #[inline]
+    fn replace_node_properties(
+        &mut self,
+        idx: NodeIndex,
+        pairs: Vec<(crate::graph::schema::InternedKey, Value)>,
+    ) {
+        if self.inner.node_weight(idx).is_some() {
+            self.ops.push(RawOp::UpsertNode(idx));
+        }
+        self.inner.replace_node_properties(idx, pairs);
+    }
+
     #[inline]
     fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
         // The caller mutates the returned &mut after this returns, so we
@@ -850,9 +974,8 @@ mod tests {
         ));
         let _ = rg.take_ops(); // drain the add
                                // SET age = 41 via the mutable-borrow path.
-        if let Some(nd) = rg.node_weight_mut(a) {
-            nd.set_property("age", Value::Int64(41), &mut interner);
-        }
+        let age_key = interner.get_or_intern("age");
+        rg.set_node_property(a, age_key, Value::Int64(41));
         let raw = rg.take_ops();
         let ops = resolve_unlabelled(&raw, &rg, &interner);
         // Resolves to the node's FINAL state (age = 41), not a delta.

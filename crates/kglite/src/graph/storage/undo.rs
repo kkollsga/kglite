@@ -182,7 +182,11 @@ pub enum UndoEntry {
     /// mutability and the fork already left `prior` pristine, so holding the
     /// handle is the entire pre-image.
     ColumnarHandles {
-        node_type: String,
+        /// Keyed by `InternedKey`, not by name: the capture now happens inside
+        /// the storage backend (which has no interner), so every columnar
+        /// write — master fast path *and* per-node fallback — goes through one
+        /// place. The rollback arm resolves the name when it needs one.
+        node_type: InternedKey,
         prior: Arc<ColumnStore>,
     },
 }
@@ -205,7 +209,7 @@ pub struct UndoJournal {
     /// First touch wins, exactly like `weighed_nodes`: a statement can write
     /// through the same master in several clauses, and only the first one saw
     /// the pre-statement store.
-    forked_columnar_types: HashSet<String>,
+    forked_columnar_types: HashSet<InternedKey>,
 }
 
 impl UndoJournal {
@@ -337,16 +341,13 @@ impl UndoJournal {
     #[inline]
     pub fn note_columnar_fork(
         &mut self,
-        node_type: &str,
+        node_type: InternedKey,
         prior: impl FnOnce() -> Option<Arc<ColumnStore>>,
     ) -> bool {
-        if !self.forked_columnar_types.contains(node_type) {
-            self.forked_columnar_types.insert(node_type.to_string());
+        if self.forked_columnar_types.insert(node_type) {
             if let Some(prior) = prior() {
-                self.entries.push(UndoEntry::ColumnarHandles {
-                    node_type: node_type.to_string(),
-                    prior,
-                });
+                self.entries
+                    .push(UndoEntry::ColumnarHandles { node_type, prior });
                 return true;
             }
         }

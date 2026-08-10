@@ -627,7 +627,7 @@ pub fn save_subset_streaming_disk(
     // least as generous.
     let mut writers: HashMap<String, TypeWriter> = HashMap::new();
     for type_name in kept_per_type.keys() {
-        let schema = if let Some(src_store) = source.column_stores.get(type_name) {
+        let schema = if let Some(src_store) = source.column_store(type_name) {
             Arc::clone(src_store.schema())
         } else if let Some(s) = source.type_schemas.get(type_name) {
             Arc::clone(s)
@@ -649,13 +649,11 @@ pub fn save_subset_streaming_disk(
         // column store entry — TypeWriter's Mixed buffer handles
         // anything.
         let id_type = source
-            .column_stores
-            .get(type_name)
+            .column_store(type_name)
             .and_then(|s| s.id_type_str())
             .unwrap_or("mixed");
         let title_type = source
-            .column_stores
-            .get(type_name)
+            .column_store(type_name)
             .and_then(|s| s.title_type_str())
             .unwrap_or("mixed");
 
@@ -690,20 +688,6 @@ pub fn save_subset_streaming_disk(
         _ => None,
     };
 
-    // Placeholder Arc handed to DiskGraph::add_node — it reads only
-    // `row_id` from the Columnar variant and drops the Arc. Real per-
-    // type Arcs are produced by writer.finalize() and installed into
-    // dest.column_stores after the loop.
-    let placeholder_arc: Option<Arc<ColumnStore>> = if writers.is_empty() {
-        None
-    } else {
-        Some(Arc::new(ColumnStore::new(
-            Arc::new(crate::graph::schema::TypeSchema::new()),
-            &HashMap::new(),
-            &source.interner,
-        )))
-    };
-
     // Sub-phase timers, gated on the same KGLITE_STREAMING_TIMING flag.
     // Each `Instant::now()` is ~50 ns on macOS so 4 calls × 17 M
     // iterations = ~3-4 s of measurement overhead on Wikidata when
@@ -729,7 +713,7 @@ pub fn save_subset_streaming_disk(
     let mut last_t_push_row = std::time::Duration::ZERO;
     let mut last_t_add_node = std::time::Duration::ZERO;
 
-    if let (Some(sdg), Some(placeholder_arc)) = (source_disk_for_nodes, placeholder_arc) {
+    if let Some(sdg) = source_disk_for_nodes {
         for old_id in 0..n_source_nodes as u32 {
             if !rank.contains(old_id) {
                 continue;
@@ -746,7 +730,7 @@ pub fn save_subset_streaming_disk(
             let type_key = InternedKey::from_u64(slot.node_type);
             let type_name = source.interner.resolve(type_key);
 
-            let src_store = match source.column_stores.get(type_name) {
+            let src_store = match source.column_store(type_name) {
                 Some(s) => s.as_ref(),
                 None => continue,
             };
@@ -827,10 +811,7 @@ pub fn save_subset_streaming_disk(
                 id: Value::Null,
                 title: Value::Null,
                 node_type: type_key,
-                properties: PropertyStorage::Columnar(ColumnarRow::new(
-                    Arc::clone(&placeholder_arc),
-                    dest_row_id,
-                )),
+                properties: PropertyStorage::Columnar(ColumnarRow::new(dest_row_id)),
             };
             crate::graph::storage::GraphWrite::add_node(&mut dest.graph, new_node_data);
             if let Some(t) = t3 {
@@ -907,8 +888,11 @@ pub fn save_subset_streaming_disk(
             .map_err(|e| format!("save_subset_streaming_disk: finalize {}: {}", type_name, e))?;
         arc_dest_stores.insert(type_name, store);
     }
-    dest.column_stores = arc_dest_stores;
-    dest.sync_disk_column_stores();
+    // Install straight onto the destination backend — the only owner.
+    dest.clear_column_stores();
+    for (type_name, store) in arc_dest_stores {
+        dest.install_column_store(&type_name, store);
+    }
     log_phase("writer finalize (close + mmap per type)", phase_finalize);
     let phase_edge_walk = Instant::now();
 

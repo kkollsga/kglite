@@ -1286,23 +1286,17 @@ impl NodeData {
     /// Get the node's ID. In mapped mode (Null sentinel), reads from ColumnStore.
     #[inline]
     pub fn id(&self) -> Cow<'_, Value> {
-        if matches!(self.id, Value::Null) {
-            // `columnar_id` keeps the store handle inside `graph::storage`.
-            if let Some(v) = self.properties.columnar_id() {
-                return Cow::Owned(v);
-            }
-        }
+        // Inline field only. A columnar node's canonical id lives in its
+        // type's store, which only the backend can reach — read it through
+        // `GraphRead::get_node_id` / `NodeView::id`, never off a bare
+        // `NodeData` (D1 Phase 3).
         Cow::Borrowed(&self.id)
     }
 
     /// Get the node's title. In mapped mode (Null sentinel), reads from ColumnStore.
     #[inline]
     pub fn title(&self) -> Cow<'_, Value> {
-        if matches!(self.title, Value::Null) {
-            if let Some(v) = self.properties.columnar_title() {
-                return Cow::Owned(v);
-            }
-        }
+        // Inline field only — see `id()`.
         Cow::Borrowed(&self.title)
     }
 
@@ -1310,43 +1304,6 @@ impl NodeData {
     #[inline]
     pub fn node_type_str<'a>(&self, interner: &'a StringInterner) -> &'a str {
         interner.resolve(self.node_type)
-    }
-
-    /// Insert or update a property, interning the key.
-    #[inline]
-    pub fn set_property(&mut self, key: &str, value: Value, interner: &mut StringInterner) {
-        let interned = interner.get_or_intern(key);
-        self.properties.insert(interned, value);
-    }
-
-    /// Remove a property by key. Returns the removed value if it existed.
-    #[inline]
-    pub fn remove_property(&mut self, key: &str) -> Option<Value> {
-        self.properties.remove(InternedKey::from_str(key))
-    }
-
-    /// Mark a property as cleared. Returns the prior value if it existed.
-    ///
-    /// Used by the Cypher `REMOVE` clause when the graph is disk-backed.
-    /// The disk write-path flush (`flush_node_mut_cache`) only writes
-    /// keys *present* in the staged property Map to the column store;
-    /// a bare `remove()` of the key from the staged Map leaves the
-    /// column store's original value untouched. By inserting
-    /// `Value::Null` for the key instead, the flush writes Null to
-    /// the column store, and reads return None — matching the
-    /// user-facing semantics of REMOVE (the property is no longer
-    /// observable on the node).
-    ///
-    /// For memory/mapped backends, `remove_property` works directly
-    /// against the in-place storage and this method isn't needed.
-    /// Disk callers detect via `graph.is_disk()` and choose the right
-    /// helper.
-    #[inline]
-    pub fn clear_property(&mut self, key: &str) -> Option<Value> {
-        let interned = InternedKey::from_str(key);
-        let prior = self.properties.remove(interned);
-        self.properties.insert(interned, Value::Null);
-        prior
     }
 }
 

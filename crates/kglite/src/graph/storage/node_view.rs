@@ -3,14 +3,13 @@
 //! # Why this exists
 //!
 //! A columnar node's properties live in a per-type
-//! [`ColumnStore`](crate::graph::storage::column_store::ColumnStore). Today
-//! *three* `Arc`s point at a type's store (see
-//! `dev-docs/plans/d1-column-store-ownership.md` §1.1): the node's own handle
-//! inside `PropertyStorage::Columnar`, `DirGraph.column_stores`, and
-//! `DiskGraph.column_stores`. Reading through the node's handle is therefore a
-//! read through *one particular replica*, not through the owner — which is how
-//! two shipped defects arose (an empty columnar `property_iter`, and a spill
-//! that reclaims nothing).
+//! [`ColumnStore`](crate::graph::storage::column_store::ColumnStore) that the
+//! **storage backend owns**. Before D1 three `Arc`s pointed at the same store —
+//! the node's own handle, a `DirGraph`-level map, and `DiskGraph`'s — so a read
+//! resolved *one particular replica* rather than the owner, which is how two
+//! shipped defects arose (an empty columnar `property_iter`, and a spill that
+//! reclaimed nothing). There is one owner now, and this type is how a caller
+//! reaches it.
 //!
 //! `NodeView` is the single place a node's property read resolves its store.
 //! Callers ask the storage backend for a view
@@ -60,34 +59,15 @@ pub struct NodeView<'a> {
 }
 
 impl<'a> NodeView<'a> {
-    /// Build a view from a node's own storage.
+    /// Pair a node with the store its backend owns.
     ///
-    /// This is the **only** place the store is resolved. Today it resolves
-    /// through the node-held `Arc`, which is what every caller did inline
-    /// before; when the backend owns the stores this body becomes a lookup in
-    /// the backend's map and no caller changes.
+    /// The only constructor. `store` comes from
+    /// [`GraphRead::column_store`](crate::graph::storage::GraphRead::column_store),
+    /// resolved by the node's type — a node itself knows only its `row_id`
+    /// (D1 Phase 3). A `None` store on a columnar node means the backend has
+    /// no store for that type, which reads as an empty property set.
     #[inline]
-    pub(crate) fn from_node_data(data: &'a NodeData) -> Self {
-        let store = match &data.properties {
-            PropertyStorage::Columnar(row) => {
-                // Test-only: when a type's store is poisoned, resolve through
-                // the *authoritative* replica rather than the node's handle —
-                // the D1 Phase-2 gate that tells a migrated caller apart from
-                // one still reading `NodeData` directly. Compiles to nothing
-                // outside the test harness.
-                #[cfg(test)]
-                if let Some(authoritative) =
-                    crate::graph::storage::poison::authoritative(data.node_type)
-                {
-                    return NodeView {
-                        data,
-                        store: Some((authoritative, row.row_id())),
-                    };
-                }
-                Some((row.store(), row.row_id()))
-            }
-            _ => None,
-        };
+    pub(crate) fn new(data: &'a NodeData, store: Option<(&'a ColumnStore, u32)>) -> Self {
         NodeView { data, store }
     }
 
@@ -349,12 +329,5 @@ impl std::fmt::Debug for NodeView<'_> {
             .field("node_type", &self.data.node_type)
             .field("columnar_row", &self.store.map(|(_, r)| r))
             .finish()
-    }
-}
-
-impl<'a> From<&'a NodeData> for NodeView<'a> {
-    #[inline]
-    fn from(data: &'a NodeData) -> Self {
-        NodeView::from_node_data(data)
     }
 }

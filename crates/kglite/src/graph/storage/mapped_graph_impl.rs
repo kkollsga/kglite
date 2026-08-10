@@ -23,6 +23,8 @@ impl Clone for MappedGraph {
         // plumbing.
         Self {
             inner: self.inner.clone(),
+            // Owned state, not a lazy index: one `Arc` bump per node type.
+            column_stores: self.column_stores.clone(),
             type_index: RwLock::new(HashMap::new()),
             property_index: RwLock::new(HashMap::new()),
             global_property_index: RwLock::new(HashMap::new()),
@@ -38,6 +40,7 @@ impl MappedGraph {
     pub fn new() -> Self {
         Self {
             inner: StableDiGraph::new(),
+            column_stores: HashMap::new(),
             type_index: RwLock::new(HashMap::new()),
             property_index: RwLock::new(HashMap::new()),
             global_property_index: RwLock::new(HashMap::new()),
@@ -77,6 +80,7 @@ impl MappedGraph {
     pub(crate) fn from_graph(inner: StableDiGraph<NodeData, EdgeData>) -> Self {
         Self {
             inner,
+            column_stores: HashMap::new(),
             type_index: RwLock::new(HashMap::new()),
             property_index: RwLock::new(HashMap::new()),
             global_property_index: RwLock::new(HashMap::new()),

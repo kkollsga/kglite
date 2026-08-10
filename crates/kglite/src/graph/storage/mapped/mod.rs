@@ -13,7 +13,8 @@
 pub mod column_store;
 pub mod mmap_vec;
 
-use crate::graph::schema::{EdgeData, NodeData};
+use crate::graph::schema::{EdgeData, InternedKey, NodeData};
+use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::undo::UndoJournal;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
@@ -32,6 +33,11 @@ use std::sync::{Arc, RwLock};
 #[derive(Debug, Default)]
 pub struct MappedGraph {
     pub(crate) inner: StableDiGraph<NodeData, EdgeData>,
+    /// **The column stores this backend owns** — see `MemoryGraph`'s field of
+    /// the same name. Mapped is the mode where this matters most: its nodes
+    /// carry *no* row copy of their properties at all, so the store map is
+    /// their only property storage.
+    pub(crate) column_stores: HashMap<InternedKey, Arc<ColumnStore>>,
     /// Lazy per-conn-type index. Populated on first typed-edge query;
     /// cleared on any edge mutation. Each entry is `Arc` so the outer
     /// `RwLock` can be released before callers iterate the block.
@@ -163,6 +169,7 @@ impl<'de> serde::Deserialize<'de> for MappedGraph {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         StableDiGraph::deserialize(de).map(|inner| MappedGraph {
             inner,
+            column_stores: HashMap::new(),
             type_index: RwLock::new(HashMap::new()),
             property_index: RwLock::new(HashMap::new()),
             global_property_index: RwLock::new(HashMap::new()),

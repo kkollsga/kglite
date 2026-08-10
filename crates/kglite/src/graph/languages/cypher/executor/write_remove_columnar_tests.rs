@@ -4,7 +4,7 @@
 //! ceiling.
 //!
 //! Each node of a columnar type holds its own `Arc<ColumnStore>` clone for
-//! cheap property reads, and `graph.column_stores` holds the master. Writing
+//! cheap property reads, and the backend holds the store. Writing
 //! through the node's handle calls `Arc::make_mut`, which **forks** it: the
 //! node sees the write and the master does not. `execute_set` avoids this by
 //! writing through the master and refreshing the per-node handles in one sweep
@@ -30,7 +30,7 @@ fn columnar_item() -> DirGraph {
     run(&mut graph, "CREATE (a:Item {id: 1, name: 'a', qty: 10})");
     graph.enable_columnar();
     assert!(
-        graph.column_stores.contains_key("Item"),
+        graph.column_store("Item").is_some(),
         "the fixture must own a master column store, or these tests are vacuous"
     );
     let idx = graph
@@ -48,8 +48,7 @@ fn columnar_item() -> DirGraph {
 
 fn master_qty(graph: &DirGraph) -> Option<Value> {
     graph
-        .column_stores
-        .get("Item")
+        .column_store("Item")
         .and_then(|m| m.get(0, InternedKey::from_str("qty")))
 }
 
@@ -111,7 +110,7 @@ fn remove_over_many_rows_clears_every_node() {
         "CREATE (:Item {id: 1, qty: 10}), (:Item {id: 2, qty: 20}), (:Item {id: 3, qty: 30})",
     );
     graph.enable_columnar();
-    assert!(graph.column_stores.contains_key("Item"));
+    assert!(graph.column_store("Item").is_some());
 
     run(&mut graph, "MATCH (a:Item) REMOVE a.qty");
 

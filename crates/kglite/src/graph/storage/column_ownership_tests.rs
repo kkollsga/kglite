@@ -4,11 +4,13 @@
 //!
 //! # What "divergence" means here
 //!
-//! A columnar type's `ColumnStore` is reachable through **two** `Arc`s on a
-//! memory/mapped graph: `DirGraph.column_stores[type]` (the master) and the
-//! handle inside every node's `PropertyStorage::Columnar`. Nothing in the type
-//! system stops those from drifting apart — `Arc::make_mut` on either side
-//! forks it — and the whole point of D1 is to delete one of them.
+//! Before D1 Phase 3 a columnar type's `ColumnStore` was reachable through
+//! **two** `Arc`s on a memory/mapped graph: a `DirGraph`-level master and the
+//! handle inside every node's `PropertyStorage::Columnar`. Nothing stopped
+//! those drifting apart — `Arc::make_mut` on either side forked — and deleting
+//! one of them was the whole point of the programme. The backend is the sole
+//! owner now; these tests keep asking the same questions of the surviving
+//! route.
 //!
 //! This module forks them deliberately and then asks every public read surface
 //! what it sees. Two classes of assertion live here:
@@ -32,7 +34,7 @@
 //!   `NodeData` property readers Phase 1 emptied are deleted. New code
 //!   *cannot* express a direct-route read; it fails to compile. The two named
 //!   escapes (`ColumnarRow::node_handle` / `::repoint`) are pinned site-for-site
-//!   by `the_node_handle_escape_has_exactly_the_phase_3_call_sites`, so the
+//!   by `no_code_reaches_a_node_held_column_store_handle`, so the
 //!   remaining direct-route set is an enumerated work list rather than a
 //!   guess.
 //! - **Runtime**, for what the compiler cannot see: a caller that *could* have
@@ -44,12 +46,12 @@
 //!
 //! # Why the divergence tests do not just assert "the master wins"
 //!
-//! On HEAD the node handle *is* the read route on memory/mapped
-//! (`storage/impls.rs`'s `get_node_property` → `node_weight(idx).properties`),
-//! and `refresh_columnar_node_handles` exists precisely to push master writes
-//! back onto the nodes at end-of-clause. Asserting master-authority now would
-//! be asserting Phase 3's end state, i.e. a permanently red test. The pins
-//! below record the current answer so the change is visible when it happens.
+//! Through Phases 1-2 the node handle *was* the read route on memory/mapped,
+//! and a re-point sweep pushed master writes back onto the nodes at
+//! end-of-clause; asserting master-authority then would have been a
+//! permanently red test, so the pins recorded the current answer instead.
+//! Phase 3 removed the handle, and those pins are inverted in place rather
+//! than deleted — each one names what it used to assert.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -59,8 +61,7 @@ use crate::graph::dir_graph::DirGraph;
 use crate::graph::schema::{InternedKey, PropertyStorage};
 use crate::graph::session::{execute_mut, execute_read, ExecuteOptions};
 use crate::graph::storage::column_store::ColumnStore;
-use crate::graph::storage::poison::{self, PoisonGuard};
-use crate::graph::storage::{GraphRead, GraphWrite};
+use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 
 const N: i64 = 4;
@@ -83,11 +84,10 @@ fn read_one(graph: &DirGraph, query: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// `N` `Item` nodes with two ordinary properties each, then `enable_columnar()`
-/// — the shape every graph takes the moment it is saved.
-fn seeded_columnar() -> DirGraph {
+/// `n` `Item` nodes with two ordinary properties each — **not** yet columnar.
+fn sized_rows(n: i64) -> DirGraph {
     let mut g = DirGraph::new();
-    let rows: Vec<Vec<Value>> = (1..=N)
+    let rows: Vec<Vec<Value>> = (1..=n)
         .map(|i| {
             vec![
                 Value::Int64(i),
@@ -116,16 +116,32 @@ fn seeded_columnar() -> DirGraph {
         None,
     )
     .unwrap();
+    g
+}
+
+/// A row-storage fixture, for tests that drive `enable_columnar` themselves.
+fn docs_fixture() -> DirGraph {
+    sized_rows(N)
+}
+
+/// `n` `Item` nodes after `enable_columnar()` — the shape every graph takes the
+/// moment it is saved.
+fn sized_columnar(n: i64) -> DirGraph {
+    let mut g = sized_rows(n);
     g.enable_columnar();
     assert!(
-        !g.column_stores.is_empty(),
+        g.is_columnar(),
         "fixture must own a master column store, or every arm below is vacuous"
     );
     assert!(
         node_row_id(&g, node_of(&g, 1)).is_some(),
-        "fixture nodes must hold a columnar handle, or divergence is unconstructible"
+        "fixture nodes must be columnar rows, or the ownership arms are vacuous"
     );
     g
+}
+
+fn seeded_columnar() -> DirGraph {
+    sized_columnar(N)
 }
 
 fn node_of(graph: &DirGraph, id: i64) -> NodeIndex {
@@ -144,12 +160,16 @@ fn node_row_id(graph: &DirGraph, idx: NodeIndex) -> Option<u32> {
 }
 
 /// Does node `idx` still share the master's `Arc`?
-fn node_shares_master(graph: &DirGraph, idx: NodeIndex) -> bool {
-    let master = graph.column_stores.get("Item").expect("master store");
-    match graph.graph.node_weight(idx).map(|n| &n.properties) {
-        Some(PropertyStorage::Columnar(row)) => Arc::ptr_eq(row.node_handle(), master),
-        _ => false,
-    }
+/// Is the type's master store owned by the backend alone?
+///
+/// The D1 Phase 3 successor to `node_shares_master`: there is no node-held
+/// handle to compare against any more, so the question that matters is whether
+/// anything at all shares the store — which is what decides whether the next
+/// write forks or mutates in place.
+fn master_is_uniquely_owned(graph: &DirGraph) -> bool {
+    graph
+        .column_store("Item")
+        .is_some_and(|master| Arc::strong_count(master) == 1)
 }
 
 /// Fork the master away from every node handle and write `value` into it.
@@ -159,15 +179,10 @@ fn node_shares_master(graph: &DirGraph, idx: NodeIndex) -> bool {
 fn diverge_master(graph: &mut DirGraph, idx: NodeIndex, key: &str, value: Value) -> InternedKey {
     let row_id = node_row_id(graph, idx).expect("columnar node");
     let ikey = graph.interner.get_or_intern(key);
-    let master = Arc::make_mut(graph.column_stores.get_mut("Item").expect("master store"));
+    let master = Arc::make_mut(graph.column_store_mut("Item").expect("master store"));
     assert!(
         master.set(row_id, ikey, &value, None),
         "master write must land"
-    );
-    assert!(
-        !node_shares_master(graph, idx),
-        "the master must have forked away from the node handles, or there is no divergence \
-         to observe and every assertion below is vacuous"
     );
     ikey
 }
@@ -297,37 +312,37 @@ fn all_public_reads_agree_under_master_node_divergence() {
 
 // ── 2. Which replica wins — pinned, inverted by Phase 3 ────────────────────
 
-/// Today the node handle wins: memory/mapped `get_node_property` reads
-/// `node_weight(idx).properties`, so a master-only write is invisible.
+/// **Inverted by D1 Phase 3** (was `today_the_node_handle_wins_over_the_master`).
 ///
-/// **Phase 3 inverts this.** When `PropertyStorage::Columnar` loses its `store`
-/// field and the backend owns the map, the expected value becomes `"MASTER"`.
-/// Getting `"MASTER"` here before then means ownership moved early — invert the
-/// assertion, do not delete it.
+/// Before Phase 3 a master-only write was invisible: every read resolved
+/// through the node's own `Arc`, and this test asserted it read the *stale*
+/// value with an instruction to flip when ownership moved. Ownership has moved.
+/// The backend's store is now the only store, so a write into it is what every
+/// read returns.
 #[test]
-fn today_the_node_handle_wins_over_the_master() {
+fn the_backend_store_is_the_only_read_route() {
     let mut graph = seeded_columnar();
     let idx = node_of(&graph, 1);
     let ikey = diverge_master(&mut graph, idx, "c0", Value::String("MASTER".into()));
     assert_eq!(
         graph.graph.get_node_property(idx, ikey),
-        Some(Value::String("c0-1".into())),
-        "the node handle is the read route on memory/mapped today; Phase 3 makes this MASTER"
+        Some(Value::String("MASTER".into())),
+        "a write into the backend's store must be what a read returns — there \
+         is no second replica left to shadow it"
     );
 }
 
 // ── 3. Writes reconverge the two replicas ──────────────────────────────────
 
 /// A columnar `SET` writes through the master and then re-points every node of
-/// the type (`refresh_columnar_node_handles`). After it, master and nodes must
-/// share one `Arc` again and every surface must read the new value — including
-/// the surfaces that had been reading a diverged replica.
+/// the type. Post-Phase-3 there are no node handles to re-point: the write goes
+/// into the store the backend owns, the journal releases its pre-image at
+/// commit, and every surface reads the new value.
 #[test]
-fn set_reconverges_master_and_node_handles() {
+fn set_leaves_the_master_uniquely_owned() {
     let mut graph = seeded_columnar();
     let idx = node_of(&graph, 1);
     let ikey = diverge_master(&mut graph, idx, "c0", Value::String("MASTER".into()));
-    assert!(!node_shares_master(&graph, idx));
 
     run(
         &mut graph,
@@ -335,8 +350,9 @@ fn set_reconverges_master_and_node_handles() {
     );
 
     assert!(
-        node_shares_master(&graph, idx),
-        "a columnar SET must leave the node pointing at the master again"
+        master_is_uniquely_owned(&graph),
+        "a committed columnar SET must leave the master uniquely owned — the \
+         journal's pre-image is released at commit"
     );
     let want = Value::String("WRITTEN".into());
     for (surface, got) in all_read_surfaces(&mut graph, idx, ikey) {
@@ -347,7 +363,7 @@ fn set_reconverges_master_and_node_handles() {
 /// The same for `REMOVE`, which takes a different master path
 /// (`Arc::make_mut(master).set(.., Null, ..)`).
 #[test]
-fn remove_reconverges_master_and_node_handles() {
+fn remove_leaves_the_master_uniquely_owned() {
     let mut graph = seeded_columnar();
     let idx = node_of(&graph, 1);
     let ikey = diverge_master(&mut graph, idx, "c0", Value::String("MASTER".into()));
@@ -355,8 +371,8 @@ fn remove_reconverges_master_and_node_handles() {
     run(&mut graph, "MATCH (n:Item) WHERE n.id = 1 REMOVE n.c0");
 
     assert!(
-        node_shares_master(&graph, idx),
-        "a columnar REMOVE must leave the node pointing at the master again"
+        master_is_uniquely_owned(&graph),
+        "a committed columnar REMOVE must leave the master uniquely owned"
     );
     for (surface, got) in all_read_surfaces(&mut graph, idx, ikey) {
         assert_eq!(got, Value::Null, "{surface} still sees a removed property");
@@ -456,66 +472,58 @@ fn save_and_reload_round_trips_the_observed_value() {
 
 // ── 4. Defect 2 — `maybe_spill_columns` reclaims nothing ───────────────────
 
-/// **D1 defect 2, pinned in its current (wrong) state.**
+/// **D1 defect 2 — CLOSED, and inverted here** (was
+/// `spill_forks_the_master_and_reclaims_nothing_today`).
 ///
-/// `maybe_spill_columns` (`dir_graph/mod.rs`) calls
-/// `Arc::make_mut(self.column_stores.get_mut(..))` and then
-/// `materialize_to_files`. Every node of the type holds a strong handle, so
-/// `make_mut` **forks**: the master becomes the file-backed copy while all N
-/// nodes keep the pre-spill in-heap store alive, and — unlike the SET path —
-/// there is no refresh sweep here to re-point them. Reads stay correct; the
-/// memory the spill exists to reclaim is not reclaimed.
+/// `maybe_spill_columns` calls `Arc::make_mut` on the type's store and then
+/// `materialize_to_files`. Before Phase 3 every node held a strong handle, so
+/// `make_mut` *forked*: the master became the file-backed copy while all N
+/// nodes kept the pre-spill in-heap store alive, and — unlike the SET path —
+/// no sweep re-pointed them. Reads stayed correct; the memory the spill exists
+/// to reclaim was never reclaimed.
 ///
-/// A true red for this needs Phase 3's end state, because the *only* way to
-/// make the fork not happen is for the nodes to stop holding handles — which is
-/// exactly what Phase 3 does and what Phase 1 is forbidden from doing. So this
-/// asserts today's wrong behaviour, exactly:
-///
-/// - the master is mapped (spilled) — the spill itself ran;
-/// - the node still points at a **different**, **unmapped** store — nothing was
-///   reclaimed.
-///
-/// **Phase 3 inverts this**: assert `node_shares_master` and that the node's
-/// store is mapped, i.e. `is_mapped()` on both. Getting there early means the
-/// defect was fixed — invert the assertion, do not delete it.
+/// With the backend the sole owner the store is uniquely owned, `make_mut`
+/// mutates in place, and the spilled store *is* the one every read resolves.
+/// The two assertions the old test made are inverted verbatim.
 #[test]
-fn spill_forks_the_master_and_reclaims_nothing_today() {
+fn spill_reclaims_the_heap_it_materialises() {
     let mut graph = seeded_columnar();
-    let idx = node_of(&graph, 1);
     let dir = tempfile::tempdir().unwrap();
     graph.spill_dir = Some(dir.path().to_path_buf());
     // Any limit below the store's heap footprint forces a spill.
     graph.memory_limit = Some(0);
 
     assert!(
-        node_shares_master(&graph, idx),
-        "precondition: nodes share the master before the spill"
+        master_is_uniquely_owned(&graph),
+        "precondition: nothing but the backend owns the store before the spill"
     );
+    let heap_before = graph
+        .column_store("Item")
+        .expect("master store")
+        .heap_bytes();
+    assert!(heap_before > 0, "precondition: the store holds heap data");
 
     graph.maybe_spill_columns();
 
-    let master = graph.column_stores.get("Item").expect("master store");
+    let master = graph.column_store("Item").expect("master store");
     assert!(
         master.is_mapped(),
         "the spill must have materialised the master to files, or this test proves nothing"
     );
+    // INVERTED (was: the node keeps an unmapped pre-spill copy alive).
     assert!(
-        !node_shares_master(&graph, idx),
-        "TODAY: make_mut forks the master away from the node handles. If this fails, \
-         the spill now re-points the nodes — invert this test (assert the node shares \
-         the mapped master) and close D1 defect 2."
+        master.heap_bytes() < heap_before,
+        "the spill must reclaim heap: got {} bytes, was {heap_before}. Before D1 \
+         Phase 3 `make_mut` forked and this number never moved.",
+        master.heap_bytes()
     );
-    let node_store_is_mapped = match graph.graph.node_weight(idx).map(|n| &n.properties) {
-        Some(PropertyStorage::Columnar(row)) => row.node_handle().is_mapped(),
-        _ => panic!("node must still be columnar"),
-    };
     assert!(
-        !node_store_is_mapped,
-        "TODAY: every node keeps the pre-spill in-heap store alive, so the spill reclaims \
-         no memory. If this fails, the reclaim works — invert and close D1 defect 2."
+        master_is_uniquely_owned(&graph),
+        "and the spilled store must still be the uniquely-owned one — a fork \
+         here would mean the reclaimed copy is not what reads resolve"
     );
 
-    // The user-visible contract is unaffected either way: reads still resolve.
+    // The user-visible contract is unchanged: reads still resolve.
     assert_eq!(
         read_one(&graph, "MATCH (n:Item) WHERE n.id = 1 RETURN n.c0"),
         Value::String("c0-1".into()),
@@ -596,55 +604,40 @@ fn property_ndv_counts_columnar_rows() {
 
 // ── The poison primitive ──────────────────────────────────────────────────
 
-/// Make the node-held handle and the backend's store disagree, the way D1
-/// Phase 3 will, and install the backend's store as the authoritative route.
+/// Install a **different** store for `node_type`, with `edit` applied.
 ///
-/// Three steps, mirroring `storage/poison.rs`:
-/// 1. every node of `node_type` is re-pointed at a **stale** private clone;
-/// 2. `edit` writes the truth into the type's **master** store only;
-/// 3. the post-write master becomes the authoritative read route.
+/// # What this proves after D1 Phase 3
 ///
-/// A caller that reads through `NodeView` / `GraphRead` sees the truth. One
-/// that reads a `NodeData` it already holds sees the stale replica. The guard
-/// restores normal resolution on drop — bind it, never `let _ = …`.
+/// In Phase 2 the poison had to fabricate a disagreement between two replicas —
+/// a stale copy on every node and the truth in the master — because both routes
+/// pointed at the same object and a gate that cannot tell them apart is not a
+/// gate. Phase 3 deleted the node-held replica outright, so the disagreement is
+/// no longer expressible: `column_store(type)` *is* the read route, and the
+/// compile-time gate (`ColumnarRow` carries a row id and nothing else) is what
+/// now rules out the class the thread-local hook used to catch.
+///
+/// What survives here is still worth having: a caller that captured an `Arc` of
+/// the store earlier — a cache, a snapshot taken across a write — keeps reading
+/// the old object, and every named class test below re-reads through the
+/// backend after this swap. The mechanism got simpler because the ownership
+/// got simpler.
 fn poison_row(
     graph: &mut DirGraph,
     node_type: &str,
     edit: impl FnOnce(&mut ColumnStore),
 ) -> PoisonGuard {
-    let master_arc = Arc::clone(
-        graph
-            .column_stores
-            .get(node_type)
-            .expect("type must be columnar, or the poison is a no-op"),
-    );
-    let stale = Arc::new((*master_arc).clone());
-
-    let indices: Vec<NodeIndex> = graph
-        .type_indices
-        .get(node_type)
-        .map(|set| set.iter().collect())
-        .unwrap_or_default();
-    assert!(
-        !indices.is_empty(),
-        "no nodes of type {node_type} to poison"
-    );
-    for idx in indices {
-        if let Some(node) = GraphWrite::node_weight_mut_silent(&mut graph.graph, idx) {
-            if let PropertyStorage::Columnar(row) = &mut node.properties {
-                row.repoint(Arc::clone(&stale));
-            }
-        }
-    }
-
-    let master = Arc::make_mut(graph.column_stores.get_mut(node_type).unwrap());
-    edit(master);
-
-    // Leaked because `NodeView` hands out `&ColumnStore` borrows; one snapshot
-    // per poison call is bounded by the number of tests here.
-    let leaked: &'static ColumnStore = Box::leak(Box::new(master.clone()));
-    poison::install(InternedKey::from_str(node_type), leaked)
+    let mut replacement: ColumnStore = (**graph
+        .column_store(node_type)
+        .expect("type must be columnar, or the poison is a no-op"))
+    .clone();
+    edit(&mut replacement);
+    graph.install_column_store(node_type, Arc::new(replacement));
+    PoisonGuard
 }
+
+/// Kept as a unit so the call sites read unchanged across Phase 2 → 3; the
+/// swap is permanent for the graph under test, which is built per test.
+struct PoisonGuard;
 
 /// Poison one row's property column.
 fn poison_property(
@@ -658,7 +651,7 @@ fn poison_property(
     poison_row(graph, node_type, move |store| {
         assert!(
             store.set(row_id, ikey, &value, None),
-            "master write must land, or the poison proves nothing"
+            "poison write must land, or the swap proves nothing"
         );
     })
 }
@@ -668,19 +661,9 @@ fn poison_title(graph: &mut DirGraph, node_type: &str, row_id: u32, value: Value
     poison_row(graph, node_type, move |store| {
         assert!(
             store.set_title(row_id, &value),
-            "master title write must land, or the poison proves nothing"
+            "poison title write must land, or the swap proves nothing"
         );
     })
-}
-
-/// The value the node's **own** handle still reports — the stale replica.
-fn stale_node_route(graph: &DirGraph, idx: NodeIndex, key: &str) -> Option<Value> {
-    match graph.graph.node_weight(idx).map(|n| &n.properties) {
-        Some(PropertyStorage::Columnar(row)) => row
-            .node_handle()
-            .get(row.row_id(), InternedKey::from_str(key)),
-        _ => None,
-    }
 }
 
 /// Fixture: a saved graph with row 0 (`id: 1`) poisoned so its authoritative
@@ -699,47 +682,40 @@ fn poisoned_fixture() -> (DirGraph, NodeIndex, PoisonGuard) {
     (graph, idx, guard)
 }
 
-/// **Non-vacuity.** The poison must actually split the two routes; if it did
-/// not, every class test below would pass by accident.
+/// **Non-vacuity for the class tests below.** The swap must install a genuinely
+/// different allocation and the read route must resolve it — otherwise every
+/// named test below would pass by accident.
 #[test]
-fn poison_makes_the_node_route_and_the_authoritative_route_disagree() {
-    let (graph, idx, _guard) = poisoned_fixture();
+fn poison_installs_a_distinct_store_that_reads_resolve() {
+    let mut graph = seeded_columnar();
+    let idx = node_of(&graph, 1);
+    let before = Arc::as_ptr(graph.column_store("Item").expect("master"));
+
+    let row_id = node_row_id(&graph, idx).unwrap();
+    let _guard = poison_property(
+        &mut graph,
+        "Item",
+        row_id,
+        "c0",
+        Value::String("TRUTH".into()),
+    );
+
+    let after = Arc::as_ptr(graph.column_store("Item").expect("master"));
+    assert!(
+        !std::ptr::eq(before, after),
+        "the poison must install a distinct allocation, or a caller holding the \
+         old one would be indistinguishable from one reading the new"
+    );
     assert_eq!(
         graph.node_view(idx).unwrap().get_property_value("c0"),
         Some(Value::String("TRUTH".into())),
-        "the accessor route must see the authoritative value"
+        "and the read route must resolve the newly installed store"
     );
     assert_eq!(
-        stale_node_route(&graph, idx, "c0"),
-        Some(Value::String("c0-1".into())),
-        "the node's own handle must still hold the stale replica — without this \
-         the poison is a no-op and every class test below is vacuous"
-    );
-}
-
-/// The guard must restore normal resolution, or poison would leak across tests.
-#[test]
-fn dropping_the_poison_guard_restores_node_handle_resolution() {
-    let mut graph = seeded_columnar();
-    let idx = node_of(&graph, 1);
-    let row_id = node_row_id(&graph, idx).unwrap();
-    {
-        let _guard = poison_property(
-            &mut graph,
-            "Item",
-            row_id,
-            "c0",
-            Value::String("TRUTH".into()),
-        );
-        assert_eq!(
-            graph.node_view(idx).unwrap().get_property_value("c0"),
-            Some(Value::String("TRUTH".into()))
-        );
-    }
-    assert_eq!(
-        graph.node_view(idx).unwrap().get_property_value("c0"),
-        Some(Value::String("c0-1".into())),
-        "resolution must fall back to the node handle once the guard is dropped"
+        node_row_id(&graph, idx),
+        Some(row_id),
+        "the node's row identity must be untouched — the swap is of the store, \
+         not of the node"
     );
 }
 
@@ -961,32 +937,22 @@ fn r14_resolve_noderefs_reads_the_authoritative_store() {
 
 // ── The compile-time gate's enumerated escape list ────────────────────────
 
-/// The **only** two ways to reach a node's own store handle outside
-/// `graph::storage`, and the exact set of call sites, file by file.
+/// **D1 Phase 3 landed: the escapes are gone.**
 ///
-/// This *is* the D1 Phase-3 work list for the node-held handle: when the
-/// `store` field is deleted, these are the sites that must change, and there
-/// are no others because nothing else can express the read.
-const NODE_HANDLE_ESCAPE_SITES: &[(&str, usize)] = &[
-    // W8 — `enable_columnar` drift check + rebuild, `disable_columnar` restore.
-    ("graph/dir_graph/mod.rs", 5),
-    // W10 — the rollback restore arm re-points nodes at the pre-statement store.
-    ("graph/dir_graph/rollback.rs", 1),
-    // W5 — the end-of-clause refresh sweep.
-    ("graph/languages/cypher/executor/columnar_write.rs", 1),
-    // Tests that are *about* handle identity, and must be rewritten (not
-    // deleted) when the handle goes — see the plan's Phase 3 step 5.
-    ("graph/dir_graph/rollback_tests.rs", 2),
-    ("graph/storage/column_ownership_tests.rs", 4),
-];
+/// `ColumnarRow::node_handle` and `::repoint` were the only two ways to reach a
+/// node's own `Arc<ColumnStore>` outside `graph::storage`, and Phase 2 pinned
+/// their call sites file-by-file as the Phase-3 work list. Phase 3 deleted the
+/// field they exposed, so both methods and every one of their 13 call sites are
+/// gone — the expected set is empty.
+///
+/// The test is kept rather than deleted because an empty expectation is the
+/// strongest form of the gate: re-introducing either name anywhere in the crate
+/// fails it. If a future phase legitimately needs a node-held handle again, it
+/// has to say so here.
+const NODE_HANDLE_ESCAPE_SITES: &[(&str, usize)] = &[];
 
-/// Pins [`NODE_HANDLE_ESCAPE_SITES`] against the source tree.
-///
-/// Fails on a **new** call site (someone re-opened the direct route) and on a
-/// **removed** one (Phase 3 landed, or coverage was lost) — so it cannot rot in
-/// either direction. Update the table in the same change that moves a site.
 #[test]
-fn the_node_handle_escape_has_exactly_the_phase_3_call_sites() {
+fn no_code_reaches_a_node_held_column_store_handle() {
     use std::collections::BTreeMap;
 
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -1031,11 +997,111 @@ fn the_node_handle_escape_has_exactly_the_phase_3_call_sites() {
 
     assert_eq!(
         found, expected,
-        "\nThe node-held column-store handle is reachable from a set of call \
-         sites that no longer matches the D1 Phase-3 work list.\n\
-         - A NEW entry means the direct route was re-opened: read through \
-           `NodeView` / `GraphRead` instead.\n\
-         - A MISSING or smaller entry means a Phase-3 site was removed: update \
-           `NODE_HANDLE_ESCAPE_SITES` in the same change.\n"
+        "\nA node-held column-store handle is reachable again.\n\
+         D1 Phase 3 made the storage backend the sole owner: a node carries a \
+         row id, and the store is resolved by `GraphRead::column_store`. Read \
+         through `NodeView` / `GraphRead` and write through \
+         `GraphWrite::set_node_property` instead of re-introducing a per-node \
+         handle.\n"
     );
+}
+
+// ── The save fast path (D1 risk 1) ────────────────────────────────────────
+
+/// A second `save()` on an unmodified graph must **not** rebuild the stores.
+///
+/// `enable_columnar`'s idempotence guard used to detect a node-private fork by
+/// `Arc::ptr_eq`; Phase 3 deleted that check because the fork is no longer
+/// expressible. The plan flagged the replacement reasoning (inline-title
+/// divergence + orphaned rows) as *believed* sufficient — risk 1 — so this
+/// counts rebuilds instead of trusting it. Losing the fast path costs a full
+/// O(N) rebuild on every save (~257 s at wiki100m).
+#[test]
+fn a_second_save_of_an_unmodified_graph_skips_the_rebuild() {
+    use crate::graph::dir_graph::COLUMNAR_REBUILDS;
+    let rebuilds = || COLUMNAR_REBUILDS.with(|c| c.get());
+
+    let mut graph = docs_fixture();
+
+    let before = rebuilds();
+    graph.enable_columnar();
+    let first = rebuilds();
+    assert_eq!(
+        first - before,
+        1,
+        "the first enable_columnar must rebuild, or this test cannot tell a \
+         skipped rebuild from a graph that was never columnar"
+    );
+
+    graph.enable_columnar();
+    assert_eq!(
+        rebuilds(),
+        first,
+        "a second save of an unmodified graph must take the fast path; a \
+         rebuild here means the idempotence guard regressed and every save \
+         pays O(N)"
+    );
+
+    // And the guard must still *fire* when it should — otherwise "no rebuild"
+    // would be trivially true and the assertion above would be vacuous.
+    run(
+        &mut graph,
+        "MATCH (n:Item) WHERE n.id = 1 SET n.title = 'moved'",
+    );
+    graph.enable_columnar();
+    assert_eq!(
+        rebuilds(),
+        first + 1,
+        "an inline-title write must still be detected as drift and rebuild"
+    );
+}
+
+/// A one-row `SET` on a saved type must touch one row, whatever N is.
+///
+/// The structural half of the perf claim (the timing half waits for Phase 5's
+/// release measurement): the deleted sweep was O(N_type) per clause, so the
+/// observable is that a graph of 200 nodes and a graph of 20 nodes both leave
+/// every *other* row untouched and the master uniquely owned.
+#[test]
+fn a_one_row_columnar_set_leaves_every_other_row_untouched() {
+    for n in [20i64, 200] {
+        let mut graph = sized_columnar(n);
+        let before: Vec<Option<Value>> = (0..n)
+            .map(|i| {
+                graph
+                    .column_store("Item")
+                    .unwrap()
+                    .get(i as u32, InternedKey::from_str("c0"))
+            })
+            .collect();
+
+        run(&mut graph, "MATCH (n:Item) WHERE n.id = 1 SET n.c0 = 'ONE'");
+
+        let after: Vec<Option<Value>> = (0..n)
+            .map(|i| {
+                graph
+                    .column_store("Item")
+                    .unwrap()
+                    .get(i as u32, InternedKey::from_str("c0"))
+            })
+            .collect();
+
+        let changed: Vec<usize> = before
+            .iter()
+            .zip(&after)
+            .enumerate()
+            .filter(|(_, (b, a))| b != a)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            changed.len(),
+            1,
+            "N={n}: a one-row SET must change exactly one row, changed {changed:?}"
+        );
+        assert!(
+            master_is_uniquely_owned(&graph),
+            "N={n}: and must leave the master uniquely owned, so the next write \
+             mutates in place rather than copying the store"
+        );
+    }
 }

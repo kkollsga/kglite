@@ -12,8 +12,25 @@ use crate::graph::schema::{
     SaveMetadata, SchemaDefinition, SpatialConfig, StringInterner, TemporalConfig, TypeIdIndex,
     TypeSchema,
 };
+use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::disk::id_index::IdIndexStore;
 use crate::graph::storage::disk::type_index::TypeIndexStore;
+
+// Counts full `enable_columnar` rebuilds, so the save fast path can be pinned
+// by measurement rather than by argument (D1 risk 1). Test-only.
+//
+// Thread-local: `cargo test` runs tests in parallel, and a global counter would
+// make the rebuild count depend on what else happened to be running.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static COLUMNAR_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+#[inline]
+fn note_columnar_rebuild() {
+    COLUMNAR_REBUILDS.with(|c| c.set(c.get() + 1));
+}
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
@@ -251,11 +268,6 @@ pub struct DirGraph {
     /// Edges of this type are auto-filtered by validity period in traverse().
     #[serde(default)]
     pub temporal_edge_configs: HashMap<String, Vec<TemporalConfig>>,
-    /// Per-type columnar property stores. When populated, nodes of these types
-    /// use `PropertyStorage::Columnar` instead of `Compact`.
-    /// Not persisted — rebuilt on load if columnar mode is enabled.
-    #[serde(skip)]
-    pub column_stores: HashMap<String, Arc<crate::graph::storage::column_store::ColumnStore>>,
     /// Memory limit for columnar heap storage. If Some(n), `enable_columnar()`
     /// will spill columns to temp files when total heap_bytes exceeds n.
     #[serde(skip)]
@@ -556,7 +568,6 @@ impl DirGraph {
             timeseries_store: HashMap::new(),
             temporal_node_configs: HashMap::new(),
             temporal_edge_configs: HashMap::new(),
-            column_stores: HashMap::new(),
             memory_limit: None,
             spill_dir: None,
             temp_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -614,7 +625,6 @@ impl DirGraph {
             timeseries_store: HashMap::new(),
             temporal_node_configs: HashMap::new(),
             temporal_edge_configs: HashMap::new(),
-            column_stores: HashMap::new(),
             memory_limit: None,
             spill_dir: None,
             temp_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -696,7 +706,9 @@ impl DirGraph {
 
         // Disk + column store: read ids directly from mmap'd columns.
         let used_columns = if let GraphBackend::Disk(ref dg) = self.graph {
-            if let Some(store) = self.column_stores.get(node_type) {
+            if let Some(store) =
+                GraphRead::column_store(dg.as_ref(), InternedKey::from_str(node_type))
+            {
                 for node_idx in node_indices.iter() {
                     let slot = dg.node_slot(node_idx.index());
                     if slot.is_alive() {
@@ -1051,6 +1063,64 @@ impl DirGraph {
         self.graph.node_weight(index)
     }
 
+    // ── Column stores: DirGraph is the access point, the backend is the owner ──
+    //
+    // D1 Phase 3 moved the per-type `ColumnStore` map onto the storage backend
+    // (`MemoryGraph` / `MappedGraph` / `DiskGraph` all carry one now) and
+    // deleted `DirGraph.column_stores` along with both halves of the
+    // DirGraph↔DiskGraph mirror that used to keep two copies in step. DirGraph
+    // keeps every lifecycle entry point — `enable_columnar`, `save`, spill,
+    // vacuum — and reaches the stores through these delegates, which translate
+    // the type *name* callers use into the `InternedKey` the backend keys by.
+
+    /// The store for `node_type`, if that type is columnar.
+    #[inline]
+    pub fn column_store(&self, node_type: &str) -> Option<&Arc<ColumnStore>> {
+        self.graph.column_store(InternedKey::from_str(node_type))
+    }
+
+    /// Mutable access to `node_type`'s store, for a copy-on-write master write.
+    #[inline]
+    pub fn column_store_mut(&mut self, node_type: &str) -> Option<&mut Arc<ColumnStore>> {
+        self.graph
+            .column_store_mut(InternedKey::from_str(node_type))
+    }
+
+    /// Install (or replace) `node_type`'s store.
+    #[inline]
+    pub fn install_column_store(&mut self, node_type: &str, store: Arc<ColumnStore>) {
+        self.graph
+            .install_column_store(InternedKey::from_str(node_type), store);
+    }
+
+    /// Remove and return `node_type`'s store.
+    #[inline]
+    pub fn take_column_store(&mut self, node_type: &str) -> Option<Arc<ColumnStore>> {
+        self.graph
+            .take_column_store(InternedKey::from_str(node_type))
+    }
+
+    /// Drop every column store this graph owns.
+    #[inline]
+    pub fn clear_column_stores(&mut self) {
+        self.graph.clear_column_stores();
+    }
+
+    /// Every `(type name, store)` pair, for the save / spill / vacuum paths
+    /// that work in type names. O(types).
+    pub fn column_stores_by_name(&self) -> Vec<(&str, &Arc<ColumnStore>)> {
+        self.graph
+            .column_stores_iter()
+            .filter_map(|(key, store)| self.interner.try_resolve(key).map(|name| (name, store)))
+            .collect()
+    }
+
+    /// Number of types with a column store.
+    #[inline]
+    pub fn column_store_count(&self) -> usize {
+        self.graph.column_stores_iter().count()
+    }
+
     /// The authoritative read route for a node's properties — delegates to the
     /// storage backend, which resolves the node's column store.
     ///
@@ -1321,7 +1391,7 @@ impl DirGraph {
     /// Idempotent fast path: returns early when (a) every live node
     /// is already in `PropertyStorage::Columnar`, AND (b) every
     /// node's `Arc<ColumnStore>` is identical to the one in
-    /// `graph.column_stores` for its type. Without this guard, a
+    /// the backend's store for its type. Without this guard, a
     /// second `g.save()` after a successful first save runs the
     /// full `for node in graph` rebuild loop against already-
     /// Columnar properties — at wiki100m that's ~257 s
@@ -1330,36 +1400,49 @@ impl DirGraph {
     /// (linked via `build_columns_direct`'s second-pass), so the
     /// same fast-path applies. 0.8.16.
     ///
-    /// The Arc-pointer check is required because
-    /// `PropertyStorage::insert` for a Columnar variant does
-    /// `Arc::make_mut(store)` which forks the Arc when shared; the
-    /// node's local Arc gets the update, `graph.column_stores`
-    /// keeps the old. Without detecting that fork, an
-    /// `add_nodes(conflict_handling="update")` followed by
-    /// `g.save()` would silently drop the new properties. Walking
-    /// every node short-circuits on the first non-columnar OR
-    /// forked node, so the cost is O(N × cheap-match) at worst.
+    /// # Why the fast path is still sound without the Arc-identity check
+    ///
+    /// Before D1 Phase 3 this guard compared each node's own store `Arc` with
+    /// the graph's by pointer, because `PropertyStorage::insert` on a columnar
+    /// node did `Arc::make_mut` and forked the node away from the master —
+    /// an `add_nodes(conflict_handling="update")` followed by `save()` would
+    /// otherwise silently drop the new properties.
+    ///
+    /// That fork is now **inexpressible**: a node holds a row id, not a handle,
+    /// and every columnar write goes through
+    /// [`GraphWrite::set_node_property`](crate::graph::storage::GraphWrite::set_node_property),
+    /// which mutates the one store the backend owns. There is no second replica
+    /// to diverge, so the pointer comparison could only ever return "same" and
+    /// has been deleted.
+    ///
+    /// The two checks that remain are the ones detecting state the store cannot
+    /// see at all, and both are still required:
+    ///
+    /// - **inline-title divergence** — an in-place title write sets the node's
+    ///   inline `title` field, not the store's `__title__` column;
+    /// - **orphaned rows** — `DETACH DELETE` removes the node but leaves its
+    ///   row, so `sum(row_count) != node_count`.
+    ///
+    /// Losing this fast path would cost a full O(N) rebuild on every save
+    /// (~257 s at wiki100m), so it is pinned by
+    /// `column_ownership_tests::a_second_save_of_an_unmodified_graph_skips_the_rebuild`,
+    /// which counts rebuilds rather than trusting the reasoning above.
     pub fn enable_columnar(&mut self) {
-        if !self.column_stores.is_empty() && self.is_columnar() {
+        if self.column_store_count() > 0 && self.is_columnar() {
             // Arena guard: node_weight materializes on the disk backend
             // (protocol in disk/graph.rs); the whole drift check is
             // read-only and the guard drops at the end of this block.
             let _guard = self.graph.begin_query();
-            let interner = &self.interner;
-            let column_stores = &self.column_stores;
+            let backend = &self.graph;
             let any_drift = self
                 .graph
                 .node_indices()
                 .filter_map(|idx| self.graph.node_weight(idx))
                 .any(|n| match &n.properties {
                     PropertyStorage::Columnar(row) => {
-                        let (store, row_id) = (row.node_handle(), &row.row_id());
-                        let type_str = n.node_type_str(interner);
-                        match column_stores.get(type_str) {
+                        let row_id = row.row_id();
+                        match backend.column_store(n.node_type) {
                             Some(graph_store) => {
-                                if !Arc::ptr_eq(store, graph_store) {
-                                    return true;
-                                }
                                 // An in-place title write (Cypher `SET n.title`,
                                 // add_nodes update/replace, connection titles)
                                 // sets the inline `node.title` but not the
@@ -1370,7 +1453,7 @@ impl DirGraph {
                                 // petekSuite bug 2). A consolidated/loaded node
                                 // has `node.title == Null`, so no false drift.
                                 !matches!(n.title, Value::Null)
-                                    && graph_store.get_title(*row_id).as_ref() != Some(&n.title)
+                                    && graph_store.get_title(row_id).as_ref() != Some(&n.title)
                             }
                             None => true,
                         }
@@ -1389,15 +1472,27 @@ impl DirGraph {
             // so the clean fast-path stays cheap. Force a rebuild from live
             // nodes when they diverge.
             let total_store_rows: u64 = self
-                .column_stores
-                .values()
-                .map(|s| s.row_count() as u64)
+                .graph
+                .column_stores_iter()
+                .map(|(_, s)| s.row_count() as u64)
                 .sum();
             let orphaned_rows = total_store_rows != self.graph.node_count() as u64;
             if !any_drift && !orphaned_rows {
                 return;
             }
         }
+        self.rebuild_column_stores();
+    }
+
+    /// The O(N) half of [`DirGraph::enable_columnar`]: rebuild every type's
+    /// store from live nodes and re-point the nodes at their rows.
+    ///
+    /// Split out so the idempotence guard above reads as the decision it is,
+    /// and so the rebuild has a single entry point to count (D1 risk 1).
+    fn rebuild_column_stores(&mut self) {
+        #[cfg(test)]
+        note_columnar_rebuild();
+        {}
         use crate::graph::storage::column_store::ColumnStore;
 
         // Ensure properties are compacted first
@@ -1459,16 +1554,14 @@ impl DirGraph {
                     // the old column store. For Compact/Map nodes, use node.id/title.
                     // Always push id and title. For Columnar nodes, try old store first,
                     // fall back to node fields. For Compact/Map, use node fields directly.
-                    let id_val = if let PropertyStorage::Columnar(row) = &node.properties {
-                        let (old_store, old_row) = (row.node_handle(), &row.row_id());
-                        old_store
-                            .get_id(*old_row)
-                            .unwrap_or_else(|| node.id.clone())
+                    let old_row = node.properties.columnar_row_id();
+                    let old_store = old_row.and(self.graph.column_store(node.node_type));
+                    let id_val = if let (Some(old_store), Some(old_row)) = (old_store, old_row) {
+                        old_store.get_id(old_row).unwrap_or_else(|| node.id.clone())
                     } else {
                         node.id.clone()
                     };
-                    let title_val = if let PropertyStorage::Columnar(row) = &node.properties {
-                        let (old_store, old_row) = (row.node_handle(), &row.row_id());
+                    let title_val = if let (Some(old_store), Some(old_row)) = (old_store, old_row) {
                         // Prefer a non-null inline `node.title` override. Every
                         // in-place title write (Cypher `SET n.title`, add_nodes
                         // update/replace, connection-title updates) sets the
@@ -1483,7 +1576,7 @@ impl DirGraph {
                             node.title.clone()
                         } else {
                             old_store
-                                .get_title(*old_row)
+                                .get_title(old_row)
                                 .unwrap_or_else(|| node.title.clone())
                         }
                     } else {
@@ -1512,9 +1605,11 @@ impl DirGraph {
                         PropertyStorage::Map(map) => {
                             map.iter().map(|(&k, v)| (k, v.clone())).collect()
                         }
-                        PropertyStorage::Columnar(row) => {
-                            row.node_handle().row_properties(row.row_id())
-                        }
+                        PropertyStorage::Columnar(row) => self
+                            .graph
+                            .column_store(node.node_type)
+                            .map(|store| store.row_properties(row.row_id()))
+                            .unwrap_or_default(),
                     };
 
                     let row_id = store.push_row(&pairs);
@@ -1569,25 +1664,32 @@ impl DirGraph {
             }
         }
 
-        // Wrap stores in Arc
+        self.install_rebuilt_column_stores(stores, &row_ids);
+    }
+
+    /// Second pass of the rebuild: publish the stores onto the backend and
+    /// point each node at its row.
+    fn install_rebuilt_column_stores(
+        &mut self,
+        stores: HashMap<String, ColumnStore>,
+        row_ids: &HashMap<String, HashMap<NodeIndex, u32>>,
+    ) {
         let arc_stores: HashMap<String, Arc<ColumnStore>> =
             stores.into_iter().map(|(t, s)| (t, Arc::new(s))).collect();
 
-        // Second pass: replace PropertyStorage in each node
-        for (node_type, type_row_ids) in &row_ids {
-            if let Some(store) = arc_stores.get(node_type) {
+        for (node_type, type_row_ids) in row_ids {
+            if arc_stores.contains_key(node_type) {
                 for (&idx, &row_id) in type_row_ids {
                     if let Some(node) = self.graph.node_weight_mut(idx) {
-                        node.properties =
-                            PropertyStorage::Columnar(ColumnarRow::new(Arc::clone(store), row_id));
+                        node.properties = PropertyStorage::Columnar(ColumnarRow::new(row_id));
                         // id/title were pushed into the store's reserved
                         // __id__/__title__ columns in the first pass, so the
                         // inline copies are now redundant. Null them to the
-                        // sentinel (NodeData::id()/title() read through to the
-                        // store) — otherwise topology serialization writes
-                        // every id/title twice (inline + column section),
-                        // bloating the saved file by ~27 B/node. Mirrors the
-                        // load path (io/file.rs) and the mapped batch path
+                        // sentinel (the backend reads them through the store)
+                        // — otherwise topology serialization writes every
+                        // id/title twice (inline + column section), bloating
+                        // the saved file by ~27 B/node. Mirrors the load path
+                        // (io/file/columns.rs) and the mapped batch path
                         // (mutation/batch.rs), which both null here.
                         node.id = Value::Null;
                         node.title = Value::Null;
@@ -1596,54 +1698,77 @@ impl DirGraph {
             }
         }
 
-        self.column_stores = arc_stores;
+        // Install on the backend — the sole owner.
+        self.clear_column_stores();
+        for (node_type, store) in arc_stores {
+            self.install_column_store(&node_type, store);
+        }
     }
 
     /// Convert all Columnar properties back to Compact.
     /// Used when a caller needs a self-contained non-columnar graph.
     pub fn disable_columnar(&mut self) {
-        let node_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
-        for node_idx in node_indices {
-            let node = self.graph.node_weight_mut(node_idx).unwrap();
-            if let PropertyStorage::Columnar(row) = &node.properties {
-                let (store, rid) = (row.node_handle(), row.row_id());
-                let pairs = store.row_properties(rid);
-                // row_properties() excludes the reserved __id__/__title__
-                // columns, so a null-sentinel node (set by enable_columnar /
-                // load) would lose its id/title when we drop the Columnar
-                // link. Pull them back from the store first.
-                let restored_id = if matches!(node.id, Value::Null) {
-                    store.get_id(rid)
-                } else {
-                    None
-                };
-                let restored_title = if matches!(node.title, Value::Null) {
-                    store.get_title(rid)
-                } else {
-                    None
-                };
-                let type_str = node.node_type_str(&self.interner);
-                if let Some(schema) = self.type_schemas.get(type_str) {
-                    node.properties = PropertyStorage::from_compact(pairs, schema);
-                } else {
-                    // Fallback to Map
-                    let map: HashMap<InternedKey, Value> = pairs.into_iter().collect();
-                    node.properties = PropertyStorage::Map(map);
-                }
-                if let Some(v) = restored_id {
-                    node.id = v;
-                }
-                if let Some(v) = restored_title {
-                    node.title = v;
-                }
+        // Two passes: the node and its store are both owned by the backend, so
+        // a single `node_weight_mut` borrow cannot also read the store. Collect
+        // the restored rows first, then write them back.
+        struct Restored {
+            idx: NodeIndex,
+            pairs: Vec<(InternedKey, Value)>,
+            id: Option<Value>,
+            title: Option<Value>,
+        }
+        let restored: Vec<Restored> = {
+            let _guard = self.graph.begin_query();
+            self.graph
+                .node_indices()
+                .filter_map(|idx| {
+                    let node = self.graph.node_weight(idx)?;
+                    let row_id = node.properties.columnar_row_id()?;
+                    let store = self.graph.column_store(node.node_type)?;
+                    Some(Restored {
+                        idx,
+                        // `row_properties` excludes the reserved
+                        // `__id__`/`__title__` columns, so a null-sentinel node
+                        // (set by `enable_columnar` / load) would lose its
+                        // identity when the columnar link drops. Pull both back.
+                        pairs: store.row_properties(row_id),
+                        id: matches!(node.id, Value::Null)
+                            .then(|| store.get_id(row_id))
+                            .flatten(),
+                        title: matches!(node.title, Value::Null)
+                            .then(|| store.get_title(row_id))
+                            .flatten(),
+                    })
+                })
+                .collect()
+        };
+
+        for entry in restored {
+            let type_str = match self.graph.node_weight(entry.idx) {
+                Some(node) => node.node_type_str(&self.interner).to_string(),
+                None => continue,
+            };
+            let schema = self.type_schemas.get(&type_str).cloned();
+            let Some(node) = self.graph.node_weight_mut(entry.idx) else {
+                continue;
+            };
+            node.properties = match schema {
+                Some(schema) => PropertyStorage::from_compact(entry.pairs, &schema),
+                None => PropertyStorage::Map(entry.pairs.into_iter().collect()),
+            };
+            if let Some(v) = entry.id {
+                node.id = v;
+            }
+            if let Some(v) = entry.title {
+                node.title = v;
             }
         }
-        self.column_stores.clear();
+        self.clear_column_stores();
     }
 
     /// Returns true if any nodes are using columnar storage.
     pub fn is_columnar(&self) -> bool {
-        !self.column_stores.is_empty()
+        self.graph.has_column_stores()
     }
 
     /// Ensure a ColumnStore exists for `node_type` with a schema covering all
@@ -1662,7 +1787,7 @@ impl DirGraph {
             .cloned()
             .unwrap_or_else(|| Arc::new(TypeSchema::new()));
 
-        let need_create = if let Some(existing) = self.column_stores.get(node_type) {
+        let need_create = if let Some(existing) = self.column_store(node_type) {
             // Rebuild if the TypeSchema has more keys than the store's schema
             existing.schema().len() < current_schema.len()
         } else {
@@ -1676,7 +1801,7 @@ impl DirGraph {
                 .cloned()
                 .unwrap_or_default();
 
-            if let Some(old_arc) = self.column_stores.remove(node_type) {
+            if let Some(old_arc) = self.take_column_store(node_type) {
                 // Migrate existing data to new store with extended schema
                 let old_store = Arc::try_unwrap(old_arc).unwrap_or_else(|a| (*a).clone());
                 let mut new_store = ColumnStore::new(current_schema, &meta, &self.interner);
@@ -1691,16 +1816,14 @@ impl DirGraph {
                     let props = old_store.row_properties(row_id);
                     new_store.push_row(&props);
                 }
-                self.column_stores
-                    .insert(node_type.to_string(), Arc::new(new_store));
+                self.install_column_store(node_type, Arc::new(new_store));
             } else {
                 let store = ColumnStore::new(current_schema, &meta, &self.interner);
-                self.column_stores
-                    .insert(node_type.to_string(), Arc::new(store));
+                self.install_column_store(node_type, Arc::new(store));
             }
         }
 
-        Arc::make_mut(self.column_stores.get_mut(node_type).unwrap())
+        Arc::make_mut(self.column_store_mut(node_type).unwrap())
     }
 
     /// Ensure the TypeSchema for `node_type` contains all the given keys.
@@ -1731,12 +1854,9 @@ impl DirGraph {
     /// choke point gives uniform create semantics across modes. The caller
     /// owns id-index / type-index / property-index / metadata bookkeeping.
     ///
-    /// **Disk note:** this does NOT push the mutated store to the disk
-    /// read-side (`dg.column_stores`). The caller must call
-    /// [`sync_disk_column_stores`](Self::sync_disk_column_stores) **once after
-    /// the batch of inserts** — per-node syncing would share the store `Arc`
-    /// and force every subsequent `ensure_column_store_for_push` to deep-clone
-    /// it (O(store) per node).
+    /// The store it mutates is the backend's own (D1 Phase 3), so there is no
+    /// read-side copy to push to afterwards — the pre-D1 shape kept a second
+    /// map on `DirGraph` and needed an explicit sync per batch.
     /// Check heap usage of column stores and spill largest to disk if over limit.
     /// No-op if memory_limit is None or the backend is memory-mode.
     pub fn maybe_spill_columns(&mut self) {
@@ -1744,7 +1864,11 @@ impl DirGraph {
             Some(l) => l,
             None => return,
         };
-        let total: usize = self.column_stores.values().map(|s| s.heap_bytes()).sum();
+        let total: usize = self
+            .graph
+            .column_stores_iter()
+            .map(|(_, s)| s.heap_bytes())
+            .sum();
         if total <= limit {
             return;
         }
@@ -1771,10 +1895,10 @@ impl DirGraph {
         }
 
         // Spill largest stores first until under limit
-        let mut by_size: Vec<_> = self
-            .column_stores
-            .iter()
-            .map(|(t, s)| (t.clone(), s.heap_bytes()))
+        let mut by_size: Vec<(String, usize)> = self
+            .column_stores_by_name()
+            .into_iter()
+            .map(|(t, s)| (t.to_string(), s.heap_bytes()))
             .collect();
         by_size.sort_by_key(|s| std::cmp::Reverse(s.1));
         let mut remaining = total;
@@ -1783,9 +1907,19 @@ impl DirGraph {
                 break;
             }
             let type_dir = spill_dir.join(&type_name);
-            let store = Arc::make_mut(self.column_stores.get_mut(&type_name).unwrap());
-            if store
-                .materialize_to_files(&type_dir, &self.interner)
+            // The backend owns the store and nothing else holds a handle, so
+            // `make_mut` mutates it in place: the spill actually reclaims the
+            // heap it materialises to files (D1 defect 2). Before Phase 3 every
+            // node held a strong `Arc`, so this forked and reclaimed nothing.
+            let interner = &self.interner;
+            let Some(arc) = self
+                .graph
+                .column_store_mut(InternedKey::from_str(&type_name))
+            else {
+                continue;
+            };
+            if Arc::make_mut(arc)
+                .materialize_to_files(&type_dir, interner)
                 .is_ok()
             {
                 remaining -= bytes;
@@ -1854,7 +1988,7 @@ impl DirGraph {
         // No petgraph tombstones — but columnar stores may still have orphaned rows
         // (e.g., all nodes deleted → petgraph is empty but column data remains).
         if old_node_count == old_node_bound {
-            let columnar_orphaned = self.column_stores.iter().any(|(t, s)| {
+            let columnar_orphaned = self.column_stores_by_name().into_iter().any(|(t, s)| {
                 let live = self.type_indices.get(t).map(|v| v.len()).unwrap_or(0);
                 (s.row_count() as usize) > live
             });
@@ -1906,7 +2040,7 @@ impl DirGraph {
         // Rebuild columnar stores if active — old stores have orphaned rows
         // from deleted nodes. The disable/enable cycle reads only live nodes,
         // producing fresh ColumnStores with no dead rows.
-        if !self.column_stores.is_empty() {
+        if self.is_columnar() {
             let saved_limit = self.memory_limit.take();
             self.disable_columnar();
             self.enable_columnar();
@@ -1973,15 +2107,21 @@ impl DirGraph {
             property_index_count: self.property_indices.len(),
             composite_index_count: self.composite_indices.len(),
             columnar_total_rows: self
-                .column_stores
-                .values()
-                .map(|s| s.row_count() as usize)
+                .graph
+                .column_stores_iter()
+                .map(|(_, s)| s.row_count() as usize)
                 .sum(),
             columnar_live_rows: self
-                .column_stores
-                .keys()
-                .map(|t| self.type_indices.get(t).map(|v| v.len()).unwrap_or(0))
+                .column_stores_by_name()
+                .into_iter()
+                .map(|(t, _)| self.type_indices.get(t).map(|v| v.len()).unwrap_or(0))
                 .sum(),
+            columnar_heap_bytes: self
+                .graph
+                .column_stores_iter()
+                .map(|(_, s)| s.heap_bytes())
+                .sum(),
+            columnar_is_mapped: self.graph.column_stores_iter().any(|(_, s)| s.is_mapped()),
         }
     }
 }
@@ -2017,6 +2157,14 @@ pub struct GraphInfo {
     pub columnar_total_rows: usize,
     /// Rows backed by live nodes (columnar_total_rows - columnar_live_rows = orphaned)
     pub columnar_live_rows: usize,
+    /// Heap bytes held by the column stores the backend owns.
+    ///
+    /// Lifted into `GraphInfo` by D1 Phase 3 so a binding can report columnar
+    /// memory without reaching into storage: the stores are backend-owned and
+    /// there is no `DirGraph.column_stores` field to read any more.
+    pub columnar_heap_bytes: usize,
+    /// `true` when at least one column store has been spilled to mmap.
+    pub columnar_is_mapped: bool,
 }
 
 // `make_dir_graph_mut` (the `Arc<DirGraph>` → `&mut DirGraph` + version-bump

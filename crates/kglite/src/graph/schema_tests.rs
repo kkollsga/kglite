@@ -477,9 +477,8 @@ mod maintenance_tests {
         let old_val = Value::String("Oslo".to_string());
         let new_val = Value::String("Bergen".to_string());
         // Actually change the property on the node
-        if let Some(node) = g.graph.node_weight_mut(n0) {
-            node.set_property("city", new_val.clone(), &mut g.interner);
-        }
+        let city_key = g.interner.get_or_intern("city");
+        GraphWrite::set_node_property(&mut g.graph, n0, city_key, new_val.clone());
         g.update_property_indices_for_set("Person", n0, "city", Some(&old_val), &new_val);
 
         // Verify: Oslo bucket should be empty, Bergen should have the node
@@ -508,9 +507,8 @@ mod maintenance_tests {
 
         // Simulate REMOVE n.city
         let old_val = Value::String("Oslo".to_string());
-        if let Some(node) = g.graph.node_weight_mut(n0) {
-            node.remove_property("city");
-        }
+        let city_key = g.interner.get_or_intern("city");
+        GraphWrite::remove_node_property(&mut g.graph, n0, city_key);
         g.update_property_indices_for_remove("Person", n0, "city", &old_val);
 
         // Verify: Oslo bucket should be empty
@@ -546,9 +544,8 @@ mod maintenance_tests {
         // Change city to Bergen
         let old_val = Value::String("Oslo".to_string());
         let new_val = Value::String("Bergen".to_string());
-        if let Some(node) = g.graph.node_weight_mut(n0) {
-            node.set_property("city", new_val.clone(), &mut g.interner);
-        }
+        let city_key = g.interner.get_or_intern("city");
+        GraphWrite::set_node_property(&mut g.graph, n0, city_key, new_val.clone());
         g.update_property_indices_for_set("Person", n0, "city", Some(&old_val), &new_val);
 
         // Verify: old composite value gone, new one present
@@ -685,10 +682,10 @@ mod maintenance_tests {
         g.enable_columnar();
 
         let idx = g.type_indices.get("Person").unwrap().get(0).unwrap();
-        let node = g.graph.node_weight_mut(idx).unwrap();
 
-        // Update existing property
-        node.set_property("age", Value::Int64(99), &mut g.interner);
+        // Update existing property — through the backend, which owns the store.
+        let age_key = g.interner.get_or_intern("age");
+        GraphWrite::set_node_property(&mut g.graph, idx, age_key, Value::Int64(99));
         assert_eq!(
             g.graph
                 .node_view(idx)
@@ -716,41 +713,49 @@ mod maintenance_tests {
         assert_eq!(keys, vec!["age"]);
     }
 
+    /// A columnar graph round-trips its properties through the **`.kgl` save
+    /// path**, which is the only production serializer that meets a columnar
+    /// node.
+    ///
+    /// Replaces `test_columnar_serialize_roundtrip`, which serialized the
+    /// backend directly and expected properties in the topology stream. D1
+    /// Phase 3 made that impossible: the store belongs to the backend, and
+    /// `PropertyStorage` — which is what serde sees — carries only a row id.
+    /// `write_kgl_to` therefore writes columns in their own sections and sets
+    /// `StripPropertiesGuard` while serializing topology; the `Serialize` impl
+    /// `debug_assert!`s that guard is set, so a new save path that forgets it
+    /// fails loudly instead of writing empty property maps.
     #[test]
-    fn test_columnar_serialize_roundtrip() {
+    fn columnar_properties_round_trip_through_the_kgl_save_path() {
         let mut g = make_test_graph(3, false);
         let mut meta = HashMap::new();
         meta.insert("age".to_string(), "int64".to_string());
         g.node_type_metadata.insert("Person".to_string(), meta);
         g.compact_properties();
         g.enable_columnar();
+        assert!(
+            g.is_columnar(),
+            "fixture must be columnar, or this is vacuous"
+        );
 
-        // Serialize (Columnar should produce same output as Compact)
-        let serialized = {
-            let _guard = SerdeSerializeGuard::new(&g.interner);
-            crate::serde_codec::encode_versioned(
-                crate::serde_codec::CURRENT_CODEC,
-                &g.graph,
-                u64::MAX,
-            )
-            .unwrap()
-        };
+        let mut buf: Vec<u8> = Vec::new();
+        crate::graph::io::file::write_kgl_to(&g, &mut buf).unwrap();
+        let loaded = crate::graph::io::file::load_kgl_bytes(&buf).unwrap();
 
-        // Deserialize into a new graph — will come back as Map
-        let graph2: GraphBackend = {
-            let _guard = SerdeDeserializeGuard::new(&mut g.interner);
-            crate::serde_codec::decode_exact_with(
-                crate::serde_codec::CURRENT_CODEC,
-                &serialized,
-                serialized.len() as u64,
-                crate::serde_codec::DecodeLimits::new(u64::MAX, u64::MAX),
-            )
-            .unwrap()
-        };
-        let node0 = graph2.node_view(NodeIndex::new(0)).unwrap();
-
-        // Properties should survive the round-trip
-        assert!(node0.get_property("age").is_some());
+        let node0 = loaded.graph.node_view(NodeIndex::new(0)).unwrap();
+        assert!(
+            node0.get_property("age").is_some(),
+            "columnar properties must survive the save path"
+        );
+        assert_eq!(
+            node0.get_property("age").map(|c| c.into_owned()),
+            g.graph
+                .node_view(NodeIndex::new(0))
+                .unwrap()
+                .get_property("age")
+                .map(|c| c.into_owned()),
+            "and must come back with the same value"
+        );
     }
 }
 

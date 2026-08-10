@@ -83,13 +83,6 @@ impl DirGraph {
                 store.push_title(&title);
                 store.push_row(&interned_props)
             };
-            // The Arc borrow above has ended; clone the (now-extended) store
-            // handle for the node's Columnar pointer.
-            let store_arc = Arc::clone(
-                self.column_stores
-                    .get(node_type)
-                    .expect("ensure_column_store_for_push just inserted it"),
-            );
             let node_type_key = self.interner.get_or_intern(node_type);
             // id/title live in the ColumnStore (pushed above); the disk
             // `add_node` drops NodeData.id/title anyway and reads row_id out of
@@ -99,7 +92,7 @@ impl DirGraph {
                 id,
                 title,
                 node_type: node_type_key,
-                properties: PropertyStorage::Columnar(ColumnarRow::new(store_arc, row_id)),
+                properties: PropertyStorage::Columnar(ColumnarRow::new(row_id)),
             };
             let idx = GraphWrite::add_node(&mut self.graph, node_data);
             GraphWrite::update_row_id(&mut self.graph, idx, row_id);

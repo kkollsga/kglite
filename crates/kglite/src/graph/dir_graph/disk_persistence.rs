@@ -40,6 +40,16 @@ impl DirGraph {
                 .as_nanos()
         ));
 
+        // The heap backend owns the stores; the new `DiskGraph` must inherit
+        // them, or every columnar property read returns Null after the switch.
+        // Before D1 Phase 3 a DirGraph-level copy survived the swap and
+        // an explicit mirror step pushed it in — there is no such copy now.
+        let carried_stores: HashMap<InternedKey, Arc<ColumnStore>> = self
+            .graph
+            .column_stores_iter()
+            .map(|(k, v)| (k, Arc::clone(v)))
+            .collect();
+
         // Extract the StableDiGraph and build DiskGraph
         let disk_graph = match &mut self.graph {
             GraphBackend::Memory(g) => {
@@ -69,20 +79,10 @@ impl DirGraph {
         }
 
         self.graph = GraphBackend::Disk(Box::new(disk_graph));
-        Ok(())
-    }
-
-    /// Sync column store references from DirGraph to DiskGraph.
-    /// Called after enable_columnar(), add_nodes(), and load.
-    pub fn sync_disk_column_stores(&mut self) {
-        if let GraphBackend::Disk(ref mut dg) = self.graph {
-            let mut stores = HashMap::new();
-            for (type_name, store) in &self.column_stores {
-                let key = InternedKey::from_str(type_name);
-                stores.insert(key, Arc::clone(store));
-            }
-            dg.set_column_stores(stores);
+        for (type_key, store) in carried_stores {
+            GraphWrite::install_column_store(&mut self.graph, type_key, store);
         }
+        Ok(())
     }
 
     /// Acquire the retained disk-writer lease before creating a mutation
@@ -92,26 +92,6 @@ impl DirGraph {
             disk.prepare_mutation()?;
         }
         Ok(())
-    }
-
-    /// Mirror DiskGraph's column_stores back into DirGraph's
-    /// `self.column_stores`. Called after mutations that flushed
-    /// through `DiskGraph::flush_node_mut_cache` so the sidecar writer
-    /// in `save_disk` and any other DirGraph-side reader sees the
-    /// post-flush state rather than the pre-flush (stale) Arcs.
-    pub fn sync_column_stores_from_disk(&mut self) {
-        if let GraphBackend::Disk(ref dg) = self.graph {
-            let pairs: Vec<(
-                String,
-                Arc<crate::graph::storage::column_store::ColumnStore>,
-            )> = dg
-                .column_stores_iter()
-                .map(|(k, v)| (self.interner.resolve(*k).to_string(), Arc::clone(v)))
-                .collect();
-            for (name, arc) in pairs {
-                self.column_stores.insert(name, arc);
-            }
-        }
     }
 
     /// Build CSR from pending edges if in disk mode. No-op otherwise.
@@ -232,13 +212,11 @@ impl DirGraph {
         // each mutated type's Arc in `DiskGraph.column_stores`.
         dg.save_to_dir(dir, &self.interner)
             .map_err(|e| format!("DiskGraph save failed: {}", e))?;
-        // Mirror the post-flush Arcs back into `self.column_stores` so
-        // the per-type sidecar writer below sees the mutated stores
-        // rather than the pre-flush (stale) Arcs. Pre-fix, mutations
-        // landed in DiskGraph's Arcs but the sidecar writer read
-        // DirGraph's Arcs — Cypher SET and DETACH DELETE property
-        // corrections never reached disk.
-        self.sync_column_stores_from_disk();
+        // No mirror to refresh: `DiskGraph` *is* the owner of the column
+        // stores (D1 Phase 3), so the sidecar writer below reads the same
+        // `Arc`s `save_to_dir` just flushed into. The pre-D1 shape kept a
+        // second copy on `DirGraph`, and a stale one is exactly how Cypher
+        // `SET` / `DETACH DELETE` corrections once failed to reach disk.
 
         // Save DirGraph metadata. 0.8.13 stripped `type_connectivity`;
         // 0.8.28 strips the two heavy HashMap fields
@@ -299,13 +277,14 @@ impl DirGraph {
         // ~150 ms for the full graph.
         let preexisting_columns_bin =
             dir.join("seg_000/columns.bin").exists() || dir.join("columns.bin").exists();
-        if !preexisting_columns_bin && !self.column_stores.is_empty() {
-            crate::graph::io::unified_columns::write_unified_columns(
-                dir,
-                &self.column_stores,
-                &self.interner,
-            )
-            .map_err(|e| format!("unified columns write failed: {}", e))?;
+        if !preexisting_columns_bin && self.is_columnar() {
+            let stores: HashMap<String, Arc<crate::graph::storage::column_store::ColumnStore>> =
+                self.column_stores_by_name()
+                    .into_iter()
+                    .map(|(name, store)| (name.to_string(), Arc::clone(store)))
+                    .collect();
+            crate::graph::io::unified_columns::write_unified_columns(dir, &stores, &self.interner)
+                .map_err(|e| format!("unified columns write failed: {}", e))?;
         }
 
         let columns_meta_path = {
@@ -349,7 +328,7 @@ impl DirGraph {
 
         let columns_dir = dir.join("columns");
         let mut sidecars_written = 0usize;
-        for (type_name, store) in &self.column_stores {
+        for (type_name, store) in self.column_stores_by_name() {
             if types_in_columns_bin.contains(type_name) {
                 continue; // covered by the fast mmap path on reload
             }

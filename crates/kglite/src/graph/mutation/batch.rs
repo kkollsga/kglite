@@ -192,10 +192,11 @@ impl BatchProcessor {
         //
         // This avoids Arc::make_mut cloning the entire store when existing nodes
         // hold shared references.
-        let (mut deferred_columnar, mut owned_stores) = if mapped {
+        let mut deferred_columnar: DeferredColumnarRows = Vec::new();
+        let mut owned_stores: OwnedColumnStores = if mapped {
             Self::detach_columnar_stores(&self.creates_interned, graph)
         } else {
-            (Vec::new(), HashMap::new())
+            HashMap::new()
         };
 
         // Process pre-interned creates (fast path — no string interning needed)
@@ -394,27 +395,18 @@ impl BatchProcessor {
     fn detach_columnar_stores(
         creates: &[NodeCreationInterned],
         graph: &mut DirGraph,
-    ) -> (DeferredColumnarRows, OwnedColumnStores) {
-        let mut deferred_columnar: DeferredColumnarRows = Vec::new();
+    ) -> OwnedColumnStores {
         // Owned mutable column stores, extracted from Arc to avoid clone-on-write
         let mut owned_stores: OwnedColumnStores = HashMap::new();
         let affected_types: HashSet<String> = creates.iter().map(|c| c.node_type.clone()).collect();
-        // For each affected type: detach existing nodes and extract the store
         for node_type in &affected_types {
-            // Detach existing nodes — record their (NodeIndex, row_id) for pass 2
-            if let Some(indices) = graph.type_indices.get(node_type) {
-                for idx in indices.iter() {
-                    if let Some(node) = GraphWrite::node_weight_mut_silent(&mut graph.graph, idx) {
-                        if let PropertyStorage::Columnar(row) = &node.properties {
-                            let rid = row.row_id();
-                            node.properties = PropertyStorage::Map(HashMap::new());
-                            deferred_columnar.push((idx, node_type.clone(), rid));
-                        }
-                    }
-                }
-            }
-            // Extract the store from Arc (now refcount=1, so try_unwrap succeeds)
-            if let Some(arc_store) = graph.column_stores.remove(node_type) {
+            // D1 Phase 3: no detach pass. The old code stripped every existing
+            // node's `PropertyStorage` purely so `Arc::try_unwrap` below could
+            // succeed — nodes held strong handles and would otherwise force a
+            // whole-store clone. Nodes now hold a row id and no handle, so the
+            // backend map is the sole owner and `try_unwrap` succeeds outright.
+            // Existing row ids stay valid across `materialize_for_append`.
+            if let Some(arc_store) = graph.take_column_store(node_type) {
                 let mut store = Arc::try_unwrap(arc_store).unwrap_or_else(|a| (*a).clone());
                 let meta = graph
                     .node_type_metadata
@@ -425,7 +417,7 @@ impl BatchProcessor {
                 owned_stores.insert(node_type.clone(), store);
             }
         }
-        (deferred_columnar, owned_stores)
+        owned_stores
     }
 
     /// Pass 2 of the mapped/disk columnar append: publish the owned stores
@@ -445,12 +437,10 @@ impl BatchProcessor {
         deferred_columnar: DeferredColumnarRows,
         owned_stores: OwnedColumnStores,
     ) {
-        if deferred_columnar.is_empty() {
-            return;
-        }
-        // Put owned stores back into graph.column_stores as Arcs
+        // Install unconditionally: the stores must go back even when the batch
+        // created no rows for an affected type, because pass 1 took them out.
         for (node_type, store) in owned_stores {
-            graph.column_stores.insert(node_type, Arc::new(store));
+            graph.install_column_store(&node_type, Arc::new(store));
         }
         // Assign Arc refs to all nodes (existing + newly created).
         // For disk mode, also update the DiskNodeSlot.row_id directly:
@@ -458,25 +448,14 @@ impl BatchProcessor {
         // the next call, so the property assignment alone doesn't persist
         // the per-type row_id back to the slot. Without this, slot.row_id
         // keeps the slot-index value assigned by add_node().
-        for (node_idx, node_type, row_id) in deferred_columnar {
-            let arc_store = graph.column_stores.get(&node_type).unwrap().clone();
+        for (node_idx, _node_type, row_id) in deferred_columnar {
             if let Some(node) = GraphWrite::node_weight_mut_silent(&mut graph.graph, node_idx) {
-                node.properties = PropertyStorage::Columnar(ColumnarRow::new(arc_store, row_id));
+                node.properties = PropertyStorage::Columnar(ColumnarRow::new(row_id));
             }
             GraphWrite::update_row_id(&mut graph.graph, node_idx, row_id);
         }
-        // 0.9.2: disk-side reads (node_weight, get_node_id, get_node_title)
-        // resolve via `disk_graph.column_stores`, NOT the DirGraph-level
-        // `graph.column_stores` we just populated. Without this sync, a
-        // freshly-built disk graph from `from_blueprint` (or any
-        // multi-create add_nodes path) has empty disk-side column_stores
-        // — every property read returns Null until save+reload bridges
-        // them. Existing sync site in the update path
-        // (`disk_updates_applied`) only fires when an UPDATE is in the
-        // chunk, never on creates-only.
-        if GraphRead::is_disk(&graph.graph) {
-            graph.sync_disk_column_stores();
-        }
+        // No disk-side sync: `install_column_store` above wrote into the
+        // backend's own map, which is what disk reads resolve through.
     }
 
     /// Apply this chunk's pending updates. Split from [`Self::flush_chunk`]
@@ -495,7 +474,7 @@ impl BatchProcessor {
         //   `clear_arenas` drops on the next `&mut self` call. Mutations via
         //   the arena never reach `dg.column_stores`, which is where
         //   `DiskGraph::get_node_property` reads from. To fix, disk updates
-        //   mutate `graph.column_stores` directly via `Arc::make_mut` and
+        //   mutate the backend's store directly via `Arc::make_mut` and
         //   then re-sync to `dg.column_stores` at the end of the loop.
         //   O(types) clones per chunk instead of the broken O(rows) pattern.
         let is_disk = GraphRead::is_disk(&graph.graph);
@@ -534,7 +513,7 @@ impl BatchProcessor {
                     _ => unreachable!("is_disk guard"),
                 };
 
-                let Some(arc_store) = graph.column_stores.get_mut(&type_name) else {
+                let Some(arc_store) = graph.column_store_mut(&type_name) else {
                     continue;
                 };
                 let store = Arc::make_mut(arc_store);
@@ -548,11 +527,10 @@ impl BatchProcessor {
                 );
                 disk_updates_applied = true;
                 stats.updates += 1;
-            } else if let Some(node) =
-                GraphWrite::node_weight_mut(&mut graph.graph, update.node_idx)
-            {
+            } else if graph.graph.node_weight(update.node_idx).is_some() {
                 Self::apply_node_update(
-                    node,
+                    graph,
+                    update.node_idx,
                     update.title,
                     interned_props,
                     update.conflict_mode,
@@ -562,9 +540,9 @@ impl BatchProcessor {
             }
         }
 
-        if disk_updates_applied {
-            graph.sync_disk_column_stores();
-        }
+        // `disk_updates_applied` no longer needs a sync — `column_store_mut`
+        // above mutated the backend's own store.
+        let _ = disk_updates_applied;
     }
 
     /// Write one pending update into a columnar row — the disk
@@ -633,41 +611,62 @@ impl BatchProcessor {
     /// Write one pending update into a live `NodeData` — the memory/mapped
     /// representation, where `PropertyStorage` mutation on the node is
     /// immediately visible to reads. Twin of [`Self::apply_row_update`].
+    /// Apply one pending update to a node, through the backend.
+    ///
+    /// Routed through `GraphWrite` rather than `&mut NodeData` because a
+    /// columnar node's properties live in the store the backend owns; there is
+    /// no per-node storage left to write into (D1 Phase 3). Title stays an
+    /// inline `NodeData` field and keeps its own short borrow.
     fn apply_node_update(
-        node: &mut NodeData,
+        graph: &mut DirGraph,
+        node_idx: NodeIndex,
         title: Option<Value>,
         properties: Vec<(InternedKey, Value)>,
         conflict_mode: ConflictHandling,
         provisional_key: InternedKey,
     ) {
+        let set_title = |graph: &mut DirGraph, value: Value| {
+            if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
+                node.title = value;
+            }
+        };
         match conflict_mode {
             ConflictHandling::Skip => unreachable!(),
             ConflictHandling::Replace => {
                 if let Some(new_title) = title {
-                    node.title = new_title;
+                    set_title(graph, new_title);
                 }
-                node.properties.replace_all(properties);
+                GraphWrite::replace_node_properties(&mut graph.graph, node_idx, properties);
             }
             ConflictHandling::Update | ConflictHandling::Sum => {
                 if let Some(new_title) = title {
-                    node.title = new_title;
+                    set_title(graph, new_title);
                 }
                 for (k, v) in properties {
-                    node.properties.insert(k, v);
+                    GraphWrite::set_node_property(&mut graph.graph, node_idx, k, v);
                 }
                 // Promote: a real-row upsert clears the stub marker.
-                if node.properties.contains_own_key(provisional_key) {
-                    node.properties.insert(provisional_key, Value::Null);
+                if graph.graph.node_has_property(node_idx, provisional_key) {
+                    GraphWrite::set_node_property(
+                        &mut graph.graph,
+                        node_idx,
+                        provisional_key,
+                        Value::Null,
+                    );
                 }
             }
             ConflictHandling::Preserve => {
                 if let Some(new_title) = title {
-                    if *node.title() == Value::Null {
-                        node.title = new_title;
+                    if graph
+                        .graph
+                        .get_node_title(node_idx)
+                        .is_none_or(|t| matches!(t, Value::Null))
+                    {
+                        set_title(graph, new_title);
                     }
                 }
                 for (k, v) in properties {
-                    node.properties.insert_if_absent(k, v);
+                    GraphWrite::set_node_property_if_absent(&mut graph.graph, node_idx, k, v);
                 }
             }
         }

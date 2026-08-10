@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A columnar `SET` / `REMOVE` no longer re-points every node of the type.**
+  Each node used to hold its own `Arc` of its type's column store, so a
+  single-row write forked the whole store and then swept every node of that
+  type to re-point it — O(N_type) per clause regardless of how many rows
+  changed, on every graph that had been saved. A node now carries only its row
+  id and the backend owns the store, so a one-row write mutates one row in
+  place. Rolling a statement back likewise restores one `Arc` per touched type
+  instead of re-pointing every node.
+- **`enable_columnar()` spilling to disk now actually reclaims the memory.**
+  With every node holding a strong handle, the `Arc::make_mut` inside
+  `maybe_spill_columns` forked: the spilled, file-backed copy became the
+  master while all N nodes kept the pre-spill in-heap store alive. Reads were
+  correct; nothing was reclaimed. The store is now uniquely owned, so the
+  materialisation happens in place.
+- **A `REMOVE` on a saved graph now journals its pre-image.** The columnar
+  `REMOVE` fast path wrote the type's master store without capturing an undo
+  entry. That was survivable only while every write forked the store; with the
+  backend as sole owner the write lands in place, so a failed statement had
+  nothing pristine to roll back to. Both `SET` and `REMOVE` now go through one
+  primitive that captures first and asserts the ordering.
+
 - **A saved graph no longer exports empty node properties.** GraphML
   (`to_graphml`) and D3-JSON (`to_d3_json`) emitted every node with *zero*
   properties once the graph had been saved (or otherwise converted to columnar
@@ -41,6 +62,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carry the same names and are complete for every storage variant:
   `graph.node_view(idx)` instead of `graph.get_node(idx)`. `NodeData` keeps
   `id()`, `title()` and `node_type_str()`.
+
+- **Rust API**: the storage backend is now the sole owner of a columnar type's
+  `ColumnStore`. `DirGraph::column_stores` (the public field) is replaced by
+  delegating accessors — `column_store`, `column_store_mut`,
+  `install_column_store`, `take_column_store`, `clear_column_stores`,
+  `column_stores_by_name`, `column_store_count` — and `GraphRead` /`GraphWrite`
+  gain `column_store` / `column_stores_iter` / `has_column_stores` and the
+  install/take/clear pair. `DirGraph::sync_disk_column_stores` and
+  `sync_column_stores_from_disk` are removed: there is no second copy to
+  mirror. `NodeData::set_property` / `remove_property` / `clear_property` are
+  removed — a columnar node has no per-node storage to write into; use
+  `GraphWrite::set_node_property` and its four siblings, which route by storage
+  variant. `impl From<&NodeData> for NodeView` is removed because a view can no
+  longer be built without the backend; use `GraphRead::node_view`.
+  `graph_info()` gains `columnar_heap_bytes` and `columnar_is_mapped`.
 
 ## [0.15.8] - 2026-08-09
 

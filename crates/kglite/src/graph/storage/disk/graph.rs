@@ -414,9 +414,7 @@ impl DiskGraph {
     }
 
     /// Iterate `(type_key, store_arc)` pairs — read-only borrow.
-    /// Used by `DirGraph::sync_column_stores_from_disk` to mirror
-    /// mutations applied in `clear_arenas` back into DirGraph's side of
-    /// the Arc pair so the sidecar writer sees the post-mutation state.
+    /// Backs `GraphRead::column_stores_iter` for the disk backend.
     pub fn column_stores_iter(
         &self,
     ) -> impl Iterator<
@@ -580,10 +578,7 @@ impl DiskGraph {
                 title,
                 node_type: node_type_key,
                 properties: crate::graph::schema::PropertyStorage::Columnar(
-                    crate::graph::storage::property_storage::ColumnarRow::new(
-                        Arc::clone(store),
-                        slot.row_id,
-                    ),
+                    crate::graph::storage::property_storage::ColumnarRow::new(slot.row_id),
                 ),
             }
         } else {
@@ -787,9 +782,9 @@ impl DiskGraph {
             id: id_val,
             title: title_val,
             node_type: node_type_key,
-            properties: if let Some(s) = store {
+            properties: if store.is_some() {
                 crate::graph::schema::PropertyStorage::Columnar(
-                    crate::graph::storage::property_storage::ColumnarRow::new(s, slot.row_id),
+                    crate::graph::storage::property_storage::ColumnarRow::new(slot.row_id),
                 )
             } else {
                 crate::graph::schema::PropertyStorage::Map(HashMap::new())
@@ -1517,9 +1512,9 @@ impl DiskGraph {
                     }
                 }
             }
-            // Replace the Arc wholesale. DirGraph's Arc is re-synced
-            // from DiskGraph's post-save via
-            // `DirGraph::sync_column_stores_from_disk`.
+            // Replace the Arc wholesale. This map is the only owner
+            // (D1 Phase 3), so every later reader sees the flushed store
+            // without a mirror step.
             self.column_stores
                 .insert(type_key, std::sync::Arc::new(new_store));
         }

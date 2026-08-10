@@ -358,7 +358,6 @@ fn independent_copy_retains_unsaved_parent_index_files() {
     )
     .unwrap();
     writer.enable_disk_mode().unwrap();
-    writer.sync_disk_column_stores();
     writer.save_disk(source.path().to_str().unwrap()).unwrap();
     match &mut writer.graph {
         GraphBackend::Disk(disk) => {

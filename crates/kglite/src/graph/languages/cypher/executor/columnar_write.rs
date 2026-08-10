@@ -59,23 +59,24 @@ pub(super) struct ColumnMasterWrite<'a> {
 /// in-memory but vanished after save+load, with
 /// `BUG: InternedKey N not found in StringInterner`.
 ///
-/// Both journals are handled here, and they pull in opposite directions:
+/// # Journals, and why the capture must come first
 ///
 /// - **WAL**: the write bypasses the recorded `GraphWrite` path, so the one
-///   mutated node is captured explicitly. The end-of-clause refresh sweep must
-///   *not* be, or a single `SET` would log every node of the type.
-/// - **Undo**: the pre-statement master is captured once per type, as
-///   [`UndoEntry::ColumnarHandles`], which is what lets the refresh sweep skip
-///   per-node capture entirely. The store itself is never copied — the fork
-///   already left the pre-statement one pristine, so holding its handle is the
-///   whole pre-image. `touched_columnar_types` keeps this to one attempt per
-///   type per clause; the journal's own first-touch rule covers a later clause
-///   writing the same type again.
-pub(super) fn set_via_column_master(
-    graph: &mut DirGraph,
-    write: ColumnMasterWrite<'_>,
-    touched_columnar_types: &mut std::collections::HashSet<String>,
-) -> bool {
+///   mutated node is captured explicitly. Exactly one node — there is no
+///   end-of-clause sweep any more, because no node holds a store handle to
+///   re-point (D1 Phase 3).
+/// - **Undo**: the pre-statement master is captured once per type as
+///   [`UndoEntry::ColumnarHandles`], **before** the write. That ordering is
+///   load-bearing and is the whole rollback correctness argument:
+///   `Arc::make_mut` below forks *only* when someone else holds a handle, so
+///   the journal's clone is what keeps the pre-statement image pristine. With
+///   no checkpoint open nobody else holds one, `make_mut` mutates the single
+///   row in place, and the statement costs O(1) instead of O(N_type).
+///
+/// Both directions are asserted rather than argued — see the `debug_assert!`
+/// at the write itself and
+/// `column_ownership_tests::the_master_is_uniquely_owned_between_statements`.
+pub(super) fn set_via_column_master(graph: &mut DirGraph, write: ColumnMasterWrite<'_>) -> bool {
     // Disk-backed graphs use a separate write path; the master `column_stores`
     // Arc is for the in-memory Columnar mode only.
     let Some(row_id) = write.row_id else {
@@ -85,80 +86,77 @@ pub(super) fn set_via_column_master(
         return false;
     }
     let key = graph.interner.get_or_intern(write.property);
-    if !touched_columnar_types.contains(write.node_type) {
-        if let Some(prior) = graph.column_stores.get(write.node_type).map(Arc::clone) {
-            if let Some(journal) = graph.graph.undo_journal_mut() {
-                journal.note_columnar_fork(write.node_type, || Some(prior));
-            }
-        }
-    }
-    let Some(master) = graph.column_stores.get_mut(write.node_type) else {
-        return false;
-    };
-    // Did `make_mut` actually fork, or did it mutate in place?
-    //
-    // Only a fork leaves the per-node handles stale, and only stale handles
-    // need the O(N) end-of-clause sweep. Comparing the allocation address
-    // across the call is the exact question — `Arc::strong_count` is not, since
-    // it cannot distinguish "nobody else holds this" from "the clone already
-    // happened".
-    //
-    // TODAY THIS IS A PROVABLE NO-OP, and that is the point of landing it
-    // alone. Every node of a type holds its own strong handle, so the master's
-    // count is `1 (map) + N (nodes)` at the first write of a clause and
-    // `make_mut` always forks; the second and later writes in the same clause
-    // find the fresh allocation uniquely owned and mutate in place, but the
-    // type is already in the set by then. So the set ends up identical either
-    // way, which `fork_detection_is_a_no_op_while_nodes_hold_strong_handles`
-    // pins.
-    //
-    // It stops being a no-op the moment nodes stop holding strong handles: then
-    // most writes mutate in place, and an unconditional insert would keep
-    // paying a sweep that has nothing to re-point.
-    let before = Arc::as_ptr(master);
-    Arc::make_mut(master).set(row_id, key, write.value, None);
-    if !std::ptr::eq(before, Arc::as_ptr(master)) {
-        touched_columnar_types.insert(write.node_type.to_string());
-    }
-    graph.graph.note_recorded_node_upsert(write.node_idx);
-    true
+    write_column_master(
+        graph,
+        write.node_type,
+        write.node_idx,
+        row_id,
+        key,
+        write.value,
+    )
+    .is_some()
 }
 
-/// Re-point every node's `Arc<ColumnStore>` handle at the graph master, for
-/// each type written through the master during this clause.
+/// Write one cell of a type's master column store, with the journalling both
+/// halves of the engine need.
 ///
-/// Each node holds its own Arc clone for efficient property reads; after a
-/// clause wrote through the graph master those per-node handles are stale and
-/// would surface pre-clause values. This sweep is O(N) per touched type and
-/// runs once per clause regardless of row count — which is the whole reason
-/// the master fast paths accumulate a type set instead of refreshing per row.
+/// The single place a columnar property value is written. Returns the prior
+/// value (`None` when the type has no store, which is also the "nothing was
+/// written" signal).
 ///
-/// Shared by `execute_set` and `execute_remove`, which must agree: a node
-/// whose property was removed on its own forked store while the master kept
-/// the value has the value resurrected by the *next* clause's sweep.
-pub(super) fn refresh_columnar_node_handles(
+/// Ordering is the correctness argument, not a detail:
+/// 1. clone the master into the undo journal — under an open checkpoint that
+///    clone is what makes step 3 fork instead of mutating the pre-statement
+///    image;
+/// 2. read the prior cell value, for the caller's result and for index
+///    maintenance;
+/// 3. `Arc::make_mut` and write — in place when nothing else holds a handle,
+///    which after D1 Phase 3 is the normal case between statements;
+/// 4. note the one mutated node for the WAL, since this bypasses the recorded
+///    `GraphWrite` path.
+pub(super) fn write_column_master(
     graph: &mut DirGraph,
-    touched_columnar_types: std::collections::HashSet<String>,
-) {
-    for node_type in touched_columnar_types {
-        let new_master = match graph.column_stores.get(&node_type) {
-            Some(m) => Arc::clone(m),
-            None => continue,
-        };
-        let indices: Vec<NodeIndex> = graph
-            .type_indices
-            .get(&node_type)
-            .map(|s| s.iter().collect())
-            .unwrap_or_default();
-        for idx in indices {
-            // `_silent`: re-pointing per-node Arc handles is internal storage
-            // bookkeeping, not a logical mutation — must not be captured by the
-            // WAL recorder (the actual write was recorded in the fast path).
-            if let Some(node) = GraphWrite::node_weight_mut_silent(&mut graph.graph, idx) {
-                if let crate::graph::schema::PropertyStorage::Columnar(row) = &mut node.properties {
-                    row.repoint(Arc::clone(&new_master));
-                }
-            }
+    node_type: &str,
+    node_idx: NodeIndex,
+    row_id: u32,
+    key: crate::graph::schema::InternedKey,
+    value: &crate::datatypes::values::Value,
+) -> Option<Option<crate::datatypes::values::Value>> {
+    let type_key = crate::graph::schema::InternedKey::from_str(node_type);
+
+    // (1) Pre-image first. If the journal already holds an entry for this type
+    // it declines the clone, which is then dropped — returning the count to one
+    // so the rest of the statement mutates in place.
+    let prior_store = graph.graph.column_store(type_key).map(Arc::clone);
+    let captured_now = match (prior_store, graph.graph.undo_journal_mut()) {
+        (Some(prior_store), Some(journal)) => {
+            journal.note_columnar_fork(type_key, || Some(prior_store))
         }
-    }
+        _ => false,
+    };
+
+    let master = graph.graph.column_store_mut(type_key)?;
+    let prior_value = master.get(row_id, key); // (2)
+                                               // The rollback invariant, asserted at the exact point it matters.
+                                               //
+                                               // `captured_now` means *this* call handed the journal the allocation the
+                                               // master currently points at — so `make_mut` must fork away from it, or the
+                                               // statement is mutating the very image rollback would restore. Silent, and
+                                               // exactly the class `rollback.rs::swap_data_scale` warns about.
+                                               //
+                                               // Later writes in the same statement do *not* fork: the journal declined a
+                                               // second clone, so the master is uniquely owned and mutates in place. That
+                                               // is correct (the first write already moved it off the pre-image) and is
+                                               // why the assertion is keyed on `captured_now` rather than on whether a
+                                               // checkpoint is open.
+    let before = Arc::as_ptr(master);
+    Arc::make_mut(master).set(row_id, key, value, None); // (3)
+    debug_assert!(
+        !captured_now || !std::ptr::eq(before, Arc::as_ptr(master)),
+        "the first columnar write of a statement must fork the master away \
+         from the pre-image just handed to the undo journal; mutating it in \
+         place leaves rollback nothing pristine to restore"
+    );
+    graph.graph.note_recorded_node_upsert(node_idx); // (4)
+    Some(prior_value)
 }

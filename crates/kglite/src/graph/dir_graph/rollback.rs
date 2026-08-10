@@ -52,39 +52,35 @@
 //! explicit addition to [`swap_data_scale`] can introduce a correctness gap,
 //! and that is a change a reviewer is looking straight at.
 //!
-//! ## Columnar mode: master from the shell, node handles from the journal
+//! ## Columnar mode: one `Arc` per touched type, restored by the journal
 //!
-//! `column_stores` — the per-type master `Arc<ColumnStore>` map that `save()`
-//! installs via `enable_columnar` — is deliberately **not** parked, so the
-//! shell clone captures one pre-statement `Arc` handle per type and
-//! `restore_schema_shell` reinstalls it verbatim. That covers the master.
-//! The other half is per-node: every node of a columnar type holds its own
-//! `Arc` clone of the store, and `execute_set`'s fast path re-points all of
-//! them at the fork its write created. That sweep is journalled as a single
-//! [`UndoEntry::ColumnarHandles`] per type, whose replay re-points them back.
+//! The per-type master `ColumnStore` map lives on the **storage backend**
+//! (D1 Phase 3), which `swap_data_scale` swaps wholesale — so it is journal
+//! territory, not shell territory: the shell restore never sees it.
+//! [`UndoEntry::ColumnarHandles`] carries the pre-statement `Arc` for each type
+//! a statement wrote, and its replay reinstalls that one handle.
 //!
-//! What makes the pair sufficient rather than merely hopeful:
+//! What makes that sufficient — the invariant, which is **asserted at the write
+//! site** (`columnar_write::write_column_master`) rather than argued here:
 //!
-//! - `ColumnStore` has no interior mutability, and the only in-statement
-//!   writer of a master store is that fast path, which goes through
-//!   `Arc::make_mut`. The refcount is above one before any checkpoint exists —
-//!   every node of the type holds a handle — so `make_mut` copies on write and
-//!   the pre-statement store is never mutated in place. **The shell's handle
-//!   is not what forces that copy**, so dropping it would buy nothing; see
-//!   `every_node_shares_the_master_column_store_handle` in `rollback_tests`.
+//! - `ColumnStore` has no interior mutability, and the only in-statement writer
+//!   of a master store goes through `Arc::make_mut`. The journal clones the
+//!   master into this entry *before* that call, so under an open checkpoint the
+//!   refcount is at least two and `make_mut` copies on write — the entry's
+//!   handle is the pristine pre-statement store. Before D1 Phase 3 the refcount
+//!   was above one for a different reason (every node held a handle), and the
+//!   journal's clone was incidental; now it is the mechanism.
+//! - With no checkpoint open nothing else holds the master, so `make_mut`
+//!   mutates one row in place. That is the point of the programme, and it is
+//!   why the capture-then-write ordering cannot be reversed.
 //! - `CREATE` and `DELETE` never reach a master store in memory mode: the
 //!   in-memory insert branch always builds a `Compact` node, and node removal
-//!   is a plain backend edit. Every other writer of `column_stores`
+//!   is a plain backend edit. Every other writer of the store map
 //!   (`enable_columnar`, `disable_columnar`, `vacuum`, the spill and bulk-batch
-//!   paths, disk sync) runs outside the statement window.
+//!   paths) runs outside the statement window.
 //!
-//! The per-type entry is load-bearing for *cost*, not just tidiness. The sweep
-//! touches every node of the type, so routing it through the ordinary weight
-//! seam made a one-row `SET` clone a `NodeData` per node of the type — O(type)
-//! per write, and measured at ~1.8× the whole-graph clone it was supposed to
-//! replace on a 100k-node graph. `MemoryGraph::node_weight_mut_silent`
-//! therefore skips undo capture as well as WAL capture, and
-//! `a_columnar_set_journals_one_pre_image_per_changed_node` pins it.
+//! Restoring a type now costs one `Arc` move rather than a re-point of every
+//! node of that type — the same O(N_type) → O(1) collapse the write path got.
 //!
 //! One consequence to keep in view when touching this path: a columnar `SET`
 //! writes into the master, never into a node's weight, so it produces **no**
@@ -112,7 +108,6 @@
 //! next insert reuses the slot.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use petgraph::graph::NodeIndex;
 
@@ -519,33 +514,19 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
             graph.timeseries_store.insert(node, *prior);
         }
         UndoEntry::ColumnarHandles { node_type, prior } => {
-            // The master half of the restore belongs to the shell —
-            // `column_stores` is not parked, so `restore_schema_shell` puts
-            // the pre-statement `Arc` back into the map. What the shell
-            // cannot reach is the copy of that handle each node of the type
-            // holds; the refresh sweep moved every one of them to the fork.
+            // Reinstall the pre-statement store. The backend owns the map and
+            // `swap_data_scale` swaps the backend, so nothing else restores it;
+            // this entry is the whole story for a columnar write.
             //
-            // Reading the membership from `type_indices` is correct because
-            // this entry was captured at the statement's *first* columnar
-            // write, so it replays near the end — after the bucket entries
-            // have already restored `type_indices` to its pre-statement
-            // contents. Nodes the statement created are gone by now, and
-            // nodes it deleted are back holding their own pre-image handles;
-            // re-pointing those again is a no-op.
-            let members: Vec<NodeIndex> = graph
-                .type_indices
-                .get(&node_type)
-                .map(|members| members.iter().collect())
-                .unwrap_or_default();
-            for idx in members {
-                if let Some(node) = GraphWrite::node_weight_mut_silent(&mut graph.graph, idx) {
-                    if let crate::graph::schema::PropertyStorage::Columnar(row) =
-                        &mut node.properties
-                    {
-                        row.repoint(Arc::clone(&prior));
-                    }
-                }
-            }
+            // `prior` is pristine by construction: `write_column_master`
+            // captured it *before* its `Arc::make_mut`, and holding it here is
+            // what made that call fork rather than mutate in place. One `Arc`
+            // move per touched type — no per-node work, because no node holds a
+            // store handle any more.
+            let Some(type_name) = graph.interner.try_resolve(node_type).map(str::to_string) else {
+                return;
+            };
+            graph.install_column_store(&type_name, prior);
             // A columnar `SET` lands in the master store, not in any node's
             // weight, so it produces no `NodeWeight` entry for the node it
             // changed — this entry is the only signal that a value under a
@@ -554,7 +535,7 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
             // occupant) or the claim it released free (a real duplicate
             // admitted), which is exactly the failure mode `swap_data_scale`
             // warns about for the parked `unique_indices`.
-            fallout.stale_unique_indices.insert(node_type);
+            fallout.stale_unique_indices.insert(type_name);
         }
     }
 }

@@ -1223,7 +1223,7 @@ fn codec_deser<'a, T: Deserialize<'a>>(
     decoded.map_err(|e| invalid_data(format!("binary deserialization failed: {e}")))
 }
 
-/// Verify every InternedKey in `graph.column_stores`'s schemas
+/// Verify every InternedKey in the backend's column-store schemas
 /// resolves to a string in `graph.interner`. Catches the class of bug where
 /// a writer synthesizes a key via `InternedKey::from_str()` (just hashing)
 /// and mutates a ColumnStore without first calling `interner.get_or_intern()`
@@ -1235,7 +1235,7 @@ fn codec_deser<'a, T: Deserialize<'a>>(
 /// path) panics loudly in debug builds rather than landing as silent data
 /// loss in release.
 fn validate_column_keys_registered(graph: &DirGraph) -> io::Result<()> {
-    for (type_name, store) in &graph.column_stores {
+    for (type_name, store) in graph.column_stores_by_name() {
         let schema = store.schema();
         for (_slot, key) in schema.iter() {
             if graph.interner.try_resolve(key).is_none() {
@@ -1360,7 +1360,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
 
     // 2. Serialize column sections (one per node type).
     //
-    // Iterate column_stores in sorted order by type_name. `graph.column_stores`
+    // Iterate column stores in sorted order by type_name. The backend's map
     // is a HashMap whose per-instance RandomState would otherwise cause the
     // section order to vary across processes — breaking byte-level reproducibility
     // that the Phase 4 golden-hash test relies on. Sorting here is free
@@ -1369,8 +1369,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
     let mut column_sections_meta: Vec<PortableColumnSection> = Vec::new();
     let mut column_sections_data: Vec<Vec<u8>> = Vec::new();
 
-    let mut column_stores_sorted: Vec<(&String, &Arc<ColumnStore>)> =
-        graph.column_stores.iter().collect();
+    let mut column_stores_sorted: Vec<(&str, &Arc<ColumnStore>)> = graph.column_stores_by_name();
     column_stores_sorted.sort_by(|a, b| a.0.cmp(b.0));
     for (type_name, store) in column_stores_sorted {
         let packed = store.write_packed_with_codec(&graph.interner, codec)?;
@@ -1387,7 +1386,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
         }
 
         column_sections_meta.push(PortableColumnSection {
-            type_name: type_name.clone(),
+            type_name: type_name.to_string(),
             compressed_size: compressed.len() as u64,
             row_count: store.row_count(),
             columns: cols,
@@ -1963,7 +1962,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
             let cs = crate::graph::storage::column_store::ColumnStore::from_mmap_store(
                 std::sync::Arc::new(store),
             );
-            graph.column_stores.insert(tm.type_name, Arc::new(cs));
+            graph.install_column_store(&tm.type_name, Arc::new(cs));
         }
 
         // Additively load sidecars for types added post-`load_ntriples`
@@ -1978,8 +1977,8 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     }
     log_stage("column_stores_load", t);
 
-    // Sync column stores to DiskGraph
-    graph.sync_disk_column_stores();
+    // No sync: the stores were installed straight onto the backend, which is
+    // their only owner (D1 Phase 3 deleted the DirGraph↔DiskGraph mirror).
 
     // Load id_indices from disk.
     //
@@ -2126,105 +2125,6 @@ fn apply_disk_metadata(dir: &std::path::Path, graph: &mut DirGraph) -> io::Resul
     Ok(())
 }
 
-/// Load `columns/<type>/columns.zst` sidecars into `graph.column_stores`.
-/// Skips entries whose type is already loaded (from `columns.bin`'s mmap
-/// fast path). Used by both the earlier per-type layout and the additive
-/// post-`columns.bin` path that covers types added post-build via
-/// `add_nodes`.
-fn load_column_sidecars(
-    dir: &std::path::Path,
-    graph: &mut crate::graph::dir_graph::DirGraph,
-) -> io::Result<()> {
-    use rayon::prelude::*;
-
-    let columns_dir = dir.join("columns");
-    if !columns_dir.exists() {
-        return Ok(());
-    }
-
-    // Collect job descriptors so the heavy work (read + zstd decode +
-    // ColumnStore::load_packed) can run in a rayon thread pool. On a
-    // 17M-node Wikidata article-author carve with ~4,500 distinct
-    // types, the previous sequential loop spent ~70 s in zstd alone;
-    // parallelising drops it to a few seconds on a 16-core machine.
-    struct Job {
-        type_name: String,
-        col_file: std::path::PathBuf,
-        schema: Arc<crate::graph::schema::TypeSchema>,
-        type_meta: std::collections::HashMap<String, String>,
-    }
-
-    let mut jobs: Vec<Job> = Vec::new();
-    for entry in std::fs::read_dir(&columns_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let type_name = entry.file_name().to_string_lossy().to_string();
-        if graph.column_stores.contains_key(&type_name) {
-            // columns.bin mmap path already loaded this type.
-            continue;
-        }
-        let col_file = entry.path().join("columns.zst");
-        if !col_file.exists() {
-            continue;
-        }
-        let schema = graph
-            .type_schemas
-            .get(&type_name)
-            .cloned()
-            .unwrap_or_else(|| std::sync::Arc::new(crate::graph::schema::TypeSchema::new()));
-        let type_meta = graph
-            .node_type_metadata
-            .get(&type_name)
-            .cloned()
-            .unwrap_or_default();
-        jobs.push(Job {
-            type_name,
-            col_file,
-            schema,
-            type_meta,
-        });
-    }
-
-    // Decompress + load_packed each sidecar in parallel.
-    let interner = &graph.interner;
-    let results: Vec<io::Result<(String, crate::graph::storage::column_store::ColumnStore)>> = jobs
-        .into_par_iter()
-        .map(
-            |job| -> io::Result<(String, crate::graph::storage::column_store::ColumnStore)> {
-                let compressed = std::fs::read(&job.col_file)?;
-                let decoded = zstd_decompress(&compressed)?;
-                // Current format: `KGLCOLv2` + row_count + Postcard-backed
-                // mixed columns. Older sidecars require a pre-0.14 converter.
-                if decoded.len() < 12 || &decoded[..8] != b"KGLCOLv2" {
-                    return Err(pre_014_bincode_error("KGLCOLv1/raw column sidecar"));
-                }
-                let packed_slice = &decoded[12..];
-                let row_count = u32::from_le_bytes(decoded[8..12].try_into().unwrap());
-                let codec = serde_codec::CodecVersion::PostcardV1;
-                let store =
-                    crate::graph::storage::column_store::ColumnStore::load_packed_with_codec(
-                        job.schema,
-                        &job.type_meta,
-                        interner,
-                        packed_slice,
-                        row_count,
-                        None,
-                        codec,
-                    )?;
-                Ok((job.type_name, store))
-            },
-        )
-        .collect();
-
-    for r in results {
-        let (type_name, store) = r?;
-        graph.column_stores.insert(type_name, Arc::new(store));
-    }
-    Ok(())
-}
-
 fn load_v5(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
     if buf.len() < 13 {
         return Err(invalid_data("v5 file is truncated — header incomplete"));
@@ -2363,31 +2263,8 @@ fn load_portable_column_section(
         Some(&type_temp_dir),
         codec,
     )?;
-    dir_graph
-        .column_stores
-        .insert(section_meta.type_name.clone(), Arc::new(store));
+    dir_graph.install_column_store(&section_meta.type_name, Arc::new(store));
     Ok(())
-}
-
-fn attach_portable_column_stores(dir_graph: &mut DirGraph) {
-    for (type_name, store) in &dir_graph.column_stores {
-        let has_id_title = store.has_id_title_columns();
-        let Some(indices) = dir_graph.type_indices.get(type_name) else {
-            continue;
-        };
-        for (row_id, node_idx) in indices.iter().enumerate() {
-            let Some(node) = dir_graph.graph.node_weight_mut(node_idx) else {
-                continue;
-            };
-            node.properties =
-                PropertyStorage::Columnar(ColumnarRow::new(Arc::clone(store), row_id as u32));
-            if has_id_title {
-                node.id = Value::Null;
-                node.title = Value::Null;
-            }
-        }
-    }
-    dir_graph.rebuild_indices_from_keys();
 }
 
 fn load_portable_columns(
@@ -2485,6 +2362,9 @@ fn load_portable_columnar(
         .map_err(io::Error::other)?;
     Ok(Arc::new(dir_graph))
 }
+
+mod columns;
+use columns::{attach_portable_column_stores, load_column_sidecars};
 
 mod vector_persistence;
 

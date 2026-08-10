@@ -29,8 +29,6 @@ pub mod mode;
 pub mod node_view;
 pub mod overflow;
 mod packed_codec;
-#[cfg(test)]
-pub mod poison;
 pub mod property_storage;
 pub mod type_build_meta;
 pub mod undo;
@@ -38,6 +36,7 @@ pub mod undo;
 use crate::datatypes::Value;
 use crate::graph::core::iterators::GraphEdgeRef;
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
+pub use crate::graph::storage::column_store::ColumnStore;
 pub use crate::graph::storage::node_view::NodeView;
 use crate::graph::storage::undo::UndoJournal;
 use petgraph::graph::{EdgeIndex, NodeIndex};
@@ -216,7 +215,14 @@ pub trait GraphRead {
     /// it must not outlive the `begin_query()` guard.
     #[inline]
     fn node_view(&self, idx: NodeIndex) -> Option<NodeView<'_>> {
-        self.node_weight(idx).map(NodeView::from_node_data)
+        let data = self.node_weight(idx)?;
+        // The node carries a row id; the store is the backend's, keyed by the
+        // node's type. This is the single resolution point for columnar reads.
+        let store = data.properties.columnar_row_id().and_then(|row_id| {
+            self.column_store(data.node_type)
+                .map(|store| (&**store, row_id))
+        });
+        Some(NodeView::new(data, store))
     }
 
     /// Every present property of a node as `(interned key, owned value)`.
@@ -248,6 +254,26 @@ pub trait GraphRead {
     #[inline]
     fn node_property_count(&self, idx: NodeIndex) -> usize {
         self.node_view(idx).map_or(0, |v| v.property_count())
+    }
+
+    // ─────────────── column-store ownership (read side) ───────────────
+    //
+    // The backend is the sole owner of a columnar type's `ColumnStore`
+    // (D1 Phase 3). A node carries only its `row_id`; the store is resolved
+    // here, keyed by the node's type.
+
+    /// The column store this backend owns for `type_key`, if the type is
+    /// columnar.
+    fn column_store(&self, type_key: InternedKey) -> Option<&Arc<ColumnStore>>;
+
+    /// Every `(type_key, store)` this backend owns.
+    fn column_stores_iter(&self)
+        -> Box<dyn Iterator<Item = (InternedKey, &Arc<ColumnStore>)> + '_>;
+
+    /// `true` when this backend owns at least one column store — i.e. the
+    /// graph has been through `enable_columnar` (which `save()` calls).
+    fn has_column_stores(&self) -> bool {
+        self.column_stores_iter().next().is_some()
     }
 
     // ─────────────── iteration ───────────────
@@ -509,6 +535,45 @@ pub trait GraphWrite: GraphRead {
     /// Mutable borrow of the full EdgeData.
     fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData>;
 
+    // ─────────────── column-store ownership (write side) ───────────────
+
+    /// Install (or replace) the store for `type_key`.
+    fn install_column_store(&mut self, type_key: InternedKey, store: Arc<ColumnStore>);
+
+    /// Mutable access to a type's store, for the copy-on-write master write.
+    fn column_store_mut(&mut self, type_key: InternedKey) -> Option<&mut Arc<ColumnStore>>;
+
+    /// Remove and return a type's store.
+    fn take_column_store(&mut self, type_key: InternedKey) -> Option<Arc<ColumnStore>>;
+
+    /// Drop every store (used by `disable_columnar` and the mid-build
+    /// page-cache reclaim in the N-Triples loader).
+    fn clear_column_stores(&mut self);
+
+    // ─────────────── node property writes ───────────────
+    //
+    // A columnar node has no store handle of its own, so a property write
+    // cannot be expressed on `&mut NodeData` alone: it needs the backend's
+    // store *and* the node's `row_id` at once. These five are the only way to
+    // write a node property, and they resolve the right route per storage
+    // variant.
+
+    /// Insert or update one property.
+    fn set_node_property(&mut self, idx: NodeIndex, key: InternedKey, value: Value);
+
+    /// Insert only when the key is absent or `Null` (Preserve conflict mode).
+    fn set_node_property_if_absent(&mut self, idx: NodeIndex, key: InternedKey, value: Value);
+
+    /// Remove a property, returning the prior value.
+    fn remove_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value>;
+
+    /// Mark a property cleared — writes `Null` rather than dropping the key, so
+    /// a disk flush propagates the removal. Returns the prior value.
+    fn clear_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value>;
+
+    /// Replace the whole property set (Replace conflict mode).
+    fn replace_node_properties(&mut self, idx: NodeIndex, pairs: Vec<(InternedKey, Value)>);
+
     /// Insert a new node, returning its assigned index.
     fn add_node(&mut self, data: NodeData) -> NodeIndex;
 
@@ -561,6 +626,19 @@ pub trait GraphWrite: GraphRead {
 #[derive(Debug, Default)]
 pub struct MemoryGraph {
     pub(crate) inner: StableDiGraph<NodeData, EdgeData>,
+    /// **The column stores this backend owns**, keyed by node-type
+    /// `InternedKey` — the same shape `DiskGraph` has always had.
+    ///
+    /// Every columnar node's properties live here; a node carries only its
+    /// `row_id`. Keyed by `InternedKey` rather than by type name because
+    /// `NodeView` resolution has only `NodeData.node_type` in hand and must
+    /// not need the interner on the read path.
+    ///
+    /// Derived-but-owned: not serialized with the graph (the `.kgl` writer
+    /// persists column data in its own section and re-installs on load), and
+    /// carried explicitly across `Clone`.
+    pub(crate) column_stores: HashMap<InternedKey, Arc<ColumnStore>>,
+
     /// Lazy per-connection-type peer counts used by grouped Cypher
     /// aggregations. Derived state: empty on clone/load and invalidated by
     /// every edge mutation.
@@ -582,6 +660,8 @@ impl Clone for MemoryGraph {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            // Cheap: one `Arc` bump per node type, not per node.
+            column_stores: self.column_stores.clone(),
             peer_counts: RwLock::new(HashMap::new()),
             // A journal belongs to the statement that opened it, never to a
             // copy of the graph it was recorded against.
@@ -600,6 +680,7 @@ impl MemoryGraph {
     pub(crate) fn from_graph(inner: StableDiGraph<NodeData, EdgeData>) -> Self {
         Self {
             inner,
+            column_stores: HashMap::new(),
             peer_counts: RwLock::new(HashMap::new()),
             undo: None,
         }

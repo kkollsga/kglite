@@ -15,7 +15,6 @@ use crate::graph::{
 };
 use kglite_core::api::mutation::{NodeOperationReport, OperationReport};
 use kglite_core::api::DirGraph;
-use kglite_core::api::GraphRead;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::Bound;
@@ -1127,9 +1126,6 @@ impl KnowledgeGraph {
         }
 
         self.cursor.selection.clear();
-        if graph.graph.is_disk() {
-            graph.sync_disk_column_stores();
-        }
         self.commit_wal()?;
         self.add_report(OperationReport::NodeOperation(result.clone()));
 

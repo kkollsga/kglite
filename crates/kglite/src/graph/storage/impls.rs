@@ -19,6 +19,7 @@ use crate::graph::core::iterators::{
     GraphNodeIndices,
 };
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
+use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::disk::csr::TOMBSTONE_EDGE;
 use crate::graph::storage::disk::graph::DiskGraph;
 use crate::graph::storage::{GraphRead, GraphWrite, MappedGraph, MemoryGraph};
@@ -121,6 +122,17 @@ macro_rules! impl_heap_graph_read {
             #[inline]
             fn str_prop_eq(&self, idx: NodeIndex, key: InternedKey, target: &str) -> Option<bool> {
                 self.node_view(idx).and_then(|v| v.str_prop_eq(key, target))
+            }
+
+            #[inline]
+            fn column_store(&self, type_key: InternedKey) -> Option<&std::sync::Arc<ColumnStore>> {
+                self.column_stores.get(&type_key)
+            }
+
+            fn column_stores_iter(
+                &self,
+            ) -> Box<dyn Iterator<Item = (InternedKey, &std::sync::Arc<ColumnStore>)> + '_> {
+                Box::new(self.column_stores.iter().map(|(k, v)| (*k, v)))
             }
 
             #[inline]
@@ -339,7 +351,223 @@ impl MemoryGraph {
     }
 }
 
+/// Inherent half of `impl_heap_column_writes!` — the undo hook the trait impl
+/// cannot host.
+macro_rules! impl_heap_pre_image_capture {
+    ($ty:ty) => {
+        impl $ty {
+            /// Journal the pre-image a property write is about to overwrite.
+            ///
+            /// One hook for both storage shapes, because a caller cannot know
+            /// which it is holding:
+            ///
+            /// - **row storage** → a `NodeData` clone, exactly what
+            ///   `node_weight_mut` captures. The five property writers bypass
+            ///   that method (they need `column_stores` at the same time), so
+            ///   they capture here or a failed statement cannot restore the
+            ///   value — which is what `rollback_tests::set_properties` caught
+            ///   when this was missing.
+            /// - **columnar** → one `Arc` of the type's store, per type per
+            ///   statement, as `UndoEntry::ColumnarHandles`. Cloning a
+            ///   `NodeData` per node would reintroduce the O(N_type) cost the
+            ///   journal exists to remove, and there is nothing on the node to
+            ///   clone anyway.
+            ///
+            /// Holding that clone is also what makes the caller's
+            /// `Arc::make_mut` fork instead of mutating the pre-image.
+            #[inline]
+            fn capture_property_pre_image(&mut self, idx: NodeIndex) {
+                if self.undo.is_none() {
+                    return;
+                }
+                let Some(nd) = self.inner.node_weight(idx) else {
+                    return;
+                };
+                match nd.properties.columnar_row_id() {
+                    None => self.capture_node_weight(idx),
+                    Some(_) => {
+                        let type_key = nd.node_type;
+                        let prior = self.column_stores.get(&type_key).map(std::sync::Arc::clone);
+                        if let Some(journal) = self.undo.as_deref_mut() {
+                            journal.note_columnar_fork(type_key, || prior);
+                        }
+                    }
+                }
+            }
+        }
+    };
+}
+
+impl_heap_pre_image_capture!(MemoryGraph);
+impl_heap_pre_image_capture!(MappedGraph);
+
+/// Column-store ownership + node-property writes, shared by the two heap
+/// backends.
+///
+/// A columnar node has no store handle, so a property write needs the store and
+/// the node's `row_id` at the same time. Both live on `self`, in different
+/// fields, so the disjoint-field borrow below is what makes this expressible at
+/// all — and is the reason these five methods sit on the backend rather than on
+/// `&mut NodeData`.
+macro_rules! impl_heap_column_writes {
+    () => {
+        #[inline]
+        fn install_column_store(
+            &mut self,
+            type_key: InternedKey,
+            store: std::sync::Arc<ColumnStore>,
+        ) {
+            self.column_stores.insert(type_key, store);
+        }
+
+        #[inline]
+        fn column_store_mut(
+            &mut self,
+            type_key: InternedKey,
+        ) -> Option<&mut std::sync::Arc<ColumnStore>> {
+            self.column_stores.get_mut(&type_key)
+        }
+
+        #[inline]
+        fn take_column_store(
+            &mut self,
+            type_key: InternedKey,
+        ) -> Option<std::sync::Arc<ColumnStore>> {
+            self.column_stores.remove(&type_key)
+        }
+
+        #[inline]
+        fn clear_column_stores(&mut self) {
+            self.column_stores.clear();
+        }
+
+        fn set_node_property(&mut self, idx: NodeIndex, key: InternedKey, value: Value) {
+            self.capture_property_pre_image(idx);
+            // Disjoint field borrows: the node lives in `inner`, its store in
+            // `column_stores`.
+            let Self {
+                inner,
+                column_stores,
+                ..
+            } = self;
+            let Some(nd) = inner.node_weight_mut(idx) else {
+                return;
+            };
+            match nd.properties.columnar_row_id() {
+                Some(row_id) => {
+                    if let Some(store) = column_stores.get_mut(&nd.node_type) {
+                        std::sync::Arc::make_mut(store).set(row_id, key, &value, None);
+                    }
+                }
+                None => nd.properties.insert(key, value),
+            }
+        }
+
+        fn set_node_property_if_absent(&mut self, idx: NodeIndex, key: InternedKey, value: Value) {
+            self.capture_property_pre_image(idx);
+            let Self {
+                inner,
+                column_stores,
+                ..
+            } = self;
+            let Some(nd) = inner.node_weight_mut(idx) else {
+                return;
+            };
+            match nd.properties.columnar_row_id() {
+                Some(row_id) => {
+                    if let Some(store) = column_stores.get_mut(&nd.node_type) {
+                        if store.get(row_id, key).is_none() {
+                            std::sync::Arc::make_mut(store).set(row_id, key, &value, None);
+                        }
+                    }
+                }
+                None => nd.properties.insert_if_absent(key, value),
+            }
+        }
+
+        fn remove_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
+            self.capture_property_pre_image(idx);
+            let Self {
+                inner,
+                column_stores,
+                ..
+            } = self;
+            let nd = inner.node_weight_mut(idx)?;
+            match nd.properties.columnar_row_id() {
+                Some(row_id) => {
+                    let store = column_stores.get_mut(&nd.node_type)?;
+                    let old = store.get(row_id, key);
+                    if old.is_some() {
+                        std::sync::Arc::make_mut(store).set(row_id, key, &Value::Null, None);
+                    }
+                    old
+                }
+                None => nd.properties.remove(key),
+            }
+        }
+
+        fn clear_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
+            self.capture_property_pre_image(idx);
+            let Self {
+                inner,
+                column_stores,
+                ..
+            } = self;
+            let nd = inner.node_weight_mut(idx)?;
+            match nd.properties.columnar_row_id() {
+                Some(row_id) => {
+                    // Columnar removal *is* a Null write, so `remove` already
+                    // has the clear semantics the disk flush needs.
+                    let store = column_stores.get_mut(&nd.node_type)?;
+                    let old = store.get(row_id, key);
+                    std::sync::Arc::make_mut(store).set(row_id, key, &Value::Null, None);
+                    old
+                }
+                None => {
+                    let prior = nd.properties.remove(key);
+                    nd.properties.insert(key, Value::Null);
+                    prior
+                }
+            }
+        }
+
+        fn replace_node_properties(&mut self, idx: NodeIndex, pairs: Vec<(InternedKey, Value)>) {
+            self.capture_property_pre_image(idx);
+            let Self {
+                inner,
+                column_stores,
+                ..
+            } = self;
+            let Some(nd) = inner.node_weight_mut(idx) else {
+                return;
+            };
+            match nd.properties.columnar_row_id() {
+                Some(row_id) => {
+                    let Some(store) = column_stores.get_mut(&nd.node_type) else {
+                        return;
+                    };
+                    let st = std::sync::Arc::make_mut(store);
+                    let existing: Vec<_> = st
+                        .row_properties(row_id)
+                        .into_iter()
+                        .map(|(k, _)| k)
+                        .collect();
+                    for k in existing {
+                        st.set(row_id, k, &Value::Null, None);
+                    }
+                    for (k, v) in pairs {
+                        st.set(row_id, k, &v, None);
+                    }
+                }
+                None => nd.properties.replace_all(pairs),
+            }
+        }
+    };
+}
+
 impl GraphWrite for MemoryGraph {
+    impl_heap_column_writes!();
+
     #[inline]
     fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
         if self.undo.is_some() {
@@ -442,6 +670,17 @@ impl GraphRead for MappedGraph {
     type NeighborsIter<'a> = GraphNeighbors<'a>;
 
     #[inline]
+    fn column_store(&self, type_key: InternedKey) -> Option<&std::sync::Arc<ColumnStore>> {
+        self.column_stores.get(&type_key)
+    }
+
+    fn column_stores_iter(
+        &self,
+    ) -> Box<dyn Iterator<Item = (InternedKey, &std::sync::Arc<ColumnStore>)> + '_> {
+        Box::new(self.column_stores.iter().map(|(k, v)| (*k, v)))
+    }
+
+    #[inline]
     fn node_count(&self) -> usize {
         self.inner().node_count()
     }
@@ -477,27 +716,25 @@ impl GraphRead for MappedGraph {
     fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
         self.inner().node_weight(idx)
     }
+    // Through `node_view`, which pairs the node's row id with the store this
+    // backend owns. Mapped is the mode where this matters most: its nodes hold
+    // no row copy of their properties at all, so reading `nd.properties`
+    // directly answers `None` for everything.
     #[inline]
     fn get_node_property(&self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
-        self.inner()
-            .node_weight(idx)
-            .and_then(|nd| nd.properties.get_value(key))
+        self.node_view(idx).and_then(|v| v.get_value(key))
     }
     #[inline]
     fn get_node_id(&self, idx: NodeIndex) -> Option<Value> {
-        self.inner().node_weight(idx).map(|nd| nd.id().into_owned())
+        self.node_view(idx).map(|v| v.id().into_owned())
     }
     #[inline]
     fn get_node_title(&self, idx: NodeIndex) -> Option<Value> {
-        self.inner()
-            .node_weight(idx)
-            .map(|nd| nd.title().into_owned())
+        self.node_view(idx).map(|v| v.title().into_owned())
     }
     #[inline]
     fn str_prop_eq(&self, idx: NodeIndex, key: InternedKey, target: &str) -> Option<bool> {
-        self.inner()
-            .node_weight(idx)
-            .and_then(|nd| nd.properties.str_prop_eq(key, target))
+        self.node_view(idx).and_then(|v| v.str_prop_eq(key, target))
     }
     #[inline]
     fn node_indices(&self) -> GraphNodeIndices<'_> {
@@ -834,6 +1071,8 @@ impl MappedGraph {
 }
 
 impl GraphWrite for MappedGraph {
+    impl_heap_column_writes!();
+
     #[inline]
     fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
         // Caller may mutate properties — invalidate property index.
@@ -945,6 +1184,17 @@ impl GraphRead for DiskGraph {
     type EdgeReferencesIter<'a> = GraphEdgeReferences<'a>;
     type EdgesConnectingIter<'a> = GraphEdgesConnecting<'a>;
     type NeighborsIter<'a> = GraphNeighbors<'a>;
+
+    #[inline]
+    fn column_store(&self, type_key: InternedKey) -> Option<&std::sync::Arc<ColumnStore>> {
+        self.column_stores.get(&type_key)
+    }
+
+    fn column_stores_iter(
+        &self,
+    ) -> Box<dyn Iterator<Item = (InternedKey, &std::sync::Arc<ColumnStore>)> + '_> {
+        Box::new(self.column_stores.iter().map(|(k, v)| (*k, v)))
+    }
 
     #[inline]
     fn node_count(&self) -> usize {
@@ -1204,6 +1454,66 @@ impl GraphRead for DiskGraph {
 }
 
 impl GraphWrite for DiskGraph {
+    #[inline]
+    fn install_column_store(&mut self, type_key: InternedKey, store: std::sync::Arc<ColumnStore>) {
+        self.column_stores.insert(type_key, store);
+    }
+
+    #[inline]
+    fn column_store_mut(
+        &mut self,
+        type_key: InternedKey,
+    ) -> Option<&mut std::sync::Arc<ColumnStore>> {
+        self.column_stores.get_mut(&type_key)
+    }
+
+    #[inline]
+    fn take_column_store(&mut self, type_key: InternedKey) -> Option<std::sync::Arc<ColumnStore>> {
+        self.column_stores.remove(&type_key)
+    }
+
+    #[inline]
+    fn clear_column_stores(&mut self) {
+        self.column_stores.clear();
+    }
+
+    // Disk keeps its own write protocol: `node_weight_mut` stages a `Map`-form
+    // `NodeData` in `node_mut_cache`, and `flush_node_mut_cache` folds the
+    // staged keys into the type's store. Writing straight to `column_stores`
+    // here would bypass that staging and lose the write on the next flush, so
+    // these five deliberately go through the cache rather than through the
+    // store the backend owns.
+    fn set_node_property(&mut self, idx: NodeIndex, key: InternedKey, value: Value) {
+        if let Some(nd) = GraphWrite::node_weight_mut(self, idx) {
+            nd.properties.insert(key, value);
+        }
+    }
+
+    fn set_node_property_if_absent(&mut self, idx: NodeIndex, key: InternedKey, value: Value) {
+        if let Some(nd) = GraphWrite::node_weight_mut(self, idx) {
+            nd.properties.insert_if_absent(key, value);
+        }
+    }
+
+    fn remove_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
+        // A bare removal from the staged Map leaves the column store's value
+        // untouched at flush time; the disk contract is a `Null` write.
+        self.clear_node_property(idx, key)
+    }
+
+    fn clear_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
+        let nd = GraphWrite::node_weight_mut(self, idx)?;
+        let prior = nd.properties.remove(key);
+        nd.properties.insert(key, Value::Null);
+        prior
+    }
+
+    fn replace_node_properties(&mut self, idx: NodeIndex, pairs: Vec<(InternedKey, Value)>) {
+        if let Some(nd) = GraphWrite::node_weight_mut(self, idx) {
+            nd.properties.replace_all(pairs);
+        }
+    }
+
     #[inline]
     fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
         DiskGraph::node_weight_mut(self, idx)

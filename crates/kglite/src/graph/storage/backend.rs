@@ -6,6 +6,7 @@
 //! captured by the source-quality whitelist.
 
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
+use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::recording::RecordingGraph;
 use crate::graph::storage::undo::UndoJournal;
 use crate::graph::storage::{GraphRead, GraphWrite, MappedGraph, MemoryGraph};
@@ -272,12 +273,20 @@ impl GraphBackend {
     /// remaps every index. Callers must flush the log *before* vacuuming.
     pub(crate) fn replace_heap_graph(&mut self, new: StableDiGraph<NodeData, EdgeData>) -> bool {
         match self {
+            // The column stores are *owned* state, not a lazy index: carry
+            // them across the swap or every columnar node's properties vanish
+            // (D1 Phase 3 — `vacuum` is the caller that would otherwise lose
+            // them).
             GraphBackend::Memory(g) => {
+                let stores = std::mem::take(&mut g.column_stores);
                 *g = MemoryGraph::from_graph(new);
+                g.column_stores = stores;
                 true
             }
             GraphBackend::Mapped(g) => {
+                let stores = std::mem::take(&mut g.column_stores);
                 *g = MappedGraph::from_graph(new);
+                g.column_stores = stores;
                 true
             }
             GraphBackend::Recording(rg) => rg.inner_mut().replace_heap_graph(new),
@@ -565,6 +574,27 @@ impl GraphRead for GraphBackend {
     type EdgeReferencesIter<'a> = crate::graph::core::iterators::GraphEdgeReferences<'a>;
     type EdgesConnectingIter<'a> = crate::graph::core::iterators::GraphEdgesConnecting<'a>;
     type NeighborsIter<'a> = crate::graph::core::iterators::GraphNeighbors<'a>;
+
+    #[inline]
+    fn column_store(&self, type_key: InternedKey) -> Option<&std::sync::Arc<ColumnStore>> {
+        match self {
+            Self::Memory(g) => GraphRead::column_store(g, type_key),
+            Self::Mapped(g) => GraphRead::column_store(g, type_key),
+            Self::Disk(g) => GraphRead::column_store(g.as_ref(), type_key),
+            Self::Recording(rg) => GraphRead::column_store(rg.as_ref(), type_key),
+        }
+    }
+
+    fn column_stores_iter(
+        &self,
+    ) -> Box<dyn Iterator<Item = (InternedKey, &std::sync::Arc<ColumnStore>)> + '_> {
+        match self {
+            Self::Memory(g) => GraphRead::column_stores_iter(g),
+            Self::Mapped(g) => GraphRead::column_stores_iter(g),
+            Self::Disk(g) => GraphRead::column_stores_iter(g.as_ref()),
+            Self::Recording(rg) => GraphRead::column_stores_iter(rg.as_ref()),
+        }
+    }
 
     #[inline]
     fn node_count(&self) -> usize {
@@ -1053,6 +1083,101 @@ impl GraphRead for GraphBackend {
 }
 
 impl GraphWrite for GraphBackend {
+    #[inline]
+    fn install_column_store(&mut self, type_key: InternedKey, store: std::sync::Arc<ColumnStore>) {
+        match self {
+            Self::Memory(g) => GraphWrite::install_column_store(g, type_key, store),
+            Self::Mapped(g) => GraphWrite::install_column_store(g, type_key, store),
+            Self::Disk(g) => GraphWrite::install_column_store(g.as_mut(), type_key, store),
+            Self::Recording(rg) => GraphWrite::install_column_store(rg.as_mut(), type_key, store),
+        }
+    }
+
+    #[inline]
+    fn column_store_mut(
+        &mut self,
+        type_key: InternedKey,
+    ) -> Option<&mut std::sync::Arc<ColumnStore>> {
+        match self {
+            Self::Memory(g) => GraphWrite::column_store_mut(g, type_key),
+            Self::Mapped(g) => GraphWrite::column_store_mut(g, type_key),
+            Self::Disk(g) => GraphWrite::column_store_mut(g.as_mut(), type_key),
+            Self::Recording(rg) => GraphWrite::column_store_mut(rg.as_mut(), type_key),
+        }
+    }
+
+    #[inline]
+    fn take_column_store(&mut self, type_key: InternedKey) -> Option<std::sync::Arc<ColumnStore>> {
+        match self {
+            Self::Memory(g) => GraphWrite::take_column_store(g, type_key),
+            Self::Mapped(g) => GraphWrite::take_column_store(g, type_key),
+            Self::Disk(g) => GraphWrite::take_column_store(g.as_mut(), type_key),
+            Self::Recording(rg) => GraphWrite::take_column_store(rg.as_mut(), type_key),
+        }
+    }
+
+    #[inline]
+    fn clear_column_stores(&mut self) {
+        match self {
+            Self::Memory(g) => GraphWrite::clear_column_stores(g),
+            Self::Mapped(g) => GraphWrite::clear_column_stores(g),
+            Self::Disk(g) => GraphWrite::clear_column_stores(g.as_mut()),
+            Self::Recording(rg) => GraphWrite::clear_column_stores(rg.as_mut()),
+        }
+    }
+
+    #[inline]
+    fn set_node_property(&mut self, idx: NodeIndex, key: InternedKey, value: Value) {
+        match self {
+            Self::Memory(g) => GraphWrite::set_node_property(g, idx, key, value),
+            Self::Mapped(g) => GraphWrite::set_node_property(g, idx, key, value),
+            Self::Disk(g) => GraphWrite::set_node_property(g.as_mut(), idx, key, value),
+            Self::Recording(rg) => GraphWrite::set_node_property(rg.as_mut(), idx, key, value),
+        }
+    }
+
+    #[inline]
+    fn set_node_property_if_absent(&mut self, idx: NodeIndex, key: InternedKey, value: Value) {
+        match self {
+            Self::Memory(g) => GraphWrite::set_node_property_if_absent(g, idx, key, value),
+            Self::Mapped(g) => GraphWrite::set_node_property_if_absent(g, idx, key, value),
+            Self::Disk(g) => GraphWrite::set_node_property_if_absent(g.as_mut(), idx, key, value),
+            Self::Recording(rg) => {
+                GraphWrite::set_node_property_if_absent(rg.as_mut(), idx, key, value)
+            }
+        }
+    }
+
+    #[inline]
+    fn remove_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
+        match self {
+            Self::Memory(g) => GraphWrite::remove_node_property(g, idx, key),
+            Self::Mapped(g) => GraphWrite::remove_node_property(g, idx, key),
+            Self::Disk(g) => GraphWrite::remove_node_property(g.as_mut(), idx, key),
+            Self::Recording(rg) => GraphWrite::remove_node_property(rg.as_mut(), idx, key),
+        }
+    }
+
+    #[inline]
+    fn clear_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
+        match self {
+            Self::Memory(g) => GraphWrite::clear_node_property(g, idx, key),
+            Self::Mapped(g) => GraphWrite::clear_node_property(g, idx, key),
+            Self::Disk(g) => GraphWrite::clear_node_property(g.as_mut(), idx, key),
+            Self::Recording(rg) => GraphWrite::clear_node_property(rg.as_mut(), idx, key),
+        }
+    }
+
+    #[inline]
+    fn replace_node_properties(&mut self, idx: NodeIndex, pairs: Vec<(InternedKey, Value)>) {
+        match self {
+            Self::Memory(g) => GraphWrite::replace_node_properties(g, idx, pairs),
+            Self::Mapped(g) => GraphWrite::replace_node_properties(g, idx, pairs),
+            Self::Disk(g) => GraphWrite::replace_node_properties(g.as_mut(), idx, pairs),
+            Self::Recording(rg) => GraphWrite::replace_node_properties(rg.as_mut(), idx, pairs),
+        }
+    }
+
     #[inline]
     fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
         match self {

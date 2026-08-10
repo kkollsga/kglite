@@ -271,16 +271,11 @@ impl KnowledgeGraph {
                 "storage_mode",
                 kglite_core::api::storage::live_storage_mode(&self.inner).as_str(),
             )?;
-            // Columnar memory info
-            let heap_bytes: usize = self
-                .inner
-                .column_stores
-                .values()
-                .map(|s| s.heap_bytes())
-                .sum();
-            let is_mapped = self.inner.column_stores.values().any(|s| s.is_mapped());
-            dict.set_item("columnar_heap_bytes", heap_bytes)?;
-            dict.set_item("columnar_is_mapped", is_mapped)?;
+            // Columnar memory info — from `graph_info()`, not from storage:
+            // the column stores belong to the backend (D1 Phase 3) and are not
+            // reachable from a binding.
+            dict.set_item("columnar_heap_bytes", info.columnar_heap_bytes)?;
+            dict.set_item("columnar_is_mapped", info.columnar_is_mapped)?;
             dict.set_item("memory_limit", self.inner.memory_limit)?;
             dict.set_item("columnar_total_rows", info.columnar_total_rows)?;
             dict.set_item("columnar_live_rows", info.columnar_live_rows)?;

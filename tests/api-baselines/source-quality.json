@@ -154,16 +154,9 @@
     {
       "path": "crates/kglite/src/graph/dir_graph/disk_persistence.rs",
       "qualified_name": "crate::DirGraph::write_disk_snapshot",
-      "lines": 250,
+      "lines": 249,
       "branches": 43,
       "nesting": 4
-    },
-    {
-      "path": "crates/kglite/src/graph/dir_graph/mod.rs",
-      "qualified_name": "crate::DirGraph::enable_columnar",
-      "lines": 259,
-      "branches": 25,
-      "nesting": 5
     },
     {
       "path": "crates/kglite/src/graph/features/equations.rs",
@@ -203,7 +196,7 @@
     {
       "path": "crates/kglite/src/graph/io/ntriples/loader.rs",
       "qualified_name": "crate::finalize_disk_graph",
-      "lines": 314,
+      "lines": 311,
       "branches": 46,
       "nesting": 5
     },
@@ -392,8 +385,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
       "qualified_name": "crate::execute_set",
-      "lines": 447,
-      "branches": 61,
+      "lines": 426,
+      "branches": 57,
       "nesting": 8
     },
     {
@@ -532,7 +525,7 @@
     {
       "path": "crates/kglite/src/graph/mutation/subgraph_streaming.rs",
       "qualified_name": "crate::save_subset_streaming_disk",
-      "lines": 538,
+      "lines": 522,
       "branches": 61,
       "nesting": 5
     },

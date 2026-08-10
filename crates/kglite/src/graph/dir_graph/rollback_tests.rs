@@ -76,7 +76,7 @@ struct Fingerprint {
     /// put both halves back *together*: leaving the nodes on the pre-statement
     /// store while the master keeps the fork (or the reverse) is the failure
     /// mode this pins, and it is invisible to a values-only comparison.
-    columnar_handles: Vec<(usize, bool)>,
+    columnar_rows: Vec<(usize, u32)>,
     /// Every user-index bucket as `(index, value, members in bucket order)`.
     /// Order matters: `lookup_by_index` hands the bucket `Vec` straight to the
     /// matcher, so bucket order is the row order an indexed `MATCH` without
@@ -194,8 +194,8 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
     id_lookup.sort();
 
     let mut column_masters: Vec<(String, MasterRows)> = graph
-        .column_stores
-        .iter()
+        .column_stores_by_name()
+        .into_iter()
         .map(|(node_type, store)| {
             let rows: MasterRows = (0..store.row_count())
                 .map(|row| {
@@ -218,30 +218,26 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
                     )
                 })
                 .collect();
-            (node_type.clone(), rows)
+            (node_type.to_string(), rows)
         })
         .collect();
     column_masters.sort();
 
-    let mut columnar_handles: Vec<(usize, bool)> = Vec::new();
+    let mut columnar_rows: Vec<(usize, u32)> = Vec::new();
     for idx in graph.graph.node_indices().collect::<Vec<_>>() {
-        // Deliberately the raw `NodeData`: this fingerprint is *about* the
-        // node-held handle's identity, which is exactly what `NodeView` hides.
+        // Deliberately the raw `NodeData`: what this fingerprints is the node's
+        // *row identity*, not its property values.
         let Some(node) = graph.graph.node_weight(idx) else {
             continue;
         };
         let PropertyStorage::Columnar(row) = &node.properties else {
             continue;
         };
-        let store = row.node_handle();
-        let node_type = node.node_type_str(&graph.interner);
-        let matches_master = graph
-            .column_stores
-            .get(node_type)
-            .is_some_and(|master| Arc::ptr_eq(store, master));
-        columnar_handles.push((idx.index(), matches_master));
+        // A node carries a row id, not a store handle (D1 Phase 3), so the
+        // identity worth fingerprinting is which row it points at.
+        columnar_rows.push((idx.index(), row.row_id()));
     }
-    columnar_handles.sort();
+    columnar_rows.sort();
 
     let mut user_indexes: Vec<(String, String, Vec<usize>)> = Vec::new();
     for ((node_type, property), value_map) in &graph.property_indices {
@@ -286,7 +282,7 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
         connection_type_metadata,
         id_lookup,
         column_masters,
-        columnar_handles,
+        columnar_rows,
         user_indexes,
     }
 }
@@ -376,7 +372,7 @@ fn seeded_columnar() -> DirGraph {
     let mut graph = seeded();
     graph.enable_columnar();
     assert!(
-        !graph.column_stores.is_empty(),
+        graph.is_columnar(),
         "the fixture must own master column stores, or the columnar arms are vacuous"
     );
     let columnar_nodes = graph
@@ -783,13 +779,14 @@ fn mapped_rolls_back_completely() {
 /// to the recorded `node_weight_mut`. `MemoryGraph` overrides it to bypass
 /// capture; `MappedGraph` relying on the default was harmless only while
 /// Mapped had no journal to capture into. The moment it got one, the default
-/// makes every silent write clone a `NodeData` pre-image — and both silent
-/// callers are sweeps over *every node of a type*:
-/// `refresh_columnar_node_handles`, and `BatchProcessor::detach_columnar_stores`
-/// / `reattach_columnar_stores`, which run only under
-/// `is_mapped() || is_disk()` and so are exercised by no memory-backed test at
-/// all. That is exactly the O(type)-per-write amplification commit 3bf9ef00
-/// removed from the WAL, re-created inside the journal.
+/// makes every silent write clone a `NodeData` pre-image. The sweeps that used
+/// to justify this — the columnar handle refresh and `add_nodes`'
+/// detach/reattach dance — are gone with D1 Phase 3, but the override still
+/// has to hold: `BatchProcessor::reattach_columnar_stores` remains a silent
+/// per-node write, it runs only under `is_mapped() || is_disk()`, and no
+/// memory-backed test exercises it. That is exactly the O(type)-per-write
+/// amplification commit 3bf9ef00 removed from the WAL, re-created inside the
+/// journal.
 ///
 /// Nothing existing catches it. The WAL payload guard
 /// (`tests/benchmarks/test_bench_wal_payload.py`) measures WAL *bytes*, which
@@ -906,13 +903,11 @@ fn the_columnar_fixture_writes_through_the_master_store() {
         "a successful columnar SET must land in the master store; if it does \
          not, the columnar arms are exercising the per-node fallback"
     );
-    assert!(
-        after
-            .columnar_handles
-            .iter()
-            .all(|(_, matches_master)| *matches_master),
-        "the post-write refresh sweep must leave every node's handle on the \
-         new master — that sweep is what the journal has to reverse"
+    assert_eq!(
+        before.columnar_rows, after.columnar_rows,
+        "a columnar SET must not move any node to a different row — it writes \
+         a cell of the store the backend owns, and the node's row identity is \
+         exactly what must stay put"
     );
 }
 
@@ -961,7 +956,7 @@ fn wide_columnar_into(mut graph: DirGraph) -> DirGraph {
     run(&mut graph, &format!("CREATE {}", rows.join(", ")));
     graph.enable_columnar();
     assert!(
-        !graph.column_stores.is_empty(),
+        graph.is_columnar(),
         "the fixture must own a master column store, or this test is vacuous"
     );
     graph
@@ -1057,26 +1052,20 @@ fn a_plain_set_journals_one_pre_image_per_changed_node() {
     );
 }
 
-/// The fork-detection guard is a no-op *today*, and this is what proves it.
+/// Two columnar writes in one statement must both be visible.
 ///
-/// `set_via_column_master` now adds a type to `touched_columnar_types` only
-/// when `Arc::make_mut` actually forked the master, rather than
-/// unconditionally. That must change nothing while every node holds its own
-/// strong handle: the master's count is `1 (map) + N (nodes)` at the first
-/// write of a clause, so the fork is unavoidable and the type is registered
-/// exactly as before.
+/// The first write of a statement forks the master away from the undo
+/// journal's pre-image; the second finds it uniquely owned and mutates in
+/// place. Both must land, and a read after the statement must see the second
+/// value, not the first.
 ///
-/// Two writes to the same type in one statement are the interesting case —
-/// the second finds the fresh allocation uniquely owned and mutates in place,
-/// so it does NOT fork. The sweep must still have happened, via the first
-/// write's registration. A regression here would surface as a stale per-node
-/// handle serving a pre-clause value, which is exactly what the assertions
-/// below read back.
-///
-/// When per-node handles become weak this test is expected to change meaning,
-/// not to be deleted: the fork count drops but the observable values must not.
+/// Before D1 Phase 3 this pinned a different mechanism: the first write forked
+/// away from `1 + N` node handles and registered the type for an end-of-clause
+/// re-point sweep, and the assertion was that the sweep had run. There is no
+/// sweep now — the store is the backend's and both writes land in it directly —
+/// but the observable is unchanged, which is the point of keeping the test.
 #[test]
-fn fork_detection_is_a_no_op_while_nodes_hold_strong_handles() {
+fn two_columnar_writes_in_one_statement_both_land() {
     let mut graph = wide_columnar();
 
     // Locate the node up front: `id` is an inline canonical field, not a
@@ -1096,71 +1085,123 @@ fn fork_detection_is_a_no_op_while_nodes_hold_strong_handles() {
         .expect("fixture seeds qty = node index");
 
     // Two SET clauses in one statement, same type and same property. The first
-    // forks (count is 1 + N); the second finds the fresh allocation uniquely
-    // owned and mutates IN PLACE, so it does not fork.
+    // forks away from the journal's pre-image; the second finds the fresh
+    // allocation uniquely owned and mutates IN PLACE.
     run(
         &mut graph,
         "MATCH (n:Item {id: 1}) SET n.qty = 111 SET n.qty = 222",
     );
 
-    // Read back THROUGH the per-node handle, not through the master. If the
-    // first write had failed to register the type, no sweep would run and this
-    // handle would still point at the pre-clause allocation serving qty = 1.
+    // Read back through the public route. Both writes must be visible.
     let node = graph.graph.node_view(idx).expect("node still present");
     assert_eq!(
         node.get_property_value("qty"),
         Some(crate::datatypes::Value::Int64(222)),
-        "both writes must be visible through the per-node handle; reading 1 \
-         means the refresh sweep never ran, i.e. fork detection failed to \
-         register the type on the write that actually forked"
+        "both writes must be visible; reading 1 means the second write landed \
+         somewhere the read route does not resolve"
     );
 
-    // The design pin still holds afterwards: the sweep re-pointed every node at
-    // the current master, so it is shared again.
-    let master = graph.column_stores.get("Item").expect("master");
-    assert!(
-        Arc::strong_count(master) > 1,
-        "the sweep must have re-pointed the per-node handles at the master"
+    // And between statements the master is uniquely owned again — the journal
+    // released its pre-image at commit, so the next statement's first write
+    // mutates in place instead of forking.
+    let master = graph.column_store("Item").expect("master");
+    assert_eq!(
+        Arc::strong_count(master),
+        1,
+        "between statements nothing but the backend may hold the master, or \
+         every write still pays a whole-store copy"
     );
 }
 
-/// Why the checkpoint's second `Arc` on the master is *not* what makes the
-/// columnar fast path fork the store.
+/// **Replaces `every_node_shares_the_master_column_store_handle`.**
 ///
-/// The natural reading of `Arc::make_mut(master)` forking is that something
-/// else holds a handle, and the statement checkpoint's schema shell does hold
-/// one. It is not the cause and removing it would not help: `enable_columnar`
-/// points every node of the type at the master, so its strong count is
-/// `1 + nodes-of-type` before any checkpoint is opened, and the first write of
-/// every statement forks regardless. Pinned here because "drop the shell's
-/// handle to stop the fork" is a plausible-sounding fix that would trade the
-/// rollback guarantee for nothing.
+/// That test pinned the pre-D1 design: `enable_columnar` pointed every node of
+/// a type at the master, so its strong count was `1 + nodes-of-type` and every
+/// first-write-of-a-statement forked the whole store. D1 Phase 3 deleted the
+/// node-held handle, and this is the inverted assertion: *no* node holds one,
+/// and the master is uniquely owned.
+///
+/// Keeping the coverage rather than the assertion is deliberate — the property
+/// this file cares about is what the refcount implies for `Arc::make_mut`, and
+/// that has flipped from "always copies" to "copies only under a checkpoint".
 #[test]
-fn every_node_shares_the_master_column_store_handle() {
+fn no_node_holds_a_column_store_handle() {
     let graph = wide_columnar();
     let master = graph
-        .column_stores
-        .get("Item")
+        .column_store("Item")
         .expect("the fixture installs a master store for Item");
 
-    assert!(
-        Arc::strong_count(master) > 1,
-        "the master must be shared with the per-node handles; if it were not, \
-         the columnar fast path would mutate in place and need no refresh sweep"
+    assert_eq!(
+        Arc::strong_count(master),
+        1,
+        "the backend must be the only owner of the master; a second handle \
+         means something re-introduced a replica, and every columnar write \
+         would silently go back to copying the whole store"
     );
-    let sharing = graph
+
+    // Non-vacuity: the nodes really are columnar, they just carry row ids.
+    let columnar = graph
         .graph
         .node_indices()
-        .filter(
-            |idx| match graph.graph.node_weight(*idx).map(|n| &n.properties) {
-                Some(PropertyStorage::Columnar(row)) => Arc::ptr_eq(row.node_handle(), master),
-                _ => false,
-            },
-        )
+        .filter(|idx| {
+            matches!(
+                graph.graph.node_weight(*idx).map(|n| &n.properties),
+                Some(PropertyStorage::Columnar(_))
+            )
+        })
         .count();
     assert_eq!(
-        sharing, WIDE_ITEMS,
-        "every node of the type must hold its own handle on the master"
+        columnar, WIDE_ITEMS,
+        "every node of the type must still be columnar, or the refcount above \
+         is 1 because the fixture stopped being saved"
+    );
+}
+
+/// **Replaces `fork_detection_is_a_no_op_while_nodes_hold_strong_handles`.**
+///
+/// The reference-count invariant the whole programme turns on, asserted in both
+/// directions (D1 Phase 3, plan step 5):
+///
+/// - **under an open checkpoint** the undo journal holds the pre-statement
+///   store, so the count is ≥ 2 and `Arc::make_mut` forks — rollback has
+///   something pristine to restore;
+/// - **between statements** nothing else holds it, so the count is 1 and a
+///   one-row write mutates one row in place.
+///
+/// The first direction is also a `debug_assert!` at the write site; this pins
+/// the second, which no assertion inside the write can see.
+#[test]
+fn the_master_is_uniquely_owned_between_statements() {
+    let mut graph = wide_columnar();
+
+    assert_eq!(
+        Arc::strong_count(graph.column_store("Item").expect("master")),
+        1,
+        "precondition: uniquely owned before any statement"
+    );
+
+    run(&mut graph, "MATCH (n:Item {id: 1}) SET n.qty = 111");
+
+    assert_eq!(
+        Arc::strong_count(graph.column_store("Item").expect("master")),
+        1,
+        "a committed statement must release the journal's pre-image, or the \
+         next statement forks the whole store again"
+    );
+    assert_eq!(
+        graph
+            .graph
+            .node_view(
+                graph
+                    .graph
+                    .node_indices()
+                    .find(|i| graph.graph.get_node_id(*i)
+                        == Some(crate::datatypes::Value::Int64(1)))
+                    .expect("node 1")
+            )
+            .and_then(|n| n.get_property_value("qty")),
+        Some(crate::datatypes::Value::Int64(111)),
+        "and the write must actually be visible"
     );
 }
 
@@ -1324,7 +1365,7 @@ fn seeded_columnar_with_unique_qty() -> DirGraph {
         "the constraint must be declared and enforcing"
     );
     assert!(
-        !graph.column_stores.is_empty(),
+        graph.is_columnar(),
         "the graph must be saved, or this is the plain unique fixture again"
     );
     graph

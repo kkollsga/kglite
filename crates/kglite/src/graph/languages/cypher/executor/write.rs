@@ -3,9 +3,7 @@
 
 use super::super::ast::*;
 use super::super::result::*;
-use super::columnar_write::{
-    refresh_columnar_node_handles, set_via_column_master, ColumnMasterWrite,
-};
+use super::columnar_write::{set_via_column_master, write_column_master, ColumnMasterWrite};
 use super::{clause_display_name, schema_ddl, CypherExecutor};
 use crate::datatypes::values::Value;
 use crate::graph::algorithms::Interrupt;
@@ -344,14 +342,6 @@ fn run_clause_pipeline(
                 // `node_weight` reads through `column_stores` and
                 // returns the pre-SET values.
                 GraphWrite::flush_pending_writes(&mut graph.graph);
-                // Disk: mirror disk's freshly-flushed column_stores back
-                // into DirGraph.column_stores so a subsequent add_nodes
-                // (which calls sync_disk_column_stores DirGraph→Disk)
-                // doesn't clobber the post-SET state with the stale
-                // pre-SET DirGraph snapshot. Without this, a multi-stage
-                // SET → add_nodes → read pipeline silently loses the
-                // SET's effects on disk-mode graphs.
-                graph.sync_column_stores_from_disk();
             }
             Clause::Delete(del) => {
                 execute_delete(graph, del, &result_set, stats, interrupt)?;
@@ -361,7 +351,6 @@ fn run_clause_pipeline(
                 // Same rationale as SET — REMOVE goes through
                 // node_weight_mut on disk.
                 GraphWrite::flush_pending_writes(&mut graph.graph);
-                graph.sync_column_stores_from_disk();
             }
             Clause::Merge(merge) => {
                 result_set = execute_merge(graph, merge, result_set, params, stats, interrupt)?;
@@ -369,7 +358,6 @@ fn run_clause_pipeline(
                 // `execute_set`; flush so any following clause sees the
                 // mutations.
                 GraphWrite::flush_pending_writes(&mut graph.graph);
-                graph.sync_column_stores_from_disk();
             }
             // FOREACH: side-effect loop. Runs its body's update clauses once
             // per list element with the loop var bound; the outer row set is
@@ -391,7 +379,6 @@ fn run_clause_pipeline(
                     budget,
                 )?;
                 GraphWrite::flush_pending_writes(&mut graph.graph);
-                graph.sync_column_stores_from_disk();
             }
             // Correlated CALL { } import validation needs the declared outer
             // scope (variables bound by clauses 0..i), distinct from the
@@ -494,7 +481,6 @@ fn finalize_mutation(
     // Without this, Cypher SET on a disk-backed graph appeared to no-op
     // until the next mutation/save flushed the cache — see CHANGELOG.
     GraphWrite::flush_pending_writes(&mut graph.graph);
-    graph.sync_column_stores_from_disk();
 
     // Finalize: if RETURN was in the query, finalize with column projection
     let has_return = query.clauses.iter().any(|c| matches!(c, Clause::Return(_)));
@@ -597,13 +583,12 @@ fn apply_foreach_body_clause(
     interrupt: &Interrupt,
     budget: &super::budget::ExecutionBudget,
 ) -> Result<ResultSet, String> {
-    // Per-element flush+sync is REQUIRED on disk, not just for add_nodes: disk
-    // property reads (e.g. `coalesce(n.hits, 0)` in a same/later iteration)
-    // consult DirGraph.column_stores, which only reflects a write after
-    // sync_column_stores_from_disk. Deferring the sync to once-after-loop
-    // (tried in Phase 1) returned stale/None properties on disk — reverted.
-    // Reducing this safely needs the disk read path to consult the mut-cache,
-    // a deeper storage change out of scope here. (Memory mode pays ~nothing.)
+    // Per-element flush is REQUIRED on disk, not just for add_nodes: a disk
+    // property read in the same or a later iteration (e.g. `coalesce(n.hits, 0)`)
+    // reads the type's column store, which only reflects a staged write after
+    // `flush_pending_writes` drains `node_mut_cache`. Reducing this safely needs
+    // the disk read path to consult the mut-cache, a deeper storage change out
+    // of scope here. (Memory mode pays ~nothing.)
     match clause {
         Clause::Create(create) => {
             execute_create(graph, create, result_set, params, stats, interrupt)
@@ -611,25 +596,21 @@ fn apply_foreach_body_clause(
         Clause::Set(set) => {
             execute_set(graph, set, &result_set, params, stats, interrupt)?;
             GraphWrite::flush_pending_writes(&mut graph.graph);
-            graph.sync_column_stores_from_disk();
             Ok(result_set)
         }
         Clause::Delete(del) => {
             execute_delete(graph, del, &result_set, stats, interrupt)?;
             GraphWrite::flush_pending_writes(&mut graph.graph);
-            graph.sync_column_stores_from_disk();
             Ok(result_set)
         }
         Clause::Remove(rem) => {
             execute_remove(graph, rem, &result_set, stats, interrupt)?;
             GraphWrite::flush_pending_writes(&mut graph.graph);
-            graph.sync_column_stores_from_disk();
             Ok(result_set)
         }
         Clause::Merge(merge) => {
             let rs = execute_merge(graph, merge, result_set, params, stats, interrupt)?;
             GraphWrite::flush_pending_writes(&mut graph.graph);
-            graph.sync_column_stores_from_disk();
             Ok(rs)
         }
         Clause::Foreach {
@@ -690,9 +671,9 @@ fn execute_create(
 ) -> Result<ResultSet, String> {
     // CREATE works on every storage mode. On disk, node properties are routed
     // through the per-type ColumnStore by `DirGraph::insert_node_routed` (the
-    // same mechanism `add_nodes` uses), and the disk read-side is synced once
-    // at the end of this function — see the `sync_disk_column_stores` call
-    // below. (SET/DELETE/REMOVE already work on disk via the staged-write path.)
+    // same mechanism `add_nodes` uses), which writes straight into the store the
+    // backend owns — there is no second copy to sync since D1 Phase 3.
+    // (SET/DELETE/REMOVE already work on disk via the staged-write path.)
     // One CREATE per incoming row, and nothing at all for zero rows. A leading
     // CREATE gets its single empty row from the pipeline's implicit-start-row
     // seed (`clause_needs_implicit_row`) — this function must not synthesize
@@ -858,14 +839,6 @@ fn execute_create(
         // individual Cypher edges normally go straight to disk overflow and are
         // already visible).
         graph.ensure_disk_edges_built()?;
-    }
-
-    // Disk: push the column stores we wrote into (via insert_node_routed) to the
-    // disk read-side, ONCE for the whole CREATE clause. Per-node syncing would
-    // share the store Arc and force every later insert to deep-clone it. No-op
-    // on memory/mapped.
-    if stats.nodes_created > 0 {
-        graph.sync_disk_column_stores();
     }
 
     Ok(ResultSet {
@@ -1261,6 +1234,46 @@ fn existing_property_keys(
     }
 }
 
+/// Write one property straight onto a node, bypassing the columnar master fast
+/// path.
+///
+/// The fall-through for row storage, for `title` / `name` (which live in the
+/// node's inline title field, not in the store), and for a columnar node whose
+/// type the backend has no store for. Returns whether the node existed.
+///
+/// Extracted from `execute_set` (D1 Phase 3) so routing the write through
+/// `GraphWrite` — which a columnar node now requires — does not push that
+/// function past its size cap.
+fn set_node_property_direct(
+    graph: &mut crate::graph::dir_graph::DirGraph,
+    node_idx: NodeIndex,
+    property: &str,
+    value: Value,
+) -> bool {
+    if graph.graph.node_weight(node_idx).is_none() {
+        return false;
+    }
+    let set_title = |graph: &mut crate::graph::dir_graph::DirGraph, v: Value| {
+        if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
+            node.title = v;
+        }
+    };
+    match property {
+        "title" => set_title(graph, value),
+        // "name" maps to title in Cypher reads; update both for consistency.
+        "name" => {
+            set_title(graph, value.clone());
+            let key = graph.interner.get_or_intern("name");
+            GraphWrite::set_node_property(&mut graph.graph, node_idx, key, value);
+        }
+        _ => {
+            let key = graph.interner.get_or_intern(property);
+            GraphWrite::set_node_property(&mut graph.graph, node_idx, key, value);
+        }
+    }
+    true
+}
+
 fn execute_set(
     graph: &mut DirGraph,
     set: &SetClause,
@@ -1276,8 +1289,6 @@ fn execute_set(
     // store (one clone per row → O(N²) work, OOM on 1k rows of a
     // type with 6.8k+ nodes — see CHANGELOG note for SET-on-Prospect
     // regression on the loaded Sodir graph).
-    let mut touched_columnar_types: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
     // Freshness provenance: nodes (of opted-in types) modified by this SET get a
     // single `updated_at` bump after the loop (engine-managed reserved key) —
     // collected here so multiple property writes on one node stamp it once.
@@ -1468,33 +1479,17 @@ fn execute_set(
                             value: &value,
                             row_id: columnar_row_id,
                         },
-                        &mut touched_columnar_types,
                     );
                     if wrote_via_master {
                         stats.properties_set += 1;
                     }
                     if !wrote_via_master {
-                        // Compact / Map storage, or title/name, or a Columnar
-                        // node whose type isn't registered in
-                        // `graph.column_stores` (e.g. disk-mode graphs that
-                        // wrap a different store): fall through to the
-                        // existing per-node setter.
-                        if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, *node_idx)
-                        {
-                            match property.as_str() {
-                                "title" => {
-                                    node.title = value;
-                                }
-                                "name" => {
-                                    // "name" maps to title in Cypher reads;
-                                    // update both title and properties for consistency
-                                    node.title = value.clone();
-                                    node.set_property("name", value, &mut graph.interner);
-                                }
-                                _ => {
-                                    node.set_property(property, value, &mut graph.interner);
-                                }
-                            }
+                        // Row storage, or title/name, or a columnar node whose
+                        // type the backend has no store for (disk-mode graphs
+                        // with their own staged-write path): fall through to the
+                        // backend's per-node setter, which routes by storage
+                        // variant.
+                        if set_node_property_direct(graph, *node_idx, property, value) {
                             stats.properties_set += 1;
                         }
                     }
@@ -1666,12 +1661,10 @@ fn execute_set(
                         value: pval,
                         row_id: columnar_row_id,
                     },
-                    &mut touched_columnar_types,
                 );
                 if !wrote {
-                    if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, *node_idx) {
-                        node.set_property(pname, pval.clone(), &mut graph.interner);
-                    }
+                    let key = graph.interner.get_or_intern(pname);
+                    GraphWrite::set_node_property(&mut graph.graph, *node_idx, key, pval.clone());
                 }
                 let mut prop_type = HashMap::new();
                 prop_type.insert(pname.to_string(), value_type_name(pval));
@@ -1705,7 +1698,6 @@ fn execute_set(
         }
     }
 
-    refresh_columnar_node_handles(graph, touched_columnar_types);
     Ok(())
 }
 
@@ -1851,8 +1843,6 @@ fn execute_remove(
     // Same batching contract as `execute_set`: Columnar types written through
     // the graph master get their per-node `Arc<ColumnStore>` handles refreshed
     // in one O(N-per-type) sweep at the end, not once per row.
-    let mut touched_columnar_types: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
 
     for (row_idx, row) in result_set.rows.iter().enumerate() {
         check_interrupt_periodic(interrupt, row_idx)?;
@@ -1953,35 +1943,43 @@ fn execute_remove(
                         };
                         if let Some(row_id) = columnar_row_id {
                             let key = graph.interner.get_or_intern(property);
-                            let prior = graph
-                                .column_stores
-                                .get(&node_type_str)
-                                .and_then(|master| master.get(row_id, key));
-                            if let Some(master) = graph.column_stores.get_mut(&node_type_str) {
-                                Arc::make_mut(master).set(row_id, key, &Value::Null, None);
-                                touched_columnar_types.insert(node_type_str.clone());
-                                // The master write bypasses the recorded
-                                // GraphWrite path, so capture the one mutated
-                                // node for the WAL explicitly. (The silent
-                                // refresh sweep must NOT be captured — else one
-                                // REMOVE would log every node of the type.)
-                                graph.graph.note_recorded_node_upsert(*node_idx);
-                                cleared_via_master = Some(prior);
-                            }
+                            // Same primitive `SET` uses, for the same reason:
+                            // it captures the pre-statement store into the undo
+                            // journal *before* mutating. This path used to write
+                            // the master directly with no pre-image, which was
+                            // survivable only while `Arc::make_mut` always
+                            // forked (every node held a handle). With the
+                            // backend the sole owner the write lands in place,
+                            // so a failed statement would have had nothing to
+                            // roll back to.
+                            cleared_via_master = write_column_master(
+                                graph,
+                                &node_type_str,
+                                *node_idx,
+                                row_id,
+                                key,
+                                &Value::Null,
+                            );
                         }
                     }
 
                     let removed_value = if let Some(prior) = cleared_via_master {
                         prior
-                    } else if let Some(node) = graph.get_node_mut(*node_idx) {
+                    } else if graph.graph.node_weight(*node_idx).is_some() {
                         if property == "name" || property == "title" {
-                            let old = std::mem::replace(&mut node.title, Value::Null);
-                            node.remove_property("name");
+                            let old = graph
+                                .get_node_mut(*node_idx)
+                                .map(|node| std::mem::replace(&mut node.title, Value::Null))
+                                .unwrap_or(Value::Null);
+                            let key = InternedKey::from_str("name");
+                            GraphWrite::remove_node_property(&mut graph.graph, *node_idx, key);
                             (!matches!(old, Value::Null)).then_some(old)
-                        } else if is_disk {
-                            node.clear_property(property)
                         } else {
-                            node.remove_property(property)
+                            // The backend picks the right removal semantics per
+                            // storage: disk stages a `Null` write so its flush
+                            // propagates the removal; row storage drops the key.
+                            let key = InternedKey::from_str(property);
+                            GraphWrite::remove_node_property(&mut graph.graph, *node_idx, key)
                         }
                     } else {
                         None
@@ -2019,7 +2017,6 @@ fn execute_remove(
         }
     }
 
-    refresh_columnar_node_handles(graph, touched_columnar_types);
     Ok(())
 }
 

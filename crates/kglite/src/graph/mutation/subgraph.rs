@@ -5,6 +5,7 @@ use crate::graph::schema::{CurrentSelection, DirGraph, EdgeData, SchemaInstall};
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Expand the current selection by N hops using BFS.
 ///
@@ -85,6 +86,21 @@ pub fn extract_subgraph(
 
     // Copy type schemas so compact property storage works correctly
     new_graph.type_schemas = source.type_schemas.clone();
+
+    // Carry the source's column stores. A copied node keeps its `row_id`, and
+    // since D1 Phase 3 that row id means nothing without the store the backend
+    // owns — before, the node carried its own `Arc` and its properties
+    // travelled with it. Sharing the `Arc` keeps every row id valid; the rows
+    // belonging to unselected nodes are orphans, which `enable_columnar`
+    // already detects and compacts away on the next save.
+    for (type_key, store) in source
+        .graph
+        .column_stores_iter()
+        .map(|(k, v)| (k, Arc::clone(v)))
+        .collect::<Vec<_>>()
+    {
+        GraphWrite::install_column_store(&mut new_graph.graph, type_key, store);
+    }
 
     // Map from old node indices to new node indices
     let mut index_map: HashMap<NodeIndex, NodeIndex> = HashMap::with_capacity(nodes.len());

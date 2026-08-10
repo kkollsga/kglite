@@ -326,9 +326,7 @@ fn finalize_disk_graph(
                     let store = crate::graph::storage::column_store::ColumnStore::from_mmap_store(
                         Arc::new(mmap_store),
                     );
-                    graph
-                        .column_stores
-                        .insert(type_meta.type_name.clone(), Arc::new(store));
+                    graph.install_column_store(&type_meta.type_name, Arc::new(store));
                 }
                 Ok(())
             })();
@@ -340,12 +338,11 @@ fn finalize_disk_graph(
             if build_debug() {
                 eplog!(
                     "  Reloaded {} column stores from mmap ({})",
-                    graph.column_stores.len(),
+                    graph.column_store_count(),
                     fmt_dur(reload_start.elapsed().as_secs_f64()),
                 );
             }
         }
-        graph.sync_disk_column_stores();
     }
 
     // Build id_indices for all types so WHERE id(n) = X is O(1).
@@ -618,9 +615,10 @@ fn build_columns(
     // Free everything not needed for Phase 2+3 to maximize page cache.
     // Phase 2 only needs qnum_to_idx + edge_buffer. Phase 3 only needs pending_edges.
     if graph.graph.is_disk() {
-        let dropped_stores = graph.column_stores.len();
-        graph.column_stores.clear();
-        graph.sync_disk_column_stores();
+        // One map to clear, not two: the backend owns it (D1 Phase 3), so
+        // there is no DirGraph copy left behind to resurrect the pages.
+        let dropped_stores = graph.column_store_count();
+        graph.clear_column_stores();
         drop(type_meta);
         // type_indices: 1 GB — not needed for Phase 2/3. Rebuild from node_slots after.
         let type_indices_count = graph.type_indices.len();
@@ -1940,7 +1938,7 @@ mod tests {
             .lookup_by_id_normalized("Human", &Value::UniqueId(3))
             .unwrap();
 
-        assert!(graph.column_stores.contains_key("Human"));
+        assert!(graph.column_store("Human").is_some());
         assert_eq!(
             graph.graph.get_node_property(q1, dense),
             Some(Value::String("dense-1".to_string()))

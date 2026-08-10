@@ -231,15 +231,22 @@ where
             .into_iter()
             .map(|(k, v)| (graph.interner.get_or_intern(&k), v))
             .collect();
-        if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
-            let count = interned_props.len();
-            for (ik, v) in interned_props {
-                node.properties.insert(ik, v);
-            }
-            nodes_updated += 1;
-            properties_set += count;
-            touched_types.insert(node.node_type_str(&graph.interner).to_string());
+        let Some(type_name) = graph
+            .graph
+            .node_weight(node_idx)
+            .map(|node| node.node_type_str(&graph.interner).to_string())
+        else {
+            continue;
+        };
+        let count = interned_props.len();
+        for (ik, v) in interned_props {
+            // Through the backend: a columnar node's properties live in the
+            // store the backend owns, not on the node (D1 Phase 3).
+            GraphWrite::set_node_property(&mut graph.graph, node_idx, ik, v);
         }
+        nodes_updated += 1;
+        properties_set += count;
+        touched_types.insert(type_name);
     }
 
     for node_type in &touched_types {

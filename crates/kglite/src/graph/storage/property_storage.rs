@@ -1,28 +1,37 @@
-//! `PropertyStorage` — the three physical shapes a node's properties take, and
-//! the boundary that keeps a columnar node's store handle inside the storage
-//! layer.
+//! `PropertyStorage` — the three physical shapes a node's properties take.
 //!
-//! # Why this lives under `graph::storage`
+//! # Ownership
 //!
 //! A columnar node's properties live in a per-type
 //! [`ColumnStore`](crate::graph::storage::column_store::ColumnStore) that the
-//! storage backend owns. Before D1, `PropertyStorage::Columnar` exposed its
-//! `Arc<ColumnStore>` as a public-in-crate enum-variant field, so *any* module
-//! could pattern-match a node and read one replica of that store — which is how
-//! the two shipped defects in `dev-docs/plans/d1-column-store-ownership.md` §2
-//! arose, and what made the caller inventory necessary in the first place.
+//! **storage backend owns** (D1 Phase 3). `PropertyStorage::Columnar` carries a
+//! [`ColumnarRow`] — a row id and nothing else. There is no handle on the node,
+//! so there is no replica to drift, no `Arc::make_mut` fork per write, and no
+//! re-point sweep after a master write.
 //!
-//! The handle now sits behind [`ColumnarRow`], whose `store` field is private to
-//! `graph::storage`. Outside the storage layer there is exactly **one** way to
-//! reach it — [`ColumnarRow::node_handle`] — and the set of call sites is pinned
-//! by `column_ownership_tests::the_node_handle_escape_has_exactly_the_phase_3_call_sites`.
-//! Everything else reads through [`NodeView`](crate::graph::storage::NodeView),
-//! which resolves the store the backend answers with.
+//! The consequence for this type is that its `Columnar` arm is **inert**:
+//! `get` / `get_value` / `str_prop_eq` / `len` / `keys` answer as if the row
+//! were empty, and the mutators `debug_assert!` rather than guess. Columnar
+//! access is expressed on the backend instead, where the store actually is:
 //!
-//! Reading a property value through `node_handle()` is always wrong. It is for
-//! handle *identity* (`Arc::ptr_eq` drift checks), handle *re-pointing* (the
-//! refresh sweep, rollback restore) and lifecycle bookkeeping — the operations
-//! D1 Phase 3 deletes outright.
+//! - read  → [`NodeView`](crate::graph::storage::NodeView), built by
+//!   [`GraphRead::node_view`](crate::graph::storage::GraphRead::node_view),
+//!   which pairs the node with `column_store(node.node_type)`;
+//! - write → [`GraphWrite::set_node_property`](crate::graph::storage::GraphWrite::set_node_property)
+//!   and its four siblings.
+//!
+//! That asymmetry is deliberate and enforced: outside `graph::storage` the
+//! value readers here are not even visible, so a caller cannot accidentally
+//! read a columnar node as empty.
+//!
+//! # Serialization hazard
+//!
+//! With no store in reach, this type cannot serialize a columnar node's
+//! properties. Every `.kgl` save path therefore writes columnar data in its own
+//! column section and sets the `STRIP_PROPERTIES` thread-local while
+//! serializing topology. The `Serialize` impl below asserts that guard is
+//! actually set before it emits an empty map for a columnar node — a silent
+//! empty map here is a **data-format** failure, not a code failure.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -32,80 +41,31 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::TypeSchema;
-use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::interner::{InternedKey, StringInterner, STRIP_PROPERTIES};
 
-/// A node's columnar row: *which* store, and *which* row inside it.
+/// A node's columnar row — **identity only**.
 ///
-/// `store` is private to `graph::storage`; see the module docs for the single
-/// allowlisted escape.
+/// D1 Phase 3 deleted the `Arc<ColumnStore>` that used to live here. A node no
+/// longer knows *which* store holds its properties, only *which row* it is; the
+/// store is resolved by the storage backend from the node's type
+/// (`GraphRead::column_store`). That is the whole point of the programme: one
+/// owner, no replicas to drift, and a `SET` that mutates one row in place
+/// instead of forking a whole store per node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ColumnarRow {
-    /// The node-held replica of the type's column store.
-    ///
-    /// D1 Phase 3 deletes this field: the backend becomes the sole owner and a
-    /// node keeps only `row_id`. Until then it is reachable outside
-    /// `graph::storage` only through [`ColumnarRow::node_handle`].
-    store: Arc<ColumnStore>,
     row_id: u32,
 }
 
 impl ColumnarRow {
     #[inline]
-    pub(crate) fn new(store: Arc<ColumnStore>, row_id: u32) -> Self {
-        ColumnarRow { store, row_id }
+    pub(crate) fn new(row_id: u32) -> Self {
+        ColumnarRow { row_id }
     }
 
     /// The node's row index within its type's store.
     #[inline]
     pub(crate) fn row_id(&self) -> u32 {
         self.row_id
-    }
-
-    /// **The one allowlisted escape.** Returns the node-held store handle.
-    ///
-    /// Every caller outside `graph::storage` is, by construction, on the D1
-    /// Phase-3 work list — this is the only route to a node's own `Arc`, and
-    /// `column_ownership_tests::the_node_handle_escape_has_exactly_the_phase_3_call_sites`
-    /// pins the exact set. Adding a call site fails that test.
-    ///
-    /// **Never use this to read a property value.** Use
-    /// [`NodeView`](crate::graph::storage::NodeView), which resolves the store
-    /// the backend owns rather than this replica.
-    #[inline]
-    pub(crate) fn node_handle(&self) -> &Arc<ColumnStore> {
-        &self.store
-    }
-
-    /// **Allowlisted escape (mutating).** Re-point this node at `store`.
-    ///
-    /// The refresh sweep (`columnar_write::refresh_columnar_node_handles`) and
-    /// the rollback restore arm are the only callers, and both disappear in D1
-    /// Phase 3 along with the field itself. Pinned by the same inventory test
-    /// as [`ColumnarRow::node_handle`].
-    #[inline]
-    pub(crate) fn repoint(&mut self, store: Arc<ColumnStore>) {
-        self.store = store;
-    }
-
-    /// Storage-internal mutable handle, for the copy-on-write mutators below.
-    #[inline]
-    fn store_mut(&mut self) -> &mut Arc<ColumnStore> {
-        &mut self.store
-    }
-
-    /// Storage-internal read handle.
-    #[inline]
-    pub(in crate::graph::storage) fn store(&self) -> &ColumnStore {
-        &self.store
-    }
-}
-
-impl Clone for ColumnarRow {
-    fn clone(&self) -> Self {
-        ColumnarRow {
-            store: Arc::clone(&self.store),
-            row_id: self.row_id,
-        }
     }
 }
 
@@ -187,7 +147,7 @@ impl PropertyStorage {
                 .and_then(|slot| values.get(slot as usize))
                 .filter(|v| !matches!(v, Value::Null))
                 .map(Cow::Borrowed),
-            PropertyStorage::Columnar(row) => row.store().get(row.row_id(), key).map(Cow::Owned),
+            PropertyStorage::Columnar(_) => None,
         }
     }
 
@@ -203,7 +163,7 @@ impl PropertyStorage {
                 .and_then(|slot| values.get(slot as usize))
                 .filter(|v| !matches!(v, Value::Null))
                 .cloned(),
-            PropertyStorage::Columnar(row) => row.store().get(row.row_id(), key),
+            PropertyStorage::Columnar(_) => None,
         }
     }
 
@@ -234,25 +194,12 @@ impl PropertyStorage {
                 .and_then(|slot| values.get(slot as usize))
                 .filter(|v| !matches!(v, Value::Null))
                 .map(|v| matches!(v, Value::String(s) if s == target)),
-            PropertyStorage::Columnar(row) => row.store().str_prop_eq(row.row_id(), key, target),
+            PropertyStorage::Columnar(_) => None,
         }
     }
 
-    /// Presence check on storage the caller **already owns mutably**, for a
-    /// read-modify-write that must not go through the backend.
-    ///
-    /// The one caller is `add_nodes`' stub-promotion step, which holds
-    /// `&mut NodeData` and is deciding whether to clear a marker it is about to
-    /// write. Returns presence only — never a value. **Reading a property value
-    /// off a `NodeData` is what `NodeView` is for**; the value readers on this
-    /// type are deliberately confined to `graph::storage`.
-    #[inline]
-    pub(crate) fn contains_own_key(&self, key: InternedKey) -> bool {
-        self.contains(key)
-    }
-
     /// Insert or update a property. For Compact, extends schema via Arc::make_mut if key is new.
-    pub fn insert(&mut self, key: InternedKey, value: Value) {
+    pub(in crate::graph::storage) fn insert(&mut self, key: InternedKey, value: Value) {
         match self {
             PropertyStorage::Map(map) => {
                 map.insert(key, value);
@@ -270,15 +217,19 @@ impl PropertyStorage {
                 }
                 values[slot] = value;
             }
-            PropertyStorage::Columnar(row) => {
-                let rid = row.row_id();
-                Arc::make_mut(row.store_mut()).set(rid, key, &value, None);
-            }
+            // A columnar node's properties live in the backend's store, which
+            // this type cannot reach. Route through
+            // `GraphWrite::set_node_property`, which has both the store and the
+            // row id.
+            PropertyStorage::Columnar(_) => debug_assert!(
+                false,
+                "columnar property write must go through GraphWrite::set_node_property"
+            ),
         }
     }
 
     /// Insert only if the key is absent or Value::Null (for Preserve conflict mode).
-    pub fn insert_if_absent(&mut self, key: InternedKey, value: Value) {
+    pub(in crate::graph::storage) fn insert_if_absent(&mut self, key: InternedKey, value: Value) {
         match self {
             PropertyStorage::Map(map) => {
                 map.entry(key).or_insert(value);
@@ -305,17 +256,15 @@ impl PropertyStorage {
                     values[slot] = value;
                 }
             }
-            PropertyStorage::Columnar(row) => {
-                let rid = row.row_id();
-                if row.store().get(rid, key).is_none() {
-                    Arc::make_mut(row.store_mut()).set(rid, key, &value, None);
-                }
-            }
+            PropertyStorage::Columnar(_) => debug_assert!(
+                false,
+                "columnar property write must go through GraphWrite::set_node_property_if_absent"
+            ),
         }
     }
 
     /// Remove a property. Returns the old value if it existed.
-    pub fn remove(&mut self, key: InternedKey) -> Option<Value> {
+    pub(in crate::graph::storage) fn remove(&mut self, key: InternedKey) -> Option<Value> {
         match self {
             PropertyStorage::Map(map) => map.remove(&key),
             PropertyStorage::Compact { schema, values } => schema.slot(key).and_then(|slot| {
@@ -331,20 +280,22 @@ impl PropertyStorage {
                     None
                 }
             }),
-            PropertyStorage::Columnar(row) => {
-                let rid = row.row_id();
-                let old = row.store().get(rid, key);
-                if old.is_some() {
-                    Arc::make_mut(row.store_mut()).set(rid, key, &Value::Null, None);
-                }
-                old
+            PropertyStorage::Columnar(_) => {
+                debug_assert!(
+                    false,
+                    "columnar property removal must go through GraphWrite::remove_node_property"
+                );
+                None
             }
         }
     }
 
     /// Replace all properties (for Replace conflict mode).
     /// Clears existing properties and inserts the new ones.
-    pub fn replace_all(&mut self, pairs: impl IntoIterator<Item = (InternedKey, Value)>) {
+    pub(in crate::graph::storage) fn replace_all(
+        &mut self,
+        pairs: impl IntoIterator<Item = (InternedKey, Value)>,
+    ) {
         match self {
             PropertyStorage::Map(map) => {
                 map.clear();
@@ -367,19 +318,10 @@ impl PropertyStorage {
                     values[slot] = value;
                 }
             }
-            PropertyStorage::Columnar(row) => {
-                let rid = row.row_id();
-                let st = Arc::make_mut(row.store_mut());
-                // Clear existing properties by setting all to null
-                let props: Vec<_> = st.row_properties(rid).into_iter().map(|(k, _)| k).collect();
-                for k in props {
-                    st.set(rid, k, &Value::Null, None);
-                }
-                // Insert new pairs
-                for (key, value) in pairs {
-                    st.set(rid, key, &value, None);
-                }
-            }
+            PropertyStorage::Columnar(_) => debug_assert!(
+                false,
+                "columnar property replace must go through GraphWrite::replace_node_properties"
+            ),
         }
     }
 
@@ -390,7 +332,7 @@ impl PropertyStorage {
             PropertyStorage::Compact { values, .. } => {
                 values.iter().filter(|v| !matches!(v, Value::Null)).count()
             }
-            PropertyStorage::Columnar(row) => row.store().row_properties(row.row_id()).len(),
+            PropertyStorage::Columnar(_) => 0,
         }
     }
 
@@ -433,15 +375,7 @@ impl PropertyStorage {
                 slot_idx: 0,
                 interner,
             },
-            PropertyStorage::Columnar(row) => {
-                // Columnar can't borrow keys through the enum — materialize once.
-                let props = row.store().row_properties(row.row_id());
-                let keys: Vec<&'a str> = props
-                    .iter()
-                    .filter_map(|(ik, _)| interner.try_resolve(*ik))
-                    .collect();
-                PropertyKeyIter::Columnar(keys.into_iter())
-            }
+            PropertyStorage::Columnar(_) => PropertyKeyIter::Columnar(Vec::new().into_iter()),
         }
     }
 
@@ -471,7 +405,7 @@ impl Clone for PropertyStorage {
                 schema: Arc::clone(schema),
                 values: values.clone(),
             },
-            PropertyStorage::Columnar(row) => PropertyStorage::Columnar(row.clone()),
+            PropertyStorage::Columnar(row) => PropertyStorage::Columnar(*row),
         }
     }
 }
@@ -520,11 +454,10 @@ impl PartialEq for PropertyStorage {
                     entries.sort_by_key(|(k, _)| k.as_u64());
                     entries
                 }
-                PropertyStorage::Columnar(row) => {
-                    let mut entries: Vec<_> = row.store().row_properties(row.row_id());
-                    entries.sort_by_key(|(k, _)| k.as_u64());
-                    entries
-                }
+                // Identity only — a columnar node's values live in the
+                // backend's store, so equality here compares the rows, which
+                // the `row_id` arm below already covers.
+                PropertyStorage::Columnar(_) => Vec::new(),
             }
         }
         collect_entries(self) == collect_entries(other)
@@ -553,14 +486,19 @@ impl Serialize for PropertyStorage {
                 }
                 map_ser.end()
             }
-            PropertyStorage::Columnar(row) => {
-                // Materialize properties from column store for serialization
-                let props = row.store().row_properties(row.row_id());
-                let mut map_ser = serializer.serialize_map(Some(props.len()))?;
-                for (ik, v) in &props {
-                    map_ser.serialize_entry(ik, v)?;
-                }
-                map_ser.end()
+            PropertyStorage::Columnar(_) => {
+                // The store is the backend's; this type cannot reach it. Every
+                // save path that can meet a columnar node writes its properties
+                // in the column section and strips them from topology — so
+                // reaching here *without* that guard set would silently drop a
+                // node's whole property set into the file.
+                debug_assert!(
+                    STRIP_PROPERTIES.with(|cell| cell.get()),
+                    "serializing a columnar node without STRIP_PROPERTIES would write \
+                     an empty property map: the save path must persist the type's \
+                     ColumnStore separately (see io/file.rs) or convert first"
+                );
+                serializer.serialize_map(Some(0))?.end()
             }
         }
     }
@@ -574,23 +512,14 @@ impl<'de> Deserialize<'de> for PropertyStorage {
 }
 
 impl PropertyStorage {
-    /// Columnar id column for this row, if the properties are columnar.
+    /// This node's row id, when its properties are columnar.
     ///
-    /// `NodeData::id` delegates here for the mapped-mode `Value::Null`
-    /// sentinel, so `graph::schema` never reaches a store handle.
+    /// The only thing a `NodeData` still knows about columnar storage. Used by
+    /// the backends to pair a node with a row in the store they own.
     #[inline]
-    pub(crate) fn columnar_id(&self) -> Option<Value> {
+    pub(crate) fn columnar_row_id(&self) -> Option<u32> {
         match self {
-            PropertyStorage::Columnar(row) => row.store().get_id(row.row_id()),
-            _ => None,
-        }
-    }
-
-    /// Columnar title column for this row, if the properties are columnar.
-    #[inline]
-    pub(crate) fn columnar_title(&self) -> Option<Value> {
-        match self {
-            PropertyStorage::Columnar(row) => row.store().get_title(row.row_id()),
+            PropertyStorage::Columnar(row) => Some(row.row_id()),
             _ => None,
         }
     }

@@ -11,9 +11,11 @@
 //! recorded (see `io/file/storage_mode.rs`), memory when it recorded none.
 
 use crate::graph::dir_graph::DirGraph;
+use crate::graph::schema::InternedKey;
 use crate::graph::storage::backend::GraphBackend;
+use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::disk::graph::DiskGraph;
-use crate::graph::storage::{GraphRead, MappedGraph, MemoryGraph};
+use crate::graph::storage::{GraphRead, GraphWrite, MappedGraph, MemoryGraph};
 use std::path::Path;
 
 /// Which storage backend a freshly-created graph uses.
@@ -126,6 +128,13 @@ pub fn convert_dir_graph_to_mode(
     if current == StorageMode::Disk || requested == StorageMode::Disk {
         return Err(disk_conversion_refusal(current, requested));
     }
+    // The stores are backend-owned state (D1 Phase 3); the new backend must
+    // inherit them or every columnar node loses its properties, id and title.
+    let carried_stores: Vec<(InternedKey, std::sync::Arc<ColumnStore>)> = graph
+        .graph
+        .column_stores_iter()
+        .map(|(k, v)| (k, std::sync::Arc::clone(v)))
+        .collect();
     let inner = match &mut graph.graph {
         GraphBackend::Memory(memory) => std::mem::take(memory.inner_mut()),
         GraphBackend::Mapped(mapped) => std::mem::take(mapped.inner_mut()),
@@ -147,6 +156,9 @@ pub fn convert_dir_graph_to_mode(
     } else {
         GraphBackend::Memory(MemoryGraph::from_graph(inner))
     };
+    for (type_key, store) in carried_stores {
+        GraphWrite::install_column_store(&mut graph.graph, type_key, store);
+    }
     // Same wiring `new_dir_graph_in_mode` applies to a fresh graph: mapped
     // spills its property columns (limit 0), memory keeps them on the heap.
     graph.memory_limit = if requested == StorageMode::Mapped {
