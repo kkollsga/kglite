@@ -90,6 +90,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`add_connections` resolves its edge property columns once per call instead
+  of once per cell.** Column names are turned into keys and positional indexes
+  a single time, and those keys travel to the edge store unchanged; previously
+  every cell of every property column paid a name-keyed frame lookup, a key
+  clone into a per-row map, and a second interning pass on the way out.
+  Measured on 60,000 edges carrying 10 property columns (release build, in
+  memory): 66.7 ms to 30.4 ms per call, with the property-specific part of the
+  work down 59%. Edges without property columns improve about 12%; null cells
+  are still skipped, so an all-null column stores nothing.
+
 - **The Java binding's documentation is rewritten against a docs-blind
   consumer run.** `kglite-java/README.md` is now one page covering the things
   a consumer previously had to discover by experiment: the `cypher` (write)

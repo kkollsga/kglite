@@ -695,11 +695,17 @@ impl BatchProcessor {
 }
 
 // Connection Processing
+//
+// Properties arrive already interned. `EdgeData` stores
+// `Vec<(InternedKey, Value)>`, so a `HashMap<String, Value>` here would only
+// have been re-hashed and re-interned per row on the way out — the callers
+// (`add_connections` above all) resolve their column names to keys once per
+// call instead.
 #[derive(Debug)]
 struct ConnectionCreation {
     source_idx: NodeIndex,
     target_idx: NodeIndex,
-    properties: HashMap<String, Value>,
+    properties: Vec<(InternedKey, Value)>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -718,7 +724,7 @@ impl ConnectionBatchStats {
 #[derive(Debug)]
 pub struct ConnectionBatchProcessor {
     connections: Vec<ConnectionCreation>,
-    schema_properties: HashSet<String>,
+    schema_properties: HashSet<InternedKey>,
     capacity: usize,
     batch_type: BatchType,
     metrics: BatchMetrics,
@@ -761,14 +767,14 @@ impl ConnectionBatchProcessor {
         &mut self,
         source_idx: NodeIndex,
         target_idx: NodeIndex,
-        mut properties: HashMap<String, Value>,
+        mut properties: Vec<(InternedKey, Value)>,
         graph: &mut DirGraph,
         connection_type: &str,
     ) -> Result<(), String> {
         // Freshness provenance: stamp `updated_at` when this edge type opted in
         // (single chokepoint for every `add_connections` route; registered into
         // `schema_properties` below so the columnar edge store gets a slot).
-        graph.inject_edge_provenance(connection_type, &mut properties);
+        graph.inject_edge_provenance_interned(connection_type, &mut properties);
         // Skip existence check on initial load (no existing edges of this type)
         if !self.skip_existence_check {
             // Check if an edge of the same type already exists between these nodes
@@ -785,9 +791,12 @@ impl ConnectionBatchProcessor {
             }
         }
 
-        // Track property names for schema
-        for key in properties.keys() {
-            self.schema_properties.insert(key.clone());
+        // Track property keys for schema. Only keys that actually carry a value
+        // are registered — a caller that skipped its null cells (every one of
+        // them does) must not see an all-null column materialize in the
+        // connection type's property list.
+        for (key, _) in &properties {
+            self.schema_properties.insert(*key);
         }
 
         self.connections.push(ConnectionCreation {
@@ -870,11 +879,7 @@ impl ConnectionBatchProcessor {
                     ConflictHandling::Replace => {
                         // Remove the existing edge and create a new one
                         GraphWrite::remove_edge(&mut graph.graph, edge_idx);
-                        let edge_data = EdgeData::new(
-                            connection_type.to_string(),
-                            conn.properties,
-                            &mut graph.interner,
-                        );
+                        let edge_data = EdgeData::new_interned(conn_type_key, conn.properties);
                         let new_id = GraphWrite::add_edge(
                             &mut graph.graph,
                             conn.source_idx,
@@ -889,15 +894,7 @@ impl ConnectionBatchProcessor {
                     }
                     ConflictHandling::Update => {
                         // Update existing edge properties
-                        // Pre-intern keys before getting mutable edge reference
-                        let interned_props: Vec<(InternedKey, Value)> = conn
-                            .properties
-                            .into_iter()
-                            .map(|(k, v)| {
-                                let key = graph.interner.get_or_intern(&k);
-                                (key, v)
-                            })
-                            .collect();
+                        let interned_props = conn.properties;
                         if let Some(EdgeData {
                             properties: edge_props,
                             ..
@@ -918,15 +915,7 @@ impl ConnectionBatchProcessor {
                     }
                     ConflictHandling::Preserve => {
                         // Update but preserve existing values
-                        // Pre-intern keys before getting mutable edge reference
-                        let interned_props: Vec<(InternedKey, Value)> = conn
-                            .properties
-                            .into_iter()
-                            .map(|(k, v)| {
-                                let key = graph.interner.get_or_intern(&k);
-                                (key, v)
-                            })
-                            .collect();
+                        let interned_props = conn.properties;
                         if let Some(EdgeData {
                             properties: edge_props,
                             ..
@@ -943,14 +932,7 @@ impl ConnectionBatchProcessor {
                     }
                     ConflictHandling::Sum => {
                         // Sum numeric properties, overwrite non-numeric
-                        let interned_props: Vec<(InternedKey, Value)> = conn
-                            .properties
-                            .into_iter()
-                            .map(|(k, v)| {
-                                let key = graph.interner.get_or_intern(&k);
-                                (key, v)
-                            })
-                            .collect();
+                        let interned_props = conn.properties;
                         if let Some(EdgeData {
                             properties: edge_props,
                             ..
@@ -971,11 +953,7 @@ impl ConnectionBatchProcessor {
                 }
             } else {
                 // Create new edge
-                let edge_data = EdgeData::new(
-                    connection_type.to_string(),
-                    conn.properties,
-                    &mut graph.interner,
-                );
+                let edge_data = EdgeData::new_interned(conn_type_key, conn.properties);
                 let new_id = GraphWrite::add_edge(
                     &mut graph.graph,
                     conn.source_idx,
@@ -1034,7 +1012,9 @@ impl ConnectionBatchProcessor {
         Ok((total_stats, self.metrics))
     }
 
-    pub fn get_schema_properties(&self) -> &HashSet<String> {
+    /// The interned keys of every property any queued edge actually carried.
+    /// Callers resolve them through `graph.interner` when they need names.
+    pub fn get_schema_properties(&self) -> &HashSet<InternedKey> {
         &self.schema_properties
     }
 }

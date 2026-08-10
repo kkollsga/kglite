@@ -665,6 +665,12 @@ pub fn add_edges_from_specs(
                 lookup.check_target(&target_id),
             ) {
                 (Some(src_idx), Some(tgt_idx)) => {
+                    // The batch carries interned keys; spec properties arrive
+                    // named, so intern here rather than a layer deeper.
+                    let props: Vec<(InternedKey, Value)> = props
+                        .into_iter()
+                        .map(|(k, v)| (graph.interner.get_or_intern(&k), v))
+                        .collect();
                     batch.add_connection(src_idx, tgt_idx, props, graph, &edge_type)?;
                 }
                 _ => report.skipped_missing_endpoint += 1,
@@ -793,9 +799,20 @@ pub fn add_connections(
     let mut seen_missing_source: HashSet<Value> = HashSet::new();
     let mut seen_missing_target: HashSet<Value> = HashSet::new();
 
-    // Cache column names and pre-compute which columns are property columns (not ID or title fields)
-    // This avoids repeated allocations and string comparisons in the loop
-    let property_columns: Vec<String> = df_data
+    // Resolve the property columns once per call — name, key and column index
+    // — mirroring `add_nodes` above. Before this, `extract_props` paid a
+    // name-keyed `column_indices` hash lookup and a `String` clone per cell,
+    // and every surviving key was re-interned again downstream in
+    // `EdgeData::new`.
+    //
+    // The key is computed with `InternedKey::from_str` (the same pure FNV that
+    // `get_or_intern` uses) rather than by interning here, because interning
+    // would register an all-null column's *name* in the persisted interner
+    // table. The names of the columns that actually carried a value are
+    // registered after the passes, below; no backend resolves an edge key
+    // during `add_edge`, so registration only has to precede the first
+    // `resolve` (schema metadata and serialization, both later).
+    let property_columns: Vec<(String, InternedKey, usize)> = df_data
         .get_column_names()
         .into_iter()
         .filter(|col_name| {
@@ -808,17 +825,25 @@ pub fn add_connections(
                 .is_some_and(|field| *col_name == *field);
             !is_id_field && !is_source_title && !is_target_title
         })
+        .filter_map(|col_name| {
+            df_data.get_column_index(&col_name).map(|col_idx| {
+                let key = InternedKey::from_str(&col_name);
+                (col_name, key, col_idx)
+            })
+        })
         .collect();
 
     // Extract a row's edge properties — shared by the happy path and
     // the deferred-row replay (Pass C). Skip nulls: property access
-    // returns Null for missing keys anyway.
-    let extract_props = |row_idx: usize| -> HashMap<String, Value> {
-        let mut properties = HashMap::with_capacity(property_columns.len());
-        for col_name in &property_columns {
-            if let Some(value) = df_data.get_value(row_idx, col_name) {
+    // returns Null for missing keys anyway, and an all-null column must
+    // register nothing at all (not on the edge, not in the connection type's
+    // property list, not in the interner).
+    let extract_props = |row_idx: usize| -> Vec<(InternedKey, Value)> {
+        let mut properties = Vec::with_capacity(property_columns.len());
+        for (_, interned_key, col_idx) in &property_columns {
+            if let Some(value) = df_data.get_value_by_index(row_idx, *col_idx) {
                 if !matches!(value, Value::Null) {
-                    properties.insert(col_name.clone(), value);
+                    properties.push((*interned_key, value));
                 }
             }
         }
@@ -950,6 +975,18 @@ pub fn add_connections(
             "Skipped {} rows: null values in target ID field '{}'",
             skipped_null_target, target_id_field
         ));
+    }
+
+    // Register the names of the property columns that actually carried a
+    // value, so `resolve` (schema metadata below, and serialization later) can
+    // recover them from the pure-hash keys the passes stored. A column that was
+    // null in every row contributed no key, so it stays unregistered — the
+    // all-null column leaves no trace, which is the contract
+    // `all_null_edge_property_column_stores_nothing` pins.
+    for (col_name, key, _) in &property_columns {
+        if batch.get_schema_properties().contains(key) {
+            graph.interner.get_or_intern(col_name);
+        }
     }
 
     update_schema_node(
@@ -1465,7 +1502,7 @@ fn update_schema_node(
     connection_type: &str,
     source_type: &str,
     target_type: &str,
-    properties: &HashSet<String>,
+    properties: &HashSet<InternedKey>,
 ) -> Result<(), String> {
     if !graph.has_node_type(source_type) {
         return Err(format!(
@@ -1480,10 +1517,16 @@ fn update_schema_node(
         ));
     }
 
-    // Build property type map — all connection properties default to "Unknown"
+    // Build property type map — all connection properties default to "Unknown".
+    // The batch carries interned keys; names are resolved once here, per call.
     let prop_types: HashMap<String, String> = properties
         .iter()
-        .map(|prop| (prop.clone(), "Unknown".to_string()))
+        .map(|prop| {
+            (
+                graph.interner.resolve(*prop).to_string(),
+                "Unknown".to_string(),
+            )
+        })
         .collect();
 
     graph.upsert_connection_type_metadata(connection_type, source_type, target_type, prop_types);
@@ -1715,6 +1758,12 @@ pub fn create_connections(
                 } else {
                     HashMap::new()
                 };
+                // The batch carries interned keys. Copied node property names
+                // are only known per chain, so they intern here.
+                let edge_props: Vec<(InternedKey, Value)> = edge_props
+                    .into_iter()
+                    .map(|(k, v)| (graph.interner.get_or_intern(&k), v))
+                    .collect();
 
                 if let Err(e) = batch.add_connection(
                     source_idx,

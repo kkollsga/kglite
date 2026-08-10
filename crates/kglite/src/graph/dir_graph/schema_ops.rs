@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use super::DirGraph;
 use crate::datatypes::values::Value;
 use crate::error::KgError;
-use crate::graph::schema::{SchemaDefinition, SchemaInstall};
+use crate::graph::schema::{InternedKey, SchemaDefinition, SchemaInstall};
 
 impl DirGraph {
     /// Run one write with caller-supplied freshness provenance, restoring the
@@ -306,6 +306,28 @@ impl DirGraph {
         }
         for (k, v) in self.provenance_props() {
             props.insert(k.to_string(), v);
+        }
+    }
+
+    /// [`Self::inject_edge_provenance`] for the interned-key edge property
+    /// representation the bulk connection path carries
+    /// (`ConnectionBatchProcessor`). Same engine-owns-the-key semantics: an
+    /// existing entry under a reserved key is replaced, not merged.
+    pub(crate) fn inject_edge_provenance_interned(
+        &mut self,
+        conn_type: &str,
+        props: &mut Vec<(InternedKey, Value)>,
+    ) {
+        if !self.auto_timestamp_for_connection(conn_type) {
+            return;
+        }
+        for (k, v) in self.provenance_props() {
+            let key = self.interner.get_or_intern(k);
+            if let Some(slot) = props.iter_mut().find(|(existing, _)| *existing == key) {
+                slot.1 = v;
+            } else {
+                props.push((key, v));
+            }
         }
     }
 
