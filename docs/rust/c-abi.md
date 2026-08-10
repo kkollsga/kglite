@@ -42,6 +42,16 @@ Engine codes are `KGLITE_STATUS_CODE_CYPHER_SYNTAX` through
 validation, and any returned error string is Rust-owned until freed with
 `kglite_free_string`.
 
+Name a code with `kglite_status_code_name_static`, which returns a `'static`
+pointer into the library's own data: no allocation, and **never free it**. A
+binding that renders the name on every error — the usual shape, since the name
+goes into the exception it raises — should prefer it. `kglite_status_code_name`
+returns the same text as an owned copy that *must* be freed with
+`kglite_free_string`; it predates the static form and stays for callers that
+would rather free one uniform kind of string. Pick one per call site; freeing
+the static pointer is undefined behaviour. Both return null for
+`KGLITE_STATUS_CODE_OK`.
+
 ## Opaque handles
 
 `KgliteGraph`, `KgliteSession`, `KgliteCypherResult`, `KgliteEmbedder`, and
@@ -59,6 +69,13 @@ The header exposes:
 - `kglite_open_or_create_graph_in_mode`, which opens or creates a path in an
   explicit mode (null mode = honour what the checkpoint recorded) and reports
   any conversion through `out_converted_from`;
+- `kglite_graph_storage_mode`, which reports the mode a graph handle is running
+  in *right now* as an owned `"memory"` / `"mapped"` / `"disk"` string. It
+  borrows the handle, so call it before `kglite_session_new` consumes it.
+  `out_converted_from` above answers "what was it before?" and is null whenever
+  nothing changed; this answers "what is it now?" unconditionally — the question
+  after a creation, after an unspecified-mode open, or when asserting the mode
+  you asked for is the mode you got;
 - `kglite_writer_lease_acquire` / `kglite_writer_lease_free`. **Any caller that
   may save to a path must hold the lease across the whole read-modify-save
   interval; readers take none.** Two processes that both open, mutate, and save
@@ -75,7 +92,10 @@ The header exposes:
   rather than from the (now-consumed) graph handle; `kglite_save_graph` stays
   the entry point for a graph that was never moved into one. The save writes
   through the session's own graph — it never copies the graph to checkpoint it
-  — and is serialized against concurrent mutations on that session;
+  — and is serialized against concurrent mutations on that session. The graph
+  handle is consumed **only on `KGLITE_STATUS_CODE_OK`**: a failed
+  `kglite_session_new` leaves ownership with the caller, who must still
+  `kglite_graph_free` it;
 - session construction plus read/mutation execution with timeout/row budgets;
 - read and mutation batches, including atomic edge batches;
 - JSON result metadata/rows, memory statistics, and embedder binding.

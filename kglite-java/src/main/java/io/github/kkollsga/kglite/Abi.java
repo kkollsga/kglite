@@ -29,7 +29,7 @@ import java.util.Set;
  * exact set the ABI contract test checks against the header.
  *
  * <p>Hand-written rather than {@code jextract}-generated: the bound surface is
- * 16 functions of pointers, {@code uint32}/{@code uint64} scalars and one
+ * 17 functions of pointers, {@code uint32}/{@code uint64} scalars and one
  * three-word return struct, with no unions, callbacks or varargs, so the
  * generator would add a separate early-access toolchain to every build in
  * exchange for a class that must stay package-private anyway. Header drift is
@@ -41,8 +41,8 @@ final class Abi {
 
     // ---- status codes we branch on ---------------------------------------
     // Only these two are mirrored in Java; every other code is rendered through
-    // kglite_status_code_name() so the wrapper cannot drift from the header.
-    // AbiContractTest asserts both numbers against kglite.h.
+    // kglite_status_code_name_static() so the wrapper cannot drift from the
+    // header. AbiContractTest asserts both numbers against kglite.h.
 
     /** {@code KGLITE_STATUS_CODE_OK} — the call succeeded. */
     static final int STATUS_OK = 0;
@@ -79,6 +79,8 @@ final class Abi {
     private static final MethodHandle OPEN_OR_CREATE_IN_MODE = bind(
             "kglite_open_or_create_graph_in_mode",
             FunctionDescriptor.of(I32, PTR, PTR, PTR, PTR, PTR));
+    private static final MethodHandle GRAPH_STORAGE_MODE =
+            bind("kglite_graph_storage_mode", FunctionDescriptor.of(I32, PTR, PTR, PTR));
     private static final MethodHandle GRAPH_FREE =
             bind("kglite_graph_free", FunctionDescriptor.ofVoid(PTR));
     private static final MethodHandle SESSION_NEW =
@@ -101,8 +103,12 @@ final class Abi {
             bind("kglite_writer_lease_acquire", FunctionDescriptor.of(I32, PTR, I64, PTR, PTR));
     private static final MethodHandle LEASE_FREE =
             bind("kglite_writer_lease_free", FunctionDescriptor.ofVoid(PTR));
-    private static final MethodHandle STATUS_CODE_NAME =
-            bind("kglite_status_code_name", FunctionDescriptor.of(PTR, I32));
+    // The static form, not kglite_status_code_name: identical text, but the
+    // pointer is library rodata, so naming a code on every thrown exception
+    // costs no allocation and — crucially — no free. Never pass it to
+    // FREE_STRING.
+    private static final MethodHandle STATUS_CODE_NAME_STATIC =
+            bind("kglite_status_code_name_static", FunctionDescriptor.of(PTR, I32));
     private static final MethodHandle FREE_STRING =
             bind("kglite_free_string", FunctionDescriptor.ofVoid(PTR));
 
@@ -143,8 +149,9 @@ final class Abi {
 
     /**
      * Locate {@code libkglite_c}. Explicit path first
-     * ({@code -Dkglite.native.path=<file-or-directory>}), then the Cargo build
-     * directory of an enclosing workspace checkout. Bundling per-platform
+     * ({@code -Dkglite.native.path=<file-or-directory>}), then the most recently
+     * built of {@code target/{release,debug}} in an enclosing workspace
+     * checkout. Bundling per-platform
      * natives inside the JAR is the packaging phase's job, not this one's.
      */
     private static Path resolveLibrary() {
@@ -163,11 +170,20 @@ final class Abi {
         }
         Path here = Path.of(System.getProperty("user.dir", ".")).toAbsolutePath();
         for (Path dir = here; dir != null; dir = dir.getParent()) {
+            // Newest of the two profiles, never a fixed preference: a stale
+            // release build left over from a benchmark otherwise shadows the
+            // debug library the current source just produced, and the ABI
+            // contract test then reports drift against code that does not
+            // exist. Same rule as tests/conftest.py::workspace_binary.
+            Path newest = null;
             for (String profile : new String[] {"release", "debug"}) {
                 Path candidate = dir.resolve("target").resolve(profile).resolve(fileName);
-                if (Files.isRegularFile(candidate)) {
-                    return candidate;
+                if (Files.isRegularFile(candidate) && (newest == null || newer(candidate, newest))) {
+                    newest = candidate;
                 }
+            }
+            if (newest != null) {
+                return newest;
             }
         }
         throw new KgliteException(
@@ -175,6 +191,16 @@ final class Abi {
                         + " and pass -Dkglite.native.path=<dir-or-file>, or run from inside a"
                         + " kglite workspace checkout (searched target/{release,debug} upward"
                         + " from " + here + ")");
+    }
+
+    /** Whether {@code candidate} was modified strictly later than {@code other}. */
+    private static boolean newer(Path candidate, Path other) {
+        try {
+            return Files.getLastModifiedTime(candidate).compareTo(Files.getLastModifiedTime(other))
+                    > 0;
+        } catch (java.io.IOException e) {
+            return false;
+        }
     }
 
     private static String libraryFileName() {
@@ -229,6 +255,22 @@ final class Abi {
             check(rc, outError);
             convertedFrom[0] = takeString(outConverted.get(PTR, 0));
             return outGraph.get(PTR, 0);
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
+    }
+
+    /**
+     * {@code kglite_graph_storage_mode} — the mode the handle is running in,
+     * as the ABI's wire string. Borrows the graph; does not consume it.
+     */
+    static String graphStorageMode(MemorySegment graph) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outMode = arena.allocate(PTR);
+            MemorySegment outError = arena.allocate(PTR);
+            int rc = (int) GRAPH_STORAGE_MODE.invokeExact(graph, outMode, outError);
+            check(rc, outError);
+            return takeString(outMode.get(PTR, 0));
         } catch (Throwable t) {
             throw rethrow(t);
         }
@@ -349,15 +391,28 @@ final class Abi {
     }
 
     /**
-     * Read an owned {@code const char*} the ABI handed us and free it, as the
-     * header requires for every out-string. Returns {@code null} for {@code NULL}.
+     * Copy a {@code const char*} the ABI handed us into a Java String, without
+     * freeing it. Returns {@code null} for {@code NULL}.
      */
     @SuppressWarnings("restricted") // reinterpret: a C string has no length until read
-    private static String takeString(MemorySegment pointer) {
+    private static String readString(MemorySegment pointer) {
         if (pointer == null || pointer.address() == 0) {
             return null;
         }
-        String value = pointer.reinterpret(Long.MAX_VALUE).getString(0);
+        return pointer.reinterpret(Long.MAX_VALUE).getString(0);
+    }
+
+    /**
+     * Read an <em>owned</em> {@code const char*} the ABI handed us and free it,
+     * as the header requires for every out-string. Returns {@code null} for
+     * {@code NULL}. Only for pointers the header documents as owned — the
+     * static status names are library rodata and must never come through here.
+     */
+    private static String takeString(MemorySegment pointer) {
+        String value = readString(pointer);
+        if (value == null) {
+            return null;
+        }
         try {
             FREE_STRING.invokeExact(pointer);
         } catch (Throwable t) {
@@ -366,11 +421,15 @@ final class Abi {
         return value;
     }
 
-    /** Canonical name of a status code, via {@code kglite_status_code_name}. */
+    /**
+     * Canonical name of a status code, via
+     * {@code kglite_status_code_name_static}. The pointer is static library
+     * data, so it is read and never freed.
+     */
     private static String statusName(int code) {
         try {
-            MemorySegment name = (MemorySegment) STATUS_CODE_NAME.invokeExact(code);
-            String value = takeString(name);
+            MemorySegment name = (MemorySegment) STATUS_CODE_NAME_STATIC.invokeExact(code);
+            String value = readString(name);
             return value == null ? "Unknown(" + code + ")" : value;
         } catch (Throwable t) {
             throw rethrow(t);

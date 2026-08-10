@@ -78,14 +78,24 @@ impl SessionState {
 ///
 /// # Arguments
 ///
-/// - `graph` (in, MOVED): graph handle. After this call, the
-///   pointer is no longer valid for any other use.
+/// - `graph` (in, MOVED on success): graph handle. After a successful
+///   call the pointer is no longer valid for any other use.
 /// - `out_session` (out, owned): set to the session handle on
 ///   success; caller must free via [`kglite_session_free`].
 ///
 /// # Errors
 ///
 /// - `KGLITE_ERR_NULL_POINTER` — `graph` or `out_session` is null
+///
+/// **The graph handle is consumed only on `Ok`; on any error the caller
+/// retains ownership and must still free it** with
+/// [`kglite_graph_free`](crate::kglite_graph_free). The move happens after
+/// argument validation, so a rejected call leaves the handle exactly as it
+/// was — a binding that treats "moved" as unconditional leaks the graph on
+/// every failed session open. Unlike the rest of the fallible surface this
+/// takes no `out_error_msg`: the sole failure is a null argument, which has
+/// no message beyond the code, and the parameter list is frozen for this ABI
+/// major version.
 ///
 /// # Safety
 ///
@@ -905,6 +915,28 @@ mod tests {
         let s = CString::new("[1, 2, 3]").unwrap();
         let err = parse_params_json(s.as_ptr()).unwrap_err();
         assert_eq!(err, KgliteStatusCode::InvalidArgument);
+    }
+
+    /// The documented ownership-on-failure contract: a rejected
+    /// `kglite_session_new` must NOT have consumed the graph, so the caller's
+    /// handle is still live and still theirs to free. If the move ever crept
+    /// above the argument validation this frees an already-dropped Box, which
+    /// the sanitizer/leak jobs report — and a binding following the header
+    /// would leak on every failed open.
+    #[test]
+    fn session_new_failure_leaves_the_graph_handle_with_the_caller() {
+        let graph = crate::kglite_graph_new();
+        assert!(!graph.is_null());
+        let rc = unsafe { kglite_session_new(graph, std::ptr::null_mut()) };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        // Still ours: usable, then freeable exactly once.
+        let mut mode: *const c_char = std::ptr::null();
+        let probe = unsafe {
+            crate::kglite_graph_storage_mode(graph, &mut mode as *mut _, std::ptr::null_mut())
+        };
+        assert_eq!(probe, KgliteStatusCode::Ok, "the handle must still be live");
+        unsafe { crate::kglite_free_string(mode) };
+        unsafe { crate::kglite_graph_free(graph) };
     }
 
     // ── kglite_create_edges_batch ────────────────────────────────────

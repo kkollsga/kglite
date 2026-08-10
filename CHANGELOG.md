@@ -29,13 +29,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out-parameter rather than performed silently. Previously the C boundary could
   only `kglite_load_file` an existing graph or create an empty one, with no way
   to express "open this in this mode".
+- **The C ABI can now be asked which storage mode a graph is in.**
+  `kglite_graph_storage_mode` returns `"memory"`, `"mapped"` or `"disk"` for a
+  graph handle, reading the same classification behind the wheel's
+  `graph_info()["storage_mode"]`. `out_converted_from` above only speaks when a
+  conversion happened, so a binding that created a graph, or opened one in
+  unspecified mode, previously had no way to find out which backend it actually
+  got — it could only infer the mode from a report that is silent in exactly
+  that case.
+- **`kglite_status_code_name_static` names a status code without allocating.**
+  Same text as `kglite_status_code_name` but the returned pointer is `'static`
+  library data that must **not** be freed, so a binding that renders the name on
+  every error — the usual shape, since the name goes into the exception it
+  raises — no longer pays an allocate/copy/free round trip per failure.
+  `kglite_status_code_name` is unchanged and still returns an owned copy: this
+  ABI is additive-only within a major version, and flipping who frees the
+  existing pointer would have turned a correct caller into a double-free.
 - **The C ABI can now save a graph it mutated.** `kglite_session_new` takes
   ownership of the graph handle, and every save entry point required one, so a
   binding could open-and-mutate or open-and-save but never open-mutate-save —
   the cycle the writer lease exists to protect. `kglite_session_save` closes
   it, with the same `fsync` durability choice as
   `kglite_save_graph_durable` and the same mode-aware dispatch, so a
-  checkpoint reopens in the mode it was written in.
+  checkpoint reopens in the mode it was written in. The header now also states
+  when that ownership transfer happens: the graph is consumed **only on `Ok`**,
+  and on any error the caller keeps it and must still `kglite_graph_free` it. It
+  always behaved that way — the move sits after argument validation — but the
+  header said "MOVED" unconditionally, so a binding that believed it leaked the
+  graph on every failed session open.
 - **`Session::save` (Rust API).** Persists a session's graph through the
   session's own `Arc` under its lock. Saving a `Session::snapshot()` cannot do
   this: a save mutates the graph it writes (save metadata, index keys,

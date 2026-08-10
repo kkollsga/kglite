@@ -969,6 +969,13 @@ fn fallible_exports_clear_all_outputs_before_validation() {
     assert_eq!(rc, KgliteStatusCode::NullPointer);
     assert!(graph.is_null() && error.is_null());
 
+    let mut mode = sentinel_cstr;
+    error = sentinel_cstr;
+    let rc =
+        unsafe { kglite_c::kglite_graph_storage_mode(std::ptr::null_mut(), &mut mode, &mut error) };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(mode.is_null() && error.is_null());
+
     let mut rdf_graph: *mut KgliteGraph = sentinel_ptr.cast();
     let mut rdf_stats = sentinel_cstr;
     error = sentinel_cstr;

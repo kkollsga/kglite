@@ -45,10 +45,12 @@ import java.util.Optional;
 public final class KnowledgeGraph implements AutoCloseable {
 
     private MemorySegment session;
+    private final StorageMode storageMode;
     private final StorageMode convertedFrom;
 
-    private KnowledgeGraph(MemorySegment session, StorageMode convertedFrom) {
+    private KnowledgeGraph(MemorySegment session, StorageMode storageMode, StorageMode convertedFrom) {
         this.session = session;
+        this.storageMode = storageMode;
         this.convertedFrom = convertedFrom;
     }
 
@@ -138,8 +140,19 @@ public final class KnowledgeGraph implements AutoCloseable {
     }
 
     private static KnowledgeGraph sessionOver(MemorySegment graph, StorageMode convertedFrom) {
+        // Read the mode while we still hold a graph handle: kglite_session_new
+        // consumes it, and the ABI's accessor is graph-scoped. The value cannot
+        // go stale — nothing converts a graph once it is inside a session.
+        StorageMode mode;
+        try {
+            mode = StorageMode.fromWire(Abi.graphStorageMode(graph));
+        } catch (RuntimeException e) {
+            // The probe borrows the handle, so a failure here leaves it ours.
+            Abi.graphFree(graph);
+            throw e;
+        }
         // Abi.sessionNew moves the graph handle in, and frees it if the move fails.
-        return new KnowledgeGraph(Abi.sessionNew(graph), convertedFrom);
+        return new KnowledgeGraph(Abi.sessionNew(graph), mode, convertedFrom);
     }
 
     // ---- queries ----------------------------------------------------------
@@ -228,6 +241,24 @@ public final class KnowledgeGraph implements AutoCloseable {
     }
 
     // ---- lifecycle --------------------------------------------------------
+
+    /**
+     * The storage backend this graph is actually running on.
+     *
+     * <p>Always answers, unlike {@link #convertedFrom()}: after a creation, after
+     * an unspecified-mode open that took whatever the checkpoint recorded, and
+     * after a conversion alike. Use it to confirm that the mode you asked for is
+     * the mode you got, rather than inferring it from a conversion report that
+     * is empty whenever nothing was converted.
+     *
+     * <p>Fixed for the life of this instance — nothing converts a graph once it
+     * is open — so this is a field read, not a call into the engine.
+     *
+     * @return the mode, never {@code null}
+     */
+    public StorageMode storageMode() {
+        return storageMode;
+    }
 
     /**
      * The mode this graph was in before an explicit {@code mode} argument

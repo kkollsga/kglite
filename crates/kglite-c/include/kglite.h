@@ -373,6 +373,49 @@ KgliteStatusCode kglite_graph_new_in_mode(const char *mode,
                                           const char **out_error_msg);
 
 /**
+ * Report the storage mode a graph is in **right now**.
+ *
+ * The counterpart of the mode a checkpoint *recorded*: this is the backend the
+ * handle is actually running on, after any conversion
+ * [`kglite_open_or_create_graph_in_mode`](crate::kglite_open_or_create_graph_in_mode)
+ * performed. That function's `out_converted_from` answers "what was it
+ * before?" and is null whenever nothing changed; this answers "what is it
+ * now?" unconditionally — the question a binding has to ask after creating a
+ * graph, after an unspecified-mode open, or to assert that the mode it asked
+ * for is the mode it got. Without it the only route to the answer was to infer
+ * it from a conversion report, which says nothing when no conversion happened.
+ *
+ * Reads the same classification (`live_storage_mode`) the wheel's
+ * `graph_info()["storage_mode"]` and the servers' `--storage` check report, so
+ * the modes cannot drift between bindings.
+ *
+ * # Arguments
+ *
+ * - `graph` (in, borrowed): the graph handle. **Not** consumed — the caller
+ *   still owns it and may hand it to
+ *   [`kglite_session_new`](crate::kglite_session_new) afterwards.
+ * - `out_mode` (out, owned): set to `"memory"`, `"mapped"` or `"disk"` — the
+ *   same mode vocabulary [`kglite_graph_new_in_mode`] accepts. Free via
+ *   [`kglite_free_string`](crate::kglite_free_string).
+ * - `out_error_msg` (out, owned): null or a valid slot; set to null here,
+ *   since the only failure is a null-argument one with nothing to describe.
+ *
+ * # Errors
+ *
+ * - `KGLITE_ERR_NULL_POINTER` — `graph` or `out_mode` is null
+ *
+ * # Safety
+ *
+ * `graph` must be a valid `*mut KgliteGraph` not yet freed or moved into a
+ * session; `out_mode` a valid writable `*const c_char` slot; `out_error_msg`
+ * null or a valid slot.
+ */
+
+KgliteStatusCode kglite_graph_storage_mode(struct KgliteGraph *graph,
+                                           const char **out_mode,
+                                           const char **out_error_msg);
+
+/**
  * Load a knowledge graph from disk. Accepts `.kgl` files
  * (single-file mmap format) and directories (disk-backed CSR
  * layout) — the loader picks the right path based on what's at
@@ -880,14 +923,24 @@ KgliteStatusCode kglite_open_or_create_graph_in_mode(const char *path,
  *
  * # Arguments
  *
- * - `graph` (in, MOVED): graph handle. After this call, the
- *   pointer is no longer valid for any other use.
+ * - `graph` (in, MOVED on success): graph handle. After a successful
+ *   call the pointer is no longer valid for any other use.
  * - `out_session` (out, owned): set to the session handle on
  *   success; caller must free via [`kglite_session_free`].
  *
  * # Errors
  *
  * - `KGLITE_ERR_NULL_POINTER` — `graph` or `out_session` is null
+ *
+ * **The graph handle is consumed only on `Ok`; on any error the caller
+ * retains ownership and must still free it** with
+ * [`kglite_graph_free`](crate::kglite_graph_free). The move happens after
+ * argument validation, so a rejected call leaves the handle exactly as it
+ * was — a binding that treats "moved" as unconditional leaks the graph on
+ * every failed session open. Unlike the rest of the fallible surface this
+ * takes no `out_error_msg`: the sole failure is a null argument, which has
+ * no message beyond the code, and the parameter list is frozen for this ABI
+ * major version.
  *
  * # Safety
  *
@@ -1153,6 +1206,34 @@ KgliteStatusCode kglite_session_save(struct KgliteSession *session,
  * null on `Ok` (no error to name).
  */
  const char *kglite_status_code_name(KgliteStatusCode code);
+
+/**
+ * Return the canonical name of a status code as a **static** string — the
+ * allocation-free companion to [`kglite_status_code_name`].
+ *
+ * Same text (`"CypherSyntax"`, `"NodeNotFound"`, `"InvalidUtf8"`, …) and the
+ * same null on `Ok`, but the pointer is a `'static` constant in the library's
+ * own read-only data rather than a fresh heap copy.
+ *
+ * **Do NOT free the returned pointer.** Handing it to
+ * [`kglite_free_string`](crate::kglite_free_string) is undefined behaviour —
+ * it is not allocator-owned memory. That is the whole difference between the
+ * two functions, so pick one per call site and do not mix them:
+ * [`kglite_status_code_name`] for a caller that would rather free one uniform
+ * kind of string, this one for a binding that names a code on every error
+ * (the common case — the name goes straight into the exception it raises),
+ * which then skips the allocate/copy/free round trip entirely.
+ *
+ * Added rather than changing [`kglite_status_code_name`] in place: that
+ * function shipped with owned-string semantics and this ABI is additive-only
+ * within a major version, so silently flipping who frees it would turn a
+ * correct caller into a double-free.
+ *
+ * The table is exhaustive over `KgliteStatusCode` by construction (no
+ * wildcard arm), so a newly added status code is a compile error here rather
+ * than a silently unnamed one.
+ */
+ const char *kglite_status_code_name_static(KgliteStatusCode code);
 
 /**
  * Return the Neo4j wire status code for a status code (e.g.

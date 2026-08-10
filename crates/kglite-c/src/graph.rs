@@ -13,7 +13,7 @@ use kglite::api::introspection::{compute_schema, schema_overview_to_json};
 use kglite::api::io::{load_file, load_kgl_bytes, save_graph, save_graph_with, write_kgl_to};
 #[cfg(feature = "rdf")]
 use kglite::api::io::{load_rdf as core_load_rdf, RdfConfig};
-use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
+use kglite::api::storage::{live_storage_mode, new_dir_graph_in_mode, StorageMode};
 use kglite::api::{graphgen, DirGraph, GraphGenConfig};
 use std::ffi::{c_char, CStr};
 use std::path::Path;
@@ -206,6 +206,65 @@ fn fail_new_in_mode(
         }
     }
     code
+}
+
+/// Report the storage mode a graph is in **right now**.
+///
+/// The counterpart of the mode a checkpoint *recorded*: this is the backend the
+/// handle is actually running on, after any conversion
+/// [`kglite_open_or_create_graph_in_mode`](crate::kglite_open_or_create_graph_in_mode)
+/// performed. That function's `out_converted_from` answers "what was it
+/// before?" and is null whenever nothing changed; this answers "what is it
+/// now?" unconditionally — the question a binding has to ask after creating a
+/// graph, after an unspecified-mode open, or to assert that the mode it asked
+/// for is the mode it got. Without it the only route to the answer was to infer
+/// it from a conversion report, which says nothing when no conversion happened.
+///
+/// Reads the same classification (`live_storage_mode`) the wheel's
+/// `graph_info()["storage_mode"]` and the servers' `--storage` check report, so
+/// the modes cannot drift between bindings.
+///
+/// # Arguments
+///
+/// - `graph` (in, borrowed): the graph handle. **Not** consumed — the caller
+///   still owns it and may hand it to
+///   [`kglite_session_new`](crate::kglite_session_new) afterwards.
+/// - `out_mode` (out, owned): set to `"memory"`, `"mapped"` or `"disk"` — the
+///   same mode vocabulary [`kglite_graph_new_in_mode`] accepts. Free via
+///   [`kglite_free_string`](crate::kglite_free_string).
+/// - `out_error_msg` (out, owned): null or a valid slot; set to null here,
+///   since the only failure is a null-argument one with nothing to describe.
+///
+/// # Errors
+///
+/// - `KGLITE_ERR_NULL_POINTER` — `graph` or `out_mode` is null
+///
+/// # Safety
+///
+/// `graph` must be a valid `*mut KgliteGraph` not yet freed or moved into a
+/// session; `out_mode` a valid writable `*const c_char` slot; `out_error_msg`
+/// null or a valid slot.
+#[no_mangle]
+pub unsafe extern "C" fn kglite_graph_storage_mode(
+    graph: *mut KgliteGraph,
+    out_mode: *mut *const c_char,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_mode, std::ptr::null()),
+        || {
+            if graph.is_null() || out_mode.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let state = unsafe { GraphState::from_handle_mut(graph) };
+            let mode = live_storage_mode(state.inner.as_ref());
+            unsafe {
+                *out_mode = alloc_c_string(mode.as_str());
+            }
+            KgliteStatusCode::Ok
+        },
+    )
 }
 
 /// Load a knowledge graph from disk. Accepts `.kgl` files
@@ -1114,6 +1173,72 @@ mod tests {
             )
         };
         assert_eq!(rc, KgliteStatusCode::NullPointer);
+    }
+
+    /// Read the mode back off a handle, freeing the out-string.
+    fn storage_mode_of(graph: *mut KgliteGraph) -> (KgliteStatusCode, Option<String>) {
+        let mut mode: *const c_char = std::ptr::null();
+        let mut err: *const c_char = std::ptr::null();
+        let rc =
+            unsafe { kglite_graph_storage_mode(graph, &mut mode as *mut _, &mut err as *mut _) };
+        assert!(
+            err.is_null(),
+            "storage_mode should never set an error string"
+        );
+        let text = (!mode.is_null()).then(|| {
+            let s = unsafe { CStr::from_ptr(mode).to_str().unwrap().to_string() };
+            unsafe { crate::kglite_free_string(mode) };
+            s
+        });
+        (rc, text)
+    }
+
+    #[test]
+    fn storage_mode_reports_the_mode_the_graph_was_created_in() {
+        // The portable pair, plus the "default" alias which must report its
+        // canonical name rather than echo the argument back.
+        for (created_as, expected) in [
+            ("memory", "memory"),
+            ("default", "memory"),
+            ("mapped", "mapped"),
+        ] {
+            let (rc, g, msg) = new_in_mode(created_as, None);
+            assert_eq!(rc, KgliteStatusCode::Ok, "{created_as}: {msg}");
+            let (rc, mode) = storage_mode_of(g);
+            assert_eq!(rc, KgliteStatusCode::Ok, "{created_as}");
+            assert_eq!(mode.as_deref(), Some(expected), "created as {created_as}");
+            unsafe { kglite_graph_free(g) };
+        }
+    }
+
+    #[test]
+    fn storage_mode_reports_disk_and_leaves_the_handle_usable() {
+        let dir = std::env::temp_dir().join(format!("kglite_c_modeprobe_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (rc, g, msg) = new_in_mode("disk", Some(dir.to_str().unwrap()));
+        assert_eq!(rc, KgliteStatusCode::Ok, "{msg}");
+        // Borrowed, not consumed: two probes in a row must both answer.
+        assert_eq!(storage_mode_of(g).1.as_deref(), Some("disk"));
+        assert_eq!(storage_mode_of(g).1.as_deref(), Some("disk"));
+        unsafe { kglite_graph_free(g) };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn storage_mode_null_returns_null_pointer() {
+        let (rc, mode) = storage_mode_of(std::ptr::null_mut());
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        assert!(
+            mode.is_none(),
+            "the out-slot must be reset, not left dangling"
+        );
+
+        // A null out-slot is the other half of the contract.
+        let g = kglite_graph_new();
+        let rc =
+            unsafe { kglite_graph_storage_mode(g, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        unsafe { kglite_graph_free(g) };
     }
 
     #[test]

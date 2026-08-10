@@ -12,7 +12,7 @@ package io.github.kkollsga.kglite;
  *
  * <p>{@link #statusCode()} and {@link #statusName()} carry the C ABI's own
  * classification (see {@code KgliteStatusCode} in {@code kglite.h}); the name
- * is produced by {@code kglite_status_code_name} rather than a table in this
+ * is produced by {@code kglite_status_code_name_static} rather than a table in this
  * wrapper, so it cannot drift from the engine.
  */
 public class KgliteException extends RuntimeException {

@@ -77,7 +77,7 @@ class AbiContractTest {
     @Test
     @DisplayName("the two status codes the wrapper hard-codes match the header")
     void statusCodesMatchHeader() {
-        // Every other code is rendered via kglite_status_code_name(); these two
+        // Every other code is rendered via kglite_status_code_name_static(); these two
         // are the ones Java branches on, so they are the only ones that can drift.
         Map<String, Integer> codes = AbiHeader.statusCodes(AbiHeader.read(AbiHeader.headerPath()));
         assertEquals(codes.get("OK"), Abi.STATUS_OK, "KGLITE_STATUS_CODE_OK moved");

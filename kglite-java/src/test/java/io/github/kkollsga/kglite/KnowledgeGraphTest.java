@@ -62,19 +62,32 @@ class KnowledgeGraphTest {
         try (WriterLease lease = WriterLease.acquire(path);
                 KnowledgeGraph graph = KnowledgeGraph.open(path, StorageMode.MAPPED)) {
             assertEquals(path.toAbsolutePath(), lease.path(), "the lease covers the saved path");
+            assertEquals(StorageMode.MAPPED, graph.storageMode(), "created in the mode asked for");
             graph.cypher("CREATE (:Thing {id: 1, title: 'kept'})");
             graph.save(path);
         }
 
+        // The checkpoint recorded MAPPED — asserted directly off the reopened
+        // graph rather than inferred from a conversion report, which is silent
+        // in exactly the case that matters here (nothing was converted).
+        try (KnowledgeGraph graph = KnowledgeGraph.open(path)) {
+            assertEquals(StorageMode.MAPPED, graph.storageMode(),
+                    "an unspecified open must land on the recorded mode");
+            assertTrue(graph.convertedFrom().isEmpty(), "an unspecified open converts nothing");
+        }
+
         // Reopening in the mode it already is converts nothing...
         try (KnowledgeGraph graph = KnowledgeGraph.open(path, StorageMode.MAPPED)) {
+            assertEquals(StorageMode.MAPPED, graph.storageMode());
             assertTrue(graph.convertedFrom().isEmpty(),
                     "reopening in the recorded mode should not convert");
         }
 
-        // ...and reopening in another one reports the mode it came back in,
-        // which is how we know the checkpoint really recorded MAPPED.
+        // ...and reopening in another one really lands on the new backend, not
+        // merely reports that it meant to.
         try (KnowledgeGraph graph = KnowledgeGraph.open(path, StorageMode.MEMORY)) {
+            assertEquals(StorageMode.MEMORY, graph.storageMode(),
+                    "the conversion must have actually happened");
             assertEquals(java.util.Optional.of(StorageMode.MAPPED), graph.convertedFrom());
             assertEquals("kept", graph.query("MATCH (t:Thing) RETURN t.title AS title")
                     .get(0).get("title"));
@@ -114,6 +127,7 @@ class KnowledgeGraphTest {
     @DisplayName("a fresh graph can be created in a non-default mode, and disk needs a path")
     void createInExplicitMode(@TempDir Path dir) {
         try (KnowledgeGraph graph = KnowledgeGraph.create(StorageMode.MAPPED, null)) {
+            assertEquals(StorageMode.MAPPED, graph.storageMode());
             graph.cypher("CREATE (:Thing {id: 1, title: 'built'})");
             assertEquals("built",
                     graph.query("MATCH (t:Thing) RETURN t.title AS title").get(0).get("title"));
@@ -128,6 +142,7 @@ class KnowledgeGraphTest {
     @DisplayName("close is idempotent and use-after-close is a clear error")
     void closeIsIdempotent() {
         KnowledgeGraph graph = KnowledgeGraph.createInMemory();
+        assertEquals(StorageMode.MEMORY, graph.storageMode());
         graph.cypher("CREATE (:X {id: 1, title: 'x'})");
         graph.close();
         graph.close();

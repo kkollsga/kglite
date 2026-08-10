@@ -71,12 +71,20 @@ dependencies {
 }
 
 // ---------------------------------------------------------------------------
-// Native library for tests: the repo's own release build.
+// Native library for tests: the repo's own build, newest profile wins.
 //
-//   cargo build -p kglite-c --release   ->   target/release/libkglite_c.dylib
+//   cargo build -p kglite-c             ->  target/debug/libkglite_c.dylib
+//   cargo build -p kglite-c --release   ->  target/release/libkglite_c.dylib
 //
-// The packaging phase bundles per-platform natives as JAR resources; until
-// then tests point at the workspace build directory explicitly.
+// Deliberately NOT pinned to one profile. Pinning `target/release` meant a
+// stale release library left over from a benchmark shadowed the debug library
+// the current source had just produced: every symbol the working tree added
+// was missing, and the ABI contract test reported drift against code that did
+// exist. Abi.resolveLibrary picks the most recently built of the two — the
+// same rule as tests/conftest.py::workspace_binary — and
+// `-Dkglite.native.path=<dir-or-file>` still overrides it outright.
+//
+// The packaging phase bundles per-platform natives as JAR resources instead.
 // ---------------------------------------------------------------------------
 val workspaceRoot = layout.projectDirectory.dir("..").asFile
 
@@ -85,7 +93,11 @@ tasks.test {
     // JDK 24+ (JEP 472) warns on restricted native access without this; a
     // future release makes it an error. Consumers pass the same flag.
     jvmArgs("--enable-native-access=ALL-UNNAMED")
-    systemProperty("kglite.native.path", File(workspaceRoot, "target/release").absolutePath)
+    // Gradle does not forward -D to the forked test JVM; relay an explicit
+    // override only, and otherwise let the resolver find the newest build.
+    providers.systemProperty("kglite.native.path").orNull?.let {
+        systemProperty("kglite.native.path", it)
+    }
     systemProperty(
         "kglite.header.path",
         providers.systemProperty("kglite.header.path")
