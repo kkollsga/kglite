@@ -142,7 +142,7 @@ Run with::
 from __future__ import annotations
 
 import itertools
-import resource
+import math
 import sys
 
 import pandas as pd
@@ -595,6 +595,21 @@ def _peak_rss_mb() -> float:
     Do not "fix" this by resetting between cells; there is no way to reset
     `ru_maxrss`. Read the first pinning arm, or run one cell per process.
     """
+    try:
+        import resource
+    except ImportError:
+        # Windows has no `resource`. Deliberately NaN rather than 0.0: a zero
+        # would read as "the fork allocated nothing", which is the reassuring
+        # direction and the one lie this file must not tell. NaN propagates
+        # through the subtraction and shows up as `nan` in `extra_info`.
+        #
+        # The import is function-local, not module-scope, because
+        # `tests/test_test_suite_portability.py::
+        # test_no_module_scope_posix_only_imports` is a **default-suite** guard:
+        # a POSIX-only import at module scope aborts collection for the entire
+        # suite on Windows. It caught this exact line on 2026-08-10, one commit
+        # after it was written.
+        return math.nan
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return peak / (1024 * 1024) if sys.platform == "darwin" else peak / 1024
 

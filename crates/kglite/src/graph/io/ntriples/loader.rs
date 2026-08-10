@@ -182,8 +182,14 @@ fn apply_type_renames(
                 }
             }
         }
-        GraphBackend::Memory(g) => retype_heap_nodes(g, rename_map),
-        GraphBackend::Mapped(g) => retype_heap_nodes(g, rename_map),
+        GraphBackend::Memory(g) => retype_heap_nodes(
+            crate::graph::storage::backend::unique_heap_backend(g),
+            rename_map,
+        ),
+        GraphBackend::Mapped(g) => retype_heap_nodes(
+            crate::graph::storage::backend::unique_heap_backend(g),
+            rename_map,
+        ),
         GraphBackend::Recording(rg) => apply_type_renames(rg.inner_mut(), rename_map),
     }
 }

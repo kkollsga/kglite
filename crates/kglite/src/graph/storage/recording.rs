@@ -830,7 +830,7 @@ mod tests {
             b,
             EdgeData::new("KNOWS".to_string(), HashMap::new(), interner),
         );
-        GraphBackend::Memory(g)
+        GraphBackend::Memory(std::sync::Arc::new(g))
     }
 
     fn make_mapped_backend(interner: &mut StringInterner) -> GraphBackend {
@@ -856,7 +856,7 @@ mod tests {
             b,
             EdgeData::new("KNOWS".to_string(), HashMap::new(), interner),
         );
-        GraphBackend::Mapped(g)
+        GraphBackend::Mapped(std::sync::Arc::new(g))
     }
 
     fn make_disk_backend(dir: &TempDir) -> GraphBackend {

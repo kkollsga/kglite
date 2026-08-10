@@ -24,7 +24,7 @@ use crate::graph::storage::disk::csr::TOMBSTONE_EDGE;
 use crate::graph::storage::disk::graph::DiskGraph;
 use crate::graph::storage::{GraphRead, GraphWrite, MappedGraph, MemoryGraph};
 use petgraph::graph::{EdgeIndex, NodeIndex};
-use petgraph::visit::{EdgeRef, IntoEdgeReferences, NodeIndexable};
+use petgraph::visit::{EdgeIndexable, EdgeRef, IntoEdgeReferences, NodeIndexable};
 use petgraph::Direction;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -40,6 +40,38 @@ use std::time::Instant;
 // `MemoryGraph` its peer counts, so the two have nothing left in common to
 // share.
 // ──────────────────────────────────────────────────────────────────────────
+
+/// The edges `StableGraph::remove_node(idx)` is about to free, **in the order
+/// petgraph frees them**.
+///
+/// `remove_node` walks the outgoing adjacency list to exhaustion removing the
+/// head each time, then does the same for the incoming list. `edges_directed`
+/// iterates each list head-first, so its order is that removal order. A
+/// self-loop sits in *both* lists but is unlinked from both by the outgoing
+/// pass, so the incoming pass must skip it — that is the `source() != idx`
+/// filter, and getting it wrong would push one slot twice and desynchronise
+/// every later edge prediction.
+///
+/// Order is load-bearing because the free list is LIFO: the same set in a
+/// different order predicts different indices. `slot_mirror::tests::
+/// the_mirror_predicts_every_slot_petgraph_actually_allocates` pins it against
+/// real petgraph, self-loop included.
+pub(crate) fn freed_edges_for_removal(
+    graph: &petgraph::stable_graph::StableDiGraph<NodeData, EdgeData>,
+    idx: NodeIndex,
+) -> Vec<EdgeIndex> {
+    let mut freed: Vec<EdgeIndex> = graph
+        .edges_directed(idx, Direction::Outgoing)
+        .map(|e| e.id())
+        .collect();
+    freed.extend(
+        graph
+            .edges_directed(idx, Direction::Incoming)
+            .filter(|e| e.source() != idx)
+            .map(|e| e.id()),
+    );
+    freed
+}
 
 macro_rules! impl_heap_graph_read {
     ($ty:ty, is_memory = $is_memory:expr, is_mapped = $is_mapped:expr) => {
@@ -605,7 +637,9 @@ impl GraphWrite for MemoryGraph {
     #[inline]
     fn add_node(&mut self, data: NodeData) -> NodeIndex {
         let node_type = data.node_type;
+        let bound_before = self.inner.node_bound();
         let idx = self.inner.add_node(data);
+        self.slot_mirror.note_node_added(bound_before, idx);
         if let Some(journal) = self.undo.as_deref_mut() {
             journal.note_node_added(idx, node_type);
         }
@@ -618,7 +652,10 @@ impl GraphWrite for MemoryGraph {
         if self.undo.is_some() {
             self.detach_for_journal(idx);
         }
+        let freed_edges = freed_edges_for_removal(&self.inner, idx);
         let removed = self.inner.remove_node(idx)?;
+        self.slot_mirror
+            .note_node_removed(idx, freed_edges.into_iter());
         if let Some(journal) = self.undo.as_deref_mut() {
             journal.note_node_removed(idx, removed.clone());
         }
@@ -628,7 +665,9 @@ impl GraphWrite for MemoryGraph {
     #[inline]
     fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
         self.invalidate_peer_counts();
+        let bound_before = EdgeIndexable::edge_bound(&self.inner);
         let idx = self.inner.add_edge(a, b, data);
+        self.slot_mirror.note_edge_added(bound_before, idx);
         if let Some(journal) = self.undo.as_deref_mut() {
             journal.note_edge_added(idx);
         }
@@ -640,6 +679,7 @@ impl GraphWrite for MemoryGraph {
         self.invalidate_peer_counts();
         let endpoints = self.undo.is_some().then(|| self.inner.edge_endpoints(idx));
         let removed = self.inner.remove_edge(idx)?;
+        self.slot_mirror.note_edge_removed(idx);
         if let Some(journal) = self.undo.as_deref_mut() {
             if let Some(Some((src, tgt))) = endpoints {
                 journal.note_edge_removed(idx, src, tgt, removed.clone());
@@ -1122,7 +1162,9 @@ impl GraphWrite for MappedGraph {
     fn add_node(&mut self, data: NodeData) -> NodeIndex {
         self.invalidate_property_index();
         let node_type = data.node_type;
+        let bound_before = self.inner.node_bound();
         let idx = self.inner_mut().add_node(data);
+        self.slot_mirror.note_node_added(bound_before, idx);
         if let Some(journal) = self.undo.as_deref_mut() {
             journal.note_node_added(idx, node_type);
         }
@@ -1138,7 +1180,10 @@ impl GraphWrite for MappedGraph {
         if self.undo.is_some() {
             self.detach_for_journal(idx);
         }
+        let freed_edges = freed_edges_for_removal(&self.inner, idx);
         let removed = self.inner_mut().remove_node(idx)?;
+        self.slot_mirror
+            .note_node_removed(idx, freed_edges.into_iter());
         if let Some(journal) = self.undo.as_deref_mut() {
             journal.note_node_removed(idx, removed.clone());
         }
@@ -1148,7 +1193,9 @@ impl GraphWrite for MappedGraph {
     #[inline]
     fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
         self.invalidate_type_index();
+        let bound_before = EdgeIndexable::edge_bound(&self.inner);
         let idx = self.inner_mut().add_edge(a, b, data);
+        self.slot_mirror.note_edge_added(bound_before, idx);
         if let Some(journal) = self.undo.as_deref_mut() {
             journal.note_edge_added(idx);
         }
@@ -1160,6 +1207,7 @@ impl GraphWrite for MappedGraph {
         self.invalidate_type_index();
         let endpoints = self.undo.is_some().then(|| self.inner.edge_endpoints(idx));
         let removed = self.inner_mut().remove_edge(idx)?;
+        self.slot_mirror.note_edge_removed(idx);
         if let Some(journal) = self.undo.as_deref_mut() {
             if let Some(Some((src, tgt))) = endpoints {
                 journal.note_edge_removed(idx, src, tgt, removed.clone());

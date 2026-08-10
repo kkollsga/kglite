@@ -48,6 +48,32 @@ pub(crate) fn backend_clone_nodes() -> usize {
 // Graph Backend Abstraction
 // ============================================================================
 
+/// The panic message behind every `unique_heap_backend` in this file.
+///
+/// It is reachable only if some code path clones a `GraphBackend` and then
+/// mutates one of the two copies while the other is alive. Today that cannot
+/// happen: `impl Clone for GraphBackend` deep-copies into a **fresh** `Arc`, so
+/// every heap `Arc` in the tree has a strong count of exactly one. D2 Phase 2
+/// is what makes sharing possible, and it will replace these call sites with a
+/// copy-on-write path rather than relaxing the assertion.
+const HEAP_BACKEND_NOT_UNIQUE: &str =
+    "heap backend Arc is shared: a GraphBackend clone must deep-copy into a fresh Arc \
+     (see D2 Phase 1). Mutating a shared backend would corrupt the other holder.";
+
+/// `&mut T` from a heap backend handle, asserting the handle is unique.
+///
+/// The `Arc` around `MemoryGraph`/`MappedGraph` exists so D2 Phase 2 can hand a
+/// reader a *shared* base while the writer builds an overlay. In **this** phase
+/// nothing shares one, so every mutable access is an `Arc::get_mut` that always
+/// succeeds — and the `expect` is the executable statement of that invariant,
+/// not defensive padding. `Arc::get_mut` costs two atomic loads on a path that
+/// already costs microseconds; it is deliberately kept off the read path, which
+/// uses a plain `&**g` deref.
+#[inline(always)]
+pub(crate) fn unique_heap_backend<T>(handle: &mut Arc<T>) -> &mut T {
+    Arc::get_mut(handle).expect(HEAP_BACKEND_NOT_UNIQUE)
+}
+
 /// Graph storage backend. Four variants — heap-resident memory,
 /// mmap-columnar-spilled mapped, CSR-on-disk, and a Phase 6 validation
 /// wrapper that logs reads. Phase 5 promoted `MappedGraph` from a type
@@ -65,8 +91,16 @@ pub(crate) fn backend_clone_nodes() -> usize {
 /// unchanged when wrapped.
 #[allow(clippy::large_enum_variant)]
 pub enum GraphBackend {
-    Memory(MemoryGraph),
-    Mapped(MappedGraph),
+    /// **`Arc` since D2 Phase 1**, and the indirection is the whole point of
+    /// that phase: it is what lets a fork share the heap graph with a reader
+    /// instead of deep-copying it (Phase 2). Until Phase 2 lands, the handle is
+    /// always uniquely owned — see [`unique_heap_backend`].
+    ///
+    /// Reads pay one pointer deref (`&**g`) per backend dispatch. That single
+    /// cost is what Phase 1's ≤5% gate measures, and it is measured *before*
+    /// any overlay code exists so nothing else can be blamed for it.
+    Memory(Arc<MemoryGraph>),
+    Mapped(Arc<MappedGraph>),
     Disk(Box<DiskGraph>),
     // Write-capture wrapper for the WAL. Introduced as a Phase 6
     // test-only validation wrapper, now the production backend of every
@@ -84,7 +118,7 @@ impl GraphBackend {
     // Keep the established constructor-only backend API stable in this hardening pass.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        GraphBackend::Memory(MemoryGraph::new())
+        GraphBackend::Memory(Arc::new(MemoryGraph::new()))
     }
 
     /// Whether a proven-infallible mutation may commit without a full rollback
@@ -143,8 +177,8 @@ impl GraphBackend {
     #[inline]
     pub(crate) fn begin_undo(&mut self) {
         match self {
-            GraphBackend::Memory(g) => g.begin_undo(),
-            GraphBackend::Mapped(g) => g.begin_undo(),
+            GraphBackend::Memory(g) => unique_heap_backend(g).begin_undo(),
+            GraphBackend::Mapped(g) => unique_heap_backend(g).begin_undo(),
             GraphBackend::Recording(rg) => rg.inner_mut().begin_undo(),
             GraphBackend::Disk(_) => {}
         }
@@ -154,8 +188,8 @@ impl GraphBackend {
     #[inline]
     pub(crate) fn take_undo(&mut self) -> Option<Box<UndoJournal>> {
         match self {
-            GraphBackend::Memory(g) => g.take_undo(),
-            GraphBackend::Mapped(g) => g.take_undo(),
+            GraphBackend::Memory(g) => unique_heap_backend(g).take_undo(),
+            GraphBackend::Mapped(g) => unique_heap_backend(g).take_undo(),
             GraphBackend::Recording(rg) => rg.inner_mut().take_undo(),
             GraphBackend::Disk(_) => None,
         }
@@ -167,8 +201,8 @@ impl GraphBackend {
     #[inline]
     pub(crate) fn undo_journal_mut(&mut self) -> Option<&mut UndoJournal> {
         match self {
-            GraphBackend::Memory(g) => g.undo_journal_mut(),
-            GraphBackend::Mapped(g) => g.undo_journal_mut(),
+            GraphBackend::Memory(g) => unique_heap_backend(g).undo_journal_mut(),
+            GraphBackend::Mapped(g) => unique_heap_backend(g).undo_journal_mut(),
             GraphBackend::Recording(rg) => rg.inner_mut().undo_journal_mut(),
             GraphBackend::Disk(_) => None,
         }
@@ -278,12 +312,14 @@ impl GraphBackend {
             // (D1 Phase 3 — `vacuum` is the caller that would otherwise lose
             // them).
             GraphBackend::Memory(g) => {
+                let g = unique_heap_backend(g);
                 let stores = std::mem::take(&mut g.column_stores);
                 *g = MemoryGraph::from_graph(new);
                 g.column_stores = stores;
                 true
             }
             GraphBackend::Mapped(g) => {
+                let g = unique_heap_backend(g);
                 let stores = std::mem::take(&mut g.column_stores);
                 *g = MappedGraph::from_graph(new);
                 g.column_stores = stores;
@@ -308,8 +344,8 @@ impl GraphBackend {
     /// between, exactly as during the old clone loop.
     pub(crate) fn take_heap_graph(&mut self) -> Option<StableDiGraph<NodeData, EdgeData>> {
         match self {
-            GraphBackend::Memory(g) => Some(std::mem::take(&mut g.inner)),
-            GraphBackend::Mapped(g) => Some(std::mem::take(&mut g.inner)),
+            GraphBackend::Memory(g) => Some(std::mem::take(&mut unique_heap_backend(g).inner)),
+            GraphBackend::Mapped(g) => Some(std::mem::take(&mut unique_heap_backend(g).inner)),
             GraphBackend::Recording(rg) => rg.inner_mut().take_heap_graph(),
             GraphBackend::Disk(_) => None,
         }
@@ -518,8 +554,15 @@ impl Clone for GraphBackend {
             BACKEND_CLONE_NODES.set(BACKEND_CLONE_NODES.get() + self.node_count());
         }
         match self {
-            GraphBackend::Memory(g) => GraphBackend::Memory(g.clone()),
-            GraphBackend::Mapped(g) => GraphBackend::Mapped(g.clone()),
+            // ⚠ `deep_clone()`, never `g.clone()`. `g` is an `Arc` handle since
+            // D2 Phase 1, so `.clone()` on it is a **refcount bump** — one
+            // character away from this line, and the opposite of what Clone
+            // must mean here. Phase 1 is behaviour-preserving by contract, so
+            // the fork still deep-copies and
+            // `handle.rs::held_reader_forces_a_whole_graph_copy` still passes
+            // unchanged; sharing is Phase 2's deliberate, tested change.
+            GraphBackend::Memory(g) => GraphBackend::Memory(Arc::new(g.deep_clone())),
+            GraphBackend::Mapped(g) => GraphBackend::Mapped(Arc::new(g.deep_clone())),
             GraphBackend::Disk(dg) => GraphBackend::Disk(dg.clone()),
             GraphBackend::Recording(rg) => GraphBackend::Recording(Box::new((**rg).clone())),
         }
@@ -548,7 +591,7 @@ impl Serialize for GraphBackend {
 impl<'de> Deserialize<'de> for GraphBackend {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let g = StableDiGraph::<NodeData, EdgeData>::deserialize(deserializer)?;
-        Ok(GraphBackend::Memory(MemoryGraph::from_graph(g)))
+        Ok(GraphBackend::Memory(Arc::new(MemoryGraph::from_graph(g))))
     }
 }
 
@@ -606,8 +649,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn node_view(&self, idx: NodeIndex) -> Option<crate::graph::storage::NodeView<'_>> {
         match self {
-            Self::Memory(g) => GraphRead::node_view(g, idx),
-            Self::Mapped(g) => GraphRead::node_view(g, idx),
+            Self::Memory(g) => GraphRead::node_view(&**g, idx),
+            Self::Mapped(g) => GraphRead::node_view(&**g, idx),
             Self::Disk(g) => GraphRead::node_view(g.as_ref(), idx),
             Self::Recording(rg) => GraphRead::node_view(rg.as_ref(), idx),
         }
@@ -616,8 +659,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn column_store(&self, type_key: InternedKey) -> Option<&std::sync::Arc<ColumnStore>> {
         match self {
-            Self::Memory(g) => GraphRead::column_store(g, type_key),
-            Self::Mapped(g) => GraphRead::column_store(g, type_key),
+            Self::Memory(g) => GraphRead::column_store(&**g, type_key),
+            Self::Mapped(g) => GraphRead::column_store(&**g, type_key),
             Self::Disk(g) => GraphRead::column_store(g.as_ref(), type_key),
             Self::Recording(rg) => GraphRead::column_store(rg.as_ref(), type_key),
         }
@@ -627,8 +670,8 @@ impl GraphRead for GraphBackend {
         &self,
     ) -> Box<dyn Iterator<Item = (InternedKey, &std::sync::Arc<ColumnStore>)> + '_> {
         match self {
-            Self::Memory(g) => GraphRead::column_stores_iter(g),
-            Self::Mapped(g) => GraphRead::column_stores_iter(g),
+            Self::Memory(g) => GraphRead::column_stores_iter(&**g),
+            Self::Mapped(g) => GraphRead::column_stores_iter(&**g),
             Self::Disk(g) => GraphRead::column_stores_iter(g.as_ref()),
             Self::Recording(rg) => GraphRead::column_stores_iter(rg.as_ref()),
         }
@@ -637,8 +680,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn node_count(&self) -> usize {
         match self {
-            Self::Memory(g) => GraphRead::node_count(g),
-            Self::Mapped(g) => GraphRead::node_count(g),
+            Self::Memory(g) => GraphRead::node_count(&**g),
+            Self::Mapped(g) => GraphRead::node_count(&**g),
             Self::Disk(g) => GraphRead::node_count(g.as_ref()),
             Self::Recording(rg) => GraphRead::node_count(rg.as_ref()),
         }
@@ -647,8 +690,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn edge_count(&self) -> usize {
         match self {
-            Self::Memory(g) => GraphRead::edge_count(g),
-            Self::Mapped(g) => GraphRead::edge_count(g),
+            Self::Memory(g) => GraphRead::edge_count(&**g),
+            Self::Mapped(g) => GraphRead::edge_count(&**g),
             Self::Disk(g) => GraphRead::edge_count(g.as_ref()),
             Self::Recording(rg) => GraphRead::edge_count(rg.as_ref()),
         }
@@ -657,8 +700,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn node_bound(&self) -> usize {
         match self {
-            Self::Memory(g) => GraphRead::node_bound(g),
-            Self::Mapped(g) => GraphRead::node_bound(g),
+            Self::Memory(g) => GraphRead::node_bound(&**g),
+            Self::Mapped(g) => GraphRead::node_bound(&**g),
             Self::Disk(g) => GraphRead::node_bound(g.as_ref()),
             Self::Recording(rg) => GraphRead::node_bound(rg.as_ref()),
         }
@@ -694,8 +737,8 @@ impl GraphRead for GraphBackend {
     #[inline(always)]
     fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey> {
         match self {
-            Self::Memory(g) => GraphRead::node_type_of(g, idx),
-            Self::Mapped(g) => GraphRead::node_type_of(g, idx),
+            Self::Memory(g) => GraphRead::node_type_of(&**g, idx),
+            Self::Mapped(g) => GraphRead::node_type_of(&**g, idx),
             Self::Disk(g) => GraphRead::node_type_of(g.as_ref(), idx),
             Self::Recording(rg) => GraphRead::node_type_of(rg.as_ref(), idx),
         }
@@ -704,8 +747,8 @@ impl GraphRead for GraphBackend {
     #[inline(always)]
     fn node_labels_of(&self, idx: NodeIndex) -> Vec<InternedKey> {
         match self {
-            Self::Memory(g) => GraphRead::node_labels_of(g, idx),
-            Self::Mapped(g) => GraphRead::node_labels_of(g, idx),
+            Self::Memory(g) => GraphRead::node_labels_of(&**g, idx),
+            Self::Mapped(g) => GraphRead::node_labels_of(&**g, idx),
             Self::Disk(g) => GraphRead::node_labels_of(g.as_ref(), idx),
             Self::Recording(rg) => GraphRead::node_labels_of(rg.as_ref(), idx),
         }
@@ -714,8 +757,8 @@ impl GraphRead for GraphBackend {
     #[inline(always)]
     fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
         match self {
-            Self::Memory(g) => GraphRead::node_weight(g, idx),
-            Self::Mapped(g) => GraphRead::node_weight(g, idx),
+            Self::Memory(g) => GraphRead::node_weight(&**g, idx),
+            Self::Mapped(g) => GraphRead::node_weight(&**g, idx),
             Self::Disk(g) => GraphRead::node_weight(g.as_ref(), idx),
             Self::Recording(rg) => GraphRead::node_weight(rg.as_ref(), idx),
         }
@@ -724,8 +767,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn get_node_property(&self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
         match self {
-            Self::Memory(g) => GraphRead::get_node_property(g, idx, key),
-            Self::Mapped(g) => GraphRead::get_node_property(g, idx, key),
+            Self::Memory(g) => GraphRead::get_node_property(&**g, idx, key),
+            Self::Mapped(g) => GraphRead::get_node_property(&**g, idx, key),
             Self::Disk(g) => GraphRead::get_node_property(g.as_ref(), idx, key),
             Self::Recording(rg) => GraphRead::get_node_property(rg.as_ref(), idx, key),
         }
@@ -734,8 +777,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn get_node_id(&self, idx: NodeIndex) -> Option<Value> {
         match self {
-            Self::Memory(g) => GraphRead::get_node_id(g, idx),
-            Self::Mapped(g) => GraphRead::get_node_id(g, idx),
+            Self::Memory(g) => GraphRead::get_node_id(&**g, idx),
+            Self::Mapped(g) => GraphRead::get_node_id(&**g, idx),
             Self::Disk(g) => GraphRead::get_node_id(g.as_ref(), idx),
             Self::Recording(rg) => GraphRead::get_node_id(rg.as_ref(), idx),
         }
@@ -744,8 +787,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn get_node_title(&self, idx: NodeIndex) -> Option<Value> {
         match self {
-            Self::Memory(g) => GraphRead::get_node_title(g, idx),
-            Self::Mapped(g) => GraphRead::get_node_title(g, idx),
+            Self::Memory(g) => GraphRead::get_node_title(&**g, idx),
+            Self::Mapped(g) => GraphRead::get_node_title(&**g, idx),
             Self::Disk(g) => GraphRead::get_node_title(g.as_ref(), idx),
             Self::Recording(rg) => GraphRead::get_node_title(rg.as_ref(), idx),
         }
@@ -754,8 +797,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn str_prop_eq(&self, idx: NodeIndex, key: InternedKey, target: &str) -> Option<bool> {
         match self {
-            Self::Memory(g) => GraphRead::str_prop_eq(g, idx, key, target),
-            Self::Mapped(g) => GraphRead::str_prop_eq(g, idx, key, target),
+            Self::Memory(g) => GraphRead::str_prop_eq(&**g, idx, key, target),
+            Self::Mapped(g) => GraphRead::str_prop_eq(&**g, idx, key, target),
             Self::Disk(g) => GraphRead::str_prop_eq(g.as_ref(), idx, key, target),
             Self::Recording(rg) => GraphRead::str_prop_eq(rg.as_ref(), idx, key, target),
         }
@@ -764,8 +807,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn node_indices(&self) -> crate::graph::core::iterators::GraphNodeIndices<'_> {
         match self {
-            Self::Memory(g) => GraphRead::node_indices(g),
-            Self::Mapped(g) => GraphRead::node_indices(g),
+            Self::Memory(g) => GraphRead::node_indices(&**g),
+            Self::Mapped(g) => GraphRead::node_indices(&**g),
             Self::Disk(g) => GraphRead::node_indices(g.as_ref()),
             Self::Recording(rg) => GraphRead::node_indices(rg.as_ref()),
         }
@@ -774,8 +817,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn edge_indices(&self) -> crate::graph::core::iterators::GraphEdgeIndices<'_> {
         match self {
-            Self::Memory(g) => GraphRead::edge_indices(g),
-            Self::Mapped(g) => GraphRead::edge_indices(g),
+            Self::Memory(g) => GraphRead::edge_indices(&**g),
+            Self::Mapped(g) => GraphRead::edge_indices(&**g),
             Self::Disk(g) => GraphRead::edge_indices(g.as_ref()),
             Self::Recording(rg) => GraphRead::edge_indices(rg.as_ref()),
         }
@@ -784,8 +827,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn edge_references(&self) -> crate::graph::core::iterators::GraphEdgeReferences<'_> {
         match self {
-            Self::Memory(g) => GraphRead::edge_references(g),
-            Self::Mapped(g) => GraphRead::edge_references(g),
+            Self::Memory(g) => GraphRead::edge_references(&**g),
+            Self::Mapped(g) => GraphRead::edge_references(&**g),
             Self::Disk(g) => GraphRead::edge_references(g.as_ref()),
             Self::Recording(rg) => GraphRead::edge_references(rg.as_ref()),
         }
@@ -794,8 +837,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = &'a EdgeData> + 'a> {
         match self {
-            Self::Memory(g) => GraphRead::edge_weights(g),
-            Self::Mapped(g) => GraphRead::edge_weights(g),
+            Self::Memory(g) => GraphRead::edge_weights(&**g),
+            Self::Mapped(g) => GraphRead::edge_weights(&**g),
             Self::Disk(g) => GraphRead::edge_weights(g.as_ref()),
             Self::Recording(rg) => GraphRead::edge_weights(rg.as_ref()),
         }
@@ -808,8 +851,8 @@ impl GraphRead for GraphBackend {
         dir: petgraph::Direction,
     ) -> crate::graph::core::iterators::GraphEdges<'_> {
         match self {
-            Self::Memory(g) => GraphRead::edges_directed(g, idx, dir),
-            Self::Mapped(g) => GraphRead::edges_directed(g, idx, dir),
+            Self::Memory(g) => GraphRead::edges_directed(&**g, idx, dir),
+            Self::Mapped(g) => GraphRead::edges_directed(&**g, idx, dir),
             Self::Disk(g) => GraphRead::edges_directed(g.as_ref(), idx, dir),
             Self::Recording(rg) => GraphRead::edges_directed(rg.as_ref(), idx, dir),
         }
@@ -818,8 +861,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn edges(&self, idx: NodeIndex) -> crate::graph::core::iterators::GraphEdges<'_> {
         match self {
-            Self::Memory(g) => GraphRead::edges(g, idx),
-            Self::Mapped(g) => GraphRead::edges(g, idx),
+            Self::Memory(g) => GraphRead::edges(&**g, idx),
+            Self::Mapped(g) => GraphRead::edges(&**g, idx),
             Self::Disk(g) => GraphRead::edges(g.as_ref(), idx),
             Self::Recording(rg) => GraphRead::edges(rg.as_ref(), idx),
         }
@@ -833,8 +876,8 @@ impl GraphRead for GraphBackend {
         conn_type_filter: Option<InternedKey>,
     ) -> crate::graph::core::iterators::GraphEdges<'_> {
         match self {
-            Self::Memory(g) => GraphRead::edges_directed_filtered(g, idx, dir, conn_type_filter),
-            Self::Mapped(g) => GraphRead::edges_directed_filtered(g, idx, dir, conn_type_filter),
+            Self::Memory(g) => GraphRead::edges_directed_filtered(&**g, idx, dir, conn_type_filter),
+            Self::Mapped(g) => GraphRead::edges_directed_filtered(&**g, idx, dir, conn_type_filter),
             Self::Disk(g) => {
                 GraphRead::edges_directed_filtered(g.as_ref(), idx, dir, conn_type_filter)
             }
@@ -851,8 +894,8 @@ impl GraphRead for GraphBackend {
         b: NodeIndex,
     ) -> crate::graph::core::iterators::GraphEdgesConnecting<'_> {
         match self {
-            Self::Memory(g) => GraphRead::edges_connecting(g, a, b),
-            Self::Mapped(g) => GraphRead::edges_connecting(g, a, b),
+            Self::Memory(g) => GraphRead::edges_connecting(&**g, a, b),
+            Self::Mapped(g) => GraphRead::edges_connecting(&**g, a, b),
             Self::Disk(g) => GraphRead::edges_connecting(g.as_ref(), a, b),
             Self::Recording(rg) => GraphRead::edges_connecting(rg.as_ref(), a, b),
         }
@@ -861,8 +904,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData> {
         match self {
-            Self::Memory(g) => GraphRead::edge_weight(g, idx),
-            Self::Mapped(g) => GraphRead::edge_weight(g, idx),
+            Self::Memory(g) => GraphRead::edge_weight(&**g, idx),
+            Self::Mapped(g) => GraphRead::edge_weight(&**g, idx),
             Self::Disk(g) => GraphRead::edge_weight(g.as_ref(), idx),
             Self::Recording(rg) => GraphRead::edge_weight(rg.as_ref(), idx),
         }
@@ -871,8 +914,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn find_edge(&self, a: NodeIndex, b: NodeIndex) -> Option<EdgeIndex> {
         match self {
-            Self::Memory(g) => GraphRead::find_edge(g, a, b),
-            Self::Mapped(g) => GraphRead::find_edge(g, a, b),
+            Self::Memory(g) => GraphRead::find_edge(&**g, a, b),
+            Self::Mapped(g) => GraphRead::find_edge(&**g, a, b),
             Self::Disk(g) => GraphRead::find_edge(g.as_ref(), a, b),
             Self::Recording(rg) => GraphRead::find_edge(rg.as_ref(), a, b),
         }
@@ -881,8 +924,8 @@ impl GraphRead for GraphBackend {
     #[inline(always)]
     fn edge_endpoints(&self, idx: EdgeIndex) -> Option<(NodeIndex, NodeIndex)> {
         match self {
-            Self::Memory(g) => GraphRead::edge_endpoints(g, idx),
-            Self::Mapped(g) => GraphRead::edge_endpoints(g, idx),
+            Self::Memory(g) => GraphRead::edge_endpoints(&**g, idx),
+            Self::Mapped(g) => GraphRead::edge_endpoints(&**g, idx),
             Self::Disk(g) => GraphRead::edge_endpoints(g.as_ref(), idx),
             Self::Recording(rg) => GraphRead::edge_endpoints(rg.as_ref(), idx),
         }
@@ -893,8 +936,8 @@ impl GraphRead for GraphBackend {
         &'a self,
     ) -> Box<dyn Iterator<Item = (NodeIndex, NodeIndex, InternedKey)> + 'a> {
         match self {
-            Self::Memory(g) => GraphRead::edge_endpoint_keys(g),
-            Self::Mapped(g) => GraphRead::edge_endpoint_keys(g),
+            Self::Memory(g) => GraphRead::edge_endpoint_keys(&**g),
+            Self::Mapped(g) => GraphRead::edge_endpoint_keys(&**g),
             Self::Disk(g) => GraphRead::edge_endpoint_keys(g.as_ref()),
             Self::Recording(rg) => GraphRead::edge_endpoint_keys(rg.as_ref()),
         }
@@ -907,8 +950,8 @@ impl GraphRead for GraphBackend {
         dir: petgraph::Direction,
     ) -> crate::graph::core::iterators::GraphNeighbors<'_> {
         match self {
-            Self::Memory(g) => GraphRead::neighbors_directed(g, idx, dir),
-            Self::Mapped(g) => GraphRead::neighbors_directed(g, idx, dir),
+            Self::Memory(g) => GraphRead::neighbors_directed(&**g, idx, dir),
+            Self::Mapped(g) => GraphRead::neighbors_directed(&**g, idx, dir),
             Self::Disk(g) => GraphRead::neighbors_directed(g.as_ref(), idx, dir),
             Self::Recording(rg) => GraphRead::neighbors_directed(rg.as_ref(), idx, dir),
         }
@@ -920,8 +963,8 @@ impl GraphRead for GraphBackend {
         idx: NodeIndex,
     ) -> crate::graph::core::iterators::GraphNeighbors<'_> {
         match self {
-            Self::Memory(g) => GraphRead::neighbors_undirected(g, idx),
-            Self::Mapped(g) => GraphRead::neighbors_undirected(g, idx),
+            Self::Memory(g) => GraphRead::neighbors_undirected(&**g, idx),
+            Self::Mapped(g) => GraphRead::neighbors_undirected(&**g, idx),
             Self::Disk(g) => GraphRead::neighbors_undirected(g.as_ref(), idx),
             Self::Recording(rg) => GraphRead::neighbors_undirected(rg.as_ref(), idx),
         }
@@ -934,8 +977,8 @@ impl GraphRead for GraphBackend {
         max: Option<usize>,
     ) -> Option<Vec<u32>> {
         match self {
-            Self::Memory(g) => GraphRead::sources_for_conn_type_bounded(g, conn_type, max),
-            Self::Mapped(g) => GraphRead::sources_for_conn_type_bounded(g, conn_type, max),
+            Self::Memory(g) => GraphRead::sources_for_conn_type_bounded(&**g, conn_type, max),
+            Self::Mapped(g) => GraphRead::sources_for_conn_type_bounded(&**g, conn_type, max),
             Self::Disk(g) => GraphRead::sources_for_conn_type_bounded(g.as_ref(), conn_type, max),
             Self::Recording(rg) => {
                 GraphRead::sources_for_conn_type_bounded(rg.as_ref(), conn_type, max)
@@ -946,8 +989,8 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn lookup_peer_counts(&self, conn_type: InternedKey) -> Option<HashMap<u32, i64>> {
         match self {
-            Self::Memory(g) => GraphRead::lookup_peer_counts(g, conn_type),
-            Self::Mapped(g) => GraphRead::lookup_peer_counts(g, conn_type),
+            Self::Memory(g) => GraphRead::lookup_peer_counts(&**g, conn_type),
+            Self::Mapped(g) => GraphRead::lookup_peer_counts(&**g, conn_type),
             Self::Disk(g) => GraphRead::lookup_peer_counts(g.as_ref(), conn_type),
             Self::Recording(rg) => GraphRead::lookup_peer_counts(rg.as_ref(), conn_type),
         }
@@ -961,8 +1004,8 @@ impl GraphRead for GraphBackend {
         value: &str,
     ) -> Option<Vec<NodeIndex>> {
         match self {
-            Self::Memory(g) => GraphRead::lookup_by_property_eq(g, node_type, property, value),
-            Self::Mapped(g) => GraphRead::lookup_by_property_eq(g, node_type, property, value),
+            Self::Memory(g) => GraphRead::lookup_by_property_eq(&**g, node_type, property, value),
+            Self::Mapped(g) => GraphRead::lookup_by_property_eq(&**g, node_type, property, value),
             Self::Disk(g) => {
                 GraphRead::lookup_by_property_eq(g.as_ref(), node_type, property, value)
             }
@@ -982,10 +1025,10 @@ impl GraphRead for GraphBackend {
     ) -> Option<Vec<NodeIndex>> {
         match self {
             Self::Memory(g) => {
-                GraphRead::lookup_by_property_prefix(g, node_type, property, prefix, limit)
+                GraphRead::lookup_by_property_prefix(&**g, node_type, property, prefix, limit)
             }
             Self::Mapped(g) => {
-                GraphRead::lookup_by_property_prefix(g, node_type, property, prefix, limit)
+                GraphRead::lookup_by_property_prefix(&**g, node_type, property, prefix, limit)
             }
             Self::Disk(g) => {
                 GraphRead::lookup_by_property_prefix(g.as_ref(), node_type, property, prefix, limit)
@@ -1007,8 +1050,8 @@ impl GraphRead for GraphBackend {
         value: &str,
     ) -> Option<Vec<NodeIndex>> {
         match self {
-            Self::Memory(g) => GraphRead::lookup_by_property_eq_any_type(g, property, value),
-            Self::Mapped(g) => GraphRead::lookup_by_property_eq_any_type(g, property, value),
+            Self::Memory(g) => GraphRead::lookup_by_property_eq_any_type(&**g, property, value),
+            Self::Mapped(g) => GraphRead::lookup_by_property_eq_any_type(&**g, property, value),
             Self::Disk(g) => GraphRead::lookup_by_property_eq_any_type(g.as_ref(), property, value),
             Self::Recording(rg) => {
                 GraphRead::lookup_by_property_eq_any_type(rg.as_ref(), property, value)
@@ -1025,10 +1068,10 @@ impl GraphRead for GraphBackend {
     ) -> Option<Vec<NodeIndex>> {
         match self {
             Self::Memory(g) => {
-                GraphRead::lookup_by_property_prefix_any_type(g, property, prefix, limit)
+                GraphRead::lookup_by_property_prefix_any_type(&**g, property, prefix, limit)
             }
             Self::Mapped(g) => {
-                GraphRead::lookup_by_property_prefix_any_type(g, property, prefix, limit)
+                GraphRead::lookup_by_property_prefix_any_type(&**g, property, prefix, limit)
             }
             Self::Disk(g) => {
                 GraphRead::lookup_by_property_prefix_any_type(g.as_ref(), property, prefix, limit)
@@ -1047,8 +1090,12 @@ impl GraphRead for GraphBackend {
         deadline: Option<std::time::Instant>,
     ) -> Result<HashMap<u32, i64>, String> {
         match self {
-            Self::Memory(g) => GraphRead::count_edges_grouped_by_peer(g, conn_type, dir, deadline),
-            Self::Mapped(g) => GraphRead::count_edges_grouped_by_peer(g, conn_type, dir, deadline),
+            Self::Memory(g) => {
+                GraphRead::count_edges_grouped_by_peer(&**g, conn_type, dir, deadline)
+            }
+            Self::Mapped(g) => {
+                GraphRead::count_edges_grouped_by_peer(&**g, conn_type, dir, deadline)
+            }
             Self::Disk(g) => {
                 GraphRead::count_edges_grouped_by_peer(g.as_ref(), conn_type, dir, deadline)
             }
@@ -1068,12 +1115,22 @@ impl GraphRead for GraphBackend {
         deadline: Option<std::time::Instant>,
     ) -> Result<usize, String> {
         match self {
-            Self::Memory(g) => {
-                GraphRead::count_edges_filtered(g, node, dir, conn_type, other_node_type, deadline)
-            }
-            Self::Mapped(g) => {
-                GraphRead::count_edges_filtered(g, node, dir, conn_type, other_node_type, deadline)
-            }
+            Self::Memory(g) => GraphRead::count_edges_filtered(
+                &**g,
+                node,
+                dir,
+                conn_type,
+                other_node_type,
+                deadline,
+            ),
+            Self::Mapped(g) => GraphRead::count_edges_filtered(
+                &**g,
+                node,
+                dir,
+                conn_type,
+                other_node_type,
+                deadline,
+            ),
             Self::Disk(g) => GraphRead::count_edges_filtered(
                 g.as_ref(),
                 node,
@@ -1101,8 +1158,8 @@ impl GraphRead for GraphBackend {
         conn_type: Option<u64>,
     ) -> Box<dyn Iterator<Item = (NodeIndex, EdgeIndex)> + 'a> {
         match self {
-            Self::Memory(g) => GraphRead::iter_peers_filtered(g, node, dir, conn_type),
-            Self::Mapped(g) => GraphRead::iter_peers_filtered(g, node, dir, conn_type),
+            Self::Memory(g) => GraphRead::iter_peers_filtered(&**g, node, dir, conn_type),
+            Self::Mapped(g) => GraphRead::iter_peers_filtered(&**g, node, dir, conn_type),
             Self::Disk(g) => GraphRead::iter_peers_filtered(g.as_ref(), node, dir, conn_type),
             Self::Recording(rg) => {
                 GraphRead::iter_peers_filtered(rg.as_ref(), node, dir, conn_type)
@@ -1124,8 +1181,12 @@ impl GraphWrite for GraphBackend {
     #[inline]
     fn install_column_store(&mut self, type_key: InternedKey, store: std::sync::Arc<ColumnStore>) {
         match self {
-            Self::Memory(g) => GraphWrite::install_column_store(g, type_key, store),
-            Self::Mapped(g) => GraphWrite::install_column_store(g, type_key, store),
+            Self::Memory(g) => {
+                GraphWrite::install_column_store(unique_heap_backend(g), type_key, store)
+            }
+            Self::Mapped(g) => {
+                GraphWrite::install_column_store(unique_heap_backend(g), type_key, store)
+            }
             Self::Disk(g) => GraphWrite::install_column_store(g.as_mut(), type_key, store),
             Self::Recording(rg) => GraphWrite::install_column_store(rg.as_mut(), type_key, store),
         }
@@ -1137,8 +1198,8 @@ impl GraphWrite for GraphBackend {
         type_key: InternedKey,
     ) -> Option<&mut std::sync::Arc<ColumnStore>> {
         match self {
-            Self::Memory(g) => GraphWrite::column_store_mut(g, type_key),
-            Self::Mapped(g) => GraphWrite::column_store_mut(g, type_key),
+            Self::Memory(g) => GraphWrite::column_store_mut(unique_heap_backend(g), type_key),
+            Self::Mapped(g) => GraphWrite::column_store_mut(unique_heap_backend(g), type_key),
             Self::Disk(g) => GraphWrite::column_store_mut(g.as_mut(), type_key),
             Self::Recording(rg) => GraphWrite::column_store_mut(rg.as_mut(), type_key),
         }
@@ -1147,8 +1208,8 @@ impl GraphWrite for GraphBackend {
     #[inline]
     fn take_column_store(&mut self, type_key: InternedKey) -> Option<std::sync::Arc<ColumnStore>> {
         match self {
-            Self::Memory(g) => GraphWrite::take_column_store(g, type_key),
-            Self::Mapped(g) => GraphWrite::take_column_store(g, type_key),
+            Self::Memory(g) => GraphWrite::take_column_store(unique_heap_backend(g), type_key),
+            Self::Mapped(g) => GraphWrite::take_column_store(unique_heap_backend(g), type_key),
             Self::Disk(g) => GraphWrite::take_column_store(g.as_mut(), type_key),
             Self::Recording(rg) => GraphWrite::take_column_store(rg.as_mut(), type_key),
         }
@@ -1157,8 +1218,8 @@ impl GraphWrite for GraphBackend {
     #[inline]
     fn clear_column_stores(&mut self) {
         match self {
-            Self::Memory(g) => GraphWrite::clear_column_stores(g),
-            Self::Mapped(g) => GraphWrite::clear_column_stores(g),
+            Self::Memory(g) => GraphWrite::clear_column_stores(unique_heap_backend(g)),
+            Self::Mapped(g) => GraphWrite::clear_column_stores(unique_heap_backend(g)),
             Self::Disk(g) => GraphWrite::clear_column_stores(g.as_mut()),
             Self::Recording(rg) => GraphWrite::clear_column_stores(rg.as_mut()),
         }
@@ -1167,8 +1228,12 @@ impl GraphWrite for GraphBackend {
     #[inline]
     fn set_node_property(&mut self, idx: NodeIndex, key: InternedKey, value: Value) {
         match self {
-            Self::Memory(g) => GraphWrite::set_node_property(g, idx, key, value),
-            Self::Mapped(g) => GraphWrite::set_node_property(g, idx, key, value),
+            Self::Memory(g) => {
+                GraphWrite::set_node_property(unique_heap_backend(g), idx, key, value)
+            }
+            Self::Mapped(g) => {
+                GraphWrite::set_node_property(unique_heap_backend(g), idx, key, value)
+            }
             Self::Disk(g) => GraphWrite::set_node_property(g.as_mut(), idx, key, value),
             Self::Recording(rg) => GraphWrite::set_node_property(rg.as_mut(), idx, key, value),
         }
@@ -1177,8 +1242,12 @@ impl GraphWrite for GraphBackend {
     #[inline]
     fn set_node_property_if_absent(&mut self, idx: NodeIndex, key: InternedKey, value: Value) {
         match self {
-            Self::Memory(g) => GraphWrite::set_node_property_if_absent(g, idx, key, value),
-            Self::Mapped(g) => GraphWrite::set_node_property_if_absent(g, idx, key, value),
+            Self::Memory(g) => {
+                GraphWrite::set_node_property_if_absent(unique_heap_backend(g), idx, key, value)
+            }
+            Self::Mapped(g) => {
+                GraphWrite::set_node_property_if_absent(unique_heap_backend(g), idx, key, value)
+            }
             Self::Disk(g) => GraphWrite::set_node_property_if_absent(g.as_mut(), idx, key, value),
             Self::Recording(rg) => {
                 GraphWrite::set_node_property_if_absent(rg.as_mut(), idx, key, value)
@@ -1189,8 +1258,8 @@ impl GraphWrite for GraphBackend {
     #[inline]
     fn remove_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
         match self {
-            Self::Memory(g) => GraphWrite::remove_node_property(g, idx, key),
-            Self::Mapped(g) => GraphWrite::remove_node_property(g, idx, key),
+            Self::Memory(g) => GraphWrite::remove_node_property(unique_heap_backend(g), idx, key),
+            Self::Mapped(g) => GraphWrite::remove_node_property(unique_heap_backend(g), idx, key),
             Self::Disk(g) => GraphWrite::remove_node_property(g.as_mut(), idx, key),
             Self::Recording(rg) => GraphWrite::remove_node_property(rg.as_mut(), idx, key),
         }
@@ -1199,8 +1268,8 @@ impl GraphWrite for GraphBackend {
     #[inline]
     fn clear_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
         match self {
-            Self::Memory(g) => GraphWrite::clear_node_property(g, idx, key),
-            Self::Mapped(g) => GraphWrite::clear_node_property(g, idx, key),
+            Self::Memory(g) => GraphWrite::clear_node_property(unique_heap_backend(g), idx, key),
+            Self::Mapped(g) => GraphWrite::clear_node_property(unique_heap_backend(g), idx, key),
             Self::Disk(g) => GraphWrite::clear_node_property(g.as_mut(), idx, key),
             Self::Recording(rg) => GraphWrite::clear_node_property(rg.as_mut(), idx, key),
         }
@@ -1209,8 +1278,12 @@ impl GraphWrite for GraphBackend {
     #[inline]
     fn replace_node_properties(&mut self, idx: NodeIndex, pairs: Vec<(InternedKey, Value)>) {
         match self {
-            Self::Memory(g) => GraphWrite::replace_node_properties(g, idx, pairs),
-            Self::Mapped(g) => GraphWrite::replace_node_properties(g, idx, pairs),
+            Self::Memory(g) => {
+                GraphWrite::replace_node_properties(unique_heap_backend(g), idx, pairs)
+            }
+            Self::Mapped(g) => {
+                GraphWrite::replace_node_properties(unique_heap_backend(g), idx, pairs)
+            }
             Self::Disk(g) => GraphWrite::replace_node_properties(g.as_mut(), idx, pairs),
             Self::Recording(rg) => GraphWrite::replace_node_properties(rg.as_mut(), idx, pairs),
         }
@@ -1219,8 +1292,8 @@ impl GraphWrite for GraphBackend {
     #[inline]
     fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
         match self {
-            Self::Memory(g) => GraphWrite::node_weight_mut(g, idx),
-            Self::Mapped(g) => GraphWrite::node_weight_mut(g, idx),
+            Self::Memory(g) => GraphWrite::node_weight_mut(unique_heap_backend(g), idx),
+            Self::Mapped(g) => GraphWrite::node_weight_mut(unique_heap_backend(g), idx),
             Self::Disk(g) => GraphWrite::node_weight_mut(g.as_mut(), idx),
             Self::Recording(rg) => GraphWrite::node_weight_mut(rg.as_mut(), idx),
         }
@@ -1229,8 +1302,8 @@ impl GraphWrite for GraphBackend {
     #[inline]
     fn node_weight_mut_silent(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
         match self {
-            Self::Memory(g) => GraphWrite::node_weight_mut_silent(g, idx),
-            Self::Mapped(g) => GraphWrite::node_weight_mut_silent(g, idx),
+            Self::Memory(g) => GraphWrite::node_weight_mut_silent(unique_heap_backend(g), idx),
+            Self::Mapped(g) => GraphWrite::node_weight_mut_silent(unique_heap_backend(g), idx),
             Self::Disk(g) => GraphWrite::node_weight_mut_silent(g.as_mut(), idx),
             // The whole point: route to the wrapper's *silent* override so the
             // columnar handle-refresh sweep isn't captured as N mutations.
@@ -1241,8 +1314,8 @@ impl GraphWrite for GraphBackend {
     #[inline]
     fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
         match self {
-            Self::Memory(g) => GraphWrite::edge_weight_mut(g, idx),
-            Self::Mapped(g) => GraphWrite::edge_weight_mut(g, idx),
+            Self::Memory(g) => GraphWrite::edge_weight_mut(unique_heap_backend(g), idx),
+            Self::Mapped(g) => GraphWrite::edge_weight_mut(unique_heap_backend(g), idx),
             Self::Disk(g) => GraphWrite::edge_weight_mut(g.as_mut(), idx),
             Self::Recording(rg) => GraphWrite::edge_weight_mut(rg.as_mut(), idx),
         }
@@ -1251,8 +1324,8 @@ impl GraphWrite for GraphBackend {
     #[inline]
     fn add_node(&mut self, data: NodeData) -> NodeIndex {
         match self {
-            Self::Memory(g) => GraphWrite::add_node(g, data),
-            Self::Mapped(g) => GraphWrite::add_node(g, data),
+            Self::Memory(g) => GraphWrite::add_node(unique_heap_backend(g), data),
+            Self::Mapped(g) => GraphWrite::add_node(unique_heap_backend(g), data),
             Self::Disk(g) => GraphWrite::add_node(g.as_mut(), data),
             Self::Recording(rg) => GraphWrite::add_node(rg.as_mut(), data),
         }
@@ -1261,8 +1334,8 @@ impl GraphWrite for GraphBackend {
     #[inline]
     fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData> {
         match self {
-            Self::Memory(g) => GraphWrite::remove_node(g, idx),
-            Self::Mapped(g) => GraphWrite::remove_node(g, idx),
+            Self::Memory(g) => GraphWrite::remove_node(unique_heap_backend(g), idx),
+            Self::Mapped(g) => GraphWrite::remove_node(unique_heap_backend(g), idx),
             Self::Disk(g) => GraphWrite::remove_node(g.as_mut(), idx),
             Self::Recording(rg) => GraphWrite::remove_node(rg.as_mut(), idx),
         }
@@ -1271,8 +1344,8 @@ impl GraphWrite for GraphBackend {
     #[inline]
     fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
         match self {
-            Self::Memory(g) => GraphWrite::add_edge(g, a, b, data),
-            Self::Mapped(g) => GraphWrite::add_edge(g, a, b, data),
+            Self::Memory(g) => GraphWrite::add_edge(unique_heap_backend(g), a, b, data),
+            Self::Mapped(g) => GraphWrite::add_edge(unique_heap_backend(g), a, b, data),
             Self::Disk(g) => GraphWrite::add_edge(g.as_mut(), a, b, data),
             Self::Recording(rg) => GraphWrite::add_edge(rg.as_mut(), a, b, data),
         }
@@ -1281,8 +1354,8 @@ impl GraphWrite for GraphBackend {
     #[inline]
     fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData> {
         match self {
-            Self::Memory(g) => GraphWrite::remove_edge(g, idx),
-            Self::Mapped(g) => GraphWrite::remove_edge(g, idx),
+            Self::Memory(g) => GraphWrite::remove_edge(unique_heap_backend(g), idx),
+            Self::Mapped(g) => GraphWrite::remove_edge(unique_heap_backend(g), idx),
             Self::Disk(g) => GraphWrite::remove_edge(g.as_mut(), idx),
             Self::Recording(rg) => GraphWrite::remove_edge(rg.as_mut(), idx),
         }
@@ -1300,8 +1373,8 @@ impl GraphWrite for GraphBackend {
     #[inline]
     fn flush_pending_writes(&mut self) {
         match self {
-            Self::Memory(g) => GraphWrite::flush_pending_writes(g),
-            Self::Mapped(g) => GraphWrite::flush_pending_writes(g),
+            Self::Memory(g) => GraphWrite::flush_pending_writes(unique_heap_backend(g)),
+            Self::Mapped(g) => GraphWrite::flush_pending_writes(unique_heap_backend(g)),
             Self::Disk(g) => GraphWrite::flush_pending_writes(g.as_mut()),
             Self::Recording(rg) => GraphWrite::flush_pending_writes(rg.as_mut()),
         }

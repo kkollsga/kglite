@@ -1,10 +1,25 @@
-//! Lazy derived indexes for the default in-memory backend.
+//! `impl MemoryGraph` — construction, `Clone`, the statement-scoped undo
+//! journal accessors, and the lazy derived peer-count index.
+//!
+//! Mirrors `mapped_graph_impl.rs` for the other heap backend, and exists for
+//! the same reason: `storage/mod.rs` holds the trait definitions and the struct
+//! declarations and is at its 800-line module cap, so the impl blocks live in a
+//! sibling. D2 Phase 1 moved `Clone` / `new` / `from_graph` / `deep_clone` /
+//! the undo accessors / `inner` / `inner_mut` here when the `SlotMirror` field
+//! pushed `mod.rs` over the cap — split, never raise the cap.
 
+use super::slot_mirror::SlotMirror;
+use super::undo::UndoJournal;
 use super::{MemoryGraph, MemoryPeerCounts};
 use crate::graph::schema::InternedKey;
+use crate::graph::schema::{EdgeData, NodeData};
+use petgraph::stable_graph::StableDiGraph;
+use petgraph::visit::{EdgeIndexable, NodeIndexable};
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Instant;
 
 impl MemoryGraph {
@@ -57,5 +72,97 @@ impl MemoryGraph {
             Err(_) => return Ok(built),
         };
         Ok(Arc::clone(cache.entry(key).or_insert(built)))
+    }
+}
+
+impl Clone for MemoryGraph {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            // Cheap: one `Arc` bump per node type, not per node.
+            column_stores: self.column_stores.clone(),
+            peer_counts: RwLock::new(HashMap::new()),
+            // A journal belongs to the statement that opened it, never to a
+            // copy of the graph it was recorded against.
+            undo: None,
+            // Copied, NOT reset. `StableDiGraph::clone` preserves the free
+            // lists, so a reset mirror would immediately mispredict on the
+            // copy — this field is canonical state about the graph, not a
+            // derived cache like `peer_counts` above.
+            slot_mirror: self.slot_mirror.clone(),
+        }
+    }
+}
+
+impl MemoryGraph {
+    /// A genuine deep copy of this backend, spelled out so it cannot be
+    /// confused with an `Arc` refcount bump.
+    ///
+    /// `GraphBackend::Memory` holds an `Arc<MemoryGraph>` since D2 Phase 1, and
+    /// on an `Arc` handle `.clone()` copies the *pointer*. The two spellings
+    /// are one character apart, sit in the same `match`, and mean opposite
+    /// things — one preserves the whole-graph copy the fork is defined as, the
+    /// other silently shares a backend that every write then mutates in place
+    /// under the reader. Naming the deep copy makes the intended one
+    /// unmistakable at the call site and gives D2 Phase 2 a single seam to
+    /// change.
+    #[inline]
+    pub(crate) fn deep_clone(&self) -> Self {
+        self.clone()
+    }
+
+    #[inline]
+    pub fn new() -> Self {
+        Self::from_graph(StableDiGraph::new())
+    }
+
+    #[inline]
+    pub(crate) fn from_graph(inner: StableDiGraph<NodeData, EdgeData>) -> Self {
+        let slot_mirror = SlotMirror::for_adopted_graph(
+            inner.node_count(),
+            inner.node_bound(),
+            inner.edge_count(),
+            inner.edge_bound(),
+        );
+        Self {
+            inner,
+            column_stores: FxHashMap::default(),
+            peer_counts: RwLock::new(HashMap::new()),
+            undo: None,
+            slot_mirror,
+        }
+    }
+
+    /// Install a fresh statement-scoped undo journal, discarding any stale
+    /// one (defensive: a journal must never outlive its statement).
+    #[inline]
+    pub(crate) fn begin_undo(&mut self) {
+        self.undo = Some(Box::new(UndoJournal::new()));
+    }
+
+    /// Uninstall and return the journal, ending capture.
+    #[inline]
+    pub(crate) fn take_undo(&mut self) -> Option<Box<UndoJournal>> {
+        self.undo.take()
+    }
+
+    /// Mutable access to the active journal, for the `DirGraph`-level capture
+    /// seam (inverted-index and timeseries edits the backend cannot see).
+    #[inline]
+    pub(crate) fn undo_journal_mut(&mut self) -> Option<&mut UndoJournal> {
+        self.undo.as_deref_mut()
+    }
+
+    /// Borrow the inner `StableDiGraph`. Shared with [`MappedGraph`]
+    /// for match arms that need the heap backend's petgraph view.
+    #[inline]
+    pub fn inner(&self) -> &StableDiGraph<NodeData, EdgeData> {
+        &self.inner
+    }
+
+    /// Mutable borrow of the inner `StableDiGraph`.
+    #[inline]
+    pub fn inner_mut(&mut self) -> &mut StableDiGraph<NodeData, EdgeData> {
+        &mut self.inner
     }
 }

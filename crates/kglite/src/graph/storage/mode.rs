@@ -67,7 +67,7 @@ pub fn new_dir_graph_in_mode(mode: StorageMode, path: Option<&Path>) -> Result<D
         StorageMode::Mapped => {
             // Switch the backend variant and force columnar property storage
             // to spill to mmap on build (memory_limit = 0).
-            graph.graph = GraphBackend::Mapped(MappedGraph::new());
+            graph.graph = GraphBackend::Mapped(std::sync::Arc::new(MappedGraph::new()));
             graph.memory_limit = Some(0);
         }
         StorageMode::Disk => {
@@ -136,8 +136,12 @@ pub fn convert_dir_graph_to_mode(
         .map(|(k, v)| (k, std::sync::Arc::clone(v)))
         .collect();
     let inner = match &mut graph.graph {
-        GraphBackend::Memory(memory) => std::mem::take(memory.inner_mut()),
-        GraphBackend::Mapped(mapped) => std::mem::take(mapped.inner_mut()),
+        GraphBackend::Memory(memory) => {
+            std::mem::take(crate::graph::storage::backend::unique_heap_backend(memory).inner_mut())
+        }
+        GraphBackend::Mapped(mapped) => {
+            std::mem::take(crate::graph::storage::backend::unique_heap_backend(mapped).inner_mut())
+        }
         // A recording wrapper is mid-flight write-ahead-log capture. Unwrapping
         // it here would silently drop the capture layer along with everything
         // it has buffered, so the conversion has to happen before durability is
@@ -152,9 +156,9 @@ pub fn convert_dir_graph_to_mode(
         }
     };
     graph.graph = if requested == StorageMode::Mapped {
-        GraphBackend::Mapped(MappedGraph::from_graph(inner))
+        GraphBackend::Mapped(std::sync::Arc::new(MappedGraph::from_graph(inner)))
     } else {
-        GraphBackend::Memory(MemoryGraph::from_graph(inner))
+        GraphBackend::Memory(std::sync::Arc::new(MemoryGraph::from_graph(inner)))
     };
     for (type_key, store) in carried_stores {
         GraphWrite::install_column_store(&mut graph.graph, type_key, store);

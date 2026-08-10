@@ -15,6 +15,7 @@ pub mod mmap_vec;
 
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use crate::graph::storage::column_store::ColumnStore;
+use crate::graph::storage::slot_mirror::SlotMirror;
 use crate::graph::storage::undo::UndoJournal;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
@@ -64,6 +65,12 @@ pub struct MappedGraph {
     /// mmap spilling that `StorageMode::Mapped` turns on lives in the
     /// *columnar property store*, not in the node/edge graph.
     pub(crate) undo: Option<Box<UndoJournal>>,
+    /// Mirror of petgraph's node/edge free lists — see `MemoryGraph`'s field of
+    /// the same name and [`crate::graph::storage::slot_mirror`]. Mapped carries
+    /// it for the same reason it carries an undo journal: `inner` is the same
+    /// heap `StableDiGraph`, so leaving it off would make Mapped the arm that is
+    /// silently half-done (D2 risk R5).
+    pub(crate) slot_mirror: SlotMirror,
 }
 
 /// Per-conn-type edge index for `MappedGraph`. CSR-style layout
@@ -168,13 +175,6 @@ impl serde::Serialize for MappedGraph {
 
 impl<'de> serde::Deserialize<'de> for MappedGraph {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        StableDiGraph::deserialize(de).map(|inner| MappedGraph {
-            inner,
-            column_stores: FxHashMap::default(),
-            type_index: RwLock::new(HashMap::new()),
-            property_index: RwLock::new(HashMap::new()),
-            global_property_index: RwLock::new(HashMap::new()),
-            undo: None,
-        })
+        StableDiGraph::deserialize(de).map(MappedGraph::from_graph)
     }
 }

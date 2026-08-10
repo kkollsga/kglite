@@ -7,9 +7,11 @@
 
 use crate::datatypes::Value;
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
+use crate::graph::storage::slot_mirror::SlotMirror;
 use crate::graph::storage::undo::UndoJournal;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
+use petgraph::visit::{EdgeIndexable, NodeIndexable};
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -31,11 +33,24 @@ impl Clone for MappedGraph {
             // A journal belongs to the statement that opened it, never to a
             // copy of the graph it was recorded against.
             undo: None,
+            // Copied, NOT reset — see `MemoryGraph::clone`. `StableDiGraph`
+            // clones its free lists, so this is canonical state, not a cache.
+            slot_mirror: self.slot_mirror.clone(),
         }
     }
 }
 
 impl MappedGraph {
+    /// A genuine deep copy of this backend — see
+    /// [`MemoryGraph::deep_clone`](crate::graph::storage::MemoryGraph::deep_clone)
+    /// for why the deep copy is named rather than left as a bare `.clone()`:
+    /// `GraphBackend::Mapped` holds an `Arc<MappedGraph>` since D2 Phase 1, and
+    /// on the handle `.clone()` bumps a refcount instead.
+    #[inline]
+    pub(crate) fn deep_clone(&self) -> Self {
+        self.clone()
+    }
+
     #[inline]
     pub fn new() -> Self {
         Self {
@@ -45,6 +60,7 @@ impl MappedGraph {
             property_index: RwLock::new(HashMap::new()),
             global_property_index: RwLock::new(HashMap::new()),
             undo: None,
+            slot_mirror: SlotMirror::for_empty_graph(),
         }
     }
 
@@ -78,6 +94,12 @@ impl MappedGraph {
     /// than silently downgrading the graph to heap storage.
     #[inline]
     pub(crate) fn from_graph(inner: StableDiGraph<NodeData, EdgeData>) -> Self {
+        let slot_mirror = SlotMirror::for_adopted_graph(
+            inner.node_count(),
+            inner.node_bound(),
+            inner.edge_count(),
+            inner.edge_bound(),
+        );
         Self {
             inner,
             column_stores: rustc_hash::FxHashMap::default(),
@@ -85,6 +107,7 @@ impl MappedGraph {
             property_index: RwLock::new(HashMap::new()),
             global_property_index: RwLock::new(HashMap::new()),
             undo: None,
+            slot_mirror,
         }
     }
 

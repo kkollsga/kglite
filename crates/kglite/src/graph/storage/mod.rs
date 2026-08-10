@@ -30,6 +30,7 @@ pub mod node_view;
 pub mod overflow;
 mod packed_codec;
 pub mod property_storage;
+pub(crate) mod slot_mirror;
 pub mod type_build_meta;
 pub mod undo;
 
@@ -38,6 +39,7 @@ use crate::graph::core::iterators::GraphEdgeRef;
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 pub use crate::graph::storage::column_store::ColumnStore;
 pub use crate::graph::storage::node_view::NodeView;
+use crate::graph::storage::slot_mirror::SlotMirror;
 use crate::graph::storage::undo::UndoJournal;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
@@ -647,76 +649,16 @@ pub struct MemoryGraph {
     /// state, so reads pay nothing and writes pay one discriminant check.
     /// See [`crate::graph::storage::undo`].
     pub(crate) undo: Option<Box<UndoJournal>>,
+    /// Mirror of petgraph's node/edge free lists, so D2 Phase 2's overlay can
+    /// *predict* the slot `add_node`/`add_edge` will hand out before the base
+    /// graph is available to ask. See [`crate::graph::storage::slot_mirror`].
+    pub(crate) slot_mirror: SlotMirror,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct MemoryPeerCounts {
     pub(crate) by_target: Arc<HashMap<u32, i64>>,
     pub(crate) by_source: Arc<HashMap<u32, i64>>,
-}
-
-impl Clone for MemoryGraph {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            // Cheap: one `Arc` bump per node type, not per node.
-            column_stores: self.column_stores.clone(),
-            peer_counts: RwLock::new(HashMap::new()),
-            // A journal belongs to the statement that opened it, never to a
-            // copy of the graph it was recorded against.
-            undo: None,
-        }
-    }
-}
-
-impl MemoryGraph {
-    #[inline]
-    pub fn new() -> Self {
-        Self::from_graph(StableDiGraph::new())
-    }
-
-    #[inline]
-    pub(crate) fn from_graph(inner: StableDiGraph<NodeData, EdgeData>) -> Self {
-        Self {
-            inner,
-            column_stores: FxHashMap::default(),
-            peer_counts: RwLock::new(HashMap::new()),
-            undo: None,
-        }
-    }
-
-    /// Install a fresh statement-scoped undo journal, discarding any stale
-    /// one (defensive: a journal must never outlive its statement).
-    #[inline]
-    pub(crate) fn begin_undo(&mut self) {
-        self.undo = Some(Box::new(UndoJournal::new()));
-    }
-
-    /// Uninstall and return the journal, ending capture.
-    #[inline]
-    pub(crate) fn take_undo(&mut self) -> Option<Box<UndoJournal>> {
-        self.undo.take()
-    }
-
-    /// Mutable access to the active journal, for the `DirGraph`-level capture
-    /// seam (inverted-index and timeseries edits the backend cannot see).
-    #[inline]
-    pub(crate) fn undo_journal_mut(&mut self) -> Option<&mut UndoJournal> {
-        self.undo.as_deref_mut()
-    }
-
-    /// Borrow the inner `StableDiGraph`. Shared with [`MappedGraph`]
-    /// for match arms that need the heap backend's petgraph view.
-    #[inline]
-    pub fn inner(&self) -> &StableDiGraph<NodeData, EdgeData> {
-        &self.inner
-    }
-
-    /// Mutable borrow of the inner `StableDiGraph`.
-    #[inline]
-    pub fn inner_mut(&mut self) -> &mut StableDiGraph<NodeData, EdgeData> {
-        &mut self.inner
-    }
 }
 
 pub(super) fn flatten_to_csr(

@@ -225,10 +225,9 @@ fn build_plain(nodes: usize) -> DirGraph {
 #[ignore = "measurement instrument: builds 1M-node fixtures. \
             cargo test -p kglite --release fork_apportionment -- --ignored --nocapture"]
 fn apportion_the_fork_across_the_data_scale_fields() {
-    assert!(
-        !cfg!(debug_assertions),
-        "run this in release; a debug-profile clone time is not a measurement (CLAUDE.md)"
-    );
+    if cfg!(debug_assertions) {
+        panic!("run this in release; a debug-profile clone time is not a measurement (CLAUDE.md)");
+    }
 
     let base = build_plain(NODES);
     report("plain", &base);

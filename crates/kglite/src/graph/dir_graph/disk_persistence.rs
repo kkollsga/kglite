@@ -54,13 +54,13 @@ impl DirGraph {
         let disk_graph = match &mut self.graph {
             GraphBackend::Memory(g) => {
                 crate::graph::storage::disk::graph::DiskGraph::from_stable_digraph(
-                    g.inner_mut(),
+                    crate::graph::storage::backend::unique_heap_backend(g).inner_mut(),
                     &data_dir,
                 )
             }
             GraphBackend::Mapped(g) => {
                 crate::graph::storage::disk::graph::DiskGraph::from_stable_digraph(
-                    g.inner_mut(),
+                    crate::graph::storage::backend::unique_heap_backend(g).inner_mut(),
                     &data_dir,
                 )
             }
