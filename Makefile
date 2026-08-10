@@ -339,6 +339,7 @@ prune-dev: prune-target
 	rm -rf docs/_build .mypy_cache .ruff_cache .pytest_cache .uv-cache
 	find kglite -maxdepth 1 -name "kglite.*.so" ! -name "kglite.abi3.so" -delete
 	rm -rf tests/conformance/js/node_modules tests/conformance/java/target tests/conformance/java/.m2
+	rm -rf kglite-java/build kglite-java/.gradle
 	find . \( -path ./target -o -path ./.venv \) -prune -o -name ".DS_Store" -type f -print0 | xargs -0 rm -f
 
 PRUNE_TARGET_GB := 40

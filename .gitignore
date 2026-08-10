@@ -97,3 +97,10 @@ tests/conformance/js/node_modules/
 tests/conformance/js/package-lock.json
 tests/conformance/java/target/
 tests/conformance/java/.m2/
+
+# Gradle build output and daemon/caching state for the Java wrapper. Sources
+# and the pinned ABI contract under kglite-java/src/ ARE tracked; everything
+# Gradle generates is regenerable from `gradle build`. Bounded by
+# `make prune-dev`.
+kglite-java/build/
+kglite-java/.gradle/
