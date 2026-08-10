@@ -719,6 +719,19 @@ _MAVEN_COORD_RE = re.compile(
     r":(?P<spec>\d+\.\d+(?:\.\d+)?[0-9A-Za-z.+-]*)"
 )
 
+#: The Maven XML spelling of the same coordinate::
+#:
+#:     <artifactId>kglite</artifactId>
+#:     <version>0.15.9</version>
+#:
+#: `_MAVEN_COORD_RE` cannot see it — there is no `:` anywhere — yet this is the
+#: form a Java consumer is most likely to copy, because it is what a `pom.xml`
+#: takes. A README carrying only the Gradle line would have exactly half its
+#: install instructions watched, which is the shape where the *unwatched* half
+#: is the one that goes stale unnoticed.
+_MAVEN_XML_ARTIFACT_RE = re.compile(r"<artifactId>\s*(?P<name>[A-Za-z][\w.-]*)\s*</artifactId>")
+_MAVEN_XML_VERSION_RE = re.compile(r"<version>\s*(?P<spec>\d+\.\d+(?:\.\d+)?[0-9A-Za-z.+-]*)\s*</version>")
+
 #: A literal `version = "0.15.9"` in a Gradle build script.
 #:
 #: kglite-java deliberately has none: it reads `[workspace.package]` out of the
@@ -789,12 +802,27 @@ def scan_docs(repo: str, path: Path, tracked: set[str]) -> list[Declaration]:
         return []
     out: list[Declaration] = []
     seen: set[tuple[int, str]] = set()
+    # A Maven `<dependency>` block splits the coordinate over three lines, so
+    # which artifact a `<version>` belongs to is only knowable from a line
+    # already passed. Carried forward rather than looked back for, because the
+    # block is always written in that order and nothing else names an
+    # artifactId.
+    pending_artifact: str | None = None
     for i, line in enumerate(lines, 1):
         s = line.strip()
         if not s or s.startswith(("[", "|--", "---")) or SUPPRESS_MARKER in s:
             continue
         if _LEDGER_ROW.match(s):
             continue
+        if m := _MAVEN_XML_ARTIFACT_RE.search(line):
+            pending_artifact = m.group("name")
+        elif m := _MAVEN_XML_VERSION_RE.search(line):
+            name, pending_artifact = pending_artifact, None
+            if name is not None and _tracked(name, tracked) and (i, name.lower()) not in seen:
+                seen.add((i, name.lower()))
+                out.append(
+                    Declaration(repo, path, i, name, "=" + m.group("spec"), "docs-install", s[:200], metadata=False)
+                )
         # An install line is the more specific reading of the same text, so it
         # wins; otherwise the two regexes double-report every `pip install X==Y`.
         for m in _INSTALL_RE.finditer(line):

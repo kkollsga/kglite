@@ -339,6 +339,58 @@ def test_stale_documented_version_is_reported(ecosystem: Path) -> None:
     assert code == 0, out
 
 
+def test_stale_maven_xml_dependency_is_reported(ecosystem: Path) -> None:
+    """A Maven `<dependency>` block splits the coordinate over three lines, so
+    the `:`-separated coordinate regex cannot see it — yet it is the form a
+    Java consumer copies into a pom.xml. Left unwatched, half of an install
+    section is gated and the other half rots."""
+    _write(
+        ecosystem / "downstream" / "README.md",
+        "# downstream\n\n```xml\n<dependency>\n"
+        "  <groupId>io.github.kkollsga</groupId>\n"
+        "  <artifactId>kglite</artifactId>\n"
+        "  <version>0.14.3</version>\n"
+        "</dependency>\n```\n",
+    )
+    code, out = run(ecosystem)
+    assert "STALE DOCUMENTED VERSIONS" in out, out
+    assert "0.14.3" in out
+    assert code == 0, out
+
+
+def test_matching_maven_xml_dependency_is_not_flagged(ecosystem: Path) -> None:
+    """The same block at the current version is the state a release leaves
+    behind, and must stay silent — otherwise the check is noise the moment it
+    is correct."""
+    _write(
+        ecosystem / "downstream" / "README.md",
+        "# downstream\n\n```xml\n<dependency>\n"
+        "  <groupId>io.github.kkollsga</groupId>\n"
+        "  <artifactId>kglite</artifactId>\n"
+        "  <version>0.15.0</version>\n"
+        "</dependency>\n```\n",
+    )
+    code, out = run(ecosystem)
+    assert "STALE DOCUMENTED VERSIONS" not in out, out
+    assert code == 0, out
+
+
+def test_maven_xml_version_of_an_untracked_artifact_is_ignored(ecosystem: Path) -> None:
+    """A pom snippet documenting some other dependency is not our problem, and
+    a `<version>` must never be attributed to whatever artifactId came last in
+    a different block."""
+    _write(
+        ecosystem / "downstream" / "README.md",
+        "# downstream\n\n```xml\n<dependency>\n"
+        "  <artifactId>junit-jupiter</artifactId>\n"
+        "  <version>5.11.4</version>\n"
+        "</dependency>\n```\n",
+    )
+    code, out = run(ecosystem)
+    assert "5.11.4" not in out, out
+    assert code == 0, out
+
+
 def test_history_bearing_documents_are_not_flagged(ecosystem: Path) -> None:
     """A changelog, a migration guide and a dated ledger row say old versions
     forever; flagging them would be wrong, not merely noisy."""
