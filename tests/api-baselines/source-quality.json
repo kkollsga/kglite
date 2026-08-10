@@ -350,7 +350,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/temporal.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_temporal_fn",
-      "lines": 274,
+      "lines": 270,
       "branches": 102,
       "nesting": 5
     },
@@ -483,8 +483,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/tokenizer.rs",
       "qualified_name": "crate::tokenize_cypher_with_positions",
-      "lines": 365,
-      "branches": 72,
+      "lines": 360,
+      "branches": 71,
       "nesting": 6
     },
     {
@@ -504,7 +504,7 @@
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::add_connections",
-      "lines": 305,
+      "lines": 304,
       "branches": 41,
       "nesting": 3
     },

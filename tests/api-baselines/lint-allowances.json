@@ -233,7 +233,7 @@
       "classification": "transitional"
     },
     {
-      "identity": "crates/kglite/src/graph/core/value_operations.rs::fn:test_arithmetic_int_overflow_wraps:fn test_arithmetic_int_overflow_wraps()::clippy::approx_constant",
+      "identity": "crates/kglite/src/graph/core/value_operations.rs::fn:test_arithmetic_int_overflow_is_an_error:fn test_arithmetic_int_overflow_is_an_error()::clippy::approx_constant",
       "classification": "test"
     },
     {

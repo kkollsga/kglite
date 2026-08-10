@@ -488,47 +488,14 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, St
                 }
             }
 
-            // Backtick-quoted identifiers: `My Identifier`.
-            //
-            // A doubled backtick is an escaped one, per openCypher: `` `a``b` ``
-            // is the single identifier `a`b`. Without the escape the quoted
-            // form had **no** way to represent a backtick, and the tokenizer
-            // simply stopped at the first one — so a caller that string-built a
-            // label or a variable from untrusted input could close the quote
-            // and append clauses:
-            //
-            //   label = "Person`) DETACH DELETE n //"
-            //   MATCH (n:`Person`) DETACH DELETE n //`) RETURN count(n) AS c
-            //
-            // …which deleted every Person and reported a count. With doubling
-            // in place the same input is representable as one (weird)
-            // identifier, so an emitter has an escaping rule to apply and the
-            // break-out is closed at the grammar rather than per binding.
+            // Backtick-quoted identifiers: `My Identifier`. The escaping
+            // rules, and the injection the doubled-backtick escape closes,
+            // are on `scan_backtick_identifier`.
             '`' => {
                 i += 1; // consume opening backtick
                 let start = i;
-                let mut ident = String::new();
-                let terminated = loop {
-                    if i >= len {
-                        break false;
-                    }
-                    if chars[i] == '`' {
-                        // A second backtick escapes the first; anything else
-                        // ends the identifier.
-                        if i + 1 < len && chars[i + 1] == '`' {
-                            ident.push('`');
-                            i += 2;
-                            continue;
-                        }
-                        i += 1; // consume closing backtick
-                        break true;
-                    }
-                    ident.push(chars[i]);
-                    i += 1;
-                };
-                if !terminated {
-                    return Err(format!("Unterminated backtick identifier: `{}", ident));
-                }
+                let (ident, next) = scan_backtick_identifier(&chars, i)?;
+                i = next;
                 tokens.push((CypherToken::Identifier(ident), start));
             }
 
@@ -542,6 +509,47 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, St
         tokens,
         keyword_lexemes,
     })
+}
+
+/// Scan a backtick-quoted identifier with `i` positioned just past the
+/// opening backtick. A doubled backtick escapes to one literal backtick;
+/// a single backtick terminates. Returns the identifier and the index just
+/// past the closing backtick, or an unterminated-identifier error carrying
+/// the partial text.
+///
+/// A doubled backtick is an escaped one, per openCypher: `` `a``b` `` is the
+/// single identifier ``a`b``. Without the escape the quoted form had **no**
+/// way to represent a backtick, and the tokenizer simply stopped at the first
+/// one — so a caller that string-built a label or a variable from untrusted
+/// input could close the quote and append clauses:
+///
+/// ```text
+///   label = "Person`) DETACH DELETE n //"
+///   MATCH (n:`Person`) DETACH DELETE n //`) RETURN count(n) AS c
+/// ```
+///
+/// …which deleted every Person and reported a count. With doubling in place
+/// the same input is representable as one (weird) identifier, so an emitter
+/// has an escaping rule to apply and the break-out is closed at the grammar
+/// rather than per binding.
+fn scan_backtick_identifier(chars: &[char], mut i: usize) -> Result<(String, usize), String> {
+    let len = chars.len();
+    let mut ident = String::new();
+    while i < len {
+        if chars[i] == '`' {
+            // A second backtick escapes the first; anything else ends the
+            // identifier.
+            if i + 1 < len && chars[i + 1] == '`' {
+                ident.push('`');
+                i += 2;
+                continue;
+            }
+            return Ok((ident, i + 1));
+        }
+        ident.push(chars[i]);
+        i += 1;
+    }
+    Err(format!("Unterminated backtick identifier: `{}", ident))
 }
 
 /// Keyword token for an identifier lexeme, or `None` when the lexeme

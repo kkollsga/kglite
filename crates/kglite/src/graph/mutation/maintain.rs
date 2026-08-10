@@ -5,6 +5,9 @@ use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOper
 use crate::graph::mutation::batch::{
     BatchProcessor, ConflictHandling, ConnectionBatchProcessor, NodeAction,
 };
+use crate::graph::mutation::edge_props::{
+    intern_edge_props, register_used_edge_property_names, resolve_edge_property_columns,
+};
 use crate::graph::schema::{
     CompositeValue, CurrentSelection, DirGraph, InternedKey, TypeSchema, PROVISIONAL_KEY,
     RESERVED_PROVENANCE_KEYS,
@@ -799,39 +802,13 @@ pub fn add_connections(
     let mut seen_missing_source: HashSet<Value> = HashSet::new();
     let mut seen_missing_target: HashSet<Value> = HashSet::new();
 
-    // Resolve the property columns once per call — name, key and column index
-    // — mirroring `add_nodes` above. Before this, `extract_props` paid a
-    // name-keyed `column_indices` hash lookup and a `String` clone per cell,
-    // and every surviving key was re-interned again downstream in
-    // `EdgeData::new`.
-    //
-    // The key is computed with `InternedKey::from_str` (the same pure FNV that
-    // `get_or_intern` uses) rather than by interning here, because interning
-    // would register an all-null column's *name* in the persisted interner
-    // table. The names of the columns that actually carried a value are
-    // registered after the passes, below; no backend resolves an edge key
-    // during `add_edge`, so registration only has to precede the first
-    // `resolve` (schema metadata and serialization, both later).
-    let property_columns: Vec<(String, InternedKey, usize)> = df_data
-        .get_column_names()
-        .into_iter()
-        .filter(|col_name| {
-            let is_id_field = *col_name == source_id_field || *col_name == target_id_field;
-            let is_source_title = source_title_field
-                .as_ref()
-                .is_some_and(|field| *col_name == *field);
-            let is_target_title = target_title_field
-                .as_ref()
-                .is_some_and(|field| *col_name == *field);
-            !is_id_field && !is_source_title && !is_target_title
-        })
-        .filter_map(|col_name| {
-            df_data.get_column_index(&col_name).map(|col_idx| {
-                let key = InternedKey::from_str(&col_name);
-                (col_name, key, col_idx)
-            })
-        })
-        .collect();
+    let property_columns = resolve_edge_property_columns(
+        &df_data,
+        &source_id_field,
+        &target_id_field,
+        source_title_field.as_deref(),
+        target_title_field.as_deref(),
+    );
 
     // Extract a row's edge properties — shared by the happy path and
     // the deferred-row replay (Pass C). Skip nulls: property access
@@ -977,17 +954,11 @@ pub fn add_connections(
         ));
     }
 
-    // Register the names of the property columns that actually carried a
-    // value, so `resolve` (schema metadata below, and serialization later) can
-    // recover them from the pure-hash keys the passes stored. A column that was
-    // null in every row contributed no key, so it stays unregistered — the
-    // all-null column leaves no trace, which is the contract
-    // `all_null_edge_property_column_stores_nothing` pins.
-    for (col_name, key, _) in &property_columns {
-        if batch.get_schema_properties().contains(key) {
-            graph.interner.get_or_intern(col_name);
-        }
-    }
+    register_used_edge_property_names(
+        &mut graph.interner,
+        &property_columns,
+        batch.get_schema_properties(),
+    );
 
     update_schema_node(
         graph,
@@ -1735,7 +1706,6 @@ pub fn create_connections(
                     // batch.add_connection's &mut graph below.
                     let _arena_guard = graph.graph.begin_query();
                     let mut props = HashMap::new();
-                    // Add source and target node properties
                     for &node_idx in &[source_idx, target_idx] {
                         if let Some(node) = graph.graph.node_view(node_idx) {
                             let nt = node.node_type_str(&graph.interner);
@@ -1758,12 +1728,7 @@ pub fn create_connections(
                 } else {
                     HashMap::new()
                 };
-                // The batch carries interned keys. Copied node property names
-                // are only known per chain, so they intern here.
-                let edge_props: Vec<(InternedKey, Value)> = edge_props
-                    .into_iter()
-                    .map(|(k, v)| (graph.interner.get_or_intern(&k), v))
-                    .collect();
+                let edge_props = intern_edge_props(edge_props, &mut graph.interner);
 
                 if let Err(e) = batch.add_connection(
                     source_idx,

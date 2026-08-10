@@ -7,6 +7,7 @@
 
 pub mod add_properties;
 pub mod batch;
+mod edge_props;
 pub mod extend;
 pub mod maintain;
 pub mod set_ops;
