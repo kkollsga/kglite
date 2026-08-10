@@ -204,6 +204,21 @@ val stageNatives = tasks.register<Sync>("stageNatives") {
 
 tasks.jar {
     from(stageNatives)
+    manifest {
+        // An automatic module name, not a module-info.java. Without it the JPMS
+        // name is derived from the *file name*, so `kglite-0.15.9.jar` becomes
+        // the module `kglite` and a consumer's `requires kglite` silently binds
+        // to whatever jar happens to be named that — and the derived name
+        // changes if the artifact is ever renamed. Declaring it pins the name
+        // to the package namespace and costs one manifest line.
+        //
+        // Deliberately not a real module descriptor: `module-info.java` would
+        // raise the compile floor's tooling requirements for no gain here (the
+        // wrapper has no dependencies to encapsulate), and it would have to
+        // declare the native-access requirements that JEP 472 already handles
+        // through the command line.
+        attributes("Automatic-Module-Name" to "io.github.kkollsga.kglite")
+    }
     // The repo's licence travels inside the artifact, not only in the POM: the
     // JAR bundles compiled Rust, and a redistributor unpacking it has to find
     // the terms without going back to a URL.
@@ -281,6 +296,14 @@ tasks.javadoc {
     // Full doclint, including the "missing" group — every documented member
     // must carry its @param/@return.
     (options as CoreJavadocOptions).addStringOption("Xdoclint:all", "-quiet")
+    // ...and -Werror, because doclint alone only *prints*. Verified 2026-08-10
+    // by deleting an `@param`: javadoc reported "warning: no @param for value"
+    // and the build still went SUCCESSFUL, so the whole Tier-2 documentation
+    // requirement was a message in a log nobody reads. Warnings here are
+    // exactly the defect the check exists to catch — an undocumented parameter
+    // reaching a published artifact — so they end the build, the same posture
+    // as `-Werror` on JavaCompile above.
+    (options as CoreJavadocOptions).addBooleanOption("Werror", true)
 }
 
 // ---------------------------------------------------------------------------
