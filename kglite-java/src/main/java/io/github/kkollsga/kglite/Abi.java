@@ -11,11 +11,8 @@ import java.lang.foreign.StructLayout;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.Collections;
 import java.util.LinkedHashMap;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -144,74 +141,7 @@ final class Abi {
 
     @SuppressWarnings("restricted") // libraryLookup: the whole point of this class
     private static SymbolLookup openLibrary() {
-        return SymbolLookup.libraryLookup(resolveLibrary(), Arena.global());
-    }
-
-    /**
-     * Locate {@code libkglite_c}. Explicit path first
-     * ({@code -Dkglite.native.path=<file-or-directory>}), then the most recently
-     * built of {@code target/{release,debug}} in an enclosing workspace
-     * checkout. Bundling per-platform
-     * natives inside the JAR is the packaging phase's job, not this one's.
-     */
-    private static Path resolveLibrary() {
-        String fileName = libraryFileName();
-        String configured = System.getProperty("kglite.native.path");
-        if (configured != null && !configured.isBlank()) {
-            Path candidate = Path.of(configured);
-            if (Files.isDirectory(candidate)) {
-                candidate = candidate.resolve(fileName);
-            }
-            if (!Files.isRegularFile(candidate)) {
-                throw new KgliteException(
-                        "kglite.native.path does not resolve to " + fileName + ": " + candidate);
-            }
-            return candidate.toAbsolutePath();
-        }
-        Path here = Path.of(System.getProperty("user.dir", ".")).toAbsolutePath();
-        for (Path dir = here; dir != null; dir = dir.getParent()) {
-            // Newest of the two profiles, never a fixed preference: a stale
-            // release build left over from a benchmark otherwise shadows the
-            // debug library the current source just produced, and the ABI
-            // contract test then reports drift against code that does not
-            // exist. Same rule as tests/conftest.py::workspace_binary.
-            Path newest = null;
-            for (String profile : new String[] {"release", "debug"}) {
-                Path candidate = dir.resolve("target").resolve(profile).resolve(fileName);
-                if (Files.isRegularFile(candidate) && (newest == null || newer(candidate, newest))) {
-                    newest = candidate;
-                }
-            }
-            if (newest != null) {
-                return newest;
-            }
-        }
-        throw new KgliteException(
-                "no " + fileName + " found. Build it with `cargo build -p kglite-c --release`"
-                        + " and pass -Dkglite.native.path=<dir-or-file>, or run from inside a"
-                        + " kglite workspace checkout (searched target/{release,debug} upward"
-                        + " from " + here + ")");
-    }
-
-    /** Whether {@code candidate} was modified strictly later than {@code other}. */
-    private static boolean newer(Path candidate, Path other) {
-        try {
-            return Files.getLastModifiedTime(candidate).compareTo(Files.getLastModifiedTime(other))
-                    > 0;
-        } catch (java.io.IOException e) {
-            return false;
-        }
-    }
-
-    private static String libraryFileName() {
-        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
-        if (os.contains("win")) {
-            return "kglite_c.dll";
-        }
-        if (os.contains("mac") || os.contains("darwin")) {
-            return "libkglite_c.dylib";
-        }
-        return "libkglite_c.so";
+        return SymbolLookup.libraryLookup(NativeLibrary.locate(), Arena.global());
     }
 
     // ---- calls ------------------------------------------------------------

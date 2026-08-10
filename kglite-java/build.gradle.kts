@@ -1,5 +1,13 @@
 plugins {
     `java-library`
+    // Sonatype's Central Portal is the only route for a new namespace (OSSRH
+    // stopped accepting them), and this plugin is the one that speaks it end to
+    // end: bundle assembly, the Portal upload API, in-memory PGP signing, and
+    // the POM completeness Central rejects a deployment for. Sonatype's own
+    // `org.sonatype.central` plugin covers the upload but leaves signing and
+    // the POM to be wired by hand — two more places for a release to fail after
+    // the artifacts are already built.
+    id("com.vanniktech.maven.publish") version "0.34.0"
 }
 
 group = "io.github.kkollsga"
@@ -48,8 +56,13 @@ java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(26)
     }
-    withSourcesJar()
-    withJavadocJar()
+    // No withSourcesJar()/withJavadocJar() here. Central requires both, and the
+    // publishing plugin builds both (`sourcesJar`, `plainJavadocJar`) — but the
+    // JDK's javadoc jar and the plugin's are two tasks writing the same
+    // `kglite-<version>-javadoc.jar`, which Gradle 9 rejects outright as an
+    // undeclared dependency between them. The plugin's pair is the one that
+    // ends up in the POM, so it is the one that exists; `assemble` is wired to
+    // build them below so a plain `build` still proves they work.
 }
 
 tasks.withType<JavaCompile>().configureEach {
@@ -80,18 +93,135 @@ dependencies {
 // stale release library left over from a benchmark shadowed the debug library
 // the current source had just produced: every symbol the working tree added
 // was missing, and the ABI contract test reported drift against code that did
-// exist. Abi.resolveLibrary picks the most recently built of the two — the
+// exist. `NativeLibrary` picks the most recently built of the two — the
 // same rule as tests/conftest.py::workspace_binary — and
 // `-Dkglite.native.path=<dir-or-file>` still overrides it outright.
 //
-// The packaging phase bundles per-platform natives as JAR resources instead.
+// The published JAR bundles per-platform natives as resources instead; see the
+// packaging section below.
 // ---------------------------------------------------------------------------
 val workspaceRoot = layout.projectDirectory.dir("..").asFile
 
-/** The header `AbiContractTest` validates, and the two profiles `Abi.resolveLibrary` picks between. */
+/** The header `AbiContractTest` validates, and the two profiles `NativeLibrary` picks between. */
 val abiHeaderFile = File(workspaceRoot, "crates/kglite-c/include/kglite.h")
 val nativeLibraryCandidates = listOf("release", "debug").map {
     File(workspaceRoot, "target/$it/${System.mapLibraryName("kglite_c")}")
+}
+
+// ---------------------------------------------------------------------------
+// Packaging: natives as JAR resources (the sqlite-jdbc pattern).
+//
+// `NativeLibrary` reads `/natives/<platform>/<libfile>` off the classpath,
+// extracts it to a content-addressed per-user cache and loads it from there. So
+// the packaging job is exactly: get one file per platform under those names.
+//
+// The staging directory `kglite-java/natives/` is the single input. CI's
+// `publish_java.yml` populates all four platform subdirectories from the
+// matrix build artifacts; it is gitignored, and on a developer machine it is
+// normally empty. Rather than making a local `gradle build` produce a JAR that
+// cannot load on the machine that built it, the host's own cargo-built library
+// is staged as a fallback when the staging directory does not already carry
+// one for this platform.
+//
+// A partial set WARNS. Failing would make the ordinary local build red for a
+// reason that has nothing to do with the change being tested, and every
+// developer would learn to ignore it. The place where an absent platform is
+// genuinely fatal is the release, so the publish job passes
+// `-PrequireAllNatives=true` and gets a hard failure there instead — the
+// difference between a warning nobody reads and a gate that can go red.
+// ---------------------------------------------------------------------------
+
+/** Platform identifiers, matching `NativeLibrary.BUNDLED_PLATFORMS` exactly. */
+val bundledPlatforms = listOf("darwin-aarch64", "linux-aarch64", "linux-x86_64", "windows-x86_64")
+
+/** `<os>-<arch>` for the machine running this build, matching `NativeLibrary.platform`. */
+val hostPlatform: String = run {
+    val os = System.getProperty("os.name", "").lowercase()
+    val arch = System.getProperty("os.arch", "").lowercase()
+    val osPart = when {
+        os.contains("win") -> "windows"
+        os.contains("mac") || os.contains("darwin") -> "darwin"
+        os.contains("linux") -> "linux"
+        else -> os.replace(Regex("[^a-z0-9]+"), "")
+    }
+    val archPart = when (arch) {
+        "aarch64", "arm64" -> "aarch64"
+        "x86_64", "amd64" -> "x86_64"
+        else -> arch.replace(Regex("[^a-z0-9_]+"), "")
+    }
+    "$osPart-$archPart"
+}
+
+val nativesStagingDir = layout.projectDirectory.dir("natives")
+val hostStagedNative = nativesStagingDir.file("$hostPlatform/${System.mapLibraryName("kglite_c")}").asFile
+val workspaceHostNative = nativeLibraryCandidates.filter { it.isFile }.maxByOrNull { it.lastModified() }
+
+/**
+ * Assembles the resource tree the JAR and the test classpath both consume:
+ * `<build>/natives-resources/natives/<platform>/<libfile>`.
+ *
+ * Producing the `natives/` prefix here rather than at each consumer is what
+ * lets the tests see the same resource path a published JAR exposes — the
+ * extraction tier is then exercised by the real layout, not a rehearsal of it.
+ */
+val stageNatives = tasks.register<Sync>("stageNatives") {
+    group = "build"
+    description = "Stages per-platform kglite natives as JAR resources."
+    into(layout.buildDirectory.dir("natives-resources"))
+    into("natives") {
+        from(nativesStagingDir)
+        if (workspaceHostNative != null && !hostStagedNative.isFile) {
+            from(workspaceHostNative) { into(hostPlatform) }
+        }
+    }
+    // Without this the coverage check below is decorative: the task goes
+    // UP-TO-DATE from the previous run and its `doLast` never executes, so
+    // `-PrequireAllNatives=true` silently passes on an incomplete staging
+    // directory — the exact "green that cannot go red" shape CLAUDE.md names.
+    inputs.property("requireAllNatives", providers.gradleProperty("requireAllNatives").orElse("false"))
+    doLast {
+        val staged = destinationDir.resolve("natives")
+        val present = bundledPlatforms.filter { staged.resolve(it).listFiles()?.isNotEmpty() == true }
+        val missing = bundledPlatforms - present.toSet()
+        if (missing.isEmpty()) {
+            logger.lifecycle("natives: all ${bundledPlatforms.size} platforms staged")
+        } else if (providers.gradleProperty("requireAllNatives").orNull == "true") {
+            error(
+                "natives staging is incomplete: missing ${missing.joinToString(", ")}. " +
+                    "Present: ${present.joinToString(", ").ifEmpty { "none" }}. " +
+                    "A JAR published without a platform's native fails at load time for those " +
+                    "users with no signal anywhere in the release."
+            )
+        } else {
+            logger.warn(
+                "natives: staged ${present.joinToString(", ").ifEmpty { "none" }}; " +
+                    "MISSING ${missing.joinToString(", ")}. This JAR only loads on the staged " +
+                    "platforms. CI stages all ${bundledPlatforms.size} from the matrix build."
+            )
+        }
+    }
+}
+
+tasks.jar {
+    from(stageNatives)
+    // The repo's licence travels inside the artifact, not only in the POM: the
+    // JAR bundles compiled Rust, and a redistributor unpacking it has to find
+    // the terms without going back to a URL.
+    from(File(workspaceRoot, "LICENSE")) { into("META-INF") }
+}
+
+// The test classpath carries the same tree, so `NativeLibraryTest` extracts
+// from a real `/natives/<platform>/…` resource. Wired as a plain srcDir plus an
+// explicit dependency rather than `srcDir(taskProvider)`, which does not carry
+// the task dependency for a SourceDirectorySet.
+sourceSets.test {
+    resources.srcDir(layout.buildDirectory.dir("natives-resources"))
+}
+tasks.processTestResources {
+    dependsOn(stageNatives)
+    // The staged library and a same-named file from src/test/resources would be
+    // a packaging bug, not something to silently pick a winner for.
+    duplicatesStrategy = DuplicatesStrategy.FAIL
 }
 
 tasks.test {
@@ -151,4 +281,120 @@ tasks.javadoc {
     // Full doclint, including the "missing" group — every documented member
     // must carry its @param/@return.
     (options as CoreJavadocOptions).addStringOption("Xdoclint:all", "-quiet")
+}
+
+// ---------------------------------------------------------------------------
+// Publication — Maven Central via the Sonatype Central Portal.
+//
+// Explicit task only. `publishToMavenCentral` is never reachable from `build`
+// or `check`: an accidental deployment is not undoable (Central never deletes a
+// published version, the same rule this repo already carries for PyPI and
+// crates.io), so the only way to reach it is to name it.
+//
+// Credentials and key both arrive as environment variables, never files —
+// `ORG_GRADLE_PROJECT_<name>` is Gradle's own env→property mapping, so nothing
+// here reads a keyring, a `gradle.properties` in `$HOME`, or a decrypted file
+// on disk:
+//
+//   ORG_GRADLE_PROJECT_mavenCentralUsername   <- CENTRAL_TOKEN_USERNAME
+//   ORG_GRADLE_PROJECT_mavenCentralPassword   <- CENTRAL_TOKEN_PASSWORD
+//   ORG_GRADLE_PROJECT_signingInMemoryKey     <- GPG_SIGNING_KEY (ASCII-armoured)
+//   ORG_GRADLE_PROJECT_signingInMemoryKeyPassword <- GPG_PASSPHRASE
+// ---------------------------------------------------------------------------
+
+/**
+ * Signing is conditional on a key being present, and deliberately not on a CI
+ * flag: a local `publishToMavenLocal` must not fail for want of a key, and a
+ * release must not be able to reach Central unsigned because a flag was
+ * mis-set. `verifyPublishable` below is what makes the release case loud.
+ */
+val hasSigningKey = providers.gradleProperty("signingInMemoryKey").isPresent
+
+mavenPublishing {
+    publishToMavenCentral()
+    if (hasSigningKey) {
+        signAllPublications()
+    }
+    coordinates(group.toString(), "kglite", version.toString())
+    configure(
+        com.vanniktech.maven.publish.JavaLibrary(
+            javadocJar = com.vanniktech.maven.publish.JavadocJar.Javadoc(),
+            sourcesJar = true,
+        ),
+    )
+
+    pom {
+        name = "kglite"
+        description =
+            "Embedded graph database for the JVM: Cypher, vector search and a single-file " +
+                "graph, in-process over the kglite C ABI. No server, no daemon, no JNI."
+        inceptionYear = "2026"
+        url = "https://github.com/kkollsga/kglite"
+        licenses {
+            license {
+                // Matches the repo's own LICENSE (MIT). Central rejects a POM
+                // with no licence block, and a licence here that disagreed with
+                // the file in the JAR would be worse than either alone.
+                name = "MIT License"
+                url = "https://github.com/kkollsga/kglite/blob/main/LICENSE"
+                distribution = "repo"
+            }
+        }
+        developers {
+            developer {
+                id = "kkollsga"
+                name = "Kristian de Figueiredo Kollsgård"
+                url = "https://github.com/kkollsga"
+            }
+        }
+        scm {
+            url = "https://github.com/kkollsga/kglite"
+            connection = "scm:git:https://github.com/kkollsga/kglite.git"
+            developerConnection = "scm:git:ssh://git@github.com/kkollsga/kglite.git"
+        }
+        issueManagement {
+            system = "GitHub Issues"
+            url = "https://github.com/kkollsga/kglite/issues"
+        }
+    }
+}
+
+/**
+ * The preconditions a Central deployment has that `build` does not.
+ *
+ * Each one fails *before* the upload rather than after: a Portal deployment
+ * that is rejected for an unsigned artifact or an incomplete native set still
+ * consumed the version's one shot at that coordinate, and the repair is manual.
+ * Run it as `gradle -p kglite-java verifyPublishable -PrequireAllNatives=true`.
+ */
+val verifyPublishable = tasks.register("verifyPublishable") {
+    group = "verification"
+    description = "Asserts this build is signable and complete enough to deploy to Central."
+    dependsOn(stageNatives, tasks.jar, tasks.named("sourcesJar"), tasks.named("plainJavadocJar"))
+    val versionForCheck = version.toString()
+    val signing = hasSigningKey
+    val credentials = providers.gradleProperty("mavenCentralUsername").isPresent &&
+        providers.gradleProperty("mavenCentralPassword").isPresent
+    doLast {
+        check(signing) {
+            "no signing key: set ORG_GRADLE_PROJECT_signingInMemoryKey (and " +
+                "…KeyPassword). Central rejects unsigned deployments, and it rejects them " +
+                "after the artifacts have been uploaded."
+        }
+        check(credentials) {
+            "no Central credentials: set ORG_GRADLE_PROJECT_mavenCentralUsername and " +
+                "ORG_GRADLE_PROJECT_mavenCentralPassword from the portal token."
+        }
+        check(!versionForCheck.endsWith("SNAPSHOT")) {
+            "refusing to deploy a SNAPSHOT version ($versionForCheck) to Central releases"
+        }
+        logger.lifecycle("publishable: kglite $versionForCheck, signed, credentials present")
+    }
+}
+
+// A plain `build` builds the two jars Central requires, so a javadoc error or a
+// broken sources jar surfaces on the branch rather than mid-deployment — where
+// the artifacts are already uploaded and the version's one shot is spent.
+tasks.assemble {
+    dependsOn(tasks.named("sourcesJar"), tasks.named("plainJavadocJar"))
 }

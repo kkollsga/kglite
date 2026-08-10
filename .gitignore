@@ -104,3 +104,10 @@ tests/conformance/java/.m2/
 # `make prune-dev`.
 kglite-java/build/
 kglite-java/.gradle/
+
+# Per-platform natives staged into the published JAR. CI's publish_java.yml
+# fills this from the matrix build artifacts; locally it holds at most a copy
+# of the host's own `cargo build -p kglite-c` output. Multi-megabyte binaries
+# rebuilt from source in one command — never committed. Bounded by
+# `make prune-dev`.
+kglite-java/natives/
