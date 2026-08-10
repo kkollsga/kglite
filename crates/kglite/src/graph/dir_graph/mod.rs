@@ -59,7 +59,7 @@ fn next_graph_id() -> u64 {
 // Lazily-computed caches + derived stats (edge-type counts, type
 // connectivity, per-(type,property) NDV) live in a child module so the
 // file stays under the god-file ceiling; child = retains private access.
-mod caches;
+pub(crate) mod caches;
 pub mod constraints;
 mod disk_persistence;
 mod independent_copy;
@@ -229,13 +229,19 @@ pub struct DirGraph {
     pub wkt_cache: Arc<RwLock<HashMap<String, Arc<geo::Geometry<f64>>>>>,
     /// Lazy edge-type count cache — avoids O(E) rescan for FusedCountEdgesByType.
     /// Invalidated on edge mutations (add/remove).
+    ///
+    /// **Fork-private** since D2 Phase 3 — see [`caches::ForkPrivateCache`] for
+    /// the aliasing bug that earned it (a snapshot reporting the writer's edge
+    /// counts) and for why `wkt_cache` and `property_ndv_cache` deliberately
+    /// stay shared.
     #[serde(skip)]
-    pub edge_type_counts_cache: Arc<RwLock<Option<HashMap<String, usize>>>>,
+    pub edge_type_counts_cache: caches::ForkPrivateCache<HashMap<String, usize>>,
     /// Cached type connectivity: (source_type, connection_type, target_type) → count.
     /// Computed by `rebuild_caches()`, persisted in metadata, restored on load.
     /// Invalidated on edge mutations alongside edge_type_counts_cache.
+    /// Fork-private, for the same reason as `edge_type_counts_cache`.
     #[serde(skip)]
-    pub type_connectivity_cache: Arc<RwLock<Option<Vec<ConnectivityTriple>>>>,
+    pub type_connectivity_cache: caches::ForkPrivateCache<Vec<ConnectivityTriple>>,
     /// Lazy per-`(type, property)` distinct-value count (NDV), used by the
     /// planner to estimate non-indexed equality selectivity
     /// (`type_count / ndv`) instead of a flat heuristic. The tuple's `u64` is
@@ -560,8 +566,8 @@ impl DirGraph {
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
-            edge_type_counts_cache: Arc::new(RwLock::new(None)),
-            type_connectivity_cache: Arc::new(RwLock::new(None)),
+            edge_type_counts_cache: Default::default(),
+            type_connectivity_cache: Default::default(),
             property_ndv_cache: Arc::new(RwLock::new((0, HashMap::new()))),
             embeddings: HashMap::new(),
             timeseries_configs: HashMap::new(),
@@ -617,8 +623,8 @@ impl DirGraph {
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
-            edge_type_counts_cache: Arc::new(RwLock::new(None)),
-            type_connectivity_cache: Arc::new(RwLock::new(None)),
+            edge_type_counts_cache: Default::default(),
+            type_connectivity_cache: Default::default(),
             property_ndv_cache: Arc::new(RwLock::new((0, HashMap::new()))),
             embeddings: HashMap::new(),
             timeseries_configs: HashMap::new(),

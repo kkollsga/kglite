@@ -28,8 +28,11 @@ impl DirGraph {
         let mut copy = self.clone();
         copy.graph_id = next_graph_id();
         copy.wkt_cache = copy_cache(&self.wkt_cache);
-        copy.edge_type_counts_cache = copy_cache(&self.edge_type_counts_cache);
-        copy.type_connectivity_cache = copy_cache(&self.type_connectivity_cache);
+        // The two edge-derived caches need nothing here: they are
+        // `ForkPrivateCache`, so `self.clone()` above already gave the copy its
+        // own empty one. Re-wrapping them was this method's half of the D2 R6
+        // workaround; the hazard is now closed at the type level for every
+        // clone, not just for the explicit-copy path.
         copy.property_ndv_cache = copy_cache(&self.property_ndv_cache);
         copy.graph.detach_independent_copy(&self.graph);
         copy.active_write_scope = None;
@@ -45,6 +48,20 @@ mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
 
+    /// `independent_copy` must hand back a graph whose caches nothing else can
+    /// write through.
+    ///
+    /// Split by mechanism since D2 Phase 3, because the two families now get
+    /// there differently and it is worth saying which is which:
+    ///
+    /// - `wkt_cache` / `property_ndv_cache` are `Arc`-shared by ordinary
+    ///   `Clone` **on purpose** (pure-function and version-tagged respectively —
+    ///   see `caches::ForkPrivateCache`), so this method still has to re-wrap
+    ///   them, and it deep-copies their contents.
+    /// - the two edge-derived caches are `ForkPrivateCache`, so `Clone` already
+    ///   gave the copy its own empty one. They arrive **cold**, not copied, and
+    ///   that is the change: a warm copy was the old behaviour, an independent
+    ///   one is the contract.
     #[test]
     fn independent_copy_mints_identity_and_owns_semantic_caches() {
         let mut graph = DirGraph::new();
@@ -61,23 +78,25 @@ mod tests {
         assert_eq!(copy.version(), graph.version());
         assert!(!Arc::ptr_eq(&copy.wkt_cache, &graph.wkt_cache));
         assert!(!Arc::ptr_eq(
-            &copy.edge_type_counts_cache,
-            &graph.edge_type_counts_cache
-        ));
-        assert!(!Arc::ptr_eq(
-            &copy.type_connectivity_cache,
-            &graph.type_connectivity_cache
-        ));
-        assert!(!Arc::ptr_eq(
             &copy.property_ndv_cache,
             &graph.property_ndv_cache
         ));
-        assert_eq!(
-            *copy.edge_type_counts_cache.read().unwrap(),
-            *graph.edge_type_counts_cache.read().unwrap()
+
+        // Cold, not copied — and writing through one cannot reach the other,
+        // which is the property that matters and the one R6 broke.
+        assert!(
+            copy.edge_type_counts_cache.read().unwrap().is_none(),
+            "a fork-private cache is reborn empty"
         );
-        *copy.edge_type_counts_cache.write().unwrap() = None;
-        assert!(graph.edge_type_counts_cache.read().unwrap().is_some());
+        assert!(copy.type_connectivity_cache.read().unwrap().is_none());
+        *copy.edge_type_counts_cache.write().unwrap() =
+            Some(HashMap::from([("LINKS".to_string(), 99)]));
+        assert_eq!(
+            graph.edge_type_counts_cache.read().unwrap().as_ref(),
+            Some(&HashMap::from([("LINKS".to_string(), 3)])),
+            "the original must keep its own entry"
+        );
+
         assert!(copy.active_write_scope.is_none());
         assert!(copy.active_git_sha.is_none());
         assert!(copy.active_modified_by.is_none());
