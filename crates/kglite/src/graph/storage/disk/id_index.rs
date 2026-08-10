@@ -38,6 +38,7 @@
 
 use crate::datatypes::Value;
 use crate::graph::schema::{InternedKey, StringInterner, TypeIdIndex};
+use crate::graph::storage::disk::id_index_layer::TypeEntry;
 use crate::serde_codec;
 use memmap2::Mmap;
 use petgraph::graph::NodeIndex;
@@ -386,16 +387,34 @@ pub struct IdIndexStore {
     /// read path can build + cache through `&self` — `DirGraph` is shared
     /// as `Arc<DirGraph>` and reads run on multiple threads (GIL-release),
     /// so this must be thread-safe.
-    overlay: RwLock<HashMap<String, TypeIdIndex>>,
+    overlay: RwLock<HashMap<String, TypeEntry>>,
     /// Types that exist in `base` but were removed/invalidated post-load.
     removed: std::collections::HashSet<String>,
     base: Option<Arc<IdIndexBase>>,
 }
 
 impl Clone for IdIndexStore {
+    /// **The fork seam for `id_indices`** (D2 Phase 3).
+    ///
+    /// Instead of deep-copying a map with one entry per node of every
+    /// materialised type — 3.7 ms at 1M, and 90% of what a plain graph's fork
+    /// still cost after Phase 2 — this converts each of *our own* entries into
+    /// a shared base in place and hands the child an empty delta over the same
+    /// allocation. Both graphs then read identical content; only the
+    /// representation changed.
+    ///
+    /// It has to happen here, taking the write lock through `&self`, because
+    /// every fork reaches this field as a `&self` clone: by the time write
+    /// entry holds a `&mut DirGraph` the copy has already been made. That is
+    /// why `overlay`'s `RwLock` is load-bearing beyond thread safety.
     fn clone(&self) -> Self {
+        let mut overlay = self.overlay.write().unwrap();
+        let shared: HashMap<String, TypeEntry> = overlay
+            .iter_mut()
+            .map(|(name, entry)| (name.clone(), TypeEntry::layered_over(entry.share())))
+            .collect();
         Self {
-            overlay: RwLock::new(self.overlay.read().unwrap().clone()),
+            overlay: RwLock::new(shared),
             removed: self.removed.clone(),
             base: self.base.clone(),
         }
@@ -462,7 +481,9 @@ impl IdIndexStore {
         // concurrent race: the first writer wins, both indices are equal).
         let built = build();
         let mut ov = self.overlay.write().unwrap();
-        ov.entry(name.to_string()).or_insert(built).get(id)
+        ov.entry(name.to_string())
+            .or_insert_with(|| TypeEntry::from(built))
+            .get(id)
     }
 
     /// Ensure `name` is indexed (overlay or base) — the `&self` pre-warm
@@ -478,7 +499,8 @@ impl IdIndexStore {
         }
         let built = build();
         let mut ov = self.overlay.write().unwrap();
-        ov.entry(name.to_string()).or_insert(built);
+        ov.entry(name.to_string())
+            .or_insert_with(|| TypeEntry::from(built));
     }
 
     /// Look up without building — None when the type isn't indexed.
@@ -506,8 +528,8 @@ impl IdIndexStore {
     pub fn materialize_type(&self, name: &str) -> Option<HashMap<Value, NodeIndex>> {
         {
             let ov = self.overlay.read().unwrap();
-            if let Some(idx) = ov.get(name) {
-                return Some(idx.iter().collect());
+            if let Some(entry) = ov.get(name) {
+                return Some(entry.materialize().iter().collect());
             }
         }
         if self.removed.contains(name) {
@@ -523,7 +545,10 @@ impl IdIndexStore {
 
     pub fn insert(&mut self, name: String, idx: TypeIdIndex) {
         self.removed.remove(&name);
-        self.overlay.get_mut().unwrap().insert(name, idx);
+        self.overlay
+            .get_mut()
+            .unwrap()
+            .insert(name, TypeEntry::from(idx));
     }
 
     /// Number of ids indexed for `name` in the mutable overlay, or `None`
@@ -531,7 +556,11 @@ impl IdIndexStore {
     /// the mmap'd base: the only caller uses this to decide whether an
     /// in-place edit is safe, and base entries are never edited in place.
     pub fn overlay_len(&self, name: &str) -> Option<usize> {
-        self.overlay.read().unwrap().get(name).map(|idx| idx.len())
+        self.overlay
+            .read()
+            .unwrap()
+            .get(name)
+            .map(|entry| entry.len())
     }
 
     /// Drop `entries` (`id → node`) from `name`'s index in place, instead of
@@ -554,18 +583,23 @@ impl IdIndexStore {
     /// and would surface a shadowed duplicate. See `detach_delete_nodes`.
     pub fn evict_entries(&mut self, name: &str, entries: &[(Value, NodeIndex)]) -> bool {
         let overlay = self.overlay.get_mut().unwrap();
-        let Some(index) = overlay.get_mut(name) else {
+        let Some(entry) = overlay.get_mut(name) else {
             self.remove(name);
             return false;
         };
         for (id, idx) in entries {
-            index.remove_matching(id, *idx);
+            entry.remove_matching(id, *idx);
         }
         true
     }
 
     pub fn remove(&mut self, name: &str) -> Option<TypeIdIndex> {
-        let prev = self.overlay.get_mut().unwrap().remove(name);
+        let prev = self
+            .overlay
+            .get_mut()
+            .unwrap()
+            .remove(name)
+            .map(|entry| entry.materialize());
         if self.base.as_ref().is_some_and(|b| b.contains(name)) {
             self.removed.insert(name.to_string());
         }
@@ -615,7 +649,7 @@ impl IdIndexStore {
         // Overlay entries first, then base entries that aren't shadowed.
         let mut out: Vec<(String, TypeIdIndex)> = overlay
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (k.clone(), v.materialize()))
             .collect();
         if let Some(base) = self.base.as_deref() {
             for k in base.dir.keys() {
@@ -633,7 +667,7 @@ impl IdIndexStore {
     /// overlay (or default-construct), then hand back a `&mut` to it. Used by
     /// the N-Triples loader's per-entity incremental build. `&mut self` gives
     /// exclusive access, so `get_mut()` is uncontended (no lock cost).
-    pub fn entry_or_default(&mut self, name: String) -> &mut TypeIdIndex {
+    pub fn entry_or_default(&mut self, name: String) -> &mut TypeEntry {
         let needs_materialize = {
             let overlay = self.overlay.get_mut().unwrap();
             !overlay.contains_key(&name) && !self.removed.contains(&name)
@@ -644,7 +678,7 @@ impl IdIndexStore {
                     self.overlay
                         .get_mut()
                         .unwrap()
-                        .insert(name.clone(), materialized);
+                        .insert(name.clone(), TypeEntry::from(materialized));
                 }
             }
         }
@@ -652,10 +686,28 @@ impl IdIndexStore {
         self.overlay.get_mut().unwrap().entry(name).or_default()
     }
 
+    /// Fold every shared base back in where this graph is its last holder.
+    ///
+    /// Called at write entry beside `GraphBackend::try_compact`, so the
+    /// "hold a view, write, drop the view, write again" sequence returns to the
+    /// flat representation on the very next write. Per entry the fold is a plain
+    /// map overwrite: unlike the topology overlay there is no slot to predict,
+    /// because the delta already recorded the real `NodeIndex` values the graph
+    /// handed out. What it must not do is edit a base another graph is reading,
+    /// which is what `Arc::get_mut` inside `TypeEntry::try_compact` gates.
+    pub fn try_compact(&mut self) {
+        for entry in self.overlay.get_mut().unwrap().values_mut() {
+            entry.try_compact();
+        }
+    }
+
     /// Replace the entire store with a fresh HashMap (used by load fallback
     /// for legacy `.bin.zst`-only graphs and by `reindex()`).
     pub fn replace_with(&mut self, map: HashMap<String, TypeIdIndex>) {
-        *self.overlay.get_mut().unwrap() = map;
+        *self.overlay.get_mut().unwrap() = map
+            .into_iter()
+            .map(|(name, index)| (name, TypeEntry::from(index)))
+            .collect();
         self.removed.clear();
         self.base = None;
     }

@@ -637,6 +637,10 @@ pub(crate) fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> 
     // over the shared base too — one `Arc::get_mut` probe when nothing is
     // shared, which is the steady state.
     graph.graph.ensure_writable();
+    // The same fold for `id_indices`, whose entries layer over a shared base of
+    // their own (D2 Phase 3). Per entry this is `Arc::get_mut` + an O(delta)
+    // merge, so it is a probe when nothing is shared.
+    graph.id_indices.try_compact();
     graph
 }
 
@@ -978,6 +982,72 @@ mod held_reference_clone_tests {
         );
         assert_eq!(reader.graph.node_count(), FIXTURE_NODES);
         assert_eq!(arc.graph.node_count(), FIXTURE_NODES + 1);
+    }
+
+    /// The **id index** must answer for the graph you asked, not the one that
+    /// wrote last — the D2 Phase 3 counterpart of
+    /// `a_held_reader_never_observes_the_writers_edits`.
+    ///
+    /// `id_indices` is layered over a base the two graphs share
+    /// (`storage/disk/id_index_layer.rs`), so this is where a delta leaking into
+    /// the base would show up: the reader would resolve an id its snapshot has
+    /// never seen, and `MATCH (n:Item {id: …})` would return a node that does
+    /// not exist in that view.
+    #[test]
+    fn a_held_reader_resolves_ids_against_its_own_snapshot() {
+        let mut arc = seeded_arc();
+        let params = HashMap::new();
+
+        // Warm the id index *before* the fork, so the lookups below take the
+        // layered path rather than build-on-miss — a cold index would rebuild
+        // from each graph's own state and pass this test for the wrong reason.
+        {
+            let graph = make_dir_graph_mut(&mut arc);
+            execute_mut(
+                graph,
+                "MATCH (n:Item {id: 0}) RETURN n.id",
+                &ExecuteOptions::eager(&params),
+            )
+            .expect("warm the id index");
+        }
+        let reader = Arc::clone(&arc);
+        assert!(
+            reader
+                .id_indices
+                .lookup("Item", &crate::datatypes::Value::Int64(0))
+                .is_some(),
+            "fixture must be id-indexed, or this test proves nothing"
+        );
+
+        {
+            let graph = make_dir_graph_mut(&mut arc);
+            execute_mut(
+                graph,
+                "CREATE (:Item {id: 4242, name: 'appended'})",
+                &ExecuteOptions::eager(&params),
+            )
+            .expect("append");
+        }
+
+        let new_id = crate::datatypes::Value::Int64(4242);
+        assert!(
+            arc.id_indices.lookup("Item", &new_id).is_some(),
+            "the writer must resolve the id it just created"
+        );
+        assert!(
+            reader.id_indices.lookup("Item", &new_id).is_none(),
+            "the reader's snapshot never saw this id; resolving it means the \
+             writer's delta leaked into the shared base"
+        );
+        // ...and every pre-existing id still resolves identically in both.
+        for id in 0..FIXTURE_NODES {
+            let value = crate::datatypes::Value::Int64(id as i64);
+            assert_eq!(
+                reader.id_indices.lookup("Item", &value),
+                arc.id_indices.lookup("Item", &value),
+                "id {id} must resolve the same in both graphs"
+            );
+        }
     }
 
     /// Compaction: once the reader drops, the next write folds the overlay back

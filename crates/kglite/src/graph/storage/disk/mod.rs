@@ -16,6 +16,7 @@ pub mod graph;
 pub mod graph_persist;
 pub mod graph_property_index;
 pub mod id_index;
+pub mod id_index_layer;
 pub mod property_index;
 pub mod segment_summary;
 /// Test-only drop-order seam for temp dirs backing a live disk/mapped graph.
