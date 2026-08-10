@@ -69,15 +69,16 @@ import java.time.Duration;
  * so tie it to deterministic teardown (try-with-resources, an explicit
  * {@code close()}), never to a {@code Cleaner} or finalizer that may not run.
  *
- * <p>Instances are not safe for concurrent use with {@link #close()}.
+ * <p>An instance is safe to share and to close from any thread: the lease is
+ * released exactly once however concurrent {@link #close()} calls interleave.
  */
 public final class WriterLease implements AutoCloseable {
 
-    private MemorySegment handle;
+    private final NativeHandle handle;
     private final Path path;
 
     private WriterLease(MemorySegment handle, Path path) {
-        this.handle = handle;
+        this.handle = new NativeHandle(handle, "WriterLease", Abi::leaseFree);
         this.path = path;
     }
 
@@ -143,15 +144,11 @@ public final class WriterLease implements AutoCloseable {
 
     /**
      * Release the lease. Idempotent — closing twice is a no-op, so a
-     * try-with-resources block around an explicit {@code close()} is safe.
+     * try-with-resources block around an explicit {@code close()} is safe, and
+     * so are two threads closing at once: the lease is freed exactly once.
      */
     @Override
     public void close() {
-        MemorySegment held = handle;
-        if (held == null) {
-            return;
-        }
-        handle = null;
-        Abi.leaseFree(held);
+        handle.close();
     }
 }

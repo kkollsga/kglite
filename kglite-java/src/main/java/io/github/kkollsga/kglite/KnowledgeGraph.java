@@ -105,10 +105,10 @@ import java.util.Optional;
  * <h2>Threading</h2>
  *
  * <p>The engine is synchronous — a call runs to completion on the calling
- * thread, and this class adds no thread pool, no async surface and no locking
- * of its own. What one instance guarantees, from the engine's session model
- * (an {@code Arc<DirGraph>} behind a mutex: readers clone the pointer, writers
- * take the lock for the whole mutation and swap):
+ * thread, and this class adds no thread pool and no async surface. What one
+ * instance guarantees, from the engine's session model (an
+ * {@code Arc<DirGraph>} behind a mutex: readers clone the pointer, writers take
+ * the lock for the whole mutation and swap):
  *
  * <ul>
  *   <li>One instance may be shared by many threads. {@link #query(String)}
@@ -122,23 +122,32 @@ import java.util.Optional;
  *       commits; it does not block the writer and is not blocked by it.</li>
  * </ul>
  *
- * <p>What is <strong>not</strong> safe: calling anything on an instance
- * concurrently with {@link #close()}. Close frees the native session, and a
- * call racing it is a use-after-free, not an exception. Confine an instance's
- * close to the thread that owns its lifetime (try-with-resources on the thread
- * that created it, or a shutdown after the workers have joined).
+ * <p><strong>{@link #close()} is safe from any thread, at any time.</strong>
+ * The one lock this class does add is a lifetime guard around the native
+ * handle, and it is what makes that true: a close waits for calls already
+ * running to return before it frees, it frees exactly once even if several
+ * threads close at once, and a call that arrives after it throws
+ * {@link IllegalStateException} rather than dereferencing freed memory. It is
+ * shared, so it introduces no serialization between concurrent calls — the
+ * three guarantees above are unchanged.
+ *
+ * <p>What that does <em>not</em> promise is a result: a worker racing a close
+ * gets either its rows or an {@code IllegalStateException}, and which one is
+ * genuinely a race. Closing after the workers join is still the design that
+ * keeps their work; closing under them is now merely an error rather than
+ * undefined behaviour.
  *
  * <p>Separate instances over the same path are governed by the
  * {@link WriterLease}, not by this — see that class.
  */
 public final class KnowledgeGraph implements AutoCloseable {
 
-    private MemorySegment session;
+    private final NativeHandle session;
     private final StorageMode storageMode;
     private final StorageMode convertedFrom;
 
     private KnowledgeGraph(MemorySegment session, StorageMode storageMode, StorageMode convertedFrom) {
-        this.session = session;
+        this.session = new NativeHandle(session, "KnowledgeGraph", Abi::sessionFree);
         this.storageMode = storageMode;
         this.convertedFrom = convertedFrom;
     }
@@ -409,7 +418,7 @@ public final class KnowledgeGraph implements AutoCloseable {
             throw new KgliteException("params cannot be null; pass Map.of() for none");
         }
         String paramsJson = params.isEmpty() ? null : Json.writeObject(params);
-        return Abi.execute(handle(), query, paramsJson, mutating);
+        return session.use(handle -> Abi.execute(handle, query, paramsJson, mutating));
     }
 
     // ---- lifecycle --------------------------------------------------------
@@ -509,7 +518,8 @@ public final class KnowledgeGraph implements AutoCloseable {
         if (path == null) {
             throw new KgliteException("save requires a path");
         }
-        Abi.sessionSave(handle(), path.toAbsolutePath().toString(), durable);
+        String destination = path.toAbsolutePath().toString();
+        session.run(handle -> Abi.sessionSave(handle, destination, durable));
     }
 
     /**
@@ -541,27 +551,24 @@ public final class KnowledgeGraph implements AutoCloseable {
     }
 
     /**
-     * Release the graph and everything the engine holds for it. Idempotent —
-     * closing twice is a no-op.
+     * Release the graph and everything the engine holds for it.
+     *
+     * <p><strong>Idempotent and safe from any thread</strong>, including
+     * several at once: the native session is freed exactly once however the
+     * calls interleave. A call that is already running in another thread
+     * completes first — this waits for it — and every call that arrives
+     * afterwards throws {@link IllegalStateException} instead of touching freed
+     * memory.
      *
      * <p>Unsaved mutations are discarded; {@link #save(Path)} is the only thing
      * that persists them.
+     *
+     * @throws IllegalStateException if called from inside one of this graph's
+     *     own calls, which cannot happen through this class's own surface (no
+     *     call runs caller-supplied code) and would otherwise deadlock
      */
     @Override
     public void close() {
-        MemorySegment open = session;
-        if (open == null) {
-            return;
-        }
-        session = null;
-        Abi.sessionFree(open);
-    }
-
-    private MemorySegment handle() {
-        MemorySegment open = session;
-        if (open == null) {
-            throw new IllegalStateException("this KnowledgeGraph is closed");
-        }
-        return open;
+        session.close();
     }
 }

@@ -8,6 +8,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -53,6 +58,46 @@ class WriterLeaseTest {
         lease.close();
         lease.close();
         try (WriterLease reacquired = WriterLease.acquire(path)) {
+            assertNotNull(reacquired);
+        }
+    }
+
+    @Test
+    @DisplayName("many threads closing one lease release it exactly once")
+    void concurrentCloseReleasesOnce(@TempDir Path dir) throws InterruptedException {
+        Path path = dir.resolve("concurrent-close.kgl");
+        WriterLease lease = WriterLease.acquire(path);
+
+        int closers = 8;
+        CountDownLatch start = new CountDownLatch(1);
+        ConcurrentLinkedQueue<Throwable> failures = new ConcurrentLinkedQueue<>();
+        List<Thread> threads = new ArrayList<>();
+        for (int i = 0; i < closers; i++) {
+            Thread thread = new Thread(() -> {
+                try {
+                    if (!start.await(10, TimeUnit.SECONDS)) {
+                        failures.add(new AssertionError("timed out waiting to start"));
+                        return;
+                    }
+                    lease.close();
+                } catch (Throwable t) {
+                    failures.add(t);
+                }
+            }, "lease-closer-" + i);
+            threads.add(thread);
+            thread.start();
+        }
+        start.countDown();
+        for (Thread thread : threads) {
+            thread.join(10_000);
+            assertTrue(!thread.isAlive(), thread.getName() + " did not finish");
+        }
+
+        assertTrue(failures.isEmpty(), () -> "close() threw: " + failures.peek());
+        // Freeing a lease handle twice is undefined behaviour, not an exception;
+        // the observable proof it happened once is that the path is free again
+        // and this process is still alive to take it.
+        try (WriterLease reacquired = assertDoesNotThrow(() -> WriterLease.acquire(path))) {
             assertNotNull(reacquired);
         }
     }

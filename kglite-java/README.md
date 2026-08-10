@@ -185,9 +185,18 @@ this wrapper adds no thread pool and no async surface. For one
   not at all, never half.
 - A reader that has already started keeps its snapshot while a writer commits.
 
-**Not safe: using an instance concurrently with `close()`** — that frees the
-native session, and a call racing it is a use-after-free, not an exception.
-Close on the thread that owns the instance's lifetime, after the workers join.
+**`close()` is safe from any thread, at any time**, on both `KnowledgeGraph`
+and `WriterLease`. A close waits for calls already running to return before it
+frees, it frees exactly once even when several threads close at once, and a
+call that arrives afterwards throws `IllegalStateException` instead of touching
+freed memory. The guard is a shared read lock, so concurrent calls stay
+concurrent — the three points above are unchanged.
+
+What that does *not* promise is a result: a worker racing a close gets either
+its rows or an `IllegalStateException`, and which one it gets is a genuine
+race. Closing after the workers join is still how you keep their work; closing
+under them is now an error rather than undefined behaviour.
+
 Across processes, the `WriterLease` above is the mechanism, not this.
 
 ## Errors
