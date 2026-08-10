@@ -132,8 +132,10 @@ pub struct DiskGraph {
     pub(super) active_queries: std::sync::Arc<std::sync::Mutex<usize>>,
 
     // ── Column stores for node properties (Arc refs, data mmap'd) ──
+    /// `FxHashMap` for the same reason as the heap backends' field: probed
+    /// once per `node_view` on every scan, over an already-hashed `u64` key.
     pub(crate) column_stores:
-        HashMap<InternedKey, Arc<crate::graph::storage::column_store::ColumnStore>>,
+        rustc_hash::FxHashMap<InternedKey, Arc<crate::graph::storage::column_store::ColumnStore>>,
 
     // ── Edge CSR (mmap'd) ──
     pub(super) out_offsets: MmapOrVec<u64>,
@@ -404,14 +406,6 @@ impl DiskGraph {
     // ====================================================================
     // Node methods
     // ====================================================================
-
-    /// Set column store references. Called by DirGraph after columnar setup or load.
-    pub fn set_column_stores(
-        &mut self,
-        stores: HashMap<InternedKey, Arc<crate::graph::storage::column_store::ColumnStore>>,
-    ) {
-        self.column_stores = stores;
-    }
 
     /// Iterate `(type_key, store_arc)` pairs — read-only borrow.
     /// Backs `GraphRead::column_stores_iter` for the disk backend.

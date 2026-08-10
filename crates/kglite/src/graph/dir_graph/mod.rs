@@ -1708,59 +1708,59 @@ impl DirGraph {
     /// Convert all Columnar properties back to Compact.
     /// Used when a caller needs a self-contained non-columnar graph.
     pub fn disable_columnar(&mut self) {
-        // Two passes: the node and its store are both owned by the backend, so
-        // a single `node_weight_mut` borrow cannot also read the store. Collect
-        // the restored rows first, then write them back.
-        struct Restored {
-            idx: NodeIndex,
-            pairs: Vec<(InternedKey, Value)>,
-            id: Option<Value>,
-            title: Option<Value>,
-        }
-        let restored: Vec<Restored> = {
-            let _guard = self.graph.begin_query();
-            self.graph
-                .node_indices()
-                .filter_map(|idx| {
-                    let node = self.graph.node_weight(idx)?;
-                    let row_id = node.properties.columnar_row_id()?;
-                    let store = self.graph.column_store(node.node_type)?;
-                    Some(Restored {
-                        idx,
-                        // `row_properties` excludes the reserved
-                        // `__id__`/`__title__` columns, so a null-sentinel node
-                        // (set by `enable_columnar` / load) would lose its
-                        // identity when the columnar link drops. Pull both back.
-                        pairs: store.row_properties(row_id),
-                        id: matches!(node.id, Value::Null)
-                            .then(|| store.get_id(row_id))
-                            .flatten(),
-                        title: matches!(node.title, Value::Null)
-                            .then(|| store.get_title(row_id))
-                            .flatten(),
-                    })
-                })
-                .collect()
-        };
+        // Per **type**, not per node. A node and its store are both owned by
+        // the backend, so a `node_weight_mut` borrow cannot also read the
+        // store — but cloning the type's store `Arc` once (O(1), a refcount
+        // bump) releases the backend borrow for the whole inner loop. That
+        // keeps this a single pass over nodes and hoists the two per-node
+        // allocations D1 Phase 3 briefly introduced: the type name `String`
+        // and the `TypeSchema` `Arc` clone are per-type facts, resolved once.
+        let type_keys: Vec<InternedKey> = self
+            .graph
+            .column_stores_iter()
+            .map(|(key, _)| key)
+            .collect();
 
-        for entry in restored {
-            let type_str = match self.graph.node_weight(entry.idx) {
-                Some(node) => node.node_type_str(&self.interner).to_string(),
-                None => continue,
-            };
-            let schema = self.type_schemas.get(&type_str).cloned();
-            let Some(node) = self.graph.node_weight_mut(entry.idx) else {
+        for type_key in type_keys {
+            let Some(type_str) = self.interner.try_resolve(type_key).map(str::to_string) else {
                 continue;
             };
-            node.properties = match schema {
-                Some(schema) => PropertyStorage::from_compact(entry.pairs, &schema),
-                None => PropertyStorage::Map(entry.pairs.into_iter().collect()),
+            let Some(store) = self.graph.column_store(type_key).map(Arc::clone) else {
+                continue;
             };
-            if let Some(v) = entry.id {
-                node.id = v;
-            }
-            if let Some(v) = entry.title {
-                node.title = v;
+            let schema = self.type_schemas.get(&type_str).cloned();
+            let indices: Vec<NodeIndex> = self
+                .type_indices
+                .get(&type_str)
+                .map(|set| set.iter().collect())
+                .unwrap_or_default();
+
+            for idx in indices {
+                let Some(node) = self.graph.node_weight_mut(idx) else {
+                    continue;
+                };
+                let Some(row_id) = node.properties.columnar_row_id() else {
+                    continue;
+                };
+                // `row_properties` excludes the reserved `__id__`/`__title__`
+                // columns, so a null-sentinel node (set by `enable_columnar` or
+                // by the load path) would lose its identity when the columnar
+                // link drops. Pull both back.
+                if matches!(node.id, Value::Null) {
+                    if let Some(v) = store.get_id(row_id) {
+                        node.id = v;
+                    }
+                }
+                if matches!(node.title, Value::Null) {
+                    if let Some(v) = store.get_title(row_id) {
+                        node.title = v;
+                    }
+                }
+                let pairs = store.row_properties(row_id);
+                node.properties = match &schema {
+                    Some(schema) => PropertyStorage::from_compact(pairs, schema),
+                    None => PropertyStorage::Map(pairs.into_iter().collect()),
+                };
             }
         }
         self.clear_column_stores();

@@ -40,7 +40,7 @@ impl MappedGraph {
     pub fn new() -> Self {
         Self {
             inner: StableDiGraph::new(),
-            column_stores: HashMap::new(),
+            column_stores: rustc_hash::FxHashMap::default(),
             type_index: RwLock::new(HashMap::new()),
             property_index: RwLock::new(HashMap::new()),
             global_property_index: RwLock::new(HashMap::new()),
@@ -80,7 +80,7 @@ impl MappedGraph {
     pub(crate) fn from_graph(inner: StableDiGraph<NodeData, EdgeData>) -> Self {
         Self {
             inner,
-            column_stores: HashMap::new(),
+            column_stores: rustc_hash::FxHashMap::default(),
             type_index: RwLock::new(HashMap::new()),
             property_index: RwLock::new(HashMap::new()),
             global_property_index: RwLock::new(HashMap::new()),

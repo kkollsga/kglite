@@ -127,12 +127,20 @@ pub(super) fn write_column_master(
     // (1) Pre-image first. If the journal already holds an entry for this type
     // it declines the clone, which is then dropped — returning the count to one
     // so the rest of the statement mutates in place.
-    let prior_store = graph.graph.column_store(type_key).map(Arc::clone);
-    let captured_now = match (prior_store, graph.graph.undo_journal_mut()) {
-        (Some(prior_store), Some(journal)) => {
-            journal.note_columnar_fork(type_key, || Some(prior_store))
+    //
+    // Gated on the journal actually existing: an unjournalled statement (no
+    // open checkpoint) must not pay the store probe and the refcount round-trip
+    // for a pre-image nobody will read.
+    let captured_now = if graph.graph.undo_journal_mut().is_some() {
+        let prior_store = graph.graph.column_store(type_key).map(Arc::clone);
+        match (prior_store, graph.graph.undo_journal_mut()) {
+            (Some(prior_store), Some(journal)) => {
+                journal.note_columnar_fork(type_key, || Some(prior_store))
+            }
+            _ => false,
         }
-        _ => false,
+    } else {
+        false
     };
 
     let master = graph.graph.column_store_mut(type_key)?;

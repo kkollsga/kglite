@@ -1177,7 +1177,7 @@ impl DiskGraph {
                 free_node_slots: meta.free_node_slots,
                 node_arena: std::sync::Mutex::new(Vec::with_capacity(1024)),
                 active_queries: std::sync::Arc::new(std::sync::Mutex::new(0)),
-                column_stores: HashMap::new(),
+                column_stores: rustc_hash::FxHashMap::default(),
                 out_offsets,
                 out_edges,
                 in_offsets,

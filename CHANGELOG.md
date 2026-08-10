@@ -70,8 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `column_stores_by_name`, `column_store_count` — and `GraphRead` /`GraphWrite`
   gain `column_store` / `column_stores_iter` / `has_column_stores` and the
   install/take/clear pair. `DirGraph::sync_disk_column_stores` and
-  `sync_column_stores_from_disk` are removed: there is no second copy to
-  mirror. `NodeData::set_property` / `remove_property` / `clear_property` are
+  `sync_column_stores_from_disk` are removed, along with
+  `DiskGraph::set_column_stores`: there is no second copy to mirror. `NodeData::set_property` / `remove_property` / `clear_property` are
   removed — a columnar node has no per-node storage to write into; use
   `GraphWrite::set_node_property` and its four siblings, which route by storage
   variant. `impl From<&NodeData> for NodeView` is removed because a view can no

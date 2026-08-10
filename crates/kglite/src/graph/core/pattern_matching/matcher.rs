@@ -1342,16 +1342,20 @@ impl<'a> PatternExecutor<'a> {
 
     /// Disk-graph columnar fast path for property matching.
     /// Reads individual column values without full NodeData materialization.
+    ///
+    /// The node's column store is resolved **once** here, not once per
+    /// property: each `GraphRead` accessor call builds its own `NodeView` and
+    /// so probes the backend's store map again, and a multi-property pattern
+    /// pays that per property per node on a full scan.
     fn node_matches_properties_columnar(
         &self,
         idx: NodeIndex,
         props: &HashMap<String, PropertyMatcher>,
     ) -> bool {
-        let node_type_key = match self.graph.graph.node_type_of(idx) {
-            Some(k) => k,
-            None => return false,
+        let Some(node) = self.graph.graph.node_view(idx) else {
+            return false;
         };
-        let type_str = match self.graph.interner.try_resolve(node_type_key) {
+        let type_str = match self.graph.interner.try_resolve(node.node_type()) {
             Some(s) => s,
             None => return false,
         };
@@ -1372,7 +1376,7 @@ impl<'a> PatternExecutor<'a> {
             {
                 if let PropertyMatcher::Equals(Value::String(target)) = matcher {
                     let k = InternedKey::from_str(resolved);
-                    match self.graph.graph.str_prop_eq(idx, k, target) {
+                    match node.str_prop_eq(k, target) {
                         Some(true) => continue,
                         Some(false) => return false,
                         None => return false,
@@ -1381,22 +1385,16 @@ impl<'a> PatternExecutor<'a> {
             }
 
             let value: Option<Cow<'_, Value>> = if resolved == "id" {
-                self.graph.graph.get_node_id(idx).map(Cow::Owned)
+                Some(node.id())
             } else if resolved == "title" {
-                self.graph.graph.get_node_title(idx).map(Cow::Owned)
-            } else if let Some(v) = self
-                .graph
-                .graph
-                .get_node_property(idx, InternedKey::from_str(resolved))
-            {
+                Some(node.title())
+            } else if let Some(v) = node.get(InternedKey::from_str(resolved)) {
                 // Stored property wins (a user `label`/`type`/`name`… — KG-1).
-                Some(Cow::Owned(v))
+                Some(v)
             } else if let Some(fb) = crate::graph::schema::soft_alias_fallback(resolved) {
                 // No stored property — structural convenience fallback.
                 let v = match fb {
-                    crate::graph::schema::SoftAliasFallback::Title => {
-                        self.graph.graph.get_node_title(idx).unwrap_or(Value::Null)
-                    }
+                    crate::graph::schema::SoftAliasFallback::Title => node.title().into_owned(),
                     crate::graph::schema::SoftAliasFallback::TypeString => {
                         Value::String(type_str.to_string())
                     }

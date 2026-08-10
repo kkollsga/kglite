@@ -575,6 +575,23 @@ impl GraphRead for GraphBackend {
     type EdgesConnectingIter<'a> = crate::graph::core::iterators::GraphEdgesConnecting<'a>;
     type NeighborsIter<'a> = crate::graph::core::iterators::GraphNeighbors<'a>;
 
+    /// Dispatch **once**, not twice.
+    ///
+    /// The trait default calls `self.node_weight(idx)` and
+    /// `self.column_store(..)`, each of which is a four-arm match on this enum
+    /// — so a scan paid two dispatches per node on top of the store probe.
+    /// Matching here and delegating to the concrete backend's `node_view` lets
+    /// the probe inline into the same call.
+    #[inline]
+    fn node_view(&self, idx: NodeIndex) -> Option<crate::graph::storage::NodeView<'_>> {
+        match self {
+            Self::Memory(g) => GraphRead::node_view(g, idx),
+            Self::Mapped(g) => GraphRead::node_view(g, idx),
+            Self::Disk(g) => GraphRead::node_view(g.as_ref(), idx),
+            Self::Recording(rg) => GraphRead::node_view(rg.as_ref(), idx),
+        }
+    }
+
     #[inline]
     fn column_store(&self, type_key: InternedKey) -> Option<&std::sync::Arc<ColumnStore>> {
         match self {

@@ -1472,6 +1472,7 @@ pub fn kglite::api::storage::GraphBackend::node_count(&self) -> usize
 pub fn kglite::api::storage::GraphBackend::node_indices(&self) -> kglite::graph::core::iterators::GraphNodeIndices<'_>
 pub fn kglite::api::storage::GraphBackend::node_labels_of(&self, idx: petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<kglite::api::InternedKey>
 pub fn kglite::api::storage::GraphBackend::node_type_of(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::InternedKey>
+pub fn kglite::api::storage::GraphBackend::node_view(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeView<'_>>
 pub fn kglite::api::storage::GraphBackend::node_weight(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&kglite::api::NodeData>
 pub fn kglite::api::storage::GraphBackend::reset_arenas(&self)
 pub fn kglite::api::storage::GraphBackend::sources_for_conn_type_bounded(&self, conn_type: kglite::api::InternedKey, max: core::option::Option<usize>) -> core::option::Option<alloc::vec::Vec<u32>>
@@ -1538,7 +1539,6 @@ pub fn kglite::api::storage::DiskGraph::remove_edge(&mut self, idx: petgraph::gr
 pub fn kglite::api::storage::DiskGraph::remove_node(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeData>
 pub fn kglite::api::storage::DiskGraph::reset_arenas(&self)
 pub fn kglite::api::storage::DiskGraph::scan_edges_of_conn_type_linear<F>(&self, conn_type: u64, f: F) where F: core::ops::function::FnMut(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, u32) -> bool
-pub fn kglite::api::storage::DiskGraph::set_column_stores(&mut self, stores: std::collections::hash::map::HashMap<kglite::api::InternedKey, alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>)
 pub fn kglite::api::storage::DiskGraph::sources_for_conn_type(&self, conn_type: u64) -> core::option::Option<alloc::vec::Vec<u32>>
 pub fn kglite::api::storage::DiskGraph::sources_for_conn_type_bounded(&self, conn_type: u64, max: core::option::Option<usize>) -> core::option::Option<alloc::vec::Vec<u32>>
 pub fn kglite::api::storage::DiskGraph::update_row_id(&mut self, node_idx: petgraph::graph_impl::NodeIndex, row_id: u32)
@@ -2739,6 +2739,7 @@ pub fn kglite::api::storage::GraphBackend::node_count(&self) -> usize
 pub fn kglite::api::storage::GraphBackend::node_indices(&self) -> kglite::graph::core::iterators::GraphNodeIndices<'_>
 pub fn kglite::api::storage::GraphBackend::node_labels_of(&self, idx: petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<kglite::api::InternedKey>
 pub fn kglite::api::storage::GraphBackend::node_type_of(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::InternedKey>
+pub fn kglite::api::storage::GraphBackend::node_view(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeView<'_>>
 pub fn kglite::api::storage::GraphBackend::node_weight(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&kglite::api::NodeData>
 pub fn kglite::api::storage::GraphBackend::reset_arenas(&self)
 pub fn kglite::api::storage::GraphBackend::sources_for_conn_type_bounded(&self, conn_type: kglite::api::InternedKey, max: core::option::Option<usize>) -> core::option::Option<alloc::vec::Vec<u32>>

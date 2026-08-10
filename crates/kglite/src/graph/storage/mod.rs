@@ -42,6 +42,7 @@ use crate::graph::storage::undo::UndoJournal;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
 use petgraph::Direction;
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, RwLock};
@@ -627,17 +628,15 @@ pub trait GraphWrite: GraphRead {
 pub struct MemoryGraph {
     pub(crate) inner: StableDiGraph<NodeData, EdgeData>,
     /// **The column stores this backend owns**, keyed by node-type
-    /// `InternedKey` — the same shape `DiskGraph` has always had.
+    /// `InternedKey`.
     ///
-    /// Every columnar node's properties live here; a node carries only its
-    /// `row_id`. Keyed by `InternedKey` rather than by type name because
-    /// `NodeView` resolution has only `NodeData.node_type` in hand and must
-    /// not need the interner on the read path.
-    ///
-    /// Derived-but-owned: not serialized with the graph (the `.kgl` writer
-    /// persists column data in its own section and re-installs on load), and
-    /// carried explicitly across `Clone`.
-    pub(crate) column_stores: HashMap<InternedKey, Arc<ColumnStore>>,
+    /// `FxHashMap`, not `HashMap`: this is probed once per `node_view`, i.e.
+    /// once per columnar node per property access on every scan, and the key is
+    /// an already-hashed `u64`. SipHash over 8 bytes measured ~14 ns per probe
+    /// there — a +22% regression on `columnar_cypher_where` — against ~1 ns for
+    /// FxHash. Same reasoning as the 0.9.x `FxHash` conversions elsewhere in the
+    /// engine; see `dev-docs/bench/results/2026-08-10-d1-perf-union.md` §E.3.
+    pub(crate) column_stores: FxHashMap<InternedKey, Arc<ColumnStore>>,
 
     /// Lazy per-connection-type peer counts used by grouped Cypher
     /// aggregations. Derived state: empty on clone/load and invalidated by
@@ -680,7 +679,7 @@ impl MemoryGraph {
     pub(crate) fn from_graph(inner: StableDiGraph<NodeData, EdgeData>) -> Self {
         Self {
             inner,
-            column_stores: HashMap::new(),
+            column_stores: FxHashMap::default(),
             peer_counts: RwLock::new(HashMap::new()),
             undo: None,
         }
