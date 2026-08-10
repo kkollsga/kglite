@@ -1570,9 +1570,7 @@ JAVA = _load_workflow(JAVA_PATH)
 JAVA_PUBLISH_GATE = "vars.JAVA_CENTRAL_PUBLISH_ENABLED == 'true' || inputs.publish"
 
 #: Source of truth for the platforms the JAR promises to carry.
-NATIVE_LIBRARY_JAVA = (
-    REPO_ROOT / "kglite-java/src/main/java/io/github/kkollsga/kglite/NativeLibrary.java"
-)
+NATIVE_LIBRARY_JAVA = REPO_ROOT / "kglite-java/src/main/java/io/github/kkollsga/kglite/NativeLibrary.java"
 
 
 def _java_job(name: str) -> _Job:
@@ -1717,9 +1715,7 @@ def test_java_release_path_requires_a_complete_native_set() -> None:
     by whoever tries to load it. This flag is the compensating check that makes
     that case red.
     """
-    gradle_lines = [
-        line for line in _command_lines(_java_job("assemble")) if line.startswith("gradle ")
-    ]
+    gradle_lines = [line for line in _command_lines(_java_job("assemble")) if line.startswith("gradle ")]
     assert gradle_lines, "the assemble job runs no gradle command — the scan is broken"
     for line in gradle_lines:
         assert "-PrequireAllNatives=true" in _tokens(line), (
@@ -1738,11 +1734,7 @@ def test_java_tag_and_workspace_version_cannot_disagree() -> None:
     rejected before it is compared.
     """
     assemble = _java_job("assemble")
-    guards = [
-        step
-        for step in _steps(assemble)
-        if any("GITHUB_REF_NAME" in line for line in _step_commands(step))
-    ]
+    guards = [step for step in _steps(assemble) if any("GITHUB_REF_NAME" in line for line in _step_commands(step))]
     assert len(guards) == 1, f"expected exactly 1 tag/version guard, found {len(guards)}"
     commands = _step_commands(guards[0])
     joined = "\n".join(commands)
@@ -1787,9 +1779,7 @@ def test_helper_java_platform_derivations_can_fail(tmp_path: Path) -> None:
         with pytest.raises(AssertionError, match="the scan is broken"):
             _bundled_platforms_declared_in_java()
 
-        NATIVE_LIBRARY_JAVA.write_text(
-            "static final Set<String> BUNDLED_PLATFORMS = Set.of();\n", encoding="utf-8"
-        )
+        NATIVE_LIBRARY_JAVA.write_text("static final Set<String> BUNDLED_PLATFORMS = Set.of();\n", encoding="utf-8")
         with pytest.raises(AssertionError, match="parsed as empty"):
             _bundled_platforms_declared_in_java()
 
