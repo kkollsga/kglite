@@ -1452,12 +1452,29 @@ def run_notify(
 #: a machine contract) and refreshed at release time alongside the other
 #: captured constants. Empty is a valid state: a release with no breaking
 #: surface notifies only on range/pin grounds.
-DEFAULT_BREAKING_SYMBOLS: list[str] = []
+DEFAULT_BREAKING_SYMBOLS: list[str] = [
+    # 0.15.9 — D1/D2 Rust-API surgery (semver-major, shipped in a patch per
+    # project policy; Python and C surfaces are additive-only this release).
+    "NodeData::get_property",
+    "NodeData::property_iter",
+    "NodeData::properties_cloned",
+    "DirGraph::column_stores",
+    "NodeView",
+    "GraphBackend::Forked",
+    "GraphRead::node_view",
+    "resolve_node_property",
+]
 
 DEFAULT_HIGHLIGHTS = [
-    "The MCP server now aligns on mcp-methods 0.4.4 and rmcp 3.1.1; "
-    "low-level dynamic tool handlers use rmcp's response envelope without "
-    "changing completed tool payloads.",
+    "Saved-graph writes no longer sweep every node of the type: a one-row "
+    "columnar SET/REMOVE mutates one row in place, and MERGE into a saved "
+    "type dropped from 1,789x to 29.6x its fresh-graph cost.",
+    "Holding a query result, freeze(), Session, or open transaction across "
+    "a write no longer copies the graph: first-write cost at 1M nodes fell "
+    "from ~36ms to ~5us on plain graphs, and the fork allocates nothing.",
+    "The Rust API changed shape (NodeData property readers removed, "
+    "NodeView is the read route, DirGraph.column_stores became accessors); "
+    "Python and C surfaces are additive-only.",
 ]
 
 
