@@ -479,6 +479,7 @@ jobs:
     permissions:
       contents: write
       id-token: write  # Required for Trusted Publishing
+      actions: write  # Dispatch publish_java.yml (tag events from GITHUB_TOKEN can't)
     steps:
       - uses: actions/checkout@v7
       - name: Download all artifacts
@@ -525,3 +526,15 @@ jobs:
           tag_name: v${{ needs.version-check.outputs.version }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Dispatch Java publish
+        # The v* tag above is created with GITHUB_TOKEN, and events created
+        # with GITHUB_TOKEN never trigger other workflows — so
+        # publish_java.yml's tag trigger cannot fire from a release train run
+        # (it never has; 0.15.9's Java publish was a manual dispatch, and
+        # 0.15.10's tag fired nothing). workflow_dispatch via the API is
+        # exempt from that recursion guard, so the train dispatches
+        # explicitly. publish_java.yml's own gates (tag-vs-Cargo.toml,
+        # JAVA_CENTRAL_PUBLISH_ENABLED) still decide whether it deploys.
+        run: gh workflow run publish_java.yml --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

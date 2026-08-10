@@ -1,11 +1,13 @@
 name: Build and Publish Java Artifact
 
-# Triggered by the release tag, not by the push to `main` that drives
-# build_wheels.yml. The wheel workflow decides for itself whether a version is
-# new by asking PyPI; Maven Central has no equivalent probe that is cheap and
-# unambiguous, and the release flow already pushes `vX.Y.Z` at exactly the
-# moment the version is final. The tag is therefore the signal, and the
-# tag-vs-Cargo.toml check below is what keeps it honest.
+# Triggered by an explicit workflow_dispatch from build_wheels.yml's publish
+# job, after it creates the release tag. The tag trigger below still exists
+# for a hand-pushed tag, but it CANNOT fire from the release train: the train's
+# tag is created with GITHUB_TOKEN, and events created with GITHUB_TOKEN never
+# trigger other workflows (it never has fired — 0.15.9's Java publish was a
+# manual dispatch, and 0.15.10's tag fired nothing until re-dispatched). The
+# dispatch chain is the signal; the tag-vs-Cargo.toml check below is what
+# keeps it honest either way.
 #
 # Release-time verification (the `release` skill's step 11) is conditional on
 # the same gate this workflow uses. Until JAVA_CENTRAL_PUBLISH_ENABLED is
