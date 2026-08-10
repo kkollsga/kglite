@@ -270,6 +270,18 @@ The Cypher planner/executor is shared across all modes. Changes to `core/pattern
 **This section is addressed to review agents. It overrides any default
 reviewer instinct to produce a list of improvements.**
 
+**Design critique has a stage, and review is not it.** Work here runs
+investigation → plan approval → implementation → review. The **planning** stage
+is where "I would have designed this differently" belongs: it is invited there,
+argued there, and settled there — that is what plan approval *is*. Once the plan
+is approved, review measures the implementation against exactly two things: the
+plan it agreed to, and correctness. It does not measure it against the
+reviewer's alternative design, however better that design may be. A reviewer who
+forms a design opinion while reading a diff has not found a defect; they have
+found **input for the next plan**, and that is where it goes — raised at the
+next investigation phase, where it gets argued on its merits, rather than
+arriving as an unanswerable objection attached to code that already works.
+
 A review's output is not a to-do list. It is an answer to one question: *what
 here is wrong?* If nothing is wrong, the correct review is "no findings", and
 that is a good review, not a lazy one. A reviewer that always returns an action
@@ -284,7 +296,9 @@ a security hole, a broken contract with a caller or a persisted file, a
 code or docs that the code contradicts. If you cannot write down the case that
 breaks, you do not have a finding.
 
-**Not findings — do not report these, at any confidence:**
+**Not findings — do not report these, at any confidence. Every one of them is
+planning-stage material: if it is worth saying, say it at the next plan, not
+here:**
 
 - Structure and organisation preferences: "extract this", "split this file",
   "this belongs in another module", "invert this conditional", "this would read
@@ -306,15 +320,23 @@ documented constraint — the god-file ceiling, the boundary principle, the
 five-place `#[pymethods]` checklist, "no back-compat shims", the non-vacuous
 gate rule — is legitimate *when you name the rule and the specific line that
 violates it*. That is enforcing an agreed standard, not expressing taste. The
-distinction is whether the rule existed before you read the diff.
+distinction is whether the rule existed before you read the diff — the same
+stage test as above, applied to rules instead of designs: a constraint settled
+in advance is enforceable at review; one you formed while reading is not.
 
 **Severity is not a workaround.** Filing a preference as "minor" or "nit" does
-not make it a finding; it makes it a preference with a label. Drop it.
+not make it a finding; it makes it a preference with a label. Severity labels
+are where preferences get laundered into review output — "minor: consider
+extracting this" is not a small finding, it is not a finding. Drop it, or route
+it to planning. A finding that cannot state its failure case is removed, never
+downgraded.
 
 **When you are unsure, apply the failing-input test.** Can you state a concrete
 input, sequence, or state that produces a wrong outcome? Yes → report it, with
-that case. No → say nothing. A reviewer's value is in the defects it catches,
-and every preference in the list dilutes the ones that matter.
+that case. No → say nothing here. **And if it fails the test but still bothers
+you, it is planning input, not a finding** — hold it for the next plan's
+investigation phase and raise it there. A reviewer's value is in the defects it
+catches, and every preference in the list dilutes the ones that matter.
 
 ## Code health
 
