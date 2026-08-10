@@ -363,6 +363,41 @@ mod maintenance_tests {
         assert_eq!(g.graph.node_count(), 3);
     }
 
+    /// `test_vacuum_preserves_edges` counts edges, which a rebuild that
+    /// remaps endpoints *wrongly* still satisfies: reversing every `(src,
+    /// tgt)` pair leaves the count untouched and the whole Rust suite green.
+    /// Direction is the part of an edge a vacuum can silently corrupt, so
+    /// assert the endpoints themselves, by node title so the assertion does
+    /// not encode the compaction's index arithmetic.
+    #[test]
+    fn test_vacuum_preserves_edge_direction() {
+        let mut g = make_test_graph(4, true); // 0→1, 1→2, 2→3
+        g.graph.remove_node(NodeIndex::new(0)); // leaves 1→2, 2→3
+
+        g.vacuum();
+
+        let title = |idx: NodeIndex| match &*g.graph.node_weight(idx).unwrap().title() {
+            Value::String(s) => s.clone(),
+            other => panic!("unexpected title {other:?}"),
+        };
+        let mut pairs: Vec<(String, String)> = g
+            .graph
+            .edge_indices()
+            .map(|e| {
+                let (src, tgt) = g.graph.edge_endpoints(e).unwrap();
+                (title(src), title(tgt))
+            })
+            .collect();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                ("Person_1".to_string(), "Person_2".to_string()),
+                ("Person_2".to_string(), "Person_3".to_string()),
+            ]
+        );
+    }
+
     #[test]
     fn test_vacuum_rebuilds_type_indices() {
         let mut g = make_test_graph(5, false);

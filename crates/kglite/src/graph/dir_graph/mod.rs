@@ -1226,8 +1226,14 @@ impl DirGraph {
     pub fn rebuild_type_indices(&mut self) {
         let type_count = self.node_type_metadata.len().max(4);
         let avg_per_type = self.graph.node_count() / type_count.max(1);
-        let mut new_type_indices: HashMap<String, Vec<NodeIndex>> =
-            HashMap::with_capacity(type_count);
+        // Group on the node's *interned* type key, not its name. The name is
+        // a per-type fact but this loop is per-node: resolving it and
+        // allocating a `String` for every node — then hashing that string
+        // with SipHash on the way into the map — was ~10% of a fired vacuum
+        // at 1M. `InternedKey` is a `Copy` integer, so grouping on it costs
+        // nothing and the O(types) resolve happens once, below.
+        let mut by_type_key: FxHashMap<InternedKey, Vec<NodeIndex>> =
+            FxHashMap::with_capacity_and_hasher(type_count, Default::default());
         {
             // Arena guard: node_weight materializes on the disk backend
             // (protocol in disk/graph.rs); scoped so the borrow ends before
@@ -1235,13 +1241,17 @@ impl DirGraph {
             let _guard = self.graph.begin_query();
             for node_idx in self.graph.node_indices() {
                 if let Some(node) = self.graph.node_view(node_idx) {
-                    let type_str = node.node_type_str(&self.interner).to_string();
-                    new_type_indices
-                        .entry(type_str)
+                    by_type_key
+                        .entry(node.node_type())
                         .or_insert_with(|| Vec::with_capacity(avg_per_type))
                         .push(node_idx);
                 }
             }
+        }
+        let mut new_type_indices: HashMap<String, Vec<NodeIndex>> =
+            HashMap::with_capacity(by_type_key.len());
+        for (type_key, indices) in by_type_key {
+            new_type_indices.insert(self.interner.resolve(type_key).to_string(), indices);
         }
         self.type_indices.replace_with(new_type_indices);
         // `secondary_label_index` is *not* rebuilt from node data — it's
@@ -2001,33 +2011,86 @@ impl DirGraph {
             return HashMap::new();
         }
 
-        // Build new graph with contiguous indices
-        let mut new_graph = StableDiGraph::with_capacity(old_node_count, self.graph.edge_count());
-        let mut old_to_new: HashMap<NodeIndex, NodeIndex> = HashMap::with_capacity(old_node_count);
+        // Take ownership of the old graph so the rebuild can *relocate* every
+        // weight instead of deep-cloning it. A `NodeData` clone reallocates
+        // the id/title strings and the whole property vector, and the
+        // originals were dropped moments later when the backend was replaced
+        // — the clone/drop pair was pure waste (profiled at ~16% of a fired
+        // vacuum at 1M, plus its share of allocator and memcpy time).
+        let Some(mut old) = self.graph.take_heap_graph() else {
+            // Disk: nothing was taken, so nothing downstream may treat the
+            // indices as remapped.
+            return HashMap::new();
+        };
 
-        // Copy all live nodes, recording index mapping
-        for old_idx in self.graph.node_indices() {
-            let node_data = self.graph[old_idx].clone();
+        // Build new graph with contiguous indices
+        let mut new_graph = StableDiGraph::with_capacity(old_node_count, old.edge_count());
+        let mut old_to_new: HashMap<NodeIndex, NodeIndex> = HashMap::with_capacity(old_node_count);
+        // Dense old→new lookup for the edge pass. Endpoint remapping is two
+        // probes per edge, and running them through the returned map's
+        // SipHash was the largest single cost in the rebuild (hashing was
+        // ~22% of a fired vacuum at 1M). The graph is index-addressed, so a
+        // bound-sized vector is the natural map; `u32::MAX` marks a slot that
+        // held no live node.
+        let mut dense: Vec<u32> = vec![u32::MAX; old_node_bound];
+
+        // Move all live nodes over, recording the index mapping. Ascending
+        // raw order reproduces `node_indices()` exactly, so the compacted
+        // indices are the same ones the clone loop produced.
+        for (raw, mapped) in dense.iter_mut().enumerate() {
+            let old_idx = NodeIndex::new(raw);
+            let Some(slot) = old.node_weight_mut(old_idx) else {
+                continue;
+            };
+            let vacated = NodeData {
+                id: Value::Null,
+                title: Value::Null,
+                node_type: slot.node_type,
+                // `HashMap::new` does not allocate, so the placeholder left
+                // in the discarded graph costs nothing to build or drop.
+                properties: PropertyStorage::Map(HashMap::new()),
+            };
+            let node_data = std::mem::replace(slot, vacated);
             let new_idx = new_graph.add_node(node_data);
+            *mapped = new_idx.index() as u32;
             old_to_new.insert(old_idx, new_idx);
         }
 
-        // Copy all live edges with remapped endpoints
-        for old_edge_idx in self.graph.edge_indices() {
-            if let Some((src, tgt)) = self.graph.edge_endpoints(old_edge_idx) {
-                let edge_data = self.graph[old_edge_idx].clone();
-                let new_src = old_to_new[&src];
-                let new_tgt = old_to_new[&tgt];
-                new_graph.add_edge(new_src, new_tgt, edge_data);
-            }
+        // Move all live edges over with remapped endpoints. The ids are
+        // collected because relocating a weight needs `&mut old` while
+        // `edge_indices()` borrows it.
+        let old_edge_ids: Vec<EdgeIndex> = old.edge_indices().collect();
+        for old_edge_idx in old_edge_ids {
+            let Some((src, tgt)) = old.edge_endpoints(old_edge_idx) else {
+                continue;
+            };
+            let (new_src, new_tgt) = (dense[src.index()], dense[tgt.index()]);
+            debug_assert!(
+                new_src != u32::MAX && new_tgt != u32::MAX,
+                "a live edge referenced a node that was not carried over"
+            );
+            let Some(slot) = old.edge_weight_mut(old_edge_idx) else {
+                continue;
+            };
+            let vacated = EdgeData {
+                connection_type: slot.connection_type,
+                properties: Vec::new(),
+            };
+            let edge_data = std::mem::replace(slot, vacated);
+            new_graph.add_edge(
+                NodeIndex::new(new_src as usize),
+                NodeIndex::new(new_tgt as usize),
+                edge_data,
+            );
         }
+        drop(old);
 
         // Replace graph storage, keeping the backend variant and any
         // write-capture wrapper — see `GraphBackend::replace_heap_graph` for
         // what assigning `Memory(..)` here used to break.
         if !self.graph.replace_heap_graph(new_graph) {
-            // Disk: nothing was replaced, so nothing downstream may treat the
-            // indices as remapped.
+            // Unreachable: `take_heap_graph` already returned `None` for the
+            // only backend `replace_heap_graph` refuses.
             return HashMap::new();
         }
 

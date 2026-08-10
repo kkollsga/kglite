@@ -294,6 +294,27 @@ impl GraphBackend {
         }
     }
 
+    /// Move the heap `StableDiGraph` out of the backend, leaving an empty one
+    /// in its place. `None` on **disk**, whose CSR arrays are not a
+    /// `StableDiGraph` — the same "not rebuilt" signal
+    /// [`replace_heap_graph`](Self::replace_heap_graph) returns `false` for.
+    ///
+    /// Exists for `DirGraph::vacuum`, which used to deep-clone every node and
+    /// edge weight into the compacted graph and then drop the originals when
+    /// the backend was replaced. Owning the old graph lets it *relocate* the
+    /// weights instead. The backend is left holding an empty graph and its
+    /// now-stale derived caches; the sole caller replaces it with the
+    /// compacted graph a few statements later and nothing reads it in
+    /// between, exactly as during the old clone loop.
+    pub(crate) fn take_heap_graph(&mut self) -> Option<StableDiGraph<NodeData, EdgeData>> {
+        match self {
+            GraphBackend::Memory(g) => Some(std::mem::take(&mut g.inner)),
+            GraphBackend::Mapped(g) => Some(std::mem::take(&mut g.inner)),
+            GraphBackend::Recording(rg) => rg.inner_mut().take_heap_graph(),
+            GraphBackend::Disk(_) => None,
+        }
+    }
+
     /// Borrow the inner heap `StableDiGraph` for petgraph algorithms
     /// (e.g. `kosaraju_scc`) that require concrete petgraph types.
     /// Disk panics — callers must gate on [`GraphRead::is_disk`].

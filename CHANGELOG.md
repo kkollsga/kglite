@@ -43,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A fired auto-vacuum pauses ~45% shorter.** The compaction rebuild now
+  relocates node weights instead of deep-cloning them, remaps edge endpoints
+  through a dense table instead of a hash map, and rebuilds type indexes once
+  per type instead of once per node. Trigger thresholds, post-vacuum
+  semantics, and the vacuum-off path are unchanged (off-arm measured within
+  0.6%).
 - **Rust API**: node property reads have a single authoritative route,
   `kglite::api::NodeView`, obtained from `GraphRead::node_view(idx)` or
   `DirGraph::node_view(idx)`. `GraphRead` gains `node_view`,
