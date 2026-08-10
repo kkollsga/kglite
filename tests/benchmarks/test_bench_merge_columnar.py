@@ -12,38 +12,37 @@ nodes**, on a graph that has been through `save()`.
 The shape, and why it is worse than "R times a one-row write"
 ────────────────────────────────────────────────────────────────────────────
 
-Two mechanisms, one per statement and one per row.
+**One mechanism, once per statement** — as of the D1 Phase-3 ownership change
+(measured 2026-08-10). The storage backend is now the sole owner of the column
+stores: `PropertyStorage::Columnar` carries only a `row_id`, no node holds a
+handle, and the O(N_type) end-of-clause re-point sweep and the per-row
+node-private fork are both **deleted**.
 
-**Per clause — the handle-refresh sweep.** Every node of a columnar type holds
-its own strong `Arc<ColumnStore>` handle, so a master write forks the store and
-`refresh_columnar_node_handles`
-(`languages/cypher/executor/columnar_write.rs`) then re-points **every** node in
-`type_indices[type]` at the fork. That is O(N_type) per `SET` / `REMOVE`
-clause, *independent of how many rows the clause wrote* — a one-row `SET`
-against a 100k type pays 100k re-points. It fires only on a saved graph,
-because only a saved graph has column stores.
+What is left is the rollback pre-image. The first property write of a statement
+against a columnar type hands the statement's undo journal an `Arc::clone` of
+the type's master store — `capture_property_pre_image`
+(`storage/impls.rs`) on the fallback route, `write_column_master`
+(`languages/cypher/executor/columnar_write.rs`) on the master route. The
+journal's handle is then what forces the following `Arc::make_mut` to
+**deep-clone the whole `ColumnStore`**, so the pre-statement image stays
+pristine for rollback. That clone is O(|store|), i.e. proportional to
+N_type x columns, and it is paid **once per statement**: the journal declines a
+second clone, so later rows in the same statement mutate the fork in place.
 
-**Per row — MERGE's fan-out.** `MERGE` issues one `SET` clause per row
-(`executor/write.rs`), each with a single-row `ResultSet`, and
-`touched_columnar_types` is **local to each `execute_set` call**. So R rows pay
-R sweeps; and because each sweep returns the master's strong count to `1 + N`,
-the next row's `Arc::make_mut` deep-copies the whole `ColumnStore` again
-(`ColumnStore::clone` copies `Vec<TypedColumn>`, whose heap arm is a `Vec<T>`).
-The MERGE cost is therefore **O(R x (N + |store|))** — not the O(R x N) the
-backlog originally recorded. The store term is what makes wide types
-disproportionately expensive, and it is invisible in any cell that writes a
-single row.
+The cost profile that follows, and what each axis now measures:
 
-The root of both is that the node handle is an *owning* handle. The remedy
-being pursued is **not** a `Weak` handle — that was evaluated and rejected,
-because `Arc::make_mut` on the node's own handle is a load-bearing node-private
-copy-on-write fork (disk write staging in `storage/disk/graph.rs` and the
-`enable_columnar` drift check in `dir_graph/mod.rs` both depend on it), and a
-`Weak` cannot fork. The chosen design instead makes the **storage backend the
-sole owner** of the column stores: `PropertyStorage::Columnar` keeps only
-`row_id`, every read resolves through a `GraphRead` accessor, and with no node
-handle there is nothing to refresh — the sweep is deleted rather than made
-cheaper.
+* A one-row `SET` / `REMOVE` / `MERGE` against a 100k x 14-property saved type
+  costs ~1.2 ms, essentially all of it that one clone (59% of samples in
+  `_platform_memmove`, 2026-08-10 profile).
+* Adding rows is nearly free by comparison — 500 rows cost the one clone plus
+  500 rows of ordinary work.
+* `MERGE` no longer compounds. It still issues one `SET` clause per row, but
+  the *statement's* journal entry is shared across those clauses, so R rows pay
+  one clone rather than R. `merge[100000-50-saved]` fell 73.0 ms -> 1.27 ms.
+* Memory no longer grows with rows at all. The pre-Phase-3 node-private route
+  retained ~44-59 MB per row; the measured per-row growth is now **zero** on
+  every route (master, title, MERGE), which is why this file no longer carries
+  a memory-budget skip guard.
 
 ────────────────────────────────────────────────────────────────────────────
 How to read it
@@ -51,20 +50,25 @@ How to read it
 
 Two axes, and the interesting number is a **ratio**, never an absolute:
 
-* **Across the row count at one `size`.** Linear in rows is the floor — R rows
-  is R rows of work. Growing *faster* than linearly is the per-row compounding
-  above.
-* **Across `SIZES` at one row count.** This is the diagnostic axis. Writing R
-  rows should not care how many nodes the type already has. If the 100k column
-  is materially slower than the 1k column at the same R, the sweep is being
-  paid. The single-row `SET` cell isolates it best: at R = 1 there is one row of
-  real work and everything else on the clock is the sweep.
+* **Across the row count at one `size`.** Linear in rows is the ceiling now,
+  not the floor: the fixed per-statement clone is amortised over rows, so a
+  500-row cell should be *sub*-linear against its own R = 1 cell. Growth that
+  is faster than linear means a per-row term has come back.
+* **Across `SIZES` at one row count.** This is the diagnostic axis, and it is
+  the one still carrying cost. Writing R rows should not care how many nodes
+  the type already has; it does, because the pre-image clone copies the whole
+  store. The single-row `SET` cell isolates that term best — at R = 1 there is
+  one row of real work and everything else on the clock is the clone.
 
 The `SET` cells carry a third axis, `target`, and it is not cosmetic: writing a
 genuine store column (`c1`) and writing the promoted node **title** (`name`) are
-two different routes through the same node, and they differ by more than an
-order of magnitude on a saved graph. See `SET_TARGETS` and the cell's docstring.
-The `MERGE` cells write `name`, so they sit on the title route.
+two different routes through the same node — `write_column_master` versus the
+`GraphWrite::set_node_property` fallback. Before D1 Phase 3 they differed by
+more than an order of magnitude on a saved graph; they now converge, because
+both end at the same once-per-statement store fork. Keeping both cells is what
+makes that convergence visible rather than assumed. See `SET_TARGETS` and the
+cell's docstring. The `MERGE` cells write `name`, so they sit on the title
+route.
 
 `fresh` is the control, and doubles as the in-memory regression control the
 ownership program must not regress by more than 5%. It has no column stores at
@@ -112,14 +116,14 @@ SIZES = [1_000, 100_000]
 
 #: Rows merged by the single measured statement. 1 is the degenerate case the
 #: other files already cover, and is included so this file's own numbers can be
-#: compared against theirs; the rest is where the compounding shows.
+#: compared against theirs; the rest is where per-row compounding would show if
+#: it ever came back (it was there before D1 Phase 3 and is not there now).
 MERGE_ROWS = [1, 50, 500]
 
 #: Rows written by the single measured `SET` / `REMOVE` statement. R = 1 is the
-#: load-bearing cell: one clause, one row of real work, so everything else on
-#: the clock is the per-clause O(N_type) handle-refresh sweep. R = 500 shows
-#: whether the clause cost is amortised over rows (it should be — unlike MERGE,
-#: a multi-row `SET` is one clause and therefore one sweep).
+#: load-bearing cell: one statement, one row of real work, so everything else on
+#: the clock is the once-per-statement rollback pre-image clone of the whole
+#: store. R = 500 shows that the clone really is amortised over rows.
 WRITE_ROWS = [1, 500]
 
 #: `fresh` owns no column stores, so it cannot take the master-write path —
@@ -133,8 +137,9 @@ VARIANTS = ["fresh", "saved"]
 WRITE_VARIANTS = ["fresh", "saved", "reloaded"]
 
 #: Wide enough that `|store|` is a visible term rather than a rounding error.
-#: The fork copies every column, so a narrow type would show the sweep cost and
-#: hide the deep-copy cost — and the deep copy is the half the backlog missed.
+#: The pre-image clone copies every column, so a narrow type understates it:
+#: measured 2026-08-10 at N = 100k, a one-row `SET` costs 409 us against a
+#: 1-extra-column type and 866 us against this 12-column one.
 EXTRA_COLUMNS = 12
 
 ROUNDS = 5
@@ -152,53 +157,32 @@ WRITE_WARMUP_ROUNDS = 3
 #: inline-promoted `name`.
 REMOVE_PROP = "c0"
 
-#: Peak resident memory a single measured statement may be *predicted* to reach
-#: before the cell is skipped instead of run. This exists because the cost below
-#: is not only a latency cost: during the D1 Phase-0 capture (2026-08-09) the
-#: pre-existing `merge[100000-500-saved]` cell was SIGKILLed on a 17 GB machine.
-#: A killed process yields no baseline at all, so the guard converts an
-#: un-measurable cell into a named skip that states the predicted figure. It is
-#: a finding about the code under test, not a harness workaround — when the
-#: node-private fork goes away the prediction collapses and the skips clear
-#: themselves, which is the evidence Phase 4 should look for.
-MEMORY_BUDGET_BYTES = 6 * 1024**3
-
-#: Whole-store copies a *node-private* write retains per row. Measured
-#: 2026-08-09 at `size=100_000` (store 25.7 MB, peak RSS via `ru_maxrss`):
-#: `MERGE … ON MATCH SET n.name` peaked at ~44 MB/row and a bare `SET n.name`
-#: at ~59 MB/row, i.e. 1.7x-2.3x the store per row. 2.5 is the conservative
-#: bound the guard predicts with. Writes that take the *master* path
-#: (`SET n.c1`, `REMOVE n.c0`) showed no per-row growth at all — 500 rows cost
-#: the same peak RSS as 1 — so they are not guarded.
-NODE_PRIVATE_STORE_COPIES_PER_ROW = 2.5
-
-
-def _skip_if_predicted_to_exhaust_memory(graph: KnowledgeGraph, rows: int, *, node_private: bool) -> None:
-    """Skip, loudly, a cell whose single statement would not fit in RAM.
-
-    Only the node-private route grows with `rows`; a master-path write does not,
-    so passing `node_private=False` is a no-op rather than a smaller budget.
-    """
-    if not node_private:
-        return
-    store_bytes = graph.graph_info().get("columnar_heap_bytes") or 0
-    predicted = rows * NODE_PRIVATE_STORE_COPIES_PER_ROW * store_bytes
-    if predicted > MEMORY_BUDGET_BYTES:
-        pytest.skip(
-            f"predicted peak ~{predicted / 1024**3:.1f} GiB > {MEMORY_BUDGET_BYTES / 1024**3:.0f} GiB budget: "
-            f"{rows} rows x ~{NODE_PRIVATE_STORE_COPIES_PER_ROW} node-private copies of a "
-            f"{store_bytes / 1024**2:.1f} MiB store. This cell is unmeasurable, not fast."
-        )
+#: There is deliberately **no memory-budget skip guard** here any more.
+#:
+#: D1 Phase 0 (2026-08-09) added one, because the node-private write route
+#: retained ~44-59 MB of peak RSS *per row* and `merge[100000-500-saved]` was
+#: SIGKILLed on a 17 GB machine — three cells skipped behind a predicted-peak
+#: budget. Phase 4 (2026-08-10) re-measured every one of them with `ru_maxrss`
+#: after the ownership change: **zero** per-row growth on all three, and on the
+#: master and title routes besides. `merge[100000-500-saved]`, predicted at
+#: ~34 GiB, completes in ~2 ms with no measurable RSS delta.
+#:
+#: The guard was a *static* prediction (`rows x 2.5 x store_bytes`), so it could
+#: not clear itself when the mechanism it predicted was deleted — it would have
+#: gone on hiding three now-cheap cells indefinitely. Deleting it is the
+#: rebaseline. If a future change reintroduces per-row store retention, these
+#: cells are the ones that will show it, which is why they must run.
 
 
 #: Where a `SET` lands, and the reason the SET cell has this extra axis:
-#: `add_nodes(..., "id", "name")` promotes `name` to the node **title**, which
-#: on a columnar node is *not* in the column store. Writing it therefore takes
-#: `PropertyStorage::insert` → `Arc::make_mut` on the node's own handle (a
-#: node-private deep copy of the store, per row), while writing `c1` takes the
-#: master-write path the sweep belongs to. Conflating the two would attribute
-#: one path's cost to the other. Note the existing MERGE cells below write
-#: `name`, i.e. they sit on the `title` route.
+#: `add_nodes(..., "id", "name")` promotes `name` to the node **title**, so a
+#: `SET n.name` writes the inline title field *and* the `name` store column via
+#: the `GraphWrite::set_node_property` fallback, while `SET n.c1` goes through
+#: `write_column_master`. Two routes, two pre-image capture sites
+#: (`storage/impls.rs::capture_property_pre_image` and
+#: `columnar_write.rs::write_column_master`) — measured separately so a
+#: regression in one is not hidden by the other. Note the MERGE cells below
+#: write `name`, i.e. they sit on the `title` route.
 SET_TARGETS = {"column": "c1", "title": "name"}
 
 
@@ -256,19 +240,16 @@ def test_bench_merge_rows_into_columnar_type(benchmark, merge_graphs, size, rows
     existing nodes.
 
     The cell the sprint's Phase 0 found missing. Read it two ways — across
-    `rows` at fixed `size` (linear is the floor), and across `size` at fixed
-    `rows` (flat is correct; growth is the per-row fork and sweep).
+    `rows` at fixed `size` (sub-linear is correct now that one statement pays
+    one store clone; growth faster than linear means a per-row term is back),
+    and across `size` at fixed `rows` (growth here is the pre-image clone, and
+    is the term D1 left on the table).
 
     Every merged row is a genuine ON MATCH: the ids are drawn from the rows the
     fixture already created, so the statement never inserts and the number is
     the update path rather than a mix of insert and update.
     """
     graph = merge_graphs[(size, variant)]
-
-    # `ON MATCH SET n.name` writes the promoted title, i.e. the node-private
-    # route — see SET_TARGETS. That is what makes this cell's memory grow with
-    # `rows`, and what makes the 100k x 500 corner unrunnable today.
-    _skip_if_predicted_to_exhaust_memory(graph, rows, node_private=variant != "fresh")
 
     # ON MATCH, not ON CREATE — ids in [0, rows) already exist in every fixture
     # (all SIZES are >= max(MERGE_ROWS)). Merging new ids would measure inserts
@@ -302,15 +283,16 @@ def test_bench_set_rows_on_columnar_type(benchmark, merge_graphs, size, rows, ta
     routes through the same node:
 
     * `column` writes `c1`, a genuine store column, so it takes the master-write
-      path (`set_via_column_master`) once per row and the O(N_type)
-      handle-refresh sweep once per clause.
-    * `title` writes `name`, which `add_nodes` promoted to the node title and is
-      therefore **not** in the store. On a columnar node that write goes through
-      `PropertyStorage::insert`, i.e. `Arc::make_mut` on the node's *own* handle
-      — a node-private deep copy of the whole store, **per row**.
+      path (`set_via_column_master` -> `write_column_master`), which journals the
+      pre-image itself.
+    * `title` writes `name`, which `add_nodes` promoted to the node title, so it
+      writes the inline title field *and* the `name` column through the
+      `GraphWrite::set_node_property` fallback, whose pre-image is journalled by
+      `capture_property_pre_image`.
 
-    Measuring only one of them would misreport the program by a large factor in
-    either direction, so both are here and each cell says which it is.
+    Two routes, two journalling sites, one shared consequence — the first write
+    of the statement forks the whole store. Measuring only one of them would let
+    a regression in the other hide; before D1 Phase 3 they differed by 30x.
 
     `fresh` is the before-save arm and the in-memory regression control;
     `saved` and `reloaded` are the two after-save arms. Read `saved / fresh` and
@@ -318,7 +300,6 @@ def test_bench_set_rows_on_columnar_type(benchmark, merge_graphs, size, rows, ta
     graph-size term is not there, and would falsify the program's premise.
     """
     graph = merge_graphs[(size, variant)]
-    _skip_if_predicted_to_exhaust_memory(graph, rows, node_private=target == "title" and variant != "fresh")
 
     ids = list(range(rows))
     prop = SET_TARGETS[target]
@@ -350,9 +331,9 @@ def test_bench_set_rows_on_columnar_type(benchmark, merge_graphs, size, rows, ta
 def test_bench_remove_rows_on_columnar_type(benchmark, merge_graphs, size, rows, variant):
     """One `REMOVE` clause covering `rows` rows, against a type with `size` nodes.
 
-    `REMOVE` is the second caller of the sweep (`execute_remove`), and its
-    master-side write is a different one — a `Null` store on the master rather
-    than a value write — so it is measured rather than inferred from `SET`.
+    `execute_remove` is the second columnar write path, and its master-side
+    write is a different one — a `Null` into the store rather than a value —
+    so it is measured rather than inferred from `SET`.
 
     Each round is preceded by an **untimed** `setup` that puts the property
     back. Without it every round after the first would be removing an absent
