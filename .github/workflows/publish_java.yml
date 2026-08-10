@@ -1,0 +1,261 @@
+name: Build and Publish Java Artifact
+
+# Triggered by the release tag, not by the push to `main` that drives
+# build_wheels.yml. The wheel workflow decides for itself whether a version is
+# new by asking PyPI; Maven Central has no equivalent probe that is cheap and
+# unambiguous, and the release flow already pushes `vX.Y.Z` at exactly the
+# moment the version is final. The tag is therefore the signal, and the
+# tag-vs-Cargo.toml check below is what keeps it honest.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Deploy to Central even if JAVA_CENTRAL_PUBLISH_ENABLED is unset (needed for the first publication)'
+        type: boolean
+        default: false
+      auto_release:
+        description: 'Release the Central deployment automatically. Turn OFF for the first publication, which must be approved by hand in the portal.'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Four natives, one per bundled platform. `darwin-x86_64` is deliberately
+  # absent: there is no Intel macOS runner here, and a cross-build nothing ever
+  # executes is a worse answer than the loader's error naming
+  # -Dkglite.native.path. NativeLibrary.BUNDLED_PLATFORMS carries the same list
+  # and the Java tests assert the two agree.
+  #
+  # Linux builds on 22.04, not `ubuntu-latest`. A JAR carries no platform tag,
+  # so unlike a wheel there is no install-time compatibility check: a native
+  # linked against a newer glibc than the deployment has fails at
+  # SymbolLookup.libraryLookup with a link error, at runtime, in the user's
+  # application. 22.04 puts the floor at glibc 2.35 (Ubuntu 22.04+, RHEL 9+,
+  # Debian 12+); 24.04 would raise it to 2.39 and silently break every LTS
+  # deployment older than a year. Same concern build_wheels.yml solves with
+  # manylinux containers, which are not usable as job containers here because
+  # the manylinux2014 image predates the glibc the runner's node actions need.
+  build-native:
+    name: Build native - ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-aarch64
+            runner: macos-14
+            library: libkglite_c.dylib
+          - platform: linux-x86_64
+            runner: ubuntu-22.04
+            library: libkglite_c.so
+          - platform: linux-aarch64
+            runner: ubuntu-22.04-arm
+            library: libkglite_c.so
+          - platform: windows-x86_64
+            runner: windows-latest
+            library: kglite_c.dll
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: java-native-${{ matrix.platform }}
+      - name: Build the C ABI library
+        # Default features on purpose: this is the same build the ABI contract
+        # test validates against kglite.h, so what ships is what the contract
+        # describes.
+        run: cargo build -p kglite-c --release
+      - name: Stage the native under its platform name
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "natives/${{ matrix.platform }}"
+          cp "target/release/${{ matrix.library }}" "natives/${{ matrix.platform }}/${{ matrix.library }}"
+          ls -l "natives/${{ matrix.platform }}"
+      - name: Upload the native as an artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: java-native-${{ matrix.platform }}
+          path: natives/${{ matrix.platform }}/${{ matrix.library }}
+          # `error`, not the default `warn`: a build that exits 0 without
+          # producing a library would otherwise upload nothing, stay green, and
+          # the assemble job would ship a JAR with a platform silently missing.
+          if-no-files-found: error
+
+  # No `timeout-minutes`: the last steps of this job deploy to a registry, and
+  # killing a Central deployment part-way leaves a half-uploaded bundle that has
+  # to be dropped by hand in the portal. build_wheels.yml's publish job omits
+  # its timeout for the same reason — a job that runs long is the cheaper
+  # failure.
+  assemble:
+    name: Assemble, verify and publish
+    needs: [build-native]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Check the tag matches the workspace version
+        if: startsWith(github.ref, 'refs/tags/v')
+        # The version in the JAR comes from [workspace.package] in Cargo.toml,
+        # not from the tag. Publishing v0.15.9 from a tree that still says
+        # 0.15.8 would produce a Central release under the wrong coordinate and
+        # a tag pointing at something else — both permanent, neither loud.
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -m 1 '^version' Cargo.toml | cut -d '"' -f 2)
+          # The pipeline reports cut's status, which is always 0, so a grep
+          # matching nothing yields an empty VERSION and every comparison below
+          # becomes meaningless. Assert it looks like a version first.
+          if ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+[.][0-9]+[.][0-9]+'; then
+            echo "::error::could not read a version from Cargo.toml (got '$VERSION')"
+            exit 1
+          fi
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $VERSION"
+            exit 1
+          fi
+          echo "publishing io.github.kkollsga:kglite:$VERSION"
+
+      - name: Set up JDK 26
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '26'
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          # Pinned, and no wrapper in the repo: kglite-java is built by whatever
+          # Gradle the developer has, so CI naming a version is the only place
+          # the build's Gradle is written down.
+          gradle-version: '9.7'
+
+      - name: Download every platform's native
+        uses: actions/download-artifact@v6
+        with:
+          pattern: java-native-*
+          path: downloaded-natives
+
+      - name: Stage natives/ for packaging
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          staged=0
+          for dir in downloaded-natives/java-native-*; do
+            platform="${dir#downloaded-natives/java-native-}"
+            mkdir -p "kglite-java/natives/$platform"
+            cp "$dir"/* "kglite-java/natives/$platform/"
+            staged=$((staged + 1))
+          done
+          # An empty loop over a missing download would leave natives/ empty and
+          # hand the whole decision to the gradle step; say it here instead.
+          if [ "$staged" -eq 0 ]; then
+            echo "::error::no java-native-* artifacts were downloaded"
+            exit 1
+          fi
+          find kglite-java/natives -type f -exec ls -l {} +
+
+      - name: Build and test against the bundled natives
+        # This job never runs cargo, so there is no target/ directory for
+        # NativeLibrary's workspace tier to find: every engine-touching test
+        # here resolves through classpath-resource extraction, which is the tier
+        # a consumer of the published JAR uses and the only one CI can prove end
+        # to end. -PrequireAllNatives turns a missing platform from a warning
+        # into a failure, here and nowhere else.
+        run: gradle -p kglite-java build -PrequireAllNatives=true
+
+      - name: Confirm the JAR carries every platform
+        # The gradle check reads the staging directory; this reads the artifact
+        # that actually ships. A packaging change that dropped the resources
+        # from the jar task would pass the first and fail here.
+        run: |
+          set -euo pipefail
+          jar=$(ls kglite-java/build/libs/kglite-*.jar | grep -Ev -- '-(sources|javadoc)[.]jar$')
+          echo "inspecting $jar"
+          for platform in darwin-aarch64 linux-aarch64 linux-x86_64 windows-x86_64; do
+            if ! unzip -l "$jar" | grep -q "natives/$platform/"; then
+              echo "::error::$jar carries no native for $platform"
+              exit 1
+            fi
+            echo "  ok: $platform"
+          done
+          unzip -l "$jar" | grep -E 'natives/|META-INF/LICENSE'
+
+      - name: Upload the built jars
+        uses: actions/upload-artifact@v7
+        with:
+          name: java-jars
+          path: kglite-java/build/libs/*.jar
+          # `error`: a green run whose only output is an empty artifact is how a
+          # release ships nothing while reporting success.
+          if-no-files-found: error
+
+      # --- publication ----------------------------------------------------
+      #
+      # Gated on the repository variable JAVA_CENTRAL_PUBLISH_ENABLED, because
+      # the Central Portal requires the FIRST deployment under a namespace to be
+      # approved by hand in its UI. Until that has happened an automatic upload
+      # on every tag piles up deployments nobody releases, so the gate stays
+      # closed and a tag push still produces (and uploads) a verified JAR.
+      #
+      # Bootstrap, once:
+      #   1. Run this workflow via workflow_dispatch with publish=true and
+      #      auto_release=false. It uploads a validated deployment.
+      #   2. Approve it at https://central.sonatype.com/publishing.
+      #   3. gh variable set JAVA_CENTRAL_PUBLISH_ENABLED --body true
+      # Every later tag then publishes without intervention.
+      #
+      # A repository *variable*, not a secret: the value is not sensitive, and
+      # it renders in the run log, so "why did this not publish?" is answerable
+      # from the run itself instead of from someone's memory.
+      - name: Verify the deployment preconditions
+        if: vars.JAVA_CENTRAL_PUBLISH_ENABLED == 'true' || inputs.publish
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_PASSPHRASE }}
+        # Signing key, credentials and a non-SNAPSHOT version, checked before
+        # anything is uploaded. Central rejects an unsigned or incomplete
+        # deployment only after receiving it, and the repair is manual.
+        run: gradle -p kglite-java verifyPublishable -PrequireAllNatives=true
+
+      - name: Publish to Maven Central
+        if: vars.JAVA_CENTRAL_PUBLISH_ENABLED == 'true' || inputs.publish
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_PASSPHRASE }}
+          # publishToMavenCentral uploads and stops, leaving the deployment for
+          # a human to release in the portal; publishAndReleaseToMavenCentral
+          # does both. The explicit github.event_name term matters: on a tag
+          # push `inputs` is null, and GitHub compares null to false as 0 == 0,
+          # so a bare `inputs.auto_release == false` would silently take the
+          # manual path on every release.
+          PUBLISH_TASK: >-
+            ${{ (github.event_name == 'workflow_dispatch' && inputs.auto_release == false)
+            && 'publishToMavenCentral' || 'publishAndReleaseToMavenCentral' }}
+        run: |
+          set -euo pipefail
+          echo "running $PUBLISH_TASK"
+          gradle -p kglite-java "$PUBLISH_TASK" -PrequireAllNatives=true
+
+      - name: Report why publication was skipped
+        if: ${{ !(vars.JAVA_CENTRAL_PUBLISH_ENABLED == 'true' || inputs.publish) }}
+        # A skipped step shows as a grey tick and explains nothing. The JAR was
+        # still built, tested and uploaded above, so the run is genuinely green;
+        # what a reader needs is the one sentence saying it went nowhere.
+        run: |
+          echo "::notice::JAR built and verified but NOT deployed."
+          echo "JAVA_CENTRAL_PUBLISH_ENABLED is not 'true' and this run did not set publish=true."
+          echo "See the bootstrap comment in .github/workflows/publish_java.yml."

@@ -1547,3 +1547,260 @@ def test_helper_continue_on_error_scan_and_allowlist_can_fail(tmp_path: Path) ->
     # Comments and blank lines are not entries; real entries are.
     assert _parse_allowlist("# just a comment\n\n  a.yml:job  # trailing\n") == {"a.yml:job"}
     assert _parse_allowlist("# only comments\n") == set()
+
+
+# --- the Java artifact's publish workflow -----------------------------------
+#
+# `publish_java.yml` is not in `PUBLISHING_WORKFLOWS`. Those tests all reach for
+# a `version-check` job that probes the registry and drives a `should_publish`
+# output; the Java workflow is tag-triggered and has no such job, so
+# parametrizing it in would fail on a shape it deliberately does not have.
+# Its own silent failure modes are different, and are guarded here.
+#
+# What is *already* covered generically, by whole-directory globs, and must not
+# be duplicated: unescaped backticks in `run:` scripts, and job-level
+# `continue-on-error`.
+
+JAVA_PATH = WORKFLOWS / "publish_java.yml"
+JAVA = _load_workflow(JAVA_PATH)
+
+#: The gate expression every publication step must carry, in both directions:
+#: the repository variable that says the namespace's first deployment has been
+#: approved, or an explicit dispatch-time override.
+JAVA_PUBLISH_GATE = "vars.JAVA_CENTRAL_PUBLISH_ENABLED == 'true' || inputs.publish"
+
+#: Source of truth for the platforms the JAR promises to carry.
+NATIVE_LIBRARY_JAVA = (
+    REPO_ROOT / "kglite-java/src/main/java/io/github/kkollsga/kglite/NativeLibrary.java"
+)
+
+
+def _java_job(name: str) -> _Job:
+    return _job(JAVA, "publish_java.yml", name)
+
+
+def _bundled_platforms_declared_in_java() -> set[str]:
+    """`NativeLibrary.BUNDLED_PLATFORMS`, read out of the Java source.
+
+    Read rather than restated: a list written down twice is a list that drifts,
+    and the direction it drifts in here is silent — the loader tells a user
+    their platform is bundled and the JAR does not carry it.
+    """
+    source = NATIVE_LIBRARY_JAVA.read_text(encoding="utf-8")
+    body = re.search(r"BUNDLED_PLATFORMS\s*=\s*Set\.of\(([^;]*)\);", source, re.DOTALL)
+    assert body, f"could not find BUNDLED_PLATFORMS in {NATIVE_LIBRARY_JAVA} — the scan is broken"
+    platforms = set(re.findall(r'"([^"]+)"', body.group(1)))
+    assert platforms, "BUNDLED_PLATFORMS parsed as empty — the scan is broken"
+    return platforms
+
+
+def _step_text(step: dict) -> str:
+    """A step's commands *and* its ``env:`` values, as one searchable string.
+
+    The gradle task this workflow deploys with depends on the trigger, so it is
+    carried in an ``env:`` value rather than written into the ``run:`` script. A
+    scan that read commands alone would find no publishing step at all and
+    report the workflow clean.
+    """
+    env = " ".join(f"{name}={value}" for name, value in (step.get("env") or {}).items())
+    return "\n".join([*_step_commands(step), env])
+
+
+def test_java_matrix_builds_exactly_the_platforms_the_loader_promises() -> None:
+    """The build matrix and `NativeLibrary.BUNDLED_PLATFORMS` must agree.
+
+    A platform in the Java list but not the matrix ships a JAR whose loader
+    looks for a resource nobody built: the consumer gets "no native library
+    found" naming a platform we told them was bundled. The reverse builds and
+    uploads a native the loader will never look for — dead weight nothing
+    reports.
+    """
+    build = _java_job("build-native")
+    legs = ((build.get("strategy") or {}).get("matrix") or {}).get("include") or []
+    assert legs, "build-native declares no matrix legs — the scan is broken"
+
+    matrix_platforms = {leg["platform"] for leg in legs}
+    assert matrix_platforms == _bundled_platforms_declared_in_java(), (
+        "publish_java.yml's build matrix and NativeLibrary.BUNDLED_PLATFORMS disagree: "
+        f"matrix={sorted(matrix_platforms)}"
+    )
+
+    # Each leg's library file name has to match what the loader computes for
+    # that platform, or the resource lands under a name nothing reads.
+    expected = {"darwin": "libkglite_c.dylib", "linux": "libkglite_c.so", "windows": "kglite_c.dll"}
+    for leg in legs:
+        os_part = leg["platform"].split("-", 1)[0]
+        assert leg["library"] == expected[os_part], (
+            f"{leg['platform']} stages {leg['library']}, but the loader looks for {expected[os_part]}"
+        )
+
+    # And the step that inspects the built JAR must name every one of them, or
+    # a platform can go missing from the artifact while the run stays green.
+    inspected = "\n".join(_command_lines(_java_job("assemble")))
+    for platform in matrix_platforms:
+        assert re.search(rf"(?<![\w-]){re.escape(platform)}(?![\w-])", inspected), (
+            f"the assemble job never checks the built JAR for {platform}"
+        )
+
+
+def test_java_linux_natives_keep_a_conservative_glibc_floor() -> None:
+    """Linux natives must not be built on the newest runner image.
+
+    A JAR carries no platform tag, so there is no install-time compatibility
+    check the way a wheel has one: a native linked against a newer glibc than
+    the deployment provides fails inside `libraryLookup`, at runtime, in the
+    user's application. `ubuntu-latest` follows the newest image and would
+    silently raise that floor on a routine GitHub rollout, with nothing in this
+    repository changing.
+    """
+    legs = ((_java_job("build-native").get("strategy") or {}).get("matrix") or {}).get("include") or []
+    linux = [leg for leg in legs if leg["platform"].startswith("linux-")]
+    assert linux, "no linux legs found — the scan is broken"
+    for leg in linux:
+        runner = leg["runner"]
+        assert runner.startswith("ubuntu-22.04"), (
+            f"{leg['platform']} builds on {runner}; pin an explicit older image so the glibc "
+            "floor is a decision recorded here rather than whatever ubuntu-latest points at"
+        )
+
+
+def test_java_publication_is_gated_and_preconditions_run_first() -> None:
+    """Every Central-deploying step carries the gate, and never runs unverified.
+
+    Two silent shapes. A publish step whose `if:` drifted from the gate would
+    upload on every tag, including before the portal has approved the
+    namespace's first deployment — those pile up and nobody is told. And a
+    publish that outran `verifyPublishable` would discover a missing signing key
+    *after* the bundle is uploaded, which is the case that costs a manual repair.
+    """
+    steps = _steps(_java_job("assemble"))
+    # The deploying task name arrives through an `env:` value (it depends on
+    # the trigger), so a scan that read `run:` alone would find nothing and
+    # report clean — the empty-scan guard below is what catches that.
+    deploying = [step for step in steps if "MavenCentral" in _step_text(step)]
+    assert deploying, "no Central-deploying step found in publish_java.yml — the scan is broken"
+
+    verify = [step for step in steps if any("verifyPublishable" in line for line in _step_commands(step))]
+    assert len(verify) == 1, f"expected exactly 1 verifyPublishable step, found {len(verify)}"
+    assert verify[0] not in deploying, "the scan cannot tell verification from deployment"
+
+    for step in deploying + verify:
+        assert JAVA_PUBLISH_GATE in str(step.get("if", "")), (
+            f"step {step.get('name')!r} runs under a different condition than "
+            f"`{JAVA_PUBLISH_GATE}`; the verification and the deployment can then diverge and a "
+            "bundle can go out unverified"
+        )
+
+    assert steps.index(verify[0]) < min(steps.index(step) for step in deploying), (
+        "verifyPublishable must run before anything is uploaded to Central"
+    )
+
+    # Both the verification and the deployment need the credentials and the
+    # key; a step missing one of them fails after the work, not before it.
+    for step in deploying + verify:
+        env = step.get("env") or {}
+        for name in (
+            "ORG_GRADLE_PROJECT_mavenCentralUsername",
+            "ORG_GRADLE_PROJECT_mavenCentralPassword",
+            "ORG_GRADLE_PROJECT_signingInMemoryKey",
+            "ORG_GRADLE_PROJECT_signingInMemoryKeyPassword",
+        ):
+            assert name in env, f"step {step.get('name')!r} does not receive {name}"
+
+
+def test_java_release_path_requires_a_complete_native_set() -> None:
+    """`-PrequireAllNatives=true` must be on every gradle command that ships.
+
+    Without it an absent platform is a build *warning*, which is the right
+    default for a developer machine and exactly the wrong one for a release:
+    the JAR publishes, the run is green, and the platform is discovered missing
+    by whoever tries to load it. This flag is the compensating check that makes
+    that case red.
+    """
+    gradle_lines = [
+        line for line in _command_lines(_java_job("assemble")) if line.startswith("gradle ")
+    ]
+    assert gradle_lines, "the assemble job runs no gradle command — the scan is broken"
+    for line in gradle_lines:
+        assert "-PrequireAllNatives=true" in _tokens(line), (
+            f"gradle command ships without a complete-natives gate: {line}"
+        )
+
+
+def test_java_tag_and_workspace_version_cannot_disagree() -> None:
+    """The tag-triggered run must assert the tag matches Cargo.toml.
+
+    The artifact's version comes from `[workspace.package]`, not from the tag.
+    A tag pushed against a tree that was never bumped would publish the
+    *previous* version's coordinate to Central — permanent, and invisible until
+    someone compares the two. Same `grep … | cut` trap as the wheel workflows'
+    version probe: the pipeline reports cut's status, so an empty read has to be
+    rejected before it is compared.
+    """
+    assemble = _java_job("assemble")
+    guards = [
+        step
+        for step in _steps(assemble)
+        if any("GITHUB_REF_NAME" in line for line in _step_commands(step))
+    ]
+    assert len(guards) == 1, f"expected exactly 1 tag/version guard, found {len(guards)}"
+    commands = _step_commands(guards[0])
+    joined = "\n".join(commands)
+    assert SEMVER_GUARD in joined, "the tag guard compares a version it never validated"
+    compared = [line for line in commands if "$VERSION" in line and "$TAG_VERSION" in line and "!=" in line]
+    assert compared, f"the guard never compares the tag to the workspace version:\n{joined}"
+    # Two failure branches — an unreadable version and a mismatched one — so two
+    # non-zero exits. A single `exit 1` shared by both is how the mismatch
+    # branch came to only *print* while the run carried on and published.
+    assert commands.count("exit 1") >= 2, (
+        f"the tag guard has {commands.count('exit 1')} non-zero exits; both the unreadable-version "
+        f"and the mismatched-tag branches must abort:\n{joined}"
+    )
+    assert "startsWith(github.ref, 'refs/tags/v')" in str(guards[0].get("if", "")), (
+        "the tag guard must be scoped to tag runs, or workflow_dispatch can never run"
+    )
+
+
+def test_java_artifact_uploads_cannot_be_empty() -> None:
+    """Every upload in the Java workflow must fail on an empty result.
+
+    The default `warn` produces the worst combination available: a green job, an
+    artifact that exists, and nothing in it. Downstream the assemble job would
+    then stage an empty directory for a platform.
+    """
+    uploads = _upload_steps(JAVA)
+    assert uploads, "publish_java.yml uploads nothing — the scan is broken"
+    for job_name, step in uploads:
+        assert (step.get("with") or {}).get("if-no-files-found") == "error", (
+            f"publish_java.yml `{job_name}` uploads without `if-no-files-found: error`"
+        )
+
+
+def test_helper_java_platform_derivations_can_fail(tmp_path: Path) -> None:
+    # The two derivations above are only trustworthy if an empty or malformed
+    # source is a failure rather than a clean pass.
+    global NATIVE_LIBRARY_JAVA
+    original = NATIVE_LIBRARY_JAVA
+    try:
+        NATIVE_LIBRARY_JAVA = tmp_path / "NativeLibrary.java"
+        NATIVE_LIBRARY_JAVA.write_text("class NativeLibrary {}\n", encoding="utf-8")
+        with pytest.raises(AssertionError, match="the scan is broken"):
+            _bundled_platforms_declared_in_java()
+
+        NATIVE_LIBRARY_JAVA.write_text(
+            "static final Set<String> BUNDLED_PLATFORMS = Set.of();\n", encoding="utf-8"
+        )
+        with pytest.raises(AssertionError, match="parsed as empty"):
+            _bundled_platforms_declared_in_java()
+
+        NATIVE_LIBRARY_JAVA.write_text(
+            'static final Set<String> BUNDLED_PLATFORMS =\n Set.of("a-b", "c-d");\n', encoding="utf-8"
+        )
+        assert _bundled_platforms_declared_in_java() == {"a-b", "c-d"}
+    finally:
+        NATIVE_LIBRARY_JAVA = original
+
+    # `_step_text` must see an env-only mention, which is the whole reason it
+    # exists — a commands-only reader reports the publish scan clean.
+    assert "MavenCentral" in _step_text({"run": "gradle $TASK", "env": {"TASK": "publishToMavenCentral"}})
+    assert "MavenCentral" not in _step_text({"run": "gradle build"})
