@@ -131,11 +131,28 @@ path the tooling writes outside git must have a bound and an owner: `target/`
 (`.bench-current.json`, `docs/_build`, `.mypy_cache`, `.ruff_cache`,
 `.pytest_cache`, `.uv-cache`, stale ABI-variant extensions, `.DS_Store`) →
 `make prune-dev` (wired into the release skill); sccache → its 30 GiB config
-cap; `dev-docs/` and `inbox/` → their skills. Never add a new file-writing
-step (bench capture, fixture dump, scratch graph) without pointing it at the
-session scratchpad / `tmp_path`, or adding it to `prune-dev` in the same
-change. `.hypothesis/` is deliberately exempt — it is the found-counterexample
+cap; `dev-docs/` and `inbox/` → their skills; `../KGLite-worktrees/` → the
+release flow (next paragraph). Never add a new file-writing step (bench
+capture, fixture dump, scratch graph) without pointing it at the session
+scratchpad / `tmp_path`, or adding it to `prune-dev` in the same change.
+`.hypothesis/` is deliberately exempt — it is the found-counterexample
 regression corpus, not a cache.
+
+**Agent worktrees live in `KGLite-worktrees/<name>` — never loose in the
+parent folder.** An agent that needs an isolated tree creates it as
+`git worktree add ../KGLite-worktrees/<name> <branch>`: a sibling *directory*
+of the repo, holding all of them, not a scattered `../KGLite-<name>` beside
+the real projects in `Rust/`. `KGLite-worktrees/` exists **only while
+worktrees are in progress**, and the release flow empties it — for each
+worktree, the outstanding actions are migrated into `dev-docs/todos.md`
+(branch name, state, what remains), then `git worktree remove` + `git worktree
+prune`; the empty `KGLite-worktrees/` directory is deleted at the end. **A
+worktree with uncommitted work is never removed without its `git diff` saved
+under `dev-docs/` first and a `todos.md` entry pointing at it.** Note that a
+fresh worktree does **not** inherit `target` — that is a symlink to
+`/Users/Shared/cargo-targets/KGLite` in this repo (see "Build the smallest
+touched surface"), and a worktree missing it cold-builds onto the external USB
+volume. Recreate the symlink before the first build in any new worktree.
 
 **Local correctness testing stays in the default/debug profile.** Never run
 `maturin develop --release`, `cargo test --release`, or another release-profile
