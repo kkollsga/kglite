@@ -158,7 +158,10 @@ gate` plus the smallest test command that exercises the changed behavior (for
 example `make test-mcp` or a single `cargo test -p … <filter>`). Do not run
 workspace-wide policy audits, clippy, `test-full`, stubtest,
 packaged-consumer verification, or a fresh native extension unless the touched
-surface specifically requires it. GitHub CI is the authoritative full matrix
+surface specifically requires it — or you are running a multi-phase program's
+completion union, where the full pytest run, the parity/differential corpora,
+and workspace clippy run once ("Testing discipline"). GitHub CI is the
+authoritative full matrix
 and must be green before release. `make lint-policy` is only for changes to
 policy scripts/baselines, dependencies, or Cypher clean-room sources; neither
 it nor `make lint-full` is a per-phase requirement. Both `cargo fmt --check`
@@ -209,12 +212,10 @@ never routinely:**
   release-time/explicit maintenance operation, not a routine phase gate. Pins
   live in `tests/api-baselines/rust-api-profiles.json`.
 - Perf-sensitive paths (`core/pattern_matching/`, `cypher/executor/`, storage
-  hot paths) → `make bench-check` **under whatever load the machine has** —
+  hot paths) → `make bench-check`, **under whatever load the machine has** —
   don't wait for an idle machine and don't defer the check because a build is
-  running. A capture taken right after heavy builds reads +4–10% hot across the
-  board, and that is precisely what the unchanged-path control cells measure:
-  read the verdict against its controls, take two agreeing runs, and retake once
-  when a verdict lands near its threshold.
+  running. Read the verdict the way "Performance protocol" items 8–9 require:
+  against its control cells, two agreeing runs, one retake near a threshold.
 - Run `scripts/check_packaged_features.sh` locally only after changing package
   metadata, feature wiring, or the packaged-consumer fixture. Never run local
   `cargo package` verify sweeps across the workspace; CI + `cargo publish`
