@@ -144,7 +144,7 @@ jobs:
           # Pinned, and no wrapper in the repo: kglite-java is built by whatever
           # Gradle the developer has, so CI naming a version is the only place
           # the build's Gradle is written down.
-          gradle-version: '9.7'
+          gradle-version: '9.7.0'
 
       - name: Download every platform's native
         uses: actions/download-artifact@v6
