@@ -50,6 +50,10 @@ impl DirGraph {
             .map(|(k, v)| (k, Arc::clone(v)))
             .collect();
 
+        // A forked backend has no single `StableDiGraph` to hand over, so
+        // collapse it first. Free when the reader has already dropped.
+        self.graph.flatten_fork();
+
         // Extract the StableDiGraph and build DiskGraph
         let disk_graph = match &mut self.graph {
             GraphBackend::Memory(g) => {
@@ -64,6 +68,7 @@ impl DirGraph {
                     &data_dir,
                 )
             }
+            GraphBackend::Forked(_) => unreachable!("flatten_fork collapsed the overlay above"),
             GraphBackend::Disk(_) => return Err("Already in disk mode".to_string()),
             GraphBackend::Recording(_) => {
                 return Err(

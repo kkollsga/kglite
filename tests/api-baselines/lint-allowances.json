@@ -401,10 +401,6 @@
       "classification": "api-shape"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/backend.rs::fn:new:pub fn new() -> Self::clippy::large_enum_variant",
-      "classification": "transitional"
-    },
-    {
       "identity": "crates/kglite/src/graph/storage/backend.rs::fn:new:pub fn new() -> Self::clippy::new_without_default",
       "classification": "api-shape"
     },

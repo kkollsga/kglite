@@ -205,6 +205,20 @@ impl<'a> EdgeRef for GraphEdgeRef<'a> {
 pub enum GraphNodeIndices<'a> {
     InMemory(petgraph::stable_graph::NodeIndices<'a, NodeData, u32>),
     Disk(DiskNodeIndices<'a>),
+    /// A `GraphBackend::Forked` overlay: the shared base's live indices,
+    /// followed by the contiguous run this writer appended past the base's
+    /// bound.
+    ///
+    /// Concatenation rather than a merge is sound *because* the fork is
+    /// conditional: `forked::can_fork` only shares a base whose free lists are
+    /// empty, so every appended index is above every base index and the
+    /// concatenation is globally ascending. Scan order — which `type_indices`
+    /// bucket order and the rollback fidelity fingerprints both pin — is
+    /// therefore identical to the unforked graph's.
+    Forked {
+        base: Box<petgraph::stable_graph::NodeIndices<'a, NodeData, u32>>,
+        appended: std::ops::Range<usize>,
+    },
 }
 
 /// Iterates alive node slots in the DiskGraph's mmap'd node_slots array.
@@ -247,6 +261,9 @@ impl<'a> Iterator for GraphNodeIndices<'a> {
         match self {
             GraphNodeIndices::InMemory(iter) => iter.next(),
             GraphNodeIndices::Disk(iter) => iter.next(),
+            GraphNodeIndices::Forked { base, appended } => {
+                base.next().or_else(|| appended.next().map(NodeIndex::new))
+            }
         }
     }
 
@@ -255,6 +272,11 @@ impl<'a> Iterator for GraphNodeIndices<'a> {
         match self {
             GraphNodeIndices::InMemory(iter) => iter.size_hint(),
             GraphNodeIndices::Disk(iter) => iter.size_hint(),
+            GraphNodeIndices::Forked { base, appended } => {
+                let (blo, bhi) = base.size_hint();
+                let extra = appended.len();
+                (blo + extra, bhi.map(|h| h + extra))
+            }
         }
     }
 }

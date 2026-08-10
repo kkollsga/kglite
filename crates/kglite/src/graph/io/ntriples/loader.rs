@@ -191,6 +191,13 @@ fn apply_type_renames(
             rename_map,
         ),
         GraphBackend::Recording(rg) => apply_type_renames(rg.inner_mut(), rename_map),
+        // Renaming every node's type would copy-on-write the whole overlay, so
+        // flatten first and rename in place — the same total work, without
+        // leaving a fully-diverged overlay behind.
+        GraphBackend::Forked(_) => {
+            backend.flatten_fork();
+            apply_type_renames(backend, rename_map);
+        }
     }
 }
 

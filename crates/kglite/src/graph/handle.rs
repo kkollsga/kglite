@@ -624,6 +624,19 @@ pub(crate) fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> 
     if let Some(parent) = parent {
         graph.graph.adopt_shared_writer_lineage(&parent.graph);
     }
+    // D2 Phase 2 compaction point. If this graph is a copy-on-write overlay and
+    // the reader that forced the fork has since dropped, fold the delta back
+    // into the base here and return to the flat representation. This is the
+    // earliest moment the writer can observe the reader's departure —
+    // `Arc::get_mut` succeeding *is* that observation — so "hold a view, write,
+    // drop the view, write again" self-heals on the very next write.
+    graph.graph.try_compact();
+    // ...and the mirror image: this graph may itself be somebody else's base
+    // (`g.copy()` forks *from* `g`), in which case writing in place would edit a
+    // backend the fork is reading. `ensure_writable` turns `g` into an overlay
+    // over the shared base too — one `Arc::get_mut` probe when nothing is
+    // shared, which is the steady state.
+    graph.graph.ensure_writable();
     graph
 }
 
@@ -811,11 +824,25 @@ mod boundary_lift_tests {
 /// fork registers the node count. That turns a ~28 ms cliff at 1M nodes into an
 /// exact integer at ten — no idle machine, no statistics, no marker.
 ///
-/// These tests pin **current** behaviour, including the cost. They are not
-/// asserting the cost is acceptable; they are making it impossible to change
-/// either direction silently. When the fork is fixed (structural sharing in
-/// `MemoryGraph` — its own sprint), `held_reader_forces_a_whole_graph_copy`
-/// is the test that must be inverted, and the diff will say so out loud.
+/// **Inverted 2026-08-10 by D2 Phase 2**, exactly as the previous version of
+/// this paragraph instructed. `held_reader_forces_a_whole_graph_copy` is now
+/// [`held_reader_copies_no_nodes`]: a held reader makes the writer fork to a
+/// copy-on-write overlay (`storage/forked.rs`) and copies **zero** nodes. The
+/// two arms around it — `unique_handle_copies_nothing` and
+/// `dropping_the_reader_restores_in_place_mutation` — are unchanged and still
+/// green, which is what keeps this a statement about *sharing* rather than
+/// about `make_dir_graph_mut` having become unconditionally cheap.
+///
+/// The oracle itself had to be re-pointed in the same change, or it would have
+/// gone on passing for the wrong reason: `impl Clone for GraphBackend` used to
+/// bump `BACKEND_CLONE_NODES` by `node_count()` on *every* clone, including the
+/// new shallow one. It now bumps only where node storage is genuinely
+/// duplicated (`backend::note_nodes_copied`). A test that cannot tell the fix
+/// from the defect is worse than no test.
+///
+/// What must **not** be relaxed here: these still pin behaviour in both
+/// directions. If a later phase makes the fork copy nodes again, this file is
+/// what says so.
 #[cfg(test)]
 mod held_reference_clone_tests {
     use super::*;
@@ -827,6 +854,27 @@ mod held_reference_clone_tests {
     /// Small on purpose. The defect is O(V), so ten nodes prove the shape
     /// exactly as well as a million and keep the test in the millisecond range.
     const FIXTURE_NODES: usize = 10;
+
+    /// `(slot, id, title)` for every live node, in scan order.
+    ///
+    /// Keyed by petgraph slot on purpose: content equality alone would pass a
+    /// compaction that put every node back with the right values on the wrong
+    /// index, which is precisely the failure `rollback.rs`'s slot-identity
+    /// contract forbids and which every `DirGraph` index would then mis-key.
+    fn snapshot_ids_and_titles(graph: &DirGraph) -> Vec<(usize, String, String)> {
+        graph
+            .graph
+            .node_indices()
+            .map(|idx| {
+                let view = graph.graph.node_view(idx).expect("live node");
+                (
+                    idx.index(),
+                    format!("{:?}", view.id()),
+                    format!("{:?}", view.title()),
+                )
+            })
+            .collect()
+    }
 
     fn seeded_arc() -> Arc<DirGraph> {
         let mut graph = DirGraph::new();
@@ -859,12 +907,14 @@ mod held_reference_clone_tests {
         );
     }
 
-    /// The defect, as an exact integer.
+    /// The fix, as an exact integer — the inversion of
+    /// `held_reader_forces_a_whole_graph_copy`.
     ///
-    /// Holding one extra `Arc` — what a live `ResultView` or an open
-    /// transaction snapshot does — makes the next write copy every node.
+    /// Holding one extra `Arc` — what a live `ResultView`, a `freeze()`, a
+    /// `Session` or an open transaction snapshot does — used to copy every
+    /// node. It now forks to an overlay and copies none.
     #[test]
-    fn held_reader_forces_a_whole_graph_copy() {
+    fn held_reader_copies_no_nodes() {
         let mut arc = seeded_arc();
         let reader = Arc::clone(&arc);
 
@@ -873,15 +923,102 @@ mod held_reference_clone_tests {
         let copied = backend_clone_nodes();
 
         // Keep the reader alive across the write. Dropping it earlier would
-        // make `Arc::get_mut` succeed and the test would measure the baseline
-        // above while appearing to measure this.
+        // make `Arc::get_mut` succeed and the test would measure
+        // `unique_handle_copies_nothing` while appearing to measure this.
         assert_eq!(reader.graph.node_count(), FIXTURE_NODES);
 
         assert_eq!(
-            copied, FIXTURE_NODES,
-            "a live second Arc<DirGraph> must (today) force a whole-graph copy; \
-             getting 0 here means the fork was fixed — invert this test and \
-             retire the backlog item rather than deleting the assertion"
+            copied, 0,
+            "a live second Arc<DirGraph> must fork to a copy-on-write overlay, \
+             not copy the graph; getting {FIXTURE_NODES} here means the fork \
+             regressed to a deep clone (storage/forked.rs)"
+        );
+        assert!(
+            arc.graph.is_forked(),
+            "the writer's backend must be the overlay variant while the reader lives"
+        );
+    }
+
+    /// The reader must still see its own pre-write graph, and the writer its
+    /// post-write one, with the writer's edits landing nowhere the reader can
+    /// see them.
+    ///
+    /// This is the semantic contract the whole programme exists to preserve.
+    /// Before D2 it held for the *expensive* reason (the reader owned a private
+    /// deep copy); it must now hold for the cheap one.
+    #[test]
+    fn a_held_reader_never_observes_the_writers_edits() {
+        let mut arc = seeded_arc();
+        let reader = Arc::clone(&arc);
+        let before = snapshot_ids_and_titles(&reader);
+
+        {
+            let graph = make_dir_graph_mut(&mut arc);
+            let params = HashMap::new();
+            execute_mut(
+                graph,
+                "MATCH (n:Item {id: 3}) SET n.name = 'rewritten'",
+                &ExecuteOptions::eager(&params),
+            )
+            .expect("write");
+            execute_mut(
+                graph,
+                "CREATE (:Item {id: 999, name: 'appended'})",
+                &ExecuteOptions::eager(&params),
+            )
+            .expect("append");
+        }
+
+        assert_eq!(
+            snapshot_ids_and_titles(&reader),
+            before,
+            "the reader's graph must be byte-for-byte what it was before the \
+             write; a difference here means the writer mutated the shared base, \
+             which silently corrupts every holder of that snapshot"
+        );
+        assert_eq!(reader.graph.node_count(), FIXTURE_NODES);
+        assert_eq!(arc.graph.node_count(), FIXTURE_NODES + 1);
+    }
+
+    /// Compaction: once the reader drops, the next write folds the overlay back
+    /// into the base and the backend returns to the flat representation — with
+    /// every node still on the slot it had.
+    #[test]
+    fn dropping_the_reader_compacts_the_overlay_back_into_the_base() {
+        let mut arc = seeded_arc();
+        let reader = Arc::clone(&arc);
+        let params = HashMap::new();
+
+        {
+            let graph = make_dir_graph_mut(&mut arc);
+            execute_mut(
+                graph,
+                "CREATE (:Item {id: 999, name: 'appended'})",
+                &ExecuteOptions::eager(&params),
+            )
+            .expect("append");
+        }
+        assert!(arc.graph.is_forked(), "precondition: the write forked");
+        let forked_view = snapshot_ids_and_titles(&arc);
+
+        drop(reader);
+        reset_backend_clone_count();
+        let _ = make_dir_graph_mut(&mut arc);
+
+        assert!(
+            !arc.graph.is_forked(),
+            "the next write after the reader drops must collapse the overlay"
+        );
+        assert_eq!(
+            backend_clone_nodes(),
+            0,
+            "compaction folds in place; it must not copy the graph"
+        );
+        assert_eq!(
+            snapshot_ids_and_titles(&arc),
+            forked_view,
+            "compaction must preserve content AND petgraph slot identity — the \
+             snapshot is keyed by slot, so a re-indexed node shows up here"
         );
     }
 

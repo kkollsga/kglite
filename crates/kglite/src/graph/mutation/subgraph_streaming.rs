@@ -963,10 +963,9 @@ pub fn save_subset_streaming_disk(
         // generically here, so fall back to per-edge lookup via
         // `edge_references()`. Less optimal but correct.
         use petgraph::visit::IntoEdgeReferences;
-        let backend = match &source.graph {
-            GraphBackend::Memory(g) => Some(g.inner()),
-            GraphBackend::Mapped(_) | GraphBackend::Recording(_) | GraphBackend::Disk(_) => None,
-        };
+        // Plain-`Memory` fast path only; every other backend (including a D2
+        // copy-on-write overlay) takes the generic walk below.
+        let backend = source.graph.plain_memory_digraph();
         if let Some(g) = backend {
             for er in g.edge_references() {
                 use petgraph::visit::EdgeRef;

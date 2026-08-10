@@ -19,6 +19,7 @@
 pub mod backend;
 pub mod column_store;
 pub mod disk;
+pub(crate) mod forked;
 pub mod interner;
 pub mod lookups;
 pub mod mapped;
