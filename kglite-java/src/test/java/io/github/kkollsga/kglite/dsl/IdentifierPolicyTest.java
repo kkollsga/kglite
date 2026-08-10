@@ -1,5 +1,7 @@
 package io.github.kkollsga.kglite.dsl;
 
+import static io.github.kkollsga.kglite.dsl.Cypher.match;
+import static io.github.kkollsga.kglite.dsl.Cypher.node;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -201,6 +203,52 @@ class IdentifierPolicyTest {
         }
     }
 
+    /**
+     * The same reserved sets, in the clauses that write.
+     *
+     * <p>The tests above probe reserved words where they are read — a {@code MATCH} label, a
+     * {@code RETURN} key. A word could in principle tokenize differently after {@code SET},
+     * {@code REMOVE} or {@code MERGE}, and the failure would be a syntax error at the caller's
+     * call site rather than ours, so the write positions get probed rather than assumed.
+     *
+     * <p>Runs against a scratch graph: unlike the read probes, these statements mutate.
+     */
+    @Test
+    @DisplayName("the reserved sets hold in the SET, REMOVE and MERGE positions too")
+    void reservationsHoldInWritePositions() {
+        List<String> wrong = new ArrayList<>();
+        for (String word : Ident.RESERVED_IN_PATTERNS) {
+            try (KnowledgeGraph scratch = KnowledgeGraph.createInMemory()) {
+                scratch.cypher("CREATE (:Person {id: 1, title: 'Ada'})");
+                if (mutates(scratch, "MATCH (n:Person) SET n." + word + " = 1")) {
+                    wrong.add(word + ": bare SET key parsed, so it is not reserved after all");
+                }
+                if (!mutates(scratch, "MATCH (n:Person) SET n.`" + word + "` = 1")) {
+                    wrong.add(word + ": quoted SET key failed, so quoting is not the escape");
+                }
+                if (!mutates(scratch, "MATCH (n:Person) REMOVE n.`" + word + "`")) {
+                    wrong.add(word + ": quoted REMOVE key failed");
+                }
+                if (isBooleanLiteral(word)) {
+                    continue;
+                }
+                if (!mutates(scratch, "MERGE (:`" + word + "` {id: 1})")) {
+                    wrong.add(word + ": quoted MERGE label failed");
+                }
+            }
+        }
+        assertEquals(List.of(), wrong);
+
+        // ...and the emitted form is the same one the read half gets, from the same Ident.
+        Node person = node("Person").named("n");
+        assertEquals("MATCH (n:Person) SET n.`MATCH` = $p0",
+                match(person).set(person.prop("MATCH").to(1)).cypher());
+        assertEquals("MATCH (n:Person) REMOVE n.`MATCH`",
+                match(person).remove(person.prop("MATCH")).cypher());
+        assertEquals("MERGE (:`MATCH` {id: $p0})",
+                Cypher.merge(node("MATCH").withProperty("id", 1)).cypher());
+    }
+
     @Test
     @DisplayName("empty identifiers are rejected in every position")
     void emptyIdentifiersAreRejected() {
@@ -214,6 +262,16 @@ class IdentifierPolicyTest {
 
     private static boolean isBooleanLiteral(String word) {
         return word.equals("TRUE") || word.equals("FALSE");
+    }
+
+    /** Whether the engine accepts a mutating statement at all; the effect is irrelevant here. */
+    private static boolean mutates(KnowledgeGraph scratch, String statement) {
+        try {
+            scratch.cypher(statement, Map.of());
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     /** Whether the engine accepts a query at all; the rows are irrelevant here. */

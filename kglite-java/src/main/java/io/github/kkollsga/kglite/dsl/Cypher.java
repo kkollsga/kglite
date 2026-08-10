@@ -1,6 +1,7 @@
 package io.github.kkollsga.kglite.dsl;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
@@ -96,6 +97,55 @@ public final class Cypher {
      */
     public static MatchStep match(Pattern... patterns) {
         return ReadingQuery.matching(false, patterns);
+    }
+
+    /**
+     * Opens a statement that creates the given patterns.
+     *
+     * <p>Emits: {@code CREATE <pattern>[, <pattern>…]}
+     *
+     * @param patterns the comma-joined patterns; at least one
+     * @return the finished statement
+     */
+    public static WriteStatement create(Pattern... patterns) {
+        return WriteQuery.after(List.of(), new Ast.Create(Ast.patterns(patterns)));
+    }
+
+    /**
+     * Opens a statement that matches the pattern or creates it — the upsert.
+     *
+     * <p>Emits: {@code MERGE <pattern>}
+     *
+     * @param pattern the pattern to match or create
+     * @return the next chain step, which is already a complete statement
+     */
+    public static MergeStep merge(Pattern pattern) {
+        return WriteQuery.after(List.of(), Ast.merge(pattern));
+    }
+
+    /**
+     * Opens a batch write: one statement that applies its clause once per row.
+     *
+     * <p>The whole list travels as a single parameter and the loop variable is named {@code row};
+     * {@link UnwindStep#field(String)} is how a pattern reads one of its keys. See
+     * {@link UnwindStep} for the shape.
+     *
+     * <p>Emits: {@code UNWIND $p<n> AS row}
+     *
+     * @param rows the rows, typically maps; the collection becomes one parameter
+     * @return the batch step
+     * @throws IllegalArgumentException if {@code rows} is {@code null} or an element is a query
+     *     element rather than data
+     */
+    public static UnwindStep unwind(Collection<?> rows) {
+        if (rows == null) {
+            throw new IllegalArgumentException("unwind() requires a collection of rows, not null");
+        }
+        List<Object> copy = new ArrayList<>(rows.size());
+        for (Object row : rows) {
+            copy.add(Values.check(row));
+        }
+        return new UnwindStep(new Ast.Unwind(List.copyOf(copy), Ident.variable("row")));
     }
 
     /**

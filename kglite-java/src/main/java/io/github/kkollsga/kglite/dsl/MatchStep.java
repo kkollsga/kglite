@@ -9,7 +9,7 @@ package io.github.kkollsga.kglite.dsl;
  * compile error rather than a runtime one, and the completion popup only lists legal
  * continuations.
  */
-public interface MatchStep {
+public interface MatchStep extends UpdatingStep {
 
     /**
      * Opens another matching stage.

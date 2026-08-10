@@ -55,6 +55,46 @@ final class ReadingQuery implements MatchStep, WhereStep {
         return project(true, projections);
     }
 
+    // ---- the updating clauses, all of which end the statement ----------------------------
+
+    @Override
+    public WriteStatement create(Pattern... patterns) {
+        return WriteQuery.after(stages, new Ast.Create(Ast.patterns(patterns)));
+    }
+
+    @Override
+    public MergeStep merge(Pattern pattern) {
+        return WriteQuery.after(stages, Ast.merge(pattern));
+    }
+
+    @Override
+    public WriteStatement set(Assignment... assignments) {
+        return WriteQuery.after(stages,
+                new Ast.SetClause(WriteQuery.assignments(assignments, "set")));
+    }
+
+    @Override
+    public WriteStatement remove(Property... properties) {
+        return WriteQuery.after(stages, new Ast.RemoveClause(
+                Ast.checked(properties, "property", "remove() needs at least one property")));
+    }
+
+    @Override
+    public WriteStatement delete(Variable... elements) {
+        return deleting(elements, false, "delete");
+    }
+
+    @Override
+    public WriteStatement detachDelete(Variable... elements) {
+        return deleting(elements, true, "detachDelete");
+    }
+
+    private WriteStatement deleting(Variable[] elements, boolean detach, String method) {
+        return WriteQuery.after(stages, new Ast.DeleteClause(
+                Ast.checked(elements, "element", method + "() needs at least one element"),
+                detach));
+    }
+
     private ReturnStep project(boolean distinct, Projection... projections) {
         return new ProjectedQuery(stages, distinct, checkedProjections(projections),
                 List.of(), null, null);

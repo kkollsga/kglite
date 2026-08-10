@@ -48,18 +48,19 @@ class EmittedCypherTest {
     }
 
     @Test
-    @DisplayName("every read-half entry carries a statement, so the gate cannot pass vacuously")
-    void everyReadHalfEntryIsCovered() {
+    @DisplayName("every expressible entry carries a statement, so the gate cannot pass vacuously")
+    void everyExpressibleEntryIsCovered() {
         List<String> uncovered = Corpus.entries().stream()
-                .filter(entry -> entry.expressibility() == Corpus.Expressibility.READ_HALF)
+                .filter(entry -> entry.expressibility() == Corpus.Expressibility.READ_HALF
+                        || entry.expressibility() == Corpus.Expressibility.WRITE_HALF)
                 .filter(entry -> entry.dsl() == null)
                 .map(Corpus.Entry::name)
                 .toList();
         assertTrue(uncovered.isEmpty(),
-                "these entries claim to be expressible by the read half but carry no statement: "
-                        + uncovered);
-        assertTrue(expressibleEntries().count() >= 30,
-                "the emitted-Cypher gate must cover at least 30 statements");
+                "these entries claim to be expressible by the v1 clause set but carry no "
+                        + "statement: " + uncovered);
+        assertTrue(expressibleEntries().count() >= 40,
+                "the emitted-Cypher gate must cover at least 40 statements");
     }
 
     /**

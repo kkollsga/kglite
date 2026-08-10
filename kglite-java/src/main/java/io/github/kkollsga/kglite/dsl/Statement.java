@@ -1,6 +1,7 @@
 package io.github.kkollsga.kglite.dsl;
 
 import io.github.kkollsga.kglite.KnowledgeGraph;
+import io.github.kkollsga.kglite.Transaction;
 import java.util.List;
 import java.util.Map;
 
@@ -37,16 +38,38 @@ public interface Statement {
     Map<String, Object> params();
 
     /**
-     * Runs this statement against a graph.
+     * Runs this statement against a graph, now.
      *
-     * <p>Read statements route to {@code KnowledgeGraph.query}, which is the read entry point; the
-     * choice is made by the type rather than by the caller, so the binding's documented
-     * {@code cypher}-versus-{@code query} footgun is unreachable through the DSL.
+     * <p>A read routes to {@code KnowledgeGraph.query} and a {@link WriteStatement} to
+     * {@code KnowledgeGraph.cypher}; the choice is made by the statement's type rather than by the
+     * caller, so the binding's documented {@code cypher}-versus-{@code query} footgun is
+     * unreachable through the DSL.
      *
      * <p>Emits: nothing further — this executes {@link #cypher()} with {@link #params()}.
      *
-     * @param graph the graph to query
+     * @param graph the graph to run against
      * @return the result rows, exactly as the raw route returns them
      */
     List<Map<String, Object>> on(KnowledgeGraph graph);
+
+    /**
+     * Stages this statement into a transaction, to run when it commits.
+     *
+     * <p>The same method for every kind of statement, because a transaction takes text and
+     * parameters and applies them atomically whatever they say — including a read, whose rows come
+     * back from {@code commit()} in position. Nothing executes here: see {@link Transaction} for
+     * what staging does and does not promise.
+     *
+     * <p>Emits: nothing further — this stages {@link #cypher()} with {@link #params()}.
+     *
+     * @param transaction the transaction to stage into
+     * @return that transaction, so staging chains
+     * @throws IllegalArgumentException if {@code transaction} is {@code null}
+     */
+    default Transaction on(Transaction transaction) {
+        if (transaction == null) {
+            throw new IllegalArgumentException("on() needs a transaction");
+        }
+        return transaction.add(cypher(), params());
+    }
 }

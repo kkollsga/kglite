@@ -7,7 +7,7 @@ package io.github.kkollsga.kglite.dsl;
  * conjunction is spelled {@link Condition#and(Condition)}, which keeps the emitted clause a single
  * unambiguous expression.
  */
-public interface WhereStep {
+public interface WhereStep extends UpdatingStep {
 
     /**
      * Opens another matching stage.

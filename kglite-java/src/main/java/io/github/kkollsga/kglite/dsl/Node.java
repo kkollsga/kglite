@@ -57,14 +57,70 @@ public final class Node implements Pattern {
      *     value is a query element
      */
     public Node withProperty(String key, Object value) {
-        Ident ident = Ident.propertyKey(key);
-        if (properties.containsKey(ident)) {
+        return withEntry(Ident.propertyKey(key), Values.check(value));
+    }
+
+    private Node withEntry(Ident key, Object value) {
+        if (properties.containsKey(key)) {
             throw new IllegalArgumentException(
-                    "inline pattern property \"" + key + "\" is already set on this node");
+                    "inline pattern property \"" + key.name() + "\" is already set on this node");
         }
         Map<Ident, Object> next = new LinkedHashMap<>(properties);
-        next.put(ident, Values.check(value));
+        next.put(key, value);
         return new Node(label, variable, next);
+    }
+
+    /**
+     * Adds an inline property whose value is an <em>expression</em> rather than data — in v1, a
+     * field of the current {@code UNWIND} row.
+     *
+     * <p>Separate from {@link #withProperty(String, Object)} rather than an overload of it: an
+     * overload would make {@code withProperty("k", null)} ambiguous, and keeping the two apart is
+     * also what keeps the value-position rule readable — {@code withProperty} takes data and only
+     * data, this one takes a piece of the query and nothing else.
+     *
+     * <p>Emits: {@code (<variable>:<Label> {<key>: <expression>})}
+     *
+     * @param key the property key
+     * @param expression the value expression, from {@link UnwindStep#field(String)}
+     * @return a new node pattern carrying the property
+     * @throws IllegalArgumentException if the key is not representable, is already present, or the
+     *     expression is {@code null}
+     */
+    public Node withPropertyFrom(String key, Expr expression) {
+        if (expression == null) {
+            throw new IllegalArgumentException(
+                    "withPropertyFrom(\"" + key + "\", …) needs an expression");
+        }
+        return withEntry(Ident.propertyKey(key), expression);
+    }
+
+    /**
+     * Merges a map of properties into this node — the {@code SET n += $map} form, and the only
+     * parameterised way to write a property set whose shape is decided at runtime.
+     *
+     * <p>Keys already on the node are overwritten; keys not mentioned are left alone. (Assigning
+     * the whole property map, {@code SET n = $map}, is not offered: it silently drops every
+     * property the map omits.)
+     *
+     * <p>Emits: {@code <variable> += $p<n>}
+     *
+     * @param values the properties to merge in
+     * @return the assignment, for {@code set}, {@code onCreateSet} or {@code onMatchSet}
+     * @throws IllegalStateException if this node has no variable
+     * @throws IllegalArgumentException if {@code values} is {@code null} or one of its values is a
+     *     query element rather than data
+     */
+    public Assignment plusProperties(Map<String, Object> values) {
+        if (values == null) {
+            throw new IllegalArgumentException("plusProperties() needs a map of properties");
+        }
+        Map<String, Object> copy = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : values.entrySet()) {
+            copy.put(entry.getKey(), Values.check(entry.getValue()));
+        }
+        return new Ast.MapAssignment(
+                requireVariable("plusProperties"), Collections.unmodifiableMap(copy));
     }
 
     /**
@@ -77,7 +133,7 @@ public final class Node implements Pattern {
      * @throws IllegalStateException if this node has no variable
      * @throws IllegalArgumentException if the key is not representable
      */
-    public Expr prop(String key) {
+    public Property prop(String key) {
         return new Ast.PropertyRef(requireVariable("prop"), Ident.propertyKey(key));
     }
 
@@ -126,7 +182,7 @@ public final class Node implements Pattern {
      * @return the variable reference
      * @throws IllegalStateException if this node has no variable
      */
-    public Expr ref() {
+    public Variable ref() {
         return new Ast.VarRef(requireVariable("ref"));
     }
 

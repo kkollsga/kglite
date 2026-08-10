@@ -149,6 +149,142 @@ class InjectionTest {
         return damage;
     }
 
+    /**
+     * The same exploit strings, through the builders that emit a <em>write</em>.
+     *
+     * <p>The read half's identifier positions are a leak at worst; a {@code MERGE} label, a
+     * {@code SET} key or a {@code REMOVE} key that broke out of its quoting would let an attack
+     * string reach a clause that changes the graph. The renderers differ, so the gate has to run
+     * against each of them rather than assume the label case covers everything.
+     *
+     * <p>Executed through {@code cypher()}, the mutating entry point, so an injected
+     * {@code DETACH DELETE} really would run.
+     */
+    @Test
+    @DisplayName("hostile identifiers are inert in write positions too")
+    void writePositionsAreInert() {
+        List<String> damage = new ArrayList<>();
+        try (KnowledgeGraph graph = graphWithASecret()) {
+            int built = 0;
+            for (String exploit : EXPLOITS) {
+                List<Statement> statements = writeStatements(exploit);
+                built += statements.size();
+                for (Statement statement : statements) {
+                    try {
+                        graph.cypher(statement.cypher(), statement.params());
+                    } catch (RuntimeException e) {
+                        // A syntax or execution error is a fine outcome: nothing ran.
+                        continue;
+                    }
+                }
+            }
+            assertTrue(built >= 8,
+                    "the write-position gate built only " + built + " statements — a gate that "
+                            + "runs nothing cannot catch anything");
+            long people = countOf(graph, "MATCH (n:Person) RETURN count(n) AS c");
+            long secrets = countOf(graph, "MATCH (n:Secret) RETURN count(n) AS c");
+            if (people != 2) {
+                damage.add("Person nodes went from 2 to " + people);
+            }
+            if (secrets != 1) {
+                damage.add("Secret nodes went from 1 to " + secrets);
+            }
+        }
+        assertEquals(List.of(), damage, "a hostile identifier reached a write clause");
+    }
+
+    /**
+     * Every write statement the DSL can build from one caller-supplied identifier.
+     *
+     * <p>The created and merged patterns carry a {@code Payload} label rather than {@code Person}
+     * so that the damage check above measures the exploit and not the harness: a statement that
+     * legitimately creates a {@code Person} would move the count on its own.
+     *
+     * <p>The label and relationship-type positions are asserted to refuse the whole exploit family
+     * at construction, which is why nothing is added for them.
+     */
+    private static List<Statement> writeStatements(String hostile) {
+        List<Statement> statements = new ArrayList<>();
+        Node person = node("Person").named("p");
+        // Property keys accept any backtick-free text, so these are the write positions where a
+        // hostile string genuinely reaches the emitted query and has to be quoted inertly.
+        if (hostile.indexOf('`') < 0) {
+            statements.add(match(person).set(person.prop(hostile).to("owned")));
+            statements.add(match(person).remove(person.prop(hostile)));
+            statements.add(Cypher.create(node("Payload").withProperty(hostile, "owned")));
+            statements.add(Cypher.merge(node("Payload").named("q").withProperty(hostile, "owned")));
+        }
+        assertThrows(IllegalArgumentException.class, () -> Cypher.merge(node(hostile)),
+                "a MERGE accepted the hostile label " + quote(hostile));
+        assertThrows(IllegalArgumentException.class,
+                () -> match(person).create(person.to(Cypher.rel(hostile), person)),
+                "a CREATE accepted the hostile relationship type " + quote(hostile));
+        return statements;
+    }
+
+    /**
+     * The positive control for the write positions: the exploit that works there, shown working.
+     *
+     * <p>The read half's exploit closes a backticked <em>label</em>; the write half's closes a
+     * backticked <em>property key</em> in a {@code SET}, which turns the rest of the caller's
+     * string into clauses of its own. Naive quoting runs it; {@link Ident} refuses to build it,
+     * because a backtick has no escape in this dialect.
+     */
+    @Test
+    @DisplayName("positive control: naive quoting of a SET key is a working delete, and Ident "
+            + "refuses to build it")
+    void naiveWriteQuotingIsAWorkingExploit() {
+        String exploit = "x` = 1 DETACH DELETE p //";
+        String naive = "MATCH (p:Person) SET p.`" + exploit + "` = 'owned'";
+
+        try (KnowledgeGraph graph = graphWithASecret()) {
+            graph.cypher(naive);
+            assertEquals(0L, countOf(graph, "MATCH (n:Person) RETURN count(n) AS c"),
+                    "the naive spelling no longer deletes, so this control has stopped being "
+                            + "about a real exploit");
+        }
+
+        Node person = node("Person").named("p");
+        assertRejected(() -> person.prop(exploit), "property key", exploit);
+        assertRejected(() -> Cypher.create(node("Payload").withProperty(exploit, "owned")),
+                "property key", exploit);
+        assertRejected(() -> Ident.label(exploit), "node label", exploit);
+    }
+
+    @Test
+    @DisplayName("the write builders emit a hostile-but-quotable key as exactly one identifier")
+    void hostileKeysAreQuotedInWritePositions() {
+        String hostile = "Person) DETACH DELETE n //";
+        List<Statement> statements = writeStatements(hostile);
+        assertEquals(4, statements.size(),
+                "the write-position gate built no statements, so it proved nothing");
+        assertEquals("MATCH (p:Person) SET p.`" + hostile + "` = $p0", statements.get(0).cypher());
+        assertEquals("MATCH (p:Person) REMOVE p.`" + hostile + "`", statements.get(1).cypher());
+        assertEquals("CREATE (:Payload {`" + hostile + "`: $p0})", statements.get(2).cypher());
+        assertEquals("MERGE (q:Payload {`" + hostile + "`: $p0})", statements.get(3).cypher());
+
+        try (KnowledgeGraph graph = graphWithASecret()) {
+            for (Statement statement : statements) {
+                graph.cypher(statement.cypher(), statement.params());
+            }
+            assertEquals(2L, countOf(graph, "MATCH (n:Person) RETURN count(n) AS c"),
+                    "nothing was deleted");
+            assertEquals(1L, countOf(graph, "MATCH (n:Payload) RETURN count(n) AS c"),
+                    "the CREATE wrote one node and the MERGE matched it — which it can only do "
+                            + "if both emitted the hostile string as the same single key");
+        }
+        // ...and the SET on its own — the REMOVE above takes the property back off again —
+        // stored the whole hostile string as one key.
+        try (KnowledgeGraph graph = graphWithASecret()) {
+            Statement set = statements.get(0);
+            graph.cypher(set.cypher(), set.params());
+            assertEquals("owned", graph.query(
+                            "MATCH (p:Person) WHERE p.id = 1 RETURN p.`" + hostile + "` AS v")
+                    .get(0).get("v"),
+                    "the quoted key must have been written as a property, not run as a clause");
+        }
+    }
+
     @Test
     @DisplayName("a backtick-bearing identifier is rejected at construction, in every position")
     void backtickBearingIdentifiersAreRejected() {

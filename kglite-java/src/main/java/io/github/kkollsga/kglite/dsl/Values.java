@@ -9,6 +9,11 @@ package io.github.kkollsga.kglite.dsl;
  * p.prop("a").eq(q.prop("b"))} reads plausibly — and it would silently be serialised as a
  * parameter value instead of comparing two properties. This rejects that at build time and says
  * what v1 does not do, rather than emitting a query that returns wrong rows.
+ *
+ * <p>The test is "does this object come from this package", not a list of the types that do. A list
+ * has to be revisited every time the DSL grows a type, and the day it is not is the day the new
+ * type serialises silently as JSON — {@code Assignment} and {@code UnwindStep} arrived exactly
+ * that way. Nothing in this package is data, so the package is the right question to ask.
  */
 final class Values {
 
@@ -21,13 +26,7 @@ final class Values {
      * @return the same value
      */
     static Object check(Object value) {
-        if (value instanceof Expr
-                || value instanceof Condition
-                || value instanceof Pattern
-                || value instanceof Rel
-                || value instanceof Projection
-                || value instanceof SortItem
-                || value instanceof Statement) {
+        if (value != null && Values.class.getPackage().equals(value.getClass().getPackage())) {
             throw new IllegalArgumentException(
                     "a value position received a query element ("
                             + value.getClass().getSimpleName()

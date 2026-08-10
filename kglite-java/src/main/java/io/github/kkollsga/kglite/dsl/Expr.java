@@ -18,7 +18,7 @@ import java.util.List;
  * {@code $p<n>} parameter and travels in {@link Statement#params()}.
  */
 public sealed interface Expr
-        permits Ast.PropertyRef, Ast.VarRef, Ast.AliasRef, Ast.FunctionExpr {
+        permits Property, Variable, Ast.AliasRef, Ast.FunctionExpr {
 
     /**
      * Equality against a value.

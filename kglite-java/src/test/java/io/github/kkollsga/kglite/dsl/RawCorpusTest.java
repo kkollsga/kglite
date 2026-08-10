@@ -58,9 +58,10 @@ class RawCorpusTest {
     void expressibilityCensus() {
         List<Corpus.Entry> entries = Corpus.entries();
         long readHalf = count(entries, Corpus.Expressibility.READ_HALF);
+        long writeHalf = count(entries, Corpus.Expressibility.WRITE_HALF);
         long later = count(entries, Corpus.Expressibility.V1_LATER);
         long outOfV1 = count(entries, Corpus.Expressibility.OUT_OF_V1);
-        long expressible = readHalf + later;
+        long expressible = readHalf + writeHalf + later;
 
         // The rule as written before the corpus was collected: fewer than 20 in 30 expressible
         // means the clause set is wrong and must be re-scoped before an emitter is written.
@@ -76,10 +77,13 @@ class RawCorpusTest {
                         + "shapes the clause set deliberately refuses");
         assertTrue(readHalf >= 30,
                 "the read half must carry the bulk of the corpus, has " + readHalf);
+        assertTrue(writeHalf >= 10,
+                "the write half must carry a representative statement per clause, has "
+                        + writeHalf);
 
         System.out.println("corpus census: " + entries.size() + " entries — "
-                + readHalf + " read-half, " + later + " later v1 clauses, "
-                + outOfV1 + " deliberately outside v1");
+                + readHalf + " read-half, " + writeHalf + " write-half, "
+                + later + " later v1 clauses, " + outOfV1 + " deliberately outside v1");
     }
 
     private static long count(List<Corpus.Entry> entries, Corpus.Expressibility bucket) {

@@ -40,8 +40,9 @@ class EmitsBoundaryTest {
 
     /** Types whose public methods contribute to the emitted query, and so must name productions. */
     private static final Set<String> BUILDERS = new TreeSet<>(Set.of(
-            "Cypher", "Expr", "Condition", "Node", "Rel", "Path",
-            "MatchStep", "WhereStep", "ReturnStep", "OrderStep", "SkipStep", "Statement"));
+            "Cypher", "Expr", "Condition", "Node", "Rel", "Path", "Property",
+            "MatchStep", "WhereStep", "ReturnStep", "OrderStep", "SkipStep", "Statement",
+            "UpdatingStep", "MergeStep", "MergeMatchStep", "UnwindStep"));
 
     /**
      * Types that carry no production of their own, with the reason each is exempt.
@@ -50,12 +51,17 @@ class EmitsBoundaryTest {
      *   <li>{@code Ident} validates an identifier; the production is named by whichever builder
      *       method puts the identifier into a clause.
      *   <li>{@code Projection} and {@code SortItem} are the values {@code Expr.as}/{@code asc}/
-     *       {@code desc} return; those three methods name the productions.
-     *   <li>{@code Pattern} is a marker interface with no methods at all.
+     *       {@code desc} return; those three methods name the productions. {@code Assignment} is
+     *       the same shape for the write half: {@code Property.to} and {@code Node.plusProperties}
+     *       name its productions.
+     *   <li>{@code Pattern} and {@code Variable} are marker interfaces with no methods at all, and
+     *       {@code WriteStatement} adds none to {@code Statement} — it only fixes which entry
+     *       point {@code on(graph)} takes, which {@code Statement.on} already names.
      * </ul>
      */
-    private static final Set<String> EXEMPT =
-            new TreeSet<>(Set.of("Ident", "Projection", "SortItem", "Pattern"));
+    private static final Set<String> EXEMPT = new TreeSet<>(Set.of(
+            "Ident", "Projection", "SortItem", "Pattern",
+            "Assignment", "Variable", "WriteStatement"));
 
     /** Object's contract, not this DSL's surface. */
     private static final Set<String> OBJECT_OVERRIDES = Set.of("equals", "hashCode", "toString");
@@ -76,7 +82,7 @@ class EmitsBoundaryTest {
         }
         assertEquals(List.of(), failures,
                 "a public builder method must name the CYPHER.md production it emits");
-        assertTrue(checked >= 60,
+        assertTrue(checked >= 80,
                 "the audit covered only " + checked + " methods — is it finding the sources?");
     }
 

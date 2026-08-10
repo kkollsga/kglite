@@ -14,10 +14,10 @@ final class Ast {
     private Ast() {}
 
     /** {@code <variable>.<key>} */
-    record PropertyRef(Ident variable, Ident key) implements Expr {}
+    record PropertyRef(Ident variable, Ident key) implements Property {}
 
     /** A bare pattern variable, as passed to {@code count()}, {@code properties()} and friends. */
-    record VarRef(Ident variable) implements Expr {}
+    record VarRef(Ident variable) implements Variable {}
 
     /** A reference to a {@code RETURN} alias, legal in {@code ORDER BY}. */
     record AliasRef(Ident alias) implements Expr {}
@@ -64,4 +64,71 @@ final class Ast {
      * @param where the stage's predicate, or {@code null}
      */
     record MatchStage(boolean optional, List<Pattern> patterns, Condition where) {}
+
+    // ---- the writing half ---------------------------------------------------------------
+
+    /** {@code <variable>.<key> = $p<n>} */
+    record PropertyAssignment(Property target, Object value) implements Assignment {}
+
+    /** {@code <variable> += $p<n>} — merge a map of properties into an element. */
+    record MapAssignment(Ident variable, Object values) implements Assignment {}
+
+    /**
+     * {@code UNWIND $p<n> AS <variable>} — the batch opener.
+     *
+     * @param rows the list, which travels as one parameter
+     * @param variable the loop variable a pattern reads fields from
+     */
+    record Unwind(Object rows, Ident variable) {}
+
+    /** One updating clause. Sealed so the renderer's switch is exhaustive. */
+    sealed interface WriteClause permits Create, MergeClause, SetClause, RemoveClause, DeleteClause {}
+
+    /** {@code CREATE <pattern>[, …]} */
+    record Create(List<Pattern> patterns) implements WriteClause {}
+
+    /**
+     * {@code MERGE <pattern> [ON CREATE SET …] [ON MATCH SET …]}.
+     *
+     * @param pattern the pattern to match or create
+     * @param onCreate assignments applied only on the creating branch; may be empty
+     * @param onMatch assignments applied only on the matching branch; may be empty
+     */
+    record MergeClause(Pattern pattern, List<Assignment> onCreate, List<Assignment> onMatch)
+            implements WriteClause {}
+
+    /** {@code SET <assignment>[, …]} */
+    record SetClause(List<Assignment> assignments) implements WriteClause {}
+
+    /** {@code REMOVE <property>[, …]} */
+    record RemoveClause(List<Property> properties) implements WriteClause {}
+
+    /** {@code [DETACH] DELETE <variable>[, …]} */
+    record DeleteClause(List<Variable> elements, boolean detach) implements WriteClause {}
+
+    /** A {@code MERGE} with no conditional assignments yet. */
+    static MergeClause merge(Pattern pattern) {
+        if (pattern == null) {
+            throw new IllegalArgumentException("merge() needs a pattern");
+        }
+        return new MergeClause(pattern, List.of(), List.of());
+    }
+
+    /** Validates a comma-joined pattern list, shared by every clause that takes one. */
+    static List<Pattern> patterns(Pattern... patterns) {
+        return checked(patterns, "pattern", "a clause needs at least one pattern");
+    }
+
+    /** Validates a varargs clause argument list: non-empty, no nulls. */
+    static <T> List<T> checked(T[] items, String what, String emptyMessage) {
+        if (items == null || items.length == 0) {
+            throw new IllegalArgumentException(emptyMessage);
+        }
+        for (T item : items) {
+            if (item == null) {
+                throw new IllegalArgumentException("a clause may not contain a null " + what);
+            }
+        }
+        return List.of(items);
+    }
 }

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.kkollsga.kglite.KnowledgeGraph;
+import io.github.kkollsga.kglite.Transaction;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.reflect.Method;
@@ -96,18 +97,22 @@ class ArchitectureTest {
     }
 
     @Test
-    @DisplayName("no KnowledgeGraph method takes or returns a DSL type")
+    @DisplayName("no core-wrapper method takes or returns a DSL type")
     void theBindingDoesNotDependOnTheDsl() {
         List<String> offenders = new ArrayList<>();
-        for (Method method : KnowledgeGraph.class.getMethods()) {
-            Stream<Class<?>> types = Stream.concat(
-                    Stream.of(method.getReturnType()), Stream.of(method.getParameterTypes()));
-            types.filter(type -> type.getName().startsWith("io.github.kkollsga.kglite.dsl."))
-                    .forEach(type -> offenders.add(method.getName() + " -> " + type.getName()));
+        for (Class<?> core : List.of(KnowledgeGraph.class, Transaction.class)) {
+            for (Method method : core.getMethods()) {
+                Stream<Class<?>> types = Stream.concat(
+                        Stream.of(method.getReturnType()), Stream.of(method.getParameterTypes()));
+                types.filter(type -> type.getName().startsWith("io.github.kkollsga.kglite.dsl."))
+                        .forEach(type -> offenders.add(
+                                core.getSimpleName() + "." + method.getName()
+                                        + " -> " + type.getName()));
+            }
         }
         assertEquals(List.of(), offenders,
-                "the dependency is one-way: a statement runs itself with on(graph), and the "
-                        + "binding never learns the DSL exists");
+                "the dependency is one-way: a statement runs itself with on(graph) or stages "
+                        + "itself with on(tx), and the binding never learns the DSL exists");
     }
 
     /** Every forbidden name whose slash or dot form appears in a class file's bytes. */

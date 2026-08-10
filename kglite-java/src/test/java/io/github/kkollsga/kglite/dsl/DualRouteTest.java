@@ -34,8 +34,12 @@ class DualRouteTest {
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("expressibleEntries")
-    @DisplayName("the DSL route and the raw route return the same rows")
+    @DisplayName("the DSL route and the raw route leave the same result behind")
     void routesAgree(Corpus.Entry entry) {
+        if (entry.route() == Corpus.Route.WRITE) {
+            writeRoutesAgree(entry);
+            return;
+        }
         List<Map<String, Object>> viaDsl;
         List<Map<String, Object>> viaRaw;
         try (KnowledgeGraph graph = Corpus.build(entry.fixture())) {
@@ -52,16 +56,85 @@ class DualRouteTest {
                 entry.name() + ": DSL route against the frozen expectation");
     }
 
+    /**
+     * A write's equality is its effect on the graph, not its return value — most of these
+     * statements return no rows at all. Each route gets its own fixture graph, runs its statement,
+     * and the whole resulting graph is compared.
+     */
+    private void writeRoutesAgree(Corpus.Entry entry) {
+        List<String> dslState;
+        List<String> rawState;
+        List<Map<String, Object>> dslVerify;
+        List<Map<String, Object>> rawVerify;
+        try (KnowledgeGraph graph = Corpus.build(entry.fixture())) {
+            entry.dsl().on(graph);
+            dslState = Corpus.state(graph);
+            dslVerify = graph.query(entry.verify());
+        }
+        try (KnowledgeGraph graph = Corpus.build(entry.fixture())) {
+            graph.cypher(entry.cypher(), entry.params());
+            rawState = Corpus.state(graph);
+            rawVerify = graph.query(entry.verify());
+        }
+        assertEquals(rawState, dslState, entry.name() + ": resulting graph state");
+        Rows.assertRows(rawVerify, dslVerify, entry.orderSensitive(),
+                entry.name() + ": route equality");
+        Rows.assertRows(entry.expectedRows(), dslVerify, entry.orderSensitive(),
+                entry.name() + ": DSL route against the frozen expectation");
+    }
+
     @Test
-    @DisplayName("the gate covers the whole read half")
+    @DisplayName("the gate covers both halves")
     void coverageIsComplete() {
         long covered = expressibleEntries().count();
-        long readHalf = Corpus.entries().stream()
-                .filter(entry -> entry.expressibility() == Corpus.Expressibility.READ_HALF)
+        long expressible = Corpus.entries().stream()
+                .filter(entry -> entry.expressibility() == Corpus.Expressibility.READ_HALF
+                        || entry.expressibility() == Corpus.Expressibility.WRITE_HALF)
                 .count();
-        assertEquals(readHalf, covered,
-                "every read-half entry must run through both routes");
-        assertTrue(covered >= 30, "the dual-route gate must cover at least 30 statements");
+        assertEquals(expressible, covered,
+                "every read-half and write-half entry must run through both routes");
+        assertTrue(covered >= 40, "the dual-route gate must cover at least 40 statements");
+        assertTrue(expressibleEntries().anyMatch(entry -> entry.route() == Corpus.Route.WRITE),
+                "the write half must be covered by this gate, not only the read half");
+    }
+
+    /**
+     * The positive control for the write half. Comparing an entry's {@code verify} rows would be
+     * satisfied by two statements that agree where the verify query looks and differ everywhere
+     * else — so the state comparison has to be shown catching exactly that.
+     */
+    @Test
+    @DisplayName("positive control: a write that diverges outside the verify query is caught")
+    void stateComparisonCatchesADivergentWrite() {
+        String raw = "MATCH (p:Person {id: 1}) SET p.city = 'Oslo'";
+        String verify = "MATCH (p:Person {id: 1}) RETURN p.city AS city";
+        Node person = node("Person").named("p");
+        Statement faithful = match(node("Person").named("p").withProperty("id", 1))
+                .set(person.prop("city").to("Oslo"));
+        // Same city, and one extra property the verify query never looks at.
+        Statement divergent = match(node("Person").named("p").withProperty("id", 1))
+                .set(person.prop("city").to("Oslo"), person.prop("age").to(99));
+
+        List<String> rawState;
+        List<Map<String, Object>> rawRows;
+        try (KnowledgeGraph graph = Corpus.build(Corpus.Fixture.PEOPLE)) {
+            graph.cypher(raw);
+            rawState = Corpus.state(graph);
+            rawRows = graph.query(verify);
+        }
+        try (KnowledgeGraph graph = Corpus.build(Corpus.Fixture.PEOPLE)) {
+            faithful.on(graph);
+            assertEquals(rawState, Corpus.state(graph), "the faithful write must clear the gate");
+            assertEquals(rawRows, graph.query(verify));
+        }
+        try (KnowledgeGraph graph = Corpus.build(Corpus.Fixture.PEOPLE)) {
+            divergent.on(graph);
+            assertEquals(rawRows, graph.query(verify),
+                    "this control is only interesting while the verify rows still agree");
+            assertNotEquals(rawState, Corpus.state(graph),
+                    "the gate cannot go red: a write that changed an extra property produced an "
+                            + "identical state dump");
+        }
     }
 
     /**

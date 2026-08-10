@@ -22,9 +22,17 @@
  *       capability is an engine item, not a DSL method.
  * </ul>
  *
+ * <p>A statement runs itself, against either of two targets:
+ * {@link io.github.kkollsga.kglite.dsl.Statement#on(io.github.kkollsga.kglite.KnowledgeGraph)}
+ * executes it now — routing a read to {@code query} and a
+ * {@link io.github.kkollsga.kglite.dsl.WriteStatement} to {@code cypher}, by the statement's type
+ * rather than the caller's choice — and
+ * {@link io.github.kkollsga.kglite.dsl.Statement#on(io.github.kkollsga.kglite.Transaction)} stages
+ * it into a transaction to run atomically at its commit.
+ *
  * <p>The dependency runs one way. Nothing in this package touches the binding internals, and no
- * type from this package appears in any {@link io.github.kkollsga.kglite.KnowledgeGraph}
- * signature; a statement runs itself with
- * {@link io.github.kkollsga.kglite.dsl.Statement#on(io.github.kkollsga.kglite.KnowledgeGraph)}.
+ * type from this package appears in any {@link io.github.kkollsga.kglite.KnowledgeGraph} or
+ * {@link io.github.kkollsga.kglite.Transaction} signature — the DSL knows about them, and they do
+ * not know it exists.
  */
 package io.github.kkollsga.kglite.dsl;

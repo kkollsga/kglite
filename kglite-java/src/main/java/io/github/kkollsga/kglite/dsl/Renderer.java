@@ -54,6 +54,32 @@ final class Renderer {
                 renderer.out.toString(), Collections.unmodifiableMap(renderer.params));
     }
 
+    /**
+     * Renders an updating statement: an optional {@code UNWIND}, the matching stages, and the
+     * updating clauses, in that order.
+     *
+     * @param unwind the batch opener, or {@code null}
+     * @param stages the matching stages; may be empty
+     * @param clauses the updating clauses; at least one
+     * @return the finished rendering
+     */
+    static Rendered render(
+            Ast.Unwind unwind, List<Ast.MatchStage> stages, List<Ast.WriteClause> clauses) {
+        Renderer renderer = new Renderer();
+        if (unwind != null) {
+            renderer.out.append("UNWIND ");
+            renderer.parameter(unwind.rows());
+            renderer.out.append(" AS ").append(unwind.variable().rendered());
+        }
+        renderer.stages(stages);
+        for (Ast.WriteClause clause : clauses) {
+            renderer.space();
+            renderer.writeClause(clause);
+        }
+        return new Rendered(
+                renderer.out.toString(), Collections.unmodifiableMap(renderer.params));
+    }
+
     private void statement(
             List<Ast.MatchStage> stages,
             boolean distinct,
@@ -61,30 +87,13 @@ final class Renderer {
             List<SortItem> sorts,
             Long skip,
             Long limit) {
-        for (Ast.MatchStage stage : stages) {
-            if (out.length() > 0) {
-                out.append(' ');
-            }
-            out.append(stage.optional() ? "OPTIONAL MATCH " : "MATCH ");
-            for (int i = 0; i < stage.patterns().size(); i++) {
-                if (i > 0) {
-                    out.append(", ");
-                }
-                pattern(stage.patterns().get(i));
-            }
-            if (stage.where() != null) {
-                out.append(" WHERE ");
-                condition(stage.where());
-            }
-        }
+        stages(stages);
         out.append(" RETURN ");
         if (distinct) {
             out.append("DISTINCT ");
         }
         for (int i = 0; i < projections.size(); i++) {
-            if (i > 0) {
-                out.append(", ");
-            }
+            separate(i);
             Projection projection = projections.get(i);
             expression(projection.expression());
             out.append(" AS ").append(projection.aliasIdent().rendered());
@@ -92,9 +101,7 @@ final class Renderer {
         if (!sorts.isEmpty()) {
             out.append(" ORDER BY ");
             for (int i = 0; i < sorts.size(); i++) {
-                if (i > 0) {
-                    out.append(", ");
-                }
+                separate(i);
                 SortItem item = sorts.get(i);
                 expression(item.expression());
                 out.append(item.descending() ? " DESC" : " ASC");
@@ -107,6 +114,95 @@ final class Renderer {
         if (limit != null) {
             out.append(" LIMIT ");
             parameter(limit);
+        }
+    }
+
+    private void stages(List<Ast.MatchStage> stages) {
+        for (Ast.MatchStage stage : stages) {
+            space();
+            out.append(stage.optional() ? "OPTIONAL MATCH " : "MATCH ");
+            patterns(stage.patterns());
+            if (stage.where() != null) {
+                out.append(" WHERE ");
+                condition(stage.where());
+            }
+        }
+    }
+
+    private void writeClause(Ast.WriteClause clause) {
+        switch (clause) {
+            case Ast.Create create -> {
+                out.append("CREATE ");
+                patterns(create.patterns());
+            }
+            case Ast.MergeClause merge -> {
+                out.append("MERGE ");
+                pattern(merge.pattern());
+                if (!merge.onCreate().isEmpty()) {
+                    out.append(" ON CREATE SET ");
+                    assignments(merge.onCreate());
+                }
+                if (!merge.onMatch().isEmpty()) {
+                    out.append(" ON MATCH SET ");
+                    assignments(merge.onMatch());
+                }
+            }
+            case Ast.SetClause set -> {
+                out.append("SET ");
+                assignments(set.assignments());
+            }
+            case Ast.RemoveClause remove -> {
+                out.append("REMOVE ");
+                for (int i = 0; i < remove.properties().size(); i++) {
+                    separate(i);
+                    expression(remove.properties().get(i));
+                }
+            }
+            case Ast.DeleteClause delete -> {
+                out.append(delete.detach() ? "DETACH DELETE " : "DELETE ");
+                for (int i = 0; i < delete.elements().size(); i++) {
+                    separate(i);
+                    expression(delete.elements().get(i));
+                }
+            }
+        }
+    }
+
+    private void assignments(List<Assignment> assignments) {
+        for (int i = 0; i < assignments.size(); i++) {
+            separate(i);
+            switch (assignments.get(i)) {
+                case Ast.PropertyAssignment property -> {
+                    expression(property.target());
+                    out.append(" = ");
+                    parameter(property.value());
+                }
+                case Ast.MapAssignment map -> {
+                    out.append(map.variable().rendered()).append(" += ");
+                    parameter(map.values());
+                }
+            }
+        }
+    }
+
+    private void patterns(List<Pattern> patterns) {
+        for (int i = 0; i < patterns.size(); i++) {
+            separate(i);
+            pattern(patterns.get(i));
+        }
+    }
+
+    /** {@code ", "} before every item but the first. */
+    private void separate(int index) {
+        if (index > 0) {
+            out.append(", ");
+        }
+    }
+
+    /** One space between clauses, and none before the first. */
+    private void space() {
+        if (out.length() > 0) {
+            out.append(' ');
         }
     }
 
@@ -162,14 +258,18 @@ final class Renderer {
             return;
         }
         out.append(" {");
-        boolean first = true;
+        int index = 0;
         for (Map.Entry<Ident, Object> entry : properties.entrySet()) {
-            if (!first) {
-                out.append(", ");
-            }
-            first = false;
+            separate(index++);
             out.append(entry.getKey().rendered()).append(": ");
-            parameter(entry.getValue());
+            // An expression here came from withPropertyFrom, the one inline-property
+            // spelling that is not a value — a row field under an UNWIND. Every other
+            // value in the map is caller data and becomes a parameter.
+            if (entry.getValue() instanceof Expr expression) {
+                expression(expression);
+            } else {
+                parameter(entry.getValue());
+            }
         }
         out.append('}');
     }

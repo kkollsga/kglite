@@ -10,14 +10,17 @@ import static io.github.kkollsga.kglite.dsl.Cypher.collectDistinct;
 import static io.github.kkollsga.kglite.dsl.Cypher.count;
 import static io.github.kkollsga.kglite.dsl.Cypher.countAll;
 import static io.github.kkollsga.kglite.dsl.Cypher.countDistinct;
+import static io.github.kkollsga.kglite.dsl.Cypher.create;
 import static io.github.kkollsga.kglite.dsl.Cypher.match;
 import static io.github.kkollsga.kglite.dsl.Cypher.max;
+import static io.github.kkollsga.kglite.dsl.Cypher.merge;
 import static io.github.kkollsga.kglite.dsl.Cypher.min;
 import static io.github.kkollsga.kglite.dsl.Cypher.node;
 import static io.github.kkollsga.kglite.dsl.Cypher.not;
 import static io.github.kkollsga.kglite.dsl.Cypher.or;
 import static io.github.kkollsga.kglite.dsl.Cypher.rel;
 import static io.github.kkollsga.kglite.dsl.Cypher.sum;
+import static io.github.kkollsga.kglite.dsl.Cypher.unwind;
 
 import io.github.kkollsga.kglite.KnowledgeGraph;
 import java.util.ArrayList;
@@ -66,7 +69,9 @@ final class Corpus {
     enum Expressibility {
         /** Expressible by the read half, and carrying the {@link Statement} that proves it. */
         READ_HALF,
-        /** Inside the v1 clause set, but a later phase's clauses (writes, {@code WITH}). */
+        /** Expressible by the write half, and carrying the {@link Statement} that proves it. */
+        WRITE_HALF,
+        /** Inside the v1 clause set, but a later phase's clauses ({@code WITH}). */
         V1_LATER,
         /** Deliberately outside v1: the clause earns no builder, or the shape is a known wart. */
         OUT_OF_V1,
@@ -162,6 +167,48 @@ final class Corpus {
                     "CREATE (:`My Label` {id: 1, `my key`: 'v1', order: 5})",
                     "CREATE (:`MATCH` {id: 2, title: 'reserved'})");
         };
+    }
+
+    /**
+     * A canonical dump of everything in a graph: one sorted line per node and per relationship,
+     * with properties in key order.
+     *
+     * <p>The write half's route-equality gate compares <em>this</em> rather than the rows a
+     * statement returned, because a write's rows say almost nothing — a {@code CREATE} returns
+     * none at all, and an entry's {@code verify} query only looks where the entry's author thought
+     * to look. Two routes agreeing here have produced the same graph, including in the places
+     * nobody wrote an expectation for.
+     *
+     * <p>Sorted in Java rather than by the engine: an {@code ORDER BY} would need a key every node
+     * has, and the point is to depend on nothing about the data.
+     *
+     * @param graph the graph to dump
+     * @return the sorted lines
+     */
+    static List<String> state(KnowledgeGraph graph) {
+        List<String> dump = new ArrayList<>();
+        for (Map<String, Object> row : graph.query(
+                "MATCH (n) RETURN labels(n) AS labels, properties(n) AS props")) {
+            dump.add("node " + row.get("labels") + " " + canonical(row.get("props")));
+        }
+        for (Map<String, Object> row : graph.query(
+                "MATCH (a)-[r]->(b) RETURN labels(a) AS sourceLabels, properties(a) AS source, "
+                        + "type(r) AS type, properties(r) AS props, labels(b) AS targetLabels, "
+                        + "properties(b) AS target")) {
+            dump.add("edge " + row.get("sourceLabels") + canonical(row.get("source"))
+                    + " -[" + row.get("type") + " " + canonical(row.get("props")) + "]-> "
+                    + row.get("targetLabels") + canonical(row.get("target")));
+        }
+        dump.sort(String::compareTo);
+        return dump;
+    }
+
+    /** A map rendered in key order, so two equal property sets render identically. */
+    private static String canonical(Object properties) {
+        if (!(properties instanceof Map<?, ?> map)) {
+            return String.valueOf(properties);
+        }
+        return new java.util.TreeMap<>(map).toString();
     }
 
     // ---------------------------------------------------------------------------------------
@@ -700,13 +747,18 @@ final class Corpus {
                         + "error"));
 
         // -----------------------------------------------------------------------------------
-        // Inside the v1 clause set, but the clauses of a later phase. Raw-route only for now.
+        // The write half.
         // -----------------------------------------------------------------------------------
 
         entries.add(write(
                 "create_node",
                 "CREATE (:Person {id: $p0, title: $p1, age: $p2, city: $p3})",
                 params("p0", 5, "p1", "Eve", "p2", 50, "p3", "Rome"),
+                create(node("Person")
+                        .withProperty("id", 5)
+                        .withProperty("title", "Eve")
+                        .withProperty("age", 50)
+                        .withProperty("city", "Rome")),
                 "MATCH (p:Person) RETURN count(p) AS n",
                 rows(row("n", 5L)),
                 "half the consumer corpus is writes"));
@@ -716,47 +768,106 @@ final class Corpus {
                 "MATCH (a:Person {id: $p0}), (b:Person {id: $p1}) "
                         + "CREATE (a)-[:KNOWS {since: $p2}]->(b)",
                 params("p0", 3, "p1", 4, "p2", 2022),
+                match(node("Person").named("a").withProperty("id", 3),
+                        node("Person").named("b").withProperty("id", 4))
+                        .create(anyNode().named("a")
+                                .to(rel("KNOWS").withProperty("since", 2022),
+                                        anyNode().named("b"))),
                 "MATCH ()-[r:KNOWS]->() RETURN count(r) AS n",
                 rows(row("n", 3L)),
-                "the consumer corpus writes edges through named endpoints"));
+                "the consumer corpus writes edges through named endpoints; the CREATE refers to "
+                        + "variables the MATCH bound, so its node patterns carry no label"));
 
         entries.add(write(
                 "set_property",
                 "MATCH (p:Person {id: $p0}) SET p.city = $p1",
                 params("p0", 2, "p1", "Lyon"),
+                match(node("Person").named("p").withProperty("id", 2))
+                        .set(PERSON.prop("city").to("Lyon")),
                 "MATCH (p:Person {id: 2}) RETURN p.city AS city",
                 rows(row("city", "Lyon")),
                 "SET with a parameterised value"));
 
         entries.add(write(
+                "set_two_properties",
+                "MATCH (p:Person {id: $p0}) SET p.city = $p1, p.age = $p2",
+                params("p0", 2, "p1", "Lyon", "p2", 42),
+                match(node("Person").named("p").withProperty("id", 2))
+                        .set(PERSON.prop("city").to("Lyon"), PERSON.prop("age").to(42)),
+                "MATCH (p:Person {id: 2}) RETURN p.city AS city, p.age AS age",
+                rows(row("city", "Lyon", "age", 42L)),
+                "one SET, two assignments — the reason set() takes varargs rather than the "
+                        + "clause chaining v1 does not offer"));
+
+        entries.add(write(
                 "set_property_map",
                 "MATCH (p:Person {id: $p0}) SET p += $p1",
                 params("p0", 2, "p1", map("city", "Lyon", "age", 42)),
+                match(node("Person").named("p").withProperty("id", 2))
+                        .set(PERSON.plusProperties(map("city", "Lyon", "age", 42))),
                 "MATCH (p:Person {id: 2}) RETURN p.city AS city, p.age AS age",
                 rows(row("city", "Lyon", "age", 42L)),
                 "+= with a map parameter is the only parameterised way to write a "
                         + "runtime-shaped property set"));
 
         entries.add(write(
+                "set_relationship_property",
+                "MATCH (a:Person)-[r:KNOWS]->(b:Person) SET r.since = $p0",
+                params("p0", 1999),
+                match(A.to(rel("KNOWS").named("r"), B))
+                        .set(rel("KNOWS").named("r").prop("since").to(1999)),
+                "MATCH ()-[r:KNOWS]->() RETURN collect(r.since) AS since",
+                rows(row("since", List.of(1999L, 1999L))),
+                "a relationship property is assigned exactly like a node's"));
+
+        entries.add(write(
                 "remove_property",
                 "MATCH (p:Person {id: $p0}) REMOVE p.email",
                 params("p0", 1),
+                match(node("Person").named("p").withProperty("id", 1))
+                        .remove(PERSON.prop("email")),
                 "MATCH (p:Person) WHERE p.email IS NULL RETURN count(p) AS n",
                 rows(row("n", 2L)),
                 "REMOVE"));
 
         entries.add(write(
+                "delete_relationship",
+                "MATCH (a:Person)-[r:KNOWS]->(b:Person) DELETE r",
+                Map.of(),
+                match(A.to(rel("KNOWS").named("r"), B))
+                        .delete(rel("KNOWS").named("r").ref()),
+                "MATCH ()-[r:KNOWS]->() RETURN count(r) AS n",
+                rows(row("n", 0L)),
+                "plain DELETE, on the relationships where it needs no DETACH"));
+
+        entries.add(write(
                 "detach_delete",
                 "MATCH (p:Person {id: $p0}) DETACH DELETE p",
                 params("p0", 1),
+                match(node("Person").named("p").withProperty("id", 1))
+                        .detachDelete(PERSON.ref()),
                 "MATCH (p:Person) RETURN count(p) AS n",
                 rows(row("n", 3L)),
                 "DETACH DELETE"));
 
         entries.add(write(
+                "merge_plain",
+                "MERGE (c:Company {id: $p0, title: $p1})",
+                params("p0", 12, "p1", "Initech"),
+                merge(node("Company").named("c")
+                        .withProperty("id", 12)
+                        .withProperty("title", "Initech")),
+                "MATCH (c:Company) RETURN count(c) AS n",
+                rows(row("n", 3L)),
+                "a MERGE with no conditional clauses is already a complete statement"));
+
+        entries.add(write(
                 "merge_with_on_match",
                 "MERGE (p:Person {id: $p0}) ON CREATE SET p.title = $p1 ON MATCH SET p.title = $p2",
                 params("p0", 1, "p1", "created", "p2", "matched"),
+                merge(node("Person").named("p").withProperty("id", 1))
+                        .onCreateSet(PERSON.prop("title").to("created"))
+                        .onMatchSet(PERSON.prop("title").to("matched")),
                 "MATCH (p:Person {id: 1}) RETURN p.title AS title",
                 rows(row("title", "matched")),
                 "upsert is the idiom users get wrong by hand"));
@@ -765,9 +876,23 @@ final class Corpus {
                 "unwind_batch_create",
                 "UNWIND $p0 AS row CREATE (:Person {id: row.id, title: row.title})",
                 params("p0", List.of(map("id", 6, "title", "Fay"), map("id", 7, "title", "Gil"))),
+                unwindCreate(),
                 "MATCH (p:Person) RETURN count(p) AS n",
                 rows(row("n", 6L)),
                 "the only way to write N nodes in one statement"));
+
+        entries.add(write(
+                "unwind_batch_merge",
+                "UNWIND $p0 AS row MERGE (:Person {id: row.id})",
+                params("p0", List.of(map("id", 1), map("id", 9))),
+                unwindMerge(),
+                "MATCH (p:Person) RETURN count(p) AS n",
+                rows(row("n", 5L)),
+                "the batch upsert: one row matches an existing person, the other creates one"));
+
+        // -----------------------------------------------------------------------------------
+        // Inside the v1 clause set, but the clauses of a later phase. Raw-route only for now.
+        // -----------------------------------------------------------------------------------
 
         entries.add(writeLater(
                 "with_aggregate_filter",
@@ -860,11 +985,29 @@ final class Corpus {
             String name,
             String cypher,
             Map<String, Object> params,
+            Statement dsl,
             String verify,
             List<Map<String, Object>> expected,
             String note) {
         return new Entry(name, Fixture.PEOPLE, Route.WRITE, cypher, params, verify, expected, null,
-                null, Expressibility.V1_LATER, note);
+                dsl, Expressibility.WRITE_HALF, note);
+    }
+
+    /**
+     * The {@code UNWIND} statements, built in a method because the rows step has to be named
+     * before the pattern can read a field off it.
+     */
+    private static Statement unwindCreate() {
+        UnwindStep rows = unwind(
+                List.of(map("id", 6, "title", "Fay"), map("id", 7, "title", "Gil")));
+        return rows.create(node("Person")
+                .withPropertyFrom("id", rows.field("id"))
+                .withPropertyFrom("title", rows.field("title")));
+    }
+
+    private static Statement unwindMerge() {
+        UnwindStep rows = unwind(List.of(map("id", 1), map("id", 9)));
+        return rows.merge(node("Person").withPropertyFrom("id", rows.field("id")));
     }
 
     private static Entry writeLater(

@@ -72,7 +72,7 @@ public final class Rel {
      * @throws IllegalStateException if this relationship has no variable
      * @throws IllegalArgumentException if the key is not representable
      */
-    public Expr prop(String key) {
+    public Property prop(String key) {
         return new Ast.PropertyRef(requireVariable("prop"), Ident.propertyKey(key));
     }
 
@@ -96,7 +96,7 @@ public final class Rel {
      * @return the variable reference
      * @throws IllegalStateException if this relationship has no variable
      */
-    public Expr ref() {
+    public Variable ref() {
         return new Ast.VarRef(requireVariable("ref"));
     }
 
