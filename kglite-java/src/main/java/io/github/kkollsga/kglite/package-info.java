@@ -3,11 +3,14 @@
  * checkpoint it, close it.
  *
  * <p>Start at {@link io.github.kkollsga.kglite.KnowledgeGraph}. The only other
- * public types are {@link io.github.kkollsga.kglite.StorageMode},
+ * public types here are {@link io.github.kkollsga.kglite.StorageMode},
  * {@link io.github.kkollsga.kglite.Transaction},
  * {@link io.github.kkollsga.kglite.WriterLease} and the two exceptions — that
- * is the whole surface, deliberately. Every engine capability is reached
- * through Cypher, so a new engine feature needs no new Java.
+ * is the whole core surface, deliberately. The optional compile-to-Cypher
+ * builder lives in its own package, {@code io.github.kkollsga.kglite.dsl};
+ * everything it produces still executes through the two Cypher entry points
+ * on this page. Every engine capability is reached through Cypher, so a new
+ * engine feature needs no new Java.
  *
  * <p>Requires Java 22 or newer (the Foreign Function &amp; Memory API). On JDK
  * 24 and newer, run with {@code --enable-native-access=ALL-UNNAMED} to

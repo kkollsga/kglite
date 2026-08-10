@@ -510,8 +510,11 @@ on the same engine — see the
 [Operators guide](https://kglite.readthedocs.io/en/latest/operators/bolt-server.html)
 for deployment.
 
-For **non-Rust language bindings** (Go via cgo, JavaScript via napi,
-JVM via JNI, .NET via P/Invoke), the
+For **Java**, an official binding is on Maven Central:
+`io.github.kkollsga:kglite` (Panama/FFM over the C ABI, natives bundled —
+see [`kglite-java/README.md`](https://github.com/kkollsga/kglite/tree/main/kglite-java)).
+For **other non-Rust language bindings** (Go via cgo, JavaScript via napi,
+.NET via P/Invoke), the
 [`crates/kglite-c`](https://github.com/kkollsga/kglite/tree/main/crates/kglite-c)
 crate exposes the engine through a stable C ABI covering lifecycle, sessions,
 Cypher, results, persistence, and embedders, plus a cbindgen-generated

@@ -48,10 +48,11 @@ import java.util.Optional;
  * <h2>Value mapping</h2>
  *
  * <p>A row is a {@link Map} keyed by the result's column names, in the order
- * the {@code RETURN} clause names them, and it is unmodifiable. Because the
- * keys are column names, two columns aliased identically
- * ({@code RETURN a AS x, b AS x}) collapse into one entry — alias them apart.
- * An empty result is an empty list, never {@code null}.
+ * the {@code RETURN} clause names them, and it is unmodifiable. Two columns
+ * aliased identically ({@code RETURN a AS x, b AS x}) are rejected by the
+ * engine since 0.15.10 with a {@code CypherSyntax} error naming the column
+ * (earlier engines silently collapsed them into one entry). An empty result
+ * is an empty list, never {@code null}.
  *
  * <p>Every cell arrives as one of the following, and parameters accept the
  * mirror set. Both directions are asserted by {@code KnowledgeGraphTest}.
@@ -579,8 +580,9 @@ public final class KnowledgeGraph implements AutoCloseable {
      *     initializer, so the failure arrives wrapped: the
      *     {@link Throwable#getCause() cause} is the {@link KgliteException}
      *     naming every location tried, and a <em>second</em> attempt in the
-     *     same JVM throws {@link NoClassDefFoundError} with no cause at all.
-     *     Log the cause, not just the error.
+     *     same JVM throws {@link NoClassDefFoundError} whose cause chain still
+     *     reaches that original {@link KgliteException}. Log the cause, not
+     *     just the error.
      */
     public static String nativeAbiVersion() {
         return Abi.abiVersion();

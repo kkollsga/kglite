@@ -16,6 +16,11 @@ Published on Maven Central since 0.15.9. The jar bundles natives for macOS
 arm64, Linux x86_64/aarch64 (glibc 2.35+), and Windows x86_64; other platforms
 build from source per the recipe at the bottom of this page.
 
+Version boundary: 0.15.9 ships the core wrapper — `KnowledgeGraph`, Cypher
+in/out, `WriterLease`, storage modes. The **Transactions** and **Cypher DSL**
+sections below, and the any-thread `close()` guarantee under **Threading**,
+ship in **0.15.10**; on 0.15.9 those classes do not exist in the jar.
+
 ```xml
 <dependency>
   <groupId>io.github.kkollsga</groupId>
@@ -114,7 +119,9 @@ temporal and spatial functions — arrives through these two as Cypher.
 
 Rows are `List<Map<String, Object>>`: one `Map` per row, keyed by column name
 in `RETURN` order, unmodifiable, empty list (never `null`) for no results. Two
-columns aliased the same collapse into one key — alias them apart. Cells map as
+columns aliased the same are rejected by the engine since 0.15.10 with a
+`CypherSyntax` error naming the column (earlier engines silently collapsed
+them into one key). Cells map as
 follows, and the mapping is asserted in both directions by
 `KnowledgeGraphTest.valueMapping`:
 
@@ -311,9 +318,11 @@ updating clauses `CREATE`, `MERGE` (+ `ON CREATE SET` / `ON MATCH SET`), `SET`
 - **A value can only ever be a parameter.** No method anywhere takes Cypher text
   in a value position, so a value cannot become syntax; identifiers — the one
   place caller text does reach the query string — are validated where they are
-  constructed, and a backtick is rejected outright because this dialect has no
-  escape for one and quoting it anyway is a working injection. The single
-  exception is `raw`, below, and it is deliberate.
+  constructed, and a backtick is rejected outright as a deliberate policy —
+  the engine accepts doubled-backtick escaping since 0.15.10, but the DSL
+  declines to emit such names to keep its identifier surface trivially
+  auditable (the raw route handles them fine). The single exception is `raw`,
+  below, and it is deliberate.
 - **Emission is deterministic, and it is part of the tested contract.** One
   rendering style, values numbered `$p0…$pN` in emission order, nothing
   rewritten. Every statement in the test corpus is asserted character for
@@ -469,7 +478,9 @@ Two shapes worth knowing:
 - **A missing native library** surfaces as `ExceptionInInitializerError`, not
   `KgliteException` — resolution happens in a static initializer. The *cause*
   is the `KgliteException` naming every location tried, so log the cause; a
-  second attempt in the same JVM throws a bare `NoClassDefFoundError`.
+  second attempt in the same JVM throws `NoClassDefFoundError` whose cause
+  chain still reaches the original `KgliteException` — walk `getCause()`
+  rather than treating it as detail-free.
 
 ## Where the native library comes from
 

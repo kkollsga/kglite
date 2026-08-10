@@ -11,11 +11,13 @@ import java.util.Map;
  * <p>Immutable. Every builder method returns a new instance, so a {@code Node} held in a field can
  * be shared between statements and across threads.
  *
- * <p>There is deliberately no way to project a whole node. {@code RETURN n} crosses the C ABI as a
- * Rust debug string rather than as structured data, so instead of documenting a footgun this DSL
- * omits it: use {@link #properties()}, {@link #labels()}, {@link #id()} or {@link #prop(String)},
- * which return real values. When the ABI grows a structured node shape the projection can be added
- * as a pure addition.
+ * <p>There is deliberately no {@code returning(node)} overload. {@code RETURN n} crosses the C ABI
+ * as a Rust debug string rather than as structured data, so the DSL steers away from it: use
+ * {@link #properties()}, {@link #labels()}, {@link #id()} or {@link #prop(String)}, which return
+ * real values. The steering is not a wall — {@code ref().as("n")} still emits {@code RETURN n AS n}
+ * and hands back the debug string — so treat {@link #ref()} as aggregate-argument plumbing, not a
+ * projection. When the ABI grows a structured node shape the projection can be added as a pure
+ * addition.
  */
 public final class Node implements Pattern {
 
@@ -176,7 +178,8 @@ public final class Node implements Pattern {
 
     /**
      * The bare variable, for the aggregate functions that take a node rather than a property —
-     * {@code count(n)}, {@code collect(n)} is deliberately not offered, see the class javadoc.
+     * {@code count(n)}, {@code exists(n.prop)}. Aliasing it into a projection is possible but
+     * returns the node's debug string, not structured data — see the class javadoc.
      *
      * <p>Emits: {@code <variable>}
      *

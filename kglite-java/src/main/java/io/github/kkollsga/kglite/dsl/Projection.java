@@ -5,8 +5,9 @@ package io.github.kkollsga.kglite.dsl;
  *
  * <p>Built with {@link Expr#as(String)}; there is no unaliased form. An implicit column name would
  * be the emitted expression text, which makes the result-row keys depend on rendering details and
- * makes duplicate-key detection guesswork — and duplicates are worth catching, because the engine
- * currently lets the second projection overwrite the first in the row map instead of complaining.
+ * makes duplicate-key detection guesswork — and duplicates are worth catching at build time: the
+ * engine rejects them since 0.15.10 with a {@code CypherSyntax} error, and the builder sees the
+ * collision earlier, before anything executes.
  */
 public final class Projection {
 

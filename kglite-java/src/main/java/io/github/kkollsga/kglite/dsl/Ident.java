@@ -17,12 +17,12 @@ import java.util.Set;
  * <p>The rules, all derived from executed probes against the engine rather than from prose:
  *
  * <ul>
- *   <li><b>A backtick is rejected outright, in every position.</b> The tokenizer reads a
- *       backticked identifier up to the <em>first</em> closing backtick and doubling does not
- *       escape, so an identifier containing one is not representable in this dialect at all.
- *       Naive backtick quoting is a working injection against the engine — {@code
- *       "Person`) DETACH DELETE n //"} closes the quote and appends a clause — and rejection,
- *       not escaping, is the only correct answer.
+ *   <li><b>A backtick is rejected outright, in every position — as policy.</b> The engine
+ *       accepts doubled-backtick escaping since 0.15.10, so such names are representable via the
+ *       raw Cypher route; the DSL still declines to emit them, because naive (undoubled) backtick
+ *       quoting is a working injection — {@code "Person`) DETACH DELETE n //"} closes the quote
+ *       and appends a clause — and refusing the character keeps this class's emission trivially
+ *       auditable instead of depending on an escaping step being applied everywhere.
  *   <li>An empty identifier is rejected.
  *   <li>In label, relationship-type and variable positions the name must start with an ASCII
  *       letter or {@code _} and may otherwise contain ASCII letters, digits, {@code _}, space,

@@ -22,9 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass `-Dkglite.native.path`, which is what the loader's error tells you.
   `.github/workflows/publish_java.yml` builds the four natives on a release
   tag, runs the Java suite against the extracted-resource path, and deploys
-  `io.github.kkollsga:kglite` to Maven Central. **Still unpublished:** the
-  first deployment awaits the Central Portal's one-time namespace approval, so
-  no artifact is resolvable yet.
+  `io.github.kkollsga:kglite` to Maven Central. Published 2026-08-10:
+  `io.github.kkollsga:kglite:0.15.9` is live (core wrapper; the Transaction
+  and DSL classes in this changelog ship with the next release).
 - **The Java JAR declares `Automatic-Module-Name: io.github.kkollsga.kglite`.**
   Without it the JPMS module name was derived from the file name, so
   `requires kglite` bound to whatever JAR happened to be called that, and the

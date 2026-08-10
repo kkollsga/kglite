@@ -152,10 +152,11 @@ final class ReadingQuery implements MatchStep, WhereStep, WithStep {
     /**
      * Rejects duplicate aliases while the statement is still being built.
      *
-     * <p>The raw route lets the second projection quietly overwrite the first in the result map, so
-     * one of the two columns disappears with no error anywhere. A builder can see both aliases
-     * before anything executes, so it says so — and it keeps saying so regardless of what the
-     * engine does with duplicates later. The same rule covers a {@code WITH}, where a collision is
+     * <p>The engine rejects a duplicate result column since 0.15.10 (earlier engines let the
+     * second projection quietly overwrite the first). A builder can see both aliases before
+     * anything executes, so it says so earlier and with the offending call in the stack — and it
+     * keeps saying so regardless of what the engine does with duplicates. The same rule covers a
+     * {@code WITH}, where a collision is
      * worse still: the lost column is not merely absent from the output, it is absent from the
      * scope every following stage reads.
      */
