@@ -24,7 +24,37 @@ import java.time.Duration;
  * does not release anything.
  * </blockquote>
  *
- * <p>In Java that shape is try-with-resources, wrapped around the whole cycle:
+ * <h2>What it does and does not enforce</h2>
+ *
+ * <p><strong>The lease is cooperative.</strong> Nothing in
+ * {@link KnowledgeGraph#open(java.nio.file.Path, StorageMode)} or
+ * {@link KnowledgeGraph#save(java.nio.file.Path)} takes it, and nothing there
+ * checks it: a program that never calls {@link #acquire(Path)} can open and
+ * save a path this lease is held on, and it will succeed. There is no
+ * permission bit here and no engine-side refusal to write.
+ *
+ * <p>What it buys is mutual exclusion among the participants who do take it —
+ * and that set is the one that matters, because it is everything kglite ships:
+ * another JVM using this wrapper, {@code kglite-cli} (which acquires it when
+ * it opens a graph for writing), the MCP and Bolt servers, and any binding
+ * going through the C ABI's {@code kglite_writer_lease_acquire}. Take it and
+ * you are excluded from clobbering them, and they from clobbering you. Skip it
+ * and last-writer-wins is the only rule left.
+ *
+ * <h2>The sidecar files</h2>
+ *
+ * <p>Acquiring creates {@code <path>.lock} and {@code <path>.lock-owner} next
+ * to the graph, and <strong>both persist after {@link #close()} and after the
+ * process exits</strong> — they are not temporary files and their presence is
+ * not a stale lock. Liveness belongs to the OS lock held on the descriptor, so
+ * a lease left behind by a crashed process is already free; deleting the files
+ * releases nothing and only removes the record that names the holder. Anything
+ * that copies, syncs, backs up or checksums a graph directory should expect
+ * them (and generally skip them).
+ *
+ * <h2>Usage</h2>
+ *
+ * <p>In Java the shape is try-with-resources, wrapped around the whole cycle:
  *
  * <pre>{@code
  * try (WriterLease lease = WriterLease.acquire(path);
@@ -61,6 +91,12 @@ public final class WriterLease implements AutoCloseable {
      *
      * <p>The path need not exist yet — a caller creating a new graph takes the
      * lease first.
+     *
+     * <p>Not reentrant, and deliberately so: a second live lease on the same
+     * path from the same JVM is contention like any other and throws
+     * {@link WriterLeaseHeldException}, with a message that says so explicitly
+     * rather than blaming an unrelated process. Hold one lease and pass it
+     * around; do not acquire per operation.
      *
      * @param path the graph path (a {@code .kgl} file or a disk-graph directory)
      * @return the held lease; close it to release

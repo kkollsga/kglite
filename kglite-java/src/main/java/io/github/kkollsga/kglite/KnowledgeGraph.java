@@ -36,11 +36,100 @@ import java.util.Optional;
  * }
  * }</pre>
  *
- * <p><strong>Threading.</strong> The engine is synchronous and the C ABI
- * documents its session handle as safe to use from several threads, so this
- * class adds no locking of its own beyond making {@link #close()} idempotent.
- * Queries from multiple threads on one instance are fine; using an instance
- * concurrently with closing it is not.
+ * <h2>Durability</h2>
+ *
+ * <p><strong>Nothing is persisted until {@link #save(Path)} runs.</strong>
+ * Mutations live in the session's graph; closing without saving discards them
+ * silently, and so does a crash. That is true even for a graph that was
+ * <em>opened</em> from a path — {@code open} is not an attachment that
+ * write-through-persists, it is a load. {@link #save(Path)} is durable
+ * (fsync); {@link #save(Path, boolean)} can trade that away.
+ *
+ * <h2>Value mapping</h2>
+ *
+ * <p>A row is a {@link Map} keyed by the result's column names, in the order
+ * the {@code RETURN} clause names them, and it is unmodifiable. Because the
+ * keys are column names, two columns aliased identically
+ * ({@code RETURN a AS x, b AS x}) collapse into one entry — alias them apart.
+ * An empty result is an empty list, never {@code null}.
+ *
+ * <p>Every cell arrives as one of the following, and parameters accept the
+ * mirror set. Both directions are asserted by {@code KnowledgeGraphTest}.
+ *
+ * <table border="1">
+ *   <caption>Cypher value to Java value</caption>
+ *   <tr><th>Cypher / engine</th><th>Java cell</th><th>Note</th></tr>
+ *   <tr><td>{@code NULL}</td><td>{@code null}</td>
+ *       <td>The key is <em>present</em> in the row map with a {@code null}
+ *           value, so {@code containsKey} is true and {@code get} is
+ *           {@code null}.</td></tr>
+ *   <tr><td>integer</td><td>{@link Long}</td>
+ *       <td>Always {@code Long}, never {@code Integer} — the engine has one
+ *           64-bit integer type. An {@code Integer} passed as a
+ *           <em>parameter</em> comes back as a {@code Long}, so
+ *           {@code row.get("id").equals(1)} is {@code false} where
+ *           {@code equals(1L)} is {@code true}.</td></tr>
+ *   <tr><td>float</td><td>{@link Double}</td><td></td></tr>
+ *   <tr><td>boolean</td><td>{@link Boolean}</td><td></td></tr>
+ *   <tr><td>string</td><td>{@link String}</td><td></td></tr>
+ *   <tr><td>list</td><td>{@link List}</td><td>Elements mapped by this table,
+ *           recursively.</td></tr>
+ *   <tr><td>map</td><td>{@link Map}</td><td>Insertion-ordered; keys are
+ *           {@code String}.</td></tr>
+ *   <tr><td>node, relationship, path, temporal</td><td>{@link String}</td>
+ *       <td><strong>An engine-side debug rendering, not a structured value</strong>
+ *           — see below.</td></tr>
+ * </table>
+ *
+ * <p><strong>Do not {@code RETURN} a node, relationship or path whole.</strong>
+ * The C ABI serialises result cells as JSON and has no JSON shape for those
+ * types, so they arrive as the engine's own {@code Debug} rendering in a
+ * {@code String}: {@code RETURN n} yields
+ * {@code "Node(NodeValue { id: 0, labels: [\"Person\"], properties: {…} })"}.
+ * It is a stable-enough string to eyeball and a terrible thing to parse. Return
+ * what you actually want instead — every one of these is a first-class value:
+ *
+ * <pre>{@code
+ * RETURN p.title AS name          // -> String
+ * RETURN properties(p) AS props   // -> Map, the node's properties
+ * RETURN labels(p) AS labels      // -> List of String
+ * RETURN id(p) AS id              // -> Long, the stable node id
+ * RETURN type(r) AS rel           // -> String, the relationship type
+ * RETURN {id: p.id, n: p.title}   // -> Map you shaped yourself
+ * }</pre>
+ *
+ * <p>The same applies inside collections: {@code collect(n)} is a {@code List}
+ * of those debug strings, while {@code collect(properties(n))} is a
+ * {@code List} of {@code Map}.
+ *
+ * <h2>Threading</h2>
+ *
+ * <p>The engine is synchronous — a call runs to completion on the calling
+ * thread, and this class adds no thread pool, no async surface and no locking
+ * of its own. What one instance guarantees, from the engine's session model
+ * (an {@code Arc<DirGraph>} behind a mutex: readers clone the pointer, writers
+ * take the lock for the whole mutation and swap):
+ *
+ * <ul>
+ *   <li>One instance may be shared by many threads. {@link #query(String)}
+ *       calls run <em>concurrently</em> — each takes a snapshot under a brief
+ *       lock and then executes outside it.</li>
+ *   <li>{@link #cypher(String, Map)} calls <em>serialize</em> against each
+ *       other and against {@link #save(Path)}. A mutation is all-or-nothing:
+ *       a concurrent reader sees the state before it or the state after it,
+ *       never a half-applied statement.</li>
+ *   <li>A reader that already started keeps its snapshot while a writer
+ *       commits; it does not block the writer and is not blocked by it.</li>
+ * </ul>
+ *
+ * <p>What is <strong>not</strong> safe: calling anything on an instance
+ * concurrently with {@link #close()}. Close frees the native session, and a
+ * call racing it is a use-after-free, not an exception. Confine an instance's
+ * close to the thread that owns its lifetime (try-with-resources on the thread
+ * that created it, or a shutdown after the workers have joined).
+ *
+ * <p>Separate instances over the same path are governed by the
+ * {@link WriterLease}, not by this — see that class.
  */
 public final class KnowledgeGraph implements AutoCloseable {
 
@@ -108,8 +197,17 @@ public final class KnowledgeGraph implements AutoCloseable {
      * Open the graph at {@code path}, creating it when absent, honouring
      * {@code mode} on both branches.
      *
-     * <p>A missing path is created in {@code mode}; an existing graph that came
-     * back in a different mode is converted to it, and the conversion is
+     * <p><strong>A missing path is created, not an error</strong> — this is
+     * the open-or-create overload, and it is what a first run of a program
+     * calls. For {@link StorageMode#MEMORY} and {@link StorageMode#MAPPED} the
+     * creation writes nothing — {@code path} stays absent until the first
+     * {@link #save(Path)} — so an early exit leaves no half-made graph behind.
+     * {@link StorageMode#DISK} is the exception: its backend <em>is</em> a
+     * directory, created here. Use {@link #open(Path)} when a missing path
+     * should fail instead of being created.
+     *
+     * <p>An existing graph that came
+     * back in a different mode is converted to {@code mode}, and the conversion is
      * <em>reported</em> through {@link #convertedFrom()} rather than performed
      * silently. Conversions with no in-place transition (either disk direction)
      * fail with the reason and the alternative named.
@@ -158,17 +256,43 @@ public final class KnowledgeGraph implements AutoCloseable {
     // ---- queries ----------------------------------------------------------
 
     /**
-     * Run a Cypher statement of any kind and return its rows.
+     * Run a Cypher statement of any kind — the <strong>write</strong> path.
      *
-     * <p>Accepts reads and writes alike ({@code CREATE}, {@code MERGE},
-     * {@code SET}, {@code DELETE}, {@code REMOVE}, {@code MATCH} …); a
-     * successful statement is auto-committed. Use {@link #query(String)} for a
-     * statement known to be read-only — it takes a consistent snapshot instead
-     * of the write path, so concurrent readers do not serialize behind it.
+     * <p>This method and {@link #query(String)} are the two halves of one
+     * choice, and picking the wrong one is a thrown exception rather than a
+     * quiet difference:
      *
-     * <p>Cells are natural Java values: {@code String}, {@code Long},
-     * {@code Double}, {@code Boolean}, {@code null}, {@code List} and
-     * {@code Map} for nested structures.
+     * <table border="1">
+     *   <caption>cypher versus query</caption>
+     *   <tr><th></th><th>{@code cypher}</th><th>{@code query}</th></tr>
+     *   <tr><td>Accepts</td>
+     *       <td>Everything — {@code CREATE}, {@code MERGE}, {@code SET},
+     *           {@code DELETE}, {@code REMOVE}, {@code CREATE INDEX},
+     *           {@code DROP INDEX}, and reads too</td>
+     *       <td>Reads only</td></tr>
+     *   <tr><td>On the other one's input</td>
+     *       <td>Runs a read perfectly well, just on the write path</td>
+     *       <td>Throws {@link KgliteException} with
+     *           {@link KgliteException#statusName()} {@code "InvalidArgument"}:
+     *           <em>execute_read called with a mutation query … use execute_mut
+     *           against a mutable graph view</em></td></tr>
+     *   <tr><td>Concurrency</td>
+     *       <td>Serializes against other {@code cypher} calls and
+     *           {@link #save(Path)}</td>
+     *       <td>Runs concurrently on a consistent snapshot</td></tr>
+     *   <tr><td>Commit</td>
+     *       <td>A successful statement is auto-committed into the session</td>
+     *       <td>Nothing to commit</td></tr>
+     * </table>
+     *
+     * <p>So: {@code cypher} for anything that changes the graph, {@code query}
+     * for anything that does not — the read path neither takes the write lock
+     * nor makes concurrent readers queue behind you. Neither one writes to
+     * disk; see {@link #save(Path)}.
+     *
+     * <p>For what the returned cells contain — including the one shape that
+     * surprises people, {@code RETURN n} on a whole node — see the value-mapping
+     * section of this class's documentation.
      *
      * @param query the Cypher text
      * @return one insertion-ordered, unmodifiable map per row, keyed by the
@@ -176,17 +300,43 @@ public final class KnowledgeGraph implements AutoCloseable {
      * @throws KgliteException on any engine failure; {@link
      *     KgliteException#statusName()} names the kind
      * @throws IllegalStateException if this graph is closed
+     * @see #query(String)
      */
     public List<Map<String, Object>> cypher(String query) {
         return cypher(query, Map.of());
     }
 
     /**
-     * Run a parameterised Cypher statement of any kind and return its rows.
+     * Run a parameterised Cypher statement of any kind — the
+     * <strong>write</strong> path. See {@link #cypher(String)} for how this
+     * differs from {@link #query(String, Map)}.
      *
-     * <p>Parameter values may be {@code null}, {@code String}, {@code Boolean},
-     * any {@code Number}, a {@code Map} with {@code String} keys, an
-     * {@code Iterable} or an {@code Object[]}; nesting is allowed.
+     * <p>Parameters are the only safe way to put a value into a statement;
+     * string-concatenating one is a Cypher injection in exactly the way it is
+     * in SQL. A legal parameter value is one of:
+     *
+     * <ul>
+     *   <li>{@code null}</li>
+     *   <li>{@link String}, {@link Boolean}</li>
+     *   <li>any {@link Number} — note that integral types all become the
+     *       engine's 64-bit integer, so an {@link Integer} comes back as a
+     *       {@link Long}</li>
+     *   <li>a {@link Map} with {@code String} keys</li>
+     *   <li>an {@link Iterable} or an {@code Object[]}</li>
+     * </ul>
+     *
+     * <p>Nesting is allowed to any depth. Anything else — a {@code java.time}
+     * value, a POJO, a {@code byte[]}, a non-{@code String} map key, a
+     * {@code NaN} or infinite {@code Double} — is rejected before the call
+     * reaches the engine, with a {@link KgliteException} whose
+     * {@link KgliteException#statusName()} is {@code "WrapperError"} and whose
+     * message names the offending type and the legal set. Convert such a value
+     * yourself, so the conversion is the one you meant rather than one this
+     * wrapper guessed.
+     *
+     * <p>A {@code $name} the statement references but {@code params} does not
+     * supply is an engine error ({@code CypherExecution}: <em>Missing
+     * parameter</em>), never a silent {@code null}.
      *
      * @param query  the Cypher text, referring to bindings as {@code $name}
      * @param params the bindings; may be empty, never {@code null}
@@ -194,22 +344,39 @@ public final class KnowledgeGraph implements AutoCloseable {
      * @throws KgliteException on any engine failure, or if a parameter value has
      *     no JSON representation
      * @throws IllegalStateException if this graph is closed
+     * @see #query(String, Map)
      */
     public List<Map<String, Object>> cypher(String query, Map<String, Object> params) {
         return run(query, params, true);
     }
 
     /**
-     * Run a read-only Cypher statement against a consistent snapshot.
+     * Run a read-only Cypher statement against a consistent snapshot — the
+     * <strong>read</strong> path.
      *
-     * <p>The engine rejects a mutating statement here; that is the point — it
-     * is the read path, and it neither takes the write lock nor commits.
+     * <p>The counterpart of {@link #cypher(String)}, which is the write path;
+     * that method's documentation carries the full comparison. In short: this
+     * one takes a snapshot rather than the write lock, so concurrent readers
+     * run in parallel and none of them queue behind a writer — and it
+     * <em>refuses</em> a mutating statement rather than quietly running it.
+     *
+     * <p>Handing it a {@code CREATE}, {@code MERGE}, {@code SET},
+     * {@code DELETE}, {@code REMOVE}, {@code CREATE INDEX} or
+     * {@code DROP INDEX} throws {@link KgliteException} with
+     * {@link KgliteException#statusName()} {@code "InvalidArgument"} and a
+     * message beginning <em>execute_read called with a mutation query</em>.
+     * The graph is untouched and still usable; switch the call to
+     * {@link #cypher(String)}.
+     *
+     * <p>For what the returned cells contain, see the value-mapping section of
+     * this class's documentation.
      *
      * @param query the Cypher text
      * @return one insertion-ordered, unmodifiable map per row
      * @throws KgliteException on any engine failure, including a write
      *     attempted through the read path
      * @throws IllegalStateException if this graph is closed
+     * @see #cypher(String)
      */
     public List<Map<String, Object>> query(String query) {
         return query(query, Map.of());
@@ -217,13 +384,18 @@ public final class KnowledgeGraph implements AutoCloseable {
 
     /**
      * Run a parameterised read-only Cypher statement against a consistent
-     * snapshot.
+     * snapshot — the <strong>read</strong> path.
+     *
+     * <p>Same mutation refusal and same snapshot semantics as
+     * {@link #query(String)}; same legal parameter types as
+     * {@link #cypher(String, Map)}.
      *
      * @param query  the Cypher text, referring to bindings as {@code $name}
      * @param params the bindings; may be empty, never {@code null}
      * @return one insertion-ordered, unmodifiable map per row
      * @throws KgliteException on any engine failure
      * @throws IllegalStateException if this graph is closed
+     * @see #cypher(String, Map)
      */
     public List<Map<String, Object>> query(String query, Map<String, Object> params) {
         return run(query, params, false);
@@ -282,12 +454,26 @@ public final class KnowledgeGraph implements AutoCloseable {
      * checkpoint survives power loss. The storage mode is written with it, so
      * {@link #open(Path)} brings the graph back in the mode it was saved in.
      *
+     * <p><strong>This is the only thing that persists anything.</strong> A
+     * mutation that is never saved is discarded at {@link #close()} with no
+     * error and no warning, including on a graph that was opened from this very
+     * path — {@code open} loads, it does not attach. {@code path} need not be
+     * the path the graph was opened from; saving elsewhere is how you copy or
+     * branch one.
+     *
      * <p><strong>The lease contract: a caller that saves must hold the
      * {@link WriterLease} across the whole open / mutate / save interval, not
      * merely at this call.</strong> Two processes that both open one path, both
      * mutate, and both save each write a complete snapshot and the later one
      * wins outright and silently — locking only at save time is already too
      * late to notice. Read-only sessions take no lease.
+     *
+     * <p>That contract is <em>cooperative</em>, and worth being precise about:
+     * this method does not check for a lease and will not refuse to run without
+     * one. The lease excludes other participants who also take it — a second
+     * Java writer, {@code kglite-cli}, any process using the C ABI's lease — and
+     * excludes nothing at all from a program that skips it. See
+     * {@link WriterLease}.
      *
      * @param path the destination
      * @throws KgliteException if the write failed
@@ -300,12 +486,22 @@ public final class KnowledgeGraph implements AutoCloseable {
     /**
      * Checkpoint this graph to {@code path} with an explicit durability choice.
      *
+     * <p>The flag is the C ABI's {@code fsync} argument to
+     * {@code kglite_session_save}, and it selects between two writes that are
+     * both atomic — the difference is the barrier, not the rename.
+     *
      * @param path    the destination
-     * @param durable {@code true} is {@link #save(Path)}: atomic and flushed to
-     *     stable storage. {@code false} is the fast, <em>non-durable</em>
-     *     opt-out — still never a torn file, but the bytes may not survive an OS
-     *     or power crash. Use it only for bulk or throwaway saves you will
-     *     re-save or can rebuild.
+     * @param durable {@code true} is {@link #save(Path)}: write to a temp file,
+     *     {@code fsync} that file <em>and</em> its parent directory, then
+     *     rename. The checkpoint is on stable storage when this returns, so it
+     *     survives an OS crash or power loss, at the cost of the fsync latency.
+     *     <p>{@code false} skips both fsyncs and keeps the temp-and-rename.
+     *     You still never get a torn or half-written file — a reader sees the
+     *     old checkpoint or the new one — but "the new one" may not have reached
+     *     the platter, so an OS crash or power loss can lose the save entirely
+     *     even though it returned successfully. A clean process exit is safe;
+     *     the kernel's page cache outlives the process. Use it for bulk loads
+     *     and throwaway checkpoints you will re-save or can rebuild.
      * @throws KgliteException if the write failed
      * @throws IllegalStateException if this graph is closed
      */
@@ -320,11 +516,25 @@ public final class KnowledgeGraph implements AutoCloseable {
      * The C ABI version of the loaded native library, as
      * {@code "major.minor.patch"}.
      *
-     * <p>Useful in bug reports and when a JAR is paired with a native library
-     * built separately, which is exactly the situation until the packaging
-     * phase bundles them together.
+     * <p>The published JAR bundles a matching native, so this normally equals
+     * the JAR's own version. It can differ — and is worth putting in a bug
+     * report — whenever the native came from somewhere else: a
+     * {@code -Dkglite.native.path} override, or a checkout's
+     * {@code target/} build. See {@code NativeLibrary} for the resolution
+     * order.
+     *
+     * <p>Calling it is also the cheapest way to force native loading at a
+     * moment of your choosing (startup, a health check) rather than at the
+     * first query.
      *
      * @return the native ABI version
+     * @throws ExceptionInInitializerError if no native library could be
+     *     resolved or linked. Resolution happens once, in a static
+     *     initializer, so the failure arrives wrapped: the
+     *     {@link Throwable#getCause() cause} is the {@link KgliteException}
+     *     naming every location tried, and a <em>second</em> attempt in the
+     *     same JVM throws {@link NoClassDefFoundError} with no cause at all.
+     *     Log the cause, not just the error.
      */
     public static String nativeAbiVersion() {
         return Abi.abiVersion();

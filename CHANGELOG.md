@@ -25,6 +25,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `io.github.kkollsga:kglite` to Maven Central. **Still unpublished:** the
   first deployment awaits the Central Portal's one-time namespace approval, so
   no artifact is resolvable yet.
+- **The Java JAR declares `Automatic-Module-Name: io.github.kkollsga.kglite`.**
+  Without it the JPMS module name was derived from the file name, so
+  `requires kglite` bound to whatever JAR happened to be called that, and the
+  derived name changed if the artifact was ever renamed.
+
+### Changed
+
+- **The Java binding's documentation is rewritten against a docs-blind
+  consumer run.** `kglite-java/README.md` is now one page covering the things
+  a consumer previously had to discover by experiment: the `cypher` (write)
+  versus `query` (read) contract and the error each throws when misused; a
+  value-mapping table — including that integers always return as `Long`, so an
+  `Integer` parameter comes back widened, and that `RETURN n` on a whole node
+  yields a debug string rather than a structured value (use `properties(n)`,
+  `labels(n)`, `id(n)`); that `save()` is the only thing that persists
+  anything and `close()` discards unsaved work silently; the threading
+  guarantees; the writer lease being cooperative rather than enforced, and its
+  two sidecar files persisting after release. The quickstart now compiles and
+  runs exactly as printed. Every public member carries javadoc, and the
+  javadoc build runs `-Xdoclint:all -Werror`, so a missing `@param` fails the
+  build instead of printing a warning nobody reads.
+- The ecosystem version-consistency checker now reads a Maven XML
+  `<dependency>` block, not only the `group:artifact:version` coordinate form.
+  A stale `<version>` in an install snippet was previously invisible to it.
 
 ## [0.15.9] - 2026-08-10
 
