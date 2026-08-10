@@ -29,14 +29,24 @@ With neither trigger, the same 100k insert costs **3.668 ms against SQLite's
 3.666 ms — exact parity**. So this was not an architectural deficit; it was a
 gate that excluded every realistic application graph.
 
-After PR #86 ``journal_covers`` (``rollback.rs:195-198``) has **exactly one**
-term left — ``graph.graph.supports_undo_journal()``. Neither ``save()`` nor any
-index family vetoes it any more. The only remaining way to force the clone is
-the *backend*: ``Memory`` journals, ``Recording`` forwards to its inner
-backend, and ``Mapped`` / ``Disk`` return ``false``
-(``storage/backend.rs:110-116``). A reintroduced veto is therefore a new
-conjunct in a one-conjunct predicate — cheap to add by accident, and these
-cells are what would notice.
+After PR #86 ``journal_covers`` (``rollback.rs``) has **exactly one** term left
+— ``graph.graph.supports_undo_journal()``. Neither ``save()`` nor any index
+family vetoes it any more. The only remaining way to force the clone is the
+*backend*: ``Memory`` **and ``Mapped``** journal (both wrap the same heap
+``StableDiGraph``), ``Recording`` forwards to its inner backend, and only
+``Disk`` returns ``false`` — it has no petgraph and therefore no
+``NodeIndex`` identity for an ``UndoEntry`` to name
+(``storage/backend.rs::supports_undo_journal``). A reintroduced veto is
+therefore a new conjunct in a one-conjunct predicate — cheap to add by
+accident, and these cells are what would notice.
+
+*(Corrected 2026-08-10. This paragraph previously claimed ``Mapped`` returned
+``false``. It has returned ``true`` since 2026-07-30, and
+``rollback_tests.rs::mapped_statements_copy_zero_nodes`` — itself the
+inversion of an arm that used to pin the opposite — is the executable proof.
+The stale claim mattered: it named the mapped backend as a known-slow write
+path, which is exactly the kind of "already understood" that stops a
+measurement being taken.)*
 
 ⚠ **The statement shape is load-bearing — see the STATEMENT SHAPE comment
 below.** A bare single-node ``CREATE`` cannot see this defect at all, in
@@ -65,6 +75,38 @@ Measured at 100k (2026-07-27): mean 0.0561 ms, p50 0.0044 ms, **max 5.17 ms**,
 with full recovery once the reference is released; ``freeze()`` held behaves
 the same (max 5.83 ms); ~28 ms at 1M. No threading, no snapshot API, no
 explicit copy — merely keeping the ``ResultView`` a query returned.
+
+**Re-pinned 2026-08-10** (release, two agreeing runs, D2 Phase 0 —
+``dev-docs/bench/results/2026-08-10-d2-phase0-pin.md``). Mean µs of the timed
+first-write, every round against a freshly acquired reference:
+
+===============  =========  ===========  ============
+holder            1k         100k         1M
+===============  =========  ===========  ============
+``none``            2.8          2.8           3.0
+``dropped_view``    3.1          3.0           3.4
+``result_view``    36.6      3,462.9      36,338.5
+``frozen``         37.5      3,354.6      36,211.3
+``session``        38.1      3,265.0      36,303.5
+``transaction``    38.7      3,357.6      36,404.9
+===============  =========  ===========  ============
+
+Three things that table says and the 2026-07-26 one could not:
+
+* **All four holders cost the same.** ``session`` and ``transaction`` were
+  never measured before and are the two an application acquires *deliberately*;
+  they pay the identical fork. There is no "just don't hold a ResultView"
+  work-around.
+* **``dropped_view`` isolates it to the hold.** Building the view and releasing
+  it costs +0.3 µs at every size. Everything else is the ``Arc``.
+* **The control got 2.6x faster while the cliff got worse.** ``none`` went
+  7.3/7.8/8.1 µs (2026-07-26) to 2.8/2.8/3.0, so the *ratio* went 3.8x/278x/
+  3,400x to **13x/1,240x/12,100x**. Removing per-write cost elsewhere made this
+  the dominant term, not a smaller one.
+
+Memory is the other half: at 1M the fork grew process peak RSS by **668.8 MB**
+in a single round — a second whole copy of the graph — while the ``none`` and
+``dropped_view`` arms immediately before it grew it by 0.0 MB.
 
 See the measurement-trap comment above that section. It is the reason this
 defect survived a benchmark suite that already had a cell pointed at it.
@@ -100,6 +142,8 @@ Run with::
 from __future__ import annotations
 
 import itertools
+import resource
+import sys
 
 import pandas as pd
 import pytest
@@ -125,10 +169,42 @@ from kglite import KnowledgeGraph
 # and four variants x 1M nodes is minutes of fixture build for no added signal.
 SIZES = [1_000, 100_000]
 
+#: Sizes for the **defect-B** (held-reference) cells only.
+#:
+#: 1M is deliberately omitted from ``SIZES`` above and deliberately present
+#: here, and the two decisions do not conflict — they are about different
+#: defects. Defect A is a *multiplier* on every write, unambiguous at two
+#: decades, and four variants x 1M nodes buys no signal for minutes of fixture
+#: build. Defect B is a *whole-graph copy*, so its cost is the graph itself:
+#: 27.6 ms at 1M against 2.2 ms at 100k (2026-07-26). 1M is where it lives, and
+#: a program that proposes to remove it has to be measured where it is largest.
+REF_SIZES = [1_000, 100_000, 1_000_000]
+
 #: The four corners of the ``journal_covers`` gate. ``saved_indexed`` is the
 #: one a real application actually is, and the one combination the Rust-side
 #: arms never build.
 VARIANTS = ["fresh", "saved", "indexed", "saved_indexed"]
+
+#: Every ordinary way a Python caller ends up holding a second
+#: ``Arc<DirGraph>``, plus two controls.
+#:
+#: * ``none`` — no reference at all. The floor.
+#: * ``dropped_view`` — the same view the ``result_view`` arm holds, built and
+#:   **released** inside the untimed setup. This is the control that separates
+#:   *building* the view from *holding* it: without it, a ``result_view`` cell
+#:   that got slower could equally be a query-planner regression, and the two
+#:   are indistinguishable from the ``none`` arm alone.
+#: * ``result_view`` — the accidental case: a lazy view a query returned.
+#: * ``frozen`` — ``freeze()``, the deliberate snapshot.
+#: * ``session`` — ``g.session()`` pins the source graph's ``Arc`` for the
+#:   session object's whole lifetime (``pyapi/session.rs::from_arc``).
+#: * ``transaction`` — ``g.begin()`` holds a snapshot until commit/rollback
+#:   (``kg_core.rs``, core ``session/transaction.rs``).
+#:
+#: ``session`` and ``transaction`` were unmeasured anywhere before 2026-08-10,
+#: and they are the two holders an application acquires *on purpose* — i.e. the
+#: ones a user cannot be told to simply stop doing.
+REF_HOLDERS = ["none", "dropped_view", "result_view", "frozen", "session", "transaction"]
 
 # Every cell here drives `benchmark.pedantic` with an explicit round count
 # rather than plain `benchmark(fn)`.
@@ -283,6 +359,24 @@ def veto_graphs(tmp_path_factory) -> dict[tuple[int, str], KnowledgeGraph]:
     return {(size, variant): _variant_graph(size, variant, tmp_dir) for size in SIZES for variant in VARIANTS}
 
 
+@pytest.fixture(scope="module")
+def ref_graphs(veto_graphs) -> dict[int, KnowledgeGraph]:
+    """One `fresh` graph per :data:`REF_SIZES`, for the defect-B cells.
+
+    The 1k and 100k entries are the *same objects* the defect-A cells use — a
+    second 100k build would be seconds of fixture time for an identical graph.
+    Only 1M is built here, and only in the `fresh` variant: defect B is
+    ``Arc::make_mut`` in ``get_graph_mut``, which fires before the checkpoint
+    whitelist is consulted, so the ``journal_covers`` corners are irrelevant to
+    it and building four of them at 1M would measure nothing extra.
+    """
+    graphs = {size: veto_graphs[(size, "fresh")] for size in REF_SIZES if size in SIZES}
+    for size in REF_SIZES:
+        if size not in graphs:
+            graphs[size] = _base_graph(size)
+    return graphs
+
+
 @pytest.mark.benchmark
 @pytest.mark.parametrize("variant", VARIANTS)
 @pytest.mark.parametrize("size", SIZES)
@@ -431,13 +525,84 @@ def _wide_result(graph: KnowledgeGraph):
     explicitly, so they never produce a lazy view; `freeze()` pins the `Arc`
     directly instead, which is the `holder="frozen"` arm.
     """
-    return graph.cypher("MATCH (n:Item) RETURN n.name, n.qty LIMIT 100")
+    return graph.cypher(WIDE_QUERY)
+
+
+#: The query :func:`_wide_result` runs, hoisted to a constant so the
+#: shape guard below can assert on the text a benchmark round actually uses
+#: rather than on a copy of it.
+WIDE_QUERY = "MATCH (n:Item) RETURN n.name, n.qty LIMIT 100"
+
+#: ``result_view.rs::EAGER_MATERIALISE_MAX_CELLS``. A view at or under this
+#: many ``rows x columns`` materialises and **drops** its ``Arc``, silently
+#: becoming the ``holder="none"`` case under a name promising otherwise.
+EAGER_MATERIALISE_MAX_CELLS = 32
+
+
+def _acquire_reference(graph: KnowledgeGraph, holder: str):
+    """Take (or deliberately decline to take) a second reference to `graph`.
+
+    **One definition, two callers**, and that is the point: the benchmark's
+    untimed `setup` and the non-benchmark guard below both go through here, so
+    the guard is testing the acquisition the benchmark performs rather than a
+    lookalike written next to it. A hoist that made the benchmark vacuous would
+    have to be made *here* to escape the guard, and here is the one place the
+    guard is looking.
+    """
+    if holder == "none":
+        return None
+    if holder == "dropped_view":
+        # Built and released before the timed call: same construction cost,
+        # no surviving `Arc`. CPython drops it at zero refcount, immediately.
+        _wide_result(graph)
+        return None
+    if holder == "result_view":
+        return _wide_result(graph)
+    if holder == "frozen":
+        return graph.freeze()
+    if holder == "session":
+        return graph.session()
+    if holder == "transaction":
+        return graph.begin()
+    raise ValueError(f"unknown holder {holder!r}")
+
+
+#: Holders that must yield a live Python object. The two that must not are
+#: `none` and `dropped_view`; asserting both directions is what makes the
+#: control a control rather than an untested label.
+PINNING_HOLDERS = [h for h in REF_HOLDERS if h not in ("none", "dropped_view")]
+
+
+def _peak_rss_mb() -> float:
+    """Process peak RSS in MB. `ru_maxrss` is bytes on macOS, KiB on Linux.
+
+    ⚠ **`ru_maxrss` is a monotone process high-water mark**, so
+    `rss_peak_growth_mb` is *not* per-cell memory. It reads non-zero only for
+    the first cell that pushes the process past its previous peak, and zero for
+    every later cell that stays under it — including cells that allocated
+    exactly as much.
+
+    That is why the order of :data:`REF_HOLDERS` is load-bearing rather than
+    alphabetical: `none` and `dropped_view` run **first** at each size and
+    establish the peak without holding anything, so the first pinning holder's
+    growth is attributable to the fork and nothing else. Measured 2026-08-10 at
+    1M: `none` and `dropped_view` grew the peak by 0.0 MB, and `result_view` —
+    the very next cell, differing only in that it kept the view — grew it by
+    **668.8 MB**, i.e. a whole second copy of the graph. The three holders after
+    it read 0.0 MB because the peak was already there, not because they were
+    free.
+
+    Do not "fix" this by resetting between cells; there is no way to reset
+    `ru_maxrss`. Read the first pinning arm, or run one cell per process.
+    """
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak / (1024 * 1024) if sys.platform == "darwin" else peak / 1024
 
 
 @pytest.mark.benchmark
-@pytest.mark.parametrize("holder", ["none", "result_view", "frozen"])
-@pytest.mark.parametrize("size", SIZES)
-def test_bench_first_write_after_reference(benchmark, veto_graphs, size, holder):
+@pytest.mark.parametrize("holder", REF_HOLDERS)
+@pytest.mark.parametrize("size", REF_SIZES)
+def test_bench_first_write_after_reference(benchmark, ref_graphs, size, holder):
     """The first write after a reference to the graph appears.
 
     Defends (measured 2026-07-27, 100k): holding a returned `ResultView` across
@@ -458,18 +623,20 @@ def test_bench_first_write_after_reference(benchmark, veto_graphs, size, holder)
     ever consulted, so the cheapest possible statement still triggers the
     clone — which isolates defect B from checkpoint cost rather than summing
     the two.
+
+    **Memory is recorded alongside time**, as `extra_info`. The fork's cost is
+    not only latency: a copy of the whole graph is also a transient allocation
+    the size of the graph, and at 1M nodes that is the difference between a
+    process that fits and one that does not. `ru_maxrss` is a process *peak*,
+    so `rss_peak_growth_mb` is a floor on the largest live footprint the cell
+    reached, not a per-round figure — read it across holders at one size, where
+    the only difference between the arms is whether a reference was held.
     """
-    graph = veto_graphs[(size, "fresh")]
+    graph = ref_graphs[size]
     ids = _FRESH_GRAPH_IDS
 
     def setup():
-        if holder == "result_view":
-            reference = _wide_result(graph)
-        elif holder == "frozen":
-            reference = graph.freeze()
-        else:
-            reference = None
-        return (reference,), {}
+        return (_acquire_reference(graph, holder),), {}
 
     def write(reference):
         graph.cypher("CREATE (:Item {id: $i, name: 'y', code: 'c', qty: 1})", params={"i": next(ids)})
@@ -478,6 +645,7 @@ def test_bench_first_write_after_reference(benchmark, veto_graphs, size, holder)
         # would quietly turn this into the `none` case.
         return reference
 
+    rss_before = _peak_rss_mb()
     benchmark.pedantic(
         write,
         setup=setup,
@@ -485,11 +653,21 @@ def test_bench_first_write_after_reference(benchmark, veto_graphs, size, holder)
         iterations=1,
         warmup_rounds=REF_WARMUP_ROUNDS,
     )
+    benchmark.extra_info["holder"] = holder
+    benchmark.extra_info["nodes"] = size
+    benchmark.extra_info["rss_peak_before_mb"] = round(rss_before, 1)
+    rss_after = _peak_rss_mb()
+    benchmark.extra_info["rss_peak_after_mb"] = round(rss_after, 1)
+    benchmark.extra_info["rss_peak_growth_mb"] = round(rss_after - rss_before, 1)
+
+    # Non-vacuity. A cell whose write silently no-opped, or whose reference was
+    # collected before the timed call, would read as a spectacular improvement.
+    assert graph.cypher("MATCH (n:Item) RETURN count(n) AS c").to_list()[0]["c"] > size
 
 
 @pytest.mark.benchmark
-@pytest.mark.parametrize("size", SIZES)
-def test_bench_write_recovers_after_reference_released(benchmark, veto_graphs, size):
+@pytest.mark.parametrize("size", REF_SIZES)
+def test_bench_write_recovers_after_reference_released(benchmark, ref_graphs, size):
     """Steady-state writes with no reference held — the recovery control.
 
     The competitive run's key attribution: after the reference is released,
@@ -499,15 +677,189 @@ def test_bench_write_recovers_after_reference_released(benchmark, veto_graphs, s
     `test_bench_first_write_after_reference` represents.
 
     Expect this to match `test_bench_insert_after_veto_trigger[*-fresh]`.
+
+    Distinct from the `dropped_view` arm of the cell above, which is the
+    *per-round* control (a view built and released inside every setup). This
+    one is the *steady-state* control: one clone-and-recover cycle, then plain
+    writes with nothing held at all. Together they separate three costs that a
+    single arm would sum — building the view, holding it, and the write itself.
     """
-    graph = veto_graphs[(size, "fresh")]
+    graph = ref_graphs[size]
     ids = _FRESH_GRAPH_IDS
     # Taken and dropped before the measurement, so the graph has definitely
     # been through the clone-and-recover cycle by the time timing starts.
     _wide_result(graph)
-    graph.cypher("CREATE (:Item {id: 29999999, name: 'settle', code: 'c', qty: 1})")
+    graph.cypher("CREATE (:Item {id: $i, name: 'settle', code: 'c', qty: 1})", params={"i": next(ids)})
 
     def write():
         graph.cypher("CREATE (:Item {id: $i, name: 'z', code: 'c', qty: 1})", params={"i": next(ids)})
 
     benchmark.pedantic(write, rounds=ROUNDS, iterations=1, warmup_rounds=WARMUP_ROUNDS)
+    benchmark.extra_info["nodes"] = size
+
+
+# ── guards: the defect-B cells cannot go vacuous ─────────────────────
+#
+# Everything below is NON-benchmark and runs in the default suite (testpaths
+# includes `tests/`, and only `-m benchmark` is deselected), inside the 120 s
+# hang ceiling. The fixtures here are small on purpose: these tests check
+# *structure*, never cost, so a thousand nodes proves what a million would.
+#
+# They exist because the defect-B cells have three independent ways to keep
+# reporting numbers while measuring nothing, and none of them is detectable by
+# reading the output:
+#
+#   1. the reference gets hoisted out of `setup` — every round after the first
+#      measures the recovered write, and the cell reads "fixed";
+#   2. `_wide_result` stops being lazy (a `LIMIT` edit, an extra clause) — the
+#      view materialises, drops its `Arc`, and every `result_view` round
+#      silently becomes the `none` control;
+#   3. a holder stops holding — an API change makes `session()` or `begin()`
+#      copy instead of pin, and its arm becomes a second `none` control.
+#
+# Each has a test. None of them asserts a timing.
+
+
+GUARD_NODES = 1_000
+GUARD_ROUNDS = 5
+
+
+@pytest.fixture
+def guard_graph() -> KnowledgeGraph:
+    """A small `_base_graph`, function-scoped so no test can see another's
+    writes. Deliberately *not* `veto_graphs`: that fixture builds eight graphs
+    including two at 100k, which is benchmark-scale setup no default-suite test
+    should trigger."""
+    return _base_graph(GUARD_NODES)
+
+
+def _distinct_reference_count(acquire, graph: KnowledgeGraph, rounds: int) -> int:
+    """Drive `acquire` once per round exactly as `pedantic(setup=...)` does,
+    and count how many *distinct live objects* it produced.
+
+    Every reference is retained in `held` for the duration. That is what makes
+    `id()` a sound identity test: CPython reuses the address of a freed object,
+    so a per-round acquisition whose result was dropped between rounds could
+    hand back the same `id()` three times and look hoisted. Holding them all
+    makes distinct objects provably distinct addresses.
+    """
+    held = []
+    for _ in range(rounds):
+        reference = acquire(graph)
+        held.append(reference)
+        graph.cypher("CREATE (:Item {id: $i, name: 'g', code: 'c', qty: 1})", params={"i": next(_FRESH_GRAPH_IDS)})
+    return len({id(reference) for reference in held})
+
+
+@pytest.mark.parametrize("holder", PINNING_HOLDERS)
+def test_every_round_acquires_a_fresh_reference(guard_graph, holder):
+    """The hoisting detector, pointed at the real acquisition helper.
+
+    `_acquire_reference` is what the benchmark's `setup` calls, so a one-line
+    edit that hoists the reference out of the per-round path has to go through
+    this function to take effect — and this test then sees `1` where it
+    requires `GUARD_ROUNDS`.
+    """
+    distinct = _distinct_reference_count(lambda g: _acquire_reference(g, holder), guard_graph, GUARD_ROUNDS)
+    assert distinct == GUARD_ROUNDS, (
+        f"holder={holder!r} produced {distinct} distinct references over {GUARD_ROUNDS} rounds; "
+        "the benchmark's `setup` must take a NEW reference every round or every round after "
+        "the first measures the already-recovered write"
+    )
+
+
+def test_the_hoisting_detector_fires_on_a_hoisted_acquirer():
+    """Proof the detector above can go red — the non-vacuity requirement.
+
+    A gate that has never been shown failing is a gate nobody has tested. This
+    drives the same counter with an acquirer that hoists its reference (the
+    exact one-line mistake the comment above the defect-B section warns about)
+    and requires the counter to report `1`, i.e. *invalid*.
+
+    Both directions are asserted in one place on purpose: if a future refactor
+    made `_distinct_reference_count` always return `rounds` — by dropping the
+    `held` list, say — this test fails immediately, while the guard above would
+    keep passing forever.
+    """
+    graph = _base_graph(GUARD_NODES)
+    hoisted = _wide_result(graph)
+
+    def hoisting_acquire(_graph):
+        return hoisted
+
+    distinct = _distinct_reference_count(hoisting_acquire, graph, GUARD_ROUNDS)
+    assert distinct == 1, (
+        "the detector must report a hoisted reference as a single distinct object; "
+        f"it reported {distinct}, so it cannot detect the hoist it exists to detect"
+    )
+
+
+def test_the_controls_hold_no_reference(guard_graph):
+    """`none` and `dropped_view` must yield nothing to hold.
+
+    The other half of the previous test: a control that silently started
+    pinning would make every arm look equally slow, and the cell would report
+    "no defect" for the one reason nobody would check.
+    """
+    assert _acquire_reference(guard_graph, "none") is None
+    assert _acquire_reference(guard_graph, "dropped_view") is None
+
+
+def test_the_wide_result_stays_past_the_eager_materialise_cutoff(guard_graph):
+    """`_wide_result` must produce a view the engine keeps lazy.
+
+    A lazy view and an eagerly-materialised one are **semantically
+    indistinguishable from Python** — that is the whole point of the fork, and
+    it is why this test asserts the *rule's inputs* rather than its outcome.
+    `EAGER_MATERIALISE_MAX_CELLS` is applied as `rows * columns`
+    (`result_view.rs`), so the two checkable inputs are the cell count and the
+    absence of any clause that disqualifies laziness outright. A `LIMIT 100` ->
+    `LIMIT 10` edit is the realistic trapdoor and it fails here.
+
+    What this cannot check is the `Arc` itself; the benchmark's
+    `rss_peak_growth_mb` on the `result_view` arm is the observable that does,
+    and it needs benchmark scale to be legible.
+    """
+    view = _wide_result(guard_graph)
+    cells = len(view.columns) * len(view.to_list())
+    assert cells > EAGER_MATERIALISE_MAX_CELLS, (
+        f"the held view is {cells} cells, at or under the {EAGER_MATERIALISE_MAX_CELLS}-cell "
+        "eager-materialise cutoff; it would drop its Arc and the result_view arm would be a "
+        "second copy of the `none` control"
+    )
+    assert view.columns == ["n.name", "n.qty"], "every RETURN item must stay a PropertyAccess"
+    disqualifying = (" WITH ", " UNWIND ", " CALL ", " ORDER BY ", " WHERE ", "DISTINCT")
+    for clause in disqualifying:
+        assert clause not in f" {WIDE_QUERY} ", f"{clause.strip()!r} disqualifies laziness (planner/fusion)"
+
+
+@pytest.mark.parametrize("holder", PINNING_HOLDERS)
+def test_a_held_reference_keeps_its_pre_write_values(guard_graph, holder):
+    """The semantic invariant the whole D2 program must preserve.
+
+    Today this passes for the *expensive* reason — the write forks the graph,
+    so the holder is left looking at an untouched copy. Structural sharing must
+    make it pass for a cheap reason instead. If a future change makes the
+    holder observe the write, this is the test that says the program broke its
+    own contract rather than merely got faster.
+
+    The write is a `SET` on a node the holder can see, not a `CREATE`: an
+    inserted node is invisible to a `LIMIT 100` view whether or not isolation
+    holds, so a `CREATE` would pass this test on a graph with no isolation at
+    all.
+    """
+    reference = _acquire_reference(guard_graph, holder)
+    before = guard_graph.cypher("MATCH (n:Item {id: 5}) RETURN n.qty AS q").to_list()[0]["q"]
+    sentinel = before + 424_242
+
+    guard_graph.cypher("MATCH (n:Item {id: 5}) SET n.qty = $v", params={"v": sentinel})
+
+    assert guard_graph.cypher("MATCH (n:Item {id: 5}) RETURN n.qty AS q").to_list()[0]["q"] == sentinel, (
+        "the graph must see its own write"
+    )
+
+    if holder == "result_view":
+        seen = {row["n.name"]: row["n.qty"] for row in reference.to_list()}["item-5"]
+    else:
+        seen = reference.cypher("MATCH (n:Item {id: 5}) RETURN n.qty AS q").to_list()[0]["q"]
+    assert seen == before, f"holder={holder!r} must still see the pre-write value {before}, saw {seen}"

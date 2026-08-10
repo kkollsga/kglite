@@ -2242,4 +2242,7 @@ mod dir_graph_tests;
 mod rollback_tests;
 
 #[cfg(test)]
+mod fork_apportionment_tests;
+
+#[cfg(test)]
 mod disk_snapshot_tests;
