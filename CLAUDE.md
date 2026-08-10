@@ -1,5 +1,10 @@
 # KGLite — Claude Code Conventions
 
+**Authority:** `CLAUDE.md` is the authority this repo's agent instructions are
+regenerated from; `AGENTS.md` and `.agents/` are generated adapters (and
+`.claude/skills/` is the authority for `.agents/skills/`). Edit the authority
+and regenerate in the same action — never edit an adapter.
+
 ## Build & test
 
 ```bash
