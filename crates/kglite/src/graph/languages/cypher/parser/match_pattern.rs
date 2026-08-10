@@ -318,7 +318,7 @@ impl CypherParser {
                     let name = self
                         .keyword_lexeme_at(self.pos - 1)
                         .unwrap_or_else(|| keyword_name_token(tok).unwrap());
-                    parts.push(backtick_quote(&name));
+                    parts.push(backtick_quote(name));
                 }
                 _ => {
                     return Err(format!("Unexpected token in EXISTS pattern: {:?}", token));
@@ -438,7 +438,7 @@ impl CypherParser {
                     let name = self
                         .keyword_lexeme_at(self.pos - 1)
                         .unwrap_or_else(|| keyword_name_token(tok).unwrap());
-                    parts.push(backtick_quote(&name));
+                    parts.push(backtick_quote(name));
                 }
                 _ => {
                     return Err(format!("Unexpected token in MATCH pattern: {:?}", token));

@@ -78,9 +78,8 @@ fn doubled_backtick_is_one_literal_backtick() {
         vec![CypherToken::Identifier("We`ird".to_string())]
     );
     // Leading, trailing, and consecutive escaped backticks.
-    assert_eq!(
-        tokenize_cypher("`` ` ``").unwrap_err().is_empty(),
-        false,
+    assert!(
+        !tokenize_cypher("`` ` ``").unwrap_err().is_empty(),
         "an unterminated quoted identifier must still be an error"
     );
     assert_eq!(
