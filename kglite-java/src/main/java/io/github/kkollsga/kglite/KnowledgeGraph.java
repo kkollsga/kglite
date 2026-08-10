@@ -421,6 +421,42 @@ public final class KnowledgeGraph implements AutoCloseable {
         return session.use(handle -> Abi.execute(handle, query, paramsJson, mutating));
     }
 
+    /**
+     * Begin a transaction: several statements, applied as one all-or-nothing
+     * unit.
+     *
+     * <p>The statements are <em>staged</em> by {@link Transaction#add(String,
+     * Map)} and all of them execute at {@link Transaction#commit()}, in one
+     * engine transaction — so a failure anywhere leaves the graph exactly as it
+     * was, and each statement sees the ones before it. Use it with
+     * try-with-resources, which rolls back a block that leaves without
+     * committing:
+     *
+     * <pre>{@code
+     * try (Transaction tx = graph.beginTransaction()) {
+     *     tx.add("CREATE (:Person {id: $id})", Map.of("id", 1));
+     *     tx.add("MATCH (p:Person {id: $id}) SET p.seen = true", Map.of("id", 1));
+     *     tx.commit();
+     * }
+     * }</pre>
+     *
+     * <p>{@code commit()} publishes into this session; it writes nothing to
+     * disk. {@link #save(Path)} is still the only thing that persists. Read
+     * {@link Transaction} before using it — three more of its behaviours differ
+     * from what the JDBC-shaped API suggests.
+     *
+     * <p>The returned instance is confined to the calling thread. This graph is
+     * not: other threads may keep querying it while a transaction is being
+     * built, and they block only for the commit itself.
+     *
+     * @return a new, empty transaction
+     * @throws IllegalStateException if this graph is closed
+     */
+    public Transaction beginTransaction() {
+        session.checkOpen();
+        return new Transaction(session);
+    }
+
     // ---- lifecycle --------------------------------------------------------
 
     /**

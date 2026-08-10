@@ -86,6 +86,8 @@ final class Abi {
             "kglite_session_execute_read", FunctionDescriptor.of(I32, PTR, PTR, PTR, PTR, PTR));
     private static final MethodHandle SESSION_EXECUTE_MUT = bind(
             "kglite_session_execute_mut", FunctionDescriptor.of(I32, PTR, PTR, PTR, PTR, PTR));
+    private static final MethodHandle SESSION_EXECUTE_MUT_BATCH = bind(
+            "kglite_session_execute_mut_batch", FunctionDescriptor.of(I32, PTR, PTR, PTR, PTR));
     private static final MethodHandle SESSION_SAVE =
             bind("kglite_session_save", FunctionDescriptor.of(I32, PTR, PTR, U8, PTR));
     private static final MethodHandle SESSION_FREE =
@@ -267,6 +269,37 @@ final class Abi {
         String columnsJson = takeString(columnsPtr);
         String rowsJson = takeString(rowsPtr);
         return Json.toRows(columnsJson, rowsJson);
+    }
+
+    /**
+     * {@code kglite_session_execute_mut_batch} — the ABI's transaction: one
+     * {@code begin}, N mutating executes against one working fork, one
+     * commit-swap. Atomic: any statement's failure drops the fork before the
+     * swap, so none of the batch reaches the graph.
+     *
+     * @param session     the session handle
+     * @param queriesJson the request array, {@code [{"query":…,"params":{…}}]}
+     * @return one result per input statement, in input order
+     */
+    static java.util.List<java.util.List<Map<String, Object>>> executeMutBatch(
+            MemorySegment session, String queriesJson) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outResults = arena.allocate(PTR);
+            MemorySegment outError = arena.allocate(PTR);
+            int rc = (int) SESSION_EXECUTE_MUT_BATCH.invokeExact(
+                    session, cstr(arena, queriesJson), outResults, outError);
+            // The header documents out_results_json as null on failure, so there
+            // is nothing to free on this branch; check() consumes out_error_msg.
+            check(rc, outError);
+            String resultsJson = takeString(outResults.get(PTR, 0));
+            if (resultsJson == null) {
+                throw new KgliteException(
+                        "the engine reported a successful transaction but produced no results");
+            }
+            return Json.toBatchRows(resultsJson);
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
     }
 
     /** {@code kglite_session_save}. */

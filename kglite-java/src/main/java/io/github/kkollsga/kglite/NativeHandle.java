@@ -106,6 +106,23 @@ final class NativeHandle implements AutoCloseable {
     }
 
     /**
+     * Assert the handle is still live without making a native call.
+     *
+     * <p>For the one path that has native work to describe but none to do — an
+     * empty transaction's {@code commit()}, which must not cross the ABI at
+     * all. Nothing else should use it: a check followed by a call is exactly
+     * the read-then-call race this class exists to close, so a caller that
+     * <em>has</em> a call to make must make it inside {@link #use(Function)}.
+     * Here there is no call, so there is no window either — the result is a
+     * diagnostic, not a permission.
+     *
+     * @throws IllegalStateException if this handle is closed
+     */
+    void checkOpen() {
+        use(pointer -> null);
+    }
+
+    /**
      * Free the pointer, once. Waits for every in-flight {@link #use(Function)}
      * to return first, and is idempotent — including when several threads call
      * it at the same time.

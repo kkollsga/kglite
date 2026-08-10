@@ -93,6 +93,44 @@ final class Json {
         out.append('}');
     }
 
+    /**
+     * Serialize a mutation batch into the request array
+     * {@code kglite_session_execute_mut_batch} parses:
+     * {@code [{"query":"…","params":{…}}, …]}.
+     *
+     * <p>The parameter blobs arrive already serialized because a transaction
+     * validates each statement's parameters when it is staged rather than when
+     * it is committed — an unbindable value is the caller's mistake at the
+     * {@code add} call site, not a failure attributed to the whole batch.
+     *
+     * @param queries    the statements, in order
+     * @param paramsJson the matching JSON object per statement, or {@code null}
+     *     for a statement with no parameters
+     * @return the JSON request text
+     * @throws KgliteException if the two lists have different lengths
+     */
+    static String writeBatch(List<String> queries, List<String> paramsJson) {
+        if (queries.size() != paramsJson.size()) {
+            throw new KgliteException("a batch needs one parameter blob per query");
+        }
+        StringBuilder out = new StringBuilder();
+        out.append('[');
+        for (int i = 0; i < queries.size(); i++) {
+            if (i > 0) {
+                out.append(',');
+            }
+            out.append("{\"query\":");
+            writeString(out, queries.get(i));
+            String params = paramsJson.get(i);
+            if (params != null) {
+                out.append(",\"params\":").append(params);
+            }
+            out.append('}');
+        }
+        out.append(']');
+        return out.toString();
+    }
+
     private static void writeArray(StringBuilder out, Iterable<?> items) {
         out.append('[');
         boolean first = true;
@@ -144,13 +182,54 @@ final class Json {
         if (rowsJson == null) {
             throw new KgliteException("the engine could not serialize the result rows");
         }
+        Object columns = columnsJson == null ? null : parse(columnsJson);
+        return toRows(columns, parse(rowsJson));
+    }
+
+    /**
+     * Decode a batch result: the array of {@code {"columns": […], "rows": […]}}
+     * objects {@code kglite_session_execute_mut_batch} returns, one per input
+     * statement and in input order.
+     *
+     * <p>The per-statement cell mapping is {@link #toRows(Object, Object)}'s,
+     * the same one the single-statement path uses, so a transaction's rows and
+     * a {@code cypher()} call's rows cannot decode differently.
+     *
+     * @param resultsJson the {@code out_results_json} text
+     * @return one row list per statement, in statement order
+     * @throws KgliteException if the blob is malformed
+     */
+    static List<List<Map<String, Object>>> toBatchRows(String resultsJson) {
+        List<Object> raw = asList(parse(resultsJson), "batch results");
+        List<List<Map<String, Object>>> results = new ArrayList<>(raw.size());
+        for (Object entry : raw) {
+            if (!(entry instanceof Map<?, ?> result)) {
+                throw new KgliteException(
+                        "expected a JSON object per batch statement, got " + entry);
+            }
+            results.add(toRows(result.get("columns"), result.get("rows")));
+        }
+        return Collections.unmodifiableList(results);
+    }
+
+    /**
+     * Shared cell mapping: turn already-parsed columns and rows into row maps.
+     *
+     * @param columnsValue the parsed {@code ["a","b"]} array, or {@code null}
+     * @param rowsValue    the parsed {@code [{"a":1}]} array
+     * @return one insertion-ordered, unmodifiable map per row
+     */
+    private static List<Map<String, Object>> toRows(Object columnsValue, Object rowsValue) {
+        if (rowsValue == null) {
+            throw new KgliteException("the engine could not serialize the result rows");
+        }
         List<String> columns = new ArrayList<>();
-        if (columnsJson != null) {
-            for (Object column : asList(parse(columnsJson), "result columns")) {
+        if (columnsValue != null) {
+            for (Object column : asList(columnsValue, "result columns")) {
                 columns.add(String.valueOf(column));
             }
         }
-        List<Object> raw = asList(parse(rowsJson), "result rows");
+        List<Object> raw = asList(rowsValue, "result rows");
         List<Map<String, Object>> rows = new ArrayList<>(raw.size());
         for (Object entry : raw) {
             if (!(entry instanceof Map<?, ?> cells)) {

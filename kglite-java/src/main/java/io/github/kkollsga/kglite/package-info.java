@@ -4,6 +4,7 @@
  *
  * <p>Start at {@link io.github.kkollsga.kglite.KnowledgeGraph}. The only other
  * public types are {@link io.github.kkollsga.kglite.StorageMode},
+ * {@link io.github.kkollsga.kglite.Transaction},
  * {@link io.github.kkollsga.kglite.WriterLease} and the two exceptions — that
  * is the whole surface, deliberately. Every engine capability is reached
  * through Cypher, so a new engine feature needs no new Java.

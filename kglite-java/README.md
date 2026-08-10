@@ -149,6 +149,62 @@ RETURN id(p) AS id             // Long, the stable node id
 RETURN type(r) AS rel          // String, the relationship type
 ```
 
+## Transactions
+
+`beginTransaction()` applies several statements as one all-or-nothing unit.
+Statements are **staged** by `add(...)` and all of them run at `commit()`, in
+one engine transaction:
+
+```java
+try (Transaction tx = graph.beginTransaction()) {
+    tx.add("CREATE (:Person {id: $id, title: $n})", Map.of("id", 1, "n", "Ada"));
+    tx.add("MATCH (p:Person {id: $id}) SET p.seen = true", Map.of("id", 1));
+
+    // Per-statement rows, in staging order. A statement that returns
+    // nothing contributes an empty list.
+    List<List<Map<String, Object>>> results = tx.commit();
+}   // no commit() reached -> rolled back, and nothing ever executed
+```
+
+If any statement fails, **none** of the batch reaches the graph, and `commit()`
+throws `KgliteException` with that statement's engine status and message. Which
+statement failed is not reported — the ABI's batch call carries a status and a
+message and no index — so the engine message is the whole diagnosis today.
+
+A transaction is confined to the thread that began it (any other thread gets
+`IllegalStateException`); the `KnowledgeGraph` itself stays shareable. An empty
+`commit()` returns an empty list without calling the engine at all. Closing the
+graph kills an open transaction: its `commit()` throws rather than touching a
+freed session.
+
+**Four ways this is not a JDBC transaction.** Each is a real difference in
+behaviour, and each one is what a JDBC-shaped reading of `commit()` gets wrong:
+
+1. **Statements are staged, not executed on `add`.** Nothing crosses into the
+   engine until `commit()`, so **you cannot branch in Java on an intermediate
+   result** — no `if` can see statement 3's rows and choose statement 4.
+   Read-your-writes still holds, *inside the engine*: every statement runs
+   against the same working graph, so a staged `MATCH` sees a staged `CREATE`
+   and its rows come back from `commit()` in position. If you need the Java-side
+   branch, use `cypher()` per statement and give up atomicity — or open an
+   issue, because a named use case is what moves the ABI to a stateful handle.
+2. **`commit()` is not durability.** It publishes into the session — the
+   in-memory graph this instance serves — and writes no bytes. `save(Path)` is
+   still the only thing that persists, and a committed transaction that is never
+   saved is discarded at `close()` like any other mutation.
+3. **The batch holds the session's write lock for its whole duration.** The
+   concurrency promise in [Threading](#threading) — readers run concurrently and
+   are not blocked by a writer — is scoped to the short statements `cypher()`
+   runs. A transaction is one lock acquisition around all of its statements, so
+   a *new* `query()` waits while a large one commits. (A reader already holding
+   a snapshot is unaffected.) Keep a transaction to a unit of work; a bulk load
+   is a job for many ordinary `cypher()` calls.
+4. **There is no cross-process transaction.** This serializes against other work
+   *on this session*. Two processes that each open the same path hold two
+   sessions and serialize nothing between them; the second `save()` still wins
+   outright and silently. The `WriterLease` below is the cross-process
+   mechanism, it is advisory, and nothing here changes that.
+
 ## Durability, and the writer lease
 
 **`save(Path)` is the only thing that persists anything.** `open()` loads a
@@ -246,17 +302,19 @@ Same engine as the Python package and the CLI — same Cypher, same `.kgl` files
 same performance. What differs is the shell around it: **Python is the richest
 one** (fluent API, dataset loaders, embedders, introspection helpers), and this
 binding is deliberately the lean one. Its entire surface is open/create, `cypher`
-/ `query`, `save`, `close`, the writer lease and error mapping. That is not a
-staging post; it is the design. A per-query capability needs no Java change,
-because it arrives through Cypher.
+/ `query`, `save`, `close`, transactions, the writer lease and error mapping.
+That is not a staging post; it is the design. A per-query capability needs no
+Java change, because it arrives through Cypher.
 
-There is no ORM, no Spring integration and no fluent mirror — third parties can
-build those on top; they are not this project's maintenance surface.
+There is no ORM and no Spring integration — third parties can build those on
+top; they are not this project's maintenance surface.
 
-**Expansions happen on demand, and the first one is already designated:**
-multi-statement transactions (begin / N statements / one atomic commit), over
-the C ABI's existing `kglite_session_execute_mut_batch`. Open an issue if you
-want it — that is what moves it.
+**Expansions happen on demand.** The first designated one — multi-statement
+transactions over the C ABI's existing `kglite_session_execute_mut_batch` — has
+shipped; see [Transactions](#transactions). The next two are gated on a named
+use case rather than scheduled: a stateful transaction handle (needed only to
+branch in Java on an intermediate result) and a batch call reporting *which*
+statement failed. Open an issue if you want either — that is what moves it.
 
 ## Pre-22 JVMs: the Bolt sidecar
 
