@@ -354,6 +354,7 @@ BINDING_SITES = {
     "makefile",
     "shell",
     "compose",
+    "gradle-build",
 }
 DOC_SITES = {"docs", "docs-install"}
 ADVISORY_SITES = {"script", "source-string"}
@@ -669,6 +670,11 @@ def scan_freetext(repo: str, path: Path, tracked: set[str], site: str) -> list[D
             continue
         for m in _INSTALL_RE.finditer(line):
             add(i, m.group("name"), m.group("spec"), stripped)
+        # A Maven coordinate is an install instruction wherever it appears —
+        # a workflow, a shell snippet, an error message — and it is the only
+        # form the Java artifact's version is ever quoted in.
+        for m in _MAVEN_COORD_RE.finditer(line):
+            add(i, m.group("name"), "=" + m.group("spec"), stripped)
         if site == "source-string":
             # Source files are scanned *only* for embedded install instructions.
             # Anything broader turns every version-shaped literal in the tree
@@ -696,6 +702,76 @@ SUPPRESS_MARKER = "version-check: ignore"
 #: GRAPH-GATE.md records "2026-07-17 | … sonara 0.2.3 sync" forever. Same class
 #: as a changelog line, so it is history rather than a stale claim.
 _LEDGER_ROW = re.compile(r"^\|\s*\d{4}-\d{2}-\d{2}\s*\|")
+
+
+# ---- Gradle / Maven coordinates -------------------------------------------
+
+#: A Maven coordinate: ``io.github.kkollsga:kglite:0.15.9``. This is how the
+#: Java artifact is *quoted* — in a Gradle `implementation(...)` line, a Maven
+#: `<dependency>`, a README install block — and it is the one shape none of the
+#: other scanners can see, because the separator is `:` rather than whitespace
+#: or a comparison operator. A stale coordinate in a doc is the exact failure
+#: this script exists to catch: the reader copies it and gets a version we no
+#: longer ship.
+_MAVEN_COORD_RE = re.compile(
+    r"(?<![\w.-])(?P<group>[A-Za-z][A-Za-z0-9_.-]*)"
+    r":(?P<name>[A-Za-z][A-Za-z0-9_.-]*)"
+    r":(?P<spec>\d+\.\d+(?:\.\d+)?[0-9A-Za-z.+-]*)"
+)
+
+#: A literal `version = "0.15.9"` in a Gradle build script.
+#:
+#: kglite-java deliberately has none: it reads `[workspace.package]` out of the
+#: root Cargo.toml, so the Java artifact ships in lockstep with the crates and
+#: the wheel by construction. A literal here would silently reintroduce the
+#: second copy — and because the Java artifact is built from the same tag, the
+#: drift would only surface as a wrong coordinate on Maven Central, after
+#: publication, permanently.
+_GRADLE_VERSION_RE = re.compile(r"""^\s*version\s*=\s*["'](?P<spec>\d+[^"']*)["']""")
+
+
+def scan_gradle(repo: str, path: Path, tracked: set[str]) -> list[Declaration]:
+    """Maven coordinates and own-version literals in a Gradle build script."""
+    lines = _read(path)
+    if lines is None:
+        return []
+    out: list[Declaration] = []
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//") or SUPPRESS_MARKER in stripped:
+            continue
+        m = _GRADLE_VERSION_RE.match(line)
+        if m:
+            # Attributed to the Java artifact's own name, which is the Gradle
+            # project name — `kglite`, same as the wheel and the engine crate.
+            out.append(
+                Declaration(
+                    repo,
+                    path,
+                    i,
+                    "kglite",
+                    "=" + m.group("spec"),
+                    "gradle-build",
+                    stripped[:200],
+                    metadata=True,
+                )
+            )
+        for coord in _MAVEN_COORD_RE.finditer(line):
+            name = coord.group("name")
+            if _tracked(name, tracked):
+                out.append(
+                    Declaration(
+                        repo,
+                        path,
+                        i,
+                        name,
+                        "=" + coord.group("spec"),
+                        "gradle-build",
+                        stripped[:200],
+                        metadata=False,
+                    )
+                )
+    return out
 
 
 def scan_docs(repo: str, path: Path, tracked: set[str]) -> list[Declaration]:
@@ -726,6 +802,13 @@ def scan_docs(repo: str, path: Path, tracked: set[str]) -> list[Declaration]:
             if _tracked(name, tracked) and (i, name.lower()) not in seen:
                 seen.add((i, name.lower()))
                 out.append(Declaration(repo, path, i, name, m.group("spec"), "docs-install", s[:200], metadata=False))
+        for m in _MAVEN_COORD_RE.finditer(line):
+            name = m.group("name")
+            if _tracked(name, tracked) and (i, name.lower()) not in seen:
+                seen.add((i, name.lower()))
+                out.append(
+                    Declaration(repo, path, i, name, "=" + m.group("spec"), "docs-install", s[:200], metadata=False)
+                )
         for m in _DOC_VERSION_RE.finditer(line):
             name = m.group("name")
             if not _tracked(name, tracked) or (i, name.lower()) in seen:
@@ -773,6 +856,8 @@ def scan_repo(repo: str, root: Path, tracked: set[str], include_docs: bool) -> l
             decls += scan_cargo_lock(repo, path, tracked)
         elif name == "pyproject.toml":
             decls += scan_pyproject(repo, path, tracked)
+        elif path.suffix in {".gradle", ".kts"}:
+            decls += scan_gradle(repo, path, tracked)
         elif re.match(r"^(requirements|constraints).*\.txt$", name):
             decls += scan_requirements(repo, path, tracked)
         elif name == "uv.lock":

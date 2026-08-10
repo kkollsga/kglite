@@ -6,6 +6,13 @@ name: Build and Publish Java Artifact
 # unambiguous, and the release flow already pushes `vX.Y.Z` at exactly the
 # moment the version is final. The tag is therefore the signal, and the
 # tag-vs-Cargo.toml check below is what keeps it honest.
+#
+# Release-time verification (the `release` skill's step 11) is conditional on
+# the same gate this workflow uses. Until JAVA_CENTRAL_PUBLISH_ENABLED is
+# 'true', a release that ships no Java artifact is the expected outcome and not
+# a failure; once it is, Central must show the version at
+# https://repo1.maven.org/maven2/io/github/kkollsga/kglite/<version>/ — allowing
+# for the portal's asynchronous release, which can lag by tens of minutes.
 on:
   push:
     tags: ['v*']
