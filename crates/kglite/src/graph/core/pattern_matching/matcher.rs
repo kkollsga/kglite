@@ -7,8 +7,9 @@
 use crate::datatypes::values::Value;
 use crate::graph::core::filtering::{compare_values, values_equal};
 use crate::graph::languages::cypher::result::Bindings;
-use crate::graph::schema::{DirGraph, InternedKey};
-use crate::graph::storage::GraphRead;
+use crate::graph::schema::{DirGraph, InternedKey, NodeData};
+use crate::graph::storage::column_store::ColumnStore;
+use crate::graph::storage::{GraphRead, NodeView};
 use petgraph::graph::NodeIndex;
 use petgraph::Direction;
 use rayon::prelude::*;
@@ -28,6 +29,33 @@ use super::pattern::{
 /// so rayon overhead only pays off for very large match sets. Also avoids
 /// contention when multiple queries run concurrently (shared thread pool).
 const EXPANSION_RAYON_THRESHOLD: usize = 8192;
+
+/// One property matcher with its field name already alias-resolved, and that
+/// name's interned key precomputed.
+struct ResolvedMatcher<'a> {
+    field: &'a str,
+    key: InternedKey,
+    matcher: &'a PropertyMatcher,
+}
+
+/// Everything a candidate scan can resolve once per node **type** instead of
+/// once per candidate: the alias-resolved matchers, the type's name, and the
+/// column store the type's rows live in.
+///
+/// All three are functions of the node's type alone. Resolving them per node
+/// cost a full-type text-filter scan roughly 40% of its runtime — two
+/// `String`-keyed hash probes in `DirGraph::resolve_alias`, one interner probe
+/// for the type name, one FNV hash per property, and one store probe inside
+/// `GraphRead::node_view` — all recomputing the same answer 10 000 times.
+struct TypeScanMemo<'a> {
+    /// The type this memo is valid for. A mixed candidate stream (primary
+    /// `type_indices` ∪ secondary-label hits) rebuilds when this changes, so
+    /// the memo never answers for the wrong type.
+    type_key: InternedKey,
+    type_str: &'a str,
+    store: Option<&'a std::sync::Arc<ColumnStore>>,
+    props: Vec<ResolvedMatcher<'a>>,
+}
 
 /// Whether adding `candidate` would reuse a relationship already consumed by
 /// this pattern match. Cypher paths are trails: nodes may repeat, edges may not.
@@ -899,13 +927,19 @@ impl<'a> PatternExecutor<'a> {
     /// Apply label intersections and any properties not already covered by an
     /// index to a candidate stream. The shared loop keeps deadline/cancellation
     /// checks identical for primary scans and secondary-label fallbacks.
-    fn filter_node_candidates(
-        &self,
+    ///
+    /// This is the one place a *stream* of candidates is property-filtered, so
+    /// it is where per-type resolution is hoisted out of the per-node work —
+    /// see [`TypeScanMemo`]. A typed scan builds the memo once; a mixed stream
+    /// rebuilds it whenever the primary type changes.
+    fn filter_node_candidates<'p>(
+        &'p self,
         candidates: impl IntoIterator<Item = NodeIndex>,
-        props: Option<&HashMap<String, PropertyMatcher>>,
+        props: Option<&'p HashMap<String, PropertyMatcher>>,
         extra_keys: &[InternedKey],
     ) -> Result<Vec<NodeIndex>, String> {
         let mut out = Vec::new();
+        let mut memo: Option<TypeScanMemo<'p>> = None;
         for (i, idx) in candidates.into_iter().enumerate() {
             if i & 0xFFF == 0 {
                 self.check_scan_deadline()?;
@@ -917,7 +951,23 @@ impl<'a> PatternExecutor<'a> {
             {
                 continue;
             }
-            if props.is_none_or(|properties| self.node_matches_properties(idx, properties)) {
+            let Some(properties) = props else {
+                out.push(idx);
+                continue;
+            };
+            let Some(data) = self.graph.graph.node_weight(idx) else {
+                continue;
+            };
+            if memo
+                .as_ref()
+                .is_none_or(|memo| memo.type_key != data.node_type)
+            {
+                memo = self.build_type_scan_memo(data.node_type, properties);
+            }
+            let Some(memo) = memo.as_ref() else {
+                continue;
+            };
+            if self.node_matches_resolved(self.node_view_of(data, memo.store), memo) {
                 out.push(idx);
             }
         }
@@ -1266,154 +1316,144 @@ impl<'a> PatternExecutor<'a> {
         self.node_matches_properties(idx, props)
     }
 
-    /// Check if a node matches property filters
-    /// Optimized: Uses references instead of cloning values
+    /// Check if a node matches property filters.
+    ///
+    /// The single-node entry point: everything in [`TypeScanMemo`] is resolved
+    /// inline here because a lone node cannot amortise it. Scans over a
+    /// candidate stream must go through [`Self::filter_node_candidates`], which
+    /// resolves per *type* instead of per node.
+    ///
+    /// One implementation for every backend. The disk backend used to take a
+    /// separate "columnar fast path" whose distinguishing property was
+    /// resolving the node's column store once per node rather than once per
+    /// property read; since D1 that is what `NodeView` does for every backend,
+    /// so the two bodies had become identical.
     fn node_matches_properties(
         &self,
         idx: NodeIndex,
         props: &HashMap<String, PropertyMatcher>,
     ) -> bool {
-        // Disk-graph fast path: read properties directly from columnar storage
-        // without materializing full NodeData. Avoids arena allocation and
-        // unnecessary id/title reads. Gated by backend type so in-memory graphs
-        // take the unchanged, faster path below.
-        if self.graph.graph.is_disk() {
-            return self.node_matches_properties_columnar(idx, props);
+        let Some(data) = self.graph.graph.node_weight(idx) else {
+            return false;
+        };
+        let Some(type_str) = self.graph.interner.try_resolve(data.node_type) else {
+            return false;
+        };
+        let node = self.node_view_of(data, self.graph.graph.column_store(data.node_type));
+        props.iter().all(|(key, matcher)| {
+            let field = self.graph.resolve_alias(type_str, key);
+            self.prop_matches(node, type_str, field, InternedKey::from_str(field), matcher)
+        })
+    }
+
+    /// Pair a node's weight with the column store its *type* lives in, without
+    /// re-probing the backend's store map when the caller already resolved it.
+    ///
+    /// Equivalent to [`GraphRead::node_view`], which resolves the store from
+    /// the node's own type on every call — the cost a scan hoists out of its
+    /// loop.
+    #[inline]
+    fn node_view_of<'d>(
+        &self,
+        data: &'d NodeData,
+        store: Option<&'d std::sync::Arc<ColumnStore>>,
+    ) -> NodeView<'d> {
+        let resolved = data
+            .properties
+            .columnar_row_id()
+            .and_then(|row_id| store.map(|store| (&**store, row_id)));
+        NodeView::new(data, resolved)
+    }
+
+    /// Match one node against matchers whose field names this node's type has
+    /// already resolved.
+    fn node_matches_resolved(&self, node: NodeView<'_>, memo: &TypeScanMemo<'_>) -> bool {
+        memo.props.iter().all(|resolved| {
+            self.prop_matches(
+                node,
+                memo.type_str,
+                resolved.field,
+                resolved.key,
+                resolved.matcher,
+            )
+        })
+    }
+
+    /// One alias-resolved property matcher against one node.
+    ///
+    /// `field` is the alias-resolved field name and `key` its interned form.
+    /// Both are pure functions of `(node type, user key)` — never of the node —
+    /// which is what lets a typed scan resolve them once per type.
+    #[inline]
+    fn prop_matches(
+        &self,
+        node: NodeView<'_>,
+        type_str: &str,
+        field: &str,
+        key: InternedKey,
+        matcher: &PropertyMatcher,
+    ) -> bool {
+        // Zero-alloc fast path for `Equals(String)` on a user property.
+        // For columnar storage this bypasses cloning bytes out of the mmap
+        // into an owned String; for Map/Compact it avoids an unnecessary
+        // Value comparison.
+        if !matches!(
+            field,
+            "name" | "title" | "id" | "type" | "node_type" | "label"
+        ) {
+            if let PropertyMatcher::Equals(Value::String(target)) = matcher {
+                return node.str_prop_eq(key, target) == Some(true);
+            }
         }
 
-        // In-memory path: node_weight() is cheap (pointer chase, no allocation)
-        if let Some(node) = self.graph.graph.node_view(idx) {
-            for (key, matcher) in props {
-                let resolved = self
-                    .graph
-                    .resolve_alias(node.node_type_str(&self.graph.interner), key);
-
-                // Zero-alloc fast path for `Equals(String)` on a user property.
-                // For columnar storage this bypasses cloning bytes out of the
-                // mmap into an owned String; for Map/Compact it avoids an
-                // unnecessary Value comparison.
-                if resolved != "name"
-                    && resolved != "title"
-                    && resolved != "id"
-                    && resolved != "type"
-                    && resolved != "node_type"
-                    && resolved != "label"
-                {
-                    if let PropertyMatcher::Equals(Value::String(target)) = matcher {
-                        match node.str_prop_eq(InternedKey::from_str(resolved), target) {
-                            Some(true) => continue,
-                            Some(false) => return false,
-                            None => return false,
-                        }
-                    }
-                }
-
-                let value: Option<Cow<'_, Value>> = if resolved == "id" {
-                    Some(node.id())
-                } else if resolved == "title" {
-                    Some(node.title())
-                } else if let Some(v) = node.get_property(resolved) {
-                    // Stored property wins (a user `label`/`type`/`name`… — KG-1).
-                    Some(v)
-                } else {
-                    // No stored property — structural convenience fallback.
-                    crate::graph::schema::soft_alias_fallback(resolved).map(|fb| match fb {
-                        crate::graph::schema::SoftAliasFallback::Title => node.title(),
-                        crate::graph::schema::SoftAliasFallback::TypeString => Cow::Owned(
-                            Value::String(node.node_type_str(&self.graph.interner).to_string()),
-                        ),
-                    })
-                };
-
-                match value {
-                    Some(v) => {
-                        if !self.value_matches(&v, matcher) {
-                            return false;
-                        }
-                    }
-                    None => return false,
-                }
-            }
-            true
+        let value: Option<Cow<'_, Value>> = if field == "id" {
+            Some(node.id())
+        } else if field == "title" {
+            Some(node.title())
+        } else if let Some(v) = node.get(key) {
+            // Stored property wins (a user `label`/`type`/`name`… — KG-1).
+            Some(v)
         } else {
-            false
+            // No stored property — structural convenience fallback.
+            crate::graph::schema::soft_alias_fallback(field).map(|fb| match fb {
+                crate::graph::schema::SoftAliasFallback::Title => node.title(),
+                crate::graph::schema::SoftAliasFallback::TypeString => {
+                    Cow::Owned(Value::String(type_str.to_string()))
+                }
+            })
+        };
+
+        match value {
+            Some(v) => self.value_matches(&v, matcher),
+            None => false,
         }
     }
 
-    /// Disk-graph columnar fast path for property matching.
-    /// Reads individual column values without full NodeData materialization.
-    ///
-    /// The node's column store is resolved **once** here, not once per
-    /// property: each `GraphRead` accessor call builds its own `NodeView` and
-    /// so probes the backend's store map again, and a multi-property pattern
-    /// pays that per property per node on a full scan.
-    fn node_matches_properties_columnar(
-        &self,
-        idx: NodeIndex,
-        props: &HashMap<String, PropertyMatcher>,
-    ) -> bool {
-        let Some(node) = self.graph.graph.node_view(idx) else {
-            return false;
-        };
-        let type_str = match self.graph.interner.try_resolve(node.node_type()) {
-            Some(s) => s,
-            None => return false,
-        };
-
-        for (key, matcher) in props {
-            let resolved = self.graph.resolve_alias(type_str, key);
-
-            // Zero-alloc fast path: literal-string equality against a user
-            // property skips materialising `Value::String(owned)` per node.
-            // Critical on mapped-mode graphs where `get_node_property` clones
-            // bytes out of the mmap for every string read.
-            if resolved != "name"
-                && resolved != "title"
-                && resolved != "id"
-                && resolved != "type"
-                && resolved != "node_type"
-                && resolved != "label"
-            {
-                if let PropertyMatcher::Equals(Value::String(target)) = matcher {
-                    let k = InternedKey::from_str(resolved);
-                    match node.str_prop_eq(k, target) {
-                        Some(true) => continue,
-                        Some(false) => return false,
-                        None => return false,
+    /// Resolve, once, everything a candidate scan would otherwise redo for
+    /// every node of the same type. `None` when the type key is unknown to the
+    /// interner, which reads as "no node of this type matches".
+    fn build_type_scan_memo<'m>(
+        &'m self,
+        type_key: InternedKey,
+        props: &'m HashMap<String, PropertyMatcher>,
+    ) -> Option<TypeScanMemo<'m>> {
+        let type_str = self.graph.interner.try_resolve(type_key)?;
+        Some(TypeScanMemo {
+            type_key,
+            type_str,
+            store: self.graph.graph.column_store(type_key),
+            props: props
+                .iter()
+                .map(|(key, matcher)| {
+                    let field = self.graph.resolve_alias(type_str, key);
+                    ResolvedMatcher {
+                        field,
+                        key: InternedKey::from_str(field),
+                        matcher,
                     }
-                }
-            }
-
-            let value: Option<Cow<'_, Value>> = if resolved == "id" {
-                Some(node.id())
-            } else if resolved == "title" {
-                Some(node.title())
-            } else if let Some(v) = node.get(InternedKey::from_str(resolved)) {
-                // Stored property wins (a user `label`/`type`/`name`… — KG-1).
-                Some(v)
-            } else if let Some(fb) = crate::graph::schema::soft_alias_fallback(resolved) {
-                // No stored property — structural convenience fallback.
-                let v = match fb {
-                    crate::graph::schema::SoftAliasFallback::Title => node.title().into_owned(),
-                    crate::graph::schema::SoftAliasFallback::TypeString => {
-                        Value::String(type_str.to_string())
-                    }
-                };
-                Some(Cow::Owned(v))
-            } else {
-                None
-            };
-
-            match value {
-                Some(v) => {
-                    if !self.value_matches(&v, matcher) {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
-        }
-        true
+                })
+                .collect(),
+        })
     }
 
     /// Check if a value matches a property matcher.

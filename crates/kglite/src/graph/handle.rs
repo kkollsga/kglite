@@ -619,6 +619,7 @@ impl KnowledgeGraph {
 /// * An adjacency edit (adding or removing an edge, deleting a node) is not
 ///   overlay-expressible and **flattens** the fork: one copy, paid once per
 ///   fork rather than once per statement.
+///
 /// Copy-on-write access that preserves disk writer authority when a shared
 /// snapshot forces a clone. Does not change the graph version; callers that
 /// perform semantic mutations should use [`make_dir_graph_mut`].
