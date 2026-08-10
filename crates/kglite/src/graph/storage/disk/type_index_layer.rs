@@ -5,10 +5,9 @@
 //!
 //! After D2 Phase 2 removed the backend row and Phase 3 removed `id_indices`,
 //! `type_indices` was the **only O(V) field left in `DirGraph::clone`** on a
-//! plain graph — ~80 µs of a 128 µs held-view round at 1M nodes
-//! (`dev-docs/bench/results/2026-08-10-d2-phase3-residual-profile.md` §C). The
-//! bucket is a `Vec<NodeIndex>` with one entry per node of the type, so the
-//! derived clone copied it whole on every fork.
+//! plain graph — ~80 µs of a 128 µs held-view round at 1M nodes. The bucket is
+//! a `Vec<NodeIndex>` with one entry per node of the type, so the derived clone
+//! copied it whole on every fork.
 //!
 //! ## Why append-only levels, and not per-bucket copy-on-write
 //!

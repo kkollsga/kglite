@@ -76,9 +76,8 @@ with full recovery once the reference is released; ``freeze()`` held behaves
 the same (max 5.83 ms); ~28 ms at 1M. No threading, no snapshot API, no
 explicit copy — merely keeping the ``ResultView`` a query returned.
 
-**Re-pinned 2026-08-10** (release, two agreeing runs, D2 Phase 0 —
-``dev-docs/bench/results/2026-08-10-d2-phase0-pin.md``). Mean µs of the timed
-first-write, every round against a freshly acquired reference:
+**Re-pinned 2026-08-10** (release, two agreeing runs, D2 Phase 0). Mean µs of
+the timed first-write, every round against a freshly acquired reference:
 
 ===============  =========  ===========  ============
 holder            1k         100k         1M

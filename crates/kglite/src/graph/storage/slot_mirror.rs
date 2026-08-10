@@ -12,9 +12,9 @@
 //! at compaction. `StableGraph::add_node` reuses free-list slots and offers no
 //! index-controlled insertion, so an overlay that invents indices from
 //! `node_bound()..` would silently disagree with the base — mis-keying every
-//! index that recorded the overlay's number. That is risk **R1** in
-//! `dev-docs/plans/d2-structural-sharing.md`, and it is the deepest one in the
-//! programme, because a gap produces wrong data rather than a crash.
+//! index that recorded the overlay's number. That is the deepest risk in the
+//! programme (`docs/rust/structural-sharing.md`), because a gap produces wrong
+//! data rather than a crash.
 //!
 //! This module is Phase 1's answer, landed a phase early **on purpose**: it
 //! costs a `Vec` push/pop per node/edge add/remove today and buys a debug

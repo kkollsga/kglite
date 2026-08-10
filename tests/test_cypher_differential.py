@@ -2486,8 +2486,7 @@ def test_mutation_optimized_matches_naive(name: str, query: str) -> None:
 # paths a real deployment exercises are the columnar ones, and until D1 none of
 # them were in this corpus.
 #
-# The shapes here are the ones the D1 programme touches
-# (`dev-docs/plans/d1-column-store-ownership.md`): a multi-row `SET` and
+# The shapes here are the ones the D1 programme touches: a multi-row `SET` and
 # `REMOVE` against a saved type (which write through the per-type master store
 # and then re-point every node's handle), `MERGE … ON MATCH SET` over several
 # rows (one `execute_set` per row), and `SET n = {…}` (which enumerates the

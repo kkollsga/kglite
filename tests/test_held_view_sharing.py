@@ -1,8 +1,7 @@
 """A write taken while a view is held must not copy the graph — user-level.
 
-D2 (`dev-docs/plans/d2-structural-sharing.md`, and the durable record at
-`docs/rust/structural-sharing.md`) turned that write from an O(V+E) deep copy
-into a copy-on-write fork. The engine-side proof lives in Rust
+D2 (`docs/rust/structural-sharing.md`) turned that write from an O(V+E) deep
+copy into a copy-on-write fork. The engine-side proof lives in Rust
 (`graph/handle.rs::held_reference_clone_tests` and the three layer modules);
 **this file exists because none of it runs through the path a Python user
 takes.** `KnowledgeGraph` writes go through `Arc::make_mut` in `get_graph_mut`,

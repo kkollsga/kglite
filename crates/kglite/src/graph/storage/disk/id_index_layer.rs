@@ -6,9 +6,8 @@
 //! `id_indices` is a `HashMap` with one entry per node of every materialised
 //! type, so `DirGraph::clone` deep-copies it on every fork. Measured 2026-08-10
 //! at 1M nodes: **3.7 ms**, which after D2 Phase 2 removed the backend row is
-//! **90% of everything left** in a plain graph's fork
-//! (`dev-docs/bench/results/2026-08-10-d2-phase2-forked.md` §D.3). This type is
-//! what makes that O(changes).
+//! **90% of everything left** in a plain graph's fork. This type is what makes
+//! that O(changes).
 //!
 //! ## The split has to happen inside `Clone`
 //!

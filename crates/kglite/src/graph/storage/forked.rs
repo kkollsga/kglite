@@ -6,8 +6,7 @@
 //! `Session`, an open `Transaction` — made the next write deep-copy the entire
 //! graph. Measured 2026-08-10 at 1M nodes: **36.3 ms** against a 3.0 µs
 //! control, of which the backend row was **37.8 ms of a 41.6 ms**
-//! `DirGraph::clone` on a plain graph (`dev-docs/bench/results/
-//! 2026-08-10-d2-phase0-pin.md` §B). This module makes that row O(changes).
+//! `DirGraph::clone` on a plain graph. This module makes that row O(changes).
 //!
 //! ## The structural fact that forces this shape
 //!

@@ -2,8 +2,7 @@
 //!
 //! `Arc::make_mut` on a shared `Arc<DirGraph>` deep-clones the whole graph
 //! (`handle.rs::make_dir_graph_mut`), and that clone is the ~27.6 ms cliff at
-//! 1M nodes recorded in `dev-docs/plans/concurrent-reader-clone.md`. The
-//! existing oracle for it — `BACKEND_CLONE_NODES`
+//! 1M nodes. The existing oracle for it — `BACKEND_CLONE_NODES`
 //! (`storage/backend.rs`) — **counts nodes only**, which
 //! `rollback_tests.rs::assert_statements_copy_zero_nodes` says out loud: *"a
 //! `HashMap` clone bumps nothing"*. So nothing in the tree has ever measured

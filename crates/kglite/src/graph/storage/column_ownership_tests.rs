@@ -1,7 +1,5 @@
 //! D1 — column-store ownership: divergence coverage and the ownership pins.
 //!
-//! Programme: `dev-docs/plans/d1-column-store-ownership.md`.
-//!
 //! # What "divergence" means here
 //!
 //! Before D1 Phase 3 a columnar type's `ColumnStore` was reachable through

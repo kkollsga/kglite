@@ -1,12 +1,11 @@
 //! Export regression tests.
 //!
-//! The columnar cases here are the red proof for D1 defect 1
-//! (`dev-docs/plans/d1-column-store-ownership.md` §2): `property_iter` yields
-//! nothing for `PropertyStorage::Columnar`, so GraphML and D3-JSON export
-//! silently emitted **empty** property sets for every node of a saved
-//! (columnar) graph, while `property_count()` reported the real count. Each
-//! test below asserts the same property survives export in *both* the
-//! row-storage and the columnar shape, so the columnar arm fails on the
+//! The columnar cases here are the red proof for D1 defect 1:
+//! `property_iter` yields nothing for `PropertyStorage::Columnar`, so GraphML
+//! and D3-JSON export silently emitted **empty** property sets for every node
+//! of a saved (columnar) graph, while `property_count()` reported the real
+//! count. Each test below asserts the same property survives export in *both*
+//! the row-storage and the columnar shape, so the columnar arm fails on the
 //! pre-fix code and the row arm proves the assertion is not vacuous.
 
 use super::*;

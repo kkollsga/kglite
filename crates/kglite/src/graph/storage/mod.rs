@@ -206,7 +206,7 @@ pub trait GraphRead {
     // These are *the* route for reading a node's properties. Reaching into
     // `NodeData` / `PropertyStorage` directly reads one replica of a columnar
     // type's store rather than the store the backend owns — see
-    // `storage/node_view.rs` and `dev-docs/plans/d1-column-store-ownership.md`.
+    // `storage/node_view.rs`.
     //
     // Every method below is complete for columnar storage, unlike
     // `NodeData::property_iter`, which yields nothing there.
@@ -638,7 +638,7 @@ pub struct MemoryGraph {
     /// an already-hashed `u64`. SipHash over 8 bytes measured ~14 ns per probe
     /// there — a +22% regression on `columnar_cypher_where` — against ~1 ns for
     /// FxHash. Same reasoning as the 0.9.x `FxHash` conversions elsewhere in the
-    /// engine; see `dev-docs/bench/results/2026-08-10-d1-perf-union.md` §E.3.
+    /// engine.
     pub(crate) column_stores: FxHashMap<InternedKey, Arc<ColumnStore>>,
 
     /// Lazy per-connection-type peer counts used by grouped Cypher
