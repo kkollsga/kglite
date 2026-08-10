@@ -93,12 +93,23 @@ pub enum TypeEntry {
 /// Every level is one extra `HashMap` probe on a miss and one retained delta,
 /// so an unbounded chain would trade the fork cost for a read cost and a leak.
 /// A chain only grows while a reader is continuously held — any write with no
-/// live reader compacts the whole thing — so in practice it stays at 1. The cap
-/// makes the pathological case (a loop that re-takes a view every iteration,
-/// forever) amortised O(N/K) rather than unbounded, and it is deliberately
-/// small: the flatten it triggers is the same merge this recursion exists to
-/// avoid, so the win is in how rarely it runs, not in the constant.
-const MAX_CHAIN_DEPTH: u16 = 8;
+/// live reader compacts the whole thing — so in practice it stays at 1.
+///
+/// **Tuned from measurement, 2026-08-10.** The flatten is O(N_type), so its
+/// amortised cost is `|index| / MAX_CHAIN_DEPTH` per fork; at 1M that is ~3.7 ms
+/// spread over K rounds. The value started at 8, which put a ~5 ms spike in
+/// roughly one round in eight and dominated the *mean* of the held-view cell
+/// (min 126 µs, median 139 µs, **mean 608 µs**, max 5 021 µs — two spikes in
+/// twenty rounds). At 32 the harness cell reads min 114 / median 118 /
+/// **mean 129** / max 289 µs: the tail is gone and the mean is the real
+/// per-round cost.
+///
+/// 128 measured identically in-window (mean 129 µs) and would amortise the
+/// flatten 4x further, but every extra level is a probe on a read miss and a
+/// retained delta, and 32 already moves the worst case from ~5x the median to
+/// ~2x. Raising it further is tuning against one benchmark's hold window rather
+/// than against a mechanism.
+const MAX_CHAIN_DEPTH: u16 = 32;
 
 impl Default for TypeEntry {
     fn default() -> Self {
