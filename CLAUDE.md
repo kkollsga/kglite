@@ -62,11 +62,20 @@ that crosses package boundaries; otherwise let GitHub CI parallelize them.
   assertions catch immediately. After any release-profile build (benchmarks,
   release constants), rebuild debug (`uv run --no-sync maturin develop`)
   before the next test run.
-- **Binary-backed suites resolve binaries through
-  `tests/conftest.py::workspace_binary`** — newest of release/debug, and a
-  skip-with-rebuild-command when the binary predates the root `Cargo.toml`.
-  Never hard-code a profile path in a test; a stale release binary shadowing
-  fresh code produces contract failures that reveal nothing.
+- **Any harness that loads a built artifact resolves newest-of-profile.** The
+  Python suites do it through `tests/conftest.py::workspace_binary` — newest of
+  release/debug, and a skip-with-rebuild-command when the binary predates the
+  root `Cargo.toml`; the Java harness does it in `Abi.resolveLibrary` (added
+  2026-08). Never hard-code *or prefer* a profile path; a stale release
+  artifact shadowing fresh code produces contract failures that reveal nothing,
+  and "release if present" is the same bug wearing a default.
+- **Targeted tests in flight; the full battery once, at the program's
+  completion.** A landing's gate is `make gate` plus the suites *chosen to
+  catch what that change could break* — its touched surface and that surface's
+  direct consumers — not a fixed list and not everything. The full default
+  pytest run, the parity and differential corpora, and workspace clippy run
+  once over the **union** of a multi-phase program's changes, at its end. That
+  is the stated default for programs (2026-08), not a per-phase requirement.
 - **Every Python test carries a 120 s hang ceiling** (`pytest-timeout`,
   configured in `pyproject.toml`; opt-in heavy markers are exempted in
   `tests/conftest.py::pytest_collection_modifyitems`). A test that hits the
@@ -91,6 +100,15 @@ that crosses package boundaries; otherwise let GitHub CI parallelize them.
   - **"It compiles" is a weak test for a dependency floor.** Below `anyhow`
     1.0.47, `anyhow!("{e}")` compiles with a warning and prints the literal
     `{e}` to users. Where a version can compile yet misbehave, *run* it.
+  - `git add` with **one** bad pathspec stages **nothing** — the good paths in
+    the same invocation are discarded with it, and the only complaint is on
+    stderr. A dotted-vs-underscored filename voided an entire release staging
+    that way (2026-08). Read back `git status --porcelain`, never the silence.
+  - `grep -c` **exits 1 on a count of zero**, so it silently breaks the `&&`
+    chain of a command that was only ever asking "how many?".
+  - A backgrounded shell can fail its `cd` restore and leave nothing behind but
+    the echo of a dead eval. Read the output artifact the command was supposed
+    to write, not the message it printed about writing it.
 
   Same rule as the non-vacuity doctrine, applied to observability: ask "can
   this green go red?" and prove it. Prefer an **expected-failure contract**
@@ -137,10 +155,19 @@ workspace-wide policy audits, clippy, `test-full`, stubtest,
 packaged-consumer verification, or a fresh native extension unless the touched
 surface specifically requires it. GitHub CI is the authoritative full matrix
 and must be green before release. `make lint-policy` is only for changes to
-policy scripts/baselines, dependencies, or Cypher clean-room sources;
-`make lint-full` is only an explicit CI-equivalent diagnostic. Neither is a
-phase or pre-push requirement. Both `cargo fmt --check` and `ruff format
---check` remain in the fast gate.
+policy scripts/baselines, dependencies, or Cypher clean-room sources; neither
+it nor `make lint-full` is a per-phase requirement. Both `cargo fmt --check`
+and `ruff format --check` remain in the fast gate.
+
+**The one exception: run `make lint-full` once before the first push of a
+long-lived branch.** `make gate` runs *none* of the CI-only policy gates —
+`scripts/check_source_quality.py` (centralisation, god files, complexity
+ceilings), `scripts/check_lint_allowances.py`, workspace `cargo clippy
+--all-targets -- -D warnings`, stubtest — so a program branch can accumulate
+weeks of work that CI rejects on contact. The 0.15.8 branch reached its first
+push carrying four such blockers (god files, complexity drift, clippy debt,
+unreviewed `#[allow]`s), every one invisible to `make gate`. Once per branch,
+not once per phase.
 
 **Abort accidental slow paths early.** A targeted local check that starts
 resolving/syncing the project or compiling unrelated feature trees is the wrong
@@ -314,7 +341,7 @@ Before any perf-related change:
 1. **Baseline first** — write/extend a benchmark covering touched code paths. Run it, record numbers.
 2. **Build only the changed working tree, always in release mode.** Every benchmark and performance gate must use a release-built candidate (`uv run --no-sync maturin develop --release`, or the release-building `make bench*` target). Debug-profile performance results are invalid and must be discarded. This is a perf-only exception to the default-profile correctness-testing rule above.
 3. **Install released/reference versions with `uv`.** Do not source-build another revision just to establish an A/B baseline. Create an isolated venv and install its published wheel, e.g. `uv venv <venv> --python 3.12 && uv pip install --python <venv>/bin/python 'kglite==0.14.2'`. Run the probe outside the repository root so the local `kglite/` package cannot shadow the installed wheel.
-4. **Trust `min` over `median`** for sub-millisecond benches. Median pulls upward with system load; min reflects best-case throughput.
+4. **Trust `min` over `median`** for sub-millisecond benches. Median pulls upward with system load; min reflects best-case throughput. **Two cell classes break this rule — judge them by mean/median and say in the write-up which statistic you used.** (a) *Once-per-event* costs: when the expensive work happens on the first call after a state change (the first write after a held view forks the store), `min` only ever reports the cheap repeats and is structurally blind to the thing being measured — use the mean of first-writes. (b) *Heavy-tailed* cells whose min sits 30%+ below their own median are reporting a lucky round, not a rate; `columnar_cypher_where` raised three false regression alarms on separate landings that way (2026-08).
 5. **Tighten the harness for noisy benches**:
    - `--benchmark-min-rounds=100` (200 for sub-10-µs benches).
    - `--benchmark-warmup=on --benchmark-warmup-iterations=20`.
@@ -327,6 +354,17 @@ Before any perf-related change:
    ~3 releases back at +30% — run at release time (wired into the release
    skill). Per-release baseline files in `tests/benchmarks/baselines/` are the
    longitudinal record; never delete them.
+8. **Read the distribution, and cross-check the instrument** (2026-08):
+   - A **30×+ median-to-max spread on a deterministic operation** is a rare
+     expensive branch, not noise. Distribution shape is a diagnostic — chase
+     the outlier instead of averaging it away.
+   - **Every capture carries unchanged-path control cells**; they are the
+     machine-drift meter. A *control* that regresses means the instrument
+     moved, not the code — re-measure, don't bisect.
+   - **Measure a claim two independent ways** (two holders, two call routes)
+     before believing it. A `WHERE` clause silently disqualifying the lazy path
+     was invisible to either route alone and showed up only as disagreement
+     between them; a single measurement cannot detect its own instrument bug.
 
 ## Key patterns
 
@@ -336,6 +374,7 @@ Before any perf-related change:
 - **Storage traits**: reads on `GraphRead`, mutations on `GraphWrite: GraphRead` (both in `crates/kglite/src/graph/storage/mod.rs`). Add new storage ops to the trait first. `GraphRead` is non-object-safe (GATs on iterator methods) — use `&impl GraphRead` everywhere, never `&dyn`. Iterator-returning trait methods declare an associated type (`type FooIter<'a>: Iterator<…> where Self: 'a;`).
 - **Transactions stay on `DirGraph`**, not in the trait surface (`version`, `read_only`, `schema_locked`, validation helpers).
 - **No back-compat shims, no `#[deprecated]` — this is about *code/APIs*, not *data*.** Obsoleted code/API paths are deleted in the same PR as their replacement: no deprecated public surface, no dual old-vs-new-API codepaths, no compat wrappers for renamed/replaced functions. **Data-format compatibility is a separate, legitimate concern and is NOT a "shim".** Persisted files (`.kgl`, disk graphs) outlive the binary that wrote them, so *reading* an older on-disk/serialized format (read-compat), or *detecting* one and refusing it with a clear "rebuild your graph" message (a deliberate hard-break, e.g. the `.kgl` v3→v4 break or the embeddings-provenance break), is expected format-lifecycle handling — keep or migrate it, don't delete it to satisfy this rule. The test when unsure: *would deleting this break a caller's **code** (shim → remove) or an existing user's **saved file** (data-compat → keep/migrate)?* Examples that are NOT shims and stay: `EdgePropertyStore` legacy-format detection, `ConnectionTypeInfo`'s old-field deserializer, the v3-magic rejection in `io/file.rs`.
+- **The published C ABI is additive-only within a major.** Before changing any exported signature in `crates/kglite-c`, diff it against the shipped header — `git show vX.Y.Z:crates/kglite-c/include/kglite.h` — because a signature that has been published never changes within an ABI major; new behaviour arrives as a *new symbol*. Prebuilt consumers link the old one, so this is data-compat's sibling, not a shim. Full rules in `docs/rust/c-abi.md`.
 - **Parity oracles** at `tests/test_storage_parity.py`, `tests/test_phase{1,2,3}_parity.py` (gated by `pytest -m parity`) must stay green after any backend-touching change.
 
 ## When changing a `#[pymethods]` function — the five-place checklist
@@ -545,7 +584,7 @@ If that returns a commit, keep the version it picked. Only mint a new version af
 When a plan has Steps 1 / 2 / 3 / …:
 
 1. **One commit per phase.** Bisectability beats batched commits. Each phase's code + tests in its own `feat:` / `refactor:` / etc.
-2. **Each phase must be green before its commit** — `make gate` and the smallest relevant package/test filter pass. A targeted test already compiles its target, so do not add a redundant build or workspace-wide clippy run. Never use workspace-root `cargo build --lib` as the generic phase build.
+2. **Each phase must be green before its commit** — `make gate` and the targeted suites that would catch what the phase could break (its surface + that surface's direct consumers). A targeted test already compiles its target, so do not add a redundant build or workspace-wide clippy run. Never use workspace-root `cargo build --lib` as the generic phase build. The full battery runs once over the plan's union at the end, per "Testing discipline".
 3. **Keep going to the end.** Once a plan is approved, don't pause between phases. The only mid-plan stops are genuine blockers (failing test you can't fix, architectural surprise invalidating a later step).
 4. **One branch per plan — phases are commits, never sub-branches.** A plan
    gets exactly one feature branch and one draft PR; never spawn per-phase or
