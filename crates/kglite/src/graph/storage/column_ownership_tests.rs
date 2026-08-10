@@ -170,10 +170,20 @@ fn master_is_uniquely_owned(graph: &DirGraph) -> bool {
         .is_some_and(|master| Arc::strong_count(master) == 1)
 }
 
-/// Fork the master away from every node handle and write `value` into it.
+/// Write `value` straight into the type's master store.
 ///
-/// `Arc::make_mut` on the master succeeds in forking precisely because the
-/// nodes hold strong handles (D1 §1.2). Returns the interned key written.
+/// **Named for the pre-Phase-3 world and kept for continuity of the tests that
+/// call it, but it no longer diverges anything.** It used to fork the master
+/// away from the node-held handles, and `Arc::make_mut` succeeded at that
+/// precisely because the nodes held strong handles (D1 §1.2). Phase 3 deleted
+/// those handles, so the store is uniquely owned (see
+/// `master_is_uniquely_owned`) and `make_mut` now mutates it in place. The
+/// callers are consequently asserting "a read returns what the backend's store
+/// holds", not "the surfaces agree despite a divergence" — which is the
+/// strongest statement still expressible, since the divergence it was built to
+/// create is no longer constructible.
+///
+/// Returns the interned key written.
 fn diverge_master(graph: &mut DirGraph, idx: NodeIndex, key: &str, value: Value) -> InternedKey {
     let row_id = node_row_id(graph, idx).expect("columnar node");
     let ikey = graph.interner.get_or_intern(key);
@@ -306,6 +316,16 @@ fn all_public_reads_agree_under_master_node_divergence() {
              two public reads of the same property must never disagree"
         );
     }
+    // Agreement alone is satisfied by every surface returning `Null`, which is
+    // exactly what a storeless columnar node produces — unanimously, and
+    // wrongly. Pin the value the store actually holds so this cannot pass by
+    // agreeing on nothing.
+    assert_eq!(
+        first,
+        Value::String("MASTER".into()),
+        "{first_name} agreed with the others on {first:?}; all surfaces \
+         returning Null is agreement without a read"
+    );
 }
 
 // ── 2. Which replica wins — pinned, inverted by Phase 3 ────────────────────

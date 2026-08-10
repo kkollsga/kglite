@@ -267,10 +267,7 @@ mod fork_aliasing_tests {
     /// * **`wkt_cache` is a pure function of its key.** The key is WKT source
     ///   text and the value is that text parsed. An entry another graph wrote is
     ///   by construction the entry this graph would have computed, so sharing it
-    ///   cannot produce a wrong answer — it can only save the parse. Asserted
-    ///   below by parsing the same geometry through a snapshot *after* the
-    ///   writer mutated the graph: same key, same value, and graph state is not
-    ///   an input.
+    ///   cannot produce a wrong answer — it can only save the parse.
     /// * **`property_ndv_cache` is version-tagged.** Entries carry the graph
     ///   `version` they were computed at and a mismatch forces a recompute, so a
     ///   fork that bumps its version cannot read the parent's numbers as its
@@ -286,6 +283,23 @@ mod fork_aliasing_tests {
         let mut writer = Arc::new(two_edge_graph());
         let reader = Arc::clone(&writer);
 
+        let version_before = reader.version();
+        {
+            let graph = make_dir_graph_mut(&mut writer);
+            run(graph, "CREATE (:Item {id: 9, name: 'z'})");
+        }
+
+        // The `ptr_eq`s have to run on the *far side* of the fork. Before
+        // `make_dir_graph_mut`, `reader` and `writer` name one allocation, so
+        // comparing `reader.wkt_cache` with `writer.wkt_cache` compares a field
+        // with itself and holds no matter what `DirGraph::clone` does with it —
+        // including moving it to `ForkPrivateCache`, which is the exact change
+        // this test exists to notice.
+        assert!(
+            !Arc::ptr_eq(&reader, &writer),
+            "the write must have forked the writer away from the reader, or the \
+             handle comparisons below are about a single graph"
+        );
         assert!(
             Arc::ptr_eq(&reader.wkt_cache, &writer.wkt_cache),
             "wkt_cache is shared on purpose: pure function of its key"
@@ -294,12 +308,6 @@ mod fork_aliasing_tests {
             Arc::ptr_eq(&reader.property_ndv_cache, &writer.property_ndv_cache),
             "property_ndv_cache is shared on purpose: version-tagged, and an estimate"
         );
-
-        let version_before = reader.version();
-        {
-            let graph = make_dir_graph_mut(&mut writer);
-            run(graph, "CREATE (:Item {id: 9, name: 'z'})");
-        }
 
         // The version moved, which is what makes a shared NDV entry
         // unreadable by the other graph rather than silently trusted.

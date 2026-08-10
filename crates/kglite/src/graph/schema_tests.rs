@@ -792,6 +792,111 @@ mod maintenance_tests {
             "and must come back with the same value"
         );
     }
+
+    /// Vacuum a **columnar** graph — the combination the `test_vacuum_*` family
+    /// above never reaches, because every one of them builds row storage.
+    ///
+    /// Three things this release changed meet here and nothing else pins their
+    /// junction:
+    ///
+    /// * `GraphBackend::replace_heap_graph` has to *carry* the per-type column
+    ///   stores across the swap. Dropping them leaves every node holding a
+    ///   `PropertyStorage::Columnar(row_id)` with no store behind it, and
+    ///   `NodeView` reads a storeless columnar node as an **empty property
+    ///   set** — silently, with no error anywhere.
+    /// * the compaction reassigns node indices, so `type_indices` and the row
+    ///   ids must still agree afterwards.
+    /// * `disable_columnar` now sweeps `type_indices` rather than
+    ///   `node_indices()`, so it only restores what that index still reaches.
+    ///
+    /// Asserted on the reserved `__id__`/`__title__` columns as well as an
+    /// ordinary property, because a consolidated node stores `Null` inline and
+    /// gets its identity back from the store — the failure mode is nodes that
+    /// survive the vacuum with the right *count* and no identity.
+    #[test]
+    fn test_vacuum_preserves_columnar_properties_and_identity() {
+        let mut g = make_test_graph(6, false);
+        let mut meta = HashMap::new();
+        meta.insert("age".to_string(), "int64".to_string());
+        g.node_type_metadata.insert("Person".to_string(), meta);
+        g.compact_properties();
+        g.enable_columnar();
+        assert!(
+            g.is_columnar(),
+            "fixture must be columnar, or this test is vacuous"
+        );
+
+        // Tombstone two nodes so the vacuum has something to compact.
+        g.graph.remove_node(NodeIndex::new(1));
+        g.graph.remove_node(NodeIndex::new(4));
+
+        let expected: Vec<(Value, Value, Value)> = [0usize, 2, 3, 5]
+            .iter()
+            .map(|i| {
+                (
+                    Value::UniqueId(*i as u32),
+                    Value::String(format!("Person_{i}")),
+                    Value::Int64(20 + *i as i64),
+                )
+            })
+            .collect();
+
+        // Reads through `type_indices`, because that is the route
+        // `disable_columnar` takes. Stale entries are tolerated (a raw
+        // `remove_node` leaves them until the vacuum cleans them) but a *live*
+        // node that reads wrong is not.
+        let observe = |g: &DirGraph| -> Vec<(Value, Value, Value)> {
+            let mut seen: Vec<(Value, Value, Value)> = g
+                .type_indices
+                .get("Person")
+                .expect("Person bucket")
+                .iter()
+                .filter_map(|idx| {
+                    let node = g.graph.node_view(idx)?;
+                    Some((
+                        node.id().into_owned(),
+                        node.title().into_owned(),
+                        node.get_property("age")
+                            .map(|c| c.into_owned())
+                            .unwrap_or(Value::Null),
+                    ))
+                })
+                .collect();
+            seen.sort_by(|a, b| format!("{:?}", a.1).cmp(&format!("{:?}", b.1)));
+            seen
+        };
+
+        assert_eq!(
+            observe(&g),
+            expected,
+            "precondition: readable before vacuum"
+        );
+
+        g.vacuum();
+
+        assert!(
+            g.is_columnar(),
+            "the vacuum must carry the column stores across the heap swap; a \
+             storeless columnar node reads as an empty property set, silently"
+        );
+        assert_eq!(g.graph.node_count(), 4);
+        assert_eq!(
+            observe(&g),
+            expected,
+            "every surviving node must keep its id, title and properties across \
+             the compaction's index reassignment"
+        );
+
+        // `disable_columnar` reaches nodes through `type_indices`, so this also
+        // pins that the vacuum left the two in agreement.
+        g.disable_columnar();
+        assert!(!g.is_columnar());
+        assert_eq!(
+            observe(&g),
+            expected,
+            "unlinking the stores must restore every node the type index reaches"
+        );
+    }
 }
 
 #[cfg(test)]

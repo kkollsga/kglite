@@ -75,7 +75,7 @@ pub(super) struct ColumnMasterWrite<'a> {
 ///
 /// Both directions are asserted rather than argued — see the `debug_assert!`
 /// at the write itself and
-/// `column_ownership_tests::the_master_is_uniquely_owned_between_statements`.
+/// `dir_graph::rollback_tests::the_master_is_uniquely_owned_between_statements`.
 pub(super) fn set_via_column_master(graph: &mut DirGraph, write: ColumnMasterWrite<'_>) -> bool {
     // Disk-backed graphs use a separate write path; the master `column_stores`
     // Arc is for the in-memory Columnar mode only.

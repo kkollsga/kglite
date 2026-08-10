@@ -88,8 +88,36 @@ dependencies {
 // ---------------------------------------------------------------------------
 val workspaceRoot = layout.projectDirectory.dir("..").asFile
 
+/** The header `AbiContractTest` validates, and the two profiles `Abi.resolveLibrary` picks between. */
+val abiHeaderFile = File(workspaceRoot, "crates/kglite-c/include/kglite.h")
+val nativeLibraryCandidates = listOf("release", "debug").map {
+    File(workspaceRoot, "target/$it/${System.mapLibraryName("kglite_c")}")
+}
+
 tasks.test {
     useJUnitPlatform()
+    // ---------------------------------------------------------------------
+    // Both real inputs of this suite are produced by cargo, outside the Gradle
+    // project tree, and are reached at *runtime* — the header through a system
+    // property, the native library through `Abi.resolveLibrary`. Gradle's
+    // up-to-date check hashes a system property's *value*, so passing the
+    // header as an absolute path string tracked the path and never the
+    // content: editing `kglite.h` (or rebuilding `libkglite_c`) left this task
+    // `UP-TO-DATE` and the build `SUCCESSFUL` without running the drift
+    // detector at all. Verified 2026-08-10 by renaming a declared function in
+    // the header — `gradle test` reported UP-TO-DATE and passed.
+    //
+    // Declaring them as content inputs is what makes the green able to go red.
+    // `optional` because a fresh checkout has neither profile built yet, and a
+    // missing library must fail in `Abi`'s initializer with its build hint
+    // rather than in Gradle's input snapshotter.
+    inputs.file(abiHeaderFile)
+        .withPropertyName("kgliteAbiHeader")
+        .withPathSensitivity(PathSensitivity.NONE)
+    inputs.files(nativeLibraryCandidates)
+        .withPropertyName("kgliteNativeLibrary")
+        .withPathSensitivity(PathSensitivity.NONE)
+        .optional()
     // JDK 24+ (JEP 472) warns on restricted native access without this; a
     // future release makes it an error. Consumers pass the same flag.
     jvmArgs("--enable-native-access=ALL-UNNAMED")

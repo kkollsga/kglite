@@ -88,31 +88,46 @@ def test_a_held_view_keeps_its_pre_write_rows(graph: kglite.KnowledgeGraph, hold
 
     Before D2 it held for the expensive reason — the reader owned a private deep
     copy. It must now hold for the cheap one.
+
+    ``pin`` is the **only** live reference across the write, which is what makes
+    the parametrization mean anything. An earlier version kept a lazy ``view``
+    alive in every arm and read back through it, so ``view`` alone forced the
+    fork: ``freeze()``, ``session()`` and ``begin()`` could each have stopped
+    pinning the backend entirely and all four arms would still have read
+    ``True`` — three of them were re-runs of ``result_view`` wearing another
+    holder's name.
     """
-    view = graph.cypher(WIDE_QUERY)
-    before = _rows(view)
+    probe = graph.cypher(WIDE_QUERY)
+    before = _rows(probe)
     assert before, "fixture must produce rows"
 
     if holder == "result_view":
-        pin = view
-    elif holder == "frozen":
-        pin = graph.freeze()
-    elif holder == "session":
-        pin = graph.session()
+        pin = probe
     else:
-        pin = graph.begin()
+        pin = {"frozen": graph.freeze, "session": graph.session, "transaction": graph.begin}[holder]()
+        # The probe was only ever a way to record the pre-write rows. Drop it,
+        # or it — not `pin` — is what keeps the base alive.
+        del probe
+        gc.collect()
+
+    assert kglite._backend_is_forked(graph) is False, (
+        f"holder={holder}: acquiring a reader must not fork on its own; only a write does"
+    )
 
     graph.cypher("MATCH (n:Item {id: 3}) SET n.name = 'rewritten'")
     graph.cypher("CREATE (:Item {id: 4242, name: 'appended', qty: 1})")
 
     assert kglite._backend_is_forked(graph) is True, (
-        f"holder={holder} pins a second reference, so the write must fork to an "
-        "overlay; False means the graph was deep-copied instead"
+        f"holder={holder} is the only live reference to the base, so the write must "
+        "fork to an overlay; False means the graph was deep-copied instead"
     )
-    # The view still answers from its own snapshot...
-    assert _rows(view) == before, "the held view must keep its pre-write rows"
-    # ...and is still usable after the write, not just equal to a cached list.
-    assert len(list(view)) == len(before)
+    # The holder still answers from its own snapshot...
+    if holder == "result_view":
+        assert _rows(pin) == before, "the held view must keep its pre-write rows"
+        # ...and is still usable after the write, not just equal to a cached list.
+        assert len(list(pin)) == len(before)
+    else:
+        assert _rows(pin.cypher(WIDE_QUERY)) == before, "the held reader must keep its pre-write rows"
     # ...while the graph shows post-write state.
     assert graph.cypher("MATCH (n:Item {id: 3}) RETURN n.name AS name").to_list()[0]["name"] == "rewritten"
     assert graph.cypher("MATCH (n:Item {id: 4242}) RETURN n.id AS id").to_list()

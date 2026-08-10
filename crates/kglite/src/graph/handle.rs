@@ -605,12 +605,20 @@ impl KnowledgeGraph {
 /// (Homed here rather than in `dir_graph.rs` to keep that file under the
 /// god-file ceiling.)
 ///
-/// **Warning:** If other `Arc<DirGraph>` references exist (e.g. a
-/// snapshot held by an open transaction, or a clone held by a still-
-/// alive `ResultView`), this deep-clones the entire graph — every
-/// node, edge, and index. Mutation in a read-heavy workload is fine,
-/// but a lingering reference can cause an unexpected memory spike on
-/// the first write.
+/// **Cost when other `Arc<DirGraph>` references exist** (a snapshot held by an
+/// open transaction, a clone held by a still-alive `ResultView`, a `freeze()`):
+///
+/// * **Memory mode — a copy-on-write fork, not a copy.** D2 replaced the
+///   whole-graph clone this warning used to describe: the backend forks to an
+///   overlay over the shared data and the indexes layer over shared levels, so
+///   the write is O(write) and the overlay folds back on the first write after
+///   the last reader drops. See `docs/rust/structural-sharing.md`, and
+///   `held_reference_clone_tests` below for the executable form.
+/// * **Mapped and disk modes still deep-copy**, so a lingering reference there
+///   does cost a full copy — every node, edge and index — on the first write.
+/// * An adjacency edit (adding or removing an edge, deleting a node) is not
+///   overlay-expressible and **flattens** the fork: one copy, paid once per
+///   fork rather than once per statement.
 /// Copy-on-write access that preserves disk writer authority when a shared
 /// snapshot forces a clone. Does not change the graph version; callers that
 /// perform semantic mutations should use [`make_dir_graph_mut`].

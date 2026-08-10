@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A Java wrapper over the C ABI (`kglite-java/`), unpublished.** A lean
+  Panama/FFM binding — `KnowledgeGraph`, `WriterLease`, `StorageMode`,
+  `KgliteException`, and a Cypher-first surface — plus a pinned ABI contract
+  (`src/test/resources/abi-contract.txt`) that fails on any added, removed or
+  reshaped `kglite_*` declaration in `crates/kglite-c/include/kglite.h`. It is
+  **source only**: no artifact is published to Maven Central, and no CI job
+  builds or tests it — packaging (natives-in-JAR) and the CI leg are a
+  deliberately deferred follow-up phase, so its 12 tests are verified by
+  running `gradle -p kglite-java test` locally against a freshly built
+  `libkglite_c` (green at this release). Consumers cannot depend on it yet.
+  Note it is also the only gate that pins the ABI's numeric status
+  discriminants: the cbindgen header-drift check regenerates both sides, so a
+  renumbering passes it.
 - **The C ABI gained the writer lease.** `kglite_writer_lease_acquire` /
   `kglite_writer_lease_free` expose the cross-process single-writer lease
   (`KgliteWriterLease`) that the wheel's `kglite.open(..., lock=True)`, the CLI

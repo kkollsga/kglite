@@ -19,8 +19,14 @@
 //!
 //! It builds million-node fixtures and reports wall time. It is a
 //! **measurement instrument**, not a gate: it asserts only the invariants that
-//! would make its own numbers meaningless (fixtures are the shape they claim,
-//! the ten field names still match `swap_data_scale`). Run it deliberately:
+//! would make its own numbers meaningless — that each fixture is the shape it
+//! claims (nodes present, id index warm, the index family under test actually
+//! populated). It does **not** check that its ten rows still match
+//! `swap_data_scale`'s ten fields; that list is hand-maintained and diffed by
+//! eye, per the comment on `apportion`. Nothing gates the drift, which is
+//! tolerable only because forgetting to park a field costs speed rather than
+//! correctness (`rollback.rs`'s module doc states the asymmetry). Run it
+//! deliberately:
 //!
 //! ```text
 //! cargo test -p kglite --release fork_apportionment -- --ignored --nocapture
