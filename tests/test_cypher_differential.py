@@ -1219,9 +1219,12 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WHERE count{(p)-[:KNOWS]->()} > 2 RETURN p.name AS n ORDER BY n",
         None,
     ),
-    # ── integer div/mod overflow wraps (i64::MIN / -1) instead of panicking ──
-    ("div_overflow_wraps", "small_graph", "RETURN (-9223372036854775807 - 1) / -1 AS n", None),
-    ("mod_overflow_wraps", "small_graph", "RETURN (-9223372036854775807 - 1) % -1 AS n", None),
+    # ── integer div/mod at the i64 boundary: in range, so both sides agree.
+    # `i64::MIN / -1` and `i64::MIN % -1` are now query errors rather than
+    # wrapped values, and an erroring query is not a differential case — the
+    # absolute goldens in `executor::tests::semantics` own that contract.
+    ("div_at_boundary", "small_graph", "RETURN (-9223372036854775807 - 1) / 2 AS n", None),
+    ("mod_at_boundary", "small_graph", "RETURN (-9223372036854775807 - 1) % 7 AS n", None),
     # ── arithmetic expression in WHERE ──
     (
         "expr_filter",

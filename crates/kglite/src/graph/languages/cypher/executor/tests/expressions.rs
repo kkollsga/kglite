@@ -169,36 +169,40 @@ fn test_arithmetic_div() {
     // int / int → int (truncated), per 0.9.0 §5. Float promotion only
     // when at least one operand is a float.
     assert_eq!(
-        arithmetic_div(&Value::Int64(10), &Value::Int64(4)),
+        arithmetic_div(&Value::Int64(10), &Value::Int64(4)).unwrap(),
         Value::Int64(2)
     );
     assert_eq!(
-        arithmetic_div(&Value::Int64(10), &Value::Float64(4.0)),
+        arithmetic_div(&Value::Int64(10), &Value::Float64(4.0)).unwrap(),
         Value::Float64(2.5)
     );
 }
 
 #[test]
 fn test_arithmetic_div_by_zero() {
+    // Integer div-by-zero is a named error; float keeps its Null.
     assert_eq!(
-        arithmetic_div(&Value::Int64(10), &Value::Int64(0)),
-        Value::Null
+        arithmetic_div(&Value::Int64(10), &Value::Int64(0)).unwrap_err(),
+        "Integer division by zero"
     );
     assert_eq!(
-        arithmetic_div(&Value::Float64(10.0), &Value::Float64(0.0)),
+        arithmetic_div(&Value::Float64(10.0), &Value::Float64(0.0)).unwrap(),
         Value::Null
     );
 }
 
 #[test]
 fn test_arithmetic_negate() {
-    assert_eq!(arithmetic_negate(&Value::Int64(5)), Value::Int64(-5));
     assert_eq!(
-        arithmetic_negate(&Value::Float64(3.14)),
+        arithmetic_negate(&Value::Int64(5)).unwrap(),
+        Value::Int64(-5)
+    );
+    assert_eq!(
+        arithmetic_negate(&Value::Float64(3.14)).unwrap(),
         Value::Float64(-3.14)
     );
     assert_eq!(
-        arithmetic_negate(&Value::String("x".to_string())),
+        arithmetic_negate(&Value::String("x".to_string())).unwrap(),
         Value::Null
     );
 }

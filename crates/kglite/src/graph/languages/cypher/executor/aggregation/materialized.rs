@@ -746,12 +746,12 @@ impl<'a> CypherExecutor<'a> {
             Expression::Divide(left, right) => {
                 let l = self.evaluate_aggregate_with_rows(left, rows)?;
                 let r = self.evaluate_aggregate_with_rows(right, rows)?;
-                Ok(crate::graph::core::value_operations::arithmetic_div(&l, &r))
+                crate::graph::core::value_operations::arithmetic_div_checked(&l, &r)
             }
             Expression::Modulo(left, right) => {
                 let l = self.evaluate_aggregate_with_rows(left, rows)?;
                 let r = self.evaluate_aggregate_with_rows(right, rows)?;
-                Ok(crate::graph::core::value_operations::arithmetic_mod(&l, &r))
+                crate::graph::core::value_operations::arithmetic_mod_checked(&l, &r)
             }
             Expression::Concat(left, right) => {
                 let l = self.evaluate_aggregate_with_rows(left, rows)?;

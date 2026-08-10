@@ -599,6 +599,14 @@ pub fn add_edges_from_specs(
     graph: &mut DirGraph,
     specs: Vec<EdgeSpec>,
 ) -> Result<EdgeSpecReport, String> {
+    // An empty batch changes nothing, so it must not touch the graph: the
+    // disk-mutation lease, the interner preflight and — the one a caller can
+    // observe — the version bump at the end were all paid for zero edges, and
+    // an unnecessary bump costs a concurrent OCC committer its race. Reachable
+    // from `kglite_create_edges_batch` with `[]`.
+    if specs.is_empty() {
+        return Ok(EdgeSpecReport::default());
+    }
     let _arena_guard = graph.graph.begin_query(); // disk arena guard (owned; no-op on memory/mapped)
     use std::collections::BTreeMap;
     let mut interned_names = Vec::from(RESERVED_PROVENANCE_KEYS);

@@ -69,15 +69,12 @@ impl<'a> CypherExecutor<'a> {
             LocalTemporalKind::DateTime => {
                 // Accept full ISO datetime, or a bare date (midnight).
                 // Returns a Value::Timestamp (date + time, second precision).
-                if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S") {
-                    Ok(Value::Timestamp(dt))
-                } else if let Ok(d) =
-                    chrono::NaiveDate::parse_from_str(s.split('T').next().unwrap_or(&s), "%Y-%m-%d")
-                {
-                    Ok(Value::Timestamp(d.and_hms_opt(0, 0, 0).unwrap_or_default()))
-                } else {
-                    Ok(Value::Null)
-                }
+                // `local` rather than `utc`: this function names the *local*
+                // reading, so an offset-bearing input keeps its wall clock and
+                // only loses the zone label — the opposite of `datetime()`,
+                // which normalises. Either way the time is never dropped.
+                Ok(shared::parse_iso_datetime(&s)
+                    .map_or(Value::Null, |parsed| Value::Timestamp(parsed.local)))
             }
             LocalTemporalKind::Time => {
                 // Accept HH:MM:SS or HH:MM.

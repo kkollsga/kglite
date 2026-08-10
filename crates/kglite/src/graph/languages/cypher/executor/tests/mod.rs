@@ -6,7 +6,10 @@
 //!
 //! - [`expressions`] — comparison, arithmetic, coercion, CASE, parameters
 //! - [`mutations`] — CREATE / SET / DELETE / REMOVE / MERGE and index upkeep
+//! - [`identifiers`] — quoted-identifier escaping (the injection class)
 //! - [`lists`] — list parsing, slicing, sizing, and quantifier predicates
+//! - [`semantics`] — absolute goldens for expression semantics (duplicate
+//!   result columns, `datetime()` time/zone, integer overflow and div-by-zero)
 //! - [`strings`] — string functions and procedure list arguments
 #![allow(clippy::approx_constant)]
 
@@ -22,8 +25,10 @@ use crate::graph::storage::GraphWrite;
 use crate::graph::languages::cypher::parser;
 
 mod expressions;
+mod identifiers;
 mod lists;
 mod mutations;
+mod semantics;
 mod strings;
 
 /// Test helper: unwraps evaluate_comparison Result for use in assert!()

@@ -217,11 +217,14 @@ class TestCypherExceptionsCrossMode:
         with pytest.raises(kglite.CypherExecutionError, match="Invalid regular expression"):
             small_graph_all_modes.cypher("MATCH (n:Person) WHERE n.name =~ '[invalid(' RETURN n")
 
-    def test_division_by_zero_does_not_raise(self, small_graph_all_modes):
-        # Cypher semantics: division by zero returns Null, not an error.
-        # Pinning this here so a future "make it strict" change has to
-        # update the test rather than slipping through.
-        rows = list(small_graph_all_modes.cypher("RETURN 1 / 0 AS x"))
+    def test_integer_division_by_zero_raises(self, small_graph_all_modes):
+        # Integer division by zero is a CypherExecutionError, not a silent
+        # Null. It used to be Null in every storage mode, which reads as a
+        # legitimately missing value; Neo4j raises for the same input.
+        with pytest.raises(kglite.CypherExecutionError, match="Integer division by zero"):
+            small_graph_all_modes.cypher("RETURN 1 / 0 AS x")
+        # Float division by zero keeps its Null — no wire format carries Inf.
+        rows = list(small_graph_all_modes.cypher("RETURN 1.0 / 0 AS x"))
         assert rows[0]["x"] is None
 
 

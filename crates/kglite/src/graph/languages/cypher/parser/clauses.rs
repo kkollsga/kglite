@@ -47,6 +47,7 @@ impl CypherParser {
             items.push(self.parse_return_item()?);
         }
 
+        reject_duplicate_column_names(&items)?;
         Ok(items)
     }
 
@@ -869,6 +870,41 @@ impl CypherParser {
 
         Ok(items)
     }
+}
+
+/// Reject a `RETURN`/`WITH` projection list that names one output column twice.
+///
+/// The projection is materialised into a single name-keyed row map, so two
+/// items sharing a column name are not two columns — the second write wins the
+/// key and *both* values are then reported wrong: `RETURN 1 AS x, 2 AS x`
+/// answered `{x: 2, x: null}`, and `RETURN n.a AS x, n.b AS x` silently
+/// dropped `n.a`. There is no representation in which both survive, so the
+/// only honest outcomes are last-wins or an error; Neo4j errors ("Multiple
+/// result columns with the same name are not supported") and so does this,
+/// because a query that asks for two columns and receives one has a bug in it
+/// either way.
+///
+/// Checked in the parser, so it costs nothing per row and applies uniformly to
+/// `RETURN`, `WITH`, and subquery bodies. Programmatically built projections
+/// (the `RETURN *` expansion, planner rewrites) never pass through here and
+/// are unaffected — they key off maps and cannot collide.
+fn reject_duplicate_column_names(items: &[ReturnItem]) -> Result<(), String> {
+    if items.len() < 2 {
+        return Ok(());
+    }
+    let mut seen: Vec<String> = Vec::with_capacity(items.len());
+    for item in items {
+        let name =
+            crate::graph::languages::cypher::executor::helpers::return_item_column_name(item);
+        if seen.contains(&name) {
+            return Err(format!(
+                "Multiple result columns with the same name are not supported: '{name}' \
+                 (rename one with AS)"
+            ));
+        }
+        seen.push(name);
+    }
+    Ok(())
 }
 
 /// Validate a `WITH` in the *importing* position of a `CALL { }` subquery and

@@ -980,14 +980,14 @@ pub(super) fn arithmetic_sub(a: &Value, b: &Value) -> Value {
 pub(super) fn arithmetic_mul(a: &Value, b: &Value) -> Value {
     crate::graph::core::value_operations::arithmetic_mul(a, b)
 }
-pub(super) fn arithmetic_div(a: &Value, b: &Value) -> Value {
-    crate::graph::core::value_operations::arithmetic_div(a, b)
+pub(super) fn arithmetic_div(a: &Value, b: &Value) -> Result<Value, String> {
+    crate::graph::core::value_operations::arithmetic_div_checked(a, b)
 }
-pub(super) fn arithmetic_mod(a: &Value, b: &Value) -> Value {
-    crate::graph::core::value_operations::arithmetic_mod(a, b)
+pub(super) fn arithmetic_mod(a: &Value, b: &Value) -> Result<Value, String> {
+    crate::graph::core::value_operations::arithmetic_mod_checked(a, b)
 }
-pub(super) fn arithmetic_negate(a: &Value) -> Value {
-    crate::graph::core::value_operations::arithmetic_negate(a)
+pub(super) fn arithmetic_negate(a: &Value) -> Result<Value, String> {
+    crate::graph::core::value_operations::arithmetic_negate_checked(a)
 }
 pub(super) fn to_integer(val: &Value) -> Value {
     crate::graph::core::value_operations::to_integer(val)

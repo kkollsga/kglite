@@ -227,13 +227,22 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 tokens.push(lex_number(&mut chars, false)?);
             }
             '`' => {
-                // Backtick-quoted identifier: `programming language`
+                // Backtick-quoted identifier: `programming language`.
+                // A doubled backtick is an escaped one, matching the Cypher
+                // tokenizer — this lexer reads patterns *re-serialized* by
+                // `parser::match_pattern`, so the two escape rules have to be
+                // the same or a round-tripped identifier changes meaning.
                 chars.next(); // consume opening backtick
                 let mut ident = String::new();
                 while let Some(&c) = chars.peek() {
                     if c == '`' {
-                        chars.next(); // consume closing backtick
-                        break;
+                        chars.next(); // consume the backtick
+                        if chars.peek() == Some(&'`') {
+                            chars.next(); // …the second of a doubled pair
+                            ident.push('`');
+                            continue;
+                        }
+                        break; // it closed the identifier
                     }
                     ident.push(c);
                     chars.next();

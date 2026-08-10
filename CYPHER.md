@@ -103,6 +103,14 @@ for row in result:
 df = graph.cypher("MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age", to_df=True)
 ```
 
+**Every result column needs a distinct name.** A `RETURN` or `WITH` that names
+one column twice — `RETURN 1 AS x, 2 AS x`, `RETURN n.a AS x, n.b AS x`, or an
+unaliased `RETURN n.a, n.a` — is rejected with *"Multiple result columns with
+the same name are not supported"*, matching Neo4j. A row is one name-keyed map,
+so two items sharing a name were never two columns: the collision used to be
+silent and lost **both** values. Rename one with `AS`. Names are
+case-sensitive, so `AS x` and `AS X` are two columns.
+
 ## WHERE Clause
 
 ```python
@@ -342,7 +350,7 @@ graph.cypher("""
 | `properties(n)` / `properties(r)` | Full property map of a node or relationship (as JSON map) |
 | `start_node(r)` | Source node of a bound relationship; supports dotted access: `start_node(r).name` |
 | `end_node(r)` | Target node of a bound relationship; supports dotted access: `end_node(r).name` |
-| `date(str)` / `datetime(str)` | Parse date string to DateTime (`date('2020-01-15')`) |
+| `date(str)` / `datetime(str)` | Parse a date / ISO-8601 datetime string (`date('2020-01-15')`, `datetime('2020-01-15T10:30:00Z')`) |
 | `date_diff(d1, d2)` | Days between two dates (`d1 - d2`); also supports `date - date` arithmetic |
 | `coalesce(a, b, ...)` | First non-null argument |
 | `range(start, end [, step])` | Generate a checked inclusive integer list; default step = 1. Cardinality, `max_rows`, and a 256 MiB materialization ceiling are validated before allocation |
@@ -551,9 +559,10 @@ Date-range filtering on nodes and relationships with explicit field names.
 
 | Function | Description |
 |----------|-------------|
-| `date(str)` / `datetime(str)` | Parse date string to DateTime value |
-| `datetime()` | Today's date (no-arg form) |
-| `localdatetime()` | Local wall-clock datetime as ISO-8601 string (`YYYY-MM-DDTHH:MM:SS`); 1-arg form parses/normalises a string (NULL on bad input) |
+| `date(str)` | Parse a date string to a DateTime (date-only) value |
+| `datetime(str)` | Parse an ISO-8601 stamp to a Timestamp (date + time, second precision). Accepts `YYYY-MM-DD`, `…THH:MM`, `…THH:MM:SS[.fff]`, and a zoned `…Z` / `…±HH:MM`. **A zone is normalised to UTC**, since `Value::Timestamp` carries no zone; sub-second digits truncate. Unparseable input is NULL |
+| `datetime()` | Current local datetime (no-arg form) |
+| `localdatetime()` | Local wall-clock datetime; 1-arg form parses/normalises a string (NULL on bad input). Unlike `datetime(str)` it keeps the wall-clock reading of a zoned input and drops only the zone label |
 | `localtime()` / `time()` | Local wall-clock time-of-day as `HH:MM:SS` string; 1-arg form parses/normalises a string (NULL on bad input) |
 | `n.d.year`, `n.d.month`, `n.d.day` | Extract component from a DateTime property (chained accessor — works in `RETURN`, `WHERE`, `ORDER BY`) |
 | `n.d.dayOfWeek`, `n.d.dayOfYear`, `n.d.epochSeconds` | Other temporal field accessors |
@@ -577,6 +586,14 @@ range allocation/budget overflow, and Duration construction or arithmetic that
 would overflow a stored component raise `CypherExecutionError`; values are
 never narrowed, wrapped, or silently truncated. Fractional/non-finite Duration
 constructor components are rejected.
+
+**The same policy covers plain integer arithmetic.** `+ - * / %` and unary `-`
+on two integers raise `CypherExecutionError` when the result leaves the signed
+64-bit range (`9223372036854775807 + 1`, `-9223372036854775808 / -1`), and
+**integer division or modulo by zero raises** rather than answering NULL.
+*Float* division by zero stays NULL: the IEEE answer is ±Infinity / NaN, which
+no wire format kglite ships over can carry, so promoting it would move the
+silence one layer out rather than remove it.
 
 **`localdatetime()` / `localtime()` / `time()` return strings, not a temporal Value.** KGLite's `Value::DateTime` is date-only (`NaiveDate`), so there is no time-of-day Value variant to carry sub-day precision. Rather than silently dropping the time component, these functions emit ISO-8601 strings (`localdatetime()` → `YYYY-MM-DDTHH:MM:SS`, `localtime()`/`time()` → `HH:MM:SS`). The single-string-argument form validates and normalises its input, returning NULL on unparseable input (same contract as `datetime(str)`).
 
@@ -781,6 +798,13 @@ graph.cypher("MATCH (n:Person) RETURN n.first || ' ' || n.last AS fullname")
 # || auto-converts non-strings; null propagates
 graph.cypher("RETURN 'block-' || 35 AS label")  # → "block-35"
 ```
+
+**Integer arithmetic is checked.** `+ - * / %` and unary `-` on two integers
+raise `CypherExecutionError` when the result leaves the signed 64-bit range,
+and integer division or modulo **by zero raises** rather than returning NULL.
+Integer division truncates toward zero (`-7 / 2 → -3`) and only promotes to
+float when an operand is a float. Float division by zero stays NULL — see
+[Magnitude/error policy](#temporal-functions).
 
 ## CASE Expressions
 
@@ -2249,6 +2273,24 @@ MATCH  (a)-[r:`refines-idea`]->(b) RETURN a, b
 MATCH  (n:`Legal Document`)       RETURN n
 RETURN n.`dc.title`
 ```
+
+**A backtick inside a quoted identifier is written as two backticks**
+(openCypher's escape), so every name is representable and a quoted identifier
+cannot be terminated early:
+
+```cypher
+CREATE (:`We``ird`)          // the label   We`ird
+RETURN n.`dc``title` AS t    // the key     dc`title
+```
+
+This matters beyond exotic labels: **if you build a query by interpolating a
+label, relationship type, property key, alias or variable, double every
+backtick in it** (`name.replace("`", "``")`) before wrapping it in backticks.
+Without doubling, a name carrying a backtick closes its own quote and the rest
+of it is read as grammar — a caller passing ``Person`) DETACH DELETE n //`` as
+a label emitted a query that deleted every `Person` and reported a count.
+Values never need this: pass them as `params=` and they can never become
+syntax.
 
 The **string-typed APIs do not need escaping** — they take the type/label as a
 plain string, so `add_connections(df, "supports-claim", …)`,

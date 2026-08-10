@@ -116,12 +116,24 @@ def test_custom_label_and_property_names_with_spaces(tmp_path):
     )
 
 
-def test_identifier_with_backtick_is_rejected(tmp_path):
-    g, _, _ = _graph(tmp_path)
-    import pytest
+def test_identifier_with_backtick_is_escaped_not_executed(tmp_path):
+    """A backtick in an interpolated identifier is doubled, not a clause break.
 
-    with pytest.raises(kglite.ArgumentError, match="backtick"):
-        kglite.stamp_file_freshness(g, path_property="file_path` SET n.hacked = true //")
+    This used to raise, because the tokenizer had no escape and the helper
+    could only refuse. It now doubles the backtick, so the payload becomes one
+    (unmatched) property name: the query runs, stamps nothing, and — the point
+    — the injected ``SET n.hacked = true`` never becomes a clause.
+    """
+    g, _, _ = _graph(tmp_path)
+    payload = "file_path` SET n.hacked = true //"
+    kglite.stamp_file_freshness(g, path_property=payload)
+    hacked = g.cypher("MATCH (n:Artifact) WHERE n.hacked = true RETURN count(n) AS c").to_list()
+    assert hacked[0]["c"] == 0
+
+    # Non-vacuity: an empty identifier is still refused, so the guard that
+    # remains can still fire.
+    with pytest.raises(kglite.ArgumentError, match="non-empty string"):
+        kglite.stamp_file_freshness(g, path_property="")
 
 
 def test_stamp_rejects_non_positive_batch_size(tmp_path):

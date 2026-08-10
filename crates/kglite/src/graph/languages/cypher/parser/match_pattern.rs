@@ -206,6 +206,10 @@ impl CypherParser {
 
     /// Extract tokens forming a pattern inside EXISTS { ... }, stopping at RBrace or comma.
     /// Re-serialize an identifier, adding backticks if it contains spaces or special chars.
+    ///
+    /// Quoting always routes through [`backtick_quote`], so an identifier that
+    /// itself contains a backtick survives the round trip through the secondary
+    /// pattern lexer instead of terminating the quote early.
     pub(super) fn quote_identifier(s: &str) -> String {
         if s.contains(' ')
             || s.contains('-')
@@ -213,8 +217,9 @@ impl CypherParser {
             || s.contains('.')
             || s.contains('(')
             || s.contains(')')
+            || s.contains('`')
         {
-            format!("`{}`", s)
+            backtick_quote(s)
         } else {
             s.to_string()
         }
@@ -313,7 +318,7 @@ impl CypherParser {
                     let name = self
                         .keyword_lexeme_at(self.pos - 1)
                         .unwrap_or_else(|| keyword_name_token(tok).unwrap());
-                    parts.push(format!("`{}`", name));
+                    parts.push(backtick_quote(&name));
                 }
                 _ => {
                     return Err(format!("Unexpected token in EXISTS pattern: {:?}", token));
@@ -433,7 +438,7 @@ impl CypherParser {
                     let name = self
                         .keyword_lexeme_at(self.pos - 1)
                         .unwrap_or_else(|| keyword_name_token(tok).unwrap());
-                    parts.push(format!("`{}`", name));
+                    parts.push(backtick_quote(&name));
                 }
                 _ => {
                     return Err(format!("Unexpected token in MATCH pattern: {:?}", token));
@@ -447,4 +452,24 @@ impl CypherParser {
     // ========================================================================
     // WHERE Clause
     // ========================================================================
+}
+
+/// Wrap `name` in backticks, doubling any backtick it contains.
+///
+/// This is the *only* place a quoted identifier is written back into Cypher
+/// text, and it is the emitter half of the tokenizer's doubling rule: without
+/// it, a re-serialized identifier carrying a backtick would close its own quote
+/// in the secondary pattern lexer and the remainder would be read as grammar.
+/// Round-tripping `a`b` through quote-then-lex must return `a`b`.
+pub(super) fn backtick_quote(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 2);
+    out.push('`');
+    for ch in name.chars() {
+        if ch == '`' {
+            out.push('`');
+        }
+        out.push(ch);
+    }
+    out.push('`');
+    out
 }

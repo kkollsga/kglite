@@ -131,6 +131,25 @@ impl Session {
     /// Run a detached serialized transaction under one Session lock. The
     /// closure sees a transaction fork; success swaps it atomically and bumps
     /// the live version once, while error drops it with no partial writes.
+    ///
+    /// **A batch that wrote nothing is a no-op**, mirroring
+    /// [`CommitOutcome::NoWritesNoOp`] on the [`commit`](Self::commit) path:
+    /// no version bump, no Arc swap, the fork is dropped. This used to bump
+    /// and swap unconditionally, so an *empty* mutation batch — or one made
+    /// only of read statements, both reachable through the C ABI's
+    /// `kglite_session_execute_mut_batch` and `kglite_create_edges_batch` —
+    /// advanced the graph version with zero writes. An unnecessary bump is
+    /// exactly what makes a concurrent OCC committer lose a race it should
+    /// win: the other transaction's `base_version` no longer matches, and it
+    /// is told to retry against a graph that never changed.
+    ///
+    /// The write test is the version delta on the fork, because
+    /// [`DirGraph::bump_version`] is the canonical "this graph just mutated"
+    /// signal that every mutation path routes through. Detection is
+    /// *post*-execution: the fork still happens, because the closure needs a
+    /// `&mut DirGraph` and the atomicity guarantee (an error publishes
+    /// nothing) depends on mutating a copy. Since D2 that fork is O(changes),
+    /// and skipping the swap is what the caller actually observes.
     pub fn transact<T, E>(
         &self,
         operation: impl FnOnce(&mut DirGraph) -> Result<T, E>,
@@ -139,6 +158,9 @@ impl Session {
         let current_version = guard.version();
         let mut working = guard.fork_transaction();
         let value = operation(&mut working)?;
+        if working.version() == current_version {
+            return Ok(value);
+        }
         working.set_version(current_version + 1);
         *guard = Arc::new(working);
         Ok(value)
@@ -555,6 +577,105 @@ mod tests {
             1,
             "failed transaction must not reach the live Arc"
         );
+    }
+
+    /// **T5 — a batch that writes nothing must not advance the version.**
+    ///
+    /// Red before the fix on every assertion here: `transact` forked,
+    /// `set_version(current + 1)` and swapped unconditionally, so an empty
+    /// batch and a read-only batch each reported version 1 and published a new
+    /// Arc. The sibling `commit` path has always answered `NoWritesNoOp` for
+    /// exactly this case; the two paths now agree.
+    #[test]
+    fn transact_with_no_writes_is_a_noop() {
+        let s = Session::new(empty_graph());
+        let before = s.snapshot();
+
+        // Empty closure — the `kglite_create_edges_batch([])` shape.
+        let value = s.transact(|_working| Ok::<_, &'static str>(7)).unwrap();
+        assert_eq!(value, 7);
+        assert_eq!(s.version(), 0, "an empty batch must not bump the version");
+        assert!(
+            Arc::ptr_eq(&before, &s.snapshot()),
+            "an empty batch must not swap the live Arc"
+        );
+
+        // Read-only closure — the `execute_mut_batch` of MATCH statements
+        // shape. `execute_mut` only bumps when the statement is a mutation, so
+        // the fork's version is the signal.
+        let value = s
+            .transact(|working| {
+                let _ = working.version();
+                Ok::<_, &'static str>(8)
+            })
+            .unwrap();
+        assert_eq!(value, 8);
+        assert_eq!(s.version(), 0);
+        assert!(Arc::ptr_eq(&before, &s.snapshot()));
+
+        // Non-vacuity: a batch that *does* write still commits, exactly once.
+        s.transact(|working| {
+            working.bump_version();
+            working.bump_version();
+            Ok::<_, &'static str>(())
+        })
+        .unwrap();
+        assert_eq!(s.version(), 1, "one writing transaction is one version");
+        assert!(!Arc::ptr_eq(&before, &s.snapshot()));
+    }
+
+    /// The reason the no-op matters: an interleaved empty batch used to make a
+    /// concurrent OCC committer lose a race it should win. `other` begins at
+    /// version V, an unrelated empty batch runs, `other` commits — with the
+    /// spurious bump its `base_version` no longer matched and it was told to
+    /// retry against a graph nothing had changed.
+    #[test]
+    fn an_empty_batch_does_not_make_a_concurrent_committer_conflict() {
+        let s = Session::new(empty_graph());
+        let mut other = s.begin();
+        other.working_mut().unwrap().bump_version();
+
+        s.transact(|_working| Ok::<_, &'static str>(())).unwrap();
+
+        assert!(
+            matches!(
+                s.commit(other, /* check_occ = */ true),
+                CommitOutcome::Committed { new_version: 1 }
+            ),
+            "an empty batch must not invalidate a concurrent transaction"
+        );
+
+        // Non-vacuity: a real interleaved write still conflicts.
+        let mut loser = s.begin();
+        loser.working_mut().unwrap().bump_version();
+        s.transact(|working| {
+            working.bump_version();
+            Ok::<_, &'static str>(())
+        })
+        .unwrap();
+        assert!(matches!(
+            s.commit(loser, true),
+            CommitOutcome::ConflictDetected { .. }
+        ));
+    }
+
+    /// `add_edges_from_specs` bumped the version at the end of the function
+    /// regardless of what it had done, so an empty spec list bumped inside the
+    /// fork too — which `transact`'s version-delta test would then have read
+    /// as a real write.
+    #[test]
+    fn an_empty_edge_spec_batch_writes_nothing_and_bumps_nothing() {
+        use crate::graph::mutation::maintain::add_edges_from_specs;
+
+        let s = Session::new(empty_graph());
+        let before = s.snapshot();
+        let report = s
+            .transact(|working| add_edges_from_specs(working, Vec::new()))
+            .unwrap();
+        assert_eq!(report.connections_created, 0);
+        assert_eq!(report.skipped_missing_endpoint, 0);
+        assert_eq!(s.version(), 0);
+        assert!(Arc::ptr_eq(&before, &s.snapshot()));
     }
 
     #[test]

@@ -50,6 +50,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<dependency>` block, not only the `group:artifact:version` coordinate form.
   A stale `<version>` in an install snippet was previously invisible to it.
 
+### Fixed
+
+- **A mutation batch that writes nothing no longer advances the graph
+  version.** `Session::transact` forked, bumped and swapped unconditionally, so
+  an empty batch — or one made only of read statements — published a new graph
+  Arc and incremented the version with zero writes, contradicting
+  `CommitOutcome::NoWritesNoOp` on the sibling `commit` path. The cost is not
+  cosmetic: a spurious bump makes a concurrent optimistic-concurrency committer
+  fail its `base_version` check and retry against a graph nothing changed.
+  `transact` now detects the no-write outcome from the fork's version delta
+  (`DirGraph::bump_version` being the canonical mutation signal) and skips both
+  the bump and the swap. Reachable from the C ABI's
+  `kglite_session_execute_mut_batch` and `kglite_create_edges_batch`;
+  `add_edges_from_specs` also returned early-but-bumping on an empty spec list
+  and now returns without touching the graph at all.
+- **Quoted identifiers support backtick escaping.** A doubled backtick inside a
+  backtick-quoted identifier now reads as one literal backtick, per openCypher:
+  `` CREATE (:`We``ird`) `` creates the label ``We`ird``. Previously the
+  tokenizer read to the *first* closing backtick and doubling was a syntax
+  error, so an identifier containing a backtick was unrepresentable — and a
+  caller that interpolated a label, relationship type, property key, alias or
+  pattern variable into query text had no escape to apply, so such a name
+  terminated its own quote and the remainder was parsed as grammar. Both
+  tokenizers (the Cypher one and the secondary pattern lexer that re-reads
+  re-serialized `EXISTS { }` / `count { }` patterns) implement the same rule,
+  and the emitters that write quoted identifiers back out — the pattern
+  re-serializer and `kglite._cypher_identifier`, which previously *rejected* an
+  embedded backtick for want of an escape — now emit the doubled form.
+  `CYPHER.md` documents the escape and states the interpolation obligation.
+- **A `RETURN` or `WITH` that names one column twice is now rejected instead of
+  silently losing both values.** `RETURN 1 AS x, 2 AS x` answered
+  `{x: 2, x: null}`; `RETURN n.a AS x, n.b AS x` answered with `n.b` alone and
+  dropped `n.a` without a diagnostic; `RETURN count(n) AS c, count(n) AS c`
+  answered `null`. A row is one name-keyed map, so two items sharing a name
+  were never two columns. The parser now raises *"Multiple result columns with
+  the same name are not supported"* (Neo4j's wording) naming the offending
+  column, for `RETURN`, `WITH`, and subquery bodies alike. Column names stay
+  case-sensitive: `AS x` and `AS X` are two columns.
+- **`datetime()` no longer drops the time of day and the zone.**
+  `datetime('2024-01-15T10:30:00Z')` returned `2024-01-15T00:00:00` — as did
+  every zoned stamp, every fractional-second stamp, and `…T10:30` — because
+  the fallback split any input on `T` and re-parsed the date half. The parser
+  now accepts `YYYY-MM-DD`, `…THH:MM`, `…THH:MM:SS[.fff]`, and RFC 3339 zoned
+  forms (`Z`, `±HH:MM`); a zone is **normalised into UTC** (`10:30+02:00` →
+  `08:30`) because `Value::Timestamp` has no zone field to carry it, and
+  sub-second digits truncate to second precision. A stamp that carries a time
+  part and does not parse is now `NULL` — the documented contract — rather
+  than a silently invented midnight. `localdatetime(str)` had the same defect
+  and takes the same parser, keeping the wall-clock reading and dropping only
+  the zone label, which is what "local" means.
+- **Integer overflow and integer division/modulo by zero are query errors.**
+  `9223372036854775807 + 1` returned `-9223372036854775808`, `… * 2` returned
+  `-2`, and `1 / 0` and `1 % 0` returned `null` — a wrong number and a missing
+  one, both silent. `+ - * / %` and unary `-` on two integers now raise
+  `CypherExecutionError` when the result leaves the signed 64-bit range, and
+  integer division or modulo by zero raises. This closes the gap between the
+  integer operators and the magnitude/error policy CYPHER.md already declared
+  for temporal and duration arithmetic ("never narrowed, wrapped, or silently
+  truncated"), and matches Neo4j. **Float** division by zero deliberately
+  stays `NULL`: the IEEE answer is ±Infinity / NaN, which no wire format this
+  project ships over can carry. Measured in release mode against an
+  identically-shaped wrapping twin, the checked path costs 3.667 ns/op versus
+  3.648 (+0.5 %, ~0.02 ns) — below the cost of the surrounding value clone.
+
 ## [0.15.9] - 2026-08-10
 
 ### Added

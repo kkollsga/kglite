@@ -43,12 +43,32 @@ pub fn to_float(val: &Value) -> Value {
 // Arithmetic operations
 // ============================================================================
 
+/// The one place the 64-bit-integer overflow message is written, so every
+/// operator reports the same shape and a caller can match on it.
+///
+/// **Why this is an error and not a wrap.** Integer `+ - * / %` and unary `-`
+/// used to answer with `wrapping_*`, so `9223372036854775807 + 1` returned
+/// `-9223372036854775808` and `1 / 0` returned `null` — a wrong number and a
+/// missing one, both silent, both indistinguishable from a legitimate result.
+/// CYPHER.md's own magnitude/error policy already states that values are
+/// "never narrowed, wrapped, or silently truncated"; only the integer
+/// operators contradicted it. Neo4j raises an arithmetic error for both, and
+/// so does this now. The wrapping behaviour was pinned by
+/// `test_int64_overflow_wraps_silently`, whose docstring asked for exactly
+/// this change to be deliberate when it came.
+fn integer_overflow(op: &str, symbol: &str, x: i64, y: i64) -> String {
+    format!("Integer overflow in {op}: {x} {symbol} {y} is outside the 64-bit integer range")
+}
+
 /// Add two Values. Returns Null for incompatible types.
 /// When one operand is a String, the other is coerced to string and concatenated
 /// (unless the other is Null, which propagates).
-fn arithmetic_add_fallback(a: &Value, b: &Value) -> Value {
-    match (a, b) {
-        (Value::Int64(x), Value::Int64(y)) => Value::Int64(x.wrapping_add(*y)),
+fn arithmetic_add_fallback(a: &Value, b: &Value) -> Result<Value, String> {
+    Ok(match (a, b) {
+        (Value::Int64(x), Value::Int64(y)) => Value::Int64(
+            x.checked_add(*y)
+                .ok_or_else(|| integer_overflow("addition", "+", *x, *y))?,
+        ),
         (Value::String(x), Value::String(y)) => Value::String(format!("{}{}", x, y)),
         // Null propagation for string ops
         (Value::String(_), Value::Null) | (Value::Null, Value::String(_)) => Value::Null,
@@ -59,72 +79,97 @@ fn arithmetic_add_fallback(a: &Value, b: &Value) -> Value {
             (Some(x), Some(y)) => Value::Float64(x + y),
             _ => Value::Null,
         },
-    }
+    })
 }
 
 /// Subtract two Values. Returns Null for incompatible types.
-fn arithmetic_sub_fallback(a: &Value, b: &Value) -> Value {
-    match (a, b) {
-        (Value::Int64(x), Value::Int64(y)) => Value::Int64(x.wrapping_sub(*y)),
+fn arithmetic_sub_fallback(a: &Value, b: &Value) -> Result<Value, String> {
+    Ok(match (a, b) {
+        (Value::Int64(x), Value::Int64(y)) => Value::Int64(
+            x.checked_sub(*y)
+                .ok_or_else(|| integer_overflow("subtraction", "-", *x, *y))?,
+        ),
         _ => match (value_to_f64(a), value_to_f64(b)) {
             (Some(x), Some(y)) => Value::Float64(x - y),
             _ => Value::Null,
         },
-    }
+    })
 }
 
 /// Multiply two Values. Returns Null for incompatible types.
-fn arithmetic_mul_fallback(a: &Value, b: &Value) -> Value {
-    match (a, b) {
-        (Value::Int64(x), Value::Int64(y)) => Value::Int64(x.wrapping_mul(*y)),
+fn arithmetic_mul_fallback(a: &Value, b: &Value) -> Result<Value, String> {
+    Ok(match (a, b) {
+        (Value::Int64(x), Value::Int64(y)) => Value::Int64(
+            x.checked_mul(*y)
+                .ok_or_else(|| integer_overflow("multiplication", "*", *x, *y))?,
+        ),
         _ => match (value_to_f64(a), value_to_f64(b)) {
             (Some(x), Some(y)) => Value::Float64(x * y),
             _ => Value::Null,
         },
-    }
+    })
 }
 
-/// Divide two Values. Returns Null for incompatible types or division by zero.
+/// Divide two Values. Returns Null for incompatible types.
 ///
 /// Integer-by-integer division truncates toward zero (Neo4j / openCypher
 /// semantics — `1967 / 10 → 196`, `-7 / 2 → -3`). Promote to Float64 only
 /// when at least one operand is a float. The previous unconditional Float64
 /// promotion was a footgun that surfaced in date-bucketing patterns
 /// (e.g. `year / 10 * 10`); see 0.9.0 readiness §5.
-pub fn arithmetic_div(a: &Value, b: &Value) -> Value {
-    match (a, b) {
-        (Value::Int64(x), Value::Int64(y)) if *y != 0 => Value::Int64(x.wrapping_div(*y)),
+///
+/// **Integer division by zero, and `i64::MIN / -1`, are errors**
+/// (see [`integer_overflow`]). *Float* division by zero stays `Null`: the
+/// IEEE answer is `±Infinity`/`NaN`, which no wire format this project ships
+/// over (JSON, Bolt, the C ABI's JSON results) can carry, so promoting it
+/// would trade a silent null for a silent corruption one layer out.
+pub fn arithmetic_div_checked(a: &Value, b: &Value) -> Result<Value, String> {
+    Ok(match (a, b) {
+        (Value::Int64(_), Value::Int64(0)) => return Err("Integer division by zero".to_string()),
+        (Value::Int64(x), Value::Int64(y)) => Value::Int64(
+            x.checked_div(*y)
+                .ok_or_else(|| integer_overflow("division", "/", *x, *y))?,
+        ),
         _ => match (value_to_f64(a), value_to_f64(b)) {
             (Some(x), Some(y)) if y != 0.0 => Value::Float64(x / y),
             _ => Value::Null,
         },
-    }
+    })
 }
 
 /// Modulo of two Values. Preserves Int64 when both operands are integers.
-pub fn arithmetic_mod(a: &Value, b: &Value) -> Value {
-    match (a, b) {
-        (Value::Int64(x), Value::Int64(y)) if *y != 0 => Value::Int64(x.wrapping_rem(*y)),
+/// Integer modulo by zero, and `i64::MIN % -1`, are errors on the same
+/// grounds as [`arithmetic_div_checked`].
+pub fn arithmetic_mod_checked(a: &Value, b: &Value) -> Result<Value, String> {
+    Ok(match (a, b) {
+        (Value::Int64(_), Value::Int64(0)) => return Err("Integer modulo by zero".to_string()),
+        (Value::Int64(x), Value::Int64(y)) => Value::Int64(
+            x.checked_rem(*y)
+                .ok_or_else(|| integer_overflow("modulo", "%", *x, *y))?,
+        ),
         _ => match (value_to_f64(a), value_to_f64(b)) {
             (Some(x), Some(y)) if y != 0.0 => Value::Float64(x % y),
             _ => Value::Null,
         },
-    }
+    })
 }
 
 /// Negate a Value. Returns Null for non-numeric types.
-pub fn arithmetic_negate(a: &Value) -> Value {
-    match a {
-        Value::Int64(x) => Value::Int64(x.wrapping_neg()),
+/// `-i64::MIN` has no 64-bit representation and is an error.
+pub fn arithmetic_negate_checked(a: &Value) -> Result<Value, String> {
+    Ok(match a {
+        Value::Int64(x) => Value::Int64(x.checked_neg().ok_or_else(|| {
+            format!("Integer overflow in negation: -({x}) is outside the 64-bit integer range")
+        })?),
         Value::Float64(x) => Value::Float64(-x),
         _ => Value::Null,
-    }
+    })
 }
 
 /// Cypher-facing addition with checked temporal/duration arithmetic.
-/// Numeric arithmetic retains the established wrapping semantics; temporal
-/// magnitudes outside chrono's representable range return `Null`, while a
-/// Duration component overflow is a query error rather than silent aliasing.
+/// Temporal magnitudes outside chrono's representable range return `Null`;
+/// a Duration component overflow and a 64-bit integer overflow are both query
+/// errors rather than silent aliasing.
 pub fn arithmetic_add_checked(a: &Value, b: &Value) -> Result<Value, String> {
     match (a, b) {
         (Value::List(left), Value::List(right)) => {
@@ -217,7 +262,7 @@ pub fn arithmetic_add_checked(a: &Value, b: &Value) -> Result<Value, String> {
                 .checked_add(*bs)
                 .ok_or("Duration second component overflow during addition")?,
         }),
-        _ => Ok(arithmetic_add_fallback(a, b)),
+        _ => arithmetic_add_fallback(a, b),
     }
 }
 
@@ -289,7 +334,7 @@ pub fn arithmetic_sub_checked(a: &Value, b: &Value) -> Result<Value, String> {
                 .checked_sub(*bs)
                 .ok_or("Duration second component overflow during subtraction")?,
         }),
-        _ => Ok(arithmetic_sub_fallback(a, b)),
+        _ => arithmetic_sub_fallback(a, b),
     }
 }
 
@@ -299,7 +344,7 @@ pub fn arithmetic_mul_checked(a: &Value, b: &Value) -> Result<Value, String> {
     let (duration, factor) = match (a, b) {
         (duration @ Value::Duration { .. }, Value::Int64(factor))
         | (Value::Int64(factor), duration @ Value::Duration { .. }) => (duration, *factor),
-        _ => return Ok(arithmetic_mul_fallback(a, b)),
+        _ => return arithmetic_mul_fallback(a, b),
     };
     let Value::Duration {
         months,
@@ -351,6 +396,16 @@ pub(crate) fn arithmetic_sub(a: &Value, b: &Value) -> Value {
 #[cfg(test)]
 pub(crate) fn arithmetic_mul(a: &Value, b: &Value) -> Value {
     arithmetic_mul_checked(a, b).expect("test arithmetic multiplication should succeed")
+}
+
+#[cfg(test)]
+pub(crate) fn arithmetic_div(a: &Value, b: &Value) -> Value {
+    arithmetic_div_checked(a, b).expect("test arithmetic division should succeed")
+}
+
+#[cfg(test)]
+pub(crate) fn arithmetic_negate(a: &Value) -> Value {
+    arithmetic_negate_checked(a).expect("test arithmetic negation should succeed")
 }
 
 // ============================================================================
@@ -518,52 +573,101 @@ pub fn parse_value_string(s: &str) -> Value {
 mod tests {
     use super::*;
 
-    // -- Integer overflow wraps silently (no debug-build panic) --
-    // Raw `+`/`-`/`*`/`-x` panic under debug overflow-checks; these assert the
-    // wrapping semantics `test_int64_overflow_wraps_silently` (Python) documents,
-    // and crucially run under a *debug* `cargo test` where the old code panicked.
+    // -- Integer overflow and division by zero are named errors --
+    //
+    // ABSOLUTE GOLDEN. Every assertion below was red before the fix, with the
+    // wrong value written next to it:
+    //
+    //   i64::MAX + 1   -> Int64(i64::MIN)   (silent wrap)
+    //   i64::MIN - 1   -> Int64(i64::MAX)   (silent wrap)
+    //   i64::MAX * 2   -> Int64(-2)         (silent wrap)
+    //   -(i64::MIN)    -> Int64(i64::MIN)   (silent wrap)
+    //   i64::MIN / -1  -> Int64(i64::MIN)   (silent wrap)
+    //   i64::MIN % -1  -> Int64(0)          (silent wrap; the true answer is 0,
+    //                                        but only because wrapping_rem and
+    //                                        the mathematical result agree here)
+    //   1 / 0          -> Null              (silent null)
+    //   1 % 0          -> Null              (silent null)
+    //
+    // Raw `+`/`-`/`*`/`-x`/`/`/`%` panic under debug overflow-checks, so these
+    // also prove the operators never reach the panicking form: a regression to
+    // raw operators aborts the process under a debug `cargo test` instead of
+    // failing this assertion, and either outcome is red.
 
     #[test]
-    fn test_arithmetic_int_overflow_wraps() {
+    fn test_arithmetic_int_overflow_is_an_error() {
+        let one = Value::Int64(1);
+        let err = |r: Result<Value, String>| r.unwrap_err();
+
         assert_eq!(
-            arithmetic_add(&Value::Int64(i64::MAX), &Value::Int64(1)),
-            Value::Int64(i64::MIN)
+            err(arithmetic_add_checked(&Value::Int64(i64::MAX), &one)),
+            "Integer overflow in addition: 9223372036854775807 + 1 is outside the 64-bit integer range"
         );
         assert_eq!(
-            arithmetic_sub(&Value::Int64(i64::MIN), &Value::Int64(1)),
+            err(arithmetic_sub_checked(&Value::Int64(i64::MIN), &one)),
+            "Integer overflow in subtraction: -9223372036854775808 - 1 is outside the 64-bit integer range"
+        );
+        assert_eq!(
+            err(arithmetic_mul_checked(&Value::Int64(i64::MAX), &Value::Int64(2))),
+            "Integer overflow in multiplication: 9223372036854775807 * 2 is outside the 64-bit integer range"
+        );
+        assert_eq!(
+            err(arithmetic_negate_checked(&Value::Int64(i64::MIN))),
+            "Integer overflow in negation: -(-9223372036854775808) is outside the 64-bit integer range"
+        );
+        assert_eq!(
+            err(arithmetic_div_checked(&Value::Int64(i64::MIN), &Value::Int64(-1))),
+            "Integer overflow in division: -9223372036854775808 / -1 is outside the 64-bit integer range"
+        );
+
+        // Values one step inside the range still compute, so the guard is not
+        // rejecting everything (the non-vacuity half).
+        assert_eq!(
+            arithmetic_add_checked(&Value::Int64(i64::MAX - 1), &one).unwrap(),
             Value::Int64(i64::MAX)
         );
         assert_eq!(
-            arithmetic_mul(&Value::Int64(i64::MAX), &Value::Int64(2)),
-            Value::Int64(-2)
-        );
-        assert_eq!(
-            arithmetic_negate(&Value::Int64(i64::MIN)),
-            Value::Int64(i64::MIN)
+            arithmetic_negate_checked(&Value::Int64(i64::MIN + 1)).unwrap(),
+            Value::Int64(i64::MAX)
         );
     }
 
     #[test]
-    fn test_arithmetic_div_mod_int_overflow_wraps() {
-        // `i64::MIN / -1` overflows (result exceeds i64::MAX) and traps with the
-        // raw `/` operator in *both* debug and release; wrapping_div yields MIN.
+    fn test_integer_division_and_modulo_by_zero_are_errors() {
         assert_eq!(
-            arithmetic_div(&Value::Int64(i64::MIN), &Value::Int64(-1)),
-            Value::Int64(i64::MIN)
+            arithmetic_div_checked(&Value::Int64(1), &Value::Int64(0)).unwrap_err(),
+            "Integer division by zero"
         );
-        // `i64::MIN % -1` similarly traps with raw `%`; wrapping_rem yields 0.
         assert_eq!(
-            arithmetic_mod(&Value::Int64(i64::MIN), &Value::Int64(-1)),
-            Value::Int64(0)
+            arithmetic_mod_checked(&Value::Int64(1), &Value::Int64(0)).unwrap_err(),
+            "Integer modulo by zero"
         );
-        // Divide-by-zero stays guarded upstream → Null (wrapping_div would panic).
+        // `i64::MIN % -1` is mathematically 0 and stays 0 — checked_rem rejects
+        // it because the paired division overflows, so it is reported, not
+        // answered wrong.
         assert_eq!(
-            arithmetic_div(&Value::Int64(1), &Value::Int64(0)),
+            arithmetic_mod_checked(&Value::Int64(i64::MIN), &Value::Int64(-1)).unwrap_err(),
+            "Integer overflow in modulo: -9223372036854775808 % -1 is outside the 64-bit integer range"
+        );
+        // Float division by zero keeps its documented Null (see
+        // `arithmetic_div_checked`): no wire format carries Infinity.
+        assert_eq!(
+            arithmetic_div_checked(&Value::Float64(1.0), &Value::Int64(0)).unwrap(),
             Value::Null
         );
         assert_eq!(
-            arithmetic_mod(&Value::Int64(1), &Value::Int64(0)),
+            arithmetic_mod_checked(&Value::Float64(1.0), &Value::Float64(0.0)).unwrap(),
             Value::Null
+        );
+        // Ordinary integer division is untouched, including its
+        // truncate-toward-zero rounding.
+        assert_eq!(
+            arithmetic_div_checked(&Value::Int64(-7), &Value::Int64(2)).unwrap(),
+            Value::Int64(-3)
+        );
+        assert_eq!(
+            arithmetic_mod_checked(&Value::Int64(7), &Value::Int64(3)).unwrap(),
+            Value::Int64(1)
         );
     }
 
@@ -743,12 +847,14 @@ mod tests {
 
     #[test]
     fn test_div_by_zero() {
+        // Integer: a named error (was a silent Null). Float: still Null —
+        // see `test_integer_division_and_modulo_by_zero_are_errors`.
         assert_eq!(
-            arithmetic_div(&Value::Int64(10), &Value::Int64(0)),
-            Value::Null
+            arithmetic_div_checked(&Value::Int64(10), &Value::Int64(0)).unwrap_err(),
+            "Integer division by zero"
         );
         assert_eq!(
-            arithmetic_div(&Value::Float64(1.0), &Value::Float64(0.0)),
+            arithmetic_div_checked(&Value::Float64(1.0), &Value::Float64(0.0)).unwrap(),
             Value::Null
         );
     }

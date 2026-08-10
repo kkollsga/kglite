@@ -488,19 +488,47 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, St
                 }
             }
 
-            // Backtick-quoted identifiers: `My Identifier`
+            // Backtick-quoted identifiers: `My Identifier`.
+            //
+            // A doubled backtick is an escaped one, per openCypher: `` `a``b` ``
+            // is the single identifier `a`b`. Without the escape the quoted
+            // form had **no** way to represent a backtick, and the tokenizer
+            // simply stopped at the first one — so a caller that string-built a
+            // label or a variable from untrusted input could close the quote
+            // and append clauses:
+            //
+            //   label = "Person`) DETACH DELETE n //"
+            //   MATCH (n:`Person`) DETACH DELETE n //`) RETURN count(n) AS c
+            //
+            // …which deleted every Person and reported a count. With doubling
+            // in place the same input is representable as one (weird)
+            // identifier, so an emitter has an escaping rule to apply and the
+            // break-out is closed at the grammar rather than per binding.
             '`' => {
                 i += 1; // consume opening backtick
                 let start = i;
-                while i < len && chars[i] != '`' {
+                let mut ident = String::new();
+                let terminated = loop {
+                    if i >= len {
+                        break false;
+                    }
+                    if chars[i] == '`' {
+                        // A second backtick escapes the first; anything else
+                        // ends the identifier.
+                        if i + 1 < len && chars[i + 1] == '`' {
+                            ident.push('`');
+                            i += 2;
+                            continue;
+                        }
+                        i += 1; // consume closing backtick
+                        break true;
+                    }
+                    ident.push(chars[i]);
                     i += 1;
-                }
-                if i >= len {
-                    let ident: String = chars[start..i].iter().collect();
+                };
+                if !terminated {
                     return Err(format!("Unterminated backtick identifier: `{}", ident));
                 }
-                let ident: String = chars[start..i].iter().collect();
-                i += 1; // consume closing backtick
                 tokens.push((CypherToken::Identifier(ident), start));
             }
 

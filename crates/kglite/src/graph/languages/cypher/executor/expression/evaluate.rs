@@ -745,8 +745,8 @@ impl<'a> CypherExecutor<'a> {
             BinaryExpression::Multiply => {
                 crate::graph::core::value_operations::arithmetic_mul_checked(&left, &right)
             }
-            BinaryExpression::Divide => Ok(arithmetic_div(&left, &right)),
-            BinaryExpression::Modulo => Ok(arithmetic_mod(&left, &right)),
+            BinaryExpression::Divide => arithmetic_div(&left, &right),
+            BinaryExpression::Modulo => arithmetic_mod(&left, &right),
             BinaryExpression::Concat => Ok(
                 crate::graph::core::value_operations::string_concat(&left, &right),
             ),
@@ -758,6 +758,6 @@ impl<'a> CypherExecutor<'a> {
         inner: &Expression,
         row: &ResultRow,
     ) -> Result<Value, String> {
-        Ok(arithmetic_negate(&self.evaluate_expression(inner, row)?))
+        arithmetic_negate(&self.evaluate_expression(inner, row)?)
     }
 }

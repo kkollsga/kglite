@@ -51,16 +51,12 @@ impl<'a> CypherExecutor<'a> {
                 let val = self.evaluate_expression(&args[0], row)?;
                 match val {
                     Value::String(s) => {
-                        // Full ISO datetime, else a bare date at midnight.
-                        let parsed = chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S")
-                            .ok()
-                            .or_else(|| {
-                                let date_part = s.split('T').next().unwrap_or(&s);
-                                crate::graph::features::timeseries::parse_date_query(date_part)
-                                    .ok()
-                                    .and_then(|(d, _)| d.and_hms_opt(0, 0, 0))
-                            });
-                        Ok(parsed.map_or(Value::Null, Value::Timestamp))
+                        // Full ISO datetime (zoned or not), else a bare date at
+                        // midnight. A zone is normalised to UTC because
+                        // `Value::Timestamp` has no zone field to carry it —
+                        // the offset is applied, never discarded.
+                        Ok(parse_iso_datetime(&s)
+                            .map_or(Value::Null, |parsed| Value::Timestamp(parsed.utc())))
                     }
                     Value::Timestamp(_) => Ok(val),
                     Value::DateTime(d) => {

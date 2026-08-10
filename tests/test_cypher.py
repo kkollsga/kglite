@@ -1480,8 +1480,20 @@ class TestBugDatetimeFunction:
         assert "2024-03-15" in str(rows[0]["dt"])
 
     def test_datetime_with_timezone(self, cypher_graph):
-        rows = cypher_graph.cypher("RETURN datetime('2024-03-15T10:30:00Z') AS dt")
+        """A zone is applied, not silently dropped along with the time.
+
+        Before the fix this returned ``2024-03-15T00:00:00`` for every
+        zone-bearing stamp: the exact ``%Y-%m-%dT%H:%M:%S`` parse missed the
+        ``Z``, and the bare-date fallback split the string on ``T`` and
+        answered midnight. ``Value::Timestamp`` has no zone field, so the
+        offset is normalised into UTC rather than discarded.
+        """
+        rows = cypher_graph.cypher("RETURN datetime('2024-03-15T10:30:00Z') AS dt").to_list()
         assert len(rows) == 1
+        assert str(rows[0]["dt"]).replace(" ", "T") == "2024-03-15T10:30:00"
+        # +02:00 is two hours ahead of UTC, so the UTC reading is 08:30.
+        shifted = cypher_graph.cypher("RETURN datetime('2024-03-15T10:30:00+02:00') AS dt").to_list()
+        assert str(shifted[0]["dt"]).replace(" ", "T") == "2024-03-15T08:30:00"
 
 
 class TestBugDateInvalidInput:
@@ -1981,18 +1993,22 @@ class TestNumericBoundaries:
     a future change is forced to be deliberate.
     """
 
-    def test_int64_overflow_wraps_silently(self):
-        """Int64::MAX + 1 silently wraps to Int64::MIN.
+    def test_int64_overflow_raises(self):
+        """Int64::MAX + 1 is an error, not a silent wrap to Int64::MIN.
 
-        This is the underlying Rust `wrapping_add` behaviour and is
-        worth flagging — openCypher technically expects either an
-        error or a Float64 promotion. KGLite chose silent wrap for
-        consistency with arithmetic on `+` / `-`. Pinning so a future
-        change to error/promote is deliberate.
+        The wrapping behaviour this test used to pin returned
+        ``-9223372036854775808`` — a wrong number with no diagnostic — and its
+        own docstring asked for the change to error to be deliberate when it
+        came. It is: CYPHER.md's magnitude/error policy already promised that
+        values are "never narrowed, wrapped, or silently truncated", and
+        Neo4j raises for the same input.
         """
         g = KnowledgeGraph()
-        rows = g.cypher("RETURN 9223372036854775807 + 1 AS r").to_list()
-        assert rows[0]["r"] == -9223372036854775808  # Int64::MIN
+        with pytest.raises(kglite.CypherExecutionError, match="Integer overflow in addition"):
+            g.cypher("RETURN 9223372036854775807 + 1 AS r")
+        # Non-vacuity: one step inside the range still computes.
+        rows = g.cypher("RETURN 9223372036854775806 + 1 AS r").to_list()
+        assert rows[0]["r"] == 9223372036854775807
 
     def test_int64_min_expressible_as_literal(self):
         """`-9223372036854775808` should parse as Int64::MIN."""
@@ -2010,18 +2026,22 @@ class TestNumericBoundaries:
         assert rows[0]["a"] == -2
         assert rows[0]["b"] == -2
 
-    def test_division_by_zero_returns_null(self):
-        """Both int and float division by zero returns NULL.
+    def test_division_by_zero_raises_for_integers_and_is_null_for_floats(self):
+        """Integer division by zero raises; float division by zero stays NULL.
 
-        openCypher would prescribe NULL for int/0 and ±Inf / NaN for
-        float/0, but KGLite has chosen the more conservative
-        "always NULL" path. Pinning so a future Inf/NaN swap is
+        Integer ``5 / 0`` used to answer NULL, which is indistinguishable from
+        a legitimately missing value; Neo4j raises and so does this now.
+        Floats keep NULL deliberately: the IEEE answer is ±Inf / NaN, which no
+        wire format this project ships over (JSON, Bolt, the C ABI's JSON
+        results) can carry, so promoting it would move the silence one layer
+        out instead of removing it. Pinning so a future Inf/NaN swap is
         explicit."""
         g = KnowledgeGraph()
-        rows = g.cypher(
-            "RETURN 5 / 0 AS int_zero, 1.0 / 0.0 AS pos_inf, -1.0 / 0.0 AS neg_inf, 0.0 / 0.0 AS nan"
-        ).to_list()
-        assert rows[0]["int_zero"] is None
+        with pytest.raises(kglite.CypherExecutionError, match="Integer division by zero"):
+            g.cypher("RETURN 5 / 0 AS int_zero")
+        with pytest.raises(kglite.CypherExecutionError, match="Integer modulo by zero"):
+            g.cypher("RETURN 5 % 0 AS int_zero")
+        rows = g.cypher("RETURN 1.0 / 0.0 AS pos_inf, -1.0 / 0.0 AS neg_inf, 0.0 / 0.0 AS nan").to_list()
         assert rows[0]["pos_inf"] is None
         assert rows[0]["neg_inf"] is None
         assert rows[0]["nan"] is None

@@ -37,6 +37,85 @@ pub(super) fn json_to_value(j: &serde_json::Value) -> Value {
     }
 }
 
+/// One parsed ISO-8601 datetime: the wall-clock reading exactly as written,
+/// plus the UTC offset the string carried (`None` when it carried none).
+pub(super) struct ParsedIsoDateTime {
+    pub local: chrono::NaiveDateTime,
+    pub offset: Option<chrono::FixedOffset>,
+}
+
+impl ParsedIsoDateTime {
+    /// The reading normalised to UTC. Identical to `local` for a zone-less
+    /// string, which is why a naive input round-trips unchanged.
+    pub fn utc(&self) -> chrono::NaiveDateTime {
+        match self.offset {
+            Some(offset) => self.local - offset,
+            None => self.local,
+        }
+    }
+}
+
+/// Parse an ISO-8601 datetime string at second precision.
+///
+/// Accepts, in order: an offset-bearing RFC 3339 stamp (`…Z`, `…+02:00`),
+/// a zone-less `YYYY-MM-DDTHH:MM:SS` with optional fractional seconds, a
+/// zone-less `YYYY-MM-DDTHH:MM`, and finally a bare date (midnight).
+/// Sub-second precision is truncated — `Value::Timestamp` is second-precision.
+///
+/// **The bare-date fallback only fires for a string with no time part.** It
+/// used to be reached by splitting any input on `'T'` and re-parsing the date
+/// half, so every form this function did not recognise — every zoned stamp
+/// included — silently answered midnight: `datetime('2024-01-15T10:30:00Z')`
+/// returned `2024-01-15T00:00:00`, dropping both the time and the zone with no
+/// diagnostic. An unrecognised stamp that *has* a time part now returns `None`,
+/// which the callers surface as `Null`, matching their documented
+/// Null-on-unparseable contract.
+pub(super) fn parse_iso_datetime(s: &str) -> Option<ParsedIsoDateTime> {
+    use chrono::Timelike;
+
+    let trimmed = s.trim();
+    let truncate = |dt: chrono::NaiveDateTime| dt.with_nanosecond(0).unwrap_or(dt);
+
+    if let Ok(zoned) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(ParsedIsoDateTime {
+            local: truncate(zoned.naive_local()),
+            offset: Some(*zoned.offset()),
+        });
+    }
+    // chrono's `%Y` refuses an *unsigned* year outside 0..=9999 but accepts a
+    // signed one, and `NaiveDateTime` represents far more than four digits of
+    // year. Retry a wide bare year with the sign it wants rather than reject a
+    // representable stamp — `datetime('10000-01-01T00:00:00')` is a real value.
+    let signed;
+    let widened = match trimmed.split_once('-') {
+        Some((year, _)) if year.len() > 4 && year.chars().all(|c| c.is_ascii_digit()) => {
+            signed = format!("+{trimmed}");
+            Some(signed.as_str())
+        }
+        _ => None,
+    };
+    for candidate in [Some(trimmed), widened].into_iter().flatten() {
+        for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M"] {
+            if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(candidate, format) {
+                return Some(ParsedIsoDateTime {
+                    local: truncate(naive),
+                    offset: None,
+                });
+            }
+        }
+    }
+    if trimmed.contains('T') {
+        return None;
+    }
+    crate::graph::features::timeseries::parse_date_query(trimmed)
+        .ok()
+        .and_then(|(date, _)| date.and_hms_opt(0, 0, 0))
+        .map(|local| ParsedIsoDateTime {
+            local,
+            offset: None,
+        })
+}
+
 /// Which wall-clock "now" shape a `local*`/`time` function produces.
 /// KGLite has no time-of-day Value variant, so these emit ISO-8601
 /// strings (see the `localdatetime`/`localtime`/`time` arms).

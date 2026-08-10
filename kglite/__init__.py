@@ -231,18 +231,17 @@ def to_neo4j(
 
 
 def _cypher_identifier(name: str, *, kind: str) -> str:
-    """Quote an interpolated Cypher identifier or reject an unrepresentable one.
+    """Quote an interpolated Cypher identifier, escaping any backtick it holds.
 
-    KGLite's tokenizer accepts backtick-delimited identifiers but does not yet
-    implement doubled-backtick escaping. Rejecting an embedded backtick keeps
-    these convenience helpers injection-safe while still supporting spaces,
-    punctuation, and keyword identifiers.
+    The tokenizer treats a doubled backtick inside a quoted identifier as one
+    literal backtick, so doubling here is what makes the quote unbreakable: an
+    interpolated name can no longer close its own quote and have the remainder
+    read as grammar. This helper previously *rejected* an embedded backtick,
+    because the escape did not exist yet.
     """
     if not isinstance(name, str) or not name:
         raise ArgumentError(f"{kind} must be a non-empty string")
-    if "`" in name:
-        raise ArgumentError(f"{kind} cannot contain a backtick")
-    return f"`{name}`"
+    return "`" + name.replace("`", "``") + "`"
 
 
 def outline(
