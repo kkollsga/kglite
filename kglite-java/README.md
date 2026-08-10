@@ -12,10 +12,9 @@ itself is documented once for every language at
 
 ## Install
 
-> **Not published yet.** The Maven Central coordinates below are the ones the
-> release will claim, and they do not resolve until the first publication
-> lands. Until then, build the jar and use it from a local path — the recipe is
-> at the bottom of this page.
+Published on Maven Central since 0.15.9. The jar bundles natives for macOS
+arm64, Linux x86_64/aarch64 (glibc 2.35+), and Windows x86_64; other platforms
+build from source per the recipe at the bottom of this page.
 
 ```xml
 <dependency>
