@@ -216,11 +216,16 @@ class NativeHandleTest {
 
         Thread second = new Thread(subject::close, "second-closer");
         second.start();
-        awaitSettled(second);
         // The first closer is provably still mid-close (it has not been
-        // released), so a second closer that has already finished was not
-        // excluded from the window.
-        boolean excluded = second.getState() != Thread.State.TERMINATED;
+        // released), so a second closer that finishes inside this window was
+        // not excluded from it. Completion-within-a-window is the verdict —
+        // never a `getState()` sample: a starved CI runner shows a just-started
+        // thread in transient non-terminated states long enough for a sample
+        // to misread the unsynchronized shape as excluded (seen on the
+        // 2-core ubuntu runner, 2026-08-11). A guarded second closer is parked
+        // on the write lock and cannot terminate while the first is held at
+        // its hazard, so the window cannot misread that direction.
+        boolean excluded = !terminatedWithin(second, EXCLUSION_WINDOW);
 
         finish.countDown();
         join(first);
@@ -356,6 +361,20 @@ class NativeHandleTest {
     private static final EnumSet<Thread.State> SETTLED =
             EnumSet.of(Thread.State.BLOCKED, Thread.State.WAITING,
                     Thread.State.TIMED_WAITING, Thread.State.TERMINATED);
+
+    /** How long the second closer gets to finish before it counts as excluded. */
+    private static final Duration EXCLUSION_WINDOW = Duration.ofSeconds(2);
+
+    /** Whether {@code thread} terminated within {@code window}. */
+    private static boolean terminatedWithin(Thread thread, Duration window) {
+        try {
+            thread.join(window.toMillis());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("interrupted while joining " + thread.getName(), e);
+        }
+        return thread.getState() == Thread.State.TERMINATED;
+    }
 
     /**
      * Wait until {@code thread} is parked or finished. A guarded handle parks
