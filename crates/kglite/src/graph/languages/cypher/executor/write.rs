@@ -970,10 +970,7 @@ fn create_node(
     // an emptied-but-present bucket still shows up in `describe()` as a
     // zero-count type.
     let bucket_was_new = !graph.type_indices.contains_key(&label);
-    graph
-        .type_indices
-        .entry_or_default(label.clone())
-        .push(node_idx);
+    graph.type_indices.push_to_type(&label, node_idx);
     if let Some(journal) = graph.graph.undo_journal_mut() {
         journal.note_bucket_appended(
             crate::graph::storage::undo::BucketId::NodeType(label.clone()),

@@ -641,6 +641,9 @@ pub(crate) fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> 
     // their own (D2 Phase 3). Per entry this is `Arc::get_mut` + an O(delta)
     // merge, so it is a probe when nothing is shared.
     graph.id_indices.try_compact();
+    // ...and for `type_indices`, whose buckets are stacks of shared levels
+    // (D2). Per bucket this is an `Arc::get_mut` probe plus an O(delta) merge.
+    graph.type_indices.try_compact();
     graph
 }
 
@@ -1046,6 +1049,71 @@ mod held_reference_clone_tests {
                 reader.id_indices.lookup("Item", &value),
                 arc.id_indices.lookup("Item", &value),
                 "id {id} must resolve the same in both graphs"
+            );
+        }
+    }
+
+    /// The **type index** must scan the graph you asked, not the one that wrote
+    /// last.
+    ///
+    /// `type_indices` buckets are stacks of shared levels
+    /// (`storage/disk/type_index_layer.rs`), so this is where a `CREATE`'s
+    /// append leaking into a shared level would show up: the reader's
+    /// `MATCH (n:Item)` would return a node its snapshot has never seen, and —
+    /// because the bucket drives the label scan directly — it would return a
+    /// `NodeIndex` the reader's backend cannot even resolve.
+    #[test]
+    fn a_held_reader_scans_types_against_its_own_snapshot() {
+        let mut arc = seeded_arc();
+        let reader = Arc::clone(&arc);
+        let before: Vec<usize> = reader
+            .type_indices
+            .get("Item")
+            .expect("fixture is type-indexed")
+            .iter()
+            .map(|idx| idx.index())
+            .collect();
+        assert_eq!(before.len(), FIXTURE_NODES);
+
+        {
+            let graph = make_dir_graph_mut(&mut arc);
+            let params = HashMap::new();
+            execute_mut(
+                graph,
+                "CREATE (:Item {id: 7007, name: 'appended'})",
+                &ExecuteOptions::eager(&params),
+            )
+            .expect("append");
+        }
+
+        let after: Vec<usize> = reader
+            .type_indices
+            .get("Item")
+            .expect("the reader keeps its bucket")
+            .iter()
+            .map(|idx| idx.index())
+            .collect();
+        assert_eq!(
+            after, before,
+            "the reader's type bucket must be what it was before a write it \
+             never asked for; a difference means the writer appended into a \
+             level the reader shares"
+        );
+        assert_eq!(
+            arc.type_indices.get("Item").map(|members| members.len()),
+            Some(FIXTURE_NODES + 1),
+            "the writer must see its own append"
+        );
+        // Every member the reader reports must still resolve in the reader's
+        // own backend — the failure a leaked append produces is a dangling
+        // NodeIndex, not merely an extra row.
+        for idx in &after {
+            assert!(
+                reader
+                    .graph
+                    .node_weight(petgraph::graph::NodeIndex::new(*idx))
+                    .is_some(),
+                "the reader's bucket points at a node its backend does not have"
             );
         }
     }

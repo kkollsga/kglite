@@ -424,9 +424,11 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
             bucket_was_new,
         } => match bucket {
             BucketId::NodeType(name) => {
-                graph
-                    .type_indices
-                    .retain_in_type(&name, |member| *member != idx);
+                // Into this graph's own delta, never into a base a forked
+                // reader is holding — see `disk/type_index_layer.rs`. Falls
+                // back to the flattening retain when the append is not in the
+                // writable tail.
+                graph.type_indices.undo_append(&name, idx);
                 // Only drop the bucket if this statement introduced it: an
                 // empty bucket can legitimately pre-exist (a type whose nodes
                 // were all deleted earlier), and dropping that would be its

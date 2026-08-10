@@ -23,6 +23,7 @@ pub mod segment_summary;
 #[cfg(test)]
 pub(crate) mod temp_owner;
 pub mod type_index;
+pub mod type_index_layer;
 
 /// Delete a scratch file that the caller has just finished with, tolerating an
 /// already-absent path but surfacing every other failure.

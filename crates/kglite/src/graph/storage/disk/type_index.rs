@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use super::type_index_layer::TypeBucket;
 use crate::graph::schema::{InternedKey, StringInterner};
 
 const MAGIC: &[u8; 8] = b"KGLTIDXR";
@@ -225,11 +226,17 @@ impl TypeIndexBase {
     }
 }
 
-/// View into either the overlay's `Vec<NodeIndex>` or canonical little-endian
-/// bytes borrowed directly from the mmap.
+/// View into the overlay's members, or canonical little-endian bytes borrowed
+/// directly from the mmap.
+///
+/// `Overlay` is what an unlayered bucket hands out — a plain slice, exactly as
+/// before D2 layered this field — so the steady-state read path is unchanged.
+/// `Layered` appears only while a fork is outstanding and is the concatenation
+/// of its levels, in order (`disk/type_index_layer.rs`).
 pub enum TypeNodesRef<'a> {
     Overlay(&'a [NodeIndex]),
     Mmap(&'a [u8]),
+    Layered(&'a [Arc<Vec<NodeIndex>>]),
 }
 
 impl<'a> TypeNodesRef<'a> {
@@ -237,6 +244,7 @@ impl<'a> TypeNodesRef<'a> {
         match self {
             TypeNodesRef::Overlay(s) => s.len(),
             TypeNodesRef::Mmap(s) => s.len() / 4,
+            TypeNodesRef::Layered(levels) => levels.iter().map(|level| level.len()).sum(),
         }
     }
 
@@ -248,6 +256,11 @@ impl<'a> TypeNodesRef<'a> {
         match self {
             TypeNodesRef::Overlay(s) => TypeNodesIter::Overlay(s.iter()),
             TypeNodesRef::Mmap(s) => TypeNodesIter::Mmap(s.chunks_exact(4)),
+            TypeNodesRef::Layered(levels) => TypeNodesIter::Layered {
+                levels,
+                level: 0,
+                pos: 0,
+            },
         }
     }
 
@@ -255,6 +268,13 @@ impl<'a> TypeNodesRef<'a> {
         match self {
             TypeNodesRef::Overlay(s) => s.to_vec(),
             TypeNodesRef::Mmap(s) => le_u32_iter(s).map(|u| NodeIndex::new(u as usize)).collect(),
+            TypeNodesRef::Layered(levels) => {
+                let mut out = Vec::with_capacity(self.len());
+                for level in levels.iter() {
+                    out.extend_from_slice(level);
+                }
+                out
+            }
         }
     }
 
@@ -262,6 +282,16 @@ impl<'a> TypeNodesRef<'a> {
         match self {
             TypeNodesRef::Overlay(s) => s.get(i).copied(),
             TypeNodesRef::Mmap(s) => read_le_u32(s, i).map(|u| NodeIndex::new(u as usize)),
+            TypeNodesRef::Layered(levels) => {
+                let mut i = i;
+                for level in levels.iter() {
+                    if i < level.len() {
+                        return Some(level[i]);
+                    }
+                    i -= level.len();
+                }
+                None
+            }
         }
     }
 
@@ -272,6 +302,7 @@ impl<'a> TypeNodesRef<'a> {
         match self {
             TypeNodesRef::Overlay(s) => s.contains(idx),
             TypeNodesRef::Mmap(s) => le_u32_iter(s).any(|u| u as usize == idx.index()),
+            TypeNodesRef::Layered(levels) => levels.iter().any(|level| level.contains(idx)),
         }
     }
 
@@ -291,6 +322,11 @@ impl<'a> TypeNodesRef<'a> {
                 let want = idx.index() as u32;
                 le_u32_binary_search(s, want)
             }
+            // Each level is a contiguous run of the sorted whole, so the
+            // invariant this method documents holds per level; probe them all.
+            TypeNodesRef::Layered(levels) => {
+                levels.iter().any(|level| level.binary_search(&idx).is_ok())
+            }
         }
     }
 }
@@ -298,6 +334,19 @@ impl<'a> TypeNodesRef<'a> {
 pub enum TypeNodesIter<'a> {
     Overlay(std::slice::Iter<'a, NodeIndex>),
     Mmap(std::slice::ChunksExact<'a, u8>),
+    /// Walks the level stack in merge order. Only reachable while a fork is
+    /// outstanding — an unlayered bucket hands out `Overlay`.
+    ///
+    /// The cursor is two `u32`s rather than two `usize`s, and the remaining
+    /// count is derived rather than carried, so this variant does not widen the
+    /// enum past the `Mmap` arm. The label scan iterates this type in its
+    /// hottest loop; growing it would tax every scan for a state only a forked
+    /// graph can be in.
+    Layered {
+        levels: &'a [Arc<Vec<NodeIndex>>],
+        level: u32,
+        pos: u32,
+    },
 }
 
 impl<'a> Iterator for TypeNodesIter<'a> {
@@ -309,14 +358,23 @@ impl<'a> Iterator for TypeNodesIter<'a> {
             TypeNodesIter::Mmap(it) => it.next().map(|bytes| {
                 NodeIndex::new(u32::from_le_bytes(bytes.try_into().unwrap()) as usize)
             }),
+            TypeNodesIter::Layered { levels, level, pos } => {
+                while (*level as usize) < levels.len() {
+                    if let Some(idx) = levels[*level as usize].get(*pos as usize) {
+                        *pos += 1;
+                        return Some(*idx);
+                    }
+                    *level += 1;
+                    *pos = 0;
+                }
+                None
+            }
         }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        match self {
-            TypeNodesIter::Overlay(it) => it.size_hint(),
-            TypeNodesIter::Mmap(it) => it.size_hint(),
-        }
+        let len = ExactSizeIterator::len(self);
+        (len, Some(len))
     }
 }
 
@@ -325,14 +383,25 @@ impl ExactSizeIterator for TypeNodesIter<'_> {
         match self {
             TypeNodesIter::Overlay(it) => it.len(),
             TypeNodesIter::Mmap(it) => it.len(),
+            TypeNodesIter::Layered { levels, level, pos } => levels
+                .iter()
+                .skip(*level as usize)
+                .map(|entries| entries.len())
+                .sum::<usize>()
+                .saturating_sub(*pos as usize),
         }
     }
 }
 
 /// HashMap-shaped wrapper around an optional mmap base + overlay.
+///
+/// **The fork seam for `type_indices`** (D2). Each overlay bucket is a stack of
+/// shared, immutable levels ([`TypeBucket`]), so the derived `Clone` below
+/// copies `Arc`s rather than the members themselves. Before that, this field
+/// was the last O(V) term in `DirGraph::clone` on a plain graph.
 #[derive(Default, Clone)]
 pub struct TypeIndexStore {
-    overlay: HashMap<String, Vec<NodeIndex>>,
+    overlay: HashMap<String, TypeBucket>,
     /// Types that exist in `base` but were removed/invalidated post-load.
     removed: std::collections::HashSet<String>,
     base: Option<Arc<TypeIndexBase>>,
@@ -351,6 +420,49 @@ impl TypeIndexStore {
         }
     }
 
+    /// Fold every bucket's level stack back into one, for the buckets this
+    /// graph is the last holder of.
+    ///
+    /// Called at write entry alongside the backend's and `id_indices`'
+    /// compaction, so "hold a view, write, drop the view, write again" returns
+    /// to the flat representation on the next write. Per bucket this is an
+    /// `Arc::get_mut` probe plus an O(delta) merge.
+    pub fn try_compact(&mut self) {
+        for bucket in self.overlay.values_mut() {
+            bucket.try_compact();
+        }
+    }
+
+    /// Append `idx` to `name`'s bucket without materialising it.
+    ///
+    /// **The `CREATE` path.** Unlike [`entry_or_default`](Self::entry_or_default)
+    /// this never needs a mutable `Vec`, so a bucket shared with a fork grows a
+    /// new level instead of copying a million entries — and it borrows the type
+    /// name rather than taking it, so the common case (the bucket exists) also
+    /// stops allocating a `String` per created node.
+    pub fn push_to_type(&mut self, name: &str, idx: NodeIndex) {
+        if let Some(bucket) = self.overlay.get_mut(name) {
+            bucket.push(idx);
+            return;
+        }
+        self.entry_or_default(name.to_string()).push(idx);
+    }
+
+    /// Reverse a journalled `BucketAppended` for `name`, editing this graph's
+    /// own delta rather than a base a forked reader is holding.
+    ///
+    /// Falls back to the flattening retain when the entry is not in the
+    /// writable tail — slower, still correct. See
+    /// [`TypeBucket::undo_append`] for when that can happen.
+    pub fn undo_append(&mut self, name: &str, idx: NodeIndex) {
+        if let Some(bucket) = self.overlay.get_mut(name) {
+            if bucket.undo_append(idx) {
+                return;
+            }
+        }
+        self.retain_in_type(name, |member| *member != idx);
+    }
+
     pub fn contains_key(&self, name: &str) -> bool {
         if self.overlay.contains_key(name) {
             return true;
@@ -362,8 +474,13 @@ impl TypeIndexStore {
     }
 
     pub fn get(&self, name: &str) -> Option<TypeNodesRef<'_>> {
-        if let Some(v) = self.overlay.get(name) {
-            return Some(TypeNodesRef::Overlay(v.as_slice()));
+        if let Some(bucket) = self.overlay.get(name) {
+            return Some(match bucket.levels() {
+                // The steady state: one level, handed out as the plain slice
+                // this returned before the field was layered.
+                [only] => TypeNodesRef::Overlay(only.as_slice()),
+                levels => TypeNodesRef::Layered(levels),
+            });
         }
         if self.removed.contains(name) {
             return None;
@@ -373,7 +490,10 @@ impl TypeIndexStore {
     }
 
     pub fn remove(&mut self, name: &str) -> Option<Vec<NodeIndex>> {
-        let prev = self.overlay.remove(name);
+        let prev = self
+            .overlay
+            .remove(name)
+            .map(|mut bucket| std::mem::take(bucket.to_mut()));
         if self.base.as_ref().is_some_and(|b| b.contains(name)) {
             self.removed.insert(name.to_string());
         }
@@ -430,7 +550,13 @@ impl TypeIndexStore {
         let overlay_pairs: Vec<(&str, TypeNodesRef<'_>)> = self
             .overlay
             .iter()
-            .map(|(k, v)| (k.as_str(), TypeNodesRef::Overlay(v.as_slice())))
+            .map(|(k, bucket)| {
+                let view = match bucket.levels() {
+                    [only] => TypeNodesRef::Overlay(only.as_slice()),
+                    levels => TypeNodesRef::Layered(levels),
+                };
+                (k.as_str(), view)
+            })
             .collect();
         let base_pairs: Vec<(&str, TypeNodesRef<'_>)> = match self.base.as_deref() {
             Some(base) => base
@@ -451,23 +577,28 @@ impl TypeIndexStore {
 
     /// HashMap-`entry`-shaped accessor: materialize any base entry into the
     /// overlay before returning a mutable Vec reference (or insert empty).
+    ///
+    /// A bucket shared with a fork is **flattened** here, because a `&mut Vec`
+    /// cannot be served out of a stack of shared levels. Callers that only
+    /// append should use [`push_to_type`](Self::push_to_type) instead, which
+    /// stays O(1) while shared.
     pub fn entry_or_default(&mut self, name: String) -> &mut Vec<NodeIndex> {
         if !self.overlay.contains_key(&name) && !self.removed.contains(&name) {
             if let Some(base) = self.base.as_deref() {
                 if let Some(v) = base.materialize(&name) {
-                    self.overlay.insert(name.clone(), v);
+                    self.overlay.insert(name.clone(), TypeBucket::from(v));
                 }
             }
         }
         self.removed.remove(&name);
-        self.overlay.entry(name).or_default()
+        self.overlay.entry(name).or_default().to_mut()
     }
 
     /// Promote a single type into the overlay if needed, then run `predicate`
     /// on its Vec via `Vec::retain`. No-op if the type is absent.
     pub fn retain_in_type<F: FnMut(&NodeIndex) -> bool>(&mut self, name: &str, predicate: F) {
-        if let Some(v) = self.overlay.get_mut(name) {
-            v.retain(predicate);
+        if let Some(bucket) = self.overlay.get_mut(name) {
+            bucket.to_mut().retain(predicate);
             return;
         }
         if self.removed.contains(name) {
@@ -477,7 +608,7 @@ impl TypeIndexStore {
         if let Some(base) = self.base.as_deref() {
             if let Some(mut v) = base.materialize(name) {
                 v.retain(predicate);
-                self.overlay.insert(name.to_string(), v);
+                self.overlay.insert(name.to_string(), TypeBucket::from(v));
             }
         }
     }
@@ -492,7 +623,7 @@ impl TypeIndexStore {
                     && !self.removed.contains(name.as_str())
                 {
                     if let Some(v) = base.materialize(name) {
-                        self.overlay.insert(name.clone(), v);
+                        self.overlay.insert(name.clone(), TypeBucket::from(v));
                     }
                 }
             }
@@ -501,14 +632,17 @@ impl TypeIndexStore {
             self.base = None;
             self.removed.clear();
         }
-        for v in self.overlay.values_mut() {
-            v.retain(predicate);
+        for bucket in self.overlay.values_mut() {
+            bucket.to_mut().retain(predicate);
         }
     }
 
     /// Replace the entire store with a fresh HashMap.
     pub fn replace_with(&mut self, map: HashMap<String, Vec<NodeIndex>>) {
-        self.overlay = map;
+        self.overlay = map
+            .into_iter()
+            .map(|(name, members)| (name, TypeBucket::from(members)))
+            .collect();
         self.removed.clear();
         self.base = None;
     }
@@ -535,12 +669,14 @@ pub fn write_type_indices_bin(
     enum Source<'a> {
         Slice(&'a [u8]),
         Vec(&'a [NodeIndex]),
+        Levels(&'a [Arc<Vec<NodeIndex>>]),
     }
     impl Source<'_> {
         fn len(&self) -> usize {
             match self {
                 Source::Slice(s) => s.len() / 4,
                 Source::Vec(s) => s.len(),
+                Source::Levels(levels) => levels.iter().map(|level| level.len()).sum(),
             }
         }
         fn write_into(&self, out: &mut Vec<u8>) {
@@ -549,6 +685,13 @@ pub fn write_type_indices_bin(
                 Source::Vec(s) => {
                     for n in s.iter() {
                         out.extend_from_slice(&(n.index() as u32).to_le_bytes());
+                    }
+                }
+                Source::Levels(levels) => {
+                    for level in levels.iter() {
+                        for n in level.iter() {
+                            out.extend_from_slice(&(n.index() as u32).to_le_bytes());
+                        }
                     }
                 }
             }
@@ -560,6 +703,7 @@ pub fn write_type_indices_bin(
         let src = match view {
             TypeNodesRef::Overlay(s) => Source::Vec(s),
             TypeNodesRef::Mmap(s) => Source::Slice(s),
+            TypeNodesRef::Layered(levels) => Source::Levels(levels),
         };
         let Some(key) = interner.try_resolve_to_key(name) else {
             if src.len() == 0 {
@@ -780,5 +924,97 @@ mod validation_tests {
         let error = write_type_indices_bin(temp.path(), &store, &interner).unwrap_err();
         assert!(error.contains("Unregistered"), "{error}");
         assert!(error.contains("cannot be read back"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod layered_view_tests {
+    use super::*;
+
+    /// A store whose bucket is layered must answer every read exactly as the
+    /// unlayered store it forked from.
+    ///
+    /// The `Layered` view walks a stack of slices instead of indexing one, so
+    /// every accessor has a second implementation — this pins them against the
+    /// original rather than against itself.
+    #[test]
+    fn a_layered_bucket_answers_exactly_as_the_flat_one() {
+        let mut flat = TypeIndexStore::new();
+        for i in 0..6u32 {
+            flat.push_to_type("Item", NodeIndex::new(i as usize));
+        }
+
+        // Fork, then write on both sides so each holds a real level stack.
+        let mut forked = flat.clone();
+        for i in 6..9u32 {
+            forked.push_to_type("Item", NodeIndex::new(i as usize));
+            flat.push_to_type("Item", NodeIndex::new(i as usize));
+        }
+        // A second fork-then-write, so the stack is three levels deep.
+        let deeper = forked.clone();
+        forked.push_to_type("Item", NodeIndex::new(9));
+
+        let expected: Vec<NodeIndex> = (0..10).map(NodeIndex::new).collect();
+        let view = forked.get("Item").expect("bucket present");
+        assert!(
+            matches!(view, TypeNodesRef::Layered(_)),
+            "the fixture must actually be layered, or this test proves nothing"
+        );
+
+        assert_eq!(view.len(), expected.len());
+        assert!(!view.is_empty());
+        assert_eq!(view.to_vec(), expected);
+        assert_eq!(view.iter().collect::<Vec<_>>(), expected);
+        assert_eq!(view.iter().len(), expected.len());
+        for (i, idx) in expected.iter().enumerate() {
+            assert_eq!(view.get(i), Some(*idx), "positional read {i}");
+            assert!(view.contains(idx));
+            assert!(view.binary_search_idx(*idx));
+        }
+        assert_eq!(view.get(expected.len()), None);
+        assert!(!view.contains(&NodeIndex::new(99)));
+        assert!(!view.binary_search_idx(NodeIndex::new(99)));
+
+        // `len()` must stay right part-way through a walk, because
+        // `ExactSizeIterator` is a promise callers size their buffers on.
+        let mut walk = view.iter();
+        for remaining in (0..expected.len()).rev() {
+            walk.next();
+            assert_eq!(walk.len(), remaining);
+        }
+
+        // The other holders are unaffected by either write.
+        assert_eq!(
+            deeper.get("Item").unwrap().to_vec(),
+            expected[..9].to_vec(),
+            "the intermediate fork sees its own snapshot"
+        );
+        assert_eq!(flat.get("Item").unwrap().to_vec(), expected[..9].to_vec());
+    }
+
+    /// A layered bucket must survive the save writer unchanged — the on-disk
+    /// payload is the merged content, in order.
+    #[test]
+    fn the_writer_flattens_a_layered_bucket_in_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut interner = StringInterner::new();
+        interner.get_or_intern("Item");
+
+        let mut store = TypeIndexStore::new();
+        for i in 0..4u32 {
+            store.push_to_type("Item", NodeIndex::new(i as usize));
+        }
+        let _reader = store.clone();
+        store.push_to_type("Item", NodeIndex::new(4));
+        assert!(matches!(store.get("Item"), Some(TypeNodesRef::Layered(_))));
+
+        write_type_indices_bin(temp.path(), &store, &interner).unwrap();
+        let base = TypeIndexBase::load_from(temp.path(), &interner)
+            .expect("written directory must load")
+            .unwrap();
+        assert_eq!(
+            base.materialize("Item").unwrap(),
+            (0..5).map(NodeIndex::new).collect::<Vec<_>>()
+        );
     }
 }

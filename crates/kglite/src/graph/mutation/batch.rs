@@ -311,8 +311,7 @@ impl BatchProcessor {
             let bucket_was_new = !graph.type_indices.contains_key(&creation.node_type);
             graph
                 .type_indices
-                .entry_or_default(creation.node_type.clone())
-                .push(node_idx);
+                .push_to_type(&creation.node_type, node_idx);
             if let Some(journal) = graph.graph.undo_journal_mut() {
                 journal.note_bucket_appended(
                     crate::graph::storage::undo::BucketId::NodeType(creation.node_type),
