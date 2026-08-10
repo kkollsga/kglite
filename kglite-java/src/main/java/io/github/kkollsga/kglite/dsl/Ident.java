@@ -204,9 +204,10 @@ public final class Ident {
         if (name.indexOf('`') >= 0) {
             throw new IllegalArgumentException(
                     describe(position) + " may not contain a backtick: " + quoted(name)
-                            + ". The dialect has no escape for one inside a quoted identifier "
-                            + "(doubling is a syntax error), so such a name cannot be represented "
-                            + "at all, and quoting it anyway is a working injection.");
+                            + ". The engine accepts doubled-backtick escaping since 0.15.10, "
+                            + "but the DSL rejects such names as a deliberate policy: no "
+                            + "consumer need has been shown, and refusing them keeps the "
+                            + "identifier surface trivially auditable.");
         }
         if (isPatternPosition(position)) {
             if (BOOLEAN_LITERALS.contains(name.toUpperCase(Locale.ROOT))) {
