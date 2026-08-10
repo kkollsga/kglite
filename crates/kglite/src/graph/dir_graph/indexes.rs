@@ -12,6 +12,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use super::index_layer::LayeredIndex;
 use super::{DirGraph, IndexStats};
 use crate::datatypes::values::Value;
 use crate::graph::schema::{CompositeIndexKey, CompositeValue, IndexKey, InternedKey};
@@ -107,7 +108,8 @@ impl DirGraph {
         }
 
         let count = index.len();
-        self.property_indices.insert(store_key, index);
+        self.property_indices
+            .insert(store_key, LayeredIndex::from(index));
         count
     }
 
@@ -201,7 +203,7 @@ impl DirGraph {
     pub fn get_index_stats(&self, node_type: &str, property: &str) -> Option<IndexStats> {
         let key = (node_type.to_string(), property.to_string());
         self.property_indices.get(&key).map(|idx| {
-            let total_entries: usize = idx.values().map(|v| v.len()).sum();
+            let total_entries: usize = idx.iter().map(|(_, v)| v.len()).sum();
             IndexStats {
                 unique_values: idx.len(),
                 total_entries,
@@ -304,7 +306,8 @@ impl DirGraph {
         }
 
         let count = index.len();
-        self.composite_indices.insert(key, index);
+        self.composite_indices
+            .insert(key, LayeredIndex::from(index));
         count
     }
 
@@ -351,7 +354,7 @@ impl DirGraph {
     ) -> Option<IndexStats> {
         let key = (node_type.to_string(), properties.to_vec());
         self.composite_indices.get(&key).map(|idx| {
-            let total_entries: usize = idx.values().map(|v| v.len()).sum();
+            let total_entries: usize = idx.iter().map(|(_, v)| v.len()).sum();
             IndexStats {
                 unique_values: idx.len(),
                 total_entries,
@@ -664,7 +667,7 @@ impl DirGraph {
         for (key, value) in &prop_updates {
             self.note_property_append(key, value, node_idx);
             if let Some(value_map) = self.property_indices.get_mut(key) {
-                value_map.entry(value.clone()).or_default().push(node_idx);
+                value_map.entry_or_default(value).push(node_idx);
             }
             self.note_range_append(key, value, node_idx);
             if let Some(btree) = self.range_indices.get_mut(key) {
@@ -704,7 +707,7 @@ impl DirGraph {
         for (key, comp_val) in comp_updates {
             self.note_composite_append(&key, &comp_val, node_idx);
             if let Some(comp_map) = self.composite_indices.get_mut(&key) {
-                comp_map.entry(comp_val).or_default().push(node_idx);
+                comp_map.entry_or_default(&comp_val).push(node_idx);
             }
         }
     }
@@ -736,10 +739,7 @@ impl DirGraph {
         }
         self.note_property_append(&key, new_value, node_idx);
         if let Some(value_map) = self.property_indices.get_mut(&key) {
-            value_map
-                .entry(new_value.clone())
-                .or_default()
-                .push(node_idx);
+            value_map.entry_or_default(new_value).push(node_idx);
         }
         // Update range index
         if let Some(old_val) = old_value {
@@ -872,7 +872,7 @@ impl DirGraph {
                 // the append actually lands in.
                 self.note_composite_append(&key, &value, node_idx);
                 if let Some(comp_map) = self.composite_indices.get_mut(&key) {
-                    comp_map.entry(value).or_default().push(node_idx);
+                    comp_map.entry_or_default(&value).push(node_idx);
                 }
             }
         }

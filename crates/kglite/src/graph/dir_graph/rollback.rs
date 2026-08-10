@@ -492,7 +492,7 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
             // into, and a rolled-back statement never removes an index.
             BucketId::PropertyValue { key, value } => {
                 if let Some(value_map) = graph.property_indices.get_mut(&key) {
-                    let members = value_map.entry(value).or_default();
+                    let members = value_map.entry_or_default(&value);
                     let pos = pos.min(members.len());
                     members.insert(pos, idx);
                 }
@@ -506,7 +506,7 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
             }
             BucketId::CompositeTuple { key, value } => {
                 if let Some(comp_map) = graph.composite_indices.get_mut(&key) {
-                    let members = comp_map.entry(value).or_default();
+                    let members = comp_map.entry_or_default(&value);
                     let pos = pos.min(members.len());
                     members.insert(pos, idx);
                 }
@@ -660,13 +660,13 @@ mod tests {
         assert!(journal_covers(&graph));
         graph
             .property_indices
-            .insert(("Item".to_string(), "name".to_string()), HashMap::new());
+            .insert(("Item".to_string(), "name".to_string()), Default::default());
         graph
             .range_indices
             .insert(("Item".to_string(), "qty".to_string()), Default::default());
         graph.composite_indices.insert(
             ("Item".to_string(), vec!["name".to_string()]),
-            HashMap::new(),
+            Default::default(),
         );
         assert!(journal_covers(&graph));
     }

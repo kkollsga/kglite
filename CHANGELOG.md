@@ -43,6 +43,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A write while a query result, `freeze()`, `Session` or open transaction is
+  held no longer copies the graph.** Holding any of those pinned a second
+  reference, and the next write deep-copied every node, edge and index — 36 ms
+  on a 1M-node graph, and the same again for each index family on an indexed
+  one. The writer now forks to a copy-on-write overlay and shares the untouched
+  data with the reader, so the first write costs **4.4 µs** on a plain 1M graph
+  (was 36.3 ms) and **~90 µs** on one carrying two property, one composite and
+  one range index (was 180 ms). Held views keep their own pre-write rows
+  exactly as before; the representation folds back to the flat one on the first
+  write after the reader drops.
+- **Rust API**: `DirGraph::property_indices` and `DirGraph::composite_indices`
+  now hold `LayeredIndex<Value>` / `LayeredIndex<CompositeValue>` instead of a
+  bare `HashMap<_, Vec<NodeIndex>>`. `LayeredIndex` keeps the map shape the
+  field had — `get`, `get_mut`, `contains_key`, `len`, `iter`, `remove`,
+  `clear` — with `entry_or_default(&key)` in place of `entry(key).or_default()`
+  and `retain_members(f)` in place of `values_mut()`. Also part of the same
+  change: `GraphBackend::Memory` / `Mapped` now carry an `Arc`, a
+  `GraphBackend::Forked` variant exists, and `edge_type_counts_cache` /
+  `type_connectivity_cache` are `ForkPrivateCache` (a fork gets an empty cache
+  rather than aliasing its parent's, which previously let a snapshot holder
+  report the writer's edge-type counts as its own).
 - **A fired auto-vacuum pauses ~45% shorter.** The compaction rebuild now
   relocates node weights instead of deep-cloning them, remaps edge endpoints
   through a dense table instead of a hash map, and rebuilds type indexes once

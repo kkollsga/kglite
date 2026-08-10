@@ -644,6 +644,16 @@ pub(crate) fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> 
     // ...and for `type_indices`, whose buckets are stacks of shared levels
     // (D2). Per bucket this is an `Arc::get_mut` probe plus an O(delta) merge.
     graph.type_indices.try_compact();
+    // ...and the two user index families, same mechanism over their
+    // `value -> members` maps (`dir_graph/index_layer.rs`). One probe per
+    // declared index, and the loops do not run at all on the overwhelmingly
+    // common graph that has no user index.
+    for index in graph.property_indices.values_mut() {
+        index.try_compact();
+    }
+    for index in graph.composite_indices.values_mut() {
+        index.try_compact();
+    }
     graph
 }
 
@@ -1114,6 +1124,127 @@ mod held_reference_clone_tests {
                     .node_weight(petgraph::graph::NodeIndex::new(*idx))
                     .is_some(),
                 "the reader's bucket points at a node its backend does not have"
+            );
+        }
+    }
+
+    /// The **user index families** must answer for the graph you asked, not the
+    /// one that wrote last.
+    ///
+    /// `property_indices` and `composite_indices` buckets live in shared,
+    /// immutable levels (`dir_graph/index_layer.rs`), and both are consulted by
+    /// `try_index_lookup` **unconditionally** — the matcher trusts the index
+    /// rather than verifying against the graph. So a delta leaking into a shared
+    /// level does not merely add a row: the reader's indexed `MATCH` returns a
+    /// `NodeIndex` its own backend cannot resolve.
+    ///
+    /// Both directions are asserted, because they fail differently: the writer
+    /// not seeing its own write is a *stale* index, the reader seeing the
+    /// writer's is a *corrupt* one.
+    #[test]
+    fn a_held_reader_resolves_user_indexes_against_its_own_snapshot() {
+        let mut arc = seeded_arc();
+        let params = HashMap::new();
+        {
+            let graph = make_dir_graph_mut(&mut arc);
+            // Give every fixture node the second composite component before the
+            // index is built, so the index is over two live properties.
+            execute_mut(
+                graph,
+                "MATCH (n:Item) SET n.qty = n.id",
+                &ExecuteOptions::eager(&params),
+            )
+            .expect("seed qty");
+            graph.create_index("Item", "name");
+            graph.create_composite_index("Item", &["name", "qty"]);
+        }
+        let reader = Arc::clone(&arc);
+
+        let existing = crate::datatypes::Value::String("item-3".to_string());
+        let created = crate::datatypes::Value::String("appended".to_string());
+        let composite_of = |value: &crate::datatypes::Value, qty: i64| {
+            vec![value.clone(), crate::datatypes::Value::Int64(qty)]
+        };
+        assert!(
+            reader
+                .lookup_by_index("Item", "name", &existing)
+                .is_some_and(|members| !members.is_empty()),
+            "the fixture must be indexed, or this test proves nothing"
+        );
+        let before_existing = reader.lookup_by_index("Item", "name", &existing);
+
+        {
+            let graph = make_dir_graph_mut(&mut arc);
+            execute_mut(
+                graph,
+                "CREATE (:Item {id: 4242, name: 'appended', qty: 7})",
+                &ExecuteOptions::eager(&params),
+            )
+            .expect("append");
+        }
+
+        assert!(
+            arc.lookup_by_index("Item", "name", &created).is_some(),
+            "the writer must find the value it just indexed"
+        );
+        assert!(
+            arc.lookup_by_composite_index(
+                "Item",
+                &["name".to_string(), "qty".to_string()],
+                &composite_of(&created, 7)
+            )
+            .is_some(),
+            "the writer's composite index must carry its own write"
+        );
+        assert_eq!(
+            reader.lookup_by_index("Item", "name", &created),
+            None,
+            "the reader's snapshot never saw this value; finding it means the \
+             writer's delta leaked into a shared level"
+        );
+        assert_eq!(
+            reader.lookup_by_composite_index(
+                "Item",
+                &["name".to_string(), "qty".to_string()],
+                &composite_of(&created, 7)
+            ),
+            None,
+            "same for the composite index"
+        );
+        assert_eq!(
+            reader.lookup_by_index("Item", "name", &existing),
+            before_existing,
+            "a value the reader already had must be unchanged, in bucket order"
+        );
+        // The other direction: the writer's own delta must not *hide* the
+        // buckets it inherited. A read that stopped at the top level would
+        // silently turn every pre-fork value into a miss, and `try_index_lookup`
+        // trusts the index rather than falling back to a scan — so the rows
+        // would simply disappear from an indexed `MATCH`.
+        assert_eq!(
+            arc.lookup_by_index("Item", "name", &existing),
+            before_existing,
+            "the writer must still resolve the values it inherited"
+        );
+        assert!(
+            arc.lookup_by_composite_index(
+                "Item",
+                &["name".to_string(), "qty".to_string()],
+                &composite_of(&existing, 3)
+            )
+            .is_some_and(|members| !members.is_empty()),
+            "the writer's composite index must still carry the inherited tuples"
+        );
+        // Every member the reader's index reports must still resolve in the
+        // reader's own backend — a leak shows up as a dangling NodeIndex, not
+        // merely as an extra row.
+        for idx in reader
+            .lookup_by_index("Item", "name", &existing)
+            .unwrap_or_default()
+        {
+            assert!(
+                reader.graph.node_weight(idx).is_some(),
+                "the reader's property index points at a node it does not have"
             );
         }
     }

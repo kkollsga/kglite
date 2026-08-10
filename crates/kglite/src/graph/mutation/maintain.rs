@@ -1041,7 +1041,7 @@ fn journal_bucket_evictions(
             if &key.0 != node_type {
                 continue;
             }
-            for (value, members) in value_map {
+            for (value, members) in value_map.iter() {
                 if members.iter().any(|idx| nodes_to_delete.contains(idx)) {
                     evictions.push((
                         BucketId::PropertyValue {
@@ -1073,7 +1073,7 @@ fn journal_bucket_evictions(
             if &key.0 != node_type {
                 continue;
             }
-            for (value, members) in comp_map {
+            for (value, members) in comp_map.iter() {
                 if members.iter().any(|idx| nodes_to_delete.contains(idx)) {
                     evictions.push((
                         BucketId::CompositeTuple {
@@ -1232,9 +1232,7 @@ pub(crate) fn detach_delete_nodes(
             .collect();
         for key in prop_keys {
             if let Some(value_map) = graph.property_indices.get_mut(&key) {
-                for indices in value_map.values_mut() {
-                    indices.retain(|idx| !nodes_to_delete.contains(idx));
-                }
+                value_map.retain_members(|idx| !nodes_to_delete.contains(idx));
             }
         }
         let comp_keys: Vec<_> = graph
@@ -1245,9 +1243,7 @@ pub(crate) fn detach_delete_nodes(
             .collect();
         for key in comp_keys {
             if let Some(value_map) = graph.composite_indices.get_mut(&key) {
-                for indices in value_map.values_mut() {
-                    indices.retain(|idx| !nodes_to_delete.contains(idx));
-                }
+                value_map.retain_members(|idx| !nodes_to_delete.contains(idx));
             }
         }
         // The B-tree range index was omitted from this cleanup, so a deleted

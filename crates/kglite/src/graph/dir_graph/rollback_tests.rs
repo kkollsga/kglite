@@ -241,7 +241,7 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
 
     let mut user_indexes: Vec<(String, String, Vec<usize>)> = Vec::new();
     for ((node_type, property), value_map) in &graph.property_indices {
-        for (value, members) in value_map {
+        for (value, members) in value_map.iter() {
             user_indexes.push((
                 format!("property {node_type}.{property}"),
                 format!("{value:?}"),
@@ -259,7 +259,7 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
         }
     }
     for ((node_type, properties), comp_map) in &graph.composite_indices {
-        for (value, members) in comp_map {
+        for (value, members) in comp_map.iter() {
             user_indexes.push((
                 format!("composite {node_type}.{}", properties.join("+")),
                 format!("{value:?}"),
@@ -446,7 +446,7 @@ fn seeded_indexed() -> DirGraph {
         graph
             .property_indices
             .values()
-            .any(|value_map| value_map.values().any(|members| !members.is_empty())),
+            .any(|value_map| value_map.iter().any(|(_, members)| !members.is_empty())),
         "the indexes must have been populated from the seeded nodes"
     );
     graph

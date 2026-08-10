@@ -4,6 +4,7 @@
 //! OCC `version`, `schema_locked`, spatial / temporal / timeseries configs,
 //! embedding stores, connection-type metadata, and schema definitions.
 
+use self::index_layer::LayeredIndex;
 use crate::datatypes::values::Value;
 use crate::graph::constraints::{NamedConstraint, UniqueConstraintKey};
 use crate::graph::schema::{
@@ -63,6 +64,7 @@ pub(crate) mod caches;
 pub mod constraints;
 mod disk_persistence;
 mod independent_copy;
+pub mod index_layer;
 mod indexes;
 mod labels;
 mod node_write;
@@ -87,12 +89,22 @@ pub struct DirGraph {
     pub schema_definition: Option<SchemaDefinition>,
     /// Single-property indexes for fast lookups: (node_type, property) -> value -> [node_indices]
     /// Skipped during serialization — rebuilt from `property_index_keys` on load.
+    ///
+    /// Each index's `value -> members` map is a [`LayeredIndex`]: a stack of
+    /// shared, immutable levels, so a fork shares the buckets instead of
+    /// copying one `Value` key and one `Vec` per distinct value (D2 — 48.0 ms
+    /// at 1M before layering). Reads and edits keep the `HashMap` shape.
     #[serde(skip)]
-    pub property_indices: HashMap<IndexKey, HashMap<Value, Vec<NodeIndex>>>,
+    pub property_indices: HashMap<IndexKey, LayeredIndex<Value>>,
     /// Composite indexes for multi-field queries: (node_type, [properties]) -> composite_value -> [node_indices]
     /// Skipped during serialization — rebuilt from `composite_index_keys` on load.
+    ///
+    /// [`LayeredIndex`] for the same reason as `property_indices`, and more
+    /// urgently: a `CompositeValue` key is a `Vec<Value>`, so the fork it
+    /// replaces allocated a `Vec` plus a `String` per component per distinct
+    /// tuple — 88.9 ms at 1M, the largest single term anywhere in the fork.
     #[serde(skip)]
-    pub composite_indices: HashMap<CompositeIndexKey, HashMap<CompositeValue, Vec<NodeIndex>>>,
+    pub composite_indices: HashMap<CompositeIndexKey, LayeredIndex<CompositeValue>>,
     /// Persisted list of property index keys so indexes can be rebuilt on load
     #[serde(default)]
     pub property_index_keys: Vec<IndexKey>,

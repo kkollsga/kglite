@@ -1395,8 +1395,9 @@ pub fn kglite::api::session::resolve_noderefs(graph: &kglite::api::storage::Grap
 pub mod kglite::api::storage
 pub enum kglite::api::storage::GraphBackend
 pub kglite::api::storage::GraphBackend::Disk(alloc::boxed::Box<kglite::api::storage::DiskGraph>)
-pub kglite::api::storage::GraphBackend::Mapped(kglite::api::storage::MappedGraph)
-pub kglite::api::storage::GraphBackend::Memory(kglite::graph::storage::MemoryGraph)
+pub kglite::api::storage::GraphBackend::Forked(alloc::boxed::Box<kglite::graph::storage::forked::ForkedGraph>)
+pub kglite::api::storage::GraphBackend::Mapped(alloc::sync::Arc<kglite::api::storage::MappedGraph>)
+pub kglite::api::storage::GraphBackend::Memory(alloc::sync::Arc<kglite::graph::storage::MemoryGraph>)
 pub kglite::api::storage::GraphBackend::Recording(alloc::boxed::Box<kglite::api::durable::RecordingGraph<kglite::api::storage::GraphBackend>>)
 impl kglite::api::storage::GraphBackend
 pub fn kglite::api::storage::GraphBackend::as_stable_digraph(&self) -> &petgraph::graph_impl::stable_graph::StableDiGraph<kglite::api::NodeData, kglite::graph::schema::EdgeData>
@@ -2065,10 +2066,10 @@ pub struct kglite::api::DirGraph
 pub kglite::api::DirGraph::auto_vacuum_threshold: core::option::Option<f64>
 pub kglite::api::DirGraph::checkpoint_lsn: u64
 pub kglite::api::DirGraph::composite_index_keys: alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<alloc::string::String>)>
-pub kglite::api::DirGraph::composite_indices: std::collections::hash::map::HashMap<(alloc::string::String, alloc::vec::Vec<alloc::string::String>), std::collections::hash::map::HashMap<kglite::graph::schema::CompositeValue, alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>>
+pub kglite::api::DirGraph::composite_indices: std::collections::hash::map::HashMap<(alloc::string::String, alloc::vec::Vec<alloc::string::String>), kglite::graph::dir_graph::index_layer::LayeredIndex<kglite::graph::schema::CompositeValue>>
 pub kglite::api::DirGraph::connection_type_metadata: std::collections::hash::map::HashMap<alloc::string::String, kglite::graph::schema::ConnectionTypeInfo>
 pub kglite::api::DirGraph::connection_types: std::collections::hash::set::HashSet<kglite::api::InternedKey>
-pub kglite::api::DirGraph::edge_type_counts_cache: alloc::sync::Arc<std::sync::poison::rwlock::RwLock<core::option::Option<std::collections::hash::map::HashMap<alloc::string::String, usize>>>>
+pub kglite::api::DirGraph::edge_type_counts_cache: kglite::graph::dir_graph::caches::ForkPrivateCache<std::collections::hash::map::HashMap<alloc::string::String, usize>>
 pub kglite::api::DirGraph::embeddings: std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), kglite::api::storage::EmbeddingStore>
 pub kglite::api::DirGraph::graph: kglite::api::storage::GraphBackend
 pub kglite::api::DirGraph::graph_id: u64
@@ -2081,7 +2082,7 @@ pub kglite::api::DirGraph::memory_limit: core::option::Option<usize>
 pub kglite::api::DirGraph::node_type_metadata: std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
 pub kglite::api::DirGraph::parent_types: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
 pub kglite::api::DirGraph::property_index_keys: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
-pub kglite::api::DirGraph::property_indices: std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), std::collections::hash::map::HashMap<kglite::datatypes::values::Value, alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>>
+pub kglite::api::DirGraph::property_indices: std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), kglite::graph::dir_graph::index_layer::LayeredIndex<kglite::datatypes::values::Value>>
 pub kglite::api::DirGraph::property_ndv_cache: alloc::sync::Arc<std::sync::poison::rwlock::RwLock<(u64, std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), usize>)>>
 pub kglite::api::DirGraph::range_index_keys: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub kglite::api::DirGraph::range_indices: std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), alloc::collections::btree::map::BTreeMap<kglite::datatypes::values::Value, alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>>
@@ -2097,7 +2098,7 @@ pub kglite::api::DirGraph::temporal_node_configs: std::collections::hash::map::H
 pub kglite::api::DirGraph::timeseries_configs: std::collections::hash::map::HashMap<alloc::string::String, kglite::api::timeseries::TimeseriesConfig>
 pub kglite::api::DirGraph::timeseries_store: std::collections::hash::map::HashMap<usize, kglite::api::timeseries::NodeTimeseries>
 pub kglite::api::DirGraph::title_field_aliases: rustc_hash::FxHashMap<alloc::string::String, alloc::string::String>
-pub kglite::api::DirGraph::type_connectivity_cache: alloc::sync::Arc<std::sync::poison::rwlock::RwLock<core::option::Option<alloc::vec::Vec<kglite::graph::schema::ConnectivityTriple>>>>
+pub kglite::api::DirGraph::type_connectivity_cache: kglite::graph::dir_graph::caches::ForkPrivateCache<alloc::vec::Vec<kglite::graph::schema::ConnectivityTriple>>
 pub kglite::api::DirGraph::type_indices: kglite::graph::storage::disk::type_index::TypeIndexStore
 pub kglite::api::DirGraph::type_schemas: std::collections::hash::map::HashMap<alloc::string::String, alloc::sync::Arc<kglite::graph::schema::TypeSchema>>
 pub kglite::api::DirGraph::user_schema_version: u32

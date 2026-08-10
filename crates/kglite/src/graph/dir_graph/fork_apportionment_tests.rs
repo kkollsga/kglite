@@ -232,8 +232,20 @@ fn apportion_the_fork_across_the_data_scale_fields() {
     let base = build_plain(NODES);
     report("plain", &base);
 
+    // ⚠ Every fixture below is built **from scratch**, never as `base.clone()`.
+    //
+    // A clone of `base` is a *fork*: its backend is a copy-on-write overlay
+    // over `base`'s, so what `report` then measures is a clone-of-a-fork, which
+    // is not the clone a user's graph performs. It reads wrong in the
+    // reassuring direction for some fixtures and the alarming direction for
+    // others — the `saved` row reported **10.9 ms** of backend copy on
+    // 2026-08-10 because `enable_columnar` had to flatten the overlay first and
+    // the rebuilt backend could no longer fork, while a real saved 1M graph
+    // measures `g.copy()` at **0.6 µs**. Independent builds cost one more
+    // pass each and describe the product.
+
     {
-        let mut saved = base.clone();
+        let mut saved = build_plain(NODES);
         saved.enable_columnar();
         assert!(
             saved.is_columnar(),
@@ -243,7 +255,7 @@ fn apportion_the_fork_across_the_data_scale_fields() {
     }
 
     {
-        let mut indexed = base.clone();
+        let mut indexed = build_plain(NODES);
         indexed.create_index("Item", "code");
         indexed.create_index("Item", "qty");
         indexed.create_range_index("Item", "qty");
@@ -258,7 +270,7 @@ fn apportion_the_fork_across_the_data_scale_fields() {
     }
 
     {
-        let mut labelled = base.clone();
+        let mut labelled = build_plain(NODES);
         run(&mut labelled, "MATCH (n:Item) SET n:Featured");
         assert!(
             !labelled.secondary_label_index.is_empty(),
@@ -268,7 +280,7 @@ fn apportion_the_fork_across_the_data_scale_fields() {
     }
 
     {
-        let mut embedded = base.clone();
+        let mut embedded = build_plain(NODES);
         let mut store = EmbeddingStore::new(EMBED_DIM);
         let vector: Vec<f32> = (0..EMBED_DIM).map(|i| i as f32 * 0.01).collect();
         for idx in 0..NODES {
