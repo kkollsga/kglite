@@ -931,6 +931,20 @@ def cypher_pass_names() -> list[str]:
     """
     ...
 
+def _backend_is_forked(graph: "KnowledgeGraph") -> bool:
+    """Whether ``graph``'s storage backend is a copy-on-write overlay right now.
+
+    Internal test hook, not part of the public Python API. A write taken while
+    a lazy ``ResultView``, a ``freeze()``, a ``Session`` or an open transaction
+    is alive forks to an overlay over the shared data instead of copying the
+    graph, and folds that overlay back on the first write after the reader
+    drops. Both halves are invisible through every behavioural surface, so this
+    is what the regression tests assert on instead of timings: ``False`` where a
+    fork is expected means whole-graph-clone semantics came back, and ``True``
+    where flat is expected means compaction stopped folding.
+    """
+    ...
+
 def _run_cli(argv: list[str]) -> None:
     """Run the bundled Rust ``kglite`` CLI in-process.
 

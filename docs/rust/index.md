@@ -150,5 +150,6 @@ building-on-kglite
 c-abi
 api-reference
 boundary-principle
+structural-sharing
 concurrency-verification
 ```

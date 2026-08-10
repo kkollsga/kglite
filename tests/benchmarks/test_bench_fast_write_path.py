@@ -141,8 +141,10 @@ Run with::
 
 from __future__ import annotations
 
+import gc
 import itertools
 import math
+import os
 import sys
 
 import pandas as pd
@@ -878,3 +880,147 @@ def test_a_held_reference_keeps_its_pre_write_values(guard_graph, holder):
     else:
         seen = reference.cypher("MATCH (n:Item {id: 5}) RETURN n.qty AS q").to_list()[0]["q"]
     assert seen == before, f"holder={holder!r} must still see the pre-write value {before}, saw {seen}"
+
+
+# ── the memory half of the same defect ──────────────────────────────────
+#
+# The timing cells above answer "how long does the first write take". This one
+# answers the question a long-running process actually cares about: **does
+# holding a view make the graph's memory grow, and does it come back.**
+#
+# Before D2 each fork allocated a second whole graph — measured at Phase 0 as
+# **+668.8 MB of process peak at 1M**, in the cell immediately after two
+# controls that grew it by 0.0 MB. So the acceptance bounds below are not
+# invented: they are "an order of magnitude under one graph copy", and the
+# defect they exclude is 668.8 MB.
+
+
+def _current_rss_mb() -> float:
+    """Resident set size *now* — not the high-water mark.
+
+    `resource.getrusage(...).ru_maxrss` is monotonic, so it can show a peak but
+    can never show a graph settling back. `ps` is the portable way to read the
+    live value on both platforms this repo tests on, and one subprocess per
+    measurement point is irrelevant next to a 1M-node build.
+    """
+    import subprocess
+
+    out = subprocess.run(["ps", "-o", "rss=", "-p", str(os.getpid())], capture_output=True, text=True, check=True)
+    return int(out.stdout.strip()) / 1024
+
+
+def _settle() -> float:
+    """Drop Python-side references and read the settled RSS."""
+    gc.collect()
+    return _current_rss_mb()
+
+
+#: Rounds per sequence. The plan asks for 20; the number matters because the
+#: failure this detects is *per-round accumulation*, which one round cannot see.
+RSS_ROUNDS = 20
+
+#: One 1M-node graph copy, measured at Phase 0 (2026-08-10). Every bound below
+#: is stated as a fraction of it so the numbers keep their meaning if the
+#: fixture changes.
+ONE_GRAPH_COPY_MB = 668.8
+
+#: Ids for the sequences below, module-scoped because `ref_graphs` is: both
+#: parametrizations write into the *same* 1M graph, and a per-test counter would
+#: make the second one collide with the first's primary keys.
+_RSS_IDS = itertools.count(70_000_000)
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("holder", ["result_view", "frozen"])
+def test_held_view_writes_do_not_grow_a_graph_copy_per_write(ref_graphs, holder):
+    """Three RSS sequences at 1M: dropped-per-round, continuously held, released.
+
+    * **dropped** — take a view, write, drop it, x20. A regression looks like
+      growth proportional to *rounds*: every round forks and never folds back.
+    * **held** — one view alive across 20 writes. A regression looks like growth
+      proportional to *writes*: a graph copy per write, the pre-D2 shape.
+    * **released** — drop the view, write once more. A regression looks like no
+      settling: the overlay never folds, so the base stays pinned forever.
+
+    Not `benchmark.pedantic`: this measures bytes, not seconds, and pytest-
+    benchmark's rounds would confound both.
+
+    ⚠ **Only the first parametrization to run measures a cold allocator.** The
+    two arms share a process and a 1M graph, so once one of them has caused a
+    large allocation the arena stays with the process and a later arm can
+    allocate the same bytes again without RSS moving. Proven, not assumed:
+    under a mutation that restores whole-graph-clone semantics, `result_view`
+    (which runs first) reads **+331.1 MB** settled and fails, while `frozen`
+    reads **+0.0 MB** and passes on the arena the first arm left behind. That is
+    the same hazard `_peak_rss_mb`'s docstring describes, and it has the same
+    remedy: to red-team the second arm, run one cell per process. Do not "fix"
+    it by resetting between arms — there is nothing to reset.
+    """
+    graph = ref_graphs[1_000_000]
+
+    def write() -> None:
+        graph.cypher("CREATE (:Item {id: $i, name: 'x', code: 'c', qty: 1})", params={"i": next(_RSS_IDS)})
+
+    def acquire():
+        return _wide_result(graph) if holder == "result_view" else graph.freeze()
+
+    # Warm: the very first write after the fixture build allocates arenas that
+    # belong to no sequence. Measure from a settled floor.
+    write()
+    baseline = _settle()
+
+    # ── sequence 1: a fresh view per round, dropped before the next ──
+    dropped_peak = baseline
+    for _ in range(RSS_ROUNDS):
+        ref = acquire()
+        write()
+        del ref
+        dropped_peak = max(dropped_peak, _current_rss_mb())
+    dropped_settled = _settle()
+
+    # ── sequence 2: one view held across every write ──
+    pin = acquire()
+    held_peak = dropped_settled
+    for _ in range(RSS_ROUNDS):
+        write()
+        held_peak = max(held_peak, _current_rss_mb())
+    held_settled = _current_rss_mb()
+
+    # ── sequence 3: release, then one more write to fold back ──
+    del pin
+    write()
+    released_settled = _settle()
+
+    report = {
+        "baseline_mb": round(baseline, 1),
+        "dropped_peak_growth_mb": round(dropped_peak - baseline, 1),
+        "dropped_settled_growth_mb": round(dropped_settled - baseline, 1),
+        "held_peak_growth_mb": round(held_peak - dropped_settled, 1),
+        "held_settled_growth_mb": round(held_settled - dropped_settled, 1),
+        "released_settled_growth_mb": round(released_settled - dropped_settled, 1),
+        "one_graph_copy_mb": ONE_GRAPH_COPY_MB,
+    }
+    print(f"\nRSS[{holder}] {report}")
+
+    # Acceptance, all as fractions of one graph copy (668.8 MB at 1M):
+    #
+    # 1. Twenty take-write-drop rounds must not accumulate. Each round forks and
+    #    the next write folds it back, so the settled cost is the 20 nodes
+    #    created — kilobytes. A tenth of one copy is a wide margin over that and
+    #    an order of magnitude under the defect.
+    assert dropped_settled - baseline < ONE_GRAPH_COPY_MB * 0.1, (
+        f"twenty fork/fold rounds settled +{dropped_settled - baseline:.1f} MB; "
+        "that is per-round accumulation, not O(changes)"
+    )
+    # 2. Twenty writes under one held view must cost one overlay, not twenty
+    #    graphs. The pre-D2 behaviour would be a copy per write.
+    assert held_peak - dropped_settled < ONE_GRAPH_COPY_MB * 0.5, (
+        f"twenty writes under a held view peaked +{held_peak - dropped_settled:.1f} MB; "
+        f"a graph copy is {ONE_GRAPH_COPY_MB} MB, so this is growing storage per write"
+    )
+    # 3. Releasing the view and writing once must not grow it further — that
+    #    write is where compaction fires.
+    assert released_settled <= held_peak + ONE_GRAPH_COPY_MB * 0.05, (
+        f"the fold-back write grew RSS to +{released_settled - dropped_settled:.1f} MB; "
+        "compaction should release the overlay, not duplicate it"
+    )

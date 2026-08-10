@@ -208,8 +208,14 @@ impl GraphBackend {
 
     /// `true` while this backend is a copy-on-write overlay over a base a
     /// reader still holds.
+    ///
+    /// Public as a **diagnostic**: it is the one cheap, non-timing observable
+    /// that distinguishes D2's copy-on-write fork from the whole-graph clone it
+    /// replaced, and from a compaction that failed to fold back. Bindings
+    /// expose it for regression tests (`kglite._backend_is_forked`); nothing in
+    /// the engine's behaviour depends on a caller reading it.
     #[inline]
-    pub(crate) fn is_forked(&self) -> bool {
+    pub fn is_forked(&self) -> bool {
         match self {
             GraphBackend::Forked(_) => true,
             GraphBackend::Recording(rg) => rg.inner().is_forked(),

@@ -1418,6 +1418,7 @@ impl kglite::api::storage::GraphBackend
 pub fn kglite::api::storage::GraphBackend::as_stable_digraph(&self) -> &petgraph::graph_impl::stable_graph::StableDiGraph<kglite::api::NodeData, kglite::graph::schema::EdgeData>
 pub fn kglite::api::storage::GraphBackend::for_each_edge_endpoint_key<F>(&self, f: F) where F: core::ops::function::FnMut(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, kglite::api::InternedKey)
 pub fn kglite::api::storage::GraphBackend::for_each_edge_of_conn_type<F>(&self, conn_type: kglite::api::InternedKey, f: F) where F: core::ops::function::FnMut(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, u32, &[(kglite::api::InternedKey, kglite::datatypes::values::Value)]) -> bool
+pub fn kglite::api::storage::GraphBackend::is_forked(&self) -> bool
 pub fn kglite::api::storage::GraphBackend::new() -> Self
 pub fn kglite::api::storage::GraphBackend::note_recorded_node_labels(&mut self, idx: petgraph::graph_impl::NodeIndex)
 pub fn kglite::api::storage::GraphBackend::note_recorded_node_upsert(&mut self, idx: petgraph::graph_impl::NodeIndex)

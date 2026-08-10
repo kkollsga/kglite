@@ -45,14 +45,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A write while a query result, `freeze()`, `Session` or open transaction is
   held no longer copies the graph.** Holding any of those pinned a second
-  reference, and the next write deep-copied every node, edge and index — 36 ms
-  on a 1M-node graph, and the same again for each index family on an indexed
-  one. The writer now forks to a copy-on-write overlay and shares the untouched
-  data with the reader, so the first write costs **4.4 µs** on a plain 1M graph
-  (was 36.3 ms) and **~90 µs** on one carrying two property, one composite and
-  one range index (was 180 ms). Held views keep their own pre-write rows
-  exactly as before; the representation folds back to the flat one on the first
-  write after the reader drops.
+  reference, and the next write deep-copied every node, edge and index. The
+  writer now forks to a copy-on-write overlay and shares the untouched data with
+  the reader. Held-view first write at 1M nodes:
+
+  | graph | before | after |
+  |---|---:|---:|
+  | plain | 36.3 ms | **4.6 µs** |
+  | saved / columnar | ~17 ms | **4.0 µs** |
+  | 2 property + 1 composite + 1 range index | ~180 ms | **~97 µs** |
+  | resident growth, 20 writes under a held view | +668.8 MB | **+0.0 MB** |
+
+  Held views keep their own pre-write rows exactly as before; the graph folds
+  back to the flat representation on the first write after the reader drops.
+  Two honest limits: a node/edge removal (and a statement rollback that undoes
+  a `CREATE`) still flattens the overlay once per fork, because an overlay
+  cannot express an adjacency edit; and a reader held *continuously* across
+  many writes pays an amortised flatten of `|index| / 32` per write — on a 1M
+  indexed graph that is ~4 ms, so the median improves ~1,500x and the mean
+  ~32x. `range_indices` is deliberately not shared and is now the entire
+  remaining fork cost on an indexed graph (~90 µs for ~1,000 distinct values,
+  and linear in that count). Design record: `docs/rust/structural-sharing.md`.
+- **A snapshot no longer reports the writer's edge-type counts as its own.**
+  `edge_type_counts_cache` and `type_connectivity_cache` were `Arc`-shared by a
+  plain clone, so a fork that recomputed them wrote a value the other holder
+  read back as its own — a wrong observable, not merely duplicated work. Both
+  are now fork-private: a clone starts with an empty cache. `wkt_cache` (a pure
+  function of its key) and `property_ndv_cache` (version-tagged, and only a
+  planner estimate) stay shared deliberately.
 - **Rust API**: `DirGraph::property_indices` and `DirGraph::composite_indices`
   now hold `LayeredIndex<Value>` / `LayeredIndex<CompositeValue>` instead of a
   bare `HashMap<_, Vec<NodeIndex>>`. `LayeredIndex` keeps the map shape the
@@ -60,10 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `clear` — with `entry_or_default(&key)` in place of `entry(key).or_default()`
   and `retain_members(f)` in place of `values_mut()`. Also part of the same
   change: `GraphBackend::Memory` / `Mapped` now carry an `Arc`, a
-  `GraphBackend::Forked` variant exists, and `edge_type_counts_cache` /
-  `type_connectivity_cache` are `ForkPrivateCache` (a fork gets an empty cache
-  rather than aliasing its parent's, which previously let a snapshot holder
-  report the writer's edge-type counts as its own).
+  `GraphBackend::Forked` variant exists, `GraphBackend::is_forked()` is public
+  as a diagnostic, and `edge_type_counts_cache` / `type_connectivity_cache` are
+  `ForkPrivateCache`.
 - **A fired auto-vacuum pauses ~45% shorter.** The compaction rebuild now
   relocates node weights instead of deep-cloning them, remaps edge endpoints
   through a dense table instead of a hash map, and rebuilds type indexes once

@@ -578,6 +578,24 @@ fn cypher_pass_names() -> Vec<String> {
     kglite_core::api::cypher::planner::all_pass_names()
 }
 
+/// Whether `graph`'s storage backend is currently a copy-on-write overlay.
+///
+/// **A test hook, not an API.** D2 made a write taken while a `ResultView`,
+/// `freeze()`, `Session` or open transaction is alive fork to an overlay over
+/// the shared data instead of deep-copying the graph, and fold that overlay
+/// back once the reader drops. Both halves are invisible through every
+/// behavioural surface — which is exactly why they need an observable that is
+/// not a timing measurement: a regression to whole-graph-clone semantics leaves
+/// `False` here where a fork is expected, and a compaction that stops folding
+/// leaves `True` where flat is expected.
+///
+/// Underscore-prefixed and undocumented in the guides for the same reason
+/// `_run_cli` is: it exists for this repository's own regression tests.
+#[pyfunction]
+fn _backend_is_forked(graph: &KnowledgeGraph) -> bool {
+    graph.inner.graph.is_forked()
+}
+
 /// Run the shared KGLite CLI in-process and block until it exits.
 ///
 /// The standalone `kglite-cli` binary and the `kglite` console script bundled
@@ -670,6 +688,7 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(from_blueprint_rust, m)?)?;
     m.add_function(wrap_pyfunction!(from_records_rust, m)?)?;
     m.add_function(wrap_pyfunction!(cypher_pass_names, m)?)?;
+    m.add_function(wrap_pyfunction!(_backend_is_forked, m)?)?;
     m.add_function(wrap_pyfunction!(_run_cli, m)?)?;
     #[cfg(feature = "mcp-server")]
     m.add_function(wrap_pyfunction!(_run_mcp_server, m)?)?;
