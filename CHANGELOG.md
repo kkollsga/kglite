@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The Java wrapper is packaged and publishable.** The JAR now bundles the
+  native engine for `darwin-aarch64`, `linux-x86_64`, `linux-aarch64` and
+  `windows-x86_64` under `/natives/<os>-<arch>/`; at first use the running
+  platform's copy is extracted to a content-addressed per-user cache
+  (`~/Library/Caches/kglite/natives`, `$XDG_CACHE_HOME/kglite/natives`,
+  `%LOCALAPPDATA%\kglite\natives`) and linked from there, so a consumer needs
+  no toolchain and no `-Dkglite.native.path`. That override still wins when
+  set, and a workspace `target/{release,debug}` build still outranks the
+  bundled copy for development. Intel macOS (`darwin-x86_64`) is **not**
+  bundled: on that platform build `cargo build -p kglite-c --release` once and
+  pass `-Dkglite.native.path`, which is what the loader's error tells you.
+  `.github/workflows/publish_java.yml` builds the four natives on a release
+  tag, runs the Java suite against the extracted-resource path, and deploys
+  `io.github.kkollsga:kglite` to Maven Central. **Still unpublished:** the
+  first deployment awaits the Central Portal's one-time namespace approval, so
+  no artifact is resolvable yet.
+
 ## [0.15.9] - 2026-08-10
 
 ### Added
