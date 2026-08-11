@@ -186,6 +186,60 @@ fn test_list_index_still_works() {
 }
 
 #[test]
+fn test_node_list_property_index_borrow_path() {
+    // The borrow fast-path in evaluate_index_access indexes a stored list
+    // property off a node binding without cloning the whole list. It must
+    // stay bit-identical to the owned path for positive, negative, and
+    // out-of-range indices, and inside a reduce loop (the vector-scoring
+    // shape that motivated the change).
+    let mut graph = DirGraph::new();
+    let setup = parser::parse_cypher("CREATE (n:V {id: 1, arr: [10, 20, 30]})").unwrap();
+    execute_mutable(
+        &mut graph,
+        &setup,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
+
+    let no_params = HashMap::new();
+    let executor = CypherExecutor::with_params(&graph, &no_params, None);
+    let q = parser::parse_cypher(
+        "MATCH (n:V) RETURN n.arr[0] AS a, n.arr[-1] AS b, n.arr[5] AS d, \
+         reduce(s = 0, i IN range(0, 2) | s + n.arr[i]) AS total",
+    )
+    .unwrap();
+    let result = executor.execute(&q).unwrap();
+    let row = &result.rows[0];
+    assert_eq!(row[0], Value::Int64(10)); // first element
+    assert_eq!(row[1], Value::Int64(30)); // negative index from the end
+    assert_eq!(row[2], Value::Null); // out of range
+    assert_eq!(row[3], Value::Int64(60)); // 10 + 20 + 30 via per-element subscript
+}
+
+#[test]
+fn test_projected_and_parameter_list_index_borrow_path() {
+    // The other two borrowable container shapes: a variable projected into
+    // the row (WITH … AS q) and a query parameter. Both must index without
+    // cloning the whole list and match the owned path.
+    let graph = DirGraph::new();
+    let mut params = HashMap::new();
+    params.insert(
+        "p".to_string(),
+        Value::List(vec![Value::Int64(7), Value::Int64(8), Value::Int64(9)]),
+    );
+    let executor = CypherExecutor::with_params(&graph, &params, None);
+    let q = parser::parse_cypher(
+        "WITH [100, 200, 300] AS q RETURN q[1] AS from_projected, $p[-1] AS from_param",
+    )
+    .unwrap();
+    let result = executor.execute(&q).unwrap();
+    let row = &result.rows[0];
+    assert_eq!(row[0], Value::Int64(200));
+    assert_eq!(row[1], Value::Int64(9));
+}
+
+#[test]
 fn test_list_slice_with_collect() {
     let mut graph = DirGraph::new();
     let setup = parser::parse_cypher(

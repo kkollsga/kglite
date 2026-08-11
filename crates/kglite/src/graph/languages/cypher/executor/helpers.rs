@@ -706,6 +706,40 @@ pub(super) fn map_subscript(container: &Value, key: &str) -> Value {
 /// every producer emits native lists (C4 removes PreProcessedValue;
 /// later cleanups retire the string path), this function can shrink
 /// to just the List arm.
+/// Index a container value with a (possibly negative) integer, cloning **only**
+/// the selected element. A native `Value::List` is indexed by reference — the
+/// whole list is never cloned, which is what makes `list[i]` O(1) in list
+/// length on the hot vector-scoring path rather than O(len) per access. The
+/// legacy stringified-list form still parses first; anything else, and any
+/// out-of-range index, is `Value::Null` — matching `parse_list_value` + index.
+pub(in crate::graph::languages::cypher) fn index_into_value(
+    container: &Value,
+    integer_index: i64,
+) -> Value {
+    match container {
+        Value::List(items) => index_list_slice(items, integer_index),
+        Value::String(_) => index_list_slice(&parse_list_value(container), integer_index),
+        _ => Value::Null,
+    }
+}
+
+/// Shared bounds/negative-index logic for `list[i]`. A negative index counts
+/// from the end; anything still out of range yields `Value::Null`.
+#[inline]
+fn index_list_slice(items: &[Value], integer_index: i64) -> Value {
+    let len = items.len() as i64;
+    let actual_index = if integer_index < 0 {
+        len + integer_index
+    } else {
+        integer_index
+    };
+    if actual_index >= 0 && (actual_index as usize) < items.len() {
+        items[actual_index as usize].clone()
+    } else {
+        Value::Null
+    }
+}
+
 pub(in crate::graph::languages::cypher) fn parse_list_value(val: &Value) -> Vec<Value> {
     match val {
         Value::List(items) => items.clone(),

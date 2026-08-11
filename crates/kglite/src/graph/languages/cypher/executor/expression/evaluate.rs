@@ -450,12 +450,17 @@ impl<'a> CypherExecutor<'a> {
             return Ok(value);
         }
 
-        // Container evaluation must precede index evaluation.
-        let container = self.evaluate_expression(expression, row)?;
+        // A string index is a map/node/relationship lookup and needs the
+        // owned container. An integer index into a list, by contrast, is the
+        // hot vector-scoring shape (`reduce(i IN … | … n.emb[i] …)`), so it
+        // borrows the container and clones only the selected element — never
+        // the whole list per access. Evaluating the index first keeps this
+        // decision cheap (the index is usually a variable/literal integer).
         let index = self.evaluate_expression(index, row)?;
         let integer_index = match &index {
             Value::Int64(index) => *index,
             Value::String(key) => {
+                let container = self.evaluate_expression(expression, row)?;
                 return match container {
                     Value::Map(_) | Value::Node(_) | Value::Relationship(_) => {
                         Ok(map_subscript(&container, key))
@@ -470,18 +475,52 @@ impl<'a> CypherExecutor<'a> {
             _ => return Err(format!("List index must be an integer, got {index:?}")),
         };
 
-        let items = parse_list_value(&container);
-        let len = items.len() as i64;
-        let actual_index = if integer_index < 0 {
-            len + integer_index
-        } else {
-            integer_index
-        };
-        Ok(if actual_index >= 0 && (actual_index as usize) < items.len() {
-            items[actual_index as usize].clone()
-        } else {
-            Value::Null
-        })
+        // Borrow the container when its shape allows it (a projected variable,
+        // a parameter, or a property of an in-memory node binding); otherwise
+        // fall back to an owned evaluation. Both routes then index identically.
+        if let Some(container) = self.borrow_index_container(expression, row) {
+            return Ok(index_into_value(&container, integer_index));
+        }
+        let container = self.evaluate_expression(expression, row)?;
+        Ok(index_into_value(&container, integer_index))
+    }
+
+    /// Borrow the container for an integer list-index access, avoiding a
+    /// whole-list clone on every element access. Returns `Some` only for the
+    /// shapes whose value is already resident and borrowable — a variable
+    /// projected into the row, a query parameter, or a property read off a
+    /// node binding (in-memory reads borrow; disk reads clone once, still
+    /// saving the second copy [`parse_list_value`] would make). Returns `None`
+    /// for every other shape, and for the fallback branches of a property read
+    /// (`id`/`title` virtuals, soft-alias, spatial), so the owned path handles
+    /// them with unchanged semantics. Precedence matches `evaluate_variable`
+    /// (projected before bindings) and `resolve_property` (`resolve_alias`).
+    fn borrow_index_container<'r>(
+        &'r self,
+        expression: &Expression,
+        row: &'r ResultRow,
+    ) -> Option<std::borrow::Cow<'r, Value>> {
+        match expression {
+            Expression::Variable(name) => {
+                row.projected.get(name).map(std::borrow::Cow::Borrowed)
+            }
+            Expression::Parameter(name) => {
+                self.params.get(name).map(std::borrow::Cow::Borrowed)
+            }
+            Expression::PropertyAccess { variable, property } => {
+                let &idx = row.node_bindings.get(variable)?;
+                let node = self.graph.graph.node_view(idx)?;
+                let type_str = node.node_type_str(&self.graph.interner);
+                let resolved = self.graph.resolve_alias(type_str, property);
+                // The identity virtuals are never lists; let the owned path
+                // resolve them (and every non-stored-property fallback).
+                if resolved == "id" || resolved == "title" {
+                    return None;
+                }
+                node.get_property(resolved)
+            }
+            _ => None,
+        }
     }
 
     fn evaluate_labels_zero_fast_path(
