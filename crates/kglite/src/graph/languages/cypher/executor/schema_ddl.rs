@@ -561,12 +561,12 @@ fn unsupported_index_type_message(index_type: DdlIndexType) -> String {
         }
         DdlIndexType::Fulltext => {
             "KGLite has no full-text index. Use the vector-search API \
-             (`create_vector_index` + `vector_score()`) for ranked text retrieval."
+             (`build_vector_index` + `vector_score()`) for ranked text retrieval."
         }
         DdlIndexType::Vector => {
             "Vector indexes exist in KGLite but are not created through Cypher DDL, because \
-             they need an embedder and HNSW build parameters. Use the Python/Rust API: \
-             `kg.create_vector_index(node_type, property, ...)`."
+             they need an existing embedding store and HNSW build parameters. Use the \
+             Python/Rust API: `kg.build_vector_index(node_type, text_column, ...)`."
         }
         DdlIndexType::Lookup => {
             "KGLite has no token-lookup index to create: label and relationship-type lookup is \
@@ -1232,7 +1232,7 @@ mod tests {
             ),
             (
                 "CREATE VECTOR INDEX v FOR (n:Person) ON (n.emb)",
-                "create_vector_index",
+                "build_vector_index",
             ),
             (
                 "CREATE LOOKUP INDEX l FOR (n) ON EACH labels(n)",

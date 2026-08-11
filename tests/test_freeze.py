@@ -125,14 +125,14 @@ def test_freeze_preserves_embeddings_for_vector_read():
     g.add_nodes(pd.DataFrame({"id": [1, 2, 3], "title": ["a", "b", "c"]}), "Doc", "id", "title")
     g.add_embeddings(
         "Doc",
-        "summary",
+        "title",
         {1: [1.0, 0.0, 0.0, 0.0], 2: [0.0, 1.0, 0.0, 0.0], 3: [0.9, 0.1, 0.0, 0.0]},
     )
     fz = g.freeze()
     # vector_score() against the frozen snapshot ranks by similarity to a query
     # vector — a read-only semantic search, no mutation, no embedder rebind.
     rows = fz.cypher(
-        "MATCH (n:Doc) RETURN n.id AS id, vector_score(n, 'summary_emb', [1.0, 0.0, 0.0, 0.0]) AS s "
+        "MATCH (n:Doc) RETURN n.id AS id, vector_score(n, 'title_emb', [1.0, 0.0, 0.0, 0.0]) AS s "
         "ORDER BY s DESC LIMIT 1"
     ).to_list()
     assert rows[0]["id"] == 1

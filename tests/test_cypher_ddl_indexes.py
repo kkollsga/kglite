@@ -310,7 +310,7 @@ NEO4J_SCHEMA_SCRIPT: list[tuple[str, str | None]] = [
     (
         "CREATE VECTOR INDEX p_emb IF NOT EXISTS FOR (p:Person) ON (p.embedding) "
         "OPTIONS {indexConfig: {`vector.dimensions`: 128}}",
-        "create_vector_index",
+        "build_vector_index",
     ),
     ("CREATE LOOKUP INDEX node_labels IF NOT EXISTS FOR (n) ON EACH labels(n)", "LOOKUP INDEX"),
     ("CREATE INDEX knows_since IF NOT EXISTS FOR ()-[r:KNOWS]-() ON (r.since)", "KNOWS"),

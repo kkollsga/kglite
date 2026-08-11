@@ -1162,7 +1162,8 @@ pub(super) fn write_fluent_topic_vectors(xml: &mut String) {
     xml.push_str("    <methods>\n");
     xml.push_str("      <m sig=\"set_embedder(model_name_or_callable)\">Register embedding model (sentence-transformers name or callable).</m>\n");
     xml.push_str("      <m sig=\"embed_texts(type, column)\">Compute and store embeddings for a text column.</m>\n");
-    xml.push_str("      <m sig=\"set_embeddings(type, column, embeddings_dict)\">Provide pre-computed embeddings {id: vector}.</m>\n");
+    xml.push_str("      <m sig=\"set_embeddings(type, column, embeddings_dict, metric=None)\">Provide pre-computed embeddings {id: vector} — replaces the store. `column` names the source text column, which must exist on the type.</m>\n");
+    xml.push_str("      <m sig=\"add_embeddings(type, column, embeddings_dict, metric=None)\">Same, upserting into the existing store so batches coexist. Call save() to persist either.</m>\n");
     xml.push_str("      <m sig=\"search_text(query, type, column=None, top_k=10, min_score=None)\">Semantic search — auto-embeds query string.</m>\n");
     xml.push_str("      <m sig=\"vector(vector, type, column=None, top_k=10, min_score=None)\">Search with explicit query vector.</m>\n");
     xml.push_str("      <m sig=\"build_vector_index(type, column, m=16, ef_search=64, metric=None)\">Build an HNSW index so search scales on large stores (opt-in; auto-used; exact=True bypasses). Dropped when vectors change.</m>\n");
@@ -1443,7 +1444,7 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
     xml.push_str("  <limitations>\n");
     xml.push_str("    <item feature=\"LOAD CSV http(s):// source\" note=\"LOAD CSV [WITH HEADERS] FROM &lt;file:// URL or local path&gt; AS row [FIELDTERMINATOR &lt;sep&gt;] IS supported as the leading clause; http(s):// is not, because the engine ships no HTTP client. Reading local files is off for remote callers unless the server enabled it. Row-local pipelines (CREATE/MERGE/SET) stream in batches; aggregate/ORDER BY/DISTINCT pipelines read the whole file, capped. CALL { } IN TRANSACTIONS is not supported.\"/>\n");
     xml.push_str("    <item feature=\"CREATE CONSTRAINT ... IS :: TYPE\" note=\"Property-type constraints (IS :: T / IS TYPED T) and relationship constraints are rejected: there is no write-time property-type enforcement to route them to, and accepting them would report success while enforcing nothing. Use lock_schema() to reject writes that disagree with a node type's recorded property type, or validate_schema() to audit existing data. UNIQUE, NOT NULL, and NODE KEY constraint DDL IS supported and enforced on every write path.\"/>\n");
-    xml.push_str("    <item feature=\"TEXT / FULLTEXT / POINT / VECTOR / LOOKUP INDEX\" note=\"Only equality, composite, and RANGE index DDL is served. CONTAINS/STARTS WITH need no text index; use create_vector_index() for vector search; label lookup is always indexed.\"/>\n");
+    xml.push_str("    <item feature=\"TEXT / FULLTEXT / POINT / VECTOR / LOOKUP INDEX\" note=\"Only equality, composite, and RANGE index DDL is served. CONTAINS/STARTS WITH need no text index; use build_vector_index() for vector search; label lookup is always indexed.\"/>\n");
     xml.push_str("    <item feature=\"Primary-type mutation\" note=\"Each node has an immutable primary type plus optional secondary labels via SET n:Label / CREATE (n:A:B) / g.add_label(...). MATCH (n:A:B) AND-intersects. SET n.type writes a property; recreate or migrate the node to change its primary type.\"/>\n");
     xml.push_str("    <item feature=\"Variable-length weighted paths\" note=\"Unweighted variable-length paths (*1..3) are supported\"/>\n");
     xml.push_str("  </limitations>\n");

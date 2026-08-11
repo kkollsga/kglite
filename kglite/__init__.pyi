@@ -5313,8 +5313,19 @@ class KnowledgeGraph:
         invisible to ``collect()``, ``to_df()``, and other property-based APIs.
         The embedding store key is auto-derived as ``{text_column}_emb``.
 
-        Validates that ``text_column`` exists as a property on the node type
-        (builtins ``id``, ``title``, ``type`` are always accepted).
+        Requires ``text_column`` to exist as a property on the node type
+        (builtins ``id``, ``title``, ``type`` are always accepted) — the guard
+        that catches passing the *store* name (``'summary_emb'``) where the
+        *column* name (``'summary'``) belongs.
+
+        The whole batch is resolved and dimension-checked before anything is
+        written, so a rejected call leaves the store exactly as it was.
+
+        Call ``save()`` to persist the store: embedding stores ride the
+        checkpoint. A store records the vectors, dimension and metric you
+        supply here; :meth:`embed_texts` additionally records the model id and
+        per-node text hashes that let a later ``embed_texts(mode='changed')``
+        re-embed only what changed.
 
         For incremental ingest where you want to add to an existing store
         without a read-merge-write round-trip, use :meth:`add_embeddings`.
@@ -5322,7 +5333,8 @@ class KnowledgeGraph:
         Args:
             node_type: The node type (e.g. ``'Article'``).
             text_column: Source text column name (e.g. ``'summary'``).
-            embeddings: Dict mapping node IDs to embedding vectors.
+            embeddings: Dict mapping node IDs to embedding vectors. An id that
+                matches no node of this type is counted in ``skipped``.
             metric: Default distance metric for this store. Used when no metric
                 is specified at query time. ``'cosine'`` (default), ``'dot_product'``,
                 ``'euclidean'``, or ``'poincare'``. Persisted with ``save()``.
@@ -5351,12 +5363,26 @@ class KnowledgeGraph:
         ``add_nodes`` + embedding batches need to coexist without a
         read-merge-write cycle through the user's process.
 
+        Requires ``text_column`` to exist as a property on the node type,
+        exactly as :meth:`set_embeddings` does (builtins ``id``, ``title``,
+        ``type`` are always accepted). The whole batch is resolved and
+        dimension-checked before anything is written, so a rejected call
+        leaves the store exactly as it was.
+
+        Call ``save()`` to persist the store: embedding stores ride the
+        checkpoint. A store records the vectors, dimension and metric you
+        supply here; :meth:`embed_texts` additionally records the model id and
+        per-node text hashes.
+
         Args:
             node_type: The node type (e.g. ``'Article'``).
             text_column: Source text column name (e.g. ``'summary'``).
-            embeddings: Dict mapping node IDs to embedding vectors.
-            metric: Only used when the store doesn't exist yet. Ignored
-                otherwise (the existing store's metric is preserved).
+            embeddings: Dict mapping node IDs to embedding vectors. An id that
+                matches no node of this type is counted in ``skipped``. When a
+                store already exists its dimension is authoritative and every
+                vector must match it.
+            metric: Applies to the call that creates the store; a later call
+                extends the store the first one made, whose metric stands.
 
         Returns:
             Dict with ``embeddings_stored`` (total in store after the
@@ -5764,6 +5790,10 @@ class KnowledgeGraph:
         ``exact=True`` to force an exact scan. The index is **dropped
         automatically** whenever the store's vectors change (``add_embeddings`` /
         ``embed_texts``) or slots are remapped (``vacuum``) — rebuild it after.
+
+        Requires an existing embedding store; build it after ingest. The index
+        is a rebuildable cache: a ``.kgl`` carries it, and a graph whose stored
+        index no longer matches its vectors loads and searches exactly.
 
         Args:
             node_type: The node type (e.g. ``'Article'``).

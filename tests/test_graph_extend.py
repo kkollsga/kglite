@@ -307,7 +307,7 @@ def test_embedding_store_warning():
     _people(g1, [{"pid": 1, "name": "A"}])
     _people(g2, [{"pid": 2, "name": "B"}])
     # Attach an embedding to g2 directly (bypassing a model).
-    g2.add_embeddings("Person", "vec", {2: [0.1, 0.2, 0.3]})
+    g2.add_embeddings("Person", "title", {2: [0.1, 0.2, 0.3]})
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         g1.extend(g2)

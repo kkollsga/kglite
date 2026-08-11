@@ -27,7 +27,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as the query argument must be bound to a string or a list, and plan-time
   validation reports the type of anything else.
 
+- **`kglite::api::embeddings` — embedding ingest is now Rust-callable.**
+  `set_embeddings`, `add_embeddings` and `build_vector_index` existed only as
+  Python methods, so every other consumer (the MCP and Bolt servers, the C ABI
+  and the bindings above it) could query vectors but never write them. They are
+  now engine primitives over `&mut DirGraph`, taking `(id, vector)` pairs from
+  any iterator — a borrowed `&[f32]` out of a packed buffer works with no
+  intermediate copy — and returning `EmbeddingIngestReport` /
+  `VectorIndexReport`. `store_key` is the one place the `"{text_column}_emb"`
+  store key is derived.
+
+  Each ingest call resolves every id and checks every dimension before it
+  touches a store, so a rejected batch leaves the graph as it found it, and it
+  bumps the graph version on a non-empty write while an empty batch writes and
+  bumps nothing. That makes them all-or-nothing under a plain `&mut DirGraph`.
+  The Python methods are now thin shells over these; the HNSW defaults, which
+  were spelled independently in the engine and the Python builder, are resolved
+  in one place.
+
+### Changed
+
+- **`add_embeddings` requires its source column to exist**, matching
+  `set_embeddings`. `add_embeddings('Doc', 'summary_emb', …)` — the store name
+  where the column name belongs — used to create an unreachable
+  `summary_emb_emb` store and report success; it now raises the same
+  `ValueError` `set_embeddings` has always raised, naming the column and type.
+  A call that passes a real column is unaffected.
+
 ### Fixed
+
+- **Three shipped messages named a method that does not exist.** The Cypher
+  `CREATE VECTOR INDEX` and `CREATE FULLTEXT INDEX` refusals, and the Cypher
+  DDL coverage note in `describe()`, directed users to `create_vector_index`;
+  the method is `build_vector_index`. The vector-index refusal also asked for
+  an embedder — it needs an existing embedding store and HNSW build
+  parameters. Same corrections in CYPHER.md, the Neo4j migration guide and the
+  Java README.
 
 - **Rust API: the write-side migration promised in 0.15.9 is now actually
   reachable — and safe.** Three parts:

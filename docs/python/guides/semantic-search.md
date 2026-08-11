@@ -143,6 +143,22 @@ graph.add_embeddings('Chunk', 'text', {  # doc B's chunks — A's survive
 Reach for `set_embeddings` only when you genuinely want to replace the
 entire store (e.g. re-embedding everything with a new model).
 
+Both calls require `text_column` to name a property that exists on the node
+type (`id`, `title` and `type` are always accepted) — the guard that catches
+passing the store name `'summary_emb'` where the column name `'summary'`
+belongs. Both resolve every id and check every dimension before writing, so a
+rejected batch leaves the store as it was, and both count ids that match no
+node in `skipped`.
+
+A store built this way records exactly what you supply: the vectors, their
+dimension, and the metric. `embed_texts()` additionally records the embedder's
+`model_id` and per-node text hashes, which is what lets
+`embed_texts(mode='changed')` re-embed only the rows whose text moved — over a
+raw-vector store it re-embeds every row.
+
+Call `save()` to persist a store: embeddings ride the checkpoint, so a durable
+graph writes them at `save()` rather than per-call.
+
 ### Vector Search
 
 Each hit is a dict with `id`, `title`, `type`, `score`, **and all node
@@ -283,7 +299,10 @@ Metric resolution order: explicit `metric=` argument > stored metric > `cosine` 
 
 ### Semantic Search in Cypher
 
-`text_score()` enables semantic search directly in Cypher queries. It automatically embeds the query text using the registered model (via `set_embedder()`) and computes similarity:
+`text_score()` enables semantic search directly in Cypher queries. Give it a
+**string** query and it embeds that text with the registered model (via
+`set_embedder()`) before scoring; give it a **list** and it scores your own
+query vector directly, needing only the embedding store:
 
 ```python
 # Requires: set_embedder() + embed_texts()
@@ -316,11 +335,25 @@ graph.cypher("""
 """)
 ```
 
-To score against a **pre-computed vector** instead of a text query (no
-`set_embedder()` needed), use `vector_score(n, 'summary_emb', $vec)` — the Cypher
-counterpart of the fluent `vector_search()` method. Note the surfaces differ:
-`text_score()`/`vector_score()` are **Cypher functions** (used in `RETURN`/`WHERE`);
-`search_text()`/`vector_search()` are **fluent methods** on a selection.
+Both scoring functions take a **pre-computed vector**, so scoring works with
+the embedding store alone:
+
+```python
+# Same scores, same ordering — the store is all either one needs.
+graph.cypher("MATCH (n:Article) RETURN vector_score(n, 'summary_emb', $q) AS s",
+             params={'q': query_vec})    # names the store
+graph.cypher("MATCH (n:Article) RETURN text_score(n, 'summary', $q) AS s",
+             params={'q': query_vec})    # names the column
+```
+
+`vector_score` is the Cypher counterpart of the fluent `vector_search()`
+method. Note the surfaces differ: `text_score()`/`vector_score()` are **Cypher
+functions** (used in `RETURN`/`WHERE`); `search_text()`/`vector_search()` are
+**fluent methods** on a selection.
+
+The query argument's type decides how `text_score` reads it — a list is a
+vector, a string is text — so a stringified vector like `'[1.0, 2.0]'` is
+embedded as a 10-character query. Pass a list and both spellings agree.
 
 ### Embedding Norm in Cypher
 

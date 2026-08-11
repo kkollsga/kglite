@@ -127,9 +127,9 @@ def test_from_bytes_rejects_empty():
 def test_to_bytes_preserves_embeddings():
     g = kglite.KnowledgeGraph()
     g.add_nodes(pd.DataFrame({"id": [1, 2], "title": ["a", "b"]}), "Doc", "id", "title")
-    g.add_embeddings("Doc", "summary", {1: [0.1, 0.2, 0.3, 0.4], 2: [0.5, 0.6, 0.7, 0.8]})
+    g.add_embeddings("Doc", "title", {1: [0.1, 0.2, 0.3, 0.4], 2: [0.5, 0.6, 0.7, 0.8]})
     g2 = kglite.from_bytes(g.to_bytes())
-    assert g2.embedding_dim("Doc", "summary") == 4
+    assert g2.embedding_dim("Doc", "title") == 4
 
 
 # ── cross-thread / re-entrant borrow error ───────────────────────────────────

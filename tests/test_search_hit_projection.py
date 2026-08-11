@@ -29,9 +29,11 @@ def _graph() -> kglite.KnowledgeGraph:
         "id",
         "title",
     )
+    # `body` is a real column on Doc: add_embeddings requires the source
+    # column to exist, the same guard set_embeddings has always applied.
     g.add_embeddings(
         "Doc",
-        "summary",
+        "body",
         {1: [1.0, 0.0, 0.0, 0.0], 2: [0.0, 1.0, 0.0, 0.0], 3: [0.9, 0.1, 0.0, 0.0]},
     )
     return g
@@ -39,7 +41,7 @@ def _graph() -> kglite.KnowledgeGraph:
 
 def test_default_hit_carries_all_fields():
     g = _graph()
-    hits = g.select("Doc").vector_search("summary", [1.0, 0.0, 0.0, 0.0], top_k=3)
+    hits = g.select("Doc").vector_search("body", [1.0, 0.0, 0.0, 0.0], top_k=3)
     top = hits[0]
     assert top["id"] == 1
     assert "score" in top
@@ -52,7 +54,7 @@ def test_default_hit_carries_all_fields():
 
 def test_returning_trims_to_named_fields():
     g = _graph()
-    hits = g.select("Doc").vector_search("summary", [1.0, 0.0, 0.0, 0.0], top_k=3, returning=["body"])
+    hits = g.select("Doc").vector_search("body", [1.0, 0.0, 0.0, 0.0], top_k=3, returning=["body"])
     top = hits[0]
     # id + score always retained (identity + rank)
     assert set(top.keys()) == {"id", "score", "body"}
@@ -61,19 +63,19 @@ def test_returning_trims_to_named_fields():
 
 def test_returning_can_request_structural_fields():
     g = _graph()
-    hits = g.select("Doc").vector_search("summary", [1.0, 0.0, 0.0, 0.0], top_k=1, returning=["title", "type"])
+    hits = g.select("Doc").vector_search("body", [1.0, 0.0, 0.0, 0.0], top_k=1, returning=["title", "type"])
     assert set(hits[0].keys()) == {"id", "score", "title", "type"}
 
 
 def test_returning_empty_list_is_id_and_score_only():
     g = _graph()
-    hits = g.select("Doc").vector_search("summary", [1.0, 0.0, 0.0, 0.0], top_k=1, returning=[])
+    hits = g.select("Doc").vector_search("body", [1.0, 0.0, 0.0, 0.0], top_k=1, returning=[])
     assert set(hits[0].keys()) == {"id", "score"}
 
 
 def test_returning_in_to_df():
     g = _graph()
-    df = g.select("Doc").vector_search("summary", [1.0, 0.0, 0.0, 0.0], top_k=3, to_df=True, returning=["body"])
+    df = g.select("Doc").vector_search("body", [1.0, 0.0, 0.0, 0.0], top_k=3, to_df=True, returning=["body"])
     assert set(df.columns) == {"id", "score", "body"}
     assert len(df) == 3
 
@@ -85,7 +87,7 @@ def test_full_hit_contract_survives_save_load(tmp_path):
     p = str(tmp_path / "g.kgl")
     g.save(p)
     g2 = kglite.load(p)
-    hits = g2.select("Doc").vector_search("summary", [0.0, 1.0, 0.0, 0.0], top_k=1)
+    hits = g2.select("Doc").vector_search("body", [0.0, 1.0, 0.0, 0.0], top_k=1)
     top = hits[0]
     assert top["id"] == 2
     assert top["body"] == "beta"

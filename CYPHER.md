@@ -1967,9 +1967,9 @@ that works — never a syntax error, and never a no-op that reports success.
 | Statement | Why, and what to use |
 |---|---|
 | `CREATE TEXT INDEX` | No text index. `CONTAINS` / `STARTS WITH` / `ENDS WITH` work unindexed (a string index already gives prefix pushdown — see above) |
-| `CREATE FULLTEXT INDEX` | No full-text index. Use `create_vector_index` + `vector_score()` for ranked text retrieval |
+| `CREATE FULLTEXT INDEX` | No full-text index. Use `build_vector_index` + `vector_score()` for ranked text retrieval |
 | `CREATE POINT INDEX` | No point index. Spatial predicates and the spatial-join optimiser work on geometry properties without one |
-| `CREATE VECTOR INDEX` | Vector indexes exist, but need an embedder and HNSW build parameters, so they are created through `create_vector_index(...)` |
+| `CREATE VECTOR INDEX` | Vector indexes exist, but need an existing embedding store and HNSW build parameters, so they are created through `build_vector_index(...)` |
 | `CREATE LOOKUP INDEX` | Label and relationship-type lookup is always indexed automatically (`type_indices`) |
 | `CREATE INDEX FOR ()-[r:T]-() ON (r.p)` | KGLite indexes node properties only. Relationship properties are queryable, just scanned |
 | `... OPTIONS { ... }` | No index providers or per-index configuration to apply |

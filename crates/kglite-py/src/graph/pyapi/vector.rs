@@ -41,114 +41,21 @@ impl KnowledgeGraph {
         embeddings: &Bound<'_, PyDict>,
         metric: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        let _arena_guard = self.inner.begin_read_pass(); // disk arena guard (no-op on memory/mapped)
+        let entries = marshal_embedding_batch(embeddings)?;
         let g = get_graph_mut(&mut self.inner);
-        let embedding_property = format!("{}_emb", text_column);
-
-        // Validate node type exists
-        if !g.type_indices.contains_key(node_type) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Node type '{}' does not exist in the graph",
-                node_type
-            )));
-        }
-
-        // Validate source column exists (skip for empty dicts)
-        if !embeddings.is_empty() {
-            let is_builtin = matches!(text_column, "id" | "title" | "type");
-            if !is_builtin {
-                let has_property = g
-                    .type_indices
-                    .get(node_type)
-                    .map(|indices| {
-                        indices.iter().any(|idx| {
-                            g.graph
-                                .node_view(idx)
-                                .map(|n| n.has_property(text_column))
-                                .unwrap_or(false)
-                        })
-                    })
-                    .unwrap_or(false);
-                if !has_property {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "Source column '{}' not found on any '{}' node. \
-                         set_embeddings() expects the text column name \
-                         (e.g. 'summary'), not the embedding store name.",
-                        text_column, node_type
-                    )));
-                }
-            }
-        }
-
-        // Build ID index for this node type if not already built
-        g.build_id_index(node_type);
-
-        let mut dimension: Option<usize> = None;
-        let mut entries: Vec<(NodeIndex, Vec<f32>)> = Vec::new();
-        let mut skipped = 0usize;
-
-        for (key, value) in embeddings.iter() {
-            // Convert key to Value for ID lookup
-            let id = py_in::py_value_to_value(&key)?;
-
-            // Look up node by ID
-            let node_idx = match g.lookup_by_id(node_type, &id) {
-                Some(idx) => idx,
-                None => {
-                    skipped += 1;
-                    continue;
-                }
-            };
-
-            // Convert embedding to Vec<f32>
-            let vec: Vec<f32> = value.extract()?;
-
-            // Validate/set dimension
-            match dimension {
-                None => dimension = Some(vec.len()),
-                Some(d) => {
-                    if vec.len() != d {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Inconsistent embedding dimensions: expected {} but got {}",
-                            d,
-                            vec.len()
-                        )));
-                    }
-                }
-            }
-
-            entries.push((node_idx, vec));
-        }
-
-        let dim = match dimension {
-            Some(d) => d,
-            None => {
-                let result = PyDict::new(py);
-                result.set_item("embeddings_stored", 0)?;
-                result.set_item("dimension", 0)?;
-                result.set_item("skipped", skipped)?;
-                return Ok(result.into());
-            }
-        };
-
-        // Create or replace the EmbeddingStore
-        let mut store = match metric {
-            Some(m) => kglite_core::api::storage::EmbeddingStore::with_metric(dim, m),
-            None => kglite_core::api::storage::EmbeddingStore::new(dim),
-        };
-        store.data.reserve(entries.len() * dim);
-        for (node_idx, vec) in &entries {
-            store.set_embedding(node_idx.index(), vec);
-        }
-
-        let stored = store.len();
-        g.embeddings
-            .insert((node_type.to_string(), embedding_property), store);
+        let report = kglite_core::api::embeddings::set_embeddings(
+            g,
+            node_type,
+            text_column,
+            metric,
+            entries,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         let result = PyDict::new(py);
-        result.set_item("embeddings_stored", stored)?;
-        result.set_item("dimension", dim)?;
-        result.set_item("skipped", skipped)?;
+        result.set_item("embeddings_stored", report.embeddings_stored)?;
+        result.set_item("dimension", report.dimension)?;
+        result.set_item("skipped", report.skipped)?;
         Ok(result.into())
     }
 
@@ -180,82 +87,22 @@ impl KnowledgeGraph {
         embeddings: &Bound<'_, PyDict>,
         metric: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
+        let entries = marshal_embedding_batch(embeddings)?;
         let g = get_graph_mut(&mut self.inner);
-        let embedding_property = format!("{}_emb", text_column);
-
-        if !g.type_indices.contains_key(node_type) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Node type '{}' does not exist in the graph",
-                node_type
-            )));
-        }
-
-        g.build_id_index(node_type);
-
-        let store_key = (node_type.to_string(), embedding_property);
-        let store_existed = g.embeddings.contains_key(&store_key);
-
-        // Snapshot the existing dimension/metric, if any, so we can
-        // validate incoming vectors against the live store's shape.
-        let existing_dim = g.embeddings.get(&store_key).map(|s| s.dimension);
-
-        let mut entries: Vec<(NodeIndex, Vec<f32>)> = Vec::new();
-        let mut skipped = 0usize;
-        let mut dim_seen: Option<usize> = existing_dim;
-
-        for (key, value) in embeddings.iter() {
-            let id = py_in::py_value_to_value(&key)?;
-            let node_idx = match g.lookup_by_id(node_type, &id) {
-                Some(idx) => idx,
-                None => {
-                    skipped += 1;
-                    continue;
-                }
-            };
-            let vec: Vec<f32> = value.extract()?;
-            match dim_seen {
-                None => dim_seen = Some(vec.len()),
-                Some(d) => {
-                    if vec.len() != d {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Inconsistent embedding dimension: store has {} but got {}",
-                            d,
-                            vec.len()
-                        )));
-                    }
-                }
-            }
-            entries.push((node_idx, vec));
-        }
-
-        let dim = match dim_seen {
-            Some(d) => d,
-            None => {
-                let result = PyDict::new(py);
-                result.set_item("embeddings_stored", 0)?;
-                result.set_item("dimension", 0)?;
-                result.set_item("skipped", skipped)?;
-                result.set_item("store_created", false)?;
-                return Ok(result.into());
-            }
-        };
-
-        let store = g
-            .embeddings
-            .entry(store_key.clone())
-            .or_insert_with(|| match metric {
-                Some(m) => kglite_core::api::storage::EmbeddingStore::with_metric(dim, m),
-                None => kglite_core::api::storage::EmbeddingStore::new(dim),
-            });
-        for (node_idx, vec) in &entries {
-            store.set_embedding(node_idx.index(), vec);
-        }
+        let report = kglite_core::api::embeddings::add_embeddings(
+            g,
+            node_type,
+            text_column,
+            metric,
+            entries,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         let result = PyDict::new(py);
-        result.set_item("embeddings_stored", store.len())?;
-        result.set_item("dimension", dim)?;
-        result.set_item("skipped", skipped)?;
-        result.set_item("store_created", !store_existed)?;
+        result.set_item("embeddings_stored", report.embeddings_stored)?;
+        result.set_item("dimension", report.dimension)?;
+        result.set_item("skipped", report.skipped)?;
+        result.set_item("store_created", report.store_created)?;
         Ok(result.into())
     }
 
@@ -1348,65 +1195,26 @@ impl KnowledgeGraph {
         ef_search: Option<usize>,
         metric: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        use kglite_core::api::algorithms::DistanceMetric;
-        use kglite_core::api::algorithms::HnswParams;
-
-        let embedding_property = format!("{}_emb", text_column);
-        let key = (node_type.to_string(), embedding_property);
-
-        // Resolve metric: explicit arg > stored metric > cosine.
-        let metric_name = match metric {
-            Some(m) => m.to_string(),
-            None => self
-                .inner
-                .embeddings
-                .get(&key)
-                .and_then(|s| s.metric.clone())
-                .unwrap_or_else(|| "cosine".to_string()),
-        };
-        let dmetric = match metric_name.as_str() {
-            "cosine" => DistanceMetric::Cosine,
-            "dot_product" => DistanceMetric::DotProduct,
-            "euclidean" => DistanceMetric::Euclidean,
-            "poincare" => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "build_vector_index: the 'poincare' metric is not supported by HNSW; \
-                     Poincaré search stays on the exact (brute-force) path.",
-                ));
-            }
-            other => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Unknown metric '{}'. Use 'cosine', 'dot_product', or 'euclidean'.",
-                    other
-                )));
-            }
-        };
-
-        let params = HnswParams {
-            m: m.unwrap_or(16).max(2),
-            ef_construction: ef_construction.unwrap_or(200).max(1),
-            ef_search: ef_search.unwrap_or(64).max(1),
-        };
-
         let g = get_graph_mut(&mut self.inner);
-        let store = g.embeddings.get_mut(&key).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "No embedding store '{}.{}_emb' to index. Call set_embeddings()/embed_texts() first.",
-                node_type, text_column
-            ))
-        })?;
-        let indexed = store.len();
-
         // Build off the GIL — pure CPU over the contiguous vector buffer.
-        // A deterministic seed keeps builds reproducible.
-        let seed = 0x9E37_79B9_7F4A_7C15 ^ (indexed as u64);
-        let build = py.detach(|| store.build_index(dmetric, params, seed));
-        build.map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        let report = py
+            .detach(|| {
+                kglite_core::api::embeddings::build_vector_index(
+                    g,
+                    node_type,
+                    text_column,
+                    m,
+                    ef_construction,
+                    ef_search,
+                    metric,
+                )
+            })
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         let result = PyDict::new(py);
-        result.set_item("indexed", indexed)?;
-        result.set_item("metric", metric_name)?;
-        result.set_item("m", params.m)?;
+        result.set_item("indexed", report.indexed)?;
+        result.set_item("metric", report.metric)?;
+        result.set_item("m", report.m)?;
         Ok(result.into())
     }
 
@@ -1438,4 +1246,22 @@ impl KnowledgeGraph {
             .map(|s| s.has_index())
             .unwrap_or(false))
     }
+}
+
+/// Marshal a `{id: [floats]}` dict into the `(id, vector)` pairs the engine
+/// primitive consumes. Purely a boundary conversion — every validation rule
+/// (node type, source column, id resolution, dimension) lives in
+/// `kglite::api::embeddings`, so this is the only Python-specific part of
+/// `set_embeddings` / `add_embeddings`.
+fn marshal_embedding_batch(
+    embeddings: &Bound<'_, PyDict>,
+) -> PyResult<Vec<(kglite_core::api::Value, Vec<f32>)>> {
+    let mut entries = Vec::with_capacity(embeddings.len());
+    for (key, value) in embeddings.iter() {
+        entries.push((
+            py_in::py_value_to_value(&key)?,
+            value.extract::<Vec<f32>>()?,
+        ));
+    }
+    Ok(entries)
 }

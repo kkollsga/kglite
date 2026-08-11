@@ -1975,6 +1975,27 @@ class TestAddEmbeddings:
         assert result["embeddings_stored"] == 1
         assert result["skipped"] == 1
 
+    def test_add_embeddings_requires_the_source_column(self):
+        """Unified with set_embeddings: naming the *store* where the *column*
+        belongs used to create an unreachable 'summary_emb_emb' store."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1], "title": ["A"], "summary": ["a"]})
+        graph.add_nodes(df, "Article", "id", "title")
+        with pytest.raises(ValueError, match="Source column 'summary_emb' not found"):
+            graph.add_embeddings("Article", "summary_emb", {1: [0.1, 0.2]})
+        assert graph.list_embeddings() == []
+
+    def test_add_embeddings_rejected_batch_leaves_the_store_intact(self):
+        """Validate-then-apply: a dimension mismatch writes nothing."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1, 2], "title": ["A", "B"], "summary": ["a", "b"]})
+        graph.add_nodes(df, "Article", "id", "title")
+        graph.add_embeddings("Article", "summary", {1: [0.1, 0.2]})
+        with pytest.raises(ValueError, match="Inconsistent embedding dimension"):
+            graph.add_embeddings("Article", "summary", {2: [0.3, 0.4, 0.5]})
+        assert graph.embedding("Article", "summary", 2) is None
+        assert graph.embedding_dim("Article", "summary") == 2
+
 
 class TestSetEmbedderUnbind:
     """set_embedder(None) unbinds without raising."""

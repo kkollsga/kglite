@@ -269,6 +269,25 @@ pub mod api {
         };
     }
 
+    /// Embedding ingest + vector-index construction — how a binding gets
+    /// vectors *into* a graph. `set_embeddings` replaces a store,
+    /// `add_embeddings` upserts into one, `build_vector_index` builds the
+    /// HNSW index that accelerates whole-corpus top-k, and `store_key` is the
+    /// one place the `"{text_column}_emb"` store key is derived. Each ingest
+    /// call validates every id and dimension before it touches a store and
+    /// bumps the graph version on a non-empty write, so it is all-or-nothing
+    /// under a plain `&mut DirGraph`.
+    ///
+    /// Querying by vector needs no surface here: `vector_score` and
+    /// `text_score` both take a caller-supplied query vector through
+    /// `cypher_query`.
+    pub mod embeddings {
+        pub use crate::graph::embeddings::{
+            add_embeddings, build_vector_index, set_embeddings, store_key, EmbeddingIngestReport,
+            VectorIndexReport,
+        };
+    }
+
     /// Graph algorithms — pathfinding, components, centrality, community
     /// detection (the typed, direct-call surface). Every binding that
     /// exposes a typed `shortest_path()` / `pagerank()` / `louvain()`

@@ -118,7 +118,7 @@ Nearly everything the engine can do — graph algorithms, aggregations,
 temporal and spatial functions — arrives through these two as Cypher. The
 named exception is the vector/embedding store: `vector_score()` and
 `text_score()` *read* an embedding index, but building one
-(`set_embeddings`, `create_vector_index`) is a Python/Rust API with no
+(`set_embeddings`, `build_vector_index`) is a Python/Rust API with no
 Cypher form and no Java equivalent today, so a Java-only application cannot
 populate it. A `.kgl` whose index was baked by a Python build step queries
 fine from Java. Details under Scope.
@@ -525,7 +525,7 @@ because it arrives through Cypher.
 
 **The vector caveat.** The engine's HNSW vector index and embedding store are
 *queryable* through Cypher (`vector_score()`, `text_score()`) but not
-*buildable* through it: `set_embeddings` and `create_vector_index` exist only
+*buildable* through it: `set_embeddings` and `build_vector_index` exist only
 in the Python/Rust API today, and this binding does not wrap them. A Java-only
 application therefore cannot populate an embedding index — storing a list
 property is not an embedding, and `vector_score` will say so. What works: ship
