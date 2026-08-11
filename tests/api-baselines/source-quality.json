@@ -455,8 +455,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/planner/simplification.rs",
       "qualified_name": "crate::TextScoreCollector::rewrite_expr",
-      "lines": 209,
-      "branches": 73,
+      "lines": 148,
+      "branches": 63,
       "nesting": 4
     },
     {

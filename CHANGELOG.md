@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`text_score()` accepts a query vector, so every scoring function is
+  usable from every binding.** `text_score(n, 'col', $q)` now scores a
+  list-valued `$q` — or an inline `[0.1, 0.2, …]` — directly as your query
+  vector, needing only the embedding store; a string `$q` is embedded first,
+  as before, via `set_embedder()`. `text_score` is `vector_score` after a
+  plan-time rewrite, and a vector query passes straight through it, so both
+  spellings return identical scores, honour the same optional metric argument
+  and ride the same fused HNSW top-k path. Any language that can send a list
+  parameter through `cypher()` can now query by vector under either spelling.
+
+  The query argument's type selects how it is scored: in `text_score` a list
+  is a vector and a string is text, so `text_score(n, 'col', '[1.0, 2.0]')`
+  embeds that 10-character string. `vector_score` reads a list as a vector and
+  also parses a JSON-array string as one (a legacy form kept for
+  compatibility) — pass a list to have both spellings agree. A `$param` used
+  as the query argument must be bound to a string or a list, and plan-time
+  validation reports the type of anything else.
+
 ### Fixed
 
 - **Rust API: the write-side migration promised in 0.15.9 is now actually

@@ -577,9 +577,13 @@ pub struct TextScoreRewrite {
 /// Walk the AST and rewrite all `text_score(node, col, query_text)` calls
 /// to `vector_score(node, col_emb, $__ts_N)`.
 ///
-/// The text argument can be a string literal or a `$parameter` (resolved from
-/// `params`).  Returns the collected texts so the caller can embed them and
-/// inject the resulting vectors into the params map before optimization.
+/// The query argument can be a string literal or a `$parameter` bound to a
+/// string — that text is collected so the caller can embed it and inject the
+/// resulting vector into the params map before optimization — **or** it can
+/// already be a vector (a list literal, or a `$parameter` bound to a
+/// `Value::List`), in which case it passes through untouched and nothing is
+/// collected. With an empty collection the caller consults no embedder, so
+/// `text_score` with a caller-supplied query vector needs no embedding model.
 pub fn rewrite_text_score(
     query: &mut CypherQuery,
     params: &HashMap<String, Value>,
@@ -709,7 +713,91 @@ struct TextScoreCollector {
     texts_to_embed: Vec<(String, String)>,
 }
 
+/// Classify `text_score`'s query argument: `Some(text)` to embed, or `None`
+/// when the argument is already a vector and passes through untouched.
+///
+/// A vector query collects nothing, and `execute` gates the embedder on a
+/// non-empty collect list — so no embedder is consulted and the query runs
+/// without one. A string stays *text* even when it looks like `"[1.0, 2.0]"`;
+/// the legacy JSON-string vector form is a `vector_score` compatibility path
+/// only (see CYPHER.md).
+fn text_score_query_arg(
+    arg: &Expression,
+    params: &HashMap<String, Value>,
+) -> Result<Option<String>, String> {
+    match arg {
+        Expression::Literal(Value::String(s)) => Ok(Some(s.clone())),
+        Expression::ListLiteral(_) | Expression::Literal(Value::List(_)) => Ok(None),
+        Expression::Parameter(param_name) => match params.get(param_name.as_str()) {
+            Some(Value::String(s)) => Ok(Some(s.clone())),
+            Some(Value::List(_)) => Ok(None),
+            Some(_) => Err(format!(
+                "text_score(): parameter ${} must be a string or a list of numbers",
+                param_name
+            )),
+            None => Err(format!("text_score(): parameter ${} not found", param_name)),
+        },
+        _ => Err("text_score(): third argument must be a string literal, \
+                  a list of numbers, or a $parameter"
+            .into()),
+    }
+}
+
 impl TextScoreCollector {
+    /// Rewrite one `text_score(node, col, query [, metric])` call in place into
+    /// `vector_score(node, '{col}_emb', query [, metric])`.
+    ///
+    /// A *text* query (string literal, or `$param` bound to a string) is
+    /// collected here and replaced by the `$__ts_N` parameter the caller
+    /// embeds into. A *vector* query (list literal, or `$param` bound to a
+    /// list) is left exactly as written — see [`text_score_query_arg`].
+    fn rewrite_text_score_call(
+        &mut self,
+        name: &mut String,
+        args: &mut [Expression],
+        params: &HashMap<String, Value>,
+    ) -> Result<(), String> {
+        if args.len() != 3 && args.len() != 4 {
+            return Err(
+                "text_score() requires 3 arguments: (node, text_column, query_text) \
+                 with optional 4th metric argument"
+                    .into(),
+            );
+        }
+
+        // arg[1]: text column — must be a string literal
+        let col_name = match &args[1] {
+            Expression::Literal(Value::String(s)) => s.clone(),
+            _ => {
+                return Err(
+                    "text_score(): second argument must be a string literal column name".into(),
+                )
+            }
+        };
+        let query_text = text_score_query_arg(&args[2], params)?;
+
+        *name = "vector_score".to_string();
+        args[1] = Expression::Literal(Value::String(format!("{}_emb", col_name)));
+
+        if let Some(query_text) = query_text {
+            args[2] = Expression::Parameter(self.param_for_text(query_text));
+        }
+        Ok(())
+    }
+
+    /// The `$__ts_N` parameter that will carry `query_text`'s vector. Two
+    /// calls with the same text share one parameter, so the embedder sees
+    /// each distinct query once.
+    fn param_for_text(&mut self, query_text: String) -> String {
+        if let Some((existing, _)) = self.texts_to_embed.iter().find(|(_, t)| t == &query_text) {
+            return existing.clone();
+        }
+        let pname = format!("__ts_{}", self.counter);
+        self.counter += 1;
+        self.texts_to_embed.push((pname.clone(), query_text));
+        pname
+    }
+
     /// Rewrite an expression in-place.  Turns `text_score(...)` into `vector_score(...)`.
     fn rewrite_expr(
         &mut self,
@@ -718,68 +806,7 @@ impl TextScoreCollector {
     ) -> Result<(), String> {
         match expr {
             Expression::FunctionCall { name, args, .. } if name == "text_score" => {
-                if args.len() != 3 && args.len() != 4 {
-                    return Err(
-                        "text_score() requires 3 arguments: (node, text_column, query_text) \
-                         with optional 4th metric argument"
-                            .into(),
-                    );
-                }
-
-                // arg[1]: text column — must be a string literal
-                let col_name =
-                    match &args[1] {
-                        Expression::Literal(Value::String(s)) => s.clone(),
-                        _ => return Err(
-                            "text_score(): second argument must be a string literal column name"
-                                .into(),
-                        ),
-                    };
-
-                // arg[2]: query text — string literal or $param
-                let query_text = match &args[2] {
-                    Expression::Literal(Value::String(s)) => s.clone(),
-                    Expression::Parameter(param_name) => match params.get(param_name.as_str()) {
-                        Some(Value::String(s)) => s.clone(),
-                        Some(_) => {
-                            return Err(format!(
-                                "text_score(): parameter ${} must be a string",
-                                param_name
-                            ))
-                        }
-                        None => {
-                            return Err(format!(
-                                "text_score(): parameter ${} not found",
-                                param_name
-                            ))
-                        }
-                    },
-                    _ => {
-                        return Err(
-                            "text_score(): third argument must be a string literal or $parameter"
-                                .into(),
-                        )
-                    }
-                };
-
-                // Deduplicate: reuse param if same query text already collected
-                let param_name = if let Some((existing, _)) =
-                    self.texts_to_embed.iter().find(|(_, t)| t == &query_text)
-                {
-                    existing.clone()
-                } else {
-                    let pname = format!("__ts_{}", self.counter);
-                    self.counter += 1;
-                    self.texts_to_embed.push((pname.clone(), query_text));
-                    pname
-                };
-
-                // Rewrite: text_score(n, 'summary', ...) → vector_score(n, 'summary_emb', $__ts_N)
-                *name = "vector_score".to_string();
-                args[1] = Expression::Literal(Value::String(format!("{}_emb", col_name)));
-                args[2] = Expression::Parameter(param_name);
-
-                Ok(())
+                self.rewrite_text_score_call(name, args, params)
             }
             Expression::FunctionCall { args, .. } => {
                 for arg in args.iter_mut() {

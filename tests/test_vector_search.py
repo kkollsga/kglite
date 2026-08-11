@@ -1213,6 +1213,153 @@ class TestCypherTextScore:
         assert len(result) == 3
 
 
+# ── text_score() with a caller-supplied query vector ─────────────────────
+#
+# Golden equality against vector_score is the load-bearing assertion here:
+# text_score IS vector_score after a plan-time rewrite, so a divergence in
+# score, ordering or metric handling between the two spellings is a bug.
+# Every graph in this class has NO embedder registered — that is the point.
+
+
+class TestCypherTextScoreVectorQuery:
+    """text_score(n, col, <vector>) works with no embedding model."""
+
+    def _make_graph(self):
+        """A graph with a store and deliberately no embedder."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "title": ["Alpha", "Mixed", "Beta"],
+                "summary": ["alpha", "mixed", "beta"],
+            }
+        )
+        graph.add_nodes(df, "Doc", "id", "title", ["summary"])
+        graph.set_embeddings("Doc", "summary", {1: [1.0, 0.0], 2: [0.8, 0.2], 3: [0.0, 1.0]})
+        return graph
+
+    def test_list_param_matches_vector_score(self):
+        """$param list: identical ids and scores to the vector_score spelling."""
+        graph = self._make_graph()
+        q = [1.0, 0.0]
+        ts = graph.cypher(
+            "MATCH (n:Doc) RETURN n.id AS id, text_score(n, 'summary', $q) AS score ORDER BY score DESC",
+            params={"q": q},
+        ).to_list()
+        vs = graph.cypher(
+            "MATCH (n:Doc) RETURN n.id AS id, vector_score(n, 'summary_emb', $q) AS score ORDER BY score DESC",
+            params={"q": q},
+        ).to_list()
+        assert [r["id"] for r in ts] == [1, 2, 3]
+        assert ts[0]["score"] == pytest.approx(1.0, abs=1e-6)
+        assert len(ts) == len(vs)
+        for a, b in zip(ts, vs):
+            assert a["id"] == b["id"]
+            assert a["score"] == pytest.approx(b["score"], abs=1e-9)
+
+    def test_list_literal_matches_vector_score(self):
+        """Inline list literal: identical ids and scores to vector_score."""
+        graph = self._make_graph()
+        ts = graph.cypher(
+            "MATCH (n:Doc) RETURN n.id AS id, text_score(n, 'summary', [1.0, 0.0]) AS score ORDER BY score DESC"
+        ).to_list()
+        vs = graph.cypher(
+            "MATCH (n:Doc) RETURN n.id AS id, vector_score(n, 'summary_emb', [1.0, 0.0]) AS score ORDER BY score DESC"
+        ).to_list()
+        assert [r["id"] for r in ts] == [1, 2, 3]
+        assert ts == vs
+
+    def test_integer_vector_elements_accepted(self):
+        """A list of ints is a vector too — no embedder, no coercion error."""
+        graph = self._make_graph()
+        rows = graph.cypher(
+            "MATCH (n:Doc) RETURN n.id AS id, text_score(n, 'summary', $q) AS score ORDER BY score DESC LIMIT 1",
+            params={"q": [1, 0]},
+        ).to_list()
+        assert rows[0]["id"] == 1
+        assert rows[0]["score"] == pytest.approx(1.0, abs=1e-6)
+
+    def test_metric_argument_matches_vector_score(self):
+        """The optional 4th metric argument behaves identically in both spellings."""
+        graph = self._make_graph()
+        q = [1.0, 0.0]
+        for metric in ("cosine", "dot_product", "euclidean"):
+            ts = graph.cypher(
+                "MATCH (n:Doc) RETURN n.id AS id, text_score(n, 'summary', $q, $m) AS score ORDER BY score DESC",
+                params={"q": q, "m": metric},
+            ).to_list()
+            vs = graph.cypher(
+                "MATCH (n:Doc) RETURN n.id AS id, vector_score(n, 'summary_emb', $q, $m) AS score ORDER BY score DESC",
+                params={"q": q, "m": metric},
+            ).to_list()
+            assert ts == vs, metric
+
+    def test_vector_in_where_clause(self):
+        """The rewrite reaches WHERE, not only RETURN."""
+        graph = self._make_graph()
+        rows = graph.cypher(
+            "MATCH (n:Doc) WHERE text_score(n, 'summary', $q) > 0.99 RETURN n.id AS id",
+            params={"q": [1.0, 0.0]},
+        ).to_list()
+        assert [r["id"] for r in rows] == [1]
+
+    def test_vector_spelling_fuses_top_k(self):
+        """The fused vector top-k pass still fires for the text_score spelling."""
+        graph = self._make_graph()
+        plan = graph.cypher(
+            "EXPLAIN MATCH (n:Doc) RETURN n.id AS id, "
+            "text_score(n, 'summary', $q) AS score ORDER BY score DESC LIMIT 2",
+            params={"q": [1.0, 0.0]},
+        ).to_list()
+        assert any("FusedVectorScoreTopK" in row["operation"] for row in plan)
+
+    def test_string_query_still_requires_an_embedder(self):
+        """A *string* query is text: still needs a registered model."""
+        graph = self._make_graph()
+        with pytest.raises(kglite.KgError, match="set_embedder"):
+            graph.cypher(
+                "MATCH (n:Doc) RETURN text_score(n, 'summary', $q) AS score",
+                params={"q": "alpha"},
+            )
+
+    def test_json_shaped_string_stays_text(self):
+        """Locked asymmetry: "[1.0, 0.0]" is text in text_score, a vector in vector_score."""
+        graph = self._make_graph()
+        with pytest.raises(kglite.KgError, match="set_embedder"):
+            graph.cypher(
+                "MATCH (n:Doc) RETURN text_score(n, 'summary', $q) AS score",
+                params={"q": "[1.0, 0.0]"},
+            )
+        # The same string reaches vector_score as the legacy JSON vector form.
+        rows = graph.cypher(
+            "MATCH (n:Doc) RETURN n.id AS id, vector_score(n, 'summary_emb', $q) AS score ORDER BY score DESC LIMIT 1",
+            params={"q": "[1.0, 0.0]"},
+        ).to_list()
+        assert rows[0]["id"] == 1
+
+    def test_non_vector_non_string_param_rejected(self):
+        """A scalar query argument is neither text nor a vector."""
+        graph = self._make_graph()
+        with pytest.raises(kglite.KgError, match="must be a string or a list of numbers"):
+            graph.cypher(
+                "MATCH (n:Doc) RETURN text_score(n, 'summary', $q) AS score",
+                params={"q": 7},
+            )
+
+    def test_unknown_param_still_rejected(self):
+        graph = self._make_graph()
+        with pytest.raises(kglite.KgError, match="not found"):
+            graph.cypher("MATCH (n:Doc) RETURN text_score(n, 'summary', $missing) AS score")
+
+    def test_non_numeric_vector_elements_rejected(self):
+        graph = self._make_graph()
+        with pytest.raises(kglite.KgError, match="must be numeric"):
+            graph.cypher(
+                "MATCH (n:Doc) RETURN text_score(n, 'summary', $q) AS score",
+                params={"q": ["a", "b"]},
+            )
+
+
 # ── Poincaré metric tests ────────────────────────────────────────────────
 
 

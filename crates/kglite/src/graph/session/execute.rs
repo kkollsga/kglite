@@ -731,15 +731,16 @@ fn embed_into_params(
     }
     let mut params = opts.params.clone();
     for (i, (param_name, _)) in rewrite.texts_to_embed.iter().enumerate() {
-        let json = format!(
-            "[{}]",
+        // Native `Value::List`, not a JSON string: the same shape a caller
+        // who supplies their own query vector passes in, so both routes into
+        // `vector_score` converge and neither re-parses per row.
+        let vector = Value::List(
             embeddings[i]
                 .iter()
-                .map(|f| f.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
+                .map(|f| Value::Float64(*f as f64))
+                .collect(),
         );
-        params.insert(param_name.clone(), Value::String(json));
+        params.insert(param_name.clone(), vector);
     }
     Ok(params)
 }

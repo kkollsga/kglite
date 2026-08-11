@@ -1799,3 +1799,163 @@ fn lazy_eligibility_corpus() {
         "MATCH (p:Person) RETURN p.name AS name, p.age AS age"
     ));
 }
+
+// ============================================================================
+// text_score() — raw query vectors
+// ============================================================================
+//
+// `text_score(n, col, q)` is `vector_score(n, '{col}_emb', q)` after this
+// rewrite. A *vector*-shaped `q` therefore has nothing to embed: it passes
+// straight through, `texts_to_embed` stays empty, and `execute` never
+// consults an embedder (the embedder call is gated on a non-empty collect
+// list). A *string*-shaped `q` stays text even when it looks like
+// `"[1.0, 2.0]"` — that ambiguity is resolved in favour of text, and
+// CYPHER.md says so.
+
+/// Rewrite helper: parse, rewrite, return the query plus the collected texts.
+fn rewrite_ts(
+    query: &str,
+    params: &HashMap<String, Value>,
+) -> Result<(CypherQuery, Vec<(String, String)>), String> {
+    let mut parsed = parse_cypher(query).unwrap();
+    let rewrite = simplification::rewrite_text_score(&mut parsed, params)?;
+    Ok((parsed, rewrite.texts_to_embed))
+}
+
+/// The `text_score(...)` call in the first RETURN item.
+fn first_return_call(query: &CypherQuery) -> (&String, &Vec<Expression>) {
+    for clause in &query.clauses {
+        if let Clause::Return(r) = clause {
+            if let Expression::FunctionCall { name, args, .. } = &r.items[0].expression {
+                return (name, args);
+            }
+        }
+    }
+    panic!("expected a function call in the first RETURN item");
+}
+
+#[test]
+fn test_text_score_list_parameter_passes_through() {
+    let mut params = HashMap::new();
+    params.insert(
+        "q".to_string(),
+        Value::List(vec![Value::Float64(1.0), Value::Float64(0.0)]),
+    );
+    let (query, texts) = rewrite_ts(
+        "MATCH (n:Doc) RETURN text_score(n, 'summary', $q) AS s",
+        &params,
+    )
+    .unwrap();
+
+    // Nothing to embed → execute() never asks for an embedder.
+    assert!(texts.is_empty(), "a vector query must collect no text");
+
+    let (name, args) = first_return_call(&query);
+    assert_eq!(name, "vector_score");
+    assert!(matches!(
+        &args[1],
+        Expression::Literal(Value::String(s)) if s == "summary_emb"
+    ));
+    // arg 2 is untouched — the caller's own parameter reaches vector_score.
+    assert!(matches!(&args[2], Expression::Parameter(p) if p == "q"));
+}
+
+#[test]
+fn test_text_score_list_literal_passes_through() {
+    let params = HashMap::new();
+    let (query, texts) = rewrite_ts(
+        "MATCH (n:Doc) RETURN text_score(n, 'summary', [1.0, 0.0]) AS s",
+        &params,
+    )
+    .unwrap();
+
+    assert!(texts.is_empty());
+    let (name, args) = first_return_call(&query);
+    assert_eq!(name, "vector_score");
+    assert!(matches!(
+        &args[1],
+        Expression::Literal(Value::String(s)) if s == "summary_emb"
+    ));
+    assert!(matches!(&args[2], Expression::ListLiteral(_)));
+}
+
+#[test]
+fn test_text_score_metric_arg_survives_vector_passthrough() {
+    let mut params = HashMap::new();
+    params.insert(
+        "q".to_string(),
+        Value::List(vec![Value::Float64(1.0), Value::Float64(0.0)]),
+    );
+    let (query, texts) = rewrite_ts(
+        "MATCH (n:Doc) RETURN text_score(n, 'summary', $q, 'euclidean') AS s",
+        &params,
+    )
+    .unwrap();
+
+    assert!(texts.is_empty());
+    let (name, args) = first_return_call(&query);
+    assert_eq!(name, "vector_score");
+    assert_eq!(args.len(), 4);
+    assert!(matches!(
+        &args[3],
+        Expression::Literal(Value::String(m)) if m == "euclidean"
+    ));
+}
+
+#[test]
+fn test_text_score_string_parameter_still_collects_text() {
+    let mut params = HashMap::new();
+    params.insert("q".to_string(), Value::String("hello".to_string()));
+    let (query, texts) = rewrite_ts(
+        "MATCH (n:Doc) RETURN text_score(n, 'summary', $q) AS s",
+        &params,
+    )
+    .unwrap();
+
+    assert_eq!(texts.len(), 1);
+    assert_eq!(texts[0].1, "hello");
+    let (name, args) = first_return_call(&query);
+    assert_eq!(name, "vector_score");
+    assert!(matches!(&args[2], Expression::Parameter(p) if p == &texts[0].0));
+}
+
+#[test]
+fn test_text_score_json_shaped_string_stays_text() {
+    // Locked decision: a string is query *text* in text_score, even when it
+    // parses as a JSON vector. vector_score keeps the legacy JSON-string form.
+    let mut params = HashMap::new();
+    params.insert("q".to_string(), Value::String("[1.0, 0.0]".to_string()));
+    let (_, texts) = rewrite_ts(
+        "MATCH (n:Doc) RETURN text_score(n, 'summary', $q) AS s",
+        &params,
+    )
+    .unwrap();
+    assert_eq!(texts.len(), 1);
+    assert_eq!(texts[0].1, "[1.0, 0.0]");
+}
+
+#[test]
+fn test_text_score_rejects_non_string_non_list_parameter() {
+    let mut params = HashMap::new();
+    params.insert("q".to_string(), Value::Int64(7));
+    let err = rewrite_ts(
+        "MATCH (n:Doc) RETURN text_score(n, 'summary', $q) AS s",
+        &params,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("must be a string or a list of numbers"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_text_score_unknown_parameter_still_errors() {
+    let params = HashMap::new();
+    let err = rewrite_ts(
+        "MATCH (n:Doc) RETURN text_score(n, 'summary', $q) AS s",
+        &params,
+    )
+    .unwrap_err();
+    assert!(err.contains("not found"), "unexpected error: {err}");
+}

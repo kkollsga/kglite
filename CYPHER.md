@@ -34,7 +34,7 @@ surface at a glance — most of what you'd reach for is here, in-process:
 | **Expressions** | list comprehension `[x IN xs WHERE … \| …]`, `reduce(…)`, `CASE`, list/map literals, parameters `$p` |
 | **Aggregation** | `count` / `sum` / `avg` / `min` / `max` / `collect` / `percentile_cont` / `mode` / `stdev` …, `DISTINCT`, `HAVING`, window functions (`OVER`, `PARTITION BY`, ranking) |
 | **Procedures** (`CALL`) | centralities (pagerank, betweenness, closeness, degree), community (louvain, leiden, label propagation), components, k-core, clustering, `triangle_count` / `transitivity`, `eccentricity` / `diameter`, `ready_set` (dependency frontier), `shortest_path_length`, `kg_knn`, structural validators (`duplicate_title`, `cycle_2step`, `parallel_edges`, …) |
-| **Vector + text** | `vector_score(…)` (HNSW index, exact fallback), `text_score(…)` (pluggable embedder) — hybrid semantic + structural in one query |
+| **Vector + text** | `vector_score(…)` (HNSW index, exact fallback), `text_score(…)` (query vector, or query text via a pluggable embedder) — hybrid semantic + structural in one query |
 | **Spatial** | `point(…)`, `distance(…)`, `wkt_within` / `intersects`, buffer / hull / union, k-NN — see [Spatial](#spatial-functions) |
 | **Temporal** | `date()` / `datetime()` / `localdatetime()`, `duration(…)`, `duration.between`, date arithmetic, `valid_at` / `valid_during` — see [Temporal](#temporal-functions) |
 | **Value types** | int, float, string, bool, **date**, **timestamp** (date + time), duration, point, list, map, node, relationship, path |
@@ -376,7 +376,7 @@ graph.cypher("""
 | `longitude(point)` | Extract longitude from point |
 | `valid_at(e, date, 'from', 'to')` | Temporal point-in-time filter (nodes or edges) |
 | `valid_during(e, start, end, 'from', 'to')` | Temporal range overlap filter |
-| `text_score(n, prop, query)` | Semantic similarity (auto-embeds query text; requires `set_embedder()`) |
+| `text_score(n, prop, query)` | Semantic similarity. A **list** `query` is scored directly as your query vector; a **string** `query` is embedded first (requires `set_embedder()`) |
 | `text_score(n, prop, query, metric)` | With explicit metric (`'cosine'`, `'dot_product'`, `'euclidean'`, `'poincare'`) |
 | `vector_score(n, prop, vector [, metric])` | Semantic similarity against a pre-computed embedding vector (pass a list of floats directly, no `set_embedder()` needed) |
 | `embedding_norm(n, prop)` | L2 norm of embedding vector (hierarchy depth in Poincaré space: 0=root, ~1=leaf) |
@@ -426,11 +426,35 @@ the `summary` column are scored as `vector_score(a, 'summary_emb', …)`.
 
 > **`vector_score` takes the store name, `text_score` takes the raw column.**
 > `vector_score` names the store directly — `'summary_emb'`. `text_score` names
-> the source *column* — `'summary'` (it resolves to `summary_emb` and auto-embeds
-> the query for you). That's why the example above uses `text_score(p, 'text', …)`
-> (raw column `text`), not `'text_emb'`. The Python API (`embedding_info`,
-> `vector_search`, `search_text`) likewise uses the raw column name throughout;
-> only Cypher's `vector_score` is in store-name terms.
+> the source *column* — `'summary'` (it resolves to `summary_emb`). That's why
+> the example above uses `text_score(p, 'text', …)` (raw column `text`), not
+> `'text_emb'`. The Python API (`embedding_info`, `vector_search`,
+> `search_text`) likewise uses the raw column name throughout; only Cypher's
+> `vector_score` is in store-name terms.
+
+> **Both scoring functions accept your own query vector.** `text_score` is
+> `vector_score` after a plan-time rewrite, so the two differ only in how they
+> name the column and in how they read the query argument. Give either one a
+> list of numbers — a literal `[0.1, 0.2, …]` or a `$param` bound to a list —
+> and it scores that list directly as the query vector, needing only the
+> embedding store. That makes semantic scoring reachable from every binding:
+> any language that can send a list parameter can query by vector.
+>
+> ```cypher
+> // identical results; both need only the embedding store
+> RETURN vector_score(n, 'summary_emb', $q) AS s   // store name
+> RETURN text_score(n, 'summary', $q)     AS s     // raw column
+> ```
+>
+> **The query argument's type selects how it is scored.** In `text_score` a
+> list is scored as a vector and a string is scored as text — so
+> `text_score(n, 'summary', [1.0, 2.0])` scores that two-element vector, while
+> `text_score(n, 'summary', '[1.0, 2.0]')` embeds the 10-character string and
+> requires `set_embedder()`. `vector_score` reads a list as a vector and also
+> parses a JSON-array string as one (a legacy form kept for compatibility), so
+> pass a list to have both spellings agree. A `$param` used as the query
+> argument must be bound to a string or a list; plan-time validation reports
+> the type of anything else.
 
 > **Index-accelerated top-k.** When an HNSW index is built
 > (`build_vector_index`), a whole-corpus top-k —
@@ -2358,7 +2382,7 @@ below; do not infer absence from this shorter list.
 | **Math** | `abs`, `ceil`/`ceiling`, `floor`, `round`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand`, `randomUUID`, trig: `sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`cot`/`haversin`/`degrees`/`radians` |
 | **Spatial** | `point(lat, lon)`, `distance(a, b)`, `contains(a, b)`, `intersects(a, b)`, `centroid(n)`, `area(n)`, `perimeter(n)`, `latitude(point)`, `longitude(point)` |
 | **Temporal** | `date(str)`/`datetime(str)`, `localdatetime()`/`localtime()`/`time()` (ISO strings), `date_diff(d1, d2)`, `date ± N` (days), `date - date` → int, `d.year`/`d.month`/`d.day`, `valid_at(...)`, `valid_during(...)` |
-| **Semantic** | `text_score(n, prop, query [, metric])` — auto-embeds query via `set_embedder()`, cosine/dot_product/euclidean/poincare; `embedding_norm(n, prop)` — L2 norm (hierarchy depth) |
+| **Semantic** | `text_score(n, prop, query [, metric])` — scores a list `query` as a vector, embeds a string `query` via `set_embedder()`, cosine/dot_product/euclidean/poincare; `embedding_norm(n, prop)` — L2 norm (hierarchy depth) |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `SET n += map`, `SET n = map`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
 | **Procedures** | `CALL pagerank/betweenness/degree/closeness() YIELD node, score`, `CALL louvain/leiden() YIELD node, community [, level]` (multilevel, hierarchical — `leiden` guarantees well-connected communities), `CALL label_propagation() YIELD node, community`, `CALL connected_components() YIELD node, component`, `CALL k_core/coreness() YIELD node, coreness`, `CALL clustering_coefficient() YIELD node, coefficient`, `CALL cluster({method, ...}) YIELD node, cluster`, `CALL affected_tests({files: [...], max_depth?}) YIELD test_file, depth` (0.9.34+, code graphs), `CALL refresh_stats() YIELD src_type, edge_type, tgt_type, count` (0.9.35+, planner cardinality cache refresh), `CALL list_procedures()` |

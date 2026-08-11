@@ -688,7 +688,7 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
     }
     if has_embeddings {
         xml.push_str(
-            "    <semantic hint=\"text_score(n, 'col', 'query', metric) — similarity (metric: 'cosine'|'poincare'|'dot_product'|'euclidean'); embedding_norm(n, 'col') — L2 norm (hierarchy depth in Poincaré space)\"/>\n",
+            "    <semantic hint=\"text_score(n, 'col', 'query'|[0.1,0.2,...], metric) — similarity; a list query is scored as your query vector, a string query is embedded via set_embedder() (metric: 'cosine'|'poincare'|'dot_product'|'euclidean'); embedding_norm(n, 'col') — L2 norm (hierarchy depth in Poincaré space)\"/>\n",
         );
     }
     xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/leiden/label_propagation), component (connected_components), coreness (k_core), coefficient (clustering_coefficient), cluster (cluster), dependency_count (ready_set — nodes whose outgoing-E dependencies all satisfy a `done` predicate). Algorithms take optional {node_type, relationship} scoping.\"/>\n");

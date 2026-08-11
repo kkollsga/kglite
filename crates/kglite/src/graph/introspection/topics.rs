@@ -317,7 +317,7 @@ pub(super) fn write_topic_functions(xml: &mut String) {
     xml.push_str("    </examples>\n");
     xml.push_str("    <group name=\"temporal\">date(str)/datetime(str), localdatetime()/localtime()/time() (wall-clock now as ISO strings; 1-arg parse form), date_diff(d1,d2), date ± N (add/sub days), date - date → days (int), d.year/d.month/d.day</group>\n");
     xml.push_str("    <group name=\"window\">row_number() OVER (...), rank() OVER (...), dense_rank() OVER (...). Syntax: func() OVER (PARTITION BY expr ORDER BY expr [DESC]). PARTITION BY optional.</group>\n");
-    xml.push_str("    <group name=\"semantic\">text_score(n, 'col', 'query' [, metric]) — similarity score (metrics: 'cosine', 'poincare', 'dot_product', 'euclidean'); embedding_norm(n, 'col') — L2 norm of embedding vector (hierarchy depth in Poincaré space, 0=root, ~1=leaf)</group>\n");
+    xml.push_str("    <group name=\"semantic\">text_score(n, 'col', 'query'|[0.1,0.2,...] [, metric]) — similarity score; a list query is scored as your query vector, a string query is embedded via set_embedder() (metrics: 'cosine', 'poincare', 'dot_product', 'euclidean'); embedding_norm(n, 'col') — L2 norm of embedding vector (hierarchy depth in Poincaré space, 0=root, ~1=leaf)</group>\n");
     xml.push_str("  </functions>\n");
 }
 

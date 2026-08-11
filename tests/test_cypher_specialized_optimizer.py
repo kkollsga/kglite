@@ -11,6 +11,7 @@ SPECIALIZED_ORACLE_IDS = {
     "spatial_join",
     "vector_score_top_k",
     "text_score_top_k",
+    "text_score_vector_top_k",
 }
 
 PLANNER_SHAPE_TRIGGER_IDS = {
@@ -89,6 +90,27 @@ def specialized_vector_graph():
     vectors = {1: [1.0, 0.0], 2: [0.8, 0.2], 3: [0.0, 1.0]}
     graph.set_embeddings("Doc", "summary", vectors)
     graph.set_embedder(DeterministicEmbedder())
+    return graph
+
+
+@pytest.fixture
+def specialized_vector_graph_no_embedder():
+    """Same store, no embedding model — the raw-query-vector path."""
+    graph = kglite.KnowledgeGraph()
+    graph.add_nodes(
+        pd.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "title": ["alpha", "mixed", "beta"],
+                "summary": ["alpha", "mixed", "beta"],
+            }
+        ),
+        "Doc",
+        "id",
+        "title",
+        ["summary"],
+    )
+    graph.set_embeddings("Doc", "summary", {1: [1.0, 0.0], 2: [0.8, 0.2], 3: [0.0, 1.0]})
     return graph
 
 
@@ -202,6 +224,22 @@ ORACLES = {
         "query": (
             "MATCH (d:Doc) RETURN d.id AS id, text_score(d, 'summary', 'alpha') AS score ORDER BY score DESC LIMIT 2"
         ),
+        "ids": [1, 2],
+    },
+    # text_score with a caller-supplied query vector: the rewrite passes the
+    # vector through untouched, so the fused pass must still fire and must
+    # still agree with the unoptimized path. The fixture deliberately has no
+    # embedder — a vector query consults none.
+    "text_score_vector_top_k": {
+        "fixture": "specialized_vector_graph_no_embedder",
+        "pass": "fuse_vector_score_order_limit",
+        "disable": ["fuse_vector_score_order_limit", "fuse_order_by_top_k"],
+        "operator": "FusedVectorScoreTopK",
+        "query": (
+            "MATCH (d:Doc) RETURN d.id AS id, text_score(d, 'summary', $query_vector) AS score "
+            "ORDER BY score DESC LIMIT 2"
+        ),
+        "params": {"query_vector": [1.0, 0.0]},
         "ids": [1, 2],
     },
 }
