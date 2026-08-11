@@ -241,6 +241,11 @@ tasks.processTestResources {
 
 tasks.test {
     useJUnitPlatform()
+    // The forked test worker loads the native engine through FFM; its default
+    // heap is sized from the runner's cgroup, which GitHub reports too low, so
+    // the first CI run OOM'd here. Bound it explicitly — adequate everywhere,
+    // and 2 GB is comfortable on the 7 GB Linux runners alongside the daemon.
+    maxHeapSize = "2g"
     // ---------------------------------------------------------------------
     // Both real inputs of this suite are produced by cargo, outside the Gradle
     // project tree, and are reached at *runtime* — the header through a system
