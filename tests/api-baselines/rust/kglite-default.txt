@@ -912,6 +912,20 @@ pub fn kglite::api::embeddings::EmbeddingIngestReport::default() -> kglite::api:
 impl core::fmt::Debug for kglite::api::embeddings::EmbeddingIngestReport
 pub fn kglite::api::embeddings::EmbeddingIngestReport::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for kglite::api::embeddings::EmbeddingIngestReport
+pub struct kglite::api::embeddings::EmbeddingStoreInfo
+pub kglite::api::embeddings::EmbeddingStoreInfo::count: usize
+pub kglite::api::embeddings::EmbeddingStoreInfo::dimension: usize
+pub kglite::api::embeddings::EmbeddingStoreInfo::metric: alloc::string::String
+pub kglite::api::embeddings::EmbeddingStoreInfo::node_type: alloc::string::String
+pub kglite::api::embeddings::EmbeddingStoreInfo::text_column: alloc::string::String
+impl core::clone::Clone for kglite::api::embeddings::EmbeddingStoreInfo
+pub fn kglite::api::embeddings::EmbeddingStoreInfo::clone(&self) -> kglite::api::embeddings::EmbeddingStoreInfo
+impl core::cmp::Eq for kglite::api::embeddings::EmbeddingStoreInfo
+impl core::cmp::PartialEq for kglite::api::embeddings::EmbeddingStoreInfo
+pub fn kglite::api::embeddings::EmbeddingStoreInfo::eq(&self, other: &kglite::api::embeddings::EmbeddingStoreInfo) -> bool
+impl core::fmt::Debug for kglite::api::embeddings::EmbeddingStoreInfo
+pub fn kglite::api::embeddings::EmbeddingStoreInfo::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::embeddings::EmbeddingStoreInfo
 pub struct kglite::api::embeddings::VectorIndexReport
 pub kglite::api::embeddings::VectorIndexReport::indexed: usize
 pub kglite::api::embeddings::VectorIndexReport::m: usize
@@ -926,6 +940,7 @@ pub fn kglite::api::embeddings::VectorIndexReport::fmt(&self, f: &mut core::fmt:
 impl core::marker::StructuralPartialEq for kglite::api::embeddings::VectorIndexReport
 pub fn kglite::api::embeddings::add_embeddings<I, V>(graph: &mut kglite::api::DirGraph, node_type: &str, text_column: &str, metric: core::option::Option<&str>, entries: I) -> core::result::Result<kglite::api::embeddings::EmbeddingIngestReport, alloc::string::String> where I: core::iter::traits::collect::IntoIterator<Item = (kglite::datatypes::values::Value, V)>, V: core::convert::AsRef<[f32]>
 pub fn kglite::api::embeddings::build_vector_index(graph: &mut kglite::api::DirGraph, node_type: &str, text_column: &str, m: core::option::Option<usize>, ef_construction: core::option::Option<usize>, ef_search: core::option::Option<usize>, metric: core::option::Option<&str>) -> core::result::Result<kglite::api::embeddings::VectorIndexReport, alloc::string::String>
+pub fn kglite::api::embeddings::list_embeddings(graph: &kglite::api::DirGraph) -> alloc::vec::Vec<kglite::api::embeddings::EmbeddingStoreInfo>
 pub fn kglite::api::embeddings::set_embeddings<I, V>(graph: &mut kglite::api::DirGraph, node_type: &str, text_column: &str, metric: core::option::Option<&str>, entries: I) -> core::result::Result<kglite::api::embeddings::EmbeddingIngestReport, alloc::string::String> where I: core::iter::traits::collect::IntoIterator<Item = (kglite::datatypes::values::Value, V)>, V: core::convert::AsRef<[f32]>
 pub fn kglite::api::embeddings::store_key(node_type: &str, text_column: &str) -> (alloc::string::String, alloc::string::String)
 pub mod kglite::api::fluent

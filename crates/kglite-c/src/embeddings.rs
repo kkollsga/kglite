@@ -28,7 +28,9 @@
 use crate::session::{KgliteSession, SessionState};
 use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
-use kglite::api::embeddings::{add_embeddings, build_vector_index, set_embeddings};
+use kglite::api::embeddings::{
+    add_embeddings, build_vector_index, list_embeddings, set_embeddings,
+};
 use kglite::api::param::json_value_to_kglite_value;
 use kglite::api::Value;
 use std::ffi::{c_char, CStr};
@@ -488,17 +490,15 @@ pub unsafe extern "C" fn kglite_session_list_embeddings(
             }
             let session_state = unsafe { SessionState::from_handle(session) };
             let snapshot = session_state.inner.snapshot();
-            let stores: Vec<serde_json::Value> = snapshot
-                .embeddings
-                .iter()
-                .map(|((node_type, store_name), store)| {
-                    let text_column = store_name.strip_suffix("_emb").unwrap_or(store_name);
+            let stores: Vec<serde_json::Value> = list_embeddings(&snapshot)
+                .into_iter()
+                .map(|info| {
                     serde_json::json!({
-                        "node_type": node_type,
-                        "text_column": text_column,
-                        "dimension": store.dimension,
-                        "count": store.len(),
-                        "metric": store.metric.as_deref().unwrap_or("cosine"),
+                        "node_type": info.node_type,
+                        "text_column": info.text_column,
+                        "dimension": info.dimension,
+                        "count": info.count,
+                        "metric": info.metric,
                     })
                 })
                 .collect();

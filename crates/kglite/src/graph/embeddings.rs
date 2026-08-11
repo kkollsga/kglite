@@ -65,11 +65,54 @@ pub struct VectorIndexReport {
     pub m: usize,
 }
 
+/// One embedding store's descriptor, as reported by [`list_embeddings`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingStoreInfo {
+    /// The node type the store is keyed on.
+    pub node_type: String,
+    /// The source column the vectors were built from — the store's `_emb`
+    /// suffix stripped, so it names what the caller passed to
+    /// [`set_embeddings`], never the store.
+    pub text_column: String,
+    /// The store's vector dimension.
+    pub dimension: usize,
+    /// Vectors currently in the store.
+    pub count: usize,
+    /// The distance metric the store is scored with; `"cosine"` when the store
+    /// recorded none.
+    pub metric: String,
+}
+
 /// The store key for a source column: `(node_type, "{text_column}_emb")`.
 ///
 /// The one place the `_emb` suffix is derived on the write path.
 pub fn store_key(node_type: &str, text_column: &str) -> (String, String) {
     (node_type.to_string(), format!("{}_emb", text_column))
+}
+
+/// List every embedding store on the graph — a read-only projection, one
+/// [`EmbeddingStoreInfo`] per store.
+///
+/// The shared read side behind every binding's `list_embeddings`. It derives
+/// the source column (stripping the `_emb` suffix, the read-side inverse of
+/// [`store_key`]) and defaults an unrecorded metric to `"cosine"`, so a wrapper
+/// renders the descriptors without re-deriving either. Takes no lock and forks
+/// nothing; order follows the underlying map and is unspecified.
+pub fn list_embeddings(graph: &DirGraph) -> Vec<EmbeddingStoreInfo> {
+    graph
+        .embeddings
+        .iter()
+        .map(|((node_type, store_name), store)| EmbeddingStoreInfo {
+            node_type: node_type.clone(),
+            text_column: store_name
+                .strip_suffix("_emb")
+                .unwrap_or(store_name)
+                .to_string(),
+            dimension: store.dimension,
+            count: store.len(),
+            metric: store.metric.as_deref().unwrap_or("cosine").to_string(),
+        })
+        .collect()
 }
 
 /// Replace the store for `(node_type, "{text_column}_emb")` with `entries`.

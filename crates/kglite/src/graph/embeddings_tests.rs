@@ -341,3 +341,41 @@ fn store_key_derives_the_emb_suffix_once() {
         ("Doc".to_string(), "summary_emb".to_string())
     );
 }
+
+#[test]
+fn list_embeddings_projects_source_column_and_defaults_metric() {
+    let mut g = docs(&[1, 2]);
+    assert!(
+        list_embeddings(&g).is_empty(),
+        "a graph with no stores lists nothing"
+    );
+
+    set_embeddings(
+        &mut g,
+        "Doc",
+        "summary",
+        Some("dot_product"),
+        batch(&[(1, [1.0, 0.0]), (2, [0.0, 1.0])]),
+    )
+    .unwrap();
+
+    let listing = list_embeddings(&g);
+    assert_eq!(
+        listing,
+        vec![EmbeddingStoreInfo {
+            node_type: "Doc".to_string(),
+            // the source column, not the "summary_emb" store name
+            text_column: "summary".to_string(),
+            dimension: 2,
+            count: 2,
+            metric: "dot_product".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn list_embeddings_defaults_an_unrecorded_metric_to_cosine() {
+    let mut g = docs(&[1]);
+    set_embeddings(&mut g, "Doc", "summary", None, batch(&[(1, [1.0, 0.0])])).unwrap();
+    assert_eq!(list_embeddings(&g)[0].metric, "cosine");
+}

@@ -337,16 +337,13 @@ impl KnowledgeGraph {
     ///     List of dicts with 'node_type', 'text_column', 'dimension', 'count', 'metric'.
     fn list_embeddings(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let py_list = PyList::empty(py);
-        for ((node_type, store_name), store) in &self.inner.embeddings {
-            let text_column = store_name
-                .strip_suffix("_emb")
-                .unwrap_or(store_name.as_str());
+        for info in kglite_core::api::embeddings::list_embeddings(&self.inner) {
             let dict = PyDict::new(py);
-            dict.set_item("node_type", node_type)?;
-            dict.set_item("text_column", text_column)?;
-            dict.set_item("dimension", store.dimension)?;
-            dict.set_item("count", store.len())?;
-            dict.set_item("metric", store.metric.as_deref().unwrap_or("cosine"))?;
+            dict.set_item("node_type", info.node_type)?;
+            dict.set_item("text_column", info.text_column)?;
+            dict.set_item("dimension", info.dimension)?;
+            dict.set_item("count", info.count)?;
+            dict.set_item("metric", info.metric)?;
             py_list.append(dict)?;
         }
         py_list.into_py_any(py)
