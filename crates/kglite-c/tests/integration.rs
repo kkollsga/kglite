@@ -17,11 +17,13 @@ use kglite_c::{
     kglite_cypher_result_row_count, kglite_cypher_result_rows_json, kglite_free_bytes,
     kglite_free_string, kglite_graph_free, kglite_graph_from_bytes, kglite_graph_new,
     kglite_graph_to_bytes, kglite_load_file, kglite_open_or_create_graph_in_mode,
-    kglite_save_graph_durable, kglite_session_execute_mut, kglite_session_execute_mut_batch,
-    kglite_session_execute_mut_opts, kglite_session_execute_read,
-    kglite_session_execute_read_batch, kglite_session_execute_read_opts, kglite_session_free,
-    kglite_session_new, kglite_session_save, kglite_writer_lease_acquire, kglite_writer_lease_free,
-    KgliteCypherResult, KgliteGraph, KgliteSession, KgliteStatusCode, KgliteWriterLease,
+    kglite_save_graph_durable, kglite_session_add_embeddings, kglite_session_build_vector_index,
+    kglite_session_execute_mut, kglite_session_execute_mut_batch, kglite_session_execute_mut_opts,
+    kglite_session_execute_read, kglite_session_execute_read_batch,
+    kglite_session_execute_read_opts, kglite_session_free, kglite_session_list_embeddings,
+    kglite_session_new, kglite_session_save, kglite_session_set_embeddings,
+    kglite_writer_lease_acquire, kglite_writer_lease_free, KgliteCypherResult, KgliteGraph,
+    KgliteSession, KgliteStatusCode, KgliteWriterLease,
 };
 
 #[cfg(feature = "fastembed")]
@@ -1205,4 +1207,427 @@ fn fallible_exports_clear_all_outputs_before_validation() {
         }
     }
     unsafe { kglite_session_free(owned_session) };
+}
+
+// ── embedding ingest (kglite_session_{set,add}_embeddings,
+//    build_vector_index, list_embeddings) ─────────────────────────────
+
+/// Build a session over a fresh in-memory graph and seed `Note` nodes with
+/// a `body` text column (the ingest primitive requires the source column to
+/// exist on at least one node of the type).
+fn seed_notes(create: &str) -> *mut KgliteSession {
+    let graph = kglite_graph_new();
+    let mut session: *mut KgliteSession = std::ptr::null_mut();
+    unsafe { kglite_session_new(graph, &mut session as *mut _) };
+    let create = CString::new(create).unwrap();
+    let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_execute_mut(
+            session,
+            create.as_ptr(),
+            std::ptr::null(),
+            &mut result as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok, "seed failed");
+    unsafe { kglite_cypher_result_free(result) };
+    session
+}
+
+/// Call `kglite_session_set_embeddings` with packed floats, returning
+/// (status, report-json, error-msg).
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn set_embeddings(
+    session: *mut KgliteSession,
+    node_type: &str,
+    text_column: &str,
+    ids_json: &str,
+    vectors: &[f32],
+    dim: usize,
+    count: usize,
+    metric: Option<&str>,
+) -> (KgliteStatusCode, Option<serde_json::Value>, Option<String>) {
+    ingest_call(
+        session,
+        node_type,
+        text_column,
+        ids_json,
+        vectors,
+        dim,
+        count,
+        metric,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ingest_call(
+    session: *mut KgliteSession,
+    node_type: &str,
+    text_column: &str,
+    ids_json: &str,
+    vectors: &[f32],
+    dim: usize,
+    count: usize,
+    metric: Option<&str>,
+    add: bool,
+) -> (KgliteStatusCode, Option<serde_json::Value>, Option<String>) {
+    let nt = CString::new(node_type).unwrap();
+    let tc = CString::new(text_column).unwrap();
+    let ids = CString::new(ids_json).unwrap();
+    let metric_c = metric.map(|m| CString::new(m).unwrap());
+    let metric_ptr = metric_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
+    let mut report: *const c_char = std::ptr::null();
+    let mut err: *const c_char = std::ptr::null();
+    let func = if add {
+        kglite_session_add_embeddings
+    } else {
+        kglite_session_set_embeddings
+    };
+    let status = unsafe {
+        func(
+            session,
+            nt.as_ptr(),
+            tc.as_ptr(),
+            ids.as_ptr(),
+            vectors.as_ptr(),
+            dim,
+            count,
+            metric_ptr,
+            &mut report as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    let report_json = (!report.is_null()).then(|| {
+        let s = unsafe { CStr::from_ptr(report) }.to_str().unwrap();
+        let v = serde_json::from_str(s).unwrap();
+        unsafe { kglite_free_string(report) };
+        v
+    });
+    let err_msg = (!err.is_null()).then(|| {
+        let s = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_string();
+        unsafe { kglite_free_string(err) };
+        s
+    });
+    (status, report_json, err_msg)
+}
+
+/// Run a read query with JSON params and return the parsed rows array.
+fn query_rows(session: *mut KgliteSession, query: &str, params: &str) -> serde_json::Value {
+    let q = CString::new(query).unwrap();
+    let p = CString::new(params).unwrap();
+    let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_execute_read(
+            session,
+            q.as_ptr(),
+            p.as_ptr(),
+            &mut result as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok, "query failed: {query}");
+    let rows_ptr = unsafe { kglite_cypher_result_rows_json(result) };
+    let rows: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(rows_ptr) }.to_str().unwrap()).unwrap();
+    unsafe { kglite_free_string(rows_ptr) };
+    unsafe { kglite_cypher_result_free(result) };
+    rows
+}
+
+/// End-to-end: packed-float ingest → build index → query with a raw query
+/// vector through `vector_score`, asserting the ranking. The ordering
+/// assertion is the readback that catches a packed-float offset bug —
+/// mis-slicing the buffer scrambles which id owns which vector and flips the
+/// order. This is the assertion §7.2 requires: never merely `status == OK`.
+#[test]
+fn set_embeddings_then_vector_score_ranks_by_packed_vectors() {
+    let session = seed_notes(
+        "CREATE (:Note {id: 1, body: 'a'}), (:Note {id: 2, body: 'b'}), (:Note {id: 3, body: 'c'})",
+    );
+
+    // id 1 -> [1,0], id 2 -> [0,1], id 3 -> [0.9, 0.1]. Row-major, aligned
+    // with ids_json order.
+    let vectors: Vec<f32> = vec![1.0, 0.0, 0.0, 1.0, 0.9, 0.1];
+    let (status, report, err) = set_embeddings(
+        session,
+        "Note",
+        "body",
+        "[1, 2, 3]",
+        &vectors,
+        2,
+        3,
+        Some("cosine"),
+    );
+    assert_eq!(status, KgliteStatusCode::Ok, "err: {err:?}");
+    let report = report.expect("report json");
+    assert_eq!(report["embeddings_stored"], 3);
+    assert_eq!(report["dimension"], 2);
+    assert_eq!(report["skipped"], 0);
+    assert_eq!(report["store_created"], true);
+
+    // The store must be readable right after the call (the §7.2 assertion) —
+    // vector_score names the STORE ('body_emb'), the query vector rides $q.
+    let rows = query_rows(
+        session,
+        "MATCH (n:Note) RETURN n.id AS id, vector_score(n, 'body_emb', $q) AS s ORDER BY s DESC",
+        r#"{"q": [1.0, 0.0]}"#,
+    );
+    let ids: Vec<i64> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![1, 3, 2], "ranking must follow the packed vectors");
+    // Cosine of the query against id 1's own vector is exactly 1.0.
+    assert!((rows[0]["s"].as_f64().unwrap() - 1.0).abs() < 1e-6);
+
+    // Build the index, then the same query still ranks correctly (the build
+    // must not corrupt the store).
+    let nt = CString::new("Note").unwrap();
+    let tc = CString::new("body").unwrap();
+    let mut ireport: *const c_char = std::ptr::null();
+    let mut ierr: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_build_vector_index(
+            session,
+            nt.as_ptr(),
+            tc.as_ptr(),
+            0,
+            0,
+            0,
+            std::ptr::null(),
+            &mut ireport as *mut _,
+            &mut ierr as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok, "build_vector_index failed");
+    let ireport_json: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(ireport) }.to_str().unwrap()).unwrap();
+    assert_eq!(ireport_json["indexed"], 3);
+    assert_eq!(ireport_json["metric"], "cosine");
+    unsafe { kglite_free_string(ireport) };
+
+    let rows = query_rows(
+        session,
+        "MATCH (n:Note) RETURN n.id AS id, vector_score(n, 'body_emb', $q) AS s ORDER BY s DESC",
+        r#"{"q": [1.0, 0.0]}"#,
+    );
+    let ids: Vec<i64> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![1, 3, 2], "ranking must survive index build");
+
+    // list_embeddings reports the store.
+    let mut lreport: *const c_char = std::ptr::null();
+    let mut lerr: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_list_embeddings(session, &mut lreport as *mut _, &mut lerr as *mut _)
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    let list: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(lreport) }.to_str().unwrap()).unwrap();
+    unsafe { kglite_free_string(lreport) };
+    let arr = list.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["node_type"], "Note");
+    assert_eq!(arr[0]["text_column"], "body");
+    assert_eq!(arr[0]["dimension"], 2);
+    assert_eq!(arr[0]["count"], 3);
+    assert_eq!(arr[0]["metric"], "cosine");
+
+    unsafe { kglite_session_free(session) };
+}
+
+/// `add_embeddings` upserts across batches and reports `store_created`.
+#[test]
+fn add_embeddings_upserts_across_batches() {
+    let session = seed_notes("CREATE (:Note {id: 1, body: 'a'}), (:Note {id: 2, body: 'b'})");
+
+    let (status, report, err) = ingest_call(
+        session,
+        "Note",
+        "body",
+        "[1]",
+        &[1.0, 0.0],
+        2,
+        1,
+        Some("cosine"),
+        true,
+    );
+    assert_eq!(status, KgliteStatusCode::Ok, "err: {err:?}");
+    assert_eq!(report.unwrap()["store_created"], true);
+
+    // Second batch into the same store: creates nothing, extends it.
+    let (status, report, _) = ingest_call(
+        session,
+        "Note",
+        "body",
+        "[2]",
+        &[0.0, 1.0],
+        2,
+        1,
+        None,
+        true,
+    );
+    assert_eq!(status, KgliteStatusCode::Ok);
+    let report = report.unwrap();
+    assert_eq!(report["store_created"], false);
+    assert_eq!(report["embeddings_stored"], 2);
+
+    unsafe { kglite_session_free(session) };
+}
+
+/// An unresolvable id is skipped and counted, never fatal.
+#[test]
+fn set_embeddings_skips_unknown_ids() {
+    let session = seed_notes("CREATE (:Note {id: 1, body: 'a'})");
+    let (status, report, err) = set_embeddings(
+        session,
+        "Note",
+        "body",
+        "[1, 999]",
+        &[1.0, 0.0, 0.0, 1.0],
+        2,
+        2,
+        None,
+    );
+    assert_eq!(status, KgliteStatusCode::Ok, "err: {err:?}");
+    let report = report.unwrap();
+    assert_eq!(report["embeddings_stored"], 1);
+    assert_eq!(report["skipped"], 1);
+    unsafe { kglite_session_free(session) };
+}
+
+/// A null required argument is rejected with `NullPointer`, and the report
+/// slot is reset to null before validation.
+#[test]
+fn set_embeddings_rejects_null_arguments() {
+    let session = seed_notes("CREATE (:Note {id: 1, body: 'a'})");
+    let tc = CString::new("body").unwrap();
+    let ids = CString::new("[1]").unwrap();
+    let vectors = [1.0f32, 0.0];
+    let mut report: *const c_char = std::ptr::NonNull::<c_char>::dangling().as_ptr();
+    let mut err: *const c_char = std::ptr::null();
+    // node_type is null.
+    let status = unsafe {
+        kglite_session_set_embeddings(
+            session,
+            std::ptr::null(),
+            tc.as_ptr(),
+            ids.as_ptr(),
+            vectors.as_ptr(),
+            2,
+            1,
+            std::ptr::null(),
+            &mut report as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(status, KgliteStatusCode::NullPointer);
+    assert!(report.is_null(), "report slot must reset before validation");
+    unsafe { kglite_session_free(session) };
+}
+
+/// `ids_json` whose length disagrees with `count` is `InvalidArgument`, not a
+/// silent truncation or over-read of the packed buffer.
+#[test]
+fn set_embeddings_rejects_id_count_mismatch() {
+    let session = seed_notes("CREATE (:Note {id: 1, body: 'a'}), (:Note {id: 2, body: 'b'})");
+    // count says 2, ids_json has 1.
+    let (status, report, err) = set_embeddings(
+        session,
+        "Note",
+        "body",
+        "[1]",
+        &[1.0, 0.0, 0.0, 1.0],
+        2,
+        2,
+        None,
+    );
+    assert_eq!(status, KgliteStatusCode::InvalidArgument);
+    assert!(report.is_none());
+    assert!(
+        err.is_none(),
+        "a boundary-shape rejection has no engine message"
+    );
+    unsafe { kglite_session_free(session) };
+}
+
+/// `count == 0` is the empty batch: a zero report, no store created, and a
+/// null `vectors` pointer is tolerated (never dereferenced).
+#[test]
+fn set_embeddings_empty_batch_is_a_noop() {
+    let session = seed_notes("CREATE (:Note {id: 1, body: 'a'})");
+    let nt = CString::new("Note").unwrap();
+    let tc = CString::new("body").unwrap();
+    let ids = CString::new("[]").unwrap();
+    let mut report: *const c_char = std::ptr::null();
+    let mut err: *const c_char = std::ptr::null();
+    let status = unsafe {
+        kglite_session_set_embeddings(
+            session,
+            nt.as_ptr(),
+            tc.as_ptr(),
+            ids.as_ptr(),
+            std::ptr::null(), // vectors null, allowed when count == 0
+            0,
+            0,
+            std::ptr::null(),
+            &mut report as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(status, KgliteStatusCode::Ok, "err: {err:?}");
+    let report_json: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(report) }.to_str().unwrap()).unwrap();
+    unsafe { kglite_free_string(report) };
+    assert_eq!(report_json["embeddings_stored"], 0);
+    assert_eq!(report_json["store_created"], false);
+
+    // No store exists.
+    let mut lreport: *const c_char = std::ptr::null();
+    let mut lerr: *const c_char = std::ptr::null();
+    unsafe { kglite_session_list_embeddings(session, &mut lreport as *mut _, &mut lerr as *mut _) };
+    let list: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(lreport) }.to_str().unwrap()).unwrap();
+    unsafe { kglite_free_string(lreport) };
+    assert_eq!(list.as_array().unwrap().len(), 0);
+    unsafe { kglite_session_free(session) };
+}
+
+/// Building an index for a store that does not exist is a clean
+/// `InvalidArgument` with an explanatory message, not a panic.
+#[test]
+fn build_vector_index_without_a_store_errors() {
+    let session = seed_notes("CREATE (:Note {id: 1, body: 'a'})");
+    let nt = CString::new("Note").unwrap();
+    let tc = CString::new("body").unwrap();
+    let mut report: *const c_char = std::ptr::null();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_build_vector_index(
+            session,
+            nt.as_ptr(),
+            tc.as_ptr(),
+            0,
+            0,
+            0,
+            std::ptr::null(),
+            &mut report as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::InvalidArgument);
+    assert!(report.is_null());
+    assert!(!err.is_null(), "a rejected build must explain itself");
+    unsafe { kglite_free_string(err) };
+    unsafe { kglite_session_free(session) };
 }

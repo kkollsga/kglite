@@ -45,6 +45,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   were spelled independently in the engine and the Python builder, are resolved
   in one place.
 
+- **C ABI: embedding ingest on the session.** Four additive symbols let a
+  non-Rust binding write vectors and build the ANN index it can already query:
+  `kglite_session_set_embeddings` and `kglite_session_add_embeddings` take the
+  vectors as a packed `const float *` (dim × count, row-major) with the ids as
+  a JSON array, `kglite_session_build_vector_index` builds the HNSW index, and
+  `kglite_session_list_embeddings` enumerates the stores. Each returns an owned
+  JSON report. The ingest calls run under the session write lock and are
+  all-or-nothing; the stores are checkpoint-only, so call
+  `kglite_session_save` to persist them. Existing symbols are unchanged — the
+  generated `include/kglite.h` gains only these four.
+
 ### Changed
 
 - **`add_embeddings` requires its source column to exist**, matching

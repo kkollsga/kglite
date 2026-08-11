@@ -307,6 +307,173 @@ KgliteStatusCode kglite_embedder_fastembed_new(const char *model_name,
 #endif
 
 /**
+ * Replace the embedding store for `(node_type, "{text_column}_emb")` with
+ * `count` vectors keyed by the ids in `ids_json`.
+ *
+ * Wraps [`kglite::api::embeddings::set_embeddings`]: the store — dimension,
+ * metric and provenance — is discarded and rebuilt, so this is the "these are
+ * the vectors" call. Use [`kglite_session_add_embeddings`] to extend a store
+ * across several batches.
+ *
+ * `vectors` is `dim * count` `f32`s, row-major: vector `i` is
+ * `vectors[i*dim .. (i+1)*dim]`, aligned with id `i` in `ids_json`. An id that
+ * matches no node of `node_type` is counted as `skipped`, never fatal. The
+ * dimension is taken from the batch; every vector must share it. `metric` (may
+ * be null) names the distance the store is scored with — `"cosine"`,
+ * `"dot_product"`, `"euclidean"`, `"poincare"`; null scores with cosine.
+ *
+ * `count == 0` (or a null `vectors` with `count == 0`) is the empty batch: no
+ * write, a zero report, no version bump. `ids_json` must always be a JSON array
+ * of exactly `count` ids.
+ *
+ * On success `out_report_json` is an owned JSON object
+ * `{"embeddings_stored": N, "dimension": D, "skipped": M, "store_created": true}`;
+ * free it with [`kglite_free_string`](crate::kglite_free_string).
+ *
+ * # Errors
+ *
+ * - `KGLITE_ERR_NULL_POINTER` — `session`, `node_type`, `text_column`,
+ *   `ids_json`, or `out_report_json` is null (or `vectors` is null with
+ *   `count > 0`).
+ * - `KGLITE_ERR_INVALID_UTF8` — a string argument is not valid UTF-8.
+ * - `KGLITE_ERR_INVALID_ARGUMENT` — `ids_json` is not a JSON array of exactly
+ *   `count` ids, `dim == 0` with `count > 0`, or the engine rejected the batch
+ *   (unknown node type, inconsistent dimension, unknown metric); the message
+ *   explains which.
+ *
+ * **The store is not durable until saved.** Embeddings are checkpoint-only;
+ * call [`kglite_session_save`](crate::kglite_session_save) to persist them.
+ *
+ * # Safety
+ *
+ * `session` must be a valid handle from
+ * [`kglite_session_new`](crate::kglite_session_new). `node_type`,
+ * `text_column` and `ids_json` must be null-terminated UTF-8 strings; `metric`
+ * null or the same. `vectors` must point to at least `dim * count` readable
+ * `f32`s (unread when `count == 0`). `out_report_json` must be a valid writable
+ * slot; `out_error_msg` null or a valid writable slot.
+ */
+
+KgliteStatusCode kglite_session_set_embeddings(struct KgliteSession *session,
+                                               const char *node_type,
+                                               const char *text_column,
+                                               const char *ids_json,
+                                               const float *vectors,
+                                               uintptr_t dim,
+                                               uintptr_t count,
+                                               const char *metric,
+                                               const char **out_report_json,
+                                               const char **out_error_msg);
+
+/**
+ * Upsert `count` vectors into the store for `(node_type, "{text_column}_emb")`,
+ * creating it if it does not exist yet.
+ *
+ * Wraps [`kglite::api::embeddings::add_embeddings`]: the incremental
+ * counterpart to [`kglite_session_set_embeddings`]. Ids already in the store
+ * replace their vector in place; the rest are appended. When the store already
+ * exists its dimension is authoritative and every incoming vector must match
+ * it; `metric` applies only to the call that creates the store.
+ *
+ * Parameters, buffer layout, empty-batch and durability semantics are
+ * identical to [`kglite_session_set_embeddings`]. The report additionally
+ * reports whether this call created the store:
+ * `{"embeddings_stored": N, "dimension": D, "skipped": M, "store_created": B}`.
+ *
+ * # Errors
+ *
+ * Same as [`kglite_session_set_embeddings`].
+ *
+ * # Safety
+ *
+ * Same as [`kglite_session_set_embeddings`].
+ */
+
+KgliteStatusCode kglite_session_add_embeddings(struct KgliteSession *session,
+                                               const char *node_type,
+                                               const char *text_column,
+                                               const char *ids_json,
+                                               const float *vectors,
+                                               uintptr_t dim,
+                                               uintptr_t count,
+                                               const char *metric,
+                                               const char **out_report_json,
+                                               const char **out_error_msg);
+
+/**
+ * Build an HNSW index over the store for `(node_type, "{text_column}_emb")`,
+ * accelerating whole-corpus top-k vector search.
+ *
+ * Wraps [`kglite::api::embeddings::build_vector_index`]. Any later vector write
+ * drops the index, so build it after ingest. `m`, `ef_construction` and
+ * `ef_search` use the engine default when passed `0` and are clamped to their
+ * valid range otherwise. `metric` (may be null) resolves as explicit argument,
+ * then the store's own metric, then cosine; `"cosine"`, `"dot_product"` and
+ * `"euclidean"` are indexable, and `"poincare"` is rejected (its search stays
+ * on the exact path).
+ *
+ * On success `out_report_json` is an owned JSON object
+ * `{"indexed": N, "metric": "cosine", "m": M}`; free it with
+ * [`kglite_free_string`](crate::kglite_free_string).
+ *
+ * # Errors
+ *
+ * - `KGLITE_ERR_NULL_POINTER` — `session`, `node_type`, `text_column`, or
+ *   `out_report_json` is null.
+ * - `KGLITE_ERR_INVALID_UTF8` — a string argument is not valid UTF-8.
+ * - `KGLITE_ERR_INVALID_ARGUMENT` — no store to index, an unknown or
+ *   non-indexable metric; the message explains which.
+ *
+ * # Safety
+ *
+ * `session` must be a valid handle from
+ * [`kglite_session_new`](crate::kglite_session_new). `node_type` and
+ * `text_column` must be null-terminated UTF-8 strings; `metric` null or the
+ * same. `out_report_json` must be a valid writable slot; `out_error_msg` null
+ * or a valid writable slot.
+ */
+
+KgliteStatusCode kglite_session_build_vector_index(struct KgliteSession *session,
+                                                   const char *node_type,
+                                                   const char *text_column,
+                                                   uintptr_t m,
+                                                   uintptr_t ef_construction,
+                                                   uintptr_t ef_search,
+                                                   const char *metric,
+                                                   const char **out_report_json,
+                                                   const char **out_error_msg);
+
+/**
+ * List every embedding store on the session's graph.
+ *
+ * A read-only projection of the graph's embedding stores — the C companion to
+ * the Python `list_embeddings()`. Reads a snapshot, so it takes no write lock
+ * and never forks.
+ *
+ * On success `out_report_json` is an owned JSON array, one object per store:
+ * `{"node_type": "Note", "text_column": "body", "dimension": 384,
+ *   "count": 1000, "metric": "cosine"}`. `text_column` is the source column
+ * (the store's `"_emb"` suffix stripped), and `metric` is the store's own
+ * metric or `"cosine"` when it recorded none. Free it with
+ * [`kglite_free_string`](crate::kglite_free_string). A graph with no stores
+ * returns `"[]"`.
+ *
+ * # Errors
+ *
+ * - `KGLITE_ERR_NULL_POINTER` — `session` or `out_report_json` is null.
+ *
+ * # Safety
+ *
+ * `session` must be a valid handle from
+ * [`kglite_session_new`](crate::kglite_session_new). `out_report_json` must be
+ * a valid writable slot; `out_error_msg` null or a valid writable slot.
+ */
+
+KgliteStatusCode kglite_session_list_embeddings(const struct KgliteSession *session,
+                                                const char **out_report_json,
+                                                const char **out_error_msg);
+
+/**
  * Create a new, empty in-memory knowledge graph.
  *
  * The returned handle owns a fresh, empty `DirGraph` — the C-side

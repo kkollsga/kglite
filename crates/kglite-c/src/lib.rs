@@ -22,6 +22,8 @@
 //!   open-or-create.
 //! - [`session`] — `KgliteSession` opaque handle + execute_read /
 //!   execute_mut.
+//! - [`embeddings`] — packed-float embedding ingest + vector-index build on
+//!   the session.
 //! - [`result`] — `KgliteCypherResult` opaque handle + JSON accessors.
 //! - [`alloc`] — tracking global allocator + `kglite_memory_stats`.
 //!
@@ -31,6 +33,7 @@
 pub mod abi;
 pub mod alloc;
 pub mod embedder;
+pub mod embeddings;
 mod ffi;
 pub mod graph;
 pub mod open;
@@ -46,6 +49,7 @@ pub mod strings;
 pub use abi::*;
 pub use alloc::*;
 pub use embedder::*;
+pub use embeddings::*;
 pub use graph::*;
 pub use open::*;
 pub use result::*;
