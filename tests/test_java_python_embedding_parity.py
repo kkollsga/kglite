@@ -70,13 +70,39 @@ def _hard_required() -> bool:
     return os.environ.get("KGLITE_JAVA_PARITY") == "1"
 
 
+def _java_runs(candidate: str) -> bool:
+    """Whether ``candidate`` is a working JDK, not just a file on PATH.
+
+    macOS ships a ``/usr/bin/java`` shim that exists and resolves through
+    ``shutil.which`` but exits non-zero with "Unable to locate a Java Runtime"
+    when no JDK is installed. A file check would call that a java and the
+    harness would fail at runtime; running ``-version`` is what tells a
+    usable runtime from the shim, so an environment without a JDK skips
+    (when the leg is optional) rather than failing.
+    """
+    try:
+        return (
+            subprocess.run(
+                [candidate, "-version"],
+                capture_output=True,
+                timeout=30,
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _java_binary() -> str | None:
     java_home = os.environ.get("JAVA_HOME")
     if java_home:
         candidate = Path(java_home) / "bin" / "java"
-        if candidate.is_file():
+        if candidate.is_file() and _java_runs(str(candidate)):
             return str(candidate)
-    return shutil.which("java")
+    path_java = shutil.which("java")
+    if path_java is not None and _java_runs(path_java):
+        return path_java
+    return None
 
 
 def _require_toolchain() -> str:
