@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.11] - 2026-08-11
+
 ### Added
 
 - **`text_score()` accepts a query vector, so every scoring function is
