@@ -10,13 +10,17 @@ import java.util.Optional;
  * An open kglite knowledge graph: open or create it, run Cypher against it,
  * checkpoint it, close it.
  *
- * <p>This is the whole wrapper. Everything a graph can do — vector search,
- * graph algorithms, aggregations, schema introspection, temporal and spatial
- * helpers — arrives through {@link #cypher(String, Map)} as Cypher, with no
- * Java-side change when the engine gains it. There is no object mapper, no
- * fluent mirror of the engine API and no framework integration here on purpose:
- * the wrapper's job is the C ABI chokepoint, and anything wider would be a
- * second surface to keep in step with the engine.
+ * <p>This is the whole wrapper. Querying a graph — vector search, graph
+ * algorithms, aggregations, schema introspection, temporal and spatial
+ * helpers — arrives through {@link #cypher(String, Map)} as Cypher, so a new
+ * engine query capability is usable from Java the day the engine ships it. The
+ * operations that live outside Cypher have dedicated methods: embedding ingest
+ * ({@link #setEmbeddings}, {@link #addEmbeddings}), index build
+ * ({@link #buildVectorIndex}), and store listing ({@link #listEmbeddings}).
+ * The wrapper's job is the C ABI chokepoint, and it stays exactly that width:
+ * object mapping, a fluent API mirror, and framework integration belong to
+ * libraries built on top, which keeps this one surface in step with the
+ * engine.
  *
  * <p>The write cycle, with the lease that makes it safe:
  *
@@ -38,12 +42,12 @@ import java.util.Optional;
  *
  * <h2>Durability</h2>
  *
- * <p><strong>Nothing is persisted until {@link #save(Path)} runs.</strong>
- * Mutations live in the session's graph; closing without saving discards them
- * silently, and so does a crash. That is true even for a graph that was
- * <em>opened</em> from a path — {@code open} is not an attachment that
- * write-through-persists, it is a load. {@link #save(Path)} is durable
- * (fsync); {@link #save(Path, boolean)} can trade that away.
+ * <p><strong>Call {@link #save(Path)} to persist your work.</strong>
+ * Mutations live in the session's graph and reach disk when you save; a graph
+ * {@code open}ed from a path is loaded into memory the same way, so it too
+ * persists on the next {@link #save(Path)}. {@link #save(Path)} is durable
+ * (fsync); {@link #save(Path, boolean)} trades fsync for speed. Save at the
+ * points your application treats as commit boundaries.
  *
  * <h2>Value mapping</h2>
  *
@@ -82,10 +86,10 @@ import java.util.Optional;
  *           — see below.</td></tr>
  * </table>
  *
- * <p><strong>Do not {@code RETURN} a node, relationship or path whole.</strong>
- * The C ABI serialises result cells as JSON and has no JSON shape for those
- * types, so they arrive as the engine's own {@code Debug} rendering in a
- * {@code String}: {@code RETURN n} yields
+ * <p><strong>Return the parts of a node, relationship or path you want, not
+ * the whole value.</strong> The C ABI serialises result cells as JSON, and a
+ * whole node, relationship or path arrives as the engine's own {@code Debug}
+ * rendering in a {@code String}: {@code RETURN n} yields
  * {@code "Node(NodeValue { id: 0, labels: [\"Person\"], properties: {…} })"}.
  * It is a stable-enough string to eyeball and a terrible thing to parse. Return
  * what you actually want instead — every one of these is a first-class value:
@@ -132,10 +136,10 @@ import java.util.Optional;
  * shared, so it introduces no serialization between concurrent calls — the
  * three guarantees above are unchanged.
  *
- * <p>What that does <em>not</em> promise is a result: a worker racing a close
- * gets either its rows or an {@code IllegalStateException}, and which one is
- * genuinely a race. Closing after the workers join is still the design that
- * keeps their work; closing under them is now merely an error rather than
+ * <p>The result of a call that races a close is itself a race: a worker gets
+ * either its rows or an {@code IllegalStateException}. Join the workers before
+ * you close to keep their work; closing under them is a clean error rather
+ * than
  * undefined behaviour.
  *
  * <p>Separate instances over the same path are governed by the
@@ -158,8 +162,8 @@ public final class KnowledgeGraph implements AutoCloseable {
     /**
      * Create a fresh, empty in-memory graph with no backing path.
      *
-     * <p>Nothing is persisted until {@link #save(Path)} is called, and no
-     * writer lease applies until it has a path to contend for.
+     * <p>Call {@link #save(Path)} to persist it to a path; a writer lease
+     * applies once it has a path to contend for.
      *
      * @return the new graph
      * @throws KgliteException if the engine could not allocate it
