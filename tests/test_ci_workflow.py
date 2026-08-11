@@ -85,6 +85,11 @@ REQUIRED_JOBS = {
     "scheduled-concurrency-stress",
     "bolt-driver-conformance",
     "perf-regression",
+    # The JVM binding's only CI home, and the only gate pinning the numeric
+    # C-ABI status discriminants (AbiContractTest) — the cbindgen drift check
+    # regenerates both sides, so a renumber slips past it. Its loss would be
+    # exactly the silent guarantee-disappearance this set guards against.
+    "kglite-java",
 }
 
 
@@ -572,6 +577,53 @@ def test_bolt_conformance_outage_classification_cannot_be_swallowed() -> None:
     )
     tolerated = [step for step in _steps(job) if step.get("continue-on-error") is True]
     assert tolerated == [], "no step in the conformance job may tolerate failure"
+
+
+def test_kglite_java_leg_is_a_blocking_gate() -> None:
+    """The JVM binding leg must build both bindings and run its suites as a gate.
+
+    This job is the only CI home of the Java wrapper, and its
+    AbiContractTest is the only gate pinning the numeric C-ABI status
+    discriminants (the cbindgen drift check regenerates both sides, so a
+    renumber passes it). The cross-binding parity suite additionally proves a
+    store written by one binding scores identically through the other, which
+    needs both bindings live in the one job. If any of that stopped running —
+    or the job were made unable to fail — a discriminant renumber or an
+    encoding divergence would ship green.
+    """
+    job = _ci_job("kglite-java")
+
+    # Both toolchains are set up: a JDK for the JVM suite, Gradle to build it,
+    # and Python for the parity leg's other binding.
+    assert _steps_using(job, "actions/setup-java@"), "kglite-java sets up no JDK"
+    assert _steps_using(job, "gradle/actions/setup-gradle@"), "kglite-java sets up no Gradle"
+    assert _steps_using(job, "actions/setup-python@"), "kglite-java sets up no Python"
+
+    # The native library both bindings load, then the JVM suite (which includes
+    # AbiContractTest and compiles the parity harness classes).
+    _assert_runs(job, "cargo build -p kglite-c")
+    _assert_runs(job, "gradle -p kglite-java build")
+
+    # The cross-binding parity pytest, run as a required leg (KGLITE_JAVA_PARITY
+    # turns a missing toolchain into a failure, not a silent skip).
+    parity = [args for args in _pytest_invocations(job) if "tests/test_java_python_embedding_parity.py" in args]
+    assert len(parity) == 1, "kglite-java does not run the cross-binding parity suite exactly once"
+    parity_step = _step_running(job, ".venv/bin/pytest tests/test_java_python_embedding_parity.py -v --tb=short")
+    assert parity_step.get("env", {}).get("KGLITE_JAVA_PARITY") == "1", (
+        "the parity suite is not marked required — without KGLITE_JAVA_PARITY=1 a missing "
+        "toolchain would skip it, and a skip is a pass"
+    )
+
+    # A gate that cannot fail is not a gate: neither the job nor any step may
+    # tolerate failure.
+    assert job.get("continue-on-error") is None, (
+        "kglite-java tolerates failure at the job level, making every gate inside it decorative"
+    )
+    tolerated = [step for step in _steps(job) if step.get("continue-on-error") is True]
+    assert tolerated == [], "no step in the kglite-java job may tolerate failure"
+
+    # And it is aggregated into the single gate the publish workflows wait on.
+    assert "kglite-java" in _ci_job("ci-success")["needs"]
 
 
 # --- the publish workflows --------------------------------------------------

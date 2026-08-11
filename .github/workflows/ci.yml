@@ -1096,6 +1096,86 @@ jobs:
         # a CI failure, not a pass.
         run: python scripts/assert_conformance_ran.py conformance.xml
 
+  kglite-java:
+    name: kglite-java (JVM binding)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The Java wrapper's only CI home. Two things ride on it that nothing else
+    # covers:
+    #   * AbiContractTest::statusCodesMatchHeader is the ONLY gate in the repo
+    #     pinning the numeric C-ABI status discriminants. The cbindgen
+    #     header-drift check (kglite-c job) regenerates both sides from source,
+    #     so a discriminant *renumber* passes it — this suite is what catches
+    #     it, by asserting the Java-side numbers against the committed header.
+    #   * The cross-binding embedding parity suite proves a vector store + HNSW
+    #     index written by one binding reads and scores identically through the
+    #     other. That needs BOTH bindings live in one job, which is why this job
+    #     builds the Python extension as well as the JVM binding.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up JDK 26
+        # 26, not the 22 floor: build.gradle.kts pins the Gradle toolchain to
+        # JavaLanguageVersion.of(26) (compiling against --release 22), so the
+        # build needs a 26 JDK present. Same version publish_java.yml uses.
+        uses: actions/setup-java@v5.6.0
+        with:
+          distribution: temurin
+          java-version: '26'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          # Pinned, and no wrapper in the repo — CI is the only place the
+          # build's Gradle version is written down. Matches publish_java.yml.
+          gradle-version: '9.7.0'
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: kglite-java
+          workspaces: ". -> target"
+
+      - name: Build the C ABI library the binding loads
+        # Debug, not release: this is a correctness job, and the debug profile
+        # keeps the engine's debug-only assertions live. NativeLibrary's
+        # workspace tier resolves target/debug/libkglite_c.so for both the JVM
+        # suite and the parity harness, so nothing needs -Dkglite.native.path.
+        run: cargo build -p kglite-c
+
+      - name: Build the Python extension for the cross-binding parity leg
+        # Lean feature set: the parity test uses only the core engine
+        # (KnowledgeGraph, set_embeddings, build_vector_index, load, cypher),
+        # so the ~100-package MCP default is not paid for here. Debug profile,
+        # same correctness reason as the C ABI build above.
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install maturin pytest pytest-timeout pandas
+          .venv/bin/maturin develop --no-default-features --features abi3,python-extension
+
+      - name: Run the JVM binding suite (ABI contract + embeddings + parity harness)
+        # `build` runs the whole JUnit suite, including AbiContractTest — the
+        # discriminant gate — and compiles the test classes the parity pytest
+        # shells out to. No -PrequireAllNatives: this job resolves the native
+        # through the workspace build, not the bundled resources.
+        run: gradle -p kglite-java build
+
+      - name: Run the cross-binding embedding parity suite
+        # KGLITE_JAVA_PARITY=1 makes a missing JDK or missing compiled classes a
+        # hard failure instead of a skip, so this cross-binding proof cannot
+        # pass by not running. Both directions (Java->Python, Python->Java) run.
+        env:
+          KGLITE_JAVA_PARITY: '1'
+        run: .venv/bin/pytest tests/test_java_python_embedding_parity.py -v --tb=short
+
   ci-success:
     name: CI success
     # Single aggregate gate the publish workflows wait on. It fails if ANY CI
@@ -1118,6 +1198,7 @@ jobs:
       - minimal-versions
       - rustsec-audit
       - kglite-c
+      - kglite-java
       - python-lint
       - python-tests
       - bolt-driver-conformance
