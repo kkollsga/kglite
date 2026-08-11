@@ -21,7 +21,8 @@ build from source per the recipe at the bottom of this page.
 Version boundary: 0.15.9 ships the core wrapper — `KnowledgeGraph`, Cypher
 in/out, `WriterLease`, storage modes. The **Transactions** and **Cypher DSL**
 sections below, and the any-thread `close()` guarantee under **Threading**,
-ship in **0.15.10**; on 0.15.9 those classes do not exist in the jar.
+ship in **0.15.10**; the **Embeddings and vector search** section ships in
+**0.15.11**. Each section works from the release named there onward.
 
 ```xml
 <dependency>
@@ -162,6 +163,22 @@ RETURN labels(p) AS labels     // List of String
 RETURN id(p) AS id             // Long, the stable node id
 RETURN type(r) AS rel          // String, the relationship type
 ```
+
+## Loading many rows
+
+Pass a list of maps as one `$rows` parameter and `UNWIND` it — one `cypher()`
+call inserts the whole batch. Put each node's `id` in the `CREATE` pattern,
+where it belongs as the node's identity:
+
+```java
+graph.cypher(
+    "UNWIND $rows AS r CREATE (:Note {id: r.id, title: r.title, body: r.body})",
+    Map.of("rows", batch));   // batch is a List<Map<String,Object>>
+```
+
+For properties beyond the identity, `SET n += r.props` adds them to a matched
+node. Batches of a few thousand rows per call load a large graph quickly — this
+is the path to a store big enough for the vector search below.
 
 ## Embeddings and vector search
 
