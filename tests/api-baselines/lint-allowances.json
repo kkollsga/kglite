@@ -9,8 +9,36 @@
   },
   "allowances": [
     {
+      "identity": "crates/kglite-c/src/embeddings.rs::fn:ingest_impl:unsafe fn ingest_impl( session: *mut KgliteSession, node_type: *const c_char, text_column: *const c_char, ids_json: *const c_char, vectors: *const f32, dim: usize, count: usize, metric: *const c_char, out_report_json: *mut *const c_char, out_error_msg: *mut *const c_char, which: Ingest, ) -> KgliteS::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-c/src/embeddings.rs::fn:kglite_session_add_embeddings:pub unsafe extern \"C\" fn kglite_session_add_embeddings( session: *mut KgliteSession, node_type: *const c_char, text_column: *const c_char, ids_json: *const c_char, vectors: *const f32, dim: usize, count: usize, metric: *const c_char, out_report_json: *mut *const c_char, out_error_msg: *mut *const c_::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-c/src/embeddings.rs::fn:kglite_session_build_vector_index:pub unsafe extern \"C\" fn kglite_session_build_vector_index( session: *mut KgliteSession, node_type: *const c_char, text_column: *const c_char, m: usize, ef_construction: usize, ef_search: usize, metric: *const c_char, out_report_json: *mut *const c_char, out_error_msg: *mut *const c_char, ) -> Kglit::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-c/src/embeddings.rs::fn:kglite_session_set_embeddings:pub unsafe extern \"C\" fn kglite_session_set_embeddings( session: *mut KgliteSession, node_type: *const c_char, text_column: *const c_char, ids_json: *const c_char, vectors: *const f32, dim: usize, count: usize, metric: *const c_char, out_report_json: *mut *const c_char, out_error_msg: *mut *const c_::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
       "identity": "crates/kglite-c/src/session.rs::fn:execute_mut_impl:unsafe fn execute_mut_impl( session: *mut KgliteSession, query: *const c_char, params_json: *const c_char, timeout_ms: u64, max_rows: u64, out_result: *mut *mut KgliteCypherResult, out_error_msg: *mut *const c_char, ) -> KgliteStatusCode::clippy::too_many_arguments",
       "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-c/tests/integration.rs::fn:ingest_call:fn ingest_call( session: *mut KgliteSession, node_type: &str, text_column: &str, ids_json: &str, vectors: &[f32], dim: usize, count: usize, metric: Option<&str>, add: bool, ) -> (KgliteStatusCode, Option<serde_json::Value>, Option<String>)::clippy::too_many_arguments",
+      "classification": "test"
+    },
+    {
+      "identity": "crates/kglite-c/tests/integration.rs::fn:set_embeddings:fn set_embeddings( session: *mut KgliteSession, node_type: &str, text_column: &str, ids_json: &str, vectors: &[f32], dim: usize, count: usize, metric: Option<&str>, ) -> (KgliteStatusCode, Option<serde_json::Value>, Option<String>)::clippy::too_many_arguments",
+      "classification": "test"
+    },
+    {
+      "identity": "crates/kglite-c/tests/integration.rs::fn:set_embeddings:fn set_embeddings( session: *mut KgliteSession, node_type: &str, text_column: &str, ids_json: &str, vectors: &[f32], dim: usize, count: usize, metric: Option<&str>, ) -> (KgliteStatusCode, Option<serde_json::Value>, Option<String>)::clippy::type_complexity",
+      "classification": "test"
     },
     {
       "identity": "crates/kglite-mcp-server/src/tools/runners.rs::fn:run_cypher_write:pub(crate) fn run_cypher_write( active: &mut ActiveGraph, query: &str, write_scope: Option<&[String]>, git_sha: Option<&str>, modified_by: Option<&str>, value_codecs: Option<&[ValueCodec]>, csv_http: Option<&crate::csv_http::CsvHttpConfig>, ) -> Result<String, String>::clippy::too_many_arguments",
