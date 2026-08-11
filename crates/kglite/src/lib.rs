@@ -71,15 +71,17 @@ pub mod api {
         infer_selection_node_type, is_canonical_node_column, KnowledgeGraph,
         CANONICAL_NODE_COLUMNS,
     };
-    /// Core schema data types — the node record (`NodeData`), the projected
-    /// `NodeInfo`, geo/temporal validity configs (`SpatialConfig` /
-    /// `TemporalConfig`), and the declarative schema-definition +
-    /// validation types. Generic across bindings; lifted in roadmap
-    /// Piece 3 cleanup.
+    /// Core schema data types — the node and edge records (`NodeData` /
+    /// `EdgeData`), the projected `NodeInfo`, geo/temporal validity configs
+    /// (`SpatialConfig` / `TemporalConfig`), and the declarative
+    /// schema-definition + validation types. Generic across bindings;
+    /// lifted in roadmap Piece 3 cleanup. `EdgeData` joined in 0.15.11:
+    /// `GraphWrite::add_edge` and `DiskGraph::from_stable_digraph` name it
+    /// in public signatures, so it must be publicly nameable too.
     pub use crate::graph::schema::{
         parse_spatial_column_types_from_pairs, parse_temporal_column_types_from_pairs,
-        ConnectionSchemaDefinition, NodeData, NodeInfo, NodeSchemaDefinition, SchemaDefinition,
-        SchemaInstall, SpatialConfig, TemporalConfig, ValidationError,
+        ConnectionSchemaDefinition, EdgeData, NodeData, NodeInfo, NodeSchemaDefinition,
+        SchemaDefinition, SchemaInstall, SpatialConfig, TemporalConfig, ValidationError,
     };
     /// The fluent **selection** data model — the cursor state threaded
     /// through the fluent query chain (and through Selection-scoped
@@ -101,22 +103,36 @@ pub mod api {
     /// borrowed node/edge weights live; `None` on memory/mapped backends.
     pub use crate::graph::storage::disk::graph::DiskQueryGuard;
     /// Interned property-/type-key handle (`InternedKey`, a transparent
-    /// `u64` newtype) + the `StringInterner` that mints them. Bindings
-    /// doing low-level direct graph access bridge string keys ↔ interned
-    /// ids via `InternedKey::from_str(..)` / `.as_u64()`. Lifted in roadmap
-    /// Piece 2 / Piece 3 cleanup.
+    /// `u64` newtype) + the `StringInterner` that mints them.
+    /// `InternedKey::from_str(..)` computes the hash **without registering
+    /// the name** — safe for lookups and removals, but a key that reaches a
+    /// *write* unregistered reads back in-session and then breaks
+    /// enumeration and persistence (the name cannot be resolved). For
+    /// writes, use `DirGraph::set_node_property` (registers for you) or
+    /// register via `StringInterner::try_get_or_intern` first.
     pub use crate::graph::storage::interner::{InternedKey, InternerCollision, StringInterner};
     /// The canonical graph read trait — node/edge/property accessors
     /// shared by every storage backend. Non-object-safe (GATs on the
     /// iterator-returning methods), so consumers take `&impl GraphRead`,
     /// never `&dyn`. Lifted for cross-binding read access (roadmap Piece 1).
     pub use crate::graph::storage::GraphRead;
+    /// The canonical graph write trait (`GraphWrite: GraphRead`) —
+    /// storage-variant-routed mutation, including `set_node_property` and
+    /// its siblings, the documented replacements for the `NodeData` mutators
+    /// removed in 0.15.9. Non-object-safe like `GraphRead`: consumers take
+    /// `&mut impl GraphWrite`, never `&mut dyn`. Implemented by the storage
+    /// backends — reach it as `graph.graph.set_node_property(..)` on a
+    /// `DirGraph` (the `graph` field is public), the same call the Cypher
+    /// `SET` executor makes. Bridge string keys via
+    /// `StringInterner::try_get_or_intern` (`DirGraph::interner` is public).
+    pub use crate::graph::storage::GraphWrite;
     /// The authoritative read handle for one node's properties.
     ///
     /// A `&NodeData` is one *replica* of a columnar type's column store;
     /// `NodeView` is the store the storage backend answers with, and its
-    /// enumeration methods are complete for every storage variant (unlike
-    /// `NodeData::property_iter`, which yields nothing for columnar rows).
+    /// enumeration methods are complete for every storage variant (the
+    /// removed `NodeData::property_iter` yielded nothing for columnar rows,
+    /// which is why it is gone).
     /// Obtain one from `GraphRead::node_view` / `DirGraph::node_view`; do not
     /// hold it across a `Python::attach` boundary — resolve to owned values
     /// first. See `crates/kglite/src/graph/storage/node_view.rs`.

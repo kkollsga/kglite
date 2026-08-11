@@ -208,8 +208,8 @@ pub trait GraphRead {
     // type's store rather than the store the backend owns — see
     // `storage/node_view.rs`.
     //
-    // Every method below is complete for columnar storage, unlike
-    // `NodeData::property_iter`, which yields nothing there.
+    // Every method below is complete for columnar storage; the removed
+    // `NodeData::property_iter` yielded nothing there.
 
     /// A borrowed read handle for one node, with its column store resolved
     /// once. Prefer this to [`GraphRead::node_weight`] whenever more than one
@@ -499,9 +499,11 @@ pub trait GraphRead {
 /// iterators — see [`GraphRead`] docs), `&mut dyn GraphWrite` also
 /// does not compile. All mutation consumers take `&mut impl GraphWrite`.
 pub trait GraphWrite: GraphRead {
-    /// Mutable borrow of the full NodeData. Escape hatch for property
-    /// mutation — prefer higher-level helpers (`NodeData::set_property`,
-    /// `NodeData::remove_property`) where available.
+    /// Mutable borrow of the full NodeData. Escape hatch for the record's
+    /// own fields — for property mutation use `set_node_property` /
+    /// `remove_node_property` on this trait, which route by storage
+    /// variant (the removed `NodeData` mutators wrote only the node's
+    /// replica, which columnar storage ignores).
     ///
     /// **Disk backend staging contract (0.9.0 Cluster 6):** on disk,
     /// `node_weight_mut` does NOT mutate the live store directly. It

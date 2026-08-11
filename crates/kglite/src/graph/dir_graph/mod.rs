@@ -1151,6 +1151,38 @@ impl DirGraph {
         self.graph.node_view(index)
     }
 
+    /// Set one property on a node by string key — the one-call embedder
+    /// route replacing the removed `NodeData::set_property`. Registers the
+    /// key in the interner and routes the write by storage variant.
+    ///
+    /// Prefer this over calling `GraphWrite::set_node_property` on the
+    /// backend directly: that trait method takes an [`InternedKey`], and a
+    /// key built with `InternedKey::from_str` (which does **not** register)
+    /// reads back in-session but resolves to nothing in enumerations,
+    /// panics `StringInterner::resolve`, and is dropped by `save_graph` —
+    /// silent data loss. Returns `false` when no node exists at `index`.
+    pub fn set_node_property(&mut self, index: NodeIndex, key: &str, value: Value) -> bool {
+        use crate::graph::storage::{GraphRead, GraphWrite};
+        if self.graph.node_weight(index).is_none() {
+            return false;
+        }
+        let interned = self.interner.get_or_intern(key);
+        self.graph.set_node_property(index, interned, value);
+        true
+    }
+
+    /// Remove one property from a node by string key — the one-call
+    /// embedder route replacing the removed `NodeData::remove_property`.
+    /// Routes by storage variant; returns the removed value, or `None` if
+    /// the node or the property was absent. Lookup uses the pure key hash,
+    /// so a never-registered key simply returns `None`.
+    pub fn remove_node_property(&mut self, index: NodeIndex, key: &str) -> Option<Value> {
+        use crate::graph::storage::interner::InternedKey;
+        use crate::graph::storage::GraphWrite;
+        self.graph
+            .remove_node_property(index, InternedKey::from_str(key))
+    }
+
     pub fn get_node_mut(&mut self, index: NodeIndex) -> Option<&mut NodeData> {
         self.graph.node_weight_mut(index)
     }

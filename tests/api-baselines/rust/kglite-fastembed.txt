@@ -820,8 +820,8 @@ pub fn kglite::api::durable::RecordingGraph<G>::edge_endpoint_keys<'a>(&'a self)
 pub fn kglite::api::durable::RecordingGraph<G>::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
 pub fn kglite::api::durable::RecordingGraph<G>::edge_indices(&self) -> Self::EdgeIndicesIter
 pub fn kglite::api::durable::RecordingGraph<G>::edge_references(&self) -> Self::EdgeReferencesIter
-pub fn kglite::api::durable::RecordingGraph<G>::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::graph::schema::EdgeData>
-pub fn kglite::api::durable::RecordingGraph<G>::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::graph::schema::EdgeData> + 'a)>
+pub fn kglite::api::durable::RecordingGraph<G>::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::api::EdgeData>
+pub fn kglite::api::durable::RecordingGraph<G>::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::api::EdgeData> + 'a)>
 pub fn kglite::api::durable::RecordingGraph<G>::edges(&self, idx: petgraph::graph_impl::NodeIndex) -> Self::EdgesIter
 pub fn kglite::api::durable::RecordingGraph<G>::edges_connecting(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> Self::EdgesConnectingIter
 pub fn kglite::api::durable::RecordingGraph<G>::edges_directed(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> Self::EdgesIter
@@ -850,6 +850,25 @@ pub fn kglite::api::durable::RecordingGraph<G>::node_weight(&self, idx: petgraph
 pub fn kglite::api::durable::RecordingGraph<G>::reset_arenas(&self)
 pub fn kglite::api::durable::RecordingGraph<G>::sources_for_conn_type_bounded(&self, conn_type: kglite::api::InternedKey, max: core::option::Option<usize>) -> core::option::Option<alloc::vec::Vec<u32>>
 pub fn kglite::api::durable::RecordingGraph<G>::str_prop_eq(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, target: &str) -> core::option::Option<bool>
+impl<G: kglite::api::GraphWrite> kglite::api::GraphWrite for kglite::api::durable::RecordingGraph<G>
+pub fn kglite::api::durable::RecordingGraph<G>::add_edge(&mut self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex, data: kglite::api::EdgeData) -> petgraph::graph_impl::EdgeIndex
+pub fn kglite::api::durable::RecordingGraph<G>::add_node(&mut self, data: kglite::api::NodeData) -> petgraph::graph_impl::NodeIndex
+pub fn kglite::api::durable::RecordingGraph<G>::clear_column_stores(&mut self)
+pub fn kglite::api::durable::RecordingGraph<G>::clear_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::durable::RecordingGraph<G>::column_store_mut(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<&mut alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+pub fn kglite::api::durable::RecordingGraph<G>::edge_weight_mut(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&mut kglite::api::EdgeData>
+pub fn kglite::api::durable::RecordingGraph<G>::flush_pending_writes(&mut self)
+pub fn kglite::api::durable::RecordingGraph<G>::install_column_store(&mut self, type_key: kglite::api::InternedKey, store: alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)
+pub fn kglite::api::durable::RecordingGraph<G>::node_weight_mut(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
+pub fn kglite::api::durable::RecordingGraph<G>::node_weight_mut_silent(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
+pub fn kglite::api::durable::RecordingGraph<G>::remove_edge(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<kglite::api::EdgeData>
+pub fn kglite::api::durable::RecordingGraph<G>::remove_node(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeData>
+pub fn kglite::api::durable::RecordingGraph<G>::remove_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::durable::RecordingGraph<G>::replace_node_properties(&mut self, idx: petgraph::graph_impl::NodeIndex, pairs: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>)
+pub fn kglite::api::durable::RecordingGraph<G>::set_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::durable::RecordingGraph<G>::set_node_property_if_absent(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::durable::RecordingGraph<G>::take_column_store(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+pub fn kglite::api::durable::RecordingGraph<G>::update_row_id(&mut self, node_idx: petgraph::graph_impl::NodeIndex, row_id: u32)
 pub struct kglite::api::durable::Wal
 impl kglite::api::durable::Wal
 pub fn kglite::api::durable::Wal::append(&mut self, frame: &kglite::api::durable::WalFrame) -> core::io::error::Result<()>
@@ -1401,7 +1420,7 @@ pub kglite::api::storage::GraphBackend::Mapped(alloc::sync::Arc<kglite::api::sto
 pub kglite::api::storage::GraphBackend::Memory(alloc::sync::Arc<kglite::graph::storage::MemoryGraph>)
 pub kglite::api::storage::GraphBackend::Recording(alloc::boxed::Box<kglite::api::durable::RecordingGraph<kglite::api::storage::GraphBackend>>)
 impl kglite::api::storage::GraphBackend
-pub fn kglite::api::storage::GraphBackend::as_stable_digraph(&self) -> &petgraph::graph_impl::stable_graph::StableDiGraph<kglite::api::NodeData, kglite::graph::schema::EdgeData>
+pub fn kglite::api::storage::GraphBackend::as_stable_digraph(&self) -> &petgraph::graph_impl::stable_graph::StableDiGraph<kglite::api::NodeData, kglite::api::EdgeData>
 pub fn kglite::api::storage::GraphBackend::for_each_edge_endpoint_key<F>(&self, f: F) where F: core::ops::function::FnMut(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, kglite::api::InternedKey)
 pub fn kglite::api::storage::GraphBackend::for_each_edge_of_conn_type<F>(&self, conn_type: kglite::api::InternedKey, f: F) where F: core::ops::function::FnMut(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, u32, &[(kglite::api::InternedKey, kglite::datatypes::values::Value)]) -> bool
 pub fn kglite::api::storage::GraphBackend::is_forked(&self) -> bool
@@ -1413,8 +1432,8 @@ pub fn kglite::api::storage::GraphBackend::clone(&self) -> Self
 impl core::fmt::Debug for kglite::api::storage::GraphBackend
 pub fn kglite::api::storage::GraphBackend::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::ops::index::Index<petgraph::graph_impl::EdgeIndex> for kglite::api::storage::GraphBackend
-pub type kglite::api::storage::GraphBackend::Output = kglite::graph::schema::EdgeData
-pub fn kglite::api::storage::GraphBackend::index(&self, index: petgraph::graph_impl::EdgeIndex) -> &kglite::graph::schema::EdgeData
+pub type kglite::api::storage::GraphBackend::Output = kglite::api::EdgeData
+pub fn kglite::api::storage::GraphBackend::index(&self, index: petgraph::graph_impl::EdgeIndex) -> &kglite::api::EdgeData
 impl core::ops::index::Index<petgraph::graph_impl::NodeIndex> for kglite::api::storage::GraphBackend
 pub type kglite::api::storage::GraphBackend::Output = kglite::api::NodeData
 pub fn kglite::api::storage::GraphBackend::index(&self, index: petgraph::graph_impl::NodeIndex) -> &kglite::api::NodeData
@@ -1434,8 +1453,8 @@ pub fn kglite::api::storage::GraphBackend::edge_endpoint_keys<'a>(&'a self) -> a
 pub fn kglite::api::storage::GraphBackend::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
 pub fn kglite::api::storage::GraphBackend::edge_indices(&self) -> kglite::graph::core::iterators::GraphEdgeIndices<'_>
 pub fn kglite::api::storage::GraphBackend::edge_references(&self) -> kglite::graph::core::iterators::GraphEdgeReferences<'_>
-pub fn kglite::api::storage::GraphBackend::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::graph::schema::EdgeData>
-pub fn kglite::api::storage::GraphBackend::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::graph::schema::EdgeData> + 'a)>
+pub fn kglite::api::storage::GraphBackend::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::api::EdgeData>
+pub fn kglite::api::storage::GraphBackend::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::api::EdgeData> + 'a)>
 pub fn kglite::api::storage::GraphBackend::edges(&self, idx: petgraph::graph_impl::NodeIndex) -> kglite::graph::core::iterators::GraphEdges<'_>
 pub fn kglite::api::storage::GraphBackend::edges_connecting(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> kglite::graph::core::iterators::GraphEdgesConnecting<'_>
 pub fn kglite::api::storage::GraphBackend::edges_directed(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> kglite::graph::core::iterators::GraphEdges<'_>
@@ -1465,6 +1484,25 @@ pub fn kglite::api::storage::GraphBackend::node_weight(&self, idx: petgraph::gra
 pub fn kglite::api::storage::GraphBackend::reset_arenas(&self)
 pub fn kglite::api::storage::GraphBackend::sources_for_conn_type_bounded(&self, conn_type: kglite::api::InternedKey, max: core::option::Option<usize>) -> core::option::Option<alloc::vec::Vec<u32>>
 pub fn kglite::api::storage::GraphBackend::str_prop_eq(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, target: &str) -> core::option::Option<bool>
+impl kglite::api::GraphWrite for kglite::api::storage::GraphBackend
+pub fn kglite::api::storage::GraphBackend::add_edge(&mut self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex, data: kglite::api::EdgeData) -> petgraph::graph_impl::EdgeIndex
+pub fn kglite::api::storage::GraphBackend::add_node(&mut self, data: kglite::api::NodeData) -> petgraph::graph_impl::NodeIndex
+pub fn kglite::api::storage::GraphBackend::clear_column_stores(&mut self)
+pub fn kglite::api::storage::GraphBackend::clear_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::storage::GraphBackend::column_store_mut(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<&mut alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+pub fn kglite::api::storage::GraphBackend::edge_weight_mut(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&mut kglite::api::EdgeData>
+pub fn kglite::api::storage::GraphBackend::flush_pending_writes(&mut self)
+pub fn kglite::api::storage::GraphBackend::install_column_store(&mut self, type_key: kglite::api::InternedKey, store: alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)
+pub fn kglite::api::storage::GraphBackend::node_weight_mut(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
+pub fn kglite::api::storage::GraphBackend::node_weight_mut_silent(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
+pub fn kglite::api::storage::GraphBackend::remove_edge(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<kglite::api::EdgeData>
+pub fn kglite::api::storage::GraphBackend::remove_node(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeData>
+pub fn kglite::api::storage::GraphBackend::remove_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::storage::GraphBackend::replace_node_properties(&mut self, idx: petgraph::graph_impl::NodeIndex, pairs: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>)
+pub fn kglite::api::storage::GraphBackend::set_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::storage::GraphBackend::set_node_property_if_absent(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::storage::GraphBackend::take_column_store(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+pub fn kglite::api::storage::GraphBackend::update_row_id(&mut self, node_idx: petgraph::graph_impl::NodeIndex, row_id: u32)
 impl serde_core::ser::Serialize for kglite::api::storage::GraphBackend
 pub fn kglite::api::storage::GraphBackend::serialize<S: serde_core::ser::Serializer>(&self, serializer: S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error>
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::storage::GraphBackend
@@ -1487,7 +1525,7 @@ impl core::marker::Copy for kglite::api::storage::StorageMode
 impl core::marker::StructuralPartialEq for kglite::api::storage::StorageMode
 pub struct kglite::api::storage::DiskGraph
 impl kglite::api::storage::DiskGraph
-pub fn kglite::api::storage::DiskGraph::add_edge(&mut self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex, data: kglite::graph::schema::EdgeData) -> petgraph::graph_impl::EdgeIndex
+pub fn kglite::api::storage::DiskGraph::add_edge(&mut self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex, data: kglite::api::EdgeData) -> petgraph::graph_impl::EdgeIndex
 pub fn kglite::api::storage::DiskGraph::add_node(&mut self, data: kglite::api::NodeData) -> petgraph::graph_impl::NodeIndex
 pub fn kglite::api::storage::DiskGraph::build_csr_from_pending(&mut self) -> core::io::error::Result<()>
 pub fn kglite::api::storage::DiskGraph::column_stores_iter(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&kglite::api::InternedKey, &alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)>
@@ -1499,9 +1537,9 @@ pub fn kglite::api::storage::DiskGraph::edge_endpoints_fn(&self, idx: petgraph::
 pub fn kglite::api::storage::DiskGraph::edge_indices_iter(&self) -> kglite::graph::core::iterators::DiskEdgeIndices<'_>
 pub fn kglite::api::storage::DiskGraph::edge_properties_at(&self, edge_idx: u32) -> core::option::Option<alloc::borrow::Cow<'_, [(kglite::api::InternedKey, kglite::datatypes::values::Value)]>>
 pub fn kglite::api::storage::DiskGraph::edge_references_iter(&self) -> kglite::graph::core::iterators::DiskEdgeReferences<'_>
-pub fn kglite::api::storage::DiskGraph::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::graph::schema::EdgeData>
-pub fn kglite::api::storage::DiskGraph::edge_weight_mut(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&mut kglite::graph::schema::EdgeData>
-pub fn kglite::api::storage::DiskGraph::edge_weights_iter(&self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &kglite::graph::schema::EdgeData> + '_)>
+pub fn kglite::api::storage::DiskGraph::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::api::EdgeData>
+pub fn kglite::api::storage::DiskGraph::edge_weight_mut(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&mut kglite::api::EdgeData>
+pub fn kglite::api::storage::DiskGraph::edge_weights_iter(&self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &kglite::api::EdgeData> + '_)>
 pub fn kglite::api::storage::DiskGraph::edges_connecting_iter(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> kglite::graph::core::iterators::DiskEdgesConnecting<'_>
 pub fn kglite::api::storage::DiskGraph::edges_directed_filtered_iter(&self, a: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type_filter: core::option::Option<u64>) -> kglite::graph::core::iterators::DiskEdges<'_>
 pub fn kglite::api::storage::DiskGraph::edges_directed_iter(&self, a: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> kglite::graph::core::iterators::DiskEdges<'_>
@@ -1523,7 +1561,7 @@ pub fn kglite::api::storage::DiskGraph::node_type_of(&self, idx: petgraph::graph
 pub fn kglite::api::storage::DiskGraph::node_weight(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&kglite::api::NodeData>
 pub fn kglite::api::storage::DiskGraph::node_weight_mut(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
 pub fn kglite::api::storage::DiskGraph::prefetch_hot_regions(&self)
-pub fn kglite::api::storage::DiskGraph::remove_edge(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<kglite::graph::schema::EdgeData>
+pub fn kglite::api::storage::DiskGraph::remove_edge(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<kglite::api::EdgeData>
 pub fn kglite::api::storage::DiskGraph::remove_node(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeData>
 pub fn kglite::api::storage::DiskGraph::reset_arenas(&self)
 pub fn kglite::api::storage::DiskGraph::scan_edges_of_conn_type_linear<F>(&self, conn_type: u64, f: F) where F: core::ops::function::FnMut(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, u32) -> bool
@@ -1540,7 +1578,7 @@ pub fn kglite::api::storage::DiskGraph::lookup_global_prefix(&self, property: &s
 pub fn kglite::api::storage::DiskGraph::lookup_property_eq(&self, node_type: &str, property: &str, value: &str) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
 pub fn kglite::api::storage::DiskGraph::lookup_property_prefix(&self, node_type: &str, property: &str, prefix: &str, limit: usize) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
 impl kglite::api::storage::DiskGraph
-pub fn kglite::api::storage::DiskGraph::from_stable_digraph(graph: &mut petgraph::graph_impl::stable_graph::StableDiGraph<kglite::api::NodeData, kglite::graph::schema::EdgeData>, root_dir: &std::path::Path) -> core::io::error::Result<Self>
+pub fn kglite::api::storage::DiskGraph::from_stable_digraph(graph: &mut petgraph::graph_impl::stable_graph::StableDiGraph<kglite::api::NodeData, kglite::api::EdgeData>, root_dir: &std::path::Path) -> core::io::error::Result<Self>
 pub fn kglite::api::storage::DiskGraph::new_at_path(root_dir: &std::path::Path) -> core::io::error::Result<Self>
 impl kglite::api::storage::DiskGraph
 pub fn kglite::api::storage::DiskGraph::load_from_dir(dir: &std::path::Path, interner: &mut kglite::api::StringInterner) -> core::io::error::Result<(Self, std::path::PathBuf)>
@@ -1555,8 +1593,8 @@ pub fn kglite::api::storage::DiskGraph::fmt(&self, f: &mut core::fmt::Formatter<
 impl core::marker::Send for kglite::api::storage::DiskGraph
 impl core::marker::Sync for kglite::api::storage::DiskGraph
 impl core::ops::index::Index<petgraph::graph_impl::EdgeIndex> for kglite::api::storage::DiskGraph
-pub type kglite::api::storage::DiskGraph::Output = kglite::graph::schema::EdgeData
-pub fn kglite::api::storage::DiskGraph::index(&self, index: petgraph::graph_impl::EdgeIndex) -> &kglite::graph::schema::EdgeData
+pub type kglite::api::storage::DiskGraph::Output = kglite::api::EdgeData
+pub fn kglite::api::storage::DiskGraph::index(&self, index: petgraph::graph_impl::EdgeIndex) -> &kglite::api::EdgeData
 impl core::ops::index::Index<petgraph::graph_impl::NodeIndex> for kglite::api::storage::DiskGraph
 pub type kglite::api::storage::DiskGraph::Output = kglite::api::NodeData
 pub fn kglite::api::storage::DiskGraph::index(&self, index: petgraph::graph_impl::NodeIndex) -> &kglite::api::NodeData
@@ -1576,8 +1614,8 @@ pub fn kglite::api::storage::DiskGraph::edge_endpoint_keys<'a>(&'a self) -> allo
 pub fn kglite::api::storage::DiskGraph::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
 pub fn kglite::api::storage::DiskGraph::edge_indices(&self) -> kglite::graph::core::iterators::GraphEdgeIndices<'_>
 pub fn kglite::api::storage::DiskGraph::edge_references(&self) -> kglite::graph::core::iterators::GraphEdgeReferences<'_>
-pub fn kglite::api::storage::DiskGraph::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::graph::schema::EdgeData>
-pub fn kglite::api::storage::DiskGraph::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::graph::schema::EdgeData> + 'a)>
+pub fn kglite::api::storage::DiskGraph::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::api::EdgeData>
+pub fn kglite::api::storage::DiskGraph::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::api::EdgeData> + 'a)>
 pub fn kglite::api::storage::DiskGraph::edges(&self, idx: petgraph::graph_impl::NodeIndex) -> kglite::graph::core::iterators::GraphEdges<'_>
 pub fn kglite::api::storage::DiskGraph::edges_connecting(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> kglite::graph::core::iterators::GraphEdgesConnecting<'_>
 pub fn kglite::api::storage::DiskGraph::edges_directed(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> kglite::graph::core::iterators::GraphEdges<'_>
@@ -1605,6 +1643,24 @@ pub fn kglite::api::storage::DiskGraph::node_weight(&self, idx: petgraph::graph_
 pub fn kglite::api::storage::DiskGraph::reset_arenas(&self)
 pub fn kglite::api::storage::DiskGraph::sources_for_conn_type_bounded(&self, conn_type: kglite::api::InternedKey, max: core::option::Option<usize>) -> core::option::Option<alloc::vec::Vec<u32>>
 pub fn kglite::api::storage::DiskGraph::str_prop_eq(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, target: &str) -> core::option::Option<bool>
+impl kglite::api::GraphWrite for kglite::api::storage::DiskGraph
+pub fn kglite::api::storage::DiskGraph::add_edge(&mut self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex, data: kglite::api::EdgeData) -> petgraph::graph_impl::EdgeIndex
+pub fn kglite::api::storage::DiskGraph::add_node(&mut self, data: kglite::api::NodeData) -> petgraph::graph_impl::NodeIndex
+pub fn kglite::api::storage::DiskGraph::clear_column_stores(&mut self)
+pub fn kglite::api::storage::DiskGraph::clear_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::storage::DiskGraph::column_store_mut(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<&mut alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+pub fn kglite::api::storage::DiskGraph::edge_weight_mut(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&mut kglite::api::EdgeData>
+pub fn kglite::api::storage::DiskGraph::flush_pending_writes(&mut self)
+pub fn kglite::api::storage::DiskGraph::install_column_store(&mut self, type_key: kglite::api::InternedKey, store: alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)
+pub fn kglite::api::storage::DiskGraph::node_weight_mut(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
+pub fn kglite::api::storage::DiskGraph::remove_edge(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<kglite::api::EdgeData>
+pub fn kglite::api::storage::DiskGraph::remove_node(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeData>
+pub fn kglite::api::storage::DiskGraph::remove_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::storage::DiskGraph::replace_node_properties(&mut self, idx: petgraph::graph_impl::NodeIndex, pairs: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>)
+pub fn kglite::api::storage::DiskGraph::set_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::storage::DiskGraph::set_node_property_if_absent(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::storage::DiskGraph::take_column_store(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+pub fn kglite::api::storage::DiskGraph::update_row_id(&mut self, node_idx: petgraph::graph_impl::NodeIndex, row_id: u32)
 pub struct kglite::api::storage::EmbeddingStore
 pub kglite::api::storage::EmbeddingStore::data: alloc::vec::Vec<f32>
 pub kglite::api::storage::EmbeddingStore::dimension: usize
@@ -1639,8 +1695,8 @@ impl<'de> serde_core::de::Deserialize<'de> for kglite::api::storage::EmbeddingSt
 pub fn kglite::api::storage::EmbeddingStore::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub struct kglite::api::storage::MappedGraph
 impl kglite::api::storage::MappedGraph
-pub fn kglite::api::storage::MappedGraph::inner(&self) -> &petgraph::graph_impl::stable_graph::StableDiGraph<kglite::api::NodeData, kglite::graph::schema::EdgeData>
-pub fn kglite::api::storage::MappedGraph::inner_mut(&mut self) -> &mut petgraph::graph_impl::stable_graph::StableDiGraph<kglite::api::NodeData, kglite::graph::schema::EdgeData>
+pub fn kglite::api::storage::MappedGraph::inner(&self) -> &petgraph::graph_impl::stable_graph::StableDiGraph<kglite::api::NodeData, kglite::api::EdgeData>
+pub fn kglite::api::storage::MappedGraph::inner_mut(&mut self) -> &mut petgraph::graph_impl::stable_graph::StableDiGraph<kglite::api::NodeData, kglite::api::EdgeData>
 pub fn kglite::api::storage::MappedGraph::new() -> Self
 impl core::clone::Clone for kglite::api::storage::MappedGraph
 pub fn kglite::api::storage::MappedGraph::clone(&self) -> Self
@@ -1649,7 +1705,7 @@ pub fn kglite::api::storage::MappedGraph::default() -> kglite::api::storage::Map
 impl core::fmt::Debug for kglite::api::storage::MappedGraph
 pub fn kglite::api::storage::MappedGraph::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::ops::deref::Deref for kglite::api::storage::MappedGraph
-pub type kglite::api::storage::MappedGraph::Target = petgraph::graph_impl::stable_graph::StableGraph<kglite::api::NodeData, kglite::graph::schema::EdgeData>
+pub type kglite::api::storage::MappedGraph::Target = petgraph::graph_impl::stable_graph::StableGraph<kglite::api::NodeData, kglite::api::EdgeData>
 pub fn kglite::api::storage::MappedGraph::deref(&self) -> &Self::Target
 impl kglite::api::GraphRead for kglite::api::storage::MappedGraph
 pub type kglite::api::storage::MappedGraph::EdgeIndicesIter<'a> = kglite::graph::core::iterators::GraphEdgeIndices<'a>
@@ -1667,8 +1723,8 @@ pub fn kglite::api::storage::MappedGraph::edge_endpoint_keys<'a>(&'a self) -> al
 pub fn kglite::api::storage::MappedGraph::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
 pub fn kglite::api::storage::MappedGraph::edge_indices(&self) -> kglite::graph::core::iterators::GraphEdgeIndices<'_>
 pub fn kglite::api::storage::MappedGraph::edge_references(&self) -> kglite::graph::core::iterators::GraphEdgeReferences<'_>
-pub fn kglite::api::storage::MappedGraph::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::graph::schema::EdgeData>
-pub fn kglite::api::storage::MappedGraph::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::graph::schema::EdgeData> + 'a)>
+pub fn kglite::api::storage::MappedGraph::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::api::EdgeData>
+pub fn kglite::api::storage::MappedGraph::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::api::EdgeData> + 'a)>
 pub fn kglite::api::storage::MappedGraph::edges(&self, idx: petgraph::graph_impl::NodeIndex) -> kglite::graph::core::iterators::GraphEdges<'_>
 pub fn kglite::api::storage::MappedGraph::edges_connecting(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> kglite::graph::core::iterators::GraphEdgesConnecting<'_>
 pub fn kglite::api::storage::MappedGraph::edges_directed(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> kglite::graph::core::iterators::GraphEdges<'_>
@@ -1694,6 +1750,23 @@ pub fn kglite::api::storage::MappedGraph::node_type_of(&self, idx: petgraph::gra
 pub fn kglite::api::storage::MappedGraph::node_weight(&self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&kglite::api::NodeData>
 pub fn kglite::api::storage::MappedGraph::sources_for_conn_type_bounded(&self, conn_type: kglite::api::InternedKey, max: core::option::Option<usize>) -> core::option::Option<alloc::vec::Vec<u32>>
 pub fn kglite::api::storage::MappedGraph::str_prop_eq(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, target: &str) -> core::option::Option<bool>
+impl kglite::api::GraphWrite for kglite::api::storage::MappedGraph
+pub fn kglite::api::storage::MappedGraph::add_edge(&mut self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex, data: kglite::api::EdgeData) -> petgraph::graph_impl::EdgeIndex
+pub fn kglite::api::storage::MappedGraph::add_node(&mut self, data: kglite::api::NodeData) -> petgraph::graph_impl::NodeIndex
+pub fn kglite::api::storage::MappedGraph::clear_column_stores(&mut self)
+pub fn kglite::api::storage::MappedGraph::clear_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::storage::MappedGraph::column_store_mut(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<&mut alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+pub fn kglite::api::storage::MappedGraph::edge_weight_mut(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&mut kglite::api::EdgeData>
+pub fn kglite::api::storage::MappedGraph::install_column_store(&mut self, type_key: kglite::api::InternedKey, store: alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)
+pub fn kglite::api::storage::MappedGraph::node_weight_mut(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
+pub fn kglite::api::storage::MappedGraph::node_weight_mut_silent(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
+pub fn kglite::api::storage::MappedGraph::remove_edge(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<kglite::api::EdgeData>
+pub fn kglite::api::storage::MappedGraph::remove_node(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeData>
+pub fn kglite::api::storage::MappedGraph::remove_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::storage::MappedGraph::replace_node_properties(&mut self, idx: petgraph::graph_impl::NodeIndex, pairs: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>)
+pub fn kglite::api::storage::MappedGraph::set_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::storage::MappedGraph::set_node_property_if_absent(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::storage::MappedGraph::take_column_store(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
 impl serde_core::ser::Serialize for kglite::api::storage::MappedGraph
 pub fn kglite::api::storage::MappedGraph::serialize<S: serde_core::ser::Serializer>(&self, ser: S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error>
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::storage::MappedGraph
@@ -2107,8 +2180,8 @@ pub kglite::api::DirGraph::user_schema_version: u32
 pub kglite::api::DirGraph::version: u64
 pub kglite::api::DirGraph::wkt_cache: alloc::sync::Arc<std::sync::poison::rwlock::RwLock<std::collections::hash::map::HashMap<alloc::string::String, alloc::sync::Arc<geo_types::geometry::Geometry<f64>>>>>
 impl kglite::api::DirGraph
-pub fn kglite::api::DirGraph::_get_connection(&self, index: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::graph::schema::EdgeData>
-pub fn kglite::api::DirGraph::_get_connection_mut(&mut self, index: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&mut kglite::graph::schema::EdgeData>
+pub fn kglite::api::DirGraph::_get_connection(&self, index: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::api::EdgeData>
+pub fn kglite::api::DirGraph::_get_connection_mut(&mut self, index: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&mut kglite::api::EdgeData>
 pub fn kglite::api::DirGraph::begin_read_pass(&self) -> core::option::Option<kglite::api::DiskQueryGuard>
 pub fn kglite::api::DirGraph::build_connection_types_cache(&mut self)
 pub fn kglite::api::DirGraph::build_id_index(&mut self, node_type: &str)
@@ -2154,7 +2227,9 @@ pub fn kglite::api::DirGraph::rebuild_type_indices(&mut self)
 pub fn kglite::api::DirGraph::rebuild_type_indices_and_compact(&mut self)
 pub fn kglite::api::DirGraph::register_connection_type(&mut self, connection_type: alloc::string::String)
 pub fn kglite::api::DirGraph::reindex(&mut self)
+pub fn kglite::api::DirGraph::remove_node_property(&mut self, index: petgraph::graph_impl::NodeIndex, key: &str) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::DirGraph::resolve_alias<'a>(&'a self, node_type: &str, property: &'a str) -> &'a str
+pub fn kglite::api::DirGraph::set_node_property(&mut self, index: petgraph::graph_impl::NodeIndex, key: &str, value: kglite::datatypes::values::Value) -> bool
 pub fn kglite::api::DirGraph::set_type_connectivity(&self, triples: alloc::vec::Vec<kglite::graph::schema::ConnectivityTriple>)
 pub fn kglite::api::DirGraph::set_version(&mut self, v: u64)
 pub fn kglite::api::DirGraph::take_column_store(&mut self, node_type: &str) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
@@ -2239,6 +2314,26 @@ pub fn kglite::api::DirGraph::deserialize<__D>(__deserializer: __D) -> core::res
 pub struct kglite::api::DiskQueryGuard
 impl core::ops::drop::Drop for kglite::api::DiskQueryGuard
 pub fn kglite::api::DiskQueryGuard::drop(&mut self)
+pub struct kglite::api::EdgeData
+pub kglite::api::EdgeData::connection_type: kglite::api::InternedKey
+pub kglite::api::EdgeData::properties: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>
+impl kglite::api::EdgeData
+pub fn kglite::api::EdgeData::connection_type_str<'a>(&self, interner: &'a kglite::api::StringInterner) -> &'a str
+pub fn kglite::api::EdgeData::get_property(&self, key: &str) -> core::option::Option<&kglite::datatypes::values::Value>
+pub fn kglite::api::EdgeData::new(connection_type: alloc::string::String, properties: std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>, interner: &mut kglite::api::StringInterner) -> Self
+pub fn kglite::api::EdgeData::new_interned(connection_type: kglite::api::InternedKey, properties: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>) -> Self
+pub fn kglite::api::EdgeData::properties_cloned(&self, interner: &kglite::api::StringInterner) -> std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
+pub fn kglite::api::EdgeData::property_count(&self) -> usize
+pub fn kglite::api::EdgeData::property_iter<'a>(&'a self, interner: &'a kglite::api::StringInterner) -> impl core::iter::traits::iterator::Iterator<Item = (&'a str, &'a kglite::datatypes::values::Value)>
+pub fn kglite::api::EdgeData::property_keys<'a>(&'a self, interner: &'a kglite::api::StringInterner) -> impl core::iter::traits::iterator::Iterator<Item = &'a str>
+impl core::clone::Clone for kglite::api::EdgeData
+pub fn kglite::api::EdgeData::clone(&self) -> Self
+impl core::fmt::Debug for kglite::api::EdgeData
+pub fn kglite::api::EdgeData::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for kglite::api::EdgeData
+pub fn kglite::api::EdgeData::serialize<S: serde_core::ser::Serializer>(&self, serializer: S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error>
+impl<'de> serde_core::de::Deserialize<'de> for kglite::api::EdgeData
+pub fn kglite::api::EdgeData::deserialize<D: serde_core::de::Deserializer<'de>>(deserializer: D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
 pub struct kglite::api::ExploreOptions
 pub kglite::api::ExploreOptions::include_source: bool
 pub kglite::api::ExploreOptions::max_depth: usize
@@ -2604,8 +2699,8 @@ pub fn kglite::api::GraphRead::edge_endpoint_keys<'a>(&'a self) -> alloc::boxed:
 pub fn kglite::api::GraphRead::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
 pub fn kglite::api::GraphRead::edge_indices(&self) -> Self::EdgeIndicesIter
 pub fn kglite::api::GraphRead::edge_references(&self) -> Self::EdgeReferencesIter
-pub fn kglite::api::GraphRead::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::graph::schema::EdgeData>
-pub fn kglite::api::GraphRead::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::graph::schema::EdgeData> + 'a)>
+pub fn kglite::api::GraphRead::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::api::EdgeData>
+pub fn kglite::api::GraphRead::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::api::EdgeData> + 'a)>
 pub fn kglite::api::GraphRead::edges(&self, idx: petgraph::graph_impl::NodeIndex) -> Self::EdgesIter
 pub fn kglite::api::GraphRead::edges_connecting(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> Self::EdgesConnectingIter
 pub fn kglite::api::GraphRead::edges_directed(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> Self::EdgesIter
@@ -2656,8 +2751,8 @@ pub fn kglite::api::storage::DiskGraph::edge_endpoint_keys<'a>(&'a self) -> allo
 pub fn kglite::api::storage::DiskGraph::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
 pub fn kglite::api::storage::DiskGraph::edge_indices(&self) -> kglite::graph::core::iterators::GraphEdgeIndices<'_>
 pub fn kglite::api::storage::DiskGraph::edge_references(&self) -> kglite::graph::core::iterators::GraphEdgeReferences<'_>
-pub fn kglite::api::storage::DiskGraph::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::graph::schema::EdgeData>
-pub fn kglite::api::storage::DiskGraph::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::graph::schema::EdgeData> + 'a)>
+pub fn kglite::api::storage::DiskGraph::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::api::EdgeData>
+pub fn kglite::api::storage::DiskGraph::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::api::EdgeData> + 'a)>
 pub fn kglite::api::storage::DiskGraph::edges(&self, idx: petgraph::graph_impl::NodeIndex) -> kglite::graph::core::iterators::GraphEdges<'_>
 pub fn kglite::api::storage::DiskGraph::edges_connecting(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> kglite::graph::core::iterators::GraphEdgesConnecting<'_>
 pub fn kglite::api::storage::DiskGraph::edges_directed(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> kglite::graph::core::iterators::GraphEdges<'_>
@@ -2701,8 +2796,8 @@ pub fn kglite::api::storage::GraphBackend::edge_endpoint_keys<'a>(&'a self) -> a
 pub fn kglite::api::storage::GraphBackend::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
 pub fn kglite::api::storage::GraphBackend::edge_indices(&self) -> kglite::graph::core::iterators::GraphEdgeIndices<'_>
 pub fn kglite::api::storage::GraphBackend::edge_references(&self) -> kglite::graph::core::iterators::GraphEdgeReferences<'_>
-pub fn kglite::api::storage::GraphBackend::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::graph::schema::EdgeData>
-pub fn kglite::api::storage::GraphBackend::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::graph::schema::EdgeData> + 'a)>
+pub fn kglite::api::storage::GraphBackend::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::api::EdgeData>
+pub fn kglite::api::storage::GraphBackend::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::api::EdgeData> + 'a)>
 pub fn kglite::api::storage::GraphBackend::edges(&self, idx: petgraph::graph_impl::NodeIndex) -> kglite::graph::core::iterators::GraphEdges<'_>
 pub fn kglite::api::storage::GraphBackend::edges_connecting(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> kglite::graph::core::iterators::GraphEdgesConnecting<'_>
 pub fn kglite::api::storage::GraphBackend::edges_directed(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> kglite::graph::core::iterators::GraphEdges<'_>
@@ -2748,8 +2843,8 @@ pub fn kglite::api::storage::MappedGraph::edge_endpoint_keys<'a>(&'a self) -> al
 pub fn kglite::api::storage::MappedGraph::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
 pub fn kglite::api::storage::MappedGraph::edge_indices(&self) -> kglite::graph::core::iterators::GraphEdgeIndices<'_>
 pub fn kglite::api::storage::MappedGraph::edge_references(&self) -> kglite::graph::core::iterators::GraphEdgeReferences<'_>
-pub fn kglite::api::storage::MappedGraph::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::graph::schema::EdgeData>
-pub fn kglite::api::storage::MappedGraph::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::graph::schema::EdgeData> + 'a)>
+pub fn kglite::api::storage::MappedGraph::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::api::EdgeData>
+pub fn kglite::api::storage::MappedGraph::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::api::EdgeData> + 'a)>
 pub fn kglite::api::storage::MappedGraph::edges(&self, idx: petgraph::graph_impl::NodeIndex) -> kglite::graph::core::iterators::GraphEdges<'_>
 pub fn kglite::api::storage::MappedGraph::edges_connecting(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> kglite::graph::core::iterators::GraphEdgesConnecting<'_>
 pub fn kglite::api::storage::MappedGraph::edges_directed(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> kglite::graph::core::iterators::GraphEdges<'_>
@@ -2791,8 +2886,8 @@ pub fn kglite::api::durable::RecordingGraph<G>::edge_endpoint_keys<'a>(&'a self)
 pub fn kglite::api::durable::RecordingGraph<G>::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
 pub fn kglite::api::durable::RecordingGraph<G>::edge_indices(&self) -> Self::EdgeIndicesIter
 pub fn kglite::api::durable::RecordingGraph<G>::edge_references(&self) -> Self::EdgeReferencesIter
-pub fn kglite::api::durable::RecordingGraph<G>::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::graph::schema::EdgeData>
-pub fn kglite::api::durable::RecordingGraph<G>::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::graph::schema::EdgeData> + 'a)>
+pub fn kglite::api::durable::RecordingGraph<G>::edge_weight(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&kglite::api::EdgeData>
+pub fn kglite::api::durable::RecordingGraph<G>::edge_weights<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = &'a kglite::api::EdgeData> + 'a)>
 pub fn kglite::api::durable::RecordingGraph<G>::edges(&self, idx: petgraph::graph_impl::NodeIndex) -> Self::EdgesIter
 pub fn kglite::api::durable::RecordingGraph<G>::edges_connecting(&self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex) -> Self::EdgesConnectingIter
 pub fn kglite::api::durable::RecordingGraph<G>::edges_directed(&self, idx: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction) -> Self::EdgesIter
@@ -2821,6 +2916,98 @@ pub fn kglite::api::durable::RecordingGraph<G>::node_weight(&self, idx: petgraph
 pub fn kglite::api::durable::RecordingGraph<G>::reset_arenas(&self)
 pub fn kglite::api::durable::RecordingGraph<G>::sources_for_conn_type_bounded(&self, conn_type: kglite::api::InternedKey, max: core::option::Option<usize>) -> core::option::Option<alloc::vec::Vec<u32>>
 pub fn kglite::api::durable::RecordingGraph<G>::str_prop_eq(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, target: &str) -> core::option::Option<bool>
+pub trait kglite::api::GraphWrite: kglite::api::GraphRead
+pub fn kglite::api::GraphWrite::add_edge(&mut self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex, data: kglite::api::EdgeData) -> petgraph::graph_impl::EdgeIndex
+pub fn kglite::api::GraphWrite::add_node(&mut self, data: kglite::api::NodeData) -> petgraph::graph_impl::NodeIndex
+pub fn kglite::api::GraphWrite::clear_column_stores(&mut self)
+pub fn kglite::api::GraphWrite::clear_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::GraphWrite::column_store_mut(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<&mut alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+pub fn kglite::api::GraphWrite::edge_weight_mut(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&mut kglite::api::EdgeData>
+pub fn kglite::api::GraphWrite::flush_pending_writes(&mut self)
+pub fn kglite::api::GraphWrite::install_column_store(&mut self, type_key: kglite::api::InternedKey, store: alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)
+pub fn kglite::api::GraphWrite::node_weight_mut(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
+pub fn kglite::api::GraphWrite::node_weight_mut_silent(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
+pub fn kglite::api::GraphWrite::remove_edge(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<kglite::api::EdgeData>
+pub fn kglite::api::GraphWrite::remove_node(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeData>
+pub fn kglite::api::GraphWrite::remove_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::GraphWrite::replace_node_properties(&mut self, idx: petgraph::graph_impl::NodeIndex, pairs: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>)
+pub fn kglite::api::GraphWrite::set_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::GraphWrite::set_node_property_if_absent(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::GraphWrite::take_column_store(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+pub fn kglite::api::GraphWrite::update_row_id(&mut self, _node_idx: petgraph::graph_impl::NodeIndex, _row_id: u32)
+impl kglite::api::GraphWrite for kglite::api::storage::DiskGraph
+pub fn kglite::api::storage::DiskGraph::add_edge(&mut self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex, data: kglite::api::EdgeData) -> petgraph::graph_impl::EdgeIndex
+pub fn kglite::api::storage::DiskGraph::add_node(&mut self, data: kglite::api::NodeData) -> petgraph::graph_impl::NodeIndex
+pub fn kglite::api::storage::DiskGraph::clear_column_stores(&mut self)
+pub fn kglite::api::storage::DiskGraph::clear_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::storage::DiskGraph::column_store_mut(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<&mut alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+pub fn kglite::api::storage::DiskGraph::edge_weight_mut(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&mut kglite::api::EdgeData>
+pub fn kglite::api::storage::DiskGraph::flush_pending_writes(&mut self)
+pub fn kglite::api::storage::DiskGraph::install_column_store(&mut self, type_key: kglite::api::InternedKey, store: alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)
+pub fn kglite::api::storage::DiskGraph::node_weight_mut(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
+pub fn kglite::api::storage::DiskGraph::remove_edge(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<kglite::api::EdgeData>
+pub fn kglite::api::storage::DiskGraph::remove_node(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeData>
+pub fn kglite::api::storage::DiskGraph::remove_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::storage::DiskGraph::replace_node_properties(&mut self, idx: petgraph::graph_impl::NodeIndex, pairs: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>)
+pub fn kglite::api::storage::DiskGraph::set_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::storage::DiskGraph::set_node_property_if_absent(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::storage::DiskGraph::take_column_store(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+pub fn kglite::api::storage::DiskGraph::update_row_id(&mut self, node_idx: petgraph::graph_impl::NodeIndex, row_id: u32)
+impl kglite::api::GraphWrite for kglite::api::storage::GraphBackend
+pub fn kglite::api::storage::GraphBackend::add_edge(&mut self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex, data: kglite::api::EdgeData) -> petgraph::graph_impl::EdgeIndex
+pub fn kglite::api::storage::GraphBackend::add_node(&mut self, data: kglite::api::NodeData) -> petgraph::graph_impl::NodeIndex
+pub fn kglite::api::storage::GraphBackend::clear_column_stores(&mut self)
+pub fn kglite::api::storage::GraphBackend::clear_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::storage::GraphBackend::column_store_mut(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<&mut alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+pub fn kglite::api::storage::GraphBackend::edge_weight_mut(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&mut kglite::api::EdgeData>
+pub fn kglite::api::storage::GraphBackend::flush_pending_writes(&mut self)
+pub fn kglite::api::storage::GraphBackend::install_column_store(&mut self, type_key: kglite::api::InternedKey, store: alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)
+pub fn kglite::api::storage::GraphBackend::node_weight_mut(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
+pub fn kglite::api::storage::GraphBackend::node_weight_mut_silent(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
+pub fn kglite::api::storage::GraphBackend::remove_edge(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<kglite::api::EdgeData>
+pub fn kglite::api::storage::GraphBackend::remove_node(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeData>
+pub fn kglite::api::storage::GraphBackend::remove_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::storage::GraphBackend::replace_node_properties(&mut self, idx: petgraph::graph_impl::NodeIndex, pairs: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>)
+pub fn kglite::api::storage::GraphBackend::set_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::storage::GraphBackend::set_node_property_if_absent(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::storage::GraphBackend::take_column_store(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+pub fn kglite::api::storage::GraphBackend::update_row_id(&mut self, node_idx: petgraph::graph_impl::NodeIndex, row_id: u32)
+impl kglite::api::GraphWrite for kglite::api::storage::MappedGraph
+pub fn kglite::api::storage::MappedGraph::add_edge(&mut self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex, data: kglite::api::EdgeData) -> petgraph::graph_impl::EdgeIndex
+pub fn kglite::api::storage::MappedGraph::add_node(&mut self, data: kglite::api::NodeData) -> petgraph::graph_impl::NodeIndex
+pub fn kglite::api::storage::MappedGraph::clear_column_stores(&mut self)
+pub fn kglite::api::storage::MappedGraph::clear_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::storage::MappedGraph::column_store_mut(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<&mut alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+pub fn kglite::api::storage::MappedGraph::edge_weight_mut(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&mut kglite::api::EdgeData>
+pub fn kglite::api::storage::MappedGraph::install_column_store(&mut self, type_key: kglite::api::InternedKey, store: alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)
+pub fn kglite::api::storage::MappedGraph::node_weight_mut(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
+pub fn kglite::api::storage::MappedGraph::node_weight_mut_silent(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
+pub fn kglite::api::storage::MappedGraph::remove_edge(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<kglite::api::EdgeData>
+pub fn kglite::api::storage::MappedGraph::remove_node(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeData>
+pub fn kglite::api::storage::MappedGraph::remove_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::storage::MappedGraph::replace_node_properties(&mut self, idx: petgraph::graph_impl::NodeIndex, pairs: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>)
+pub fn kglite::api::storage::MappedGraph::set_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::storage::MappedGraph::set_node_property_if_absent(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::storage::MappedGraph::take_column_store(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+impl<G: kglite::api::GraphWrite> kglite::api::GraphWrite for kglite::api::durable::RecordingGraph<G>
+pub fn kglite::api::durable::RecordingGraph<G>::add_edge(&mut self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex, data: kglite::api::EdgeData) -> petgraph::graph_impl::EdgeIndex
+pub fn kglite::api::durable::RecordingGraph<G>::add_node(&mut self, data: kglite::api::NodeData) -> petgraph::graph_impl::NodeIndex
+pub fn kglite::api::durable::RecordingGraph<G>::clear_column_stores(&mut self)
+pub fn kglite::api::durable::RecordingGraph<G>::clear_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::durable::RecordingGraph<G>::column_store_mut(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<&mut alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+pub fn kglite::api::durable::RecordingGraph<G>::edge_weight_mut(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<&mut kglite::api::EdgeData>
+pub fn kglite::api::durable::RecordingGraph<G>::flush_pending_writes(&mut self)
+pub fn kglite::api::durable::RecordingGraph<G>::install_column_store(&mut self, type_key: kglite::api::InternedKey, store: alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)
+pub fn kglite::api::durable::RecordingGraph<G>::node_weight_mut(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
+pub fn kglite::api::durable::RecordingGraph<G>::node_weight_mut_silent(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<&mut kglite::api::NodeData>
+pub fn kglite::api::durable::RecordingGraph<G>::remove_edge(&mut self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<kglite::api::EdgeData>
+pub fn kglite::api::durable::RecordingGraph<G>::remove_node(&mut self, idx: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeData>
+pub fn kglite::api::durable::RecordingGraph<G>::remove_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
+pub fn kglite::api::durable::RecordingGraph<G>::replace_node_properties(&mut self, idx: petgraph::graph_impl::NodeIndex, pairs: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>)
+pub fn kglite::api::durable::RecordingGraph<G>::set_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::durable::RecordingGraph<G>::set_node_property_if_absent(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::durable::RecordingGraph<G>::take_column_store(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
+pub fn kglite::api::durable::RecordingGraph<G>::update_row_id(&mut self, node_idx: petgraph::graph_impl::NodeIndex, row_id: u32)
 pub fn kglite::api::discover_property_keys_excluding(nodes: &[(&str, kglite::api::NodeView<'_>)], interner: &kglite::api::StringInterner, excluded: &[&str]) -> alloc::vec::Vec<alloc::string::String>
 pub fn kglite::api::discover_property_keys_from_data(nodes: &[(&str, kglite::api::NodeView<'_>)], interner: &kglite::api::StringInterner) -> alloc::vec::Vec<alloc::string::String>
 pub fn kglite::api::explore_markdown(dir: &kglite::api::DirGraph, query: &str, opts: &kglite::api::ExploreOptions, source_roots: &[std::path::PathBuf]) -> alloc::string::String

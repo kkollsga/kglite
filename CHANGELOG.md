@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rust API: the write-side migration promised in 0.15.9 is now actually
+  reachable — and safe.** Three parts:
+  - `GraphWrite` is exported from `kglite::api`. The 0.15.9 changelog
+    directed embedders to `GraphWrite::set_node_property`, but the trait was
+    never re-exported, so the advertised migration could not compile from
+    outside the crate (every internal consumer reaches it through
+    `pub(crate)`, which is why no build here noticed). Reach it as
+    `graph.graph.set_node_property(..)` with the trait in scope.
+  - `DirGraph::set_node_property(idx, "key", value)` and
+    `DirGraph::remove_node_property(idx, "key")` — one-call string-keyed
+    replacements matching the removed `NodeData` mutators' ergonomics. Prefer
+    these: the trait method takes an `InternedKey`, and a key built with
+    `InternedKey::from_str` (which does not register the name) reads back
+    in-session but breaks enumeration and is silently dropped by `save_graph`.
+    The `kglite::api` interner docs, which previously recommended exactly
+    that bridge for direct graph access, now spell out the write-side rule.
+  - `EdgeData` is exported from `kglite::api` beside `NodeData` — public
+    signatures (`GraphWrite::add_edge`, `DiskGraph::from_stable_digraph`)
+    name it, so it must be publicly nameable.
+
+  The packaged Rust embed-consumer fixture now exercises the documented
+  migration (NodeView read, both write routes, key registration, enumeration,
+  save/load) from outside the crate, so an advertised route that is not
+  publicly reachable or drops data fails the fixture. Corrections riding
+  along: two 0.15.9 changelog migration lines were fixed in place
+  (`NodeView::from(&node_data)` was itself removed — use `graph.node_view`;
+  `property_iter`'s replacement is `property_pairs_named`, not a same-named
+  method), four stale doc comments recommending removed `NodeData` methods
+  were corrected, `docs/rust/api-reference.md` no longer promises that patch
+  releases never break the API (this project deliberately ships documented
+  breaking changes in patch bumps — pin exact versions), and its
+  `compute_description`/`compute_schema` paths gained their real
+  `introspection::` segment.
+
 ## [0.15.10] - 2026-08-11
 
 ### Added
@@ -362,15 +398,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NodeView` is complete for columnar rows. `discover_property_keys_from_data`,
   `discover_property_keys_excluding`, `cypher::resolve_node_property` and the
   three `fluent::node_*` temporal predicates now take `NodeView` instead of
-  `&NodeData`; pass `graph.node_view(idx)` (or `NodeView::from(&node_data)`)
-  where you passed a `&NodeData` before.
+  `&NodeData`; pass `graph.node_view(idx)`
+  where you passed a `&NodeData` before. *(Correction, 0.15.11: this entry
+  originally also suggested `NodeView::from(&node_data)`, but that `From`
+  impl is removed by the entry below — `graph.node_view(idx)` is the route.)*
 - **Rust API**: `NodeData`'s property readers are removed — `get_property`,
   `get_property_value`, `get_field_ref`, `property_keys`, `property_iter`,
   `property_count`, `has_property`, `properties_cloned`, `to_node_info`,
   `get_node_type_ref`, `field_contains_ci`, `field_starts_with_ci`. Every one of
   them read the node's own replica of a columnar type's column store, and
   `property_iter` silently yielded nothing there. Use `NodeView`, whose methods
-  carry the same names and are complete for every storage variant:
+  carry the same names (except `property_iter`, whose replacement is
+  `property_pairs_named`) and are complete for every storage variant:
   `graph.node_view(idx)` instead of `graph.get_node(idx)`. `NodeData` keeps
   `id()`, `title()` and `node_type_str()`.
 

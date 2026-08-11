@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use kglite::api::io::{load_file, save_graph};
 use kglite::api::session::{execute_mut, execute_read, ExecuteOptions};
-use kglite::api::{DirGraph, Embedder, KnowledgeGraph, Value};
+use kglite::api::{DirGraph, Embedder, GraphRead, GraphWrite, KnowledgeGraph, Value};
 
 struct DeterministicEmbedder;
 
@@ -40,6 +40,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         result.result.rows,
         vec![vec![Value::String("Alice".into())]]
     );
+
+    // The 0.15.9 migration routes, exercised from *outside* the crate — the
+    // only vantage point that can see an unexported symbol. The changelog
+    // advertised `GraphWrite::set_node_property` as `NodeData::set_property`'s
+    // replacement while `GraphWrite` was still `pub(crate)`, and every
+    // internal build resolved it fine (that shipped in 0.15.9; no external
+    // consumer could compile the migration until the trait was re-exported).
+    let idx = graph
+        .graph
+        .node_indices()
+        .next()
+        .expect("the CREATE above made a node");
+    assert!(
+        graph.set_node_property(idx, "age", Value::Int64(30)),
+        "the one-call string-keyed route must land on an existing node"
+    );
+    let city_key = graph.interner.try_get_or_intern("city")?;
+    graph
+        .graph
+        .set_node_property(idx, city_key, Value::String("Oslo".into()));
+    let view = graph.node_view(idx).expect("node has a view");
+    assert_eq!(
+        view.get_property("age").map(|v| v.into_owned()),
+        Some(Value::Int64(30)),
+        "a property written via DirGraph::set_node_property must read back via NodeView"
+    );
+    assert_eq!(
+        view.get_property("city").map(|v| v.into_owned()),
+        Some(Value::String("Oslo".into())),
+        "a property written via GraphWrite with a registered key must read back via NodeView"
+    );
+    let keys = view.property_keys(&graph.interner);
+    for wanted in ["age", "city"] {
+        assert!(
+            keys.contains(&wanted),
+            "written key {wanted:?} must resolve during enumeration (an \
+             unregistered key panics in property_keys and vanishes on save); got {keys:?}"
+        );
+    }
+    drop(view);
 
     let path = std::env::temp_dir().join(format!(
         "kglite-rust-embed-consumer-{}.kgl",

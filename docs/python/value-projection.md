@@ -103,7 +103,7 @@ py_out::value_to_py(py, &Value::Node(node_val)) →
 
 The `materialize_node_value` helper (`executor/helpers.rs`) is the
 canonical entry point. It's **backend-aware**: in memory mode it reads
-properties via `NodeData::property_iter`; in mapped / disk modes
+properties via `NodeView::property_pairs_named`; in mapped / disk modes
 properties live in the column store, so it walks `graph
 .get_node_type_metadata(node_type)` and reads each property via
 `resolve_node_property` (which knows the column-aware path). The

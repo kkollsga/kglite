@@ -244,8 +244,8 @@ impl<'a> NodeView<'a> {
 
     /// Every present property as `(interned key, owned value)`.
     ///
-    /// **Complete for columnar storage** — unlike `NodeData::property_iter`,
-    /// which yields nothing there.
+    /// **Complete for columnar storage** — the removed
+    /// `NodeData::property_iter` yielded nothing there.
     pub fn property_pairs(&self) -> Vec<(InternedKey, Value)> {
         match self.store {
             Some((store, row_id)) => store.row_properties(row_id),

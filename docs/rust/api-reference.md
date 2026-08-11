@@ -20,11 +20,16 @@ the same way (cbindgen vs the committed header).
 
 Pre-1.0, the policy is:
 
-- **PATCH releases never break the API** — additive or internal only.
-- **MINOR releases may break it deliberately.** Every intentional break ships
-  with a `CHANGELOG.md` entry and, when user-visible, a migration guide. The
-  minor bump *is* the pre-1.0 breaking-change signal — we never patch-bump a
-  removal.
+- **Any release, including a PATCH, may ship a documented breaking change.**
+  KGLite's crates ship in lockstep and deliberately ship breaking engine
+  changes in patch bumps; the version number is not a compatibility signal.
+  Every intentional break ships with a `CHANGELOG.md` entry naming the
+  removed items and their replacements — the changelog, not the bump size, is
+  the migration contract. Embedders should pin an exact version
+  (`kglite = "=X.Y.Z"`) and upgrade against the changelog. *(This paragraph
+  previously promised "patch releases never break the API"; 0.15.9 removed
+  public items in a patch, per the actual policy, and this page was the
+  outlier.)*
 - New options land under **0.14's options-struct convention** (`*Options`
   structs, `#[non_exhaustive]` + `Default`), so adding an option is a
   non-breaking change rather than a signature break.
@@ -69,8 +74,8 @@ methods, documented in the Python track, not raw `kglite::api` functions.
 
 | Item | Path | Purpose |
 |---|---|---|
-| `compute_description(...)` | `kglite::api::compute_description` | XML schema description for agent system prompts. |
-| `compute_schema(&dir)` | `kglite::api::compute_schema` | Structured `SchemaOverview` (node types, edge types, indexes). |
+| `compute_description(...)` | `kglite::api::introspection::compute_description` | XML schema description for agent system prompts. |
+| `compute_schema(&dir)` | `kglite::api::introspection::compute_schema` | Structured `SchemaOverview` (node types, edge types, indexes). |
 | `SchemaOverview`, `ConnectionDetail`, `CypherDetail`, `FluentDetail` | `kglite::api::*` | Structured introspection types. |
 
 ## Cypher pipeline (`kglite::api::cypher`)
