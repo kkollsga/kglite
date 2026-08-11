@@ -69,6 +69,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`list[i]` is now O(1) in list length, not O(list length) per access.**
+  Indexing a list in Cypher (`n.emb[i]`, `$q[i]`, a projected `q[i]`) used to
+  clone the entire list on every element access, so a dot product spelled
+  `reduce(i IN range(0, d) | s + n.emb[i] * q[i])` over a `d`-dimensional
+  embedding cost O(d²) per row. It now borrows the list and clones only the
+  selected element. A per-element scoring reduce over a 384-dim stored vector
+  drops from ~340 ms to ~13 ms across 2 000 nodes (~26×), and per-element cost
+  is now flat in vector width — on par with a scalar property read. Bring-your-
+  own-vector scoring written by hand in Cypher, not just the native
+  `vector_score`, is now practical.
+
 - **`add_embeddings` requires its source column to exist**, matching
   `set_embeddings`. `add_embeddings('Doc', 'summary_emb', …)` — the store name
   where the column name belongs — used to create an unreachable
