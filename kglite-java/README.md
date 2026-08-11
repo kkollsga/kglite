@@ -1,8 +1,10 @@
 # kglite for Java
 
-An embedded knowledge-graph engine in your JVM process — Cypher, vector search
-and a single-file `.kgl` graph, with no server, no daemon and no JNI. A lean
-[Panama](https://openjdk.org/jeps/454) wrapper over kglite's C ABI.
+An embedded knowledge-graph engine in your JVM process — Cypher and a
+single-file `.kgl` graph, with no server, no daemon and no JNI. A lean
+[Panama](https://openjdk.org/jeps/454) wrapper over kglite's C ABI. (Vector
+*search* is queryable from Java only against an embedding index built by the
+Python/Rust API — see the vector caveat under Scope.)
 
 This page is the whole hand-written reference for the Java binding. The
 per-member API reference is the **javadoc**, shipped alongside the jar; Cypher
@@ -112,8 +114,14 @@ the engine. Choosing wrong is an exception, not a subtle difference.
 | Persists anything | no — only `save()` does | no |
 
 Use `cypher` for anything that changes the graph, `query` for everything else.
-Everything the engine can do — vector search, graph algorithms, aggregations,
-temporal and spatial functions — arrives through these two as Cypher.
+Nearly everything the engine can do — graph algorithms, aggregations,
+temporal and spatial functions — arrives through these two as Cypher. The
+named exception is the vector/embedding store: `vector_score()` and
+`text_score()` *read* an embedding index, but building one
+(`set_embeddings`, `create_vector_index`) is a Python/Rust API with no
+Cypher form and no Java equivalent today, so a Java-only application cannot
+populate it. A `.kgl` whose index was baked by a Python build step queries
+fine from Java. Details under Scope.
 
 ## Values
 
@@ -340,7 +348,7 @@ typed row and no object mapping: see [Scope](#scope).
 
 What the DSL does not model, it hands back rather than blocks. Three tiers, in
 increasing order of drop-out — and everything the engine can do that has no
-builder (procedures, graph algorithms, vector search, subqueries, `UNION`, DDL,
+builder (procedures, graph algorithms, subqueries, `UNION`, DDL,
 scalar functions, `CASE`, map projections, variable-length paths) arrives
 through one of them:
 
@@ -514,6 +522,21 @@ binding is deliberately the lean one. Its entire surface is open/create, `cypher
 the Cypher DSL that builds the text those two methods take. That is not a
 staging post; it is the design. A per-query capability needs no Java change,
 because it arrives through Cypher.
+
+**The vector caveat.** The engine's HNSW vector index and embedding store are
+*queryable* through Cypher (`vector_score()`, `text_score()`) but not
+*buildable* through it: `set_embeddings` and `create_vector_index` exist only
+in the Python/Rust API today, and this binding does not wrap them. A Java-only
+application therefore cannot populate an embedding index — storing a list
+property is not an embedding, and `vector_score` will say so. What works: ship
+a `.kgl` whose index was baked by a Python build step (the file format carries
+it; Java queries it fine), prefilter with a graph pattern and score a small
+candidate set in Cypher arithmetic, or keep vectors in a JVM-side ANN library
+(Lucene HNSW, JVector) keyed by kglite `id`. Schema declaration
+(`define_schema`, including the primary-key uniqueness rule on `id`) has the
+same Python/Rust-only status — from Java, upsert with `MERGE` rather than
+`CREATE` to keep `id` unique. Closing these two gaps at the C ABI is filed
+work, gated like every expansion on demand.
 
 **The DSL is a query builder, not a second API.** Every one of its methods names
 the Cypher production it emits — that rule is enforced by a test, so the surface
