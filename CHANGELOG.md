@@ -56,6 +56,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kglite_session_save` to persist them. Existing symbols are unchanged — the
   generated `include/kglite.h` gains only these four.
 
+- **Java: ingest embeddings and query the graph by vector.** `KnowledgeGraph`
+  gains `setEmbeddings(nodeType, column, byId[, metric])`,
+  `addEmbeddings(nodeType, column, byId[, metric])`,
+  `buildVectorIndex(nodeType, column[, m, efConstruction, efSearch, metric])`
+  and `listEmbeddings()`. Bring your own vectors as a `Map<?, float[]>` keyed by
+  node id; the wrapper flattens them into one packed-float buffer at the FFM
+  boundary. A `float[]` or `List<Float>` is now a bindable Cypher parameter, so
+  `vector_score(n, 'col_emb', $q)` and `text_score(n, 'col', $q)` score against
+  your own query vector. `save()` carries the store and its HNSW index in the
+  `.kgl` checkpoint, so a store written from Java reloads in every binding.
+
 ### Changed
 
 - **`add_embeddings` requires its source column to exist**, matching

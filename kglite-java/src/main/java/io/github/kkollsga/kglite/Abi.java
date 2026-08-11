@@ -56,6 +56,10 @@ final class Abi {
     private static final ValueLayout.OfInt I32 = ValueLayout.JAVA_INT;
     private static final ValueLayout.OfLong I64 = ValueLayout.JAVA_LONG;
     private static final ValueLayout.OfByte U8 = ValueLayout.JAVA_BYTE;
+    private static final ValueLayout.OfFloat F32 = ValueLayout.JAVA_FLOAT;
+    // uintptr_t is pointer-width; every bundled platform is 64-bit, so it binds
+    // as a Java long. (darwin-aarch64, linux-{aarch64,x86_64}, windows-x86_64.)
+    private static final ValueLayout.OfLong USIZE = I64;
 
     /** {@code struct KgliteAbiVersion { uint32_t major, minor, patch; }}. */
     private static final StructLayout ABI_VERSION_LAYOUT = MemoryLayout.structLayout(
@@ -90,6 +94,19 @@ final class Abi {
             "kglite_session_execute_mut_batch", FunctionDescriptor.of(I32, PTR, PTR, PTR, PTR));
     private static final MethodHandle SESSION_SAVE =
             bind("kglite_session_save", FunctionDescriptor.of(I32, PTR, PTR, U8, PTR));
+    // Embedding ingest: (session, node_type, text_column, ids_json, vectors,
+    // dim, count, metric, out_report_json, out_error_msg). set and add share it.
+    private static final FunctionDescriptor INGEST_DESCRIPTOR =
+            FunctionDescriptor.of(I32, PTR, PTR, PTR, PTR, PTR, USIZE, USIZE, PTR, PTR, PTR);
+    private static final MethodHandle SESSION_SET_EMBEDDINGS =
+            bind("kglite_session_set_embeddings", INGEST_DESCRIPTOR);
+    private static final MethodHandle SESSION_ADD_EMBEDDINGS =
+            bind("kglite_session_add_embeddings", INGEST_DESCRIPTOR);
+    private static final MethodHandle SESSION_BUILD_VECTOR_INDEX = bind(
+            "kglite_session_build_vector_index",
+            FunctionDescriptor.of(I32, PTR, PTR, PTR, USIZE, USIZE, USIZE, PTR, PTR, PTR));
+    private static final MethodHandle SESSION_LIST_EMBEDDINGS =
+            bind("kglite_session_list_embeddings", FunctionDescriptor.of(I32, PTR, PTR, PTR));
     private static final MethodHandle SESSION_FREE =
             bind("kglite_session_free", FunctionDescriptor.ofVoid(PTR));
     private static final MethodHandle RESULT_COLUMNS_JSON =
@@ -312,6 +329,145 @@ final class Abi {
         } catch (Throwable t) {
             throw rethrow(t);
         }
+    }
+
+    /**
+     * Flatten a {@code Map<?, float[]>} ingest into the packed-float wire and
+     * call {@code set}/{@code add}. A single confined-arena
+     * {@link MemorySegment} of {@code dim * count} floats, filled in one pass
+     * that also builds the id array — the one unavoidable copy at the FFM
+     * boundary. The ids ride as a JSON array so their typing matches the node
+     * payload the same way every other binding's ids do.
+     *
+     * @param replace    {@code true} calls {@code set_embeddings} (replace the
+     *     store), {@code false} calls {@code add_embeddings} (upsert)
+     * @param session    the session handle
+     * @param nodeType   the node type to key the store on
+     * @param textColumn the source column; the store key is {@code "{col}_emb"}
+     * @param byId       vectors keyed by node id; an empty map is a no-op batch
+     * @param metric     the distance metric, or {@code null} for cosine
+     * @return the ingest report, parsed from the ABI's JSON
+     */
+    static Map<String, Object> ingestEmbeddings(
+            boolean replace,
+            MemorySegment session,
+            String nodeType,
+            String textColumn,
+            Map<?, float[]> byId,
+            String metric) {
+        try (Arena arena = Arena.ofConfined()) {
+            int count = byId.size();
+            long dim = 0;
+            MemorySegment vectors = MemorySegment.NULL;
+            String idsJson;
+            if (count == 0) {
+                idsJson = "[]";
+            } else {
+                dim = byId.values().iterator().next().length;
+                if (dim == 0) {
+                    throw new KgliteException("an embedding vector cannot be empty");
+                }
+                vectors = arena.allocate(F32, dim * count);
+                java.util.List<Object> ids = new java.util.ArrayList<>(count);
+                long slot = 0;
+                for (Map.Entry<?, float[]> entry : byId.entrySet()) {
+                    float[] vector = entry.getValue();
+                    if (vector == null) {
+                        throw new KgliteException(
+                                "the embedding vector for id " + entry.getKey() + " is null");
+                    }
+                    if (vector.length != dim) {
+                        throw new KgliteException(
+                                "every embedding vector must share one dimension; the first is "
+                                        + dim + " but id " + entry.getKey() + " has " + vector.length);
+                    }
+                    MemorySegment.copy(vector, 0, vectors, F32, slot * dim * Float.BYTES, (int) dim);
+                    ids.add(entry.getKey());
+                    slot++;
+                }
+                idsJson = Json.write(ids);
+            }
+            MemorySegment outReport = arena.allocate(PTR);
+            MemorySegment outError = arena.allocate(PTR);
+            MethodHandle handle = replace ? SESSION_SET_EMBEDDINGS : SESSION_ADD_EMBEDDINGS;
+            int rc = (int) handle.invokeExact(
+                    session, cstr(arena, nodeType), cstr(arena, textColumn), cstr(arena, idsJson),
+                    vectors, dim, (long) count, cstr(arena, metric), outReport, outError);
+            check(rc, outError);
+            return decodeReport(outReport.get(PTR, 0));
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
+    }
+
+    /** {@code kglite_session_build_vector_index} — HNSW build; returns the report. */
+    static Map<String, Object> buildVectorIndex(
+            MemorySegment session,
+            String nodeType,
+            String textColumn,
+            long m,
+            long efConstruction,
+            long efSearch,
+            String metric) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outReport = arena.allocate(PTR);
+            MemorySegment outError = arena.allocate(PTR);
+            int rc = (int) SESSION_BUILD_VECTOR_INDEX.invokeExact(
+                    session, cstr(arena, nodeType), cstr(arena, textColumn),
+                    m, efConstruction, efSearch, cstr(arena, metric), outReport, outError);
+            check(rc, outError);
+            return decodeReport(outReport.get(PTR, 0));
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
+    }
+
+    /** {@code kglite_session_list_embeddings} — one report object per store. */
+    static java.util.List<Map<String, Object>> listEmbeddings(MemorySegment session) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outReport = arena.allocate(PTR);
+            MemorySegment outError = arena.allocate(PTR);
+            int rc = (int) SESSION_LIST_EMBEDDINGS.invokeExact(session, outReport, outError);
+            check(rc, outError);
+            String json = takeString(outReport.get(PTR, 0));
+            if (json == null) {
+                throw new KgliteException("the engine returned no embedding listing");
+            }
+            return decodeStoreList(json);
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
+    }
+
+    /** Parse an owned ingest / index report string into an unmodifiable map. */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> decodeReport(MemorySegment pointer) {
+        String json = takeString(pointer);
+        if (json == null) {
+            throw new KgliteException("the engine returned no embedding report");
+        }
+        Object parsed = Json.parse(json);
+        if (!(parsed instanceof Map<?, ?>)) {
+            throw new KgliteException("expected a JSON object embedding report, got " + parsed);
+        }
+        return Collections.unmodifiableMap((Map<String, Object>) parsed);
+    }
+
+    /** Parse the {@code list_embeddings} array into one unmodifiable map per store. */
+    @SuppressWarnings("unchecked")
+    private static java.util.List<Map<String, Object>> decodeStoreList(String json) {
+        Object parsed = Json.parse(json);
+        if (!(parsed instanceof java.util.List<?> stores)) {
+            throw new KgliteException("expected a JSON array of embedding stores, got " + parsed);
+        }
+        java.util.List<Map<String, Object>> out = new java.util.ArrayList<>(stores.size());
+        for (Object store : stores) {
+            if (!(store instanceof Map<?, ?>)) {
+                throw new KgliteException("expected a JSON object per embedding store, got " + store);
+            }
+            out.add(Collections.unmodifiableMap((Map<String, Object>) store));
+        }
+        return Collections.unmodifiableList(out);
     }
 
     /** {@code kglite_session_free} — null-safe. */

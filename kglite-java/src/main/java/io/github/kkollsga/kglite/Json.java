@@ -39,6 +39,21 @@ final class Json {
         return out.toString();
     }
 
+    /**
+     * Serialize a single value to a JSON string — the array form of
+     * {@link #writeObject(Map)}, used to pass the id list alongside a packed
+     * embedding batch.
+     *
+     * @param value the value; the same set {@link #writeObject(Map)} accepts
+     * @return the JSON text
+     * @throws KgliteException if a value has no JSON representation
+     */
+    static String write(Object value) {
+        StringBuilder out = new StringBuilder();
+        writeValue(out, value);
+        return out.toString();
+    }
+
     private static void writeValue(StringBuilder out, Object value) {
         switch (value) {
             case null -> out.append("null");
@@ -48,10 +63,27 @@ final class Json {
             case Map<?, ?> map -> writeMap(out, map);
             case Iterable<?> items -> writeArray(out, items);
             case Object[] items -> writeArray(out, java.util.Arrays.asList(items));
+            case float[] floats -> writePrimitiveArray(out, floats.length, i -> writeNumber(out, floats[i]));
+            case double[] doubles ->
+                    writePrimitiveArray(out, doubles.length, i -> writeNumber(out, doubles[i]));
             default -> throw new KgliteException(
                     "cannot bind a " + value.getClass().getName() + " as a Cypher parameter;"
-                            + " use null, String, Boolean, a Number, Map, Iterable or Object[]");
+                            + " use null, String, Boolean, a Number, Map, Iterable, Object[],"
+                            + " float[] or double[]");
         }
+    }
+
+    /** Write a JSON array of {@code length} elements, each emitted by {@code element}. */
+    private static void writePrimitiveArray(
+            StringBuilder out, int length, java.util.function.IntConsumer element) {
+        out.append('[');
+        for (int i = 0; i < length; i++) {
+            if (i > 0) {
+                out.append(',');
+            }
+            element.accept(i);
+        }
+        out.append(']');
     }
 
     private static void writeNumber(StringBuilder out, Number value) {

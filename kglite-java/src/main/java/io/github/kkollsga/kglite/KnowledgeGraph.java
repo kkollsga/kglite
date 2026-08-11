@@ -458,6 +458,223 @@ public final class KnowledgeGraph implements AutoCloseable {
         return new Transaction(session);
     }
 
+    // ---- embeddings -------------------------------------------------------
+
+    /**
+     * Store one embedding vector per node id for {@code (nodeType, textColumn)},
+     * replacing any existing store for that pair.
+     *
+     * <p>This is the "these are the vectors" call: it installs a fresh store
+     * keyed {@code "{textColumn}_emb"}, scored with cosine distance. Bring your
+     * own vectors — one {@code float[]} per node, keyed by the node's {@code id}
+     * value (the value {@code n.id} returns), so the keys survive a graph
+     * rebuild. Every vector shares one dimension, taken from the batch.
+     *
+     * <p>Query the store by your own vector once it exists:
+     *
+     * <pre>{@code
+     * graph.setEmbeddings("Note", "body", Map.of(1L, v1, 2L, v2));
+     * List<Map<String, Object>> hits = graph.query(
+     *     "MATCH (n:Note) RETURN n.id AS id, vector_score(n, 'body_emb', $q) AS s "
+     *   + "ORDER BY s DESC LIMIT 10",
+     *     Map.of("q", queryVector));   // queryVector is a float[]
+     * }</pre>
+     *
+     * The column-named spelling {@code text_score(n, 'body', $q)} scores the
+     * same store. Build an HNSW index with {@link #buildVectorIndex(String,
+     * String)} to accelerate whole-corpus top-k.
+     *
+     * <p>Call {@link #save(Path)} to persist the store; embeddings ride the
+     * checkpoint, so a store lives in the session until it is saved.
+     *
+     * @param nodeType   the node type to key the store on; it must exist in the
+     *     graph, and {@code textColumn} must name a property present on it
+     * @param textColumn the source column name (for example {@code "body"}); the
+     *     store key is {@code "{textColumn}_emb"}
+     * @param byId       vectors keyed by node id. Iteration order fixes the
+     *     stored slot order, so a {@link java.util.LinkedHashMap} gives a
+     *     reproducible {@code .kgl} across runs. An empty map is a no-op batch.
+     * @return the ingest report: {@code embeddings_stored}, {@code dimension},
+     *     {@code skipped} (ids that matched no node), {@code store_created}
+     * @throws KgliteException if the node type or column is unknown, the vectors
+     *     disagree on dimension, or a vector is null
+     * @throws IllegalStateException if this graph is closed
+     * @see #buildVectorIndex(String, String)
+     * @see #listEmbeddings()
+     */
+    public Map<String, Object> setEmbeddings(
+            String nodeType, String textColumn, Map<?, float[]> byId) {
+        return setEmbeddings(nodeType, textColumn, byId, null);
+    }
+
+    /**
+     * Store one embedding vector per node id for {@code (nodeType, textColumn)},
+     * scored with an explicit distance metric.
+     *
+     * <p>As {@link #setEmbeddings(String, String, Map)}, and additionally names
+     * the distance the store is scored with. Call {@link #save(Path)} to persist
+     * it.
+     *
+     * @param nodeType   the node type to key the store on
+     * @param textColumn the source column name; the store key is
+     *     {@code "{textColumn}_emb"}
+     * @param byId       vectors keyed by node id; an empty map is a no-op batch
+     * @param metric     the distance metric: {@code "cosine"},
+     *     {@code "dot_product"}, {@code "euclidean"} or {@code "poincare"}. Pass
+     *     {@code null} to score with cosine.
+     * @return the ingest report, as {@link #setEmbeddings(String, String, Map)}
+     * @throws KgliteException if the node type or column is unknown, the vectors
+     *     disagree on dimension, the metric is unknown, or a vector is null
+     * @throws IllegalStateException if this graph is closed
+     */
+    public Map<String, Object> setEmbeddings(
+            String nodeType, String textColumn, Map<?, float[]> byId, String metric) {
+        Map<?, float[]> vectors = requireIngestArgs(nodeType, textColumn, byId);
+        return session.use(handle ->
+                Abi.ingestEmbeddings(true, handle, nodeType, textColumn, vectors, metric));
+    }
+
+    /**
+     * Upsert embedding vectors into the store for {@code (nodeType, textColumn)},
+     * creating it if it is the first batch.
+     *
+     * <p>The incremental counterpart to {@link #setEmbeddings(String, String,
+     * Map)}: ingest a large corpus in several batches, each one adding to the
+     * same store. A node id already present has its vector replaced; the rest
+     * are appended. Once the store exists its dimension is authoritative, and
+     * every later vector shares it. Call {@link #save(Path)} to persist it.
+     *
+     * @param nodeType   the node type to key the store on
+     * @param textColumn the source column name; the store key is
+     *     {@code "{textColumn}_emb"}
+     * @param byId       vectors keyed by node id; an empty map is a no-op batch
+     * @return the ingest report; {@code store_created} is {@code true} on the
+     *     batch that created the store
+     * @throws KgliteException if the node type or column is unknown, a vector
+     *     disagrees with the store's dimension, or a vector is null
+     * @throws IllegalStateException if this graph is closed
+     */
+    public Map<String, Object> addEmbeddings(
+            String nodeType, String textColumn, Map<?, float[]> byId) {
+        return addEmbeddings(nodeType, textColumn, byId, null);
+    }
+
+    /**
+     * Upsert embedding vectors into the store for {@code (nodeType, textColumn)},
+     * naming the metric the store is created with.
+     *
+     * <p>As {@link #addEmbeddings(String, String, Map)}. The metric applies to
+     * the batch that creates the store; later batches extend it under that
+     * metric. Call {@link #save(Path)} to persist it.
+     *
+     * @param nodeType   the node type to key the store on
+     * @param textColumn the source column name; the store key is
+     *     {@code "{textColumn}_emb"}
+     * @param byId       vectors keyed by node id; an empty map is a no-op batch
+     * @param metric     the distance metric for the store when this batch
+     *     creates it: {@code "cosine"}, {@code "dot_product"},
+     *     {@code "euclidean"} or {@code "poincare"}. Pass {@code null} for cosine.
+     * @return the ingest report, as {@link #addEmbeddings(String, String, Map)}
+     * @throws KgliteException if the node type or column is unknown, a vector
+     *     disagrees with the store's dimension, the metric is unknown, or a
+     *     vector is null
+     * @throws IllegalStateException if this graph is closed
+     */
+    public Map<String, Object> addEmbeddings(
+            String nodeType, String textColumn, Map<?, float[]> byId, String metric) {
+        Map<?, float[]> vectors = requireIngestArgs(nodeType, textColumn, byId);
+        return session.use(handle ->
+                Abi.ingestEmbeddings(false, handle, nodeType, textColumn, vectors, metric));
+    }
+
+    /**
+     * Build an HNSW index over the store for {@code (nodeType, textColumn)} with
+     * the engine's default tuning, accelerating whole-corpus top-k vector search.
+     *
+     * <p>Build it after ingest: a later vector write drops the index, so the
+     * order is {@code setEmbeddings} / {@code addEmbeddings} then this. A heavily
+     * filtered query stays on the exact path; the index earns its keep on
+     * {@code ORDER BY vector_score(...) DESC LIMIT k} over the whole corpus. The
+     * index is a rebuildable cache, and {@link #save(Path)} carries it in the
+     * checkpoint alongside the store.
+     *
+     * @param nodeType   the node type the store is keyed on
+     * @param textColumn the source column name; the store key is
+     *     {@code "{textColumn}_emb"}
+     * @return the index report: {@code indexed}, {@code metric}, {@code m}
+     * @throws KgliteException if the store does not exist yet, or its metric is
+     *     one HNSW does not index
+     * @throws IllegalStateException if this graph is closed
+     * @see #setEmbeddings(String, String, Map)
+     */
+    public Map<String, Object> buildVectorIndex(String nodeType, String textColumn) {
+        return buildVectorIndex(nodeType, textColumn, 0, 0, 0, null);
+    }
+
+    /**
+     * Build an HNSW index over the store for {@code (nodeType, textColumn)} with
+     * explicit tuning and metric.
+     *
+     * <p>As {@link #buildVectorIndex(String, String)}, with the HNSW parameters
+     * and the scoring metric named. Each parameter uses the engine default when
+     * passed {@code 0} and is clamped to its valid range otherwise, so a caller
+     * can set one and default the rest.
+     *
+     * @param nodeType       the node type the store is keyed on
+     * @param textColumn     the source column name; the store key is
+     *     {@code "{textColumn}_emb"}
+     * @param m              max neighbours per node above layer 0; {@code 0} uses
+     *     the engine default
+     * @param efConstruction build-time candidate-list width; {@code 0} uses the
+     *     engine default
+     * @param efSearch       query-time candidate-list width; {@code 0} uses the
+     *     engine default
+     * @param metric         the metric to index for: {@code "cosine"},
+     *     {@code "dot_product"} or {@code "euclidean"}. Pass {@code null} to use
+     *     the store's own metric, falling back to cosine.
+     * @return the index report: {@code indexed}, {@code metric}, {@code m}
+     * @throws KgliteException if the store does not exist yet, or the metric is
+     *     one HNSW does not index
+     * @throws IllegalStateException if this graph is closed
+     */
+    public Map<String, Object> buildVectorIndex(
+            String nodeType, String textColumn, int m, int efConstruction, int efSearch, String metric) {
+        if (nodeType == null || textColumn == null) {
+            throw new KgliteException("buildVectorIndex requires a node type and a text column");
+        }
+        return session.use(handle -> Abi.buildVectorIndex(
+                handle, nodeType, textColumn, m, efConstruction, efSearch, metric));
+    }
+
+    /**
+     * List every embedding store on this graph.
+     *
+     * <p>A read-only projection, one map per store, taken from a snapshot — it
+     * runs concurrently with other reads. Each map carries {@code node_type},
+     * {@code text_column} (the source column, the store's {@code "_emb"} suffix
+     * stripped), {@code dimension}, {@code count} and {@code metric} (the store's
+     * own metric, or {@code "cosine"} when it recorded none).
+     *
+     * @return one unmodifiable map per store, in unspecified order; an empty
+     *     list when the graph has no stores
+     * @throws IllegalStateException if this graph is closed
+     */
+    public List<Map<String, Object>> listEmbeddings() {
+        return session.use(Abi::listEmbeddings);
+    }
+
+    /** Validate the shared ingest arguments and hand back the vectors map. */
+    private static Map<?, float[]> requireIngestArgs(
+            String nodeType, String textColumn, Map<?, float[]> byId) {
+        if (nodeType == null || textColumn == null) {
+            throw new KgliteException("embedding ingest requires a node type and a text column");
+        }
+        if (byId == null) {
+            throw new KgliteException("embedding ingest requires a vectors map; pass Map.of() for none");
+        }
+        return byId;
+    }
+
     // ---- lifecycle --------------------------------------------------------
 
     /**

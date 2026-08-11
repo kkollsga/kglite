@@ -2,9 +2,9 @@
 
 An embedded knowledge-graph engine in your JVM process — Cypher and a
 single-file `.kgl` graph, with no server, no daemon and no JNI. A lean
-[Panama](https://openjdk.org/jeps/454) wrapper over kglite's C ABI. (Vector
-*search* is queryable from Java only against an embedding index built by the
-Python/Rust API — see the vector caveat under Scope.)
+[Panama](https://openjdk.org/jeps/454) wrapper over kglite's C ABI. Ingest your
+own embedding vectors and query the graph by vector directly from Java — see
+[Embeddings and vector search](#embeddings-and-vector-search).
 
 This page is the whole hand-written reference for the Java binding. The
 per-member API reference is the **javadoc**, shipped alongside the jar; Cypher
@@ -115,13 +115,12 @@ the engine. Choosing wrong is an exception, not a subtle difference.
 
 Use `cypher` for anything that changes the graph, `query` for everything else.
 Nearly everything the engine can do — graph algorithms, aggregations,
-temporal and spatial functions — arrives through these two as Cypher. The
-named exception is the vector/embedding store: `vector_score()` and
-`text_score()` *read* an embedding index, but building one
-(`set_embeddings`, `build_vector_index`) is a Python/Rust API with no
-Cypher form and no Java equivalent today, so a Java-only application cannot
-populate it. A `.kgl` whose index was baked by a Python build step queries
-fine from Java. Details under Scope.
+temporal and spatial functions, and scoring against an embedding store with
+`vector_score()` / `text_score()` — arrives through these two as Cypher.
+Building an embedding store is the one capability with its own small set of
+methods rather than a Cypher form: `setEmbeddings`, `addEmbeddings` and
+`buildVectorIndex`, covered in
+[Embeddings and vector search](#embeddings-and-vector-search).
 
 ## Values
 
@@ -163,6 +162,68 @@ RETURN labels(p) AS labels     // List of String
 RETURN id(p) AS id             // Long, the stable node id
 RETURN type(r) AS rel          // String, the relationship type
 ```
+
+## Embeddings and vector search
+
+Bring your own vectors. `setEmbeddings` stores one `float[]` per node, keyed by
+the node's `id`; `buildVectorIndex` builds the HNSW index that accelerates
+whole-corpus top-k; and `vector_score()` / `text_score()` score every node
+against a query vector you pass as a parameter. `save()` writes the store and
+its index into the `.kgl` checkpoint, so it reloads here — and in the Python and
+Rust bindings — on the next open.
+
+```java
+import io.github.kkollsga.kglite.*;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+
+void main() {
+    try (KnowledgeGraph graph = KnowledgeGraph.createInMemory()) {
+        graph.cypher("CREATE (:Note {id: 1, title: 'a', body: 'rust'})");
+        graph.cypher("CREATE (:Note {id: 2, title: 'b', body: 'java'})");
+
+        // One float[] per node, keyed by n.id. The store key is "body_emb".
+        graph.setEmbeddings("Note", "body", Map.of(
+                1, new float[] {1.0f, 0.0f},
+                2, new float[] {0.0f, 1.0f}));
+        graph.buildVectorIndex("Note", "body");   // optional; speeds up top-k
+
+        // Score against your own query vector, passed as a float[] parameter.
+        List<Map<String, Object>> hits = graph.query(
+                "MATCH (n:Note) RETURN n.id AS id, vector_score(n, 'body_emb', $q) AS s "
+              + "ORDER BY s DESC LIMIT 10",
+                Map.of("q", new float[] {1.0f, 0.0f}));
+        System.out.println(hits);   // [{id=1, s=1.0}, {id=2, s=0.0}]
+
+        graph.save(Path.of("notes.kgl"));   // the store rides the checkpoint
+    }
+}
+```
+
+**Naming.** `setEmbeddings("Note", "body", …)` names the source column, `body`;
+the store it creates is `body_emb`. `vector_score(n, 'body_emb', $q)` names that
+store, and the column-named `text_score(n, 'body', $q)` scores the same one — a
+`float[]` (or `List<Float>`) query vector works in both, with no registered
+embedder involved.
+
+**Metric.** Cosine by default; pass `"dot_product"`, `"euclidean"` or
+`"poincare"` to `setEmbeddings(nodeType, column, byId, metric)`. `cosine`,
+`dot_product` and `euclidean` are indexable by `buildVectorIndex`.
+
+**Batches.** `addEmbeddings` upserts, so a large corpus loads in several calls
+that share one store; a node id seen again replaces its vector. Iteration order
+of the map fixes the stored slot order, so a `LinkedHashMap` gives a
+byte-identical `.kgl` across runs.
+
+**Durability.** The store lives in the session until `save()`. Because
+embeddings ride the checkpoint rather than the write-ahead log, `save()` after
+an ingest is what persists them — the same rule every mutation follows, and more
+load-bearing here because there is no intermediate log to replay.
+
+**Listing.** `listEmbeddings()` returns one map per store — `node_type`,
+`text_column`, `dimension`, `count`, `metric` — the same shape the Python
+`list_embeddings()` returns.
 
 ## Transactions
 
@@ -518,25 +579,25 @@ Same engine as the Python package and the CLI — same Cypher, same `.kgl` files
 same performance. What differs is the shell around it: **Python is the richest
 one** (fluent API, dataset loaders, embedders, introspection helpers), and this
 binding is deliberately the lean one. Its entire surface is open/create, `cypher`
-/ `query`, `save`, `close`, transactions, the writer lease, error mapping, and
-the Cypher DSL that builds the text those two methods take. That is not a
-staging post; it is the design. A per-query capability needs no Java change,
-because it arrives through Cypher.
+/ `query`, `save`, `close`, transactions, the writer lease, error mapping,
+embedding ingest (`setEmbeddings` / `addEmbeddings` / `buildVectorIndex` /
+`listEmbeddings`), and the Cypher DSL that builds the text those two methods
+take. That is not a staging post; it is the design. A per-query capability needs
+no Java change, because it arrives through Cypher.
 
-**The vector caveat.** The engine's HNSW vector index and embedding store are
-*queryable* through Cypher (`vector_score()`, `text_score()`) but not
-*buildable* through it: `set_embeddings` and `build_vector_index` exist only
-in the Python/Rust API today, and this binding does not wrap them. A Java-only
-application therefore cannot populate an embedding index — storing a list
-property is not an embedding, and `vector_score` will say so. What works: ship
-a `.kgl` whose index was baked by a Python build step (the file format carries
-it; Java queries it fine), prefilter with a graph pattern and score a small
-candidate set in Cypher arithmetic, or keep vectors in a JVM-side ANN library
-(Lucene HNSW, JVector) keyed by kglite `id`. Schema declaration
-(`define_schema`, including the primary-key uniqueness rule on `id`) has the
-same Python/Rust-only status — from Java, upsert with `MERGE` rather than
-`CREATE` to keep `id` unique. Closing these two gaps at the C ABI is filed
-work, gated like every expansion on demand.
+**Embeddings.** Vectors are a first-class part of the Java surface: bring your
+own, ingest them with `setEmbeddings` / `addEmbeddings`, build the HNSW index
+with `buildVectorIndex`, and query the graph by your own vector through
+`vector_score()` / `text_score()`. `save()` carries the store and its index in
+the `.kgl` checkpoint, and any other binding reads it back — see
+[Embeddings and vector search](#embeddings-and-vector-search). Registering an
+embedder that turns text into vectors for you stays a Python convenience; this
+binding takes the vectors you supply.
+
+**Schema declaration.** `define_schema` (including the primary-key uniqueness
+rule on `id`) is reached from Python; from Java, upsert with `MERGE` rather than
+`CREATE` to keep `id` unique. Closing that gap at the C ABI is filed work, gated
+like every expansion on demand.
 
 **The DSL is a query builder, not a second API.** Every one of its methods names
 the Cypher production it emits — that rule is enforced by a test, so the surface
