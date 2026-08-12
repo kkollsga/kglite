@@ -104,6 +104,54 @@ The supported behavior is locked by the standing Bolt correctness and
 differential suites. Avoid relying on an exact test/query count or a particular
 driver patch version; CI exercises the complete current corpus.
 
+### Write concurrency
+
+Reads run against snapshots and do not block each other or writers. Writes are
+the serialized resource: every write is an explicit transaction, transactions
+work independently, and they order at commit. A transaction whose snapshot was
+overtaken loses the race and conflicts with the retriable status code, so a
+driver-managed transaction re-runs the unit of work on a fresh snapshot without
+your code seeing the conflict at all.
+
+What that means for capacity, measured under contending managed writers on one
+graph:
+
+- **Committed throughput is flat.** Adding writers does not add write
+  throughput — the commit point is single — but it does not lose it either.
+  Eight contending writers commit at roughly the rate one writer does.
+- **Latency is where contention shows up.** The median committed transaction
+  stays as fast as the uncontended one; the *average* grows about in proportion
+  to the number of writers, because a transaction now waits behind others.
+- **Conflicts stay rare and self-clearing.** The share of attempts that had to
+  be retried stays in the low single digits at eight writers, no writer
+  exhausts the driver's retry budget, and every committed write lands exactly
+  once.
+- **The tail belongs to the retry policy, not the server.** An unlucky writer
+  can lose several conflict rounds in a row, and each loss pays the driver's
+  compounding backoff, so worst-case *end-to-end* time for one unit of work
+  reaches seconds while the underlying transaction still takes under a
+  millisecond. Tune `max_transaction_retry_time` and the retry-delay settings
+  if that tail matters to you — that is a client-side dial.
+
+Size a deployment by write *rate*, therefore, not by writer count: more
+concurrent clients do not raise the ceiling, and past it, latency rather than
+error rate is what degrades. If a workload needs more write throughput than one
+commit point provides, batch more work into each transaction rather than adding
+writers.
+
+None of this makes the server highly available: one process owns the graph, and
+losing it loses the endpoint. That is the design (see *What this server is (and
+is not)* above), not a tuning problem.
+
+The measured curve is produced by
+`tests/benchmarks/test_bench_bolt_writers.py` (opt-in:
+`-m "benchmark and bolt_stress"`), which sweeps the writer count and records
+committed throughput, retry rate, and latency percentiles; captured numbers
+land in the repository's benchmark results record. The correctness half —
+that conflicts are retriable and managed transactions actually retry them —
+is pinned by `tests/test_bolt_server_transactions.py` and
+`tests/test_bolt_server_concurrency.py`.
+
 ## Driver identity (`--neo4j-compat`)
 
 The handshake reports `kglite-bolt-server/<version>` by default. The official

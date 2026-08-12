@@ -58,7 +58,11 @@ generation exists.
   but correctness is provided by the Rust ownership/session model, not by the
   GIL.
 - Bolt owns `Arc<kglite::api::session::Session>` and per-connection transaction
-  state.
+  state. Its client-facing contract — reads on snapshots, every write an
+  explicit transaction ordering at commit, conflicts retriable and absorbed by
+  driver-managed transactions, and what that does to throughput and latency as
+  writers are added — is stated in
+  [Bolt server → Write concurrency](../operators/bolt-server.md#write-concurrency).
 - MCP uses the native session pipeline; writable workbench mode is explicit.
 - A new binding owns async/runtime scheduling but should reuse
   `kglite::api::session` rather than creating a second lock/transaction model.
@@ -70,6 +74,15 @@ lifecycle tests, disk writer-lease/generation regressions, Loom session models,
 native lock checks on macOS/Windows, Miri unsafe-loader checks, and scheduled
 sanitizer/stress workflows. ThreadSanitizer is a manual/scheduled diagnostic,
 not a substitute for the deterministic model tests.
+
+At the Bolt level specifically: `tests/test_bolt_server_concurrency.py`
+(concurrent readers, readers against a writer, competing transactions, session
+teardown under load), the managed-retry contention test in
+`tests/test_bolt_server_transactions.py` (two transactions made to collide
+deterministically, then required to both land via driver retry), and the
+contended-writer load test `tests/benchmarks/test_bench_bolt_writers.py`
+(writer-count sweep producing the throughput/retry/latency curve behind the
+operator contract). All three are opt-in (`-m bolt_stress`).
 
 See [Python transactions](../python/transactions.md),
 [Rust session](../rust/session.md), and [Architecture](architecture.md).

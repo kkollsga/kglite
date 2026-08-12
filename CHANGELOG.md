@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The Bolt server's write-concurrency contract is now written down.**
+  [Bolt server → Write concurrency](https://kglite.readthedocs.io/en/latest/operators/bolt-server.html#write-concurrency)
+  states what concurrent writers actually get — flat committed throughput as
+  writers are added (the commit point is single, so more clients raise latency
+  rather than capacity), conflicts that stay rare and are absorbed by
+  driver-managed retry, and a worst-case tail owned by the driver's backoff
+  policy rather than the server. Backed by a new contended-writer load test
+  (`tests/benchmarks/test_bench_bolt_writers.py`, opt-in via
+  `-m "benchmark and bolt_stress"`) that sweeps the writer count and records
+  the curve, so the prose is measured rather than asserted.
+
 ### Fixed
 
 - **Bolt: a lost OCC race is now retriable, so managed transactions retry it
