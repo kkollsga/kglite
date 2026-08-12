@@ -85,6 +85,27 @@ of the wheel, and pre-0.14 bincode persistence needs a 0.13.4 conversion — see
 [0.13 → 0.14 migration guide](https://kglite.readthedocs.io/en/latest/python/migrations/0.13-to-0.14.html).
 Pin back anytime with `pip install "kglite<0.14"`.
 
+## One engine, seven doorways
+
+Every wrapper drives the same engine over the same `.kgl` files with the same
+Cypher — pick the doorway that matches your stack, and a graph built through
+any of them is readable through all of them.
+
+| Doorway | Get it | Docs |
+|---|---|---|
+| **Python** — the primary binding: DataFrames in/out, fluent API, embeddings | `pip install kglite` | [Getting started](https://kglite.readthedocs.io/en/latest/python/getting-started.html) · [Python track](https://kglite.readthedocs.io/en/latest/python/index.html) |
+| **Rust** — embed the engine directly; sessions, CoW transactions | `cargo add kglite` | [Rust track](https://kglite.readthedocs.io/en/latest/rust/index.html) · [docs.rs](https://docs.rs/kglite) |
+| **Java** — Panama/FFM binding, natives for 4 platforms bundled | Maven Central `io.github.kkollsga:kglite` | [kglite-java README](https://github.com/kkollsga/kglite/tree/main/kglite-java) |
+| **C ABI** — stable `kglite.h` for any other language (Go, JS, .NET, …) | [`crates/kglite-c`](https://github.com/kkollsga/kglite/tree/main/crates/kglite-c) | [C ABI design](https://kglite.readthedocs.io/en/latest/rust/c-abi.html) · [implementing a binding](https://kglite.readthedocs.io/en/latest/rust/implementing-a-binding.html) |
+| **CLI** — shell/scripts/JSONL agent loops over a `.kgl` | bundled in the wheel, or `pip install kglite-cli` / `cargo install kglite-cli` | [CLI guide](https://kglite.readthedocs.io/en/latest/operators/cli.html) |
+| **Bolt server** — Bolt v5 front-end for Neo4j wire-compatible drivers | `cargo install kglite-bolt-server` | [Bolt server](https://kglite.readthedocs.io/en/latest/operators/bolt-server.html) |
+| **MCP server** — serve a graph to AI agents as tools + skills | bundled with the wheel: `kglite-mcp-server --graph <graph>.kgl` | [MCP config guide](https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html) · [operators page](https://kglite.readthedocs.io/en/latest/operators/mcp-server.html) |
+
+The [operators index](https://kglite.readthedocs.io/en/latest/operators/index.html)
+has a decision table for the server-shaped doorways; the boundary rule for what
+lives in a wrapper vs the engine is in
+[Design decisions](https://kglite.readthedocs.io/en/latest/concepts/design-decisions.html).
+
 ## Use cases
 
 The same agent-facing surface works whether the graph holds legal
