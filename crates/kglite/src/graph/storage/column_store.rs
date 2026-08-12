@@ -1392,14 +1392,20 @@ impl ColumnStore {
         // collisions. Pre-0.9.4 the mmap-backed branch short-
         // circuited and SET-introduced keys never appeared.
         let mut result = Vec::new();
-        let mut seen: std::collections::HashSet<InternedKey> = std::collections::HashSet::new();
         for (slot, ik) in self.schema.iter() {
             if let Some(val) = self.columns.get(slot as usize).and_then(|c| c.get(row_id)) {
-                seen.insert(ik);
                 result.push((ik, val));
             }
         }
         if let Some(ref ms) = self.mmap_store {
+            // The `seen` set exists only to keep the mmap row from
+            // re-reporting a key the overlay already answered, so it is built
+            // here rather than in the scan loop above: on a non-mmap store
+            // (every in-memory/saved graph) nothing consumes it, and this is
+            // the per-node allocation on every columnar row enumeration —
+            // `describe`, export, `keys(n)`, projection completion.
+            let seen: std::collections::HashSet<InternedKey> =
+                result.iter().map(|(ik, _)| *ik).collect();
             for (ik, val) in ms.row_properties(row_id) {
                 if !seen.contains(&ik) {
                     result.push((ik, val));
@@ -1407,17 +1413,14 @@ impl ColumnStore {
             }
             return result;
         }
-        for (slot, ik) in self.schema.iter() {
-            // re-iterate to keep overflow-bag fall-through unchanged for
-            // the non-mmap path (the loop above already inserted dense
-            // entries; below we only fill blanks).
-            if seen.contains(&ik) {
-                continue;
-            }
-            if let Some(val) = self.columns.get(slot as usize).and_then(|c| c.get(row_id)) {
-                result.push((ik, val));
-            }
-        }
+        // A second dense pass used to run here for the non-mmap path, skipping
+        // keys already in `seen`. It could never emit anything: its predicate
+        // is `columns[slot].get(row_id)` — identical to the first loop's, on
+        // the same `&self` — so any (slot, key) it visited had already
+        // answered `None` above, and any key it would have accepted was
+        // already pushed and thus in `seen`. Pinned by
+        // `row_properties_matches_forced_second_pass` in column_store_tests.
+        //
         // Append overflow bag properties
         let overflow = self.overflow_row_properties(row_id);
         result.extend(overflow);

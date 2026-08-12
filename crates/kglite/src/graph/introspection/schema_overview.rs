@@ -5,6 +5,7 @@ use crate::graph::constraints::ConstraintKind;
 use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::GraphRead;
 use petgraph::Direction;
+use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 
 use super::capabilities::discover_endpoint_types_batch;
@@ -796,39 +797,84 @@ impl PropAccum {
     }
 }
 
+/// Accumulator keys for the two synthetic built-in fields.
+///
+/// `InternedKey` is the FNV hash of the name, so a property *literally* named
+/// `id`/`title` hashes to the same key and folds into the same accumulator —
+/// exactly what the previous `HashMap<String, _>` keying did (both wrote to the
+/// `"id"` entry).
+fn builtin_accum_keys() -> (InternedKey, InternedKey) {
+    (InternedKey::from_str("id"), InternedKey::from_str("title"))
+}
+
 /// Single pass over `scan_indices`, folding id / title / every stored property
 /// into `accum`.
+///
+/// Keyed by [`InternedKey`] (a `Copy` u64) rather than `String`: the row loop
+/// runs once per property per node, so string keying cost one allocation plus a
+/// string hash per property per node (~650k allocations for a 50k-node × 13-prop
+/// type). Names are resolved once, after the scan, in
+/// [`compute_property_stats`].
 ///
 /// Reads through [`NodeView`](crate::graph::storage::NodeView): the previous
 /// `NodeData::property_iter` route yielded **nothing** for columnar storage, so
 /// on a saved graph this pass contributed no values at all and the stats
 /// degraded to whatever the `type_schemas` pre-seed supplied — keys with a zero
-/// non-null count (D1 defect 1).
+/// non-null count (D1 defect 1). `property_pairs` is the same complete route as
+/// `property_pairs_named`, minus the per-key `String`.
 fn accumulate_property_values(
     graph: &DirGraph,
     scan_indices: &[petgraph::graph::NodeIndex],
     value_cap: usize,
-    accum: &mut HashMap<String, PropAccum>,
+    accum: &mut FxHashMap<InternedKey, PropAccum>,
 ) {
+    let (id_key, title_key) = builtin_accum_keys();
     for &idx in scan_indices {
         let Some(node) = graph.node_view(idx) else {
             continue;
         };
         accum
-            .entry("id".to_string())
+            .entry(id_key)
             .or_insert_with(|| PropAccum::new(value_cap))
             .add(&node.id());
         accum
-            .entry("title".to_string())
+            .entry(title_key)
             .or_insert_with(|| PropAccum::new(value_cap))
             .add(&node.title());
-        for (key, value) in node.property_pairs_named(&graph.interner) {
+        for (key, value) in node.property_pairs() {
             accum
                 .entry(key)
                 .or_insert_with(|| PropAccum::new(value_cap))
                 .add(&value);
         }
     }
+}
+
+/// Resolve the scan's interned accumulator keys back to property names.
+///
+/// Keys the interner cannot resolve are dropped, matching the
+/// `property_pairs_named` contract the scan used to enforce inline; the two
+/// built-ins resolve to their fixed names whether or not a real property shares
+/// the key.
+fn resolve_accum_names(
+    graph: &DirGraph,
+    interned: FxHashMap<InternedKey, PropAccum>,
+) -> HashMap<String, PropAccum> {
+    let (id_key, title_key) = builtin_accum_keys();
+    let mut out = HashMap::with_capacity(interned.len());
+    for (key, accum) in interned {
+        let name = if key == id_key {
+            "id"
+        } else if key == title_key {
+            "title"
+        } else if let Some(name) = graph.interner.try_resolve(key) {
+            name
+        } else {
+            continue;
+        };
+        out.insert(name.to_string(), accum);
+    }
+    out
 }
 
 pub fn compute_property_stats(
@@ -872,26 +918,27 @@ pub fn compute_property_stats(
         }
     };
 
-    // Single pass: accumulate stats for all properties simultaneously
-    let mut accum: HashMap<String, PropAccum> = HashMap::new();
+    // Single pass: accumulate stats for all properties simultaneously.
+    // Interned keys throughout — names are resolved once, after the scan.
+    let (id_key, title_key) = builtin_accum_keys();
+    let mut interned_accum: FxHashMap<InternedKey, PropAccum> = FxHashMap::default();
     // Pre-insert built-in fields so they appear even when all null
-    accum.insert("title".to_string(), PropAccum::new(value_cap));
-    accum.insert("id".to_string(), PropAccum::new(value_cap));
+    interned_accum.insert(title_key, PropAccum::new(value_cap));
+    interned_accum.insert(id_key, PropAccum::new(value_cap));
 
     // When sampling, pre-populate property keys from TypeSchema (knows ALL keys)
     if sample_size.is_some() {
         if let Some(schema) = graph.type_schemas.get(node_type) {
             for slot_key in schema.iter() {
-                if let Some(key_str) = graph.interner.try_resolve(slot_key.1) {
-                    accum
-                        .entry(key_str.to_string())
-                        .or_insert_with(|| PropAccum::new(value_cap));
-                }
+                interned_accum
+                    .entry(slot_key.1)
+                    .or_insert_with(|| PropAccum::new(value_cap));
             }
         }
     }
 
-    accumulate_property_values(graph, &scan_indices, value_cap, &mut accum);
+    accumulate_property_values(graph, &scan_indices, value_cap, &mut interned_accum);
+    let mut accum = resolve_accum_names(graph, interned_accum);
 
     // When sampling, scale non_null counts to the full population
     let scale_factor = if sample_count < total_nodes && sample_count > 0 {

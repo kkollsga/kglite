@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`describe()` / `describe(types=[...])` are ~2.3× faster on property-heavy
+  graphs, with byte-identical output.** 0.15.9 routed the property-stats scan
+  through the storage accessors so that saved (columnar) graphs stop reporting
+  empty stats — a real fix that stays — but it paid for every row twice over:
+  the per-node accumulator was keyed by `String`, so a 50k-node × 13-property
+  type allocated and hashed ~650k short-lived key strings per call, and every
+  columnar row enumeration allocated a `HashSet` for a merge step that only the
+  mmap-backed path performs. The scan now accumulates by interned key (a `Copy`
+  u64) and resolves names once at the end, and the row enumerator builds its
+  merge set only when there is an mmap store to merge with — which speeds up
+  every columnar row read, not just `describe`. Measured (release build,
+  min-of-12, two agreeing runs, unchanged-path controls flat within 4%):
+  synthetic law-like graph (50k nodes × 13 string properties + 5 smaller
+  types), saved and reloaded, `describe()` 49.4 ms → 21.9 ms and
+  `describe(types=["Decision"])` 48.7 ms → 21.4 ms; a 40-type narrow-numeric
+  graph's `describe(types=[...])` 3.19 ms → 0.88 ms (3.6×). Output is
+  unchanged — counts, distinct values, ordering and every byte of the XML
+  match, verified fixture-by-fixture before and after.
+
 ### Fixed
 
 - **A join filtered on a type's title/id field is no longer planned as if the

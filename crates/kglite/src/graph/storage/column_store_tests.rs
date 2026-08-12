@@ -455,6 +455,127 @@ fn test_column_store_materialize_roundtrip() {
     assert_eq!(store.get(1, age_key), Some(Value::Int64(25)));
 }
 
+/// The `row_properties` shape that shipped before the second dense pass was
+/// removed: two passes over the schema, the second one filling blanks the first
+/// left. Kept here as the equivalence reference — see
+/// `row_properties_matches_forced_second_pass`.
+fn row_properties_forced_second_pass(
+    store: &ColumnStore,
+    row_id: u32,
+) -> Vec<(InternedKey, Value)> {
+    if row_id >= store.row_count
+        || store
+            .tombstones
+            .get(row_id as usize)
+            .copied()
+            .unwrap_or(false)
+    {
+        return Vec::new();
+    }
+    let mut result = Vec::new();
+    let mut seen: std::collections::HashSet<InternedKey> = std::collections::HashSet::new();
+    for (slot, ik) in store.schema.iter() {
+        if let Some(val) = store.columns.get(slot as usize).and_then(|c| c.get(row_id)) {
+            seen.insert(ik);
+            result.push((ik, val));
+        }
+    }
+    if let Some(ref ms) = store.mmap_store {
+        for (ik, val) in ms.row_properties(row_id) {
+            if !seen.contains(&ik) {
+                result.push((ik, val));
+            }
+        }
+        return result;
+    }
+    for (slot, ik) in store.schema.iter() {
+        if seen.contains(&ik) {
+            continue;
+        }
+        if let Some(val) = store.columns.get(slot as usize).and_then(|c| c.get(row_id)) {
+            result.push((ik, val));
+        }
+    }
+    result.extend(store.overflow_row_properties(row_id));
+    result
+}
+
+/// `row_properties` drops the second dense pass on the non-mmap path (it could
+/// never emit a row the first pass had not already emitted) and builds the
+/// `seen` set only for the mmap merge. This pins the output against the old
+/// two-pass shape over every row class: fully populated, partially null,
+/// carrying a schema key that has no value on any row, tombstoned, out of
+/// range, and with an overflow bag installed.
+#[test]
+fn row_properties_matches_forced_second_pass() {
+    use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
+
+    let (schema, meta, interner) = make_schema_and_meta();
+    let mut store = ColumnStore::new(schema, &meta, &interner);
+
+    let name_key = InternedKey::from_str("name");
+    let age_key = InternedKey::from_str("age");
+    let salary_key = InternedKey::from_str("salary");
+    // `joined` and `active` stay unset on every row: schema keys whose column
+    // answers `None` for all of them — precisely the case the removed second
+    // pass claimed to cover.
+    store.push_row(&[
+        (name_key, Value::String("Alice".into())),
+        (age_key, Value::Int64(30)),
+        (salary_key, Value::Float64(1.5)),
+    ]);
+    store.push_row(&[(name_key, Value::String("Bob".into()))]);
+    store.push_row(&[(age_key, Value::Int64(41))]);
+    // A key added after the fact extends the schema and backfills nulls.
+    let nickname_key = InternedKey::from_str("nickname");
+    assert!(store.set(
+        1,
+        nickname_key,
+        &Value::String("Bobby".into()),
+        Some("string")
+    ));
+    store.tombstone(2);
+
+    // Overflow bag: row 0 carries a sparse property, row 1 none.
+    let mut data = Vec::new();
+    let mut offsets: Vec<u64> = vec![0];
+    let mut blob = 1u16.to_le_bytes().to_vec();
+    crate::graph::storage::overflow::encode_value(
+        &mut blob,
+        InternedKey::from_str("sparse"),
+        &Value::Int64(9),
+    );
+    data.extend_from_slice(&blob);
+    offsets.push(data.len() as u64);
+    for _ in 1..store.row_count {
+        offsets.push(data.len() as u64);
+    }
+    let mut data_bytes = MmapBytes::new();
+    data_bytes.extend(&data).expect("overflow data");
+    store.replace_overflow_bag(MmapOrVec::from_vec(offsets), data_bytes);
+
+    let schema_len = store.schema.iter().count();
+    let row0 = store.row_properties(0);
+    assert!(
+        row0.len() < schema_len,
+        "fixture must leave at least one schema key unset on row 0 \
+         (schema {schema_len}, row {row0:?})"
+    );
+    assert!(
+        row0.iter()
+            .any(|(k, _)| *k == InternedKey::from_str("sparse")),
+        "fixture must exercise the overflow bag: {row0:?}"
+    );
+
+    for row_id in 0..=store.row_count {
+        assert_eq!(
+            store.row_properties(row_id),
+            row_properties_forced_second_pass(&store, row_id),
+            "row {row_id} diverged from the two-pass reference"
+        );
+    }
+}
+
 #[test]
 fn test_overflow_value_list_roundtrip() {
     // Native list properties must survive the overflow-bag wire format
