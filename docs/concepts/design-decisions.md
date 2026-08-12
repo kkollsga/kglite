@@ -13,7 +13,11 @@ mandatory service hop and keeps graph state deployable with the application.
 Embedded-first does not mean “Python-only” or “no protocols.” The same core is
 wrapped by bundled MCP and Bolt servers, and non-Rust bindings can use the C
 ABI. Those adapters are useful integration boundaries, but they do not turn
-KGLite into a replicated, horizontally scaled database service.
+KGLite into a replicated, horizontally scaled database service. The shape that
+scales an application instead is an embedded traversal component behind the
+application's own API — that API owns authentication, authorization, and write
+policy, while KGLite serves traversal from a refreshed snapshot; see
+[Derived index](../python/guides/derived-index.md#an-embedded-traversal-component-behind-your-api).
 
 The storage modes also change the old “must fit in RAM” limit. `mapped` spills
 property columns during construction, and `disk` uses CSR plus mmap for large

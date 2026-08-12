@@ -52,6 +52,31 @@ From here the graph is read-only as far as your application is concerned. The
 build step is the only writer, and it runs on your schedule: nightly, on a
 webhook, or on process start.
 
+## An embedded traversal component behind your API
+
+The deployment shape this pattern is built for has a name: KGLite is an
+**embedded traversal component behind your own API**. Your service keeps the
+endpoints it already has, and the engine sits inside it as the thing that
+answers graph questions.
+
+The boundary is the whole point. Your API owns authentication, authorization,
+and write policy; KGLite owns graph traversal. Nothing reaches the engine except
+the Cypher your handler decided to run for that caller, so per-user rules stay
+in the one place that knows who the user is.
+
+Reads are served from a `freeze()` snapshot that the process refreshes on the
+same schedule as the build. Taking one is an O(1) clone rather than a copy, and
+a `FrozenGraph` exposes only read methods — so any number of request threads can
+query the same snapshot in parallel, lock-free, while the next one is being
+built. [Rebuild and swap](#rebuild-and-swap) below is the swap itself.
+
+Choose this over exposing
+[`kglite-bolt-server`](../../operators/bolt-server.md#what-this-server-is-and-is-not)
+whenever access control has to be per user. The Bolt server has no principal
+model: `--auth basic` is a single shared credential, and no per-session identity
+survives LOGON to authorize against. Serving Bolt is right for trusted or
+loopback clients; it is not a way to give different callers different views.
+
 ## Rebuild and swap
 
 The reason this pattern is cheap is that you never mutate a live graph to

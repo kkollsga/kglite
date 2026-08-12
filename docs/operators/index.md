@@ -19,9 +19,14 @@ Choose the smallest deployment surface that matches the client:
    a trusted reverse proxy or host firewall provides the boundary.
 4. Configure Bolt authentication/TLS where exposed beyond localhost. MCP uses
    stdio; source roots and manifests define its filesystem/tool boundary.
-5. Back up the complete `.kgl`/disk directory before upgrades and read the
+5. If callers need per-user access control, don't reach for a protocol server —
+   no bundled server has a principal model. Embed the engine behind your own
+   API, which owns authn/authz, and serve reads from a refreshed `freeze()`
+   snapshot: the
+   [traversal-component pattern](../python/guides/derived-index.md#an-embedded-traversal-component-behind-your-api).
+6. Back up the complete `.kgl`/disk directory before upgrades and read the
    migration notes. Portable CSV exports are intentionally not full backups.
-6. Run `--help` for the installed version and a startup/self-test before routing
+7. Run `--help` for the installed version and a startup/self-test before routing
    production traffic.
 
 For persistence semantics, backup limitations, and durable in-memory WAL use,

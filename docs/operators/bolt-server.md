@@ -25,6 +25,11 @@ authorization. Reads run against snapshots and scale across concurrent sessions.
   writable server per graph is enforced by a cross-process lease (see
   *Operations and security* below).
 
+If you need per-user access control, the supported shape is not this server: it
+is the [derived-index / traversal-component pattern](../python/guides/derived-index.md#an-embedded-traversal-component-behind-your-api),
+where the engine is embedded behind your own API and that API owns
+authentication, authorization, and write policy.
+
 Single-writer and no-HA are design decisions, not gaps: KGLite is deliberately
 an embedded single-graph engine, and this server publishes that engine over
 Bolt rather than layering a distributed database on top of it. For the
