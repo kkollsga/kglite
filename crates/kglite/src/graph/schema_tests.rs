@@ -1124,9 +1124,12 @@ mod alias_index_maintenance_tests {
         );
     }
 
+    /// One property index's buckets in comparable form: (value, members) rows.
+    type BucketRows = Vec<(Value, Vec<NodeIndex>)>;
+
     /// Every property-index bucket, in a comparable, order-normalised form.
-    fn index_snapshot(graph: &DirGraph) -> Vec<(IndexKey, Vec<(Value, Vec<NodeIndex>)>)> {
-        let mut snapshot: Vec<(IndexKey, Vec<(Value, Vec<NodeIndex>)>)> = graph
+    fn index_snapshot(graph: &DirGraph) -> Vec<(IndexKey, BucketRows)> {
+        let mut snapshot: Vec<(IndexKey, BucketRows)> = graph
             .property_indices
             .iter()
             .map(|(key, index)| {
