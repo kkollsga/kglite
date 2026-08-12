@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A join filtered on a type's title/id field is no longer planned as if the
+  filter matched everything.** The planner estimates a non-indexed equality
+  (and `IN`) filter as `type_count / distinct_values`, but the distinct-value
+  scan read the property map only — and a type's `node_title_field` /
+  `unique_id_field` (`add_nodes(..., unique_id_field="wlbWellboreName")`, and
+  the canonical `title` / `id`) do not live there. The scan therefore found
+  nothing, reported one distinct value, and the filter scored as excluding
+  nothing, so the join anchored on the *other*, larger end of the pattern and
+  drove every one of its rows through the filter. Present since 0.11.9, when
+  the distinct-value estimate was introduced. The statistic now resolves the
+  same field aliases the matcher does, and an empty scan reports *no
+  information* rather than "one distinct value" — no estimate can be
+  manufactured from an absent property again. Traversals filtered on a title
+  or id field over a large type get order-of-magnitude speedups. Measured
+  (release build, min-of-12, two agreeing runs, unchanged-path controls flat):
+  a 20k-node synthetic join filtered on the title field 1.09 ms → 0.039 ms
+  (28×) and on the id field 1.02 ms → 0.006 ms (168×), against 0.023 ms for
+  the same join filtered on an ordinary property; on a real 195 MB legal
+  graph `MATCH (d:CourtDecision)-[:HAS_KEYWORD]->(k:Keyword) WHERE k.name =
+  'Erstatning'` 5.79 ms → 0.92 ms, and on a 135 MB petroleum graph a
+  four-hop anchored on `w.wlbWellboreName` 2.41 ms → 0.22 ms. Results were
+  always correct — only the plan was wrong. `create_index` on the filtered
+  property remains faster still (it answers the lookup outright rather than
+  scanning the now-correctly-chosen type), so an index added as a workaround
+  is still worth keeping.
+
 ## [0.15.12] - 2026-08-12
 
 ### Changed

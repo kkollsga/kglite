@@ -1959,3 +1959,216 @@ fn test_text_score_unknown_parameter_still_errors() {
     .unwrap_err();
     assert!(err.contains("not found"), "unexpected error: {err}");
 }
+
+// ============================================================================
+// NDV selectivity on identity fields (Track H2)
+// ============================================================================
+//
+// `property_ndv` feeds `estimate_node_selectivity`'s `type_count / ndv`
+// equality estimate. It used to read the property map only, which does not
+// hold a type's `node_title_field` (`add_nodes` hoists that column into
+// `NodeData.title`), so the scan found nothing, `.max(1)` reported NDV = 1,
+// and the filter was scored *completely non-selective* — the planner then
+// anchored on the other, larger end of the pattern. These pin the anchor
+// choice, which the Cypher differential corpus cannot see (both plans return
+// the same rows; only the cost differs).
+
+/// `Doc` (the unfiltered end) outnumbers `Keyword` 3:1, and every `Keyword`
+/// has a distinct title. `Keyword` is therefore the right anchor for a
+/// `title`-equality filter (one node) and the wrong one only if the filter is
+/// scored as matching the whole type.
+fn title_anchor_graph() -> DirGraph {
+    fn typed(graph: &mut DirGraph, node_type: &str, n: i64) {
+        let rows: Vec<Vec<Value>> = (1..=n)
+            .map(|i| {
+                vec![
+                    Value::Int64(i),
+                    Value::String(format!("{}-{i}", node_type.to_lowercase())),
+                ]
+            })
+            .collect();
+        let df = crate::datatypes::DataFrame::from_cypher_rows(
+            vec!["id".to_string(), "title".to_string()],
+            rows,
+        )
+        .unwrap();
+        crate::graph::mutation::maintain::add_nodes(
+            graph,
+            df,
+            node_type.to_string(),
+            "id".to_string(),
+            Some("title".to_string()),
+            None,
+        )
+        .unwrap();
+    }
+    let mut graph = DirGraph::new();
+    typed(&mut graph, "Doc", 3000);
+    typed(&mut graph, "Keyword", 1000);
+    graph
+}
+
+fn optimized_start_variable(query: &str, graph: &DirGraph) -> String {
+    let mut query = parse_cypher(query).unwrap();
+    optimize(&mut query, graph, &HashMap::new());
+    let m = query
+        .clauses
+        .iter()
+        .find_map(|c| match c {
+            Clause::Match(m) => Some(m),
+            _ => None,
+        })
+        .expect("expected MATCH clause");
+    match &m.patterns[0].elements[0] {
+        PatternElement::Node(np) => np
+            .variable
+            .clone()
+            .expect("start node should carry a variable"),
+        _ => panic!("expected start node"),
+    }
+}
+
+#[test]
+fn test_ndv_counts_the_title_field() {
+    let graph = title_anchor_graph();
+    assert_eq!(
+        graph.property_ndv("Keyword", "title"),
+        Some(1000),
+        "`title` is Keyword's node_title_field, so its distinct values live on \
+         NodeData.title, not in the property map; reporting 1 (or None) makes \
+         the planner score a title equality filter as non-selective"
+    );
+}
+
+#[test]
+fn test_title_equality_anchors_on_the_filtered_type() {
+    let graph = title_anchor_graph();
+    assert_eq!(
+        optimized_start_variable(
+            "MATCH (a:Doc)-[:MENTIONS]->(b:Keyword) WHERE b.title = 'keyword-7' RETURN a, b",
+            &graph,
+        ),
+        "b",
+        "a unique title equality selects one Keyword; anchoring on the 3000 \
+         Docs instead means the filter was scored non-selective (NDV=1)"
+    );
+}
+
+#[test]
+fn test_title_in_list_anchors_on_the_filtered_type() {
+    let graph = title_anchor_graph();
+    assert_eq!(
+        optimized_start_variable(
+            "MATCH (a:Doc)-[:MENTIONS]->(b:Keyword) \
+             WHERE b.title IN ['keyword-7', 'keyword-9'] RETURN a, b",
+            &graph,
+        ),
+        "b",
+        "PropertyMatcher::In reads the same NDV; two of 1000 distinct titles \
+         is far more selective than a full Doc scan"
+    );
+}
+
+/// The reporter's real shape: the filtered type names its identity columns
+/// itself (`add_nodes(unique_id_field='term_id', node_title_field='term_name')`),
+/// so `term_name` is a *registered alias* for the title field — the matcher
+/// resolves it, and the statistic feeding the planner has to resolve it too.
+fn aliased_identity_graph() -> DirGraph {
+    let mut graph = DirGraph::new();
+    let rows: Vec<Vec<Value>> = (1..=3000)
+        .map(|i| vec![Value::Int64(i), Value::String(format!("doc-{i}"))])
+        .collect();
+    let df = crate::datatypes::DataFrame::from_cypher_rows(vec!["id".into(), "title".into()], rows)
+        .unwrap();
+    crate::graph::mutation::maintain::add_nodes(
+        &mut graph,
+        df,
+        "Doc".to_string(),
+        "id".to_string(),
+        Some("title".to_string()),
+        None,
+    )
+    .unwrap();
+
+    let rows: Vec<Vec<Value>> = (1..=1000)
+        .map(|i| vec![Value::Int64(i), Value::String(format!("term-{i}"))])
+        .collect();
+    let df = crate::datatypes::DataFrame::from_cypher_rows(
+        vec!["term_id".into(), "term_name".into()],
+        rows,
+    )
+    .unwrap();
+    crate::graph::mutation::maintain::add_nodes(
+        &mut graph,
+        df,
+        "Term".to_string(),
+        "term_id".to_string(),
+        Some("term_name".to_string()),
+        None,
+    )
+    .unwrap();
+    graph
+}
+
+#[test]
+fn test_aliased_title_equality_anchors_on_the_filtered_type() {
+    let graph = aliased_identity_graph();
+    assert_eq!(
+        graph.property_ndv("Term", "term_name"),
+        Some(1000),
+        "the statistic has to resolve the alias, not just the anchor it feeds"
+    );
+    assert_eq!(
+        optimized_start_variable(
+            "MATCH (a:Doc)-[:MENTIONS]->(b:Term) WHERE b.term_name = 'term-7' RETURN a, b",
+            &graph,
+        ),
+        "b",
+        "`term_name` is Term's registered title alias — the matcher resolves it \
+         to the title field, so the NDV statistic must resolve it the same way"
+    );
+}
+
+#[test]
+fn test_aliased_id_equality_anchors_on_the_filtered_type() {
+    let graph = aliased_identity_graph();
+    assert_eq!(
+        graph.property_ndv("Term", "term_id"),
+        Some(1000),
+        "the statistic has to resolve the alias, not just the anchor it feeds"
+    );
+    assert_eq!(
+        optimized_start_variable(
+            "MATCH (a:Doc)-[:MENTIONS]->(b:Term) WHERE b.term_id = 7 RETURN a, b",
+            &graph,
+        ),
+        "b",
+        "`term_id` is Term's registered id alias; only a literal `id` gets the \
+         dedicated selectivity-1 path, so the alias has to come out of the NDV \
+         statistic"
+    );
+}
+
+#[test]
+fn test_absent_property_is_no_information_not_zero_selectivity() {
+    // The safety net behind the alias fix: when the scan finds *no* values at
+    // all, "distinct = 0" must not collapse into "NDV = 1" — that reads as
+    // `type_count / 1`, i.e. a filter that excludes nothing, and anchors the
+    // join on the other, larger end. No information means fall back to the
+    // flat heuristic.
+    let graph = aliased_identity_graph();
+    assert_eq!(
+        graph.property_ndv("Term", "not_a_property"),
+        None,
+        "an empty scan is no information, not NDV=1"
+    );
+    assert_eq!(
+        optimized_start_variable(
+            "MATCH (a:Doc)-[:MENTIONS]->(b:Term) WHERE b.not_a_property = 'x' RETURN a, b",
+            &graph,
+        ),
+        "b",
+        "scanning the 1000 filtered Terms beats driving 3000 Docs through the \
+         same filter, however unselective the estimate"
+    );
+}

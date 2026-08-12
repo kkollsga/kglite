@@ -171,6 +171,44 @@ impl<'a> NodeView<'a> {
         }
     }
 
+    /// Read an **alias-resolved matcher field** — the value a property filter
+    /// on this node actually compares against.
+    ///
+    /// `field`/`key` are the output of
+    /// [`DirGraph::resolve_alias`](crate::graph::schema::DirGraph::resolve_alias)
+    /// (a type's `unique_id_field` / `node_title_field` map onto `id` /
+    /// `title`), and the resolution order is the one the pattern matcher
+    /// applies: identity fields first, then a stored property (a user's own
+    /// `label`/`name`/… wins — KG-1), then the structural soft-alias fallback.
+    ///
+    /// Every consumer of "what would a filter on `field` see?" must come
+    /// through here. The planner's NDV statistic did not, read the property map
+    /// alone, and so found *nothing* for a type's title field — scoring an
+    /// equality filter on it as completely non-selective (Track H2).
+    #[inline]
+    pub fn resolved_field(
+        &self,
+        type_str: &str,
+        field: &str,
+        key: InternedKey,
+    ) -> Option<Cow<'a, Value>> {
+        if field == "id" {
+            return Some(self.id());
+        }
+        if field == "title" {
+            return Some(self.title());
+        }
+        if let Some(value) = self.get(key) {
+            return Some(value);
+        }
+        crate::graph::schema::soft_alias_fallback(field).map(|fallback| match fallback {
+            crate::graph::schema::SoftAliasFallback::Title => self.title(),
+            crate::graph::schema::SoftAliasFallback::TypeString => {
+                Cow::Owned(Value::String(type_str.to_string()))
+            }
+        })
+    }
+
     /// `true` when the property is present and non-`Null`.
     #[inline]
     pub fn contains(&self, key: InternedKey) -> bool {

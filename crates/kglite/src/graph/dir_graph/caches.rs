@@ -111,19 +111,31 @@ impl DirGraph {
     /// absent or larger than `MAX_SCAN` (caller falls back to the heuristic);
     /// at that scale a real property index is the right tool and gives exact
     /// selectivity anyway. Plan-time read path only — never the write hot path.
+    ///
+    /// The scan reads the same **alias-resolved field** a property filter would
+    /// ([`NodeView::resolved_field`](crate::graph::storage::NodeView::resolved_field)),
+    /// so a type's `node_title_field` / `unique_id_field` — which live on the
+    /// node's identity columns, not in its property map — report their real
+    /// distinct count. Reading the property map alone found nothing for those
+    /// and scored the filter as completely non-selective (Track H2).
     pub fn property_ndv(&self, node_type: &str, property: &str) -> Option<usize> {
         const MAX_SCAN: usize = 200_000;
         let nodes = self.type_indices.get(node_type)?;
         if nodes.is_empty() || nodes.len() > MAX_SCAN {
             return None;
         }
-        let key = (node_type.to_string(), property.to_string());
-        // Fast path: cache hit at the current graph version.
+        // Key the cache by the *resolved* field: two spellings of one identity
+        // field (`term_name` and `title`) are one statistic, not two scans.
+        let field = self.resolve_alias(node_type, property);
+        let key = (node_type.to_string(), field.to_string());
+        // Fast path: cache hit at the current graph version. A cached `0` is
+        // the "no information" verdict below, memoised so a fruitless scan is
+        // paid once rather than on every plan.
         {
             let read = self.property_ndv_cache.read().unwrap();
             if read.0 == self.version {
                 if let Some(&ndv) = read.1.get(&key) {
-                    return Some(ndv);
+                    return (ndv > 0).then_some(ndv);
                 }
             }
         }
@@ -131,15 +143,16 @@ impl DirGraph {
         // Arena guard: get_node -> node_weight materializes on the disk
         // backend (protocol in disk/graph.rs); no-op on memory/mapped.
         let _arena_guard = self.graph.begin_query();
+        let field_key = InternedKey::from_str(field);
         let mut seen: std::collections::HashSet<Value> = std::collections::HashSet::new();
         for idx in nodes.iter() {
             if let Some(node) = self.node_view(idx) {
-                if let Some(val) = node.get_property(property) {
+                if let Some(val) = node.resolved_field(node_type, field, field_key) {
                     seen.insert(val.into_owned());
                 }
             }
         }
-        let ndv = seen.len().max(1);
+        let ndv = seen.len();
         let mut write = self.property_ndv_cache.write().unwrap();
         // Drop a stale-version map before inserting (auto-invalidation).
         if write.0 != self.version {
@@ -147,7 +160,12 @@ impl DirGraph {
             write.0 = self.version;
         }
         write.1.insert(key, ndv);
-        Some(ndv)
+        // An empty scan means this route found no values at all — the property
+        // is absent from every node, or some future resolution gap hides it.
+        // That is *no information*, and it must not be handed to the estimator
+        // as `type_count / 1`, i.e. "this filter excludes nothing". Report
+        // `None` so the caller falls back to its flat heuristic.
+        (ndv > 0).then_some(ndv)
     }
 
     /// Check if edge type count cache is populated (avoids O(E) scan).

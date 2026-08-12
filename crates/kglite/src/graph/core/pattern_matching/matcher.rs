@@ -14,7 +14,6 @@ use petgraph::graph::NodeIndex;
 use petgraph::Direction;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
@@ -1406,24 +1405,11 @@ impl<'a> PatternExecutor<'a> {
             }
         }
 
-        let value: Option<Cow<'_, Value>> = if field == "id" {
-            Some(node.id())
-        } else if field == "title" {
-            Some(node.title())
-        } else if let Some(v) = node.get(key) {
-            // Stored property wins (a user `label`/`type`/`name`… — KG-1).
-            Some(v)
-        } else {
-            // No stored property — structural convenience fallback.
-            crate::graph::schema::soft_alias_fallback(field).map(|fb| match fb {
-                crate::graph::schema::SoftAliasFallback::Title => node.title(),
-                crate::graph::schema::SoftAliasFallback::TypeString => {
-                    Cow::Owned(Value::String(type_str.to_string()))
-                }
-            })
-        };
-
-        match value {
+        // Identity fields, then a stored property (a user `label`/`type`/
+        // `name`… wins — KG-1), then the structural soft-alias fallback. Shared
+        // with the planner's NDV statistic so the two cannot disagree about
+        // what a filter on `field` sees.
+        match node.resolved_field(type_str, field, key) {
             Some(v) => self.value_matches(&v, matcher),
             None => false,
         }
