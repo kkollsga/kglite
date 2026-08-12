@@ -939,6 +939,8 @@ impl<'a> PatternExecutor<'a> {
     ) -> Result<Vec<NodeIndex>, String> {
         let mut out = Vec::new();
         let mut memo: Option<TypeScanMemo<'p>> = None;
+        // Resolved once: only the disk backend materialises into an arena.
+        let scoped_materialization = self.graph.graph.is_disk();
         for (i, idx) in candidates.into_iter().enumerate() {
             if i & 0xFFF == 0 {
                 self.check_scan_deadline()?;
@@ -954,7 +956,21 @@ impl<'a> PatternExecutor<'a> {
                 out.push(idx);
                 continue;
             };
-            let Some(data) = self.graph.graph.node_weight(idx) else {
+            // On disk, materialize into this frame: `node_weight` would park a
+            // record in the query arena for every node the scan walks, and the
+            // scan drops each one immediately (storage/disk/query_arena.rs).
+            // Heap backends borrow straight out of the graph. Both branches
+            // then run the same body below, over a plain `&NodeData` — no
+            // closure, which would force `memo` out of registers for the whole
+            // loop and cost the heap path ~8% on a 50k-node filtered scan.
+            let owned;
+            let data = if scoped_materialization {
+                owned = self.graph.graph.owned_node_data(idx);
+                owned.as_ref()
+            } else {
+                self.graph.graph.node_weight(idx)
+            };
+            let Some(data) = data else {
                 continue;
             };
             if memo
@@ -1332,9 +1348,29 @@ impl<'a> PatternExecutor<'a> {
         idx: NodeIndex,
         props: &HashMap<String, PropertyMatcher>,
     ) -> bool {
-        let Some(data) = self.graph.graph.node_weight(idx) else {
+        // Disk materializes into this frame (see `filter_node_candidates`):
+        // the record is consumed here, so it must not enter the query arena.
+        // Heap backends keep the direct borrow.
+        let owned;
+        let data = if self.graph.graph.is_disk() {
+            owned = self.graph.graph.owned_node_data(idx);
+            owned.as_ref()
+        } else {
+            self.graph.graph.node_weight(idx)
+        };
+        let Some(data) = data else {
             return false;
         };
+        self.node_data_matches_properties(data, props)
+    }
+
+    /// [`Self::node_matches_properties`] against an already-borrowed record.
+    #[inline]
+    fn node_data_matches_properties(
+        &self,
+        data: &NodeData,
+        props: &HashMap<String, PropertyMatcher>,
+    ) -> bool {
         let Some(type_str) = self.graph.interner.try_resolve(data.node_type) else {
             return false;
         };

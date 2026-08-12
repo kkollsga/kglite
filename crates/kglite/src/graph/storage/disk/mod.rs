@@ -18,6 +18,7 @@ pub mod graph_property_index;
 pub mod id_index;
 pub mod id_index_layer;
 pub mod property_index;
+pub(crate) mod query_arena;
 pub mod segment_summary;
 /// Test-only drop-order seam for temp dirs backing a live disk/mapped graph.
 #[cfg(test)]

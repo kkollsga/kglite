@@ -660,53 +660,82 @@ fn slot(node_type: u64, row_id: u32) -> DiskNodeSlot {
 #[test]
 fn overlapping_query_guards_keep_materializations_alive() {
     let tmp = TempDir::new().unwrap();
-    let graph = super::DiskGraph::new_at_path(tmp.path()).unwrap();
+    let mut graph = super::DiskGraph::new_at_path(tmp.path()).unwrap();
     let mut interner = StringInterner::new();
+    let a = graph.add_node(seal_test_node(&mut interner, 0, "Item"));
+    let b = graph.add_node(seal_test_node(&mut interner, 1, "Item"));
+    let edge = graph.add_edge(a, b, seal_test_edge(&mut interner, "LINKS"));
 
     let first = graph.begin_query();
-    graph
-        .node_arena
-        .lock()
-        .unwrap()
-        .push(Box::new(NodeData::new(
-            Value::Int64(1),
-            Value::String("one".into()),
-            "Item".into(),
-            HashMap::new(),
-            &mut interner,
-        )));
-    graph
-        .edge_arena
-        .lock()
-        .unwrap()
-        .push(Box::new(EdgeData::new(
-            "LINKS".into(),
-            HashMap::new(),
-            &mut interner,
-        )));
+    assert!(graph.node_weight(a).is_some());
+    graph.materialize_edge(edge.index() as u32);
+    assert_eq!(graph.node_arena_len(), 1);
+    assert_eq!(graph.edge_arena_len(), 1);
 
     let second = graph.begin_query();
-    assert_eq!(*graph.active_queries.lock().unwrap(), 2);
-    assert_eq!(graph.node_arena.lock().unwrap().len(), 1);
-    assert_eq!(graph.edge_arena.lock().unwrap().len(), 1);
+    assert_eq!(graph.active_query_count(), 2);
+    assert_eq!(graph.node_arena_len(), 1);
+    assert_eq!(graph.edge_arena_len(), 1);
 
     // A reset from another execution path must not invalidate either guard.
     graph.reset_arenas();
-    assert_eq!(graph.node_arena.lock().unwrap().len(), 1);
-    assert_eq!(graph.edge_arena.lock().unwrap().len(), 1);
+    assert_eq!(graph.node_arena_len(), 1);
+    assert_eq!(graph.edge_arena_len(), 1);
 
-    drop(first);
-    assert_eq!(*graph.active_queries.lock().unwrap(), 1);
-    assert_eq!(graph.node_arena.lock().unwrap().len(), 1);
+    // Nor may a *younger* query's completion reclaim what an older, still
+    // running query materialized.
     drop(second);
-    assert_eq!(*graph.active_queries.lock().unwrap(), 0);
+    assert_eq!(graph.active_query_count(), 1);
+    assert_eq!(graph.node_arena_len(), 1);
+    assert_eq!(graph.edge_arena_len(), 1);
 
-    // Reclamation is deferred until the next query begins, after the last
-    // prior-generation reference is guaranteed to be gone.
-    let next = graph.begin_query();
-    assert!(graph.node_arena.lock().unwrap().is_empty());
-    assert!(graph.edge_arena.lock().unwrap().is_empty());
-    drop(next);
+    // The materializing query finishing does reclaim them — without waiting
+    // for the graph to go completely idle, which is what makes the arena
+    // bounded under sustained overlapping reads.
+    let third = graph.begin_query();
+    drop(first);
+    assert_eq!(graph.active_query_count(), 1);
+    assert_eq!(graph.node_arena_len(), 0);
+    assert_eq!(graph.edge_arena_len(), 0);
+    drop(third);
+}
+
+#[test]
+fn sustained_overlapping_reads_do_not_grow_the_arena() {
+    const NODES: usize = 100;
+    const ROUNDS: usize = 50;
+
+    let tmp = TempDir::new().unwrap();
+    let mut graph = super::DiskGraph::new_at_path(tmp.path()).unwrap();
+    let mut interner = StringInterner::new();
+    for i in 0..NODES {
+        graph.add_node(seal_test_node(&mut interner, i as i64, "Item"));
+    }
+
+    // Guards overlap by construction: every round opens the next query before
+    // closing the previous one, so the active-query count never reaches zero —
+    // the state a concurrently served disk graph lives in permanently. Each
+    // round's materializations are dead as soon as its own query ends, so a
+    // bounded arena must reclaim them without waiting for global quiescence.
+    let mut prev = Some(graph.begin_query());
+    for _ in 0..ROUNDS {
+        let next = graph.begin_query();
+        for i in 0..NODES {
+            assert!(graph.node_weight(NodeIndex::new(i)).is_some());
+        }
+        drop(prev.take());
+        prev = Some(next);
+    }
+    let retained = graph.node_arena_len();
+    drop(prev);
+
+    let bound = 3 * NODES;
+    assert!(
+        retained <= bound,
+        "node arena retained {retained} records after {ROUNDS} overlapping rounds \
+         of {NODES} materializations (bound {bound}) — arena reclamation is not \
+         reachable under sustained concurrent reads"
+    );
 }
 
 // ------------- segment_subdir + enumerate (pre-phase-7 cases) -------------

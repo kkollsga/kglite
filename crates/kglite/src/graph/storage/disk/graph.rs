@@ -102,34 +102,26 @@ pub struct DiskGraph {
     pub(super) node_count: usize,
     pub(super) free_node_slots: Vec<u32>,
 
-    // ── Node materialization arena ──
+    // ── Node/edge materialization arenas + their reclamation epochs ──
     //
-    // `Mutex<Vec<Box<NodeData>>>` mirrors `edge_arena` below — the Box
-    // gives stable heap pointers that survive Vec growth, and the Mutex
-    // serialises pushes from concurrent `node_weight` callers (the
-    // Cypher executor's `return_clause::project_row` runs under
-    // `par_iter_mut`, and any call to `evaluate_expression` from there
-    // can reach `node_weight` via `resolve_property` /
-    // `build_node_spatial_data`). Pre-0.9.3 this was
-    // `UnsafeCell<Vec<NodeData>>` which raced under the same parallel
-    // path: a concurrent `arena.push` realloc invalidated references
-    // returned by sibling Rayon tasks, leaking into either silent
-    // wrong-row reads (Bug A in the disk-mode regression report —
-    // ~13% NEAREST_AFEX_HUB edges lost) or use-after-free segfaults
-    // with `BUG: InternedKey N not found in StringInterner` lines on
+    // Disk reads have nothing in memory to borrow, so `node_weight` /
+    // `materialize_edge` build a record and park it here. The records are
+    // boxed (stable heap pointers that survive the arena's own growth) and
+    // pushed under a Mutex, because the Cypher executor's
+    // `return_clause::project_row` runs under `par_iter_mut` and any
+    // `evaluate_expression` from there can reach `node_weight` via
+    // `resolve_property` / `build_node_spatial_data`. Pre-0.9.3 this was
+    // `UnsafeCell<Vec<NodeData>>` which raced on that path: a concurrent
+    // `arena.push` realloc invalidated references already returned to sibling
+    // Rayon tasks, surfacing as silent wrong-row reads (Bug A in the disk-mode
+    // regression report — ~13% NEAREST_AFEX_HUB edges lost) or use-after-free
+    // segfaults with `BUG: InternedKey N not found in StringInterner` on
     // stderr (Bug B in the same report).
-    // clippy::vec_box: the Box is load-bearing — gives stable heap
-    // addresses that survive Vec growth, so `&NodeData` references
-    // returned by `node_weight` stay valid across concurrent pushes
-    // from sibling Rayon tasks. Removing the Box would put the
-    // race back. Same exemption applies to `edge_arena` below.
-    #[allow(clippy::vec_box)]
-    pub(super) node_arena: std::sync::Mutex<Vec<Box<NodeData>>>,
-    /// Number of overlapping top-level/nested read queries using the
-    /// materialization arenas. Arena reclamation is allowed only when this
-    /// count is zero; otherwise references returned to another query may still
-    /// be live. See [`DiskQueryGuard`].
-    pub(super) active_queries: std::sync::Arc<std::sync::Mutex<usize>>,
+    //
+    // When a record may be dropped is the epoch protocol in
+    // [`super::query_arena`] — read that module before touching either
+    // materialization path.
+    pub(super) arenas: std::sync::Arc<super::query_arena::QueryArenas>,
 
     // ── Column stores for node properties (Arc refs, data mmap'd) ──
     /// `FxHashMap` for the same reason as the heap backends' field: probed
@@ -157,10 +149,6 @@ pub struct DiskGraph {
     // Overlay grows with mutations, base is mmap'd. See edge_properties.rs.
     pub(super) edge_properties: EdgePropertyStore,
 
-    // ── Edge materialization arena (Mutex + Box for Rayon thread safety) ──
-    // Box gives stable heap pointers that survive Vec reallocation.
-    #[allow(clippy::vec_box)]
-    pub(super) edge_arena: std::sync::Mutex<Vec<Box<EdgeData>>>,
     /// Cache for edge_weight_mut: stores materialized EdgeData that may be modified.
     /// Flushed to edge_properties on next clear_arenas call.
     pub(super) edge_mut_cache: HashMap<u32, EdgeData>,
@@ -299,36 +287,28 @@ use std::sync::Arc;
 
 // SAFETY — DiskGraph interior-mutability model:
 //
-// Two arena-like fields share the same thread-safety pattern:
+// 1. `arenas: Arc<QueryArenas>` — the node/edge materialization arenas,
+//    thread-safe for Rayon parallel queries. Each record is boxed (stable heap
+//    pointer that survives the arena's own growth) and pushed under a Mutex,
+//    because the Cypher executor's projection phase runs
+//    `evaluate_expression` under `par_iter_mut` (return_clause.rs) and any
+//    spatial / non-fast-path `resolve_property` branch reaches `node_weight`
+//    through that parallel context. Pre-0.9.3 this was
+//    `UnsafeCell<Vec<NodeData>>` and races were silent: a sibling Rayon task's
+//    `arena.push` realloc invalidated references already returned to other
+//    tasks, surfacing as either wrong-row reads on disk-mode aggregations
+//    (Bug A in the 0.9.2 disk regression — ~13% NEAREST_AFEX_HUB edges
+//    silently lost) or use-after-free segfaults with `BUG: InternedKey N not
+//    found in StringInterner` on stderr (Bug B in the same report).
 //
-// 1. `node_arena: Mutex<Vec<Box<NodeData>>>` — thread-safe for Rayon
-//    parallel queries. `Box` gives stable heap pointers that survive
-//    Vec reallocation; the Mutex serialises pushes from concurrent
-//    `node_weight` callers. The Cypher executor's projection phase
-//    runs `evaluate_expression` under `par_iter_mut`
-//    (return_clause.rs), and any spatial / non-fast-path
-//    `resolve_property` branch reaches `node_weight` through that
-//    parallel context. Pre-0.9.3 this was `UnsafeCell<Vec<NodeData>>`
-//    and races were silent: a sibling Rayon task's `arena.push`
-//    realloc invalidated references already returned to other tasks,
-//    surfacing as either wrong-row reads on disk-mode aggregations
-//    (Bug A in the 0.9.2 disk regression — ~13% NEAREST_AFEX_HUB
-//    edges silently lost) or use-after-free segfaults with
-//    `BUG: InternedKey N not found in StringInterner` on stderr
-//    (Bug B in the same report). Mirrors the long-standing pattern
-//    used by `edge_arena` immediately below.
+//    The *lifetime* side lives in `super::query_arena`: every materializing
+//    read runs under a `DiskQueryGuard`, records are stamped with an epoch
+//    above every live query's id, and a record is dropped only once every
+//    query that could hold it has finished. `reset_arenas` reclaims only while
+//    nothing is reading; `clear_arenas` takes `&mut self`, which the borrow
+//    checker already orders after any outstanding materialization borrow.
 //
-// 2. `edge_arena: Mutex<Vec<Box<EdgeData>>>` — thread-safe for Rayon
-//    parallel queries (same pattern, predates 0.9.3).
-//
-// `active_queries` supplies the lifetime side of that synchronization:
-// `begin_query` clears the prior generation only while the count is zero,
-// then increments it before any materialization can occur. `reset_arenas`
-// takes the same lock and refuses to clear while a query is active. Arena
-// locks are always acquired after `active_queries`, so the ordering is
-// consistent. A `DiskQueryGuard` decrement never needs an arena lock.
-//
-// 3. `pending_edges: UnsafeCell<MmapOrVec<…>>` — only accessed via
+// 2. `pending_edges: UnsafeCell<MmapOrVec<…>>` — only accessed via
 //    `get_mut()` in `&mut self` contexts (`add_edge` with `defer_csr`,
 //    `build_csr_from_pending`, `compact`). `UnsafeCell` is retained here
 //    for a planned future auto-CSR-build-from-`&self` path; today no
@@ -337,48 +317,22 @@ use std::sync::Arc;
 unsafe impl Send for DiskGraph {}
 unsafe impl Sync for DiskGraph {}
 
-/// Query-lifetime token for DiskGraph materialization arenas.
-///
-/// The token is intentionally small and non-cloneable. It owns a handle to
-/// the graph's active-query counter rather than borrowing the graph, so
-/// mutation paths (which hold `&mut DirGraph`) and direct readers outside the
-/// executor can hold one without freezing an immutable borrow. Dropping the
-/// last overlapping token makes the previous arena generation reclaimable by
-/// the next query.
-pub struct DiskQueryGuard {
-    active_queries: std::sync::Arc<std::sync::Mutex<usize>>,
-}
-
-impl Drop for DiskQueryGuard {
-    fn drop(&mut self) {
-        let mut active = self
-            .active_queries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        debug_assert!(*active > 0, "DiskQueryGuard active count underflow");
-        *active = active.saturating_sub(1);
-    }
-}
+pub use super::query_arena::DiskQueryGuard;
 
 /// Debug-only check that a materializing read is running under an
 /// active [`DiskQueryGuard`]. The arena SAFETY argument (see the block
-/// comment above) rests on the guard count keeping
-/// `begin_query`/`reset_arenas` from clearing the arenas while returned
-/// references are alive — a materialization with the count at zero is a
-/// protocol violation that could become a use-after-free the moment a
-/// concurrent query begins. Compiles to nothing in release builds.
+/// comment above and `super::query_arena`) rests on a live guard keeping the
+/// record reachable — a materialization with no guard at all is a protocol
+/// violation that could become a use-after-free the moment any query starts or
+/// ends. Compiles to nothing in release builds.
 #[inline(always)]
 fn debug_assert_arena_guard_active(graph: &DiskGraph, who: &str) {
     #[cfg(debug_assertions)]
     {
-        let active = graph
-            .active_queries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         debug_assert!(
-            *active > 0,
+            graph.arenas.active_count() > 0,
             "DiskGraph::{who} materialized into the arena without an active \
-             DiskQueryGuard (active_queries == 0); wrap the read in begin_query() \
+             DiskQueryGuard (no query is open); wrap the read in begin_query() \
              — see the arena SAFETY protocol comment in disk/graph.rs"
         );
     }
@@ -517,8 +471,44 @@ impl DiskGraph {
     // ====================================================================
 
     /// Materialize a NodeData from disk slot + ColumnStore into the arena.
+    ///
+    /// Every call parks a record that survives until the calling query ends.
+    /// Callers that finish with the record inside their own stack frame — the
+    /// scans and filters, which are the bulk of the traffic — should use
+    /// [`Self::owned_node_data`] instead and leave the arena alone.
     #[inline]
     pub fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
+        let node_data = self.materialize_node_data(idx)?;
+        // The record is boxed into the query arena, which hands back a stable
+        // heap pointer. It lives until every query that could reach it has
+        // finished — the epoch protocol in `super::query_arena` — and this
+        // read runs under a `DiskQueryGuard` (asserted in debug builds), so
+        // the pointer outlives the returned reference. The `&self` borrow
+        // alone would NOT be enough: `begin_query`/`reset_arenas` reclaim
+        // through `&self`.
+        debug_assert_arena_guard_active(self, "node_weight");
+        let ptr = self.arenas.push_node(node_data);
+        // SAFETY: per the paragraph above, the arena keeps this heap pointer
+        // alive for at least the returned reference's lifetime.
+        unsafe { Some(&*ptr) }
+    }
+
+    /// Materialize a node into the *caller's* frame.
+    ///
+    /// The arena-free counterpart of [`Self::node_weight`]: the record dies
+    /// where the caller drops it, so a scan over a million nodes holds one at
+    /// a time instead of a million, and never touches the arena mutex.
+    /// Nothing is parked, so no [`DiskQueryGuard`] is required for the
+    /// record's sake (callers still hold one for whatever else the read does).
+    #[inline]
+    pub(crate) fn owned_node_data(&self, idx: NodeIndex) -> Option<NodeData> {
+        self.materialize_node_data(idx)
+    }
+
+    /// Build a `NodeData` for `idx` from the node slot + its type's
+    /// ColumnStore. Pure: the caller decides where the record lives.
+    #[inline]
+    fn materialize_node_data(&self, idx: NodeIndex) -> Option<NodeData> {
         let i = idx.index();
         if i >= self.node_slot_len() {
             return None;
@@ -564,7 +554,7 @@ impl DiskGraph {
         let node_type_key = InternedKey::from_u64(slot.node_type);
         let store = self.column_stores.get(&node_type_key);
 
-        let node_data = if let Some(store) = store {
+        Some(if let Some(store) = store {
             let id = store.get_id(slot.row_id).unwrap_or(Value::Null);
             let title = store.get_title(slot.row_id).unwrap_or(Value::Null);
             NodeData {
@@ -582,35 +572,7 @@ impl DiskGraph {
                 node_type: node_type_key,
                 properties: crate::graph::schema::PropertyStorage::Map(HashMap::new()),
             }
-        };
-
-        // `Box::new` puts NodeData on the heap; the pointer stays valid
-        // even when the arena Vec reallocates on push. The Mutex
-        // serialises pushes from concurrent `node_weight` callers (the
-        // Cypher executor runs projection under `par_iter_mut` and
-        // reaches this through `resolve_property` /
-        // `build_node_spatial_data`). Mirrors the Box pattern already
-        // used by `edge_arena`.
-        let boxed = Box::new(node_data);
-        let ptr: *const NodeData = &*boxed;
-        debug_assert_arena_guard_active(self, "node_weight");
-        self.node_arena.lock().unwrap().push(boxed);
-        // `boxed` lives in the arena until the arena is cleared, and
-        // clearing is governed by the `active_queries` guard protocol
-        // (see the DiskGraph interior-mutability block comment): the only
-        // `&self` clear paths — `begin_query` and `reset_arenas` — take
-        // the `active_queries` lock and clear ONLY while the count is
-        // zero, and every materializing read runs under a `DiskQueryGuard`
-        // that holds the count above zero for the returned reference's
-        // lifetime. (`clear_arenas` takes `&mut self`, which the borrow
-        // checker already orders after this `&self` borrow.) The `&self`
-        // borrow alone would NOT be enough — `begin_query`/`reset_arenas`
-        // clear through `&self`.
-        //
-        // SAFETY: the guard-count protocol above keeps the arena (and so
-        // this heap pointer) alive for the returned reference's lifetime;
-        // the protocol is asserted in debug builds above.
-        unsafe { Some(&*ptr) }
+        })
     }
 
     pub fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
@@ -832,23 +794,17 @@ impl DiskGraph {
                 .map(|cow| cow.into_owned())
                 .unwrap_or_default()
         };
-        let boxed = Box::new(EdgeData {
+        debug_assert_arena_guard_active(self, "materialize_edge");
+        // Same lifetime protocol as `node_weight`: the arena's stable heap
+        // pointer is protected by the epoch bookkeeping in
+        // `super::query_arena`, not by the `&self` borrow alone.
+        let ptr = self.arenas.push_edge(EdgeData {
             connection_type: ct,
             properties: props,
         });
-        let ptr = &*boxed as *const EdgeData;
-        debug_assert_arena_guard_active(self, "materialize_edge");
-        let mut arena = self.edge_arena.lock().unwrap();
-        arena.push(boxed);
-        // `boxed: Box<EdgeData>` gives a stable heap pointer that survives
-        // Vec regrowth. Its lifetime is protected by the `active_queries`
-        // guard protocol, not by `&self` alone — `begin_query`/
-        // `reset_arenas` clear through `&self` but only while the guard
-        // count is zero (see the DiskGraph interior-mutability block
-        // comment and the matching note in `node_weight`).
-        // SAFETY: materializing reads run under a `DiskQueryGuard`
-        // (asserted in debug builds above), which keeps the arena — and
-        // this pointer — alive for the returned reference's lifetime.
+        // SAFETY: this read runs under a `DiskQueryGuard` (asserted in debug
+        // builds above), which keeps the record alive for the returned
+        // reference's lifetime.
         unsafe { &*ptr }
     }
 
@@ -1395,8 +1351,7 @@ impl DiskGraph {
         // cloned at most once per flush, regardless of how many rows
         // were mutated.
         self.flush_node_mut_cache();
-        self.node_arena.lock().unwrap().clear();
-        self.edge_arena.lock().unwrap().clear();
+        self.arenas.clear_all();
     }
 
     /// Drain `node_mut_cache` and apply the staged writes to
@@ -1516,45 +1471,38 @@ impl DiskGraph {
 
     /// Enter a read query that may materialize disk-backed nodes or edges.
     ///
-    /// The first query after an idle period reclaims values retained by the
-    /// previous query generation. Overlapping and nested queries merely bump
-    /// the active count, so neither can invalidate references held by another.
+    /// Overlapping and nested queries each take their own guard; a query's
+    /// materializations are released when *its* guard drops, unless an older
+    /// query is still running (epoch protocol in [`super::query_arena`]). No
+    /// query can invalidate references held by another.
     pub(crate) fn begin_query(&self) -> DiskQueryGuard {
-        let mut active = self
-            .active_queries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if *active == 0 {
-            self.clear_read_arenas();
-        }
-        *active += 1;
-        DiskQueryGuard {
-            active_queries: std::sync::Arc::clone(&self.active_queries),
-        }
+        self.arenas.begin()
     }
 
-    fn clear_read_arenas(&self) {
-        self.node_arena
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
-        self.edge_arena
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+    /// Records currently retained in the node materialization arena.
+    /// Test accessor for the arena-reclamation bound.
+    #[cfg(test)]
+    pub(crate) fn node_arena_len(&self) -> usize {
+        self.arenas.node_len()
+    }
+
+    /// Records currently retained in the edge materialization arena.
+    #[cfg(test)]
+    pub(crate) fn edge_arena_len(&self) -> usize {
+        self.arenas.edge_len()
+    }
+
+    /// Queries currently holding a read guard on this graph.
+    #[cfg(test)]
+    pub(crate) fn active_query_count(&self) -> usize {
+        self.arenas.active_count()
     }
 
     /// Reclaim materialization arenas when no guarded read query is active.
     /// Mutation execution calls this while holding exclusive graph ownership;
     /// the active-count check also makes accidental concurrent resets safe.
     pub fn reset_arenas(&self) {
-        let active = self
-            .active_queries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if *active == 0 {
-            self.clear_read_arenas();
-        }
+        self.arenas.reclaim_if_idle();
     }
 
     pub fn edges_directed_iter(&self, a: NodeIndex, dir: Direction) -> DiskEdges<'_> {
@@ -2160,8 +2108,7 @@ impl Clone for DiskGraph {
             appended_node_slots: self.appended_node_slots.clone(),
             node_count: self.node_count,
             free_node_slots: self.free_node_slots.clone(),
-            node_arena: std::sync::Mutex::new(Vec::new()),
-            active_queries: std::sync::Arc::new(std::sync::Mutex::new(0)),
+            arenas: super::query_arena::QueryArenas::new(0),
             column_stores: self.column_stores.clone(),
             out_offsets: snapshot("out offsets", &self.out_offsets),
             out_edges: snapshot("out edges", &self.out_edges),
@@ -2173,7 +2120,6 @@ impl Clone for DiskGraph {
             edge_count: self.edge_count,
             next_edge_idx: self.next_edge_idx,
             edge_properties: self.edge_properties.fork_overlay(),
-            edge_arena: std::sync::Mutex::new(Vec::new()),
             edge_mut_cache: HashMap::new(),
             node_mut_cache: HashMap::new(),
             // SAFETY: cloning takes `&self`; every mutation of pending_edges is

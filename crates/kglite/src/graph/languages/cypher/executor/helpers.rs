@@ -519,9 +519,35 @@ pub(crate) fn materialize_node_value(
     idx: petgraph::graph::NodeIndex,
     graph: &crate::graph::DirGraph,
 ) -> Option<crate::datatypes::values::NodeValue> {
+    // The returned value owns everything it needs, so on the disk backend the
+    // record must not be parked in the query arena — a projection over N rows
+    // would retain N records for the rest of the query
+    // (storage/disk/query_arena.rs). Heap backends have no arena and keep the
+    // direct borrow, which measures faster than routing through a closure.
+    if graph.graph.is_disk() {
+        let data = graph.graph.owned_node_data(idx)?;
+        let store = data.properties.columnar_row_id().and_then(|row_id| {
+            graph
+                .graph
+                .column_store(data.node_type)
+                .map(|store| (&**store, row_id))
+        });
+        let node = crate::graph::storage::NodeView::new(&data, store);
+        return Some(node_value_from_view(idx, node, graph));
+    }
+    let node = graph.graph.node_view(idx)?;
+    Some(node_value_from_view(idx, node, graph))
+}
+
+/// Owned [`NodeValue`] from a borrowed view. Split out of
+/// [`materialize_node_value`] so the view's lifetime ends with the call.
+fn node_value_from_view(
+    idx: petgraph::graph::NodeIndex,
+    node: crate::graph::storage::NodeView<'_>,
+    graph: &crate::graph::DirGraph,
+) -> crate::datatypes::values::NodeValue {
     use crate::datatypes::values::NodeValue;
     use std::collections::BTreeMap;
-    let node = graph.graph.node_view(idx)?;
     let node_type = node.node_type_str(&graph.interner).to_string();
     let mut properties: BTreeMap<String, Value> = BTreeMap::new();
     // Include the three virtual builtins so consumers always see
@@ -619,11 +645,11 @@ pub(crate) fn materialize_node_value(
     } else {
         labels
     };
-    Some(NodeValue {
+    NodeValue {
         id: idx.index() as u32,
         labels,
         properties,
-    })
+    }
 }
 
 /// Phase A.1 / C2 — materialise an edge into an owned [`RelValue`]

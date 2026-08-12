@@ -138,6 +138,28 @@ pub enum GraphBackend {
 }
 
 impl GraphBackend {
+    /// An **owned** node record, for a caller that finishes with it inside its
+    /// own frame — scans and filters, which drop each record immediately.
+    ///
+    /// This exists for the disk backend, where [`GraphRead::node_weight`]
+    /// parks every record it builds in the per-query arena: a scan walking a
+    /// million nodes retains a million records until its query ends
+    /// (`storage/disk/query_arena.rs`). Materializing into the caller's frame
+    /// keeps such a scan flat in memory and skips the arena mutex entirely.
+    ///
+    /// **Gate on [`GraphRead::is_disk`] before calling.** The heap backends
+    /// already own their records and can only answer by *cloning*, which is
+    /// pure loss for them — hence the branch at the call sites rather than a
+    /// wholesale switch.
+    #[inline]
+    pub(crate) fn owned_node_data(&self, idx: NodeIndex) -> Option<NodeData> {
+        match self {
+            Self::Disk(g) => g.owned_node_data(idx),
+            Self::Recording(rg) => rg.inner().owned_node_data(idx),
+            _ => GraphRead::node_weight(self, idx).cloned(),
+        }
+    }
+
     #[inline]
     // Keep the established constructor-only backend API stable in this hardening pass.
     #[allow(clippy::new_without_default)]

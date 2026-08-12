@@ -87,6 +87,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   points cannot disagree about what a field name means. A genuinely absent
   property still reports `valid_count = 0`.
 
+- **Disk mode: concurrent reads no longer grow the process without bound.**
+  Serving a disk graph to more than one reader at a time — a Bolt server, a
+  thread pool, any concurrent `Session` — grew RSS for as long as the load
+  lasted and never gave it back: 60 MB → over 10 GB on a 43 MB graph, and a
+  measured 87 MB → 4.4 GB in five seconds of eight-thread reads. Disk reads
+  build node/edge records on demand and park them in a per-query arena; the
+  arena could only be reclaimed while the graph was *completely* idle, which
+  sustained concurrency never is. Records now carry the query epoch that
+  created them and are dropped as soon as every query that could hold one has
+  finished, so the retained set is bounded by the queries actually in flight
+  (same 8-thread load: 91 MB → 128 MB, flat, over 23 000 queries). Scans and
+  filters — the bulk of the traffic — no longer touch the arena at all,
+  materializing into the caller's frame instead, which also removes the arena
+  mutex from the concurrent read path: filtered scans and parameterised
+  traversals went from *losing* throughput as readers were added (0.29×
+  at 8 threads) to scaling 4.6–4.8×, and are 10–16 % faster single-threaded.
+  In-memory and mapped modes are untouched — they have no arena, and their
+  read paths were left byte-for-byte as they were.
+
 ## [0.15.12] - 2026-08-12
 
 ### Changed
