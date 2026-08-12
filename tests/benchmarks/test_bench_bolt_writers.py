@@ -5,6 +5,12 @@ writes are *explicit* transactions (auto-commit mutations are rejected at
 `backend.rs`), so what matters is how committed throughput, conflict rate,
 and latency move as N driver-managed writers contend for the single graph.
 
+Two sweeps live here: `test_contended_writer_sweep` varies the writer count
+at one write per transaction, and `test_batch_size_sweep` varies the writes
+per transaction at a fixed writer count — the measurement behind the
+operator page's "batch more work into each transaction rather than adding
+writers".
+
 The unit of work runs through `session.execute_write`, i.e. the
 driver-managed path that retries a `Neo.TransientError.*` failure by
 itself — the system a caller actually gets after the conflict code became
@@ -65,6 +71,12 @@ OCC_CONFLICT_CODE = "Neo.TransientError.Transaction.Outdated"
 #: Writer counts swept.
 WRITER_COUNTS = (1, 2, 4, 8)
 
+#: Batch sweep: (writers, creates-per-transaction) cells. N=4 is the
+#: contended series the operator page's batching advice is about; the two
+#: N=1 cells are the uncontended control that separates "batching amortizes
+#: per-transaction cost" from "batching wins because it dodges conflicts".
+BATCH_CELLS = ((4, 1), (4, 10), (4, 100), (1, 1), (1, 100))
+
 #: Measurement window per cell, seconds.
 CELL_SECONDS = 5.0
 
@@ -100,10 +112,22 @@ class CellResult:
     max_op_attempts: int = 1
     #: Attempts made by the single slowest committed unit of work.
     slowest_op_attempts: int = 1
+    #: CREATEs per committed transaction (the unit of work's batch size).
+    batch: int = 1
 
     @property
     def committed_per_s(self) -> float:
         return self.committed / self.elapsed_s if self.elapsed_s > 0 else 0.0
+
+    @property
+    def ops_per_s(self) -> float:
+        """Committed *node creations* per second — the decision metric.
+
+        `committed_per_s` counts transactions, which is the wrong unit for
+        comparing batch sizes: a K=100 cell that commits a tenth as often
+        still does ten times the work.
+        """
+        return self.committed_per_s * self.batch
 
     @property
     def retries(self) -> int:
@@ -161,19 +185,39 @@ def _writer_fixture(tmp_path_factory):
     return fixture_path
 
 
-def _run_cell(fixture_path, tmp_dir, writers: int, seconds: float, tag: str) -> CellResult:
+#: Batched unit of work. One query, one server round-trip, `$rows` rows —
+#: the idiomatic way a driver user "batches more work into a transaction",
+#: and the shape used at *every* K including K=1 so that batch size is the
+#: only thing that varies across the sweep.
+_BATCH_QUERY = "UNWIND $rows AS row CREATE (:Person {id: row.id, title: row.title, city: row.city})"
+
+
+def _run_cell(
+    fixture_path,
+    tmp_dir,
+    writers: int,
+    seconds: float,
+    tag: str,
+    batch: int | None = None,
+) -> CellResult:
     """One cell: `writers` threads hammering `execute_write` for `seconds`.
 
     Each thread owns its own session and a disjoint id range, so the final
     graph count is an exact oracle for "every committed write landed".
+
+    `batch` selects the unit of work. `None` (the writer-count sweep) is a
+    bare single-node `CREATE`. An integer K runs `_BATCH_QUERY` with K rows,
+    including at K=1 — so the batch sweep's cells differ *only* in K, and
+    the K=1 cell carries the same `UNWIND`/parameter overhead as K=100.
     """
+    rows_per_tx = 1 if batch is None else batch
     cell_graph = tmp_dir / f"cell_{tag}.kgl"
     shutil.copy(fixture_path, cell_graph)
 
     stop = threading.Event()
     start_barrier = threading.Barrier(writers + 1, timeout=60)
     lock = threading.Lock()
-    result = CellResult(writers=writers, committed=0, attempts=0, elapsed_s=0.0)
+    result = CellResult(writers=writers, committed=0, attempts=0, elapsed_s=0.0, batch=rows_per_tx)
 
     def worker(driver, worker_id: int) -> None:
         attempts = 0
@@ -184,24 +228,45 @@ def _run_cell(fixture_path, tmp_dir, writers: int, seconds: float, tag: str) -> 
         max_op_attempts = 1
         slowest_op_attempts = 1
         slowest_ms = -1.0
-        base_id = 1_000_000 + worker_id * 100_000
+        # Wide enough that a fast K=100 cell cannot walk into the next
+        # worker's ids and break the exact landed-count oracle.
+        base_id = 1_000_000 + worker_id * 100_000_000
         seq = 0
         try:
             with driver.session() as session:
                 start_barrier.wait()
                 while not stop.is_set():
-                    node_id = base_id + seq
+                    node_id = base_id + seq * rows_per_tx
                     seq += 1
+                    # Built once per unit of work, not once per attempt: a
+                    # retry should re-run the *transaction*, not re-pay a
+                    # client-side list build the timing would then charge
+                    # to the server.
+                    rows = (
+                        None
+                        if batch is None
+                        else [
+                            {
+                                "id": node_id + j,
+                                "title": f"{tag}-w{worker_id}-{node_id + j}",
+                                "city": "loadtest",
+                            }
+                            for j in range(batch)
+                        ]
+                    )
 
-                    def unit_of_work(tx, node_id=node_id, worker_id=worker_id):
+                    def unit_of_work(tx, node_id=node_id, worker_id=worker_id, rows=rows):
                         nonlocal attempts
                         attempts += 1
-                        tx.run(
-                            "CREATE (:Person {id: $id, title: $title, city: $city})",
-                            id=node_id,
-                            title=f"{tag}-w{worker_id}-{node_id}",
-                            city="loadtest",
-                        ).consume()
+                        if batch is None:
+                            tx.run(
+                                "CREATE (:Person {id: $id, title: $title, city: $city})",
+                                id=node_id,
+                                title=f"{tag}-w{worker_id}-{node_id}",
+                                city="loadtest",
+                            ).consume()
+                            return
+                        tx.run(_BATCH_QUERY, rows=rows).consume()
 
                     attempts_before = attempts
                     t0 = time.perf_counter()
@@ -283,6 +348,23 @@ def _format_table(cells: list[CellResult]) -> str:
     return "\n".join(lines)
 
 
+def _format_batch_table(cells: list[CellResult]) -> str:
+    lines = [
+        "",
+        f"bolt batch-size sweep — binary: {_BOLT_BINARY}",
+        f"{'N':>3} {'K':>5} {'ops/s':>10} {'tx/s':>9} {'committed':>10} {'attempts':>9} "
+        f"{'retry_rate':>11} {'p50_ms':>8} {'p95_ms':>8} {'max_ms':>9} {'exhaust':>8}",
+    ]
+    for c in cells:
+        lines.append(
+            f"{c.writers:>3} {c.batch:>5} {c.ops_per_s:>10.1f} {c.committed_per_s:>9.1f} "
+            f"{c.committed:>10} {c.attempts:>9} {c.retry_rate:>11.3f} "
+            f"{_percentile(c.latencies_ms, 50):>8.2f} {_percentile(c.latencies_ms, 95):>8.2f} "
+            f"{max(c.latencies_ms or [0.0]):>9.2f} {c.exhausted_conflicts:>8}"
+        )
+    return "\n".join(lines)
+
+
 def test_contended_writer_sweep(_writer_fixture, tmp_path):
     """Sweep N ∈ {1,2,4,8} managed writers; record the curve, assert only
     that the system stayed correct (see module docstring)."""
@@ -301,3 +383,33 @@ def test_contended_writer_sweep(_writer_fixture, tmp_path):
         # else is: a retried transaction must not leave a partial write.
         assert c.landed == c.committed, f"N={c.writers}: landed {c.landed} != committed {c.committed}"
         assert c.committed_per_s > 0
+
+
+def test_batch_size_sweep(_writer_fixture, tmp_path):
+    """Sweep K ∈ {1,10,100} creations per managed transaction at N=4, with
+    an uncontended N=1 control at K ∈ {1,100}.
+
+    This is the measurement behind the operator page's "batch more work
+    into each transaction rather than adding writers": committed *ops*/s
+    (K × tx/s) is the decision metric, since transactions/s necessarily
+    falls as K grows. As everywhere in this module, nothing numeric is
+    asserted — the recorded curve lives in
+    `dev-docs/bench/results/results.csv`.
+    """
+    # Warmup cell — discarded.
+    _run_cell(_writer_fixture, tmp_path, WARMUP_WRITERS, WARMUP_SECONDS, "batchwarm", batch=10)
+
+    cells = [_run_cell(_writer_fixture, tmp_path, n, CELL_SECONDS, f"b{k}n{n}", batch=k) for n, k in BATCH_CELLS]
+
+    print(_format_batch_table(cells))
+
+    for c in cells:
+        label = f"N={c.writers} K={c.batch}"
+        assert c.hard_errors == [], f"{label}: non-conflict errors: {c.hard_errors[:3]}"
+        assert c.committed > 0, f"{label}: no writer committed"
+        assert c.attempts >= c.committed, f"{label}: attempts {c.attempts} < committed {c.committed}"
+        # A batched transaction is all-or-nothing: every committed unit of
+        # work contributed exactly K nodes, and a retried or conflicted one
+        # contributed none.
+        assert c.landed == c.committed * c.batch, f"{label}: landed {c.landed} != committed*K {c.committed * c.batch}"
+        assert c.ops_per_s > 0

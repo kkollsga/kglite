@@ -137,7 +137,15 @@ Size a deployment by write *rate*, therefore, not by writer count: more
 concurrent clients do not raise the ceiling, and past it, latency rather than
 error rate is what degrades. If a workload needs more write throughput than one
 commit point provides, batch more work into each transaction rather than adding
-writers.
+writers — that is the dial that moves the ceiling. Measured on the same graph,
+raising a transaction from a single write to a hundred (one `UNWIND $rows`
+query instead of a hundred round-trips) multiplied committed writes per second
+by roughly an order of magnitude, contended and uncontended alike: the cost
+that dominates a small write is per-*transaction*, and batching amortizes it.
+The trade is at the tail — a longer transaction is a wider window in which to
+be overtaken, so at a hundred writes per transaction roughly one attempt in ten
+is retried, against under one in fifty unbatched, and a single unit of work
+correspondingly takes longer end to end.
 
 None of this makes the server highly available: one process owns the graph, and
 losing it loses the endpoint. That is the design (see *What this server is (and
@@ -145,8 +153,9 @@ is not)* above), not a tuning problem.
 
 The measured curve is produced by
 `tests/benchmarks/test_bench_bolt_writers.py` (opt-in:
-`-m "benchmark and bolt_stress"`), which sweeps the writer count and records
-committed throughput, retry rate, and latency percentiles; captured numbers
+`-m "benchmark and bolt_stress"`), which sweeps the writer count and the
+writes-per-transaction batch size, recording committed throughput, retry rate,
+and latency percentiles; captured numbers
 land in the repository's benchmark results record. The correctness half —
 that conflicts are retriable and managed transactions actually retry them —
 is pinned by `tests/test_bolt_server_transactions.py` and
