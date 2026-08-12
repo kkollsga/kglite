@@ -1,6 +1,6 @@
 // src/graph/statistics.rs
 use crate::datatypes::values::Value;
-use crate::graph::schema::{CurrentSelection, DirGraph};
+use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey};
 use petgraph::graph::NodeIndex;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -92,25 +92,21 @@ pub fn calculate_grouped_property_stats(
         let Some(node) = graph.node_view(index) else {
             continue;
         };
-        let node_type = node.node_type_str(&graph.interner);
-        let resolved_group = graph.resolve_alias(node_type, group_by);
-        let key = match node.get_field_ref(resolved_group).as_deref() {
+        let key = match resolved_stat_field(graph, node, group_by).as_deref() {
             Some(Value::String(value)) => value.clone(),
             Some(Value::Int64(value)) => value.to_string(),
             Some(value) => format!("{:?}", value),
             None => "null".to_string(),
         };
         let values = grouped_values.entry(key).or_default();
-        let resolved_property = graph.resolve_alias(node_type, property);
-        let numeric =
-            node.get_field_ref(resolved_property)
-                .as_deref()
-                .and_then(|value| match value {
-                    Value::Int64(value) => Some(*value as f64),
-                    Value::Float64(value) => Some(*value),
-                    Value::UniqueId(value) => Some(*value as f64),
-                    _ => None,
-                });
+        let numeric = resolved_stat_field(graph, node, property)
+            .as_deref()
+            .and_then(|value| match value {
+                Value::Int64(value) => Some(*value as f64),
+                Value::Float64(value) => Some(*value),
+                Value::UniqueId(value) => Some(*value as f64),
+                _ => None,
+            });
         if let Some(value) = numeric {
             values.push(value);
         }
@@ -250,7 +246,7 @@ fn calculate_stats_for_nodes(
 
     for &node_idx in nodes {
         if let Some(node) = graph.node_view(node_idx) {
-            if let Some(value) = get_node_property(node, property) {
+            if let Some(value) = resolved_stat_field(graph, node, property) {
                 match &*value {
                     Value::Null => continue,
                     Value::String(s) if s.is_empty() => continue,
@@ -325,11 +321,146 @@ fn try_convert_to_float(value: &Value) -> Option<f64> {
     }
 }
 
-fn get_node_property<'a>(
+/// Read `property` off `node` the way a filter on it would.
+///
+/// Both statistics entry points come through here, so the grouped and
+/// ungrouped surfaces cannot disagree about what a field name means. The
+/// resolution is [`NodeView::resolved_field`]'s — a type's `unique_id_field` /
+/// `node_title_field` map onto the identity columns, then a stored property,
+/// then the structural soft alias. `calculate_property_stats` used to read the
+/// property map alone, so `.statistics()` on a type's own id/title column (in
+/// any spelling) reported `valid_count = 0` and no numeric stats.
+fn resolved_stat_field<'a>(
+    graph: &'a DirGraph,
     node: crate::graph::storage::NodeView<'a>,
     property: &str,
 ) -> Option<Cow<'a, Value>> {
-    node.get_property(property)
+    let node_type = node.node_type_str(&graph.interner);
+    let field = graph.resolve_alias(node_type, property);
+    node.resolved_field(node_type, field, InternedKey::from_str(field))
+}
+
+#[cfg(test)]
+mod identity_field_tests {
+    use super::*;
+    use crate::datatypes::DataFrame;
+    use crate::graph::mutation::maintain::add_nodes;
+
+    /// A type whose identity columns are named `term_id` / `term_name`, so
+    /// `add_nodes` hoists them onto `NodeData.id` / `NodeData.title` and
+    /// registers the alias. Nothing named `term_id`, `term_name`, `id` or
+    /// `title` remains in the property map — a read that skips alias
+    /// resolution finds nothing at all.
+    fn aliased_graph() -> DirGraph {
+        let rows: Vec<Vec<Value>> = (1..=5)
+            .map(|i| vec![Value::Int64(i), Value::String(format!("term-{i}"))])
+            .collect();
+        let df =
+            DataFrame::from_cypher_rows(vec!["term_id".to_string(), "term_name".to_string()], rows)
+                .expect("fixture frame");
+        let mut graph = DirGraph::new();
+        add_nodes(
+            &mut graph,
+            df,
+            "Term".to_string(),
+            "term_id".to_string(),
+            Some("term_name".to_string()),
+            None,
+        )
+        .expect("fixture add_nodes");
+        graph
+    }
+
+    fn stats_for(graph: &DirGraph, property: &str) -> PropertyStats {
+        let children: Vec<_> = graph
+            .type_indices
+            .get("Term")
+            .expect("Term type index")
+            .iter()
+            .collect();
+        let pairs = vec![ParentChildPair {
+            parent: None,
+            children,
+        }];
+        calculate_property_stats(graph, &pairs, property)
+            .pop()
+            .expect("one group")
+    }
+
+    /// `.statistics("term_id")` and `.statistics("id")` must both see the
+    /// identity column. Reading the property map alone reports
+    /// `valid_count = 0` with no numeric stats — silently wrong, not an error.
+    #[test]
+    fn statistics_resolve_the_types_id_field() {
+        let graph = aliased_graph();
+        for spelling in ["term_id", "id"] {
+            let stats = stats_for(&graph, spelling);
+            assert_eq!(stats.count, 5, "{spelling}: node count");
+            assert_eq!(
+                stats.valid_count, 5,
+                "{spelling}: every node carries the id field"
+            );
+            assert!(stats.is_numeric, "{spelling}: id values are integers");
+            assert_eq!(stats.min, Some(1.0), "{spelling}: min");
+            assert_eq!(stats.max, Some(5.0), "{spelling}: max");
+            assert_eq!(stats.sum, Some(15.0), "{spelling}: sum");
+            assert_eq!(stats.avg, Some(3.0), "{spelling}: avg");
+        }
+    }
+
+    /// Same for the title field, which is non-numeric: the fix is visible as
+    /// `valid_count` and the value type, not as min/max.
+    #[test]
+    fn statistics_resolve_the_types_title_field() {
+        let graph = aliased_graph();
+        for spelling in ["term_name", "title"] {
+            let stats = stats_for(&graph, spelling);
+            assert_eq!(stats.count, 5, "{spelling}: node count");
+            assert_eq!(
+                stats.valid_count, 5,
+                "{spelling}: every node carries the title field"
+            );
+            assert_eq!(stats.value_type, "string", "{spelling}: value type");
+        }
+    }
+
+    /// A genuinely absent property still reports nothing — the fix must not
+    /// invent values.
+    #[test]
+    fn statistics_on_an_absent_property_stay_empty() {
+        let graph = aliased_graph();
+        let stats = stats_for(&graph, "no_such_property");
+        assert_eq!(stats.count, 5);
+        assert_eq!(stats.valid_count, 0);
+        assert_eq!(stats.value_type, "null");
+        assert_eq!(stats.min, None);
+        assert_eq!(stats.max, None);
+    }
+
+    /// The grouped sibling resolves the same way — one graph, one field, two
+    /// entry points, one answer.
+    #[test]
+    fn grouped_statistics_resolve_the_types_id_field() {
+        let graph = aliased_graph();
+        let indices: Vec<_> = graph
+            .type_indices
+            .get("Term")
+            .expect("Term type index")
+            .iter()
+            .collect();
+        let mut selection = CurrentSelection::new();
+        selection
+            .get_level_mut(0)
+            .expect("root level")
+            .add_selection(None, indices);
+        let grouped =
+            calculate_grouped_property_stats(&graph, &selection, "term_id", "term_name", None);
+        assert_eq!(grouped.len(), 5, "one group per distinct title");
+        let one = &grouped["term-1"];
+        assert_eq!(one.count, 1);
+        assert_eq!(one.min, Some(1.0));
+        assert_eq!(one.max, Some(1.0));
+    }
 }
 
 #[cfg(test)]

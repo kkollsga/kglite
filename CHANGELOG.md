@@ -35,6 +35,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scanning the now-correctly-chosen type), so an index added as a workaround
   is still worth keeping.
 
+- **`.statistics()` on a type's own title or id field returned nothing.** For a
+  type loaded as `add_nodes(..., unique_id_field="term_id",
+  node_title_field="term_name")`, `select("Term").statistics("term_id")` —
+  and equally `"term_name"`, `"id"`, `"title"` — reported `count = N` with
+  `valid_count = 0`, no `min`/`max`/`avg`, and `value_type = "null"`: a silently
+  empty answer rather than an error, on a column every node carries. The
+  ungrouped path read the property map directly, where identity columns do not
+  live, while its `group_by=` sibling already resolved the alias. Both now read
+  through the same alias-resolving route as every other read, so the two entry
+  points cannot disagree about what a field name means. A genuinely absent
+  property still reports `valid_count = 0`.
+
 ## [0.15.12] - 2026-08-12
 
 ### Changed
