@@ -255,7 +255,9 @@ class BoltConformanceTest {
       txA.commit();
       Neo4jException raised =
           assertThrows(Neo4jException.class, txB::commit, "expected the stale commit to conflict");
-      assertEquals("Neo.ClientError.Transaction.ConflictDetected", raised.code());
+      // The `Neo.TransientError.*` class is what makes the driver's
+      // managed-transaction machinery retry instead of throwing through.
+      assertEquals("Neo.TransientError.Transaction.Outdated", raised.code());
     }
   }
 

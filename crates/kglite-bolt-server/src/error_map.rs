@@ -71,6 +71,21 @@ mod tests {
     }
 
     #[test]
+    fn transaction_conflict_is_published_in_the_retriable_class() {
+        // Neo4j drivers decide whether to retry a managed transaction from
+        // the *class prefix* alone (`Neo.TransientError.*`), not the title —
+        // so the prefix, not the exact string, is the contract that makes
+        // `session.execute_write` re-run a unit of work that lost an OCC
+        // race. A `ClientError`-class code here silently turns every
+        // conflict into a caller-visible failure with a lost write.
+        let code = KgErrorCode::TransactionConflict.neo4j_status_code();
+        assert!(
+            code.starts_with("Neo.TransientError."),
+            "OCC conflicts must be published in the driver-retriable class, got: {code}"
+        );
+    }
+
+    #[test]
     fn every_code_has_a_neo4j_string_starting_with_neo_dot() {
         for code in [
             KgErrorCode::CypherSyntax,

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Bolt: a lost OCC race is now retriable, so managed transactions retry it
+  themselves.** A stale-snapshot commit reported
+  `Neo.ClientError.Transaction.ConflictDetected` — a code invented here, in
+  the class every Neo4j driver reads as "do not retry". Drivers therefore
+  raised the conflict straight through to the caller and the losing writer's
+  work was silently dropped, even though the operation would have succeeded on
+  a second attempt. Conflicts now report the published
+  `Neo.TransientError.Transaction.Outdated`, whose class is the retriable one:
+  `session.execute_write` (and its equivalents in the JS and Java drivers)
+  re-runs the unit of work on a fresh transaction with a fresh base version,
+  with no retry loop in your code. Hand-rolled `begin_transaction` /
+  `commit()` code still owns its own retry, and can keep branching on the
+  status code — the new one.
+
+  **Breaking for Bolt clients that catch the conflict by class.** A conflict
+  is now `neo4j.exceptions.TransientError`, not `ClientError`, so
+  `except ClientError` no longer sees it (`except Neo4jError`, or a check on
+  `.code` / `.is_retryable()`, still does). The embedded Python path is
+  unaffected: `kglite.TransactionConflictError`, `.code ==
+  "TransactionConflict"`, `kglite.retry_on_conflict`, HTTP 409 and the C ABI
+  status code are all unchanged.
+
 ## [0.15.11] - 2026-08-11
 
 ### Added

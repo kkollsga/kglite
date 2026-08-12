@@ -18,6 +18,9 @@ The 18 contracts:
    begin_read like kglite's pyapi; we test --readonly server)
 9. OCC conflict — two sessions both write, second commit conflicts
    (OCC version checking enforced via session::Session::commit; Phase E.4)
+9b. Managed-transaction retry — the conflict is published in the
+   retriable `Neo.TransientError.*` class, so `session.execute_write`
+   re-runs the losing unit of work by itself and both writes land
 10. Outside mutation during tx — pin current behavior (no conflict;
     inner tx has no writes, NoWritesNoOp commit doesn't check version)
 11-14. Read-only --readonly rejects CREATE/SET/DELETE/MERGE
@@ -30,6 +33,9 @@ The 18 contracts:
 Fixtures: `bolt_server` (RW) + `bolt_server_readonly` from
 `tests/conftest.py`.
 """
+
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 import pytest
 
@@ -172,19 +178,101 @@ def test_two_concurrent_commits_second_conflicts(bolt_server):
                 tx_b.run("CREATE (:Person {id: 801, title: 'FromB'})")
                 tx_a.commit()
                 # B's snapshot is stale; OCC rejects the swap.
-                with pytest.raises(neo4j.exceptions.ClientError) as excinfo:
+                with pytest.raises(neo4j.exceptions.TransientError) as excinfo:
                     tx_b.commit()
                 assert "conflict" in str(excinfo.value).lower()
                 # The status code is the documented contract (README +
                 # docs/python/migrations/neo4j-to-kglite.md) and the only
-                # thing a ported retry loop can branch on. It used to be
-                # `Neo.ClientError.Transaction.TransactionStartFailed`,
-                # which was wrong twice over — the transaction started
-                # fine — so this assertion exists to keep it pinned.
-                assert excinfo.value.code == "Neo.ClientError.Transaction.ConflictDetected"
+                # thing a ported retry loop can branch on. Its *class*
+                # carries the load: `TransientError` is what tells every
+                # Neo4j driver the failure is retriable, which is what
+                # makes `session.execute_write` re-run the unit of work
+                # (see test_managed_transaction_retries_after_conflict).
+                # An earlier invented `Neo.ClientError.Transaction.
+                # ConflictDetected` was in the non-retriable class, so
+                # this pins both class and exact code.
+                assert excinfo.value.is_retryable() is True
+                assert excinfo.value.code == "Neo.TransientError.Transaction.Outdated"
             # Only A's CREATE survives.
             assert _count_people(session_a, "n.title = 'FromA'") == 1
             assert _count_people(session_a, "n.title = 'FromB'") == 0
+
+
+def test_managed_transaction_retries_after_conflict(bolt_server):
+    """A driver-managed transaction retries an OCC conflict by itself.
+
+    This is the *behavioural* half of the status-code contract pinned by
+    `test_two_concurrent_commits_second_conflicts`: because the conflict
+    is published in the `Neo.TransientError.*` class, the driver's
+    managed-transaction machinery (`session.execute_write`) classifies it
+    as retryable and runs the unit of work again on a fresh transaction —
+    with a fresh base version, so the retry commits cleanly. Under the
+    old `Neo.ClientError.Transaction.ConflictDetected` code the driver
+    raised straight through to the caller and the loser's write was lost.
+
+    Contention is made deterministic rather than hoped for: both threads
+    open their transaction (the leading `RETURN 1` forces BEGIN to reach
+    the server, fixing each transaction's base version), then meet at a
+    two-party barrier, and only *then* write. The barrier is waited on
+    only during each thread's first attempt, so retries run unblocked and
+    can actually succeed. Its timeout means a regression that stops one
+    side from reaching the barrier fails in seconds instead of hanging.
+    """
+    attempts: dict[str, int] = {"A": 0, "B": 0}
+    # Generous relative to the work (two round trips), short enough that a
+    # broken retry path fails the test rather than the 120 s ceiling.
+    barrier = threading.Barrier(2, timeout=30)
+
+    def contend(driver, name: str, node_id: int) -> None:
+        def unit_of_work(tx):
+            attempts[name] += 1
+            # Force BEGIN to the server so this tx's base version is
+            # pinned before the barrier releases.
+            tx.run("RETURN 1 AS ok").consume()
+            if attempts[name] == 1:
+                # First attempts only: both transactions are now open on
+                # the same base version, so whoever commits second must
+                # conflict. Retries skip this and run alone.
+                barrier.wait()
+            tx.run(
+                "CREATE (:Person {id: $id, title: $title})",
+                id=node_id,
+                title=f"Retry{name}",
+            ).consume()
+
+        with driver.session() as session:
+            session.execute_write(unit_of_work)
+
+    with neo4j.GraphDatabase.driver(
+        bolt_server,
+        auth=("neo4j", "password"),
+        # Retry fast: the default 1 s initial delay doubling up to a 30 s
+        # budget would make this test needlessly slow.
+        max_transaction_retry_time=20.0,
+        initial_retry_delay=0.2,
+        retry_delay_multiplier=1.5,
+        retry_delay_jitter_factor=0.1,
+    ) as driver:
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [
+                    pool.submit(contend, driver, "A", 1300),
+                    pool.submit(contend, driver, "B", 1301),
+                ]
+                # .result() re-raises whatever the worker saw — a
+                # non-retried conflict surfaces here.
+                for f in futures:
+                    f.result()
+        finally:
+            barrier.abort()  # release a stranded partner on failure
+
+        with driver.session() as session:
+            assert _count_people(session, "n.title = 'RetryA'") == 1
+            assert _count_people(session, "n.title = 'RetryB'") == 1
+
+    # Non-vacuity: if nothing conflicted, the test proved nothing about
+    # retrying. Exactly one side loses the race, so one counter is 2+.
+    assert max(attempts.values()) >= 2, f"no retry observed — the two transactions never contended: {attempts}"
 
 
 def test_outside_mutation_during_open_transaction(bolt_server):

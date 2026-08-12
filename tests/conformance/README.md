@@ -20,9 +20,11 @@ driver's expectations and violate another's — the Python suite cannot detect
 that by construction. This is not hypothetical: writing these suites is what
 surfaced that OCC commit conflicts were reporting
 `Neo.ClientError.Transaction.TransactionStartFailed` while the README promised
-`Neo.ClientError.Transaction.ConflictDetected`. The Python tests matched on
-message text and never noticed; a driver-idiomatic retry loop branches on the
-code, so it would have.
+a different code. The Python tests matched on message text and never noticed; a
+driver-idiomatic retry loop branches on the code, so it would have. Conflicts
+now report `Neo.TransientError.Transaction.Outdated`, and each driver's
+retry machinery keys off that class prefix — so these suites are also where a
+driver that declines to retry it would show up.
 
 **Java specifically.** The JVM has no in-process route to a kglite graph — no
 JNI binding, no embedded engine — so the Bolt server *is* the integration

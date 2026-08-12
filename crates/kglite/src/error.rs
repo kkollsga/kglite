@@ -218,10 +218,18 @@ impl KgErrorCode {
             KgErrorCode::ConstraintCreationFailed => {
                 "Neo.ClientError.Schema.ConstraintCreationFailed"
             }
-            // Matches the string `kglite-bolt-server` has published for OCC
-            // conflicts since the transaction work landed; the driver
-            // conformance suite pins it (tests/test_bolt_server_transactions.py).
-            KgErrorCode::TransactionConflict => "Neo.ClientError.Transaction.ConflictDetected",
+            // The `TransientError` *class* is the contract here, not the
+            // title: Neo4j drivers decide retryability from the class
+            // prefix, so an OCC conflict must be published in this class
+            // for a managed transaction to re-run the unit of work
+            // instead of raising through to the caller. `Outdated` is
+            // Neo4j's published code for "transaction saw state
+            // invalidated by applied updates; may succeed if retried",
+            // which is exactly whole-graph OCC. Both the prefix and the
+            // exact string are pinned by tests (error_map.rs unit test,
+            // tests/test_bolt_server_transactions.py, and the JS/Java
+            // conformance corpora).
+            KgErrorCode::TransactionConflict => "Neo.TransientError.Transaction.Outdated",
             KgErrorCode::Validation | KgErrorCode::Expr => {
                 "Neo.ClientError.Statement.ArgumentError"
             }

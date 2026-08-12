@@ -49,21 +49,20 @@ def _run_read(driver, n_iterations: int, min_count: int = 4) -> tuple[int, list]
     return successes, errors
 
 
+OCC_CONFLICT_CODE = "Neo.TransientError.Transaction.Outdated"
+
+
 def _is_occ_conflict(err: BaseException) -> bool:
     """OCC conflicts surface via `kglite::api::session::Session::commit`
     when another writer committed between this tx's BEGIN and COMMIT.
-    The bolt-server raises `BoltError::Transaction("Transaction
-    conflict: ...")`. The neo4j driver wraps that as `ClientError`
-    with the message tucked into `.message` (not `repr(e)`)."""
-    if not isinstance(err, neo4j.exceptions.ClientError):
-        return False
-    parts = [
-        str(err),
-        getattr(err, "message", "") or "",
-        " ".join(str(a) for a in (err.args or ())),
-    ]
-    blob = " ".join(parts).lower()
-    return "conflict" in blob or "transaction conflict" in blob
+
+    Classified by status code, not by exception class or message
+    substring: the code is the stable wire contract, while the driver
+    class is derived from it (and changed once already, when the conflict
+    moved from the non-retriable `ClientError` class to the retriable
+    `TransientError` one) and the message is free prose. `getattr` keeps
+    this total over non-Neo4jError exceptions, which have no `.code`."""
+    return getattr(err, "code", None) == OCC_CONFLICT_CODE
 
 
 def _run_write_tx(driver, ids: list[int]) -> tuple[int, list]:
@@ -124,9 +123,11 @@ def test_8_readers_plus_1_writer(bolt_server):
 def test_4_concurrent_writers(bolt_server):
     """4 parallel transactions each create 5 nodes. Without per-tx
     mutex splitting (RA-1), these would serialize on the global
-    transactions mutex. With OCC enforced (Phase E.4), losing
-    writers see ClientError("conflict") on commit — `_run_write_tx`
-    treats those as expected, not errors. At least ONE writer
+    transactions mutex. With OCC enforced (Phase E.4), losing writers
+    get the conflict status code on commit — `_run_write_tx` uses the
+    raw explicit-transaction path rather than a managed one, so it sees
+    the conflict itself and treats it as expected, not an error (a
+    managed `execute_write` would have retried instead). At least ONE writer
     survives because the winner of each conflict round commits
     successfully."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:

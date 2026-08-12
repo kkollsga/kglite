@@ -228,7 +228,9 @@ async function main() {
         raised = err;
       }
       assert(raised !== null, "expected the stale commit to conflict");
-      assertEqual(raised.code, "Neo.ClientError.Transaction.ConflictDetected", "conflict code");
+      // The `Neo.TransientError.*` class is what makes the driver's
+      // managed-transaction machinery retry instead of throwing through.
+      assertEqual(raised.code, "Neo.TransientError.Transaction.Outdated", "conflict code");
     } finally {
       await sessionA.close();
       await sessionB.close();

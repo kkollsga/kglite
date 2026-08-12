@@ -121,7 +121,7 @@ should work, but are untested — exercise them yourself first.
 | TLS (`bolt+s://` / `neo4j+s://`) | Supported via `--tls-cert` + `--tls-key` |
 | Read-only enforcement | `--readonly` rejects all mutations |
 | Auto-commit **mutations** | **Not supported** — wrap `CREATE`/`SET`/`DELETE`/`MERGE` in explicit `BEGIN`/`COMMIT`. Auto-commit reads work. (Drivers wrap writes in a tx anyway.) |
-| OCC on writes | Supported — stale-snapshot commits get `Neo.ClientError.Transaction.ConflictDetected`; retry client-side |
+| OCC on writes | Supported — stale-snapshot commits get `Neo.TransientError.Transaction.Outdated`. That class is retriable, so `session.execute_write` retries the unit of work for you; only hand-rolled `begin_transaction` code needs its own retry loop |
 | Multi-database (`USE db`) | **Not supported** — single graph; `USE` is accepted but ignored |
 | Causal consistency / bookmarks | **Not supported** — the `bookmark` field is not returned on COMMIT |
 | Multi-statement queries (`;`-separated) | **Not supported** — one statement per `session.run`, or group with `BEGIN`/`COMMIT` |

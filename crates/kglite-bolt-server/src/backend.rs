@@ -643,9 +643,10 @@ impl BoltBackend for KgliteBackend {
 
         // Delegate to session::Session::commit which handles OCC +
         // Arc swap atomically. Phase E.4 wires OCC (was deferred in
-        // C.5); concurrent writers now get
-        // ConflictDetected -> BoltError::Query carrying the documented
-        // `Neo.ClientError.Transaction.ConflictDetected` status code.
+        // C.5); a concurrent writer that lost the race gets
+        // ConflictDetected -> BoltError::Query carrying the retriable
+        // `Neo.TransientError.*` status code, so driver-managed
+        // transactions re-run the unit of work by themselves.
         let Some(tx) = state.inner.take() else {
             // Defensive fallthrough — was already consumed.
             return Ok(BoltDict::new());
@@ -679,17 +680,20 @@ impl BoltBackend for KgliteBackend {
                 );
                 // `BoltError::Query` rather than `BoltError::Transaction`:
                 // boltr maps the latter to
-                // `Neo.ClientError.Transaction.TransactionStartFailed`, which
-                // is wrong twice over — the transaction started fine, and it
-                // contradicted the documented contract in this crate's README
-                // and the migration guide, both of which promise
-                // `ConflictDetected`. A ported client that branches on the
-                // status code (the normal way to write an OCC retry loop) was
-                // therefore told the wrong thing, and the Python tests could
-                // only match on the message text. `Query` lets us set the
-                // documented code directly.
+                // `Neo.ClientError.Transaction.TransactionStartFailed` — wrong
+                // twice over, since the transaction started fine and the
+                // `ClientError` class tells every Neo4j driver the failure is
+                // *not* retriable. A lost OCC race is the textbook retriable
+                // failure, so the code must sit in the `TransientError` class:
+                // `session.execute_write` then re-runs the unit of work on a
+                // fresh transaction (fresh base version) without the caller
+                // writing a retry loop at all. `Query` lets us set the code
+                // directly; the string itself comes from the shared taxonomy
+                // so this site and the embedded/pyo3 path cannot drift apart.
                 return Err(BoltError::Query {
-                    code: "Neo.ClientError.Transaction.ConflictDetected".into(),
+                    code: kglite::api::KgErrorCode::TransactionConflict
+                        .neo4j_status_code()
+                        .into(),
                     message: format!(
                         "Transaction conflict: graph was modified by another committer \
                          since this transaction's BEGIN (base version {base_version}, \

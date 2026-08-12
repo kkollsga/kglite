@@ -34,8 +34,11 @@ documented Cypher dialect against the loaded `.kgl` graph.
   Neo4j-conventional column names (`label`, `relationshipType`).
 - **Optimistic concurrency control** on commit — concurrent
   writers whose snapshots become stale see
-  `Neo.ClientError.Transaction.ConflictDetected`. Retry on the
-  client side.
+  `Neo.TransientError.Transaction.Outdated`. That class is the
+  retriable one, so driver-managed transactions
+  (`session.execute_write` and its equivalents) re-run the unit of
+  work themselves; only hand-rolled `BEGIN`/`COMMIT` code needs its
+  own retry.
 - **Cross-process writer lease** — a writable server takes the
   graph's exclusive writer lease before it reads the path and holds
   it until shutdown, so a second writer (server, CLI, MCP server or
