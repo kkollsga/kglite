@@ -40,10 +40,12 @@ def test_bolt_handshake_and_verify_connectivity(bolt_server):
     """Phase C.1 ✓: HELLO/LOGON/GOODBYE + a `verify_connectivity()` ping.
 
     The backend's `create_session` / `get_server_info` / `close_session`
-    + the auto-no-op `set_session_auth` (boltr skips it when no
-    `AuthValidator` is wired) are enough to satisfy the neo4j Python
-    driver's handshake. Driver opens a connection, sends HELLO + LOGON,
-    receives SUCCESS for both, sends GOODBYE, closes. No queries run.
+    + `set_session_auth` (which by design only logs the principal — this
+    fixture runs the default `--auth none`, so boltr wires no
+    `AuthValidator` and accepts any LOGON) are enough to satisfy the
+    neo4j Python driver's handshake. Driver opens a connection, sends
+    HELLO + LOGON, receives SUCCESS for both, sends GOODBYE, closes. No
+    queries run.
     """
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         driver.verify_connectivity()

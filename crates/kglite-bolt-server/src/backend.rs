@@ -342,6 +342,13 @@ impl BoltBackend for KgliteBackend {
         Ok(handle)
     }
 
+    /// Credentials are already validated at LOGON by the configured
+    /// [`AuthValidator`](boltr::server::AuthValidator) (`--auth basic` wires
+    /// `BasicAuthValidator`; `--auth none` wires none and boltr accepts any
+    /// LOGON). Storing the principal on the session would buy nothing: this
+    /// server has no per-session principal model — no RBAC, no per-user
+    /// authorization — so every authenticated session sees the same graph with
+    /// the same rights. Recording it and dropping it is the shipped design.
     async fn set_session_auth(
         &self,
         session: &SessionHandle,
@@ -350,7 +357,7 @@ impl BoltBackend for KgliteBackend {
         tracing::debug!(
             session_id = %session.0,
             principal = %auth_info.principal,
-            "set_session_auth (no-op until C.6)"
+            "set_session_auth (principal validated at LOGON; not stored — no per-session principal model)"
         );
         Ok(())
     }
