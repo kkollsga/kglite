@@ -2560,6 +2560,7 @@ pub fn kglite::api::NodeView<'a>::property_count(&self) -> usize
 pub fn kglite::api::NodeView<'a>::property_keys(&self, interner: &'a kglite::api::StringInterner) -> alloc::vec::Vec<&'a str>
 pub fn kglite::api::NodeView<'a>::property_pairs(&self) -> alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>
 pub fn kglite::api::NodeView<'a>::property_pairs_named(&self, interner: &kglite::api::StringInterner) -> alloc::vec::Vec<(alloc::string::String, kglite::datatypes::values::Value)>
+pub fn kglite::api::NodeView<'a>::resolved_field(&self, type_str: &str, field: &str, key: kglite::api::InternedKey) -> core::option::Option<alloc::borrow::Cow<'a, kglite::datatypes::values::Value>>
 pub fn kglite::api::NodeView<'a>::str_prop_eq(&self, key: kglite::api::InternedKey, target: &str) -> core::option::Option<bool>
 pub fn kglite::api::NodeView<'a>::title(&self) -> alloc::borrow::Cow<'a, kglite::datatypes::values::Value>
 pub fn kglite::api::NodeView<'a>::to_node_info(&self, interner: &kglite::api::StringInterner) -> kglite::api::NodeInfo
