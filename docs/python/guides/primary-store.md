@@ -224,11 +224,17 @@ There is still no shared live multi-process transaction handle and no
 replication protocol. Disk mode publishes immutable generations behind the same
 kind of lease — that is stable-reader/single-writer publication, not concurrent
 multi-process write access. When several processes need to read and write one
-graph, the answer is to run `kglite-bolt-server` and let that one process own
-the graph while clients connect over the Bolt protocol. The official Python,
-JavaScript, and Java drivers are regression-tested in CI — session and
-explicit-transaction lifecycle, managed retry, PackStream type round-trips,
-`Neo.*` error codes, and OCC conflict detection. Read that as a 22-check
+graph, `kglite-bolt-server` is the coordination point: that one process owns
+the graph while clients connect over the Bolt protocol. It does not lift the
+single-writer model — it centralises it. All writes go through explicit
+transactions (auto-commit mutations are refused), they serialize at commit, and
+a commit against a stale snapshot conflicts with a retriable status code so
+driver-managed transactions retry on their own; that retry is contention-tested,
+not merely lifecycle-tested
+(`tests/test_bolt_server_transactions.py::test_managed_transaction_retries_after_conflict`).
+The official Python, JavaScript, and Java drivers are regression-tested in CI —
+session and explicit-transaction lifecycle, managed retry, PackStream type
+round-trips, `Neo.*` error codes, and OCC conflict detection. Read that as a 22-check
 conformance suite per driver rather than a full protocol sweep, and note that
 every *other* driver — Go, .NET — remains untested: those clients may connect but
 can rely on features outside the documented wire and Cypher contracts.

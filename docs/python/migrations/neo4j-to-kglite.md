@@ -105,10 +105,15 @@ The query path is the *same* Cypher engine the Python API uses;
 differential tests confirm row-for-row equivalence
 (`tests/test_bolt_server_differential.py`). The official **Python,
 JavaScript, and Java** drivers all have automated regression coverage in
-CI — session and explicit-transaction lifecycle, managed `executeWrite`
-retry, PackStream type round-trips, `Node`/`Relationship`/`Path` values,
-`Neo.*` error codes, and OCC conflict detection
-(`tests/conformance/`). Go and .NET use the same Bolt v5 protocol and
+CI — session and explicit-transaction lifecycle, the managed
+`executeWrite` path, PackStream type round-trips,
+`Node`/`Relationship`/`Path` values, `Neo.*` error codes, and the OCC
+conflict status code (`tests/conformance/`). Those per-driver checks run
+the managed API uncontended; that a managed transaction actually *retries*
+a conflict is covered separately, under real contention, against the
+Python driver
+(`tests/test_bolt_server_transactions.py::test_managed_transaction_retries_after_conflict`).
+Go and .NET use the same Bolt v5 protocol and
 should work, but are untested — exercise them yourself first.
 
 #### What carries over, and what does not

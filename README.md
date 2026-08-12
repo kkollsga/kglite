@@ -605,7 +605,7 @@ Full docs at **[kglite.readthedocs.io](https://kglite.readthedocs.io)**
 - [API manifest](https://kglite.readthedocs.io/en/latest/rust/api-reference.html) + [per-symbol docs.rs](https://docs.rs/kglite)
 
 **[Operators](https://kglite.readthedocs.io/en/latest/operators/index.html)** — running the protocol servers
-- [Bolt server](https://kglite.readthedocs.io/en/latest/operators/bolt-server.html) — Neo4j wire compat for cluster-aware drivers
+- [Bolt server](https://kglite.readthedocs.io/en/latest/operators/bolt-server.html) — Bolt v5 front-end for Neo4j wire-compatible drivers
 
 **Reference** — cross-binding
 - [Cypher reference](https://kglite.readthedocs.io/en/latest/reference/cypher-reference.html) — the supported Cypher subset

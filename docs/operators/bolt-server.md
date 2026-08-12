@@ -5,6 +5,33 @@
 regression-tested; other Bolt v5 clients are subject to the documented protocol
 and [Cypher dialect](../reference/cypher-reference.md) limits.
 
+## What this server is (and is not)
+
+**It is** a driver-compatible Bolt front-end over the embedded engine: one
+process owns one graph and serves Neo4j-aware clients over the wire. Use it for
+trusted or loopback access, or behind a proxy that owns authentication and
+authorization. Reads run against snapshots and scale across concurrent sessions.
+
+**It is not** a Neo4j server replacement:
+
+- **No user directory and no RBAC.** `--auth basic` configures a single shared
+  credential; the authenticated principal is validated at LOGON and not stored,
+  so there is no per-session identity to authorize against. `--auth none`
+  accepts any LOGON.
+- **No high availability and no replication.** A single process serves a single
+  graph — it is a single point of failure, and there is no failover, no cluster,
+  and no bookmark/causal-consistency protocol.
+- **One writer.** Writes serialize at commit within the process, and one
+  writable server per graph is enforced by a cross-process lease (see
+  *Operations and security* below).
+
+Single-writer and no-HA are design decisions, not gaps: KGLite is deliberately
+an embedded single-graph engine, and this server publishes that engine over
+Bolt rather than layering a distributed database on top of it. For the
+feature-by-feature carry-over table — routing URIs, auth, auto-commit
+mutations, OCC, multi-database — see
+[Migrating from Neo4j to KGLite](../python/migrations/neo4j-to-kglite.md).
+
 ## Install and start
 
 ```bash
@@ -58,11 +85,15 @@ by the client, especially behind a proxy or when binding `0.0.0.0`.
 ## Transactions and errors
 
 The backend uses native KGLite sessions/transactions, not Python or the GIL.
-Auto-commit and explicit driver transactions both run through the canonical
-session pipeline. Concurrent writers compose through session serialization;
-stale explicit transactions surface a mapped conflict status. KGLite typed
-errors map to Neo4j status codes for syntax, schema, timeout, access-mode,
-conflict, and execution failures.
+Reads may auto-commit; **all writes must be explicit driver transactions** —
+an auto-commit `CREATE`/`SET`/`DELETE`/`MERGE` is rejected rather than run
+(drivers wrap writes in a transaction anyway). Concurrent writers serialize at
+commit, and a transaction committing against a stale snapshot conflicts with a
+retriable status code, so driver-managed transactions (`execute_write` and its
+per-language equivalents) retry the unit of work by themselves; hand-rolled
+`begin_transaction` code needs its own retry loop. KGLite typed errors map to
+Neo4j status codes for syntax, schema, timeout, access-mode, conflict, and
+execution failures.
 
 The supported behavior is locked by the standing Bolt correctness and
 differential suites. Avoid relying on an exact test/query count or a particular
@@ -107,10 +138,13 @@ switched automatically.
 
 - Loopback is the safe default. If exposed remotely, enable basic auth and TLS
   or terminate TLS/auth at a trusted proxy/firewall boundary.
-- Set `--max-message-size`, `--max-sessions`, and an idle timeout for untrusted
-  or multi-tenant clients.
-- Use `--readonly` for analytical replicas and agent connections that do not
-  need writes.
+- Set `--max-message-size`, `--max-sessions`, and an idle timeout whenever the
+  listener is reachable from an untrusted network — they bound resource use per
+  connection, they are not an access-control boundary.
+- Use `--readonly` for read-only analytical instances sharing the same graph
+  file, and for agent connections that do not need writes. A `--readonly`
+  server is a second process opening the same graph, not a replica: it serves
+  what the file contained when it opened it.
 - One writable server per graph. A server started without `--readonly` takes
   the same cross-process writer lease as `kglite.open()` *before* it reads the
   graph, and holds it until shutdown, so a second writable server — or a CLI
