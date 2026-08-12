@@ -125,6 +125,81 @@ def test_created_index_is_populated_and_the_lookup_still_answers(graph) -> None:
     assert sorted(r["n"] for r in rows) == ["Alice", "Charlie"]
 
 
+# ── Index content stays in step with writes ──────────────────────────
+
+
+def _aliased_graph() -> kglite.KnowledgeGraph:
+    """`Term` names its identity columns itself: `term_id` is the id field and
+    `term_name` the title field, so neither lives in the property map — an
+    index on either spelling is built from the node's id / title, which is also
+    what a `MATCH` on that name compares against."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "term_id": [1, 2, 3],
+                "term_name": ["term-1", "term-2", "term-3"],
+                "city": ["Oslo", "Bergen", "Oslo"],
+            }
+        ),
+        "Term",
+        "term_id",
+        "term_name",
+    )
+    return g
+
+
+def _matched(g: kglite.KnowledgeGraph, predicate: str) -> int:
+    """Row counts for the indexed spelling and the scanning spelling of one
+    predicate. An index that has drifted from the data makes them disagree."""
+    inline = g.cypher(f"MATCH (t:Term {{{predicate}}}) RETURN t").to_list()
+    where_key, where_value = predicate.split(": ", 1)
+    scanned = g.cypher(f"MATCH (t:Term) WHERE t.{where_key} = {where_value} RETURN t").to_list()
+    assert len(inline) == len(scanned), (
+        f"the indexed and scanning spellings of `{predicate}` disagree: {len(inline)} vs {len(scanned)}"
+    )
+    return len(inline)
+
+
+@pytest.mark.parametrize("indexed_property", ["city", "term_name"])
+def test_a_cypher_create_keeps_the_index_in_step_with_the_scan(
+    indexed_property: str,
+) -> None:
+    """Incremental maintenance has to file a written node the way a rebuild
+    would, or the index answers with rows a scan cannot produce."""
+    g = _aliased_graph()
+    g.cypher(f"CREATE INDEX FOR (t:Term) ON (t.{indexed_property})")
+    g.cypher("CREATE (:Term {term_id: 99, term_name: 'created-x', city: 'Oslo'})")
+
+    _matched(g, "term_name: 'created-x'")
+    _matched(g, "term_name: 'term-1'")
+    assert _matched(g, "city: 'Oslo'") == 3
+
+
+def test_a_cypher_set_keeps_the_index_in_step_with_the_scan() -> None:
+    g = _aliased_graph()
+    g.cypher("CREATE INDEX FOR (t:Term) ON (t.term_name)")
+    g.cypher("CREATE INDEX FOR (t:Term) ON (t.city)")
+    g.cypher("MATCH (t:Term {term_id: 1}) SET t.city = 'Trondheim'")
+    g.cypher("MATCH (t:Term {term_id: 2}) SET t.term_name = 'renamed'")
+
+    assert _matched(g, "city: 'Trondheim'") == 1
+    assert _matched(g, "city: 'Oslo'") == 1
+    _matched(g, "term_name: 'renamed'")
+    _matched(g, "term_name: 'term-2'")
+
+
+def test_a_range_index_does_not_double_count_a_created_node() -> None:
+    """A RANGE index installs both structures on one property, so the write
+    path sees the same key twice — the node must still join each bucket once."""
+    g = _aliased_graph()
+    g.cypher("CREATE RANGE INDEX term_city FOR (t:Term) ON (t.city)")
+    g.cypher("CREATE (:Term {term_id: 99, term_name: 'Dana', city: 'Tromso'})")
+
+    assert _matched(g, "city: 'Tromso'") == 1
+    assert len(g.cypher("MATCH (t:Term) WHERE t.city > 'Trom' RETURN t").to_list()) == 1
+
+
 # ── SHOW INDEXES ─────────────────────────────────────────────────────
 
 

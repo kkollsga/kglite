@@ -1032,3 +1032,357 @@ mod embedding_store_tests {
         }
     }
 }
+
+/// Incremental index maintenance must file a node under the value an index
+/// *rebuild* would file it under — including when the index is registered under
+/// an id/title **alias** spelling, where the value the matcher's scan consults
+/// is the node's id/title and not the verbatim property.
+///
+/// Before the fix, `update_property_indices_for_add` / `_for_set` read the node
+/// by the user-facing key (`NodeData::get_property`) while `create_index` /
+/// `refresh_indexes_for_type` read through the alias-resolving `read_indexed`.
+/// A Cypher `CREATE` into such a type filed the node under a bucket value the
+/// scan can never produce: indexed `MATCH` returned rows the same query without
+/// the index did not, and the two spellings of the same predicate (inline map
+/// vs `WHERE`) disagreed with each other.
+#[cfg(test)]
+mod alias_index_maintenance_tests {
+    use super::*;
+    use crate::datatypes::DataFrame;
+    use crate::graph::mutation::maintain::add_nodes;
+    use crate::graph::session::{execute_mut, execute_read, ExecuteOptions};
+    use petgraph::graph::NodeIndex;
+
+    /// `Term` carries both alias kinds: `term_id` is its id field and
+    /// `term_name` its title field, so `add_nodes` hoists both columns off the
+    /// property map. `city` is an ordinary property, for the non-alias arms.
+    fn aliased_graph() -> DirGraph {
+        let rows: Vec<Vec<Value>> = (1..=3)
+            .map(|i| {
+                vec![
+                    Value::Int64(i),
+                    Value::String(format!("term-{i}")),
+                    Value::String("Oslo".to_string()),
+                ]
+            })
+            .collect();
+        let df = DataFrame::from_cypher_rows(
+            vec![
+                "term_id".to_string(),
+                "term_name".to_string(),
+                "city".to_string(),
+            ],
+            rows,
+        )
+        .expect("frame");
+        let mut graph = DirGraph::new();
+        add_nodes(
+            &mut graph,
+            df,
+            "Term".to_string(),
+            "term_id".to_string(),
+            Some("term_name".to_string()),
+            None,
+        )
+        .expect("add_nodes");
+        graph
+    }
+
+    fn run(graph: &mut DirGraph, statement: &str) {
+        let params = HashMap::new();
+        execute_mut(graph, statement, &ExecuteOptions::eager(&params))
+            .unwrap_or_else(|error| panic!("{statement}: {error}"));
+    }
+
+    fn count(graph: &DirGraph, query: &str) -> usize {
+        let params = HashMap::new();
+        let result = execute_read(graph, query, &ExecuteOptions::eager(&params))
+            .unwrap_or_else(|error| panic!("{query}: {error}"));
+        result.result.rows.len()
+    }
+
+    /// A graph carrying `index_on`, mutated by `mutations`.
+    fn mutated(index_on: &str, mutations: &[&str]) -> DirGraph {
+        let mut graph = aliased_graph();
+        graph.create_index("Term", index_on);
+        for statement in mutations {
+            run(&mut graph, statement);
+        }
+        graph
+    }
+
+    /// The divergence oracle: ask `query` on the mutated graph with the index
+    /// installed, then drop the index — same data, same query — and ask again.
+    fn assert_index_agrees_with_scan(index_on: &str, mutations: &[&str], query: &str) {
+        let mut graph = mutated(index_on, mutations);
+        let with_index = count(&graph, query);
+        graph.drop_index("Term", index_on).expect("drop");
+        let scanned = count(&graph, query);
+        assert_eq!(
+            with_index, scanned,
+            "indexed and unindexed answers diverge after {mutations:?} for: {query}"
+        );
+    }
+
+    /// Every property-index bucket, in a comparable, order-normalised form.
+    fn index_snapshot(graph: &DirGraph) -> Vec<(IndexKey, Vec<(Value, Vec<NodeIndex>)>)> {
+        let mut snapshot: Vec<(IndexKey, Vec<(Value, Vec<NodeIndex>)>)> = graph
+            .property_indices
+            .iter()
+            .map(|(key, index)| {
+                let mut buckets: Vec<(Value, Vec<NodeIndex>)> = index
+                    .iter()
+                    .map(|(value, members)| {
+                        let mut members = members.clone();
+                        members.sort();
+                        (value.clone(), members)
+                    })
+                    .collect();
+                buckets.sort();
+                (key.clone(), buckets)
+            })
+            .collect();
+        snapshot.sort();
+        snapshot
+    }
+
+    const CREATE_X: &str = "CREATE (:Term {term_id: 99, term_name: 'created-x'})";
+    const CREATE_COLLIDING: &str = "CREATE (:Term {term_id: 98, term_name: 'term-1'})";
+
+    #[test]
+    fn cypher_create_on_a_title_aliased_index_agrees_with_the_scan() {
+        // The phantom: the CREATE's verbatim `term_name` becomes a bucket the
+        // scan can never produce, so the indexed MATCH returns a row the
+        // unindexed one does not.
+        assert_index_agrees_with_scan(
+            "term_name",
+            &[CREATE_X],
+            "MATCH (t:Term {term_name: 'created-x'}) RETURN t",
+        );
+        assert_index_agrees_with_scan(
+            "term_name",
+            &[CREATE_X],
+            "MATCH (t:Term) WHERE t.term_name = 'created-x' RETURN t",
+        );
+    }
+
+    #[test]
+    fn a_cypher_create_does_not_poison_an_existing_bucket() {
+        // The poisoned bucket: the CREATE's verbatim value equals an existing
+        // node's title, so the index reports two members for a value only one
+        // node really carries.
+        assert_index_agrees_with_scan(
+            "term_name",
+            &[CREATE_COLLIDING],
+            "MATCH (t:Term {term_name: 'term-1'}) RETURN t",
+        );
+        assert_index_agrees_with_scan(
+            "term_name",
+            &[CREATE_COLLIDING],
+            "MATCH (t:Term) WHERE t.term_name = 'term-1' RETURN t",
+        );
+    }
+
+    #[test]
+    fn the_two_spellings_of_one_predicate_agree_on_an_indexed_graph() {
+        // Inline map vs WHERE: only the first consults the index, so a poisoned
+        // index makes the same predicate answer two different ways.
+        let graph = mutated("term_name", &[CREATE_X, CREATE_COLLIDING]);
+        for value in ["created-x", "term-1", "term-2"] {
+            let inline = count(
+                &graph,
+                &format!("MATCH (t:Term {{term_name: '{value}'}}) RETURN t"),
+            );
+            let filtered = count(
+                &graph,
+                &format!("MATCH (t:Term) WHERE t.term_name = '{value}' RETURN t"),
+            );
+            assert_eq!(
+                inline, filtered,
+                "inline-map and WHERE spellings disagree for term_name = '{value}'"
+            );
+        }
+    }
+
+    #[test]
+    fn cypher_set_on_a_title_aliased_index_agrees_with_the_scan() {
+        let set = "MATCH (t:Term {term_id: 1}) SET t.term_name = 'renamed'";
+        for query in [
+            "MATCH (t:Term {term_name: 'renamed'}) RETURN t",
+            "MATCH (t:Term) WHERE t.term_name = 'renamed' RETURN t",
+            "MATCH (t:Term {term_name: 'term-1'}) RETURN t",
+            "MATCH (t:Term) WHERE t.term_name = 'term-1' RETURN t",
+        ] {
+            assert_index_agrees_with_scan("term_name", &[CREATE_X, set], query);
+        }
+    }
+
+    #[test]
+    fn cypher_set_on_the_title_keeps_an_alias_spelled_index_in_step() {
+        // The index is registered under the alias spelling but holds titles, so
+        // a write to `title` moves the node between its buckets.
+        let set = "MATCH (t:Term {term_id: 1}) SET t.title = 'retitled'";
+        for query in [
+            "MATCH (t:Term {term_name: 'retitled'}) RETURN t",
+            "MATCH (t:Term) WHERE t.term_name = 'retitled' RETURN t",
+            "MATCH (t:Term {term_name: 'term-1'}) RETURN t",
+        ] {
+            assert_index_agrees_with_scan("term_name", &[set], query);
+        }
+    }
+
+    #[test]
+    fn cypher_set_on_the_name_synonym_moves_the_node_between_buckets() {
+        // `name` is Cypher's own spelling of the title and the SET executor
+        // writes the title through it, so — unlike an arbitrary alias spelling —
+        // this write *does* move the field the index holds. A type that names
+        // its title column `name` gets both readings of the same word.
+        let rows: Vec<Vec<Value>> = (1..=3)
+            .map(|i| vec![Value::Int64(i), Value::String(format!("person-{i}"))])
+            .collect();
+        let df =
+            DataFrame::from_cypher_rows(vec!["person_id".to_string(), "name".to_string()], rows)
+                .expect("frame");
+        let mut graph = DirGraph::new();
+        add_nodes(
+            &mut graph,
+            df,
+            "Person".to_string(),
+            "person_id".to_string(),
+            Some("name".to_string()),
+            None,
+        )
+        .expect("add_nodes");
+        graph.create_index("Person", "name");
+        run(
+            &mut graph,
+            "MATCH (p:Person {name: 'person-1'}) SET p.name = 'renamed'",
+        );
+
+        assert_eq!(
+            count(&graph, "MATCH (p:Person {name: 'renamed'}) RETURN p"),
+            1,
+            "the index lost the node its SET renamed"
+        );
+        assert_eq!(
+            count(&graph, "MATCH (p:Person {name: 'person-1'}) RETURN p"),
+            0,
+            "the index still answers with the pre-SET value"
+        );
+    }
+
+    #[test]
+    fn cypher_remove_on_a_title_aliased_index_agrees_with_the_scan() {
+        let remove = "MATCH (t:Term {term_id: 1}) REMOVE t.term_name";
+        for query in [
+            "MATCH (t:Term {term_name: 'term-1'}) RETURN t",
+            "MATCH (t:Term) WHERE t.term_name = 'term-1' RETURN t",
+        ] {
+            assert_index_agrees_with_scan("term_name", &[remove], query);
+        }
+    }
+
+    #[test]
+    fn incremental_maintenance_reproduces_a_rebuilt_index() {
+        // The general contract, of which every case above is an instance:
+        // whatever the writes were, the incrementally maintained index must
+        // equal the one `refresh_indexes_for_type` builds from live state.
+        let mutations = [
+            CREATE_X,
+            CREATE_COLLIDING,
+            "MATCH (t:Term {term_id: 1}) SET t.term_name = 'renamed'",
+            "MATCH (t:Term {term_id: 2}) SET t.title = 'retitled'",
+            "MATCH (t:Term {term_id: 3}) SET t.city = 'Bergen'",
+            "MATCH (t:Term {term_id: 99}) REMOVE t.city",
+        ];
+        let mut graph = aliased_graph();
+        graph.create_index("Term", "term_name");
+        graph.create_index("Term", "term_id");
+        graph.create_index("Term", "city");
+        for statement in mutations {
+            run(&mut graph, statement);
+        }
+
+        let incremental = index_snapshot(&graph);
+        graph.refresh_indexes_for_type("Term");
+        assert_eq!(
+            incremental,
+            index_snapshot(&graph),
+            "incremental index maintenance diverged from a rebuild"
+        );
+    }
+
+    #[test]
+    fn a_created_node_joins_a_doubly_indexed_property_once() {
+        // A property carrying both a hash and a range index appears twice in
+        // the key iteration; the node must still land in each bucket once, or
+        // an indexed MATCH returns it twice.
+        let mut graph = aliased_graph();
+        graph.create_index("Term", "city");
+        graph.create_range_index("Term", "city");
+        run(&mut graph, "CREATE (:Term {term_id: 99, city: 'Bergen'})");
+
+        let bucket = graph
+            .lookup_by_index("Term", "city", &Value::String("Bergen".to_string()))
+            .expect("bucket");
+        assert_eq!(bucket.len(), 1, "hash-index bucket holds the node twice");
+        let range = graph
+            .lookup_range(
+                "Term",
+                "city",
+                std::ops::Bound::Included(&Value::String("Bergen".to_string())),
+                std::ops::Bound::Included(&Value::String("Bergen".to_string())),
+            )
+            .expect("range bucket");
+        assert_eq!(range.len(), 1, "range-index bucket holds the node twice");
+        assert_eq!(
+            count(&graph, "MATCH (t:Term {city: 'Bergen'}) RETURN t"),
+            1,
+            "indexed MATCH returned the node more than once"
+        );
+    }
+
+    /// Every node the index still points at, across all buckets.
+    fn indexed_members(graph: &DirGraph, property: &str) -> Vec<NodeIndex> {
+        graph
+            .property_indices
+            .get(&("Term".to_string(), property.to_string()))
+            .expect("index")
+            .iter()
+            .flat_map(|(_, members)| members.iter().copied())
+            .collect()
+    }
+
+    #[test]
+    fn deleting_every_node_empties_the_buckets() {
+        // The add/remove symmetry: whichever bucket a write filed a node under,
+        // the delete has to reclaim it. Deletion evicts by *membership*, so it
+        // is value-agnostic — this pins that it stays that way.
+        let mut graph = mutated("term_name", &[CREATE_X]);
+        run(&mut graph, "MATCH (t:Term) DELETE t");
+
+        assert!(
+            indexed_members(&graph, "term_name").is_empty(),
+            "deleted nodes left entries behind: {:?}",
+            indexed_members(&graph, "term_name")
+        );
+        assert_eq!(count(&graph, "MATCH (t:Term) RETURN t"), 0);
+    }
+
+    #[test]
+    fn deleting_one_node_leaves_the_survivors_indexed() {
+        let mut graph = mutated("term_name", &[CREATE_X]);
+        run(&mut graph, "MATCH (t:Term {term_id: 1}) DELETE t");
+
+        let members = indexed_members(&graph, "term_name");
+        assert!(
+            members.iter().all(|idx| graph.get_node(*idx).is_some()),
+            "the index points at a deleted node: {members:?}"
+        );
+        assert_index_agrees_with_scan(
+            "term_name",
+            &[CREATE_X, "MATCH (t:Term {term_id: 1}) DELETE t"],
+            "MATCH (t:Term {term_name: 'term-1'}) RETURN t",
+        );
+    }
+}

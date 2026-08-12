@@ -807,8 +807,9 @@ fn r8_property_index_build_reads_the_authoritative_store() {
 }
 
 /// **R9 — incremental index maintenance.** The incremental updater
-/// (`update_property_indices_for_add`) bypasses `read_indexed`, so it gets its
-/// own arm: it must agree with the rebuild above.
+/// (`update_property_indices_for_add`) reads through `read_indexed` for exactly
+/// this reason; it gets its own arm because it is a separate call path from the
+/// rebuild above, and the two must file a row identically.
 #[test]
 fn r9_incremental_index_maintenance_reads_the_authoritative_store() {
     let mut graph = seeded_columnar();

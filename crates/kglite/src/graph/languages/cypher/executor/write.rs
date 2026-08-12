@@ -1145,7 +1145,9 @@ struct LandedPropertyWrite<'a> {
 /// needs the old value, so it runs before the constraint plan is redeemed. The
 /// `updated_at` bump is skipped when the write *is* to `updated_at`, which would
 /// otherwise recurse. A `title` write touches only the title field, not a
-/// property map, so it skips both the schema key and the index move.
+/// property map, so it registers no schema key — but it still moves the node
+/// between index buckets: an index on `title`, or one registered under the
+/// type's title-alias spelling, is built from exactly the value it changed.
 fn finish_node_property_write(
     graph: &mut DirGraph,
     write: LandedPropertyWrite<'_>,
@@ -1158,14 +1160,14 @@ fn finish_node_property_write(
                 Arc::make_mut(schema_arc).add_key(ik);
             }
         }
-        graph.update_property_indices_for_set(
-            write.node_type,
-            write.node_idx,
-            write.property,
-            write.old_value,
-            write.value,
-        );
     }
+    graph.update_property_indices_for_set(
+        write.node_type,
+        write.node_idx,
+        write.property,
+        write.old_value,
+        write.value,
+    );
 
     graph.apply_property_write_plan(write.constraint_plan, write.node_idx);
 

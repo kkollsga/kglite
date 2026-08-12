@@ -35,6 +35,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scanning the now-correctly-chosen type), so an index added as a workaround
   is still worth keeping.
 
+- **An indexed `MATCH` could return phantom or duplicate rows after a Cypher
+  `CREATE` / `SET` on a type whose indexed property is an id/title alias
+  spelling.** For a type loaded as `add_nodes(..., unique_id_field="term_id",
+  node_title_field="term_name")` and indexed with `create_index("Term",
+  "term_name")` (or `CREATE INDEX FOR (t:Term) ON (t.term_name)`), the index is
+  built from the node's title — the value a `MATCH` on that name compares
+  against — but incremental maintenance read the node by the user-facing key
+  instead. A written node was filed under a bucket value no scan can produce:
+  `MATCH (t:Term {term_name: …})` returned rows that the same query without the
+  index did not, an inline-map predicate and its `WHERE` spelling disagreed with
+  each other, and a written value colliding with an existing node's title added
+  a bogus member to that node's bucket. Index updates now resolve field aliases
+  exactly like index rebuilds and scans do, so incremental maintenance and
+  `create_index` agree by construction. Two adjacent defects fixed with it: a
+  `SET` on `title` left an index registered under the title-alias spelling
+  stale, and a property carrying both a hash and a range index (Neo4j-style
+  `CREATE RANGE INDEX`) had newly created nodes appended to each bucket twice,
+  so an indexed lookup returned them twice.
+
 - **`.statistics()` on a type's own title or id field returned nothing.** For a
   type loaded as `add_nodes(..., unique_id_field="term_id",
   node_title_field="term_name")`, `select("Term").statistics("term_id")` —

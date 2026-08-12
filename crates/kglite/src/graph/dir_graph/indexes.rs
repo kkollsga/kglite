@@ -9,7 +9,6 @@
 //! keys before save and `rebuild_indices_from_keys` replays them on load (both
 //! in `mod.rs`, with the other serialization helpers).
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 use super::index_layer::LayeredIndex;
@@ -76,15 +75,17 @@ impl DirGraph {
     /// Create an index on a property for a specific node type.
     /// Returns the number of entries indexed.
     ///
-    /// The id-alias / title-alias fields (e.g. `add_nodes(df, "Star",
-    /// "starId", "title")` makes `starId` the alias for the canonical
-    /// id) are intentionally NOT special-cased here: their indices
-    /// would build as empty (id/title live off the properties map).
-    /// Lookups against id-alias names route through `lookup_by_id_readonly`
-    /// in the matcher (`try_index_lookup`), which uses the auto-
-    /// maintained per-type `id_index` — no separate `create_index` call
-    /// required, and SET-on-id always stays in sync because id mutation
-    /// updates the id_index directly.
+    /// An index on an id-alias / title-alias field (e.g. `add_nodes(df, "Star",
+    /// "starId", "title")` makes `starId` the alias for the canonical id) is
+    /// keyed by the alias spelling but built from the node's id / title, since
+    /// that is where the value lives and what a `MATCH` on that name compares
+    /// against — [`Self::read_indexed`] does the resolving, and the incremental
+    /// updaters read through the same funnel so they agree with this build.
+    /// Such an index is not *required*, though: lookups against id-alias names
+    /// route through `lookup_by_id_readonly` in the matcher
+    /// (`try_index_lookup`), which uses the auto-maintained per-type
+    /// `id_index`, and SET-on-id stays in sync because id mutation updates the
+    /// id_index directly.
     pub fn create_index(&mut self, node_type: &str, property: &str) -> usize {
         // Store key uses the user's `property` name verbatim — the
         // matcher's `try_index_lookup` indexes into `property_indices`
@@ -641,75 +642,157 @@ impl DirGraph {
     // Incremental Index Maintenance (called by Cypher mutations)
     // ========================================================================
 
+    /// The value an index *rebuild* would file `node_idx` under for the index
+    /// registered as `property` — [`Self::create_index`]'s read, for one node.
+    ///
+    /// Incremental maintenance reads through here so it agrees with a rebuild
+    /// **by construction**. Index keys carry the user's spelling, but their
+    /// contents are the *resolved* field's values, so reading the node by the
+    /// user-facing key files it under a value the matcher's scan can never
+    /// produce — the phantom-row / poisoned-bucket divergence this replaced.
+    fn indexed_value(
+        &mut self,
+        node_type: &str,
+        property: &str,
+        node_idx: NodeIndex,
+    ) -> Option<Value> {
+        let reader = self.property_reader(node_type, property);
+        self.read_indexed(&reader, node_idx)
+    }
+
+    /// The properties carrying a single-value (hash or range) index on
+    /// `node_type`, **deduplicated**: a property carrying both kinds appears
+    /// once in each store, so iterating the two key sets naively appended the
+    /// node twice per bucket and an indexed `MATCH` returned it twice.
+    fn single_value_indexed_properties(&self, node_type: &str) -> Vec<String> {
+        let mut properties: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for (nt, property) in self
+            .property_indices
+            .keys()
+            .chain(self.range_indices.keys())
+        {
+            if nt == node_type {
+                properties.insert(property.as_str());
+            }
+        }
+        properties.into_iter().map(str::to_string).collect()
+    }
+
+    /// The single-value index keys on `node_type` whose contents are drawn from
+    /// `resolved` — the field a write to it moves the node within.
+    ///
+    /// Usually just `resolved` itself. It differs only for `id` / `title`,
+    /// which an index may also be registered under the type's *alias* spelling
+    /// for (`create_index("Term", "term_name")` on a title-aliased type builds
+    /// its buckets from `get_node_title`), and those keys have to move with the
+    /// field, not with the spelling of the statement that wrote it.
+    fn index_keys_for_field(&self, node_type: &str, resolved: &str) -> Vec<String> {
+        if self.id_field_aliases.is_empty() && self.title_field_aliases.is_empty() {
+            return vec![resolved.to_string()];
+        }
+        let mut keys: Vec<String> = self
+            .single_value_indexed_properties(node_type)
+            .into_iter()
+            .filter(|property| self.resolve_alias(node_type, property) == resolved)
+            .collect();
+        if !keys.iter().any(|property| property == resolved) {
+            keys.push(resolved.to_string());
+        }
+        keys
+    }
+
     /// Update property, composite, and range indices after a new node is added.
     /// Only updates indices that already exist for this node_type.
     pub fn update_property_indices_for_add(&mut self, node_type: &str, node_idx: NodeIndex) {
-        // Collect single-property index updates (immutable borrow of self.graph)
-        let prop_updates: Vec<(IndexKey, Value)> = {
-            // Disk backend: node_weight materializes into the query arena,
-            // which must run under a DiskQueryGuard (arena protocol in
-            // disk/graph.rs). No-op on memory/mapped backends.
-            let _guard = self.graph.begin_query();
-            let node = match self.graph.node_view(node_idx) {
-                Some(n) => n,
-                None => return,
+        for property in self.single_value_indexed_properties(node_type) {
+            let Some(value) = self.indexed_value(node_type, &property, node_idx) else {
+                continue;
             };
-            self.property_indices
-                .keys()
-                .chain(self.range_indices.keys())
-                .filter(|(nt, _)| nt == node_type)
-                .filter_map(|key| {
-                    node.get_property(&key.1)
-                        .map(|v| (key.clone(), v.into_owned()))
-                })
-                .collect()
-        };
-        for (key, value) in &prop_updates {
-            self.note_property_append(key, value, node_idx);
-            if let Some(value_map) = self.property_indices.get_mut(key) {
-                value_map.entry_or_default(value).push(node_idx);
+            let key = (node_type.to_string(), property);
+            self.note_property_append(&key, &value, node_idx);
+            if let Some(value_map) = self.property_indices.get_mut(&key) {
+                value_map.entry_or_default(&value).push(node_idx);
             }
-            self.note_range_append(key, value, node_idx);
-            if let Some(btree) = self.range_indices.get_mut(key) {
-                btree.entry(value.clone()).or_default().push(node_idx);
+            self.note_range_append(&key, &value, node_idx);
+            if let Some(btree) = self.range_indices.get_mut(&key) {
+                btree.entry(value).or_default().push(node_idx);
             }
         }
 
-        // Collect composite index updates
-        let comp_updates: Vec<(CompositeIndexKey, CompositeValue)> = {
-            // Arena guard: see prop_updates block above.
-            let _guard = self.graph.begin_query();
-            let node = match self.graph.node_view(node_idx) {
-                Some(n) => n,
-                None => return,
-            };
-            self.composite_indices
-                .keys()
-                .filter(|(nt, _)| nt == node_type)
-                .filter_map(|key| {
-                    let vals: Vec<Value> = key
-                        .1
-                        .iter()
-                        .map(|p| {
-                            node.get_property(p)
-                                .map(Cow::into_owned)
-                                .unwrap_or(Value::Null)
-                        })
-                        .collect();
-                    if vals.iter().any(|v| !matches!(v, Value::Null)) {
-                        Some((key.clone(), CompositeValue(vals)))
-                    } else {
-                        None
-                    }
+        let comp_keys: Vec<CompositeIndexKey> = self
+            .composite_indices
+            .keys()
+            .filter(|(nt, _)| nt == node_type)
+            .cloned()
+            .collect();
+        for key in comp_keys {
+            let values: Vec<Value> = key
+                .1
+                .iter()
+                .map(|property| {
+                    self.indexed_value(node_type, property, node_idx)
+                        .unwrap_or(Value::Null)
                 })
-                .collect()
-        };
-        for (key, comp_val) in comp_updates {
+                .collect();
+            if values.iter().all(|v| matches!(v, Value::Null)) {
+                continue;
+            }
+            let comp_val = CompositeValue(values);
             self.note_composite_append(&key, &comp_val, node_idx);
             if let Some(comp_map) = self.composite_indices.get_mut(&key) {
                 comp_map.entry_or_default(&comp_val).push(node_idx);
             }
         }
+    }
+
+    /// Vacate `node_idx` from the `value` bucket of the hash and range indices
+    /// keyed `key`, journalling each eviction first.
+    ///
+    /// Vacating the old bucket and joining the new one are journalled
+    /// separately, and each capture has to read the map as it stands just
+    /// before its own edit — hence the split borrows.
+    fn evict_from_single_value_indexes(&mut self, key: &IndexKey, value: &Value, node: NodeIndex) {
+        self.note_property_eviction(key, value, node);
+        if let Some(value_map) = self.property_indices.get_mut(key) {
+            if let Some(indices) = value_map.get_mut(value) {
+                indices.retain(|&idx| idx != node);
+                if indices.is_empty() {
+                    value_map.remove(value);
+                }
+            }
+        }
+        self.note_range_eviction(key, value, node);
+        if let Some(btree) = self.range_indices.get_mut(key) {
+            if let Some(indices) = btree.get_mut(value) {
+                indices.retain(|&idx| idx != node);
+                if indices.is_empty() {
+                    btree.remove(value);
+                }
+            }
+        }
+    }
+
+    /// Whether a write spelled `property` left the field every index on
+    /// `node_type` is built from untouched.
+    ///
+    /// True when `property` is one of the type's id/title **alias** spellings:
+    /// Cypher stores such a write verbatim in the property map (see the
+    /// CREATE/SET write path), while every index — under either spelling —
+    /// holds the node's id/title, read through [`Self::read_indexed`]. A
+    /// rebuild would therefore reproduce the buckets already present, so the
+    /// correct incremental action is none. Filing the written value here is
+    /// what produced buckets an equivalent scan can never match.
+    ///
+    /// `title` and `name` are the exception: they are the Cypher-level
+    /// spellings of the title itself, and the SET/REMOVE executor writes the
+    /// node's title through both (`write.rs::set_node_property_direct`), so a
+    /// write spelled either one *does* move the indexed field — even for a type
+    /// that also declares `name` as its title alias.
+    fn write_bypasses_indexed_fields(&self, node_type: &str, property: &str) -> bool {
+        if property == "title" || property == "name" {
+            return false;
+        }
+        self.resolve_alias(node_type, property) != property
     }
 
     /// Update property, range, and composite indices after a property value is changed.
@@ -722,40 +805,30 @@ impl DirGraph {
         old_value: Option<&Value>,
         new_value: &Value,
     ) {
-        let key = (node_type.to_string(), property.to_string());
-        // Update hash index. Vacating the old bucket and joining the new one
-        // are journalled separately, and each capture has to read the map as
-        // it stands just before its own edit — hence the split borrows.
-        if let Some(old_val) = old_value {
-            self.note_property_eviction(&key, old_val, node_idx);
+        if self.write_bypasses_indexed_fields(node_type, property) {
+            return;
+        }
+        // The value that actually landed, read the way a rebuild reads it, so
+        // storage that keeps the authoritative copy elsewhere (a columnar
+        // master, the node's id/title fields) buckets the node under what a
+        // `MATCH` will find. Falls back to the caller's value for a backend
+        // whose granular read cannot see the write yet.
+        let landed = self.indexed_value(node_type, property, node_idx);
+        let landed = landed.unwrap_or_else(|| new_value.clone());
+        let field = self.resolve_alias(node_type, property).to_string();
+        for indexed_as in self.index_keys_for_field(node_type, &field) {
+            let key = (node_type.to_string(), indexed_as);
+            if let Some(old_val) = old_value {
+                self.evict_from_single_value_indexes(&key, old_val, node_idx);
+            }
+            self.note_property_append(&key, &landed, node_idx);
             if let Some(value_map) = self.property_indices.get_mut(&key) {
-                if let Some(indices) = value_map.get_mut(old_val) {
-                    indices.retain(|&idx| idx != node_idx);
-                    if indices.is_empty() {
-                        value_map.remove(old_val);
-                    }
-                }
+                value_map.entry_or_default(&landed).push(node_idx);
             }
-        }
-        self.note_property_append(&key, new_value, node_idx);
-        if let Some(value_map) = self.property_indices.get_mut(&key) {
-            value_map.entry_or_default(new_value).push(node_idx);
-        }
-        // Update range index
-        if let Some(old_val) = old_value {
-            self.note_range_eviction(&key, old_val, node_idx);
+            self.note_range_append(&key, &landed, node_idx);
             if let Some(btree) = self.range_indices.get_mut(&key) {
-                if let Some(indices) = btree.get_mut(old_val) {
-                    indices.retain(|&idx| idx != node_idx);
-                    if indices.is_empty() {
-                        btree.remove(old_val);
-                    }
-                }
+                btree.entry(landed.clone()).or_default().push(node_idx);
             }
-        }
-        self.note_range_append(&key, new_value, node_idx);
-        if let Some(btree) = self.range_indices.get_mut(&key) {
-            btree.entry(new_value.clone()).or_default().push(node_idx);
         }
 
         // Update any composite indices that include this property
@@ -770,24 +843,13 @@ impl DirGraph {
         property: &str,
         old_value: &Value,
     ) {
-        let key = (node_type.to_string(), property.to_string());
-        self.note_property_eviction(&key, old_value, node_idx);
-        if let Some(value_map) = self.property_indices.get_mut(&key) {
-            if let Some(indices) = value_map.get_mut(old_value) {
-                indices.retain(|&idx| idx != node_idx);
-                if indices.is_empty() {
-                    value_map.remove(old_value);
-                }
-            }
+        if self.write_bypasses_indexed_fields(node_type, property) {
+            return;
         }
-        self.note_range_eviction(&key, old_value, node_idx);
-        if let Some(btree) = self.range_indices.get_mut(&key) {
-            if let Some(indices) = btree.get_mut(old_value) {
-                indices.retain(|&idx| idx != node_idx);
-                if indices.is_empty() {
-                    btree.remove(old_value);
-                }
-            }
+        let field = self.resolve_alias(node_type, property).to_string();
+        for indexed_as in self.index_keys_for_field(node_type, &field) {
+            let key = (node_type.to_string(), indexed_as);
+            self.evict_from_single_value_indexes(&key, old_value, node_idx);
         }
 
         // Update any composite indices that include this property
@@ -796,33 +858,33 @@ impl DirGraph {
 
     /// Re-index a single node in all composite indices that include the changed property.
     /// Reads current node properties to build the new composite value.
+    ///
+    /// Membership is decided by *field*, not spelling: a composite index
+    /// registered under a type's title-alias spelling holds titles, so a write
+    /// to `title` moves the node within it (same reasoning as
+    /// [`Self::index_keys_for_field`]).
     fn update_composite_indices_for_property_change(
         &mut self,
         node_type: &str,
         node_idx: NodeIndex,
         changed_property: &str,
     ) {
+        let changed_field = self.resolve_alias(node_type, changed_property);
         let comp_keys: Vec<CompositeIndexKey> = self
             .composite_indices
             .keys()
-            .filter(|(nt, props)| nt == node_type && props.contains(&changed_property.to_string()))
+            .filter(|(nt, props)| {
+                nt == node_type
+                    && props
+                        .iter()
+                        .any(|p| self.resolve_alias(node_type, p) == changed_field)
+            })
             .cloned()
             .collect();
 
         if comp_keys.is_empty() {
             return;
         }
-
-        // Read current node properties once. Arena guard: disk-backend
-        // node_weight materializes into the query arena (protocol in
-        // disk/graph.rs); no-op on memory/mapped backends.
-        let current_props: HashMap<String, Value> = {
-            let _guard = self.graph.begin_query();
-            match self.graph.node_view(node_idx) {
-                Some(node) => node.properties_cloned(&self.interner),
-                None => return,
-            }
-        };
 
         for key in comp_keys {
             // The buckets this node currently sits in, read before vacating
@@ -860,11 +922,15 @@ impl DirGraph {
                 }
             }
 
-            // Build new composite value from current properties
+            // Build the new composite value the way `create_composite_index`
+            // builds every other one — see `indexed_value`.
             let new_values: Vec<Value> = key
                 .1
                 .iter()
-                .map(|p| current_props.get(p).cloned().unwrap_or(Value::Null))
+                .map(|p| {
+                    self.indexed_value(node_type, p, node_idx)
+                        .unwrap_or(Value::Null)
+                })
                 .collect();
             if new_values.iter().any(|v| !matches!(v, Value::Null)) {
                 let value = CompositeValue(new_values);
