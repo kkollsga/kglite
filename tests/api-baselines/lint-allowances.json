@@ -449,14 +449,6 @@
       "classification": "test"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/disk/graph.rs::statement:pub(super) edge_arena: std::sync::Mutex<Vec<Box<EdgeData>>>,::clippy::vec_box",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/graph/storage/disk/graph.rs::statement:pub(super) node_arena: std::sync::Mutex<Vec<Box<NodeData>>>,::clippy::vec_box",
-      "classification": "transitional"
-    },
-    {
       "identity": "crates/kglite/src/graph/storage/interner.rs::fn:from_str:pub fn from_str(s: &str) -> Self::clippy::should_implement_trait",
       "classification": "api-shape"
     },
