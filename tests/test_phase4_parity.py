@@ -129,7 +129,7 @@ def _parity_query(kg: KnowledgeGraph) -> list[tuple]:
 # Changing this digest without a format bump is a refactor bug — the
 # whole point of this test is to trip loudly when the `.kgl` byte layout
 # silently drifts.
-GOLDEN_V3_DIGEST = "903f2e494aa942c4c5364288cdc0d30c83f89e429ca46ec131ae9f1ccd5438d5"
+GOLDEN_V3_DIGEST = "82df28b1fb8e58d9b278792130e6f1d2e643d13ae400ec3b992a961f310fc47f"
 
 # Phase A.1 / C5 cleared this set on the v3 → v4 format break. The
 # new v4 loader rejects v3 files (per the user-decided hard break
@@ -336,6 +336,8 @@ ACCEPTABLE_DIGESTS: frozenset[str] = frozenset(
         "b7d1f4c20e35b8658848d9811787f091cc4388afe2de5c3a79ab8a09fefe1805",
         # Demoted from GOLDEN_V3_DIGEST when 0.15.11 took over.
         "1f4f24215a7c0304a7dc3be655a6fb2e2c9508d3ef09697f2cd7d1124e1a79be",
+        # Demoted from GOLDEN_V3_DIGEST when 0.15.12 took over.
+        "903f2e494aa942c4c5364288cdc0d30c83f89e429ca46ec131ae9f1ccd5438d5",
     }
 )
 
