@@ -362,6 +362,11 @@ impl GraphFileIdentity {
 /// A caller that may later publish to `path` must hold its own cross-process
 /// writer lease across the read/modify/save interval. Read-only callers should
 /// not acquire such a lease merely to open a graph.
+///
+/// The graph comes back with **no write-ahead log attached**, so a path whose
+/// sidecar still holds unfolded frames is refused rather than opened — see
+/// [`crate::graph::durability::ensure_recovered`] for why that refusal covers
+/// reads as well as writes.
 pub fn open_or_create_graph(
     path: &Path,
     create_mode: Option<StorageMode>,
@@ -377,6 +382,7 @@ pub fn open_or_create_graph(
                     format!("graph path {} changed while it was loading", path.display()),
                 ));
             }
+            unrecovered_sidecar_check(path, graph.checkpoint_lsn)?;
             return Ok(OpenGraphResult {
                 graph,
                 disposition: OpenDisposition::Opened,
@@ -397,6 +403,12 @@ pub fn open_or_create_graph(
             ),
         )
     })?;
+    // A sidecar surviving a *deleted* checkpoint is the same hazard as one
+    // surviving a stale checkpoint, and worse-signposted: a fresh graph has
+    // `checkpoint_lsn` 0, so every frame in it would replay over whatever this
+    // caller saves here. Checked before the graph is created, so a refused
+    // disk-mode open leaves no directory behind.
+    unrecovered_sidecar_check(path, 0)?;
     let graph = new_dir_graph_in_mode(mode, Some(path))
         .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
     Ok(OpenGraphResult {
@@ -404,6 +416,18 @@ pub fn open_or_create_graph(
         disposition: OpenDisposition::Created,
         identity: GraphFileIdentity::capture(path)?,
         converted_from: None,
+    })
+}
+
+/// The log-less half of the recovery-on-open rule, in the error type this
+/// module speaks. [`DurableOpenError::Refused`] becomes [`io::ErrorKind::InvalidData`]
+/// — the path's on-disk state is not something this entry point can safely
+/// open — while an unreadable sidecar stays an uncategorised I/O failure, since
+/// it says nothing about the data's shape.
+fn unrecovered_sidecar_check(path: &Path, checkpoint_lsn: u64) -> io::Result<()> {
+    crate::graph::durability::ensure_recovered(path, checkpoint_lsn).map_err(|e| match e {
+        crate::graph::durability::DurableOpenError::Io(message) => io::Error::other(message),
+        other => io::Error::new(io::ErrorKind::InvalidData, other.to_string()),
     })
 }
 
@@ -451,8 +475,125 @@ pub fn open_or_create_graph_in_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::datatypes::Value;
     use crate::graph::storage::GraphRead;
+    use crate::graph::wal::{wal_path, DurabilityLevel, MutationOp, SyncMode, Wal, WalFrame};
     use std::process::Command;
+
+    /// Seed a checkpoint at `path` holding `Person 1` with `age` and stamped
+    /// `checkpoint_lsn`, then leave the sidecar holding one frame at `lsn` that
+    /// upserts the same node with `age + 1` — the residue a durable writer
+    /// leaves when it dies between a commit and its next checkpoint.
+    fn checkpoint_with_pending_frame(path: &Path, checkpoint_lsn: u64, age: i64, lsn: u64) {
+        let mut graph = Arc::new(DirGraph::new());
+        crate::graph::mutation::wal_replay::apply_frames(
+            crate::graph::handle::make_dir_graph_mut(&mut graph),
+            &[person_frame(1, age)],
+            0,
+        )
+        .unwrap();
+        crate::graph::handle::make_dir_graph_mut(&mut graph).checkpoint_lsn = checkpoint_lsn;
+        crate::graph::io::file::save_graph(&mut graph, &path.to_string_lossy()).unwrap();
+
+        let mut wal = Wal::open(wal_path(path), SyncMode::Barrier).unwrap();
+        wal.append(&person_frame(lsn, age + 1)).unwrap();
+    }
+
+    fn person_frame(lsn: u64, age: i64) -> WalFrame {
+        WalFrame {
+            lsn,
+            ops: vec![MutationOp::UpsertNode {
+                node_type: "Person".into(),
+                id: Value::Int64(1),
+                title: Value::String("Alice".into()),
+                properties: vec![("age".to_string(), Value::Int64(age))],
+            }],
+        }
+    }
+
+    fn age_of(graph: &mut Arc<DirGraph>) -> Option<Value> {
+        let dir = crate::graph::handle::make_dir_graph_mut(graph);
+        let idx = dir.lookup_by_id("Person", &Value::Int64(1))?;
+        dir.graph
+            .node_view(idx)
+            .and_then(|n| n.get_field_ref("age").map(|c| c.into_owned()))
+    }
+
+    /// The end-to-end hazard this guard closes: an opener that never consults
+    /// the WAL used to open such a path, write, and save — and because that
+    /// save neither stamps `checkpoint_lsn` nor truncates the sidecar, the
+    /// next *durable* open replayed the stale frames over the newer state.
+    /// Measured before the guard: the saved `age=3` came back as `age=2`.
+    ///
+    /// The open is now refused, so the sequence cannot start; the committed
+    /// frame is still there for a durable open to recover, which is the whole
+    /// point of refusing rather than silently discarding it.
+    #[test]
+    fn a_stale_sidecar_cannot_be_replayed_over_a_newer_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("graph.kgl");
+        // Checkpoint holds age=1; a durable writer committed age=2 as frame
+        // lsn 1 and died before checkpointing.
+        checkpoint_with_pending_frame(&path, 0, 1, 1);
+
+        // The MCP server's opener — no WAL awareness at all.
+        let refusal = open_or_create_graph_in_mode(&path, Some(StorageMode::Memory))
+            .err()
+            .expect("an open that attaches no log must not proceed over unfolded frames");
+        assert_eq!(refusal.kind(), io::ErrorKind::InvalidData);
+        let message = refusal.to_string();
+        assert!(message.contains("graph.kgl-wal"), "{message}");
+        assert!(message.contains("holds commits this checkpoint does not contain"));
+        // Both exits named: replay them, or discard them deliberately.
+        assert!(message.contains("'full' or 'normal'"), "{message}");
+        assert!(message.contains("move the sidecar aside"), "{message}");
+
+        // Nothing was consumed: the commit is still recoverable durably.
+        let mut recovered = crate::graph::io::file::load_file(&path.to_string_lossy()).unwrap();
+        crate::graph::durability::open_log(&mut recovered, &path, DurabilityLevel::Full).unwrap();
+        assert_eq!(age_of(&mut recovered), Some(Value::Int64(2)));
+    }
+
+    /// Crash residue — frames the checkpoint already folded in — is not
+    /// grounds to refuse, exactly as at `durable='off'`. The boundary is
+    /// asserted from both sides so the comparison cannot drift: `lsn ==
+    /// checkpoint_lsn` is folded in (`>=` would refuse it), `lsn ==
+    /// checkpoint_lsn + 1` is not (`>` on a wrong operand order, or a `<`,
+    /// would let it through).
+    #[test]
+    fn frames_at_or_below_the_checkpoint_still_open() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let folded = tmp.path().join("folded.kgl");
+        checkpoint_with_pending_frame(&folded, 7, 1, 7);
+        let opened = open_or_create_graph(&folded, Some(StorageMode::Memory))
+            .expect("a frame the checkpoint already contains is harmless residue");
+        assert_eq!(opened.disposition, OpenDisposition::Opened);
+
+        let ahead = tmp.path().join("ahead.kgl");
+        checkpoint_with_pending_frame(&ahead, 7, 1, 8);
+        assert!(
+            open_or_create_graph(&ahead, Some(StorageMode::Memory)).is_err(),
+            "one frame past the checkpoint is unrecovered data"
+        );
+    }
+
+    /// A sidecar outliving a *deleted* checkpoint is the same hazard wearing a
+    /// missing file: the fresh graph starts at `checkpoint_lsn` 0, so every
+    /// frame in the sidecar would replay over whatever this caller saves.
+    #[test]
+    fn a_live_sidecar_beside_a_missing_checkpoint_refuses_creation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("gone.kgl");
+        let mut wal = Wal::open(wal_path(&path), SyncMode::Barrier).unwrap();
+        wal.append(&person_frame(1, 2)).unwrap();
+
+        let refusal = open_or_create_graph(&path, Some(StorageMode::Memory))
+            .err()
+            .expect("creating over a live sidecar must be refused");
+        assert_eq!(refusal.kind(), io::ErrorKind::InvalidData);
+        assert!(!path.exists(), "a refused open must leave no graph behind");
+    }
 
     #[test]
     fn missing_path_requires_explicit_create_mode() {

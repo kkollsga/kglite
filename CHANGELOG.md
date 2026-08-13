@@ -108,6 +108,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wheel and the engine's `Session` now perform the same open sequence through
   one shared function (`kglite::api::durable::open_log`), so the two cannot
   disagree about what a sidecar means.
+- **A server-style open over an unrecovered WAL sidecar no longer lets a later
+  durable open replay stale frames over newer saved data.** The MCP server, the
+  Bolt server and the CLI open graphs through
+  `kglite::api::io::open_or_create_graph[_in_mode]`, which read the `.kgl`
+  checkpoint alone and attach no log. Over a path whose sidecar still held
+  frames the checkpoint had not folded in — a durable writer that died between
+  a commit and its next checkpoint — that open silently returned a graph
+  missing those commits, and any subsequent save made it worse rather than
+  better: the save stamps no `checkpoint_lsn` and truncates nothing, so the
+  stale frames survived *in front of* the newer checkpoint and the next durable
+  open replayed them back over it, reverting saved state to an older commit.
+  These openers now refuse such a path on the same terms as `durable="off"`
+  (`kglite::api::durable::ensure_recovered`, shared with the wheel's refusal),
+  naming the sidecar and both ways out: open it through a durable entry point
+  to replay the frames, or move the sidecar aside to discard them
+  deliberately. The refusal covers read-only opens too, because an opener that
+  may later publish cannot be told apart from one that only looks, and it
+  covers a sidecar found beside a *missing* checkpoint, where a fresh graph
+  would replay every frame in it. Frames at or below `checkpoint_lsn` — crash
+  residue between a save and its truncation — still open fine. `load_file` is
+  deliberately unguarded: it is the primitive durable recovery is itself built
+  on, and the way to read a graph another process is writing durably, where a
+  sidecar running ahead of the checkpoint is the steady state.
 
 ## [0.15.13] - 2026-08-12
 

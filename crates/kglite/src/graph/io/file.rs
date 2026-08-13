@@ -1619,6 +1619,19 @@ impl<'a> SectionCursor<'a> {
     }
 }
 
+/// Load the `.kgl` checkpoint (or disk-graph directory) at `path`.
+///
+/// **The checkpoint only.** Any write-ahead sidecar beside it is neither read
+/// nor consulted, deliberately: this is the primitive the durable path is
+/// built on — a durable owner loads the checkpoint here and *then* replays the
+/// log over it ([`crate::graph::durability::open_log`]) — so a recovery check
+/// at this level would make recovery itself unreachable. It is also the way to
+/// read a graph another process is writing durably, where a sidecar running
+/// ahead of the checkpoint is the steady state rather than a fault.
+///
+/// A caller that takes the path over — one that may later save back to it —
+/// wants [`crate::graph::io::open::open_or_create_graph`], which adds the
+/// recovery refusal, or a durable open, which replays.
 pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
     // If path is a directory, load as disk graph
     let p = std::path::Path::new(path);

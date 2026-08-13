@@ -432,9 +432,11 @@ pub mod api {
         /// recover→replay→wrap→append ordering every owner of a log performs at
         /// open (`open_log`, which also enforces the unconditional
         /// recovery-on-open refusal), and the two halves of the four-step
-        /// checkpoint that bracket a binding's own save.
+        /// checkpoint that bracket a binding's own save. `ensure_recovered` is
+        /// that same refusal for an opener that attaches no log at all, and is
+        /// already applied by `io::open_or_create_graph`.
         pub use crate::graph::durability::{
-            checkpoint_epilogue, checkpoint_prologue, open_log, DurableOpenError,
+            checkpoint_epilogue, checkpoint_prologue, ensure_recovered, open_log, DurableOpenError,
         };
         pub use crate::graph::mutation::wal_replay::apply_frames;
         pub use crate::graph::storage::recording::{

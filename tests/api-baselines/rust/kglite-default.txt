@@ -904,6 +904,7 @@ pub fn kglite::api::durable::WalFrame::deserialize<__D>(__deserializer: __D) -> 
 pub fn kglite::api::durable::apply_frames(graph: &mut kglite::api::DirGraph, frames: &[kglite::api::durable::WalFrame], after_lsn: u64) -> core::result::Result<u64, alloc::string::String>
 pub fn kglite::api::durable::checkpoint_epilogue(wal: &mut kglite::api::durable::Wal, graph: &mut kglite::api::DirGraph) -> core::io::error::Result<()>
 pub fn kglite::api::durable::checkpoint_prologue(wal: &mut kglite::api::durable::Wal, next_lsn: u64, graph: &mut kglite::api::DirGraph) -> core::io::error::Result<()>
+pub fn kglite::api::durable::ensure_recovered(checkpoint_path: &std::path::Path, checkpoint_lsn: u64) -> core::result::Result<(), kglite::api::durable::DurableOpenError>
 pub fn kglite::api::durable::open_log(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>, checkpoint_path: &std::path::Path, level: kglite::api::durable::DurabilityLevel) -> core::result::Result<core::option::Option<(kglite::api::durable::Wal, u64)>, kglite::api::durable::DurableOpenError>
 pub fn kglite::api::durable::recover(path: &std::path::Path) -> core::io::error::Result<alloc::vec::Vec<kglite::api::durable::WalFrame>>
 pub fn kglite::api::durable::resolve_ops(raw: &[kglite::graph::storage::recording::RawOp], graph: &impl kglite::api::GraphRead, interner: &kglite::api::StringInterner, secondary_labels: impl core::ops::function::Fn(petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<alloc::string::String>) -> alloc::vec::Vec<kglite::graph::wal::MutationOp>

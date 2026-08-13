@@ -116,6 +116,57 @@ fn disk_request_on_a_portable_graph_is_refused_with_the_core_reason() {
     assert_eq!(active_mode(&after), "memory");
 }
 
+/// This server opens graphs with no write-ahead log attached, so a path whose
+/// sidecar still holds frames the checkpoint has not folded in must be refused
+/// rather than served. Opening it would hand back a graph missing committed
+/// writes, and the next `save_graph` would strand those frames in front of a
+/// newer checkpoint for a later durable open to replay back over it.
+///
+/// The refusal is the engine's (`api::io::open_or_create_graph`); asserted here
+/// because inheriting it is the whole point of routing through that entry.
+#[test]
+fn an_unrecovered_wal_sidecar_is_refused_rather_than_served() {
+    use kglite::api::durable::{wal_path, DurabilityLevel};
+    use kglite::api::session::{execute_mut, CommitOutcome, ExecuteOptions, Session};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("unrecovered.kgl");
+    let path = p.to_string_lossy().into_owned();
+    seed(&p, StorageMode::Memory);
+
+    // A real durable writer commits one frame and dies before checkpointing:
+    // the checkpoint just seeded carries `checkpoint_lsn` 0, so that frame is
+    // unfolded, and dropping the session is the crash (no save, no truncate).
+    {
+        let graph = kglite::api::io::load_file(&path).unwrap();
+        let session = Session::open_durable(graph, &path, DurabilityLevel::Full).unwrap();
+        let mut tx = session.begin();
+        let params = std::collections::HashMap::new();
+        let opts = ExecuteOptions::eager(&params);
+        execute_mut(tx.working_mut().unwrap(), "CREATE (:Task {id:'t1'})", &opts).unwrap();
+        assert!(matches!(
+            session.commit(tx, true),
+            CommitOutcome::Committed { .. }
+        ));
+    }
+
+    let state = GraphState::default();
+    let error = state
+        .open_or_create(&p, None)
+        .expect_err("a log-less open over unfolded frames must be refused")
+        .to_string();
+    assert!(
+        error.contains("unrecovered.kgl-wal")
+            && error.contains("holds commits this checkpoint does not contain"),
+        "the refusal must carry the core reason: {error}"
+    );
+
+    // The named remedy works: with the sidecar moved aside, the same open
+    // succeeds — and the refusal released the writer lease it took.
+    std::fs::rename(wal_path(&p), tmp.path().join("aside")).unwrap();
+    GraphState::default().open_or_create(&p, None).unwrap();
+}
+
 #[test]
 fn path_backed_active_graph_retains_writer_lease() {
     let tmp = tempfile::tempdir().unwrap();

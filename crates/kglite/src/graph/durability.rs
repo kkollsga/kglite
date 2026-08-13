@@ -48,6 +48,17 @@
 //! would truncate the log and destroy them for good. Frames at or below
 //! `checkpoint_lsn` are the harmless residue of a crash between the `.kgl`
 //! write and the truncation, and are not grounds to refuse.
+//!
+//! The same decision is owed by an opener that has no durability argument at
+//! all — the server-style [`open_or_create_graph`] lifecycle — because the
+//! damage is not confined to the missing reads. Such an opener writes and
+//! saves without stamping `checkpoint_lsn` or truncating the sidecar, so the
+//! stale frames outlive the newer `.kgl` and the *next* durable open replays
+//! them over it: state that was already saved is rolled back to an older
+//! commit. [`ensure_recovered`] is that refusal, shared so the two openers
+//! decide on identical terms.
+//!
+//! [`open_or_create_graph`]: crate::graph::io::open::open_or_create_graph
 
 use std::io;
 use std::path::Path;
@@ -119,14 +130,7 @@ pub fn open_log(
     level: DurabilityLevel,
 ) -> Result<Option<(Wal, u64)>, DurableOpenError> {
     let wpath = wal_path(checkpoint_path);
-    // Read (do not truncate) whatever the last session left behind. Torn tails
-    // stop the scan; see `wal::read_frames`.
-    let frames = recover(&wpath).map_err(|e| {
-        DurableOpenError::Io(format!(
-            "failed to read the write-ahead log at '{}': {e}",
-            wpath.display()
-        ))
-    })?;
+    let frames = read_sidecar(&wpath)?;
     let checkpoint_lsn = graph.checkpoint_lsn;
 
     if !level.logs() {
@@ -136,8 +140,7 @@ pub fn open_log(
                  contain, and durability level 'off' would neither replay them nor keep \
                  them — the next checkpoint would truncate the log and the commits would \
                  be gone. Open with level 'full' or 'normal' to replay and continue the \
-                 log, or move the sidecar aside first to deliberately discard those \
-                 commits.",
+                 log, {DISCARD_EXIT}",
                 wpath.display(),
             )));
         }
@@ -210,6 +213,66 @@ pub fn checkpoint_epilogue(wal: &mut Wal, graph: &mut DirGraph) -> io::Result<()
         let _ = rg.take_ops();
     }
     wal.reset()
+}
+
+/// Refuse a **log-less** open of `checkpoint_path` while its sidecar still
+/// holds frames the checkpoint at `checkpoint_lsn` does not contain.
+///
+/// The companion to [`open_log`]'s `off` refusal, for openers that take no
+/// durability argument and attach no log — [`open_or_create_graph`] and every
+/// binding built on it (the MCP and Bolt servers, the CLI). They read the
+/// `.kgl` alone, so without this they open a graph that is silently missing
+/// committed writes and, worse, may then *save* over the path: the save
+/// neither stamps `checkpoint_lsn` nor truncates the sidecar, so the stale
+/// frames survive it and the next durable open replays them over the newer
+/// state. That is a rollback of saved data, not merely a stale read, which is
+/// why the refusal covers reads too — an opener that can later publish cannot
+/// be distinguished at open time from one that only looks.
+///
+/// Frames at or below `checkpoint_lsn` are crash residue between the `.kgl`
+/// write and the truncation, exactly as in [`open_log`], and open fine.
+///
+/// **Not called by [`load_file`].** That is the primitive the durable path is
+/// itself built on — every durable owner loads the checkpoint and *then*
+/// replays — so a guard there would make recovery unreachable. It is also the
+/// documented way to read a graph another process is writing durably, where a
+/// sidecar ahead of the checkpoint is the normal steady state rather than a
+/// fault.
+///
+/// [`open_or_create_graph`]: crate::graph::io::open::open_or_create_graph
+/// [`load_file`]: crate::graph::io::file::load_file
+pub fn ensure_recovered(
+    checkpoint_path: &Path,
+    checkpoint_lsn: u64,
+) -> Result<(), DurableOpenError> {
+    let wpath = wal_path(checkpoint_path);
+    if unreplayed(&read_sidecar(&wpath)?, checkpoint_lsn) {
+        return Err(DurableOpenError::Refused(format!(
+            "the write-ahead log at '{}' holds commits this checkpoint does not contain, \
+             and this open attaches no log — it would neither replay them nor keep them, \
+             and the first save over this path would strand them in front of a newer \
+             checkpoint for a later durable open to replay back over it. Open the graph \
+             through a durable entry point (a durable graph handle, or a Session, at \
+             level 'full' or 'normal') to replay them first, {DISCARD_EXIT}",
+            wpath.display(),
+        )));
+    }
+    Ok(())
+}
+
+/// The exit that is the same whichever open was refused: the frames are only
+/// discardable deliberately, by moving the sidecar out of the way.
+const DISCARD_EXIT: &str = "or move the sidecar aside first to deliberately discard those commits.";
+
+/// Read (do not truncate) whatever the last durable owner left behind. Torn
+/// tails stop the scan; see `wal::read_frames`.
+fn read_sidecar(wpath: &Path) -> Result<Vec<WalFrame>, DurableOpenError> {
+    recover(wpath).map_err(|e| {
+        DurableOpenError::Io(format!(
+            "failed to read the write-ahead log at '{}': {e}",
+            wpath.display()
+        ))
+    })
 }
 
 /// Whether `frames` hold anything the checkpoint at `checkpoint_lsn` has not
