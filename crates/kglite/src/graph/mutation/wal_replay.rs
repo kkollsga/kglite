@@ -41,6 +41,24 @@
 //! Labels fold in their own map rather than riding on `UpsertNode`, because
 //! in the live graph properties and labels are independent state: neither
 //! `SET n.x = 1` nor `SET n:B` disturbs the other. See [`LabelNet`].
+//!
+//! ## Recovery is value-faithful
+//!
+//! The bulk calls above take a [`DataFrame`], whose columns are singly
+//! typed — so a property logged as `Int64` on one node and `String` on
+//! another would come back as two strings. Replay is recovery, not a load:
+//! a mixed-type property is legal in a live graph, and losing a value's
+//! type across a crash is unrecoverable. So each group's columns are split
+//! by [`split_faithful_columns`] and only the ones the frame carries
+//! unchanged ride it; the rest are written value by value afterwards
+//! ([`apply_exact_node_props`] / [`apply_exact_edge_props`]).
+//!
+//! The two *fixed* columns — a node's `id`/`title`, an edge's endpoint ids —
+//! cannot be held back, because the bulk calls address rows by them. A group
+//! whose fixed columns are mixed is split by shape into one bulk call each
+//! ([`partition_by_fixed_shapes`]) instead. Endpoint ids make the stakes
+//! plainest: `add_connections` vivifies a stub for an id it cannot find, so a
+//! stringified endpoint id does not merely lose an edge, it *invents a node*.
 
 use std::collections::{HashMap, HashSet};
 
@@ -56,6 +74,9 @@ use crate::graph::wal::{MutationOp, WalFrame};
 type NodeKey = (String, Value);
 /// Logical edge identity: `(conn_type, src_type, src_id, tgt_type, tgt_id)`.
 type EdgeKey = (String, String, Value, String, Value);
+/// One row headed for a bulk call: the two fixed cells (a node's id/title,
+/// an edge's src/tgt id) plus that row's property payload.
+type UpsertRow = (Value, Value, HashMap<String, Value>);
 
 /// Net state of a node after folding: an upsert (title + props) or a remove.
 enum NodeNet {
@@ -205,6 +226,12 @@ fn apply_net(
 
 /// Phase 1 — node upserts, grouped by node_type, one `add_nodes` each so
 /// the type's id-index is rebuilt once rather than per row.
+///
+/// Property columns the frame cannot carry without retyping their values
+/// (see [`split_faithful_columns`]) are held back from the `DataFrame` and
+/// written one exact `Value` at a time afterwards — after, because
+/// `add_nodes` runs in `replace` mode and clears a row's properties before
+/// applying the frame's.
 fn apply_node_upserts(
     graph: &mut DirGraph,
     nodes: &HashMap<NodeKey, NodeNet>,
@@ -221,17 +248,88 @@ fn apply_node_upserts(
         }
     }
     for (node_type, group) in node_groups {
-        let df = build_dataframe(&["id", "title"], &group.columns, &group.rows)?;
-        add_nodes(
-            graph,
-            df,
-            node_type.to_string(),
-            "id".to_string(),
-            Some("title".to_string()),
-            Some("replace".to_string()),
-        )?;
+        let (framed, exact) = split_faithful_columns(&group.columns, &group.rows);
+        // `id` and `title` cannot be held back — `add_nodes` addresses rows by
+        // them — so a type whose ids or titles differ in type across nodes is
+        // split into one bulk call per shape instead. Only such a type pays
+        // the extra call; the usual one keeps a single `add_nodes`.
+        if fixed_columns_are_faithful(&group.rows) {
+            upsert_node_rows(graph, node_type, &framed, &exact, &group.rows)?;
+        } else {
+            for part in partition_by_fixed_shapes(&group.rows) {
+                upsert_node_rows(graph, node_type, &framed, &exact, &part)?;
+            }
+        }
     }
     Ok(())
+}
+
+/// One bulk `add_nodes` over rows that share an id and title shape, plus the
+/// held-back columns those rows carry.
+fn upsert_node_rows(
+    graph: &mut DirGraph,
+    node_type: &str,
+    framed: &[String],
+    exact: &[String],
+    rows: &[UpsertRow],
+) -> Result<(), String> {
+    let df = build_dataframe(&["id", "title"], framed, rows)?;
+    add_nodes(
+        graph,
+        df,
+        node_type.to_string(),
+        "id".to_string(),
+        Some("title".to_string()),
+        Some("replace".to_string()),
+    )?;
+    apply_exact_node_props(graph, node_type, exact, rows);
+    Ok(())
+}
+
+/// Write the held-back columns onto each node with their logged `Value`
+/// untouched, through the same per-property setter the Cypher `SET`
+/// fallback uses.
+fn apply_exact_node_props(
+    graph: &mut DirGraph,
+    node_type: &str,
+    exact: &[String],
+    rows: &[UpsertRow],
+) {
+    if exact.is_empty() {
+        return;
+    }
+    // Declare the property on the type the way a live `SET` does — its own
+    // value's type when the column is single-typed (a `Point`, say, which
+    // has no frame column but one clear type), `"mixed"` when it is not.
+    // Skipping this would leave a replayed property out of the type's
+    // metadata, which on a disk graph decides what `save()` persists.
+    let mut declared: HashMap<String, String> = HashMap::new();
+    for col in exact {
+        declared.insert(
+            col.clone(),
+            declared_type_name(rows.iter().filter_map(|(_, _, p)| p.get(col))),
+        );
+    }
+    graph.upsert_node_type_metadata(node_type, declared);
+
+    for (id, _, props) in rows {
+        let Some(idx) = graph.lookup_by_id(node_type, id) else {
+            continue;
+        };
+        for col in exact {
+            match props.get(col) {
+                None | Some(Value::Null) => continue,
+                Some(value) => {
+                    // `get_or_intern`, never `InternedKey::from_str`: a
+                    // hash-only key cannot be resolved back to a string at
+                    // save time, and the property vanishes on reload.
+                    let key = graph.interner.get_or_intern(col);
+                    graph.ensure_type_schema_keys(node_type, &[key]);
+                    GraphWrite::set_node_property(&mut graph.graph, idx, key, value.clone());
+                }
+            }
+        }
+    }
 }
 
 /// Phase 2 — secondary-label sets, applied through the `DirGraph` choke
@@ -297,21 +395,283 @@ fn apply_edge_upserts(
         }
     }
     for ((conn, src_type, tgt_type), group) in edge_groups {
-        let df = build_dataframe(&["src_id", "tgt_id"], &group.columns, &group.rows)?;
-        add_connections(
-            graph,
-            df,
-            conn.to_string(),
-            src_type.to_string(),
-            "src_id".to_string(),
-            tgt_type.to_string(),
-            "tgt_id".to_string(),
-            None,
-            None,
-            Some("replace".to_string()),
-        )?;
+        let (framed, exact) = split_faithful_columns(&group.columns, &group.rows);
+        // The endpoint-id columns get the same treatment as a node's `id`,
+        // and for a sharper reason: `add_connections` *vivifies* a stub for an
+        // endpoint id it cannot find, so a stringified `2` does not merely
+        // lose an edge — it invents a node under the id `"2"`.
+        let key = EdgeGroup {
+            conn,
+            src_type,
+            tgt_type,
+        };
+        if fixed_columns_are_faithful(&group.rows) {
+            upsert_edge_rows(graph, key, &framed, &exact, &group.rows)?;
+        } else {
+            for part in partition_by_fixed_shapes(&group.rows) {
+                upsert_edge_rows(graph, key, &framed, &exact, &part)?;
+            }
+        }
     }
     Ok(())
+}
+
+/// The `(conn, src_type, tgt_type)` an edge group is keyed by.
+#[derive(Clone, Copy)]
+struct EdgeGroup<'a> {
+    conn: &'a str,
+    src_type: &'a str,
+    tgt_type: &'a str,
+}
+
+/// One bulk `add_connections` over rows whose endpoint ids share a shape.
+fn upsert_edge_rows(
+    graph: &mut DirGraph,
+    group: EdgeGroup<'_>,
+    framed: &[String],
+    exact: &[String],
+    rows: &[UpsertRow],
+) -> Result<(), String> {
+    let df = build_dataframe(&["src_id", "tgt_id"], framed, rows)?;
+    add_connections(
+        graph,
+        df,
+        group.conn.to_string(),
+        group.src_type.to_string(),
+        "src_id".to_string(),
+        group.tgt_type.to_string(),
+        "tgt_id".to_string(),
+        None,
+        None,
+        Some("replace".to_string()),
+    )?;
+    apply_exact_edge_props(graph, group, exact, rows);
+    Ok(())
+}
+
+/// The edge twin of [`apply_exact_node_props`] — write the held-back
+/// columns straight onto the `EdgeData`, as the Cypher `SET` path on an
+/// edge binding does.
+fn apply_exact_edge_props(
+    graph: &mut DirGraph,
+    group: EdgeGroup<'_>,
+    exact: &[String],
+    rows: &[UpsertRow],
+) {
+    let EdgeGroup {
+        conn,
+        src_type,
+        tgt_type,
+    } = group;
+    if exact.is_empty() {
+        return;
+    }
+    let mut declared: HashMap<String, String> = HashMap::new();
+    for col in exact {
+        declared.insert(
+            col.clone(),
+            declared_type_name(rows.iter().filter_map(|(_, _, p)| p.get(col))),
+        );
+    }
+    graph.upsert_connection_type_metadata(conn, src_type, tgt_type, declared);
+
+    let conn_key = InternedKey::from_str(conn);
+    for (src_id, tgt_id, props) in rows {
+        let (Some(src), Some(tgt)) = (
+            graph.lookup_by_id(src_type, src_id),
+            graph.lookup_by_id(tgt_type, tgt_id),
+        ) else {
+            continue;
+        };
+        let Some(eidx) = graph
+            .graph
+            .edges_connecting(src, tgt)
+            .find(|er| er.weight().connection_type == conn_key)
+            .map(|er| er.id())
+        else {
+            continue;
+        };
+        for col in exact {
+            match props.get(col) {
+                None | Some(Value::Null) => continue,
+                Some(value) => {
+                    let key = graph.interner.get_or_intern(col);
+                    if let Some(edge) = GraphWrite::edge_weight_mut(&mut graph.graph, eidx) {
+                        match edge.properties.iter_mut().find(|(ek, _)| *ek == key) {
+                            Some((_, existing)) => *existing = value.clone(),
+                            None => edge.properties.push((key, value.clone())),
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Split a group's property columns into the ones a `DataFrame` carries
+/// unchanged and the ones it would retype.
+///
+/// `DataFrame` columns are singly typed: `from_cypher_rows` promotes each
+/// column to one `ColumnType` and rewrites every cell into it. That is the
+/// documented, wanted behaviour for the load paths that share the builder —
+/// but replay is not a load, it is *recovery*, and a mixed `Int64`/`String`
+/// property replaying as two strings (or an `Int64`/`Float64` one replaying
+/// as two floats) is type loss no re-query can undo. A live graph is allowed
+/// mixed types under one property — `Value` is a sum type and the columnar
+/// store demotes such a column to `Mixed` — so recovery must be allowed them
+/// too.
+///
+/// A column is *faithful* when every value it carries has an exact column
+/// shape and they all share it; `Null` carries no type and is ignored (the
+/// frame fills absent cells with `Null`, which `add_nodes` skips). Anything
+/// else — a mix, or a variant with no dense column at all such as `Point` —
+/// is returned as `exact` for its caller to write value by value.
+fn split_faithful_columns(columns: &[String], rows: &[UpsertRow]) -> (Vec<String>, Vec<String>) {
+    let mut framed = Vec::with_capacity(columns.len());
+    let mut exact = Vec::new();
+    for col in columns {
+        if column_is_faithful(rows.iter().filter_map(|(_, _, p)| p.get(col))) {
+            framed.push(col.clone());
+        } else {
+            exact.push(col.clone());
+        }
+    }
+    (framed, exact)
+}
+
+/// Would every value here survive `DataFrame::from_cypher_rows` unchanged?
+/// True when they all share one exact column shape. `Null` carries no type
+/// and is skipped — the frame stores it as a null cell in any column, and
+/// the loaders skip null cells.
+fn column_is_faithful<'a>(values: impl Iterator<Item = &'a Value>) -> bool {
+    let mut shape: Option<FrameShape> = None;
+    for value in values {
+        if matches!(value, Value::Null) {
+            continue;
+        }
+        match (frame_shape(value), shape) {
+            (None, _) => return false,
+            (Some(s), None) => shape = Some(s),
+            (Some(s), Some(seen)) if s == seen => {}
+            (Some(_), Some(_)) => return false,
+        }
+    }
+    true
+}
+
+/// Do a group's two fixed columns — a node's `id`/`title`, an edge's
+/// `src_id`/`tgt_id` — survive the frame unchanged? They cannot be held back
+/// like a property (the bulk calls address rows by them), so a `false` here
+/// means the rows must be split by shape instead.
+fn fixed_columns_are_faithful(rows: &[UpsertRow]) -> bool {
+    column_is_faithful(rows.iter().map(|(a, _, _)| a))
+        && column_is_faithful(rows.iter().map(|(_, b, _)| b))
+}
+
+/// What a fixed cell contributes to its column's shape.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FixedKind {
+    /// No type evidence — a null cell in any column, so it fits any part.
+    Null,
+    Shaped(FrameShape),
+    /// A value with no exact column (a `Point` id). Kept in its own part so
+    /// it cannot drag a typed column to text with it.
+    Shapeless,
+}
+
+fn fixed_kind(value: &Value) -> FixedKind {
+    match value {
+        Value::Null => FixedKind::Null,
+        other => match frame_shape(other) {
+            Some(shape) => FixedKind::Shaped(shape),
+            None => FixedKind::Shapeless,
+        },
+    }
+}
+
+/// Split rows so that each part's two fixed columns are singly shaped, and
+/// therefore ride the frame unchanged. A null cell joins the first part it
+/// fits — it is a null in every column shape, so which part carries it
+/// cannot change what is stored.
+///
+/// Only reached for a group [`fixed_columns_are_faithful`] rejected, so the
+/// clone it costs is paid by a mixed-id type alone.
+fn partition_by_fixed_shapes(rows: &[UpsertRow]) -> Vec<Vec<UpsertRow>> {
+    type PartKey = (FixedKind, FixedKind);
+    let fits = |part: FixedKind, row: FixedKind| {
+        part == FixedKind::Null || row == FixedKind::Null || part == row
+    };
+    let mut parts: Vec<(PartKey, Vec<UpsertRow>)> = Vec::new();
+    for row in rows {
+        let key = (fixed_kind(&row.0), fixed_kind(&row.1));
+        let slot = parts
+            .iter_mut()
+            .find(|(k, _)| fits(k.0, key.0) && fits(k.1, key.1));
+        match slot {
+            Some((k, part)) => {
+                // The part's shape is whichever half first showed one.
+                if k.0 == FixedKind::Null {
+                    k.0 = key.0;
+                }
+                if k.1 == FixedKind::Null {
+                    k.1 = key.1;
+                }
+                part.push(row.clone());
+            }
+            None => parts.push((key, vec![row.clone()])),
+        }
+    }
+    parts.into_iter().map(|(_, part)| part).collect()
+}
+
+/// The `DataFrame` column shapes that store a `Value` without changing it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FrameShape {
+    UniqueId,
+    Int64,
+    Float64,
+    String,
+    Boolean,
+    DateTime,
+    Timestamp,
+    List,
+    Map,
+}
+
+/// The shape a lone `value` would round-trip through, or `None` when the
+/// frame has no exact column for it (`Point`, `Duration`, the query-time
+/// graph-entity variants) and would render it as text.
+fn frame_shape(value: &Value) -> Option<FrameShape> {
+    Some(match value {
+        Value::UniqueId(_) => FrameShape::UniqueId,
+        Value::Int64(_) => FrameShape::Int64,
+        Value::Float64(_) => FrameShape::Float64,
+        Value::String(_) => FrameShape::String,
+        Value::Boolean(_) => FrameShape::Boolean,
+        Value::DateTime(_) => FrameShape::DateTime,
+        Value::Timestamp(_) => FrameShape::Timestamp,
+        Value::List(_) => FrameShape::List,
+        Value::Map(_) => FrameShape::Map,
+        _ => return None,
+    })
+}
+
+/// The type name to declare for a held-back column: the values' own type
+/// when they agree, `"mixed"` when they don't — the string the columnar
+/// store and the streaming writer already use for a heterogeneous column.
+fn declared_type_name<'a>(values: impl Iterator<Item = &'a Value>) -> String {
+    let mut seen: Option<&'static str> = None;
+    for value in values {
+        if matches!(value, Value::Null) {
+            continue;
+        }
+        match seen {
+            None => seen = Some(value.type_name()),
+            Some(name) if name == value.type_name() => {}
+            Some(_) => return "mixed".to_string(),
+        }
+    }
+    seen.unwrap_or("mixed").to_string()
 }
 
 /// Phase 4 — edge removes by logical identity. The one thing the
@@ -366,7 +726,7 @@ fn apply_node_removes(graph: &mut DirGraph, nodes: &HashMap<NodeKey, NodeNet>) {
 struct NodeRows {
     columns: Vec<String>,
     seen: std::collections::HashSet<String>,
-    rows: Vec<(Value, Value, HashMap<String, Value>)>,
+    rows: Vec<UpsertRow>,
 }
 
 /// Accumulator for one (conn, src_type, tgt_type)'s upsert rows.
@@ -374,7 +734,7 @@ struct NodeRows {
 struct EdgeRows {
     columns: Vec<String>,
     seen: std::collections::HashSet<String>,
-    rows: Vec<(Value, Value, HashMap<String, Value>)>,
+    rows: Vec<UpsertRow>,
 }
 
 impl NodeRows {
@@ -398,7 +758,7 @@ impl EdgeRows {
 fn build_dataframe(
     fixed: &[&str],
     prop_columns: &[String],
-    rows: &[(Value, Value, HashMap<String, Value>)],
+    rows: &[UpsertRow],
 ) -> Result<DataFrame, String> {
     let mut columns: Vec<String> = fixed.iter().map(|s| s.to_string()).collect();
     columns.extend(prop_columns.iter().cloned());
@@ -768,6 +1128,345 @@ mod tests {
         assert_eq!(g.graph.edge_count(), 0, "edge went with the removed node");
         assert_eq!(labels_of(&mut g, 1), vec!["Person", "Employee"]);
         assert_eq!(prop(&mut g, 1, "age"), Some(Value::Int64(30)));
+    }
+
+    /// A property whose values differ in type across nodes must replay with
+    /// every value's type intact. Folding routes a whole node_type's rows
+    /// through one `DataFrame`, whose columns are singly-typed, so a mixed
+    /// column used to resolve to `String` (or `Float64` for an int/float
+    /// mix) and rewrite every cell in it.
+    #[test]
+    fn mixed_typed_property_keeps_every_value_type() {
+        use chrono::NaiveDate;
+        let date = NaiveDate::from_ymd_opt(2020, 1, 2).unwrap();
+        let cases: Vec<(i64, Value)> = vec![
+            (1, Value::Int64(1)),
+            (2, Value::String("two".into())),
+            (3, Value::Float64(3.5)),
+            (4, Value::Boolean(true)),
+            (5, Value::DateTime(date)),
+        ];
+        let mut g = DirGraph::new();
+        let frames: Vec<WalFrame> = cases
+            .iter()
+            .enumerate()
+            .map(|(i, (id, v))| {
+                frame(
+                    i as u64 + 1,
+                    vec![upsert_node(*id, "n", vec![("mixedish", v.clone())])],
+                )
+            })
+            .collect();
+        apply_frames(&mut g, &frames, 0).unwrap();
+        for (id, expected) in &cases {
+            assert_eq!(
+                prop(&mut g, *id, "mixedish").as_ref(),
+                Some(expected),
+                "node {id}"
+            );
+        }
+    }
+
+    /// The framed half of the split: a singly-typed property still rides the
+    /// bulk `DataFrame`, and every shape it carries round-trips exactly. Without
+    /// this the mixed-type tests above could pass vacuously by routing
+    /// everything down the per-value path.
+    #[test]
+    fn single_typed_properties_keep_their_types_through_the_frame() {
+        use chrono::NaiveDate;
+        let props = vec![
+            ("i", Value::Int64(7)),
+            ("f", Value::Float64(0.5)),
+            ("s", Value::String("x".into())),
+            ("b", Value::Boolean(true)),
+            (
+                "d",
+                Value::DateTime(NaiveDate::from_ymd_opt(2020, 1, 2).unwrap()),
+            ),
+            ("l", Value::List(vec![Value::Int64(1), Value::Int64(2)])),
+        ];
+        let mut g = DirGraph::new();
+        apply_frames(
+            &mut g,
+            &[frame(1, vec![upsert_node(1, "a", props.clone())])],
+            0,
+        )
+        .unwrap();
+        for (key, expected) in props {
+            assert_eq!(prop(&mut g, 1, key).as_ref(), Some(&expected), "{key}");
+        }
+        // …and each one is a frame column, not a per-value write: the type's
+        // metadata carries the DataFrame's name for it, never "mixed".
+        let meta = g.get_node_type_metadata("Person").cloned().unwrap();
+        assert!(
+            !meta.values().any(|t| t == "mixed"),
+            "single-typed columns must stay framed: {meta:?}"
+        );
+    }
+
+    /// The narrower numeric case: an int and a float under one property must
+    /// not promote the int to a float.
+    #[test]
+    fn int_and_float_under_one_property_do_not_promote() {
+        let mut g = DirGraph::new();
+        apply_frames(
+            &mut g,
+            &[frame(
+                1,
+                vec![
+                    upsert_node(1, "a", vec![("n", Value::Int64(2))]),
+                    upsert_node(2, "b", vec![("n", Value::Float64(2.5))]),
+                ],
+            )],
+            0,
+        )
+        .unwrap();
+        assert_eq!(prop(&mut g, 1, "n"), Some(Value::Int64(2)));
+        assert_eq!(prop(&mut g, 2, "n"), Some(Value::Float64(2.5)));
+    }
+
+    /// Same defect class, single-typed: a `Point` has no columnar shape, so
+    /// the frame column falls back to `String` and the value replays as WKT
+    /// text.
+    #[test]
+    fn point_property_survives_replay_as_a_point() {
+        let mut g = DirGraph::new();
+        apply_frames(
+            &mut g,
+            &[frame(
+                1,
+                vec![upsert_node(
+                    1,
+                    "a",
+                    vec![(
+                        "loc",
+                        Value::Point {
+                            lat: 59.9,
+                            lon: 10.7,
+                        },
+                    )],
+                )],
+            )],
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            prop(&mut g, 1, "loc"),
+            Some(Value::Point {
+                lat: 59.9,
+                lon: 10.7
+            })
+        );
+    }
+
+    /// A mixed property folded together with a later op on the same node:
+    /// the faithless column is applied after the bulk upsert, so the last
+    /// write must still win and the rest of the row must survive.
+    #[test]
+    fn mixed_property_folds_with_later_ops_on_the_same_node() {
+        let mut g = DirGraph::new();
+        apply_frames(
+            &mut g,
+            &[
+                frame(
+                    1,
+                    vec![
+                        upsert_node(1, "a", vec![("m", Value::Int64(1))]),
+                        upsert_node(2, "b", vec![("m", Value::String("two".into()))]),
+                    ],
+                ),
+                frame(
+                    2,
+                    vec![upsert_node(
+                        1,
+                        "a",
+                        vec![("m", Value::Boolean(false)), ("age", Value::Int64(41))],
+                    )],
+                ),
+            ],
+            0,
+        )
+        .unwrap();
+        assert_eq!(prop(&mut g, 1, "m"), Some(Value::Boolean(false)));
+        assert_eq!(prop(&mut g, 1, "age"), Some(Value::Int64(41)));
+        assert_eq!(prop(&mut g, 2, "m"), Some(Value::String("two".into())));
+        assert_eq!(
+            g.get_node_type_metadata("Person").unwrap().get("m"),
+            Some(&"mixed".to_string()),
+            "a heterogeneous property is declared 'mixed', not left undeclared"
+        );
+    }
+
+    /// Identity is a value too. Two nodes of one type whose ids differ in
+    /// type share the frame's `id` column, which cannot be held back the way
+    /// a property can — the rows are split into one bulk call each instead.
+    #[test]
+    fn nodes_whose_ids_differ_in_type_keep_their_ids() {
+        let mut g = DirGraph::new();
+        let string_id = MutationOp::UpsertNode {
+            node_type: "Person".into(),
+            id: Value::String("x".into()),
+            title: Value::String("b".into()),
+            properties: vec![("tag".to_string(), Value::String("str-id".into()))],
+        };
+        apply_frames(
+            &mut g,
+            &[frame(
+                1,
+                vec![
+                    upsert_node(1, "a", vec![("tag", Value::String("int-id".into()))]),
+                    string_id,
+                ],
+            )],
+            0,
+        )
+        .unwrap();
+        assert_eq!(g.graph.node_count(), 2);
+        let idx = g
+            .lookup_by_id("Person", &Value::Int64(1))
+            .expect("the integer id must still be an integer");
+        assert_eq!(g.graph.get_node_id(idx), Some(Value::Int64(1)));
+        let idx = g
+            .lookup_by_id("Person", &Value::String("x".into()))
+            .expect("the string id must survive alongside it");
+        assert_eq!(g.graph.get_node_id(idx), Some(Value::String("x".into())));
+    }
+
+    /// The title column has the same shape as the id column and the same
+    /// exposure.
+    #[test]
+    fn nodes_whose_titles_differ_in_type_keep_their_titles() {
+        let mut g = DirGraph::new();
+        let numeric_title = MutationOp::UpsertNode {
+            node_type: "Person".into(),
+            id: Value::Int64(2),
+            title: Value::Int64(5),
+            properties: vec![],
+        };
+        apply_frames(
+            &mut g,
+            &[frame(1, vec![upsert_node(1, "a", vec![]), numeric_title])],
+            0,
+        )
+        .unwrap();
+        let title = |g: &mut DirGraph, id: i64| {
+            let idx = g.lookup_by_id("Person", &Value::Int64(id)).unwrap();
+            g.graph.get_node_title(idx)
+        };
+        assert_eq!(title(&mut g, 1), Some(Value::String("a".into())));
+        assert_eq!(title(&mut g, 2), Some(Value::Int64(5)));
+    }
+
+    /// An edge's endpoints are addressed by those same ids, so a mixed-id
+    /// node type must not cost the edges that reach it.
+    #[test]
+    fn edges_reach_endpoints_whose_ids_differ_in_type() {
+        let mut g = DirGraph::new();
+        let string_node = MutationOp::UpsertNode {
+            node_type: "Person".into(),
+            id: Value::String("x".into()),
+            title: Value::String("b".into()),
+            properties: vec![],
+        };
+        let edge = MutationOp::UpsertEdge {
+            conn_type: "KNOWS".into(),
+            src_type: "Person".into(),
+            src_id: Value::Int64(1),
+            tgt_type: "Person".into(),
+            tgt_id: Value::String("x".into()),
+            properties: vec![],
+        };
+        apply_frames(
+            &mut g,
+            &[frame(
+                1,
+                vec![upsert_node(1, "a", vec![]), string_node, knows(1, 2), edge],
+            )],
+            0,
+        )
+        .unwrap();
+        // Nodes: 1, "x", and the id-2 stub `knows(1, 2)` vivifies — three,
+        // not four. A `tgt_id` column holding both `2` and `"x"` renders the
+        // integer endpoint as `"2"`, which matches nothing and vivifies a
+        // *second* stub under a string id.
+        assert_eq!(g.graph.node_count(), 3, "no stub under a stringified id");
+        assert_eq!(g.graph.edge_count(), 2, "both edges land");
+        let src = g.lookup_by_id("Person", &Value::Int64(1)).unwrap();
+        for tgt_id in [Value::Int64(2), Value::String("x".into())] {
+            let tgt = g
+                .lookup_by_id("Person", &tgt_id)
+                .unwrap_or_else(|| panic!("endpoint {tgt_id:?} must exist"));
+            assert!(
+                g.graph.find_edge(src, tgt).is_some(),
+                "the edge to {tgt_id:?} must connect that node"
+            );
+        }
+    }
+
+    /// Same on a mapped graph — the per-value path must reach the mmap-backed
+    /// backend as the bulk one does.
+    #[test]
+    fn mixed_typed_property_keeps_its_types_on_a_mapped_graph() {
+        use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+        let mut g = new_dir_graph_in_mode(StorageMode::Mapped, None).unwrap();
+        assert!(g.graph.is_mapped(), "fixture must really be mapped");
+        apply_frames(
+            &mut g,
+            &[frame(
+                1,
+                vec![
+                    upsert_node(1, "a", vec![("m", Value::Int64(1))]),
+                    upsert_node(2, "b", vec![("m", Value::String("two".into()))]),
+                ],
+            )],
+            0,
+        )
+        .unwrap();
+        assert!(g.graph.is_mapped(), "replay must not switch the backend");
+        assert_eq!(prop(&mut g, 1, "m"), Some(Value::Int64(1)));
+        assert_eq!(prop(&mut g, 2, "m"), Some(Value::String("two".into())));
+    }
+
+    /// Edge properties fold through the same `DataFrame` builder.
+    #[test]
+    fn mixed_typed_edge_property_keeps_every_value_type() {
+        let mut g = DirGraph::new();
+        let knows_with = |src: i64, tgt: i64, v: Value| MutationOp::UpsertEdge {
+            conn_type: "KNOWS".into(),
+            src_type: "Person".into(),
+            src_id: Value::Int64(src),
+            tgt_type: "Person".into(),
+            tgt_id: Value::Int64(tgt),
+            properties: vec![("w".to_string(), v)],
+        };
+        apply_frames(
+            &mut g,
+            &[frame(
+                1,
+                vec![
+                    upsert_node(1, "a", vec![]),
+                    upsert_node(2, "b", vec![]),
+                    upsert_node(3, "c", vec![]),
+                    knows_with(1, 2, Value::Int64(7)),
+                    knows_with(1, 3, Value::String("heavy".into())),
+                ],
+            )],
+            0,
+        )
+        .unwrap();
+        let w = |g: &mut DirGraph, src: i64, tgt: i64| -> Option<Value> {
+            let s = g.lookup_by_id("Person", &Value::Int64(src))?;
+            let t = g.lookup_by_id("Person", &Value::Int64(tgt))?;
+            let e = g.graph.find_edge(s, t)?;
+            g.graph
+                .edge_weight(e)?
+                .properties
+                .iter()
+                .find(|(k, _)| *k == InternedKey::from_str("w"))
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(w(&mut g, 1, 2), Some(Value::Int64(7)));
+        assert_eq!(w(&mut g, 1, 3), Some(Value::String("heavy".into())));
     }
 
     #[test]

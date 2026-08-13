@@ -299,28 +299,108 @@ def test_typed_columns_do_not_change_what_the_wal_replays(tmp_path, storage):
     assert g.cypher("MATCH (n:Item {id:2}) RETURN n.count AS c").scalar() is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PRE-EXISTING WAL DEFECT, surfaced while testing Phase 5(ii) and NOT "
-        "caused by it. A property that arrives with two different value types "
-        "across nodes replays with the numeric one coerced to a string: node 1 "
-        "is written `mixedish = 1` and reads back `'1'` after recovery. "
-        "Reproduced on a graph that never went columnar at all (no `save()`, "
-        "so the properties stay row-shaped), which is what rules the columnar "
-        "column typing out as the cause - the coercion is in WAL capture or "
-        "replay, where a per-property type is decided for the whole batch. "
-        "This is unrecoverable type loss across a crash, not a wrong answer "
-        "you can re-query, so it is pinned rather than reported and forgotten. "
-        "Out of scope for the shape-convergence program's Phase 5; needs its "
-        "own fix in the replay path. strict=True: it goes RED when fixed."
-    ),
-)
-@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES[:1])
+#: One property, a different value type per node. Mixed types under one
+#: property are legal in a live graph (`Value` is a sum type; a columnar
+#: column demotes to `Mixed`), so they have to survive recovery too — and a
+#: bool/int/float trio needs `isinstance`, since `True == 1` and `2.0 == 2`
+#: in Python. Dates are covered in the Rust replay tests instead: the Python
+#: surface renders a `DateTime` as its ISO string, so a date coerced to text
+#: would read back identical here and the check would be vacuous.
+MIXED_BY_ID = {
+    1: 1,
+    2: "two",
+    3: 3.5,
+    4: True,
+    5: [1, 2],
+}
+
+
+def _assert_mixed_intact(g, expected):
+    for node_id, want in expected.items():
+        got = g.cypher(f"MATCH (n:Item {{id:{node_id}}}) RETURN n.mixedish AS m").scalar()
+        assert got == want and isinstance(got, type(want)), (
+            f"node {node_id}: {got!r} ({type(got).__name__}) != {want!r} ({type(want).__name__})"
+        )
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
 def test_a_heterogeneous_property_keeps_its_types_across_replay(tmp_path, storage):
+    """Recovery is value-faithful, not merely value-shaped.
+
+    Replay folds a whole node type's upserts into one bulk `add_nodes` call,
+    whose `DataFrame` columns are singly typed — so a property written as an
+    int on one node and a string on another used to come back as two strings
+    (and an int/float pair as two floats). Type loss across a crash cannot be
+    re-queried away, which is what makes this a durability test rather than a
+    correctness one.
+    """
+    g = _open(tmp_path / "app.kgl", storage)
+    for node_id in MIXED_BY_ID:
+        g.cypher(f"CREATE (:Item {{id: {node_id}, seed: {node_id}}})")
+    del g
+
+    def literal(value):
+        # Cypher spells booleans lowercase; every other value here has a
+        # `repr` Cypher reads the same way Python does.
+        return str(value).lower() if isinstance(value, bool) else repr(value)
+
+    sets = "\n".join(
+        f'g.cypher("MATCH (n:Item {{id:{node_id}}}) SET n.mixedish = {literal(value)}")'
+        for node_id, value in MIXED_BY_ID.items()
+    )
+    _crash_child(tmp_path, "g = open_durable()\n" + sets, storage)
+
+    g = _open(tmp_path / "app.kgl", storage)
+    _assert_mixed_intact(g, MIXED_BY_ID)
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_node_ids_and_titles_keep_their_types_across_replay(tmp_path, storage):
+    """Identity is a value too.
+
+    ``id`` and ``title`` ride the same bulk load as the properties, but cannot
+    be held back from it — rows are addressed by them — so a type carrying an
+    integer id on one node and a string id on another is replayed one shape at
+    a time. Getting this wrong does more than mistype a field: an edge whose
+    endpoint id was stringified matches nothing, and the loader *vivifies* a
+    stub for it, so recovery invents a node that never existed.
+    """
+    _crash_child(
+        tmp_path,
+        """
+        g = open_durable()
+        g.cypher("CREATE (:Item {id: 1, title: 'one'})")
+        g.cypher("CREATE (:Item {id: 'x', title: 2})")
+        g.cypher("MATCH (a:Item {id:1}), (b:Item {id:'x'}) CREATE (a)-[:LINKS]->(b)")
+        """,
+        storage,
+    )
+
+    g = _open(tmp_path / "app.kgl", storage)
+    rows = g.cypher("MATCH (n:Item) RETURN n.id AS id, n.title AS t").to_list()
+    by_id = {r["id"]: r["t"] for r in rows}
+    assert len(rows) == 2, f"no invented stub node: {rows}"
+    # `1` stringified would key this dict under `'1'`, and `2` under `'2'`.
+    assert set(by_id) == {1, "x"}, f"ids kept their types: {rows}"
+    assert by_id[1] == "one"
+    assert by_id["x"] == 2 and isinstance(by_id["x"], int)
+    assert g.cypher("MATCH (a:Item {id:1})-[r:LINKS]->(b:Item {id:'x'}) RETURN count(r) AS c").scalar() == 1
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_a_heterogeneous_property_survives_a_folded_replay(tmp_path, storage):
+    """The same, with the mixed property folded against later ops on the same
+    node.
+
+    The per-value writes land *after* the bulk upsert (which runs in `replace`
+    mode and clears a row's properties first), so this pins the two halves in
+    the right order: the last write to the mixed property still wins, and the
+    ordinary properties written alongside it in the same frame survive.
+    """
     g = _open(tmp_path / "app.kgl", storage)
     g.cypher("CREATE (:Item {id: 1, seed: 1})")
     g.cypher("CREATE (:Item {id: 2, seed: 2})")
+    g.save()  # checkpoint first: the type is columnar for the replay below
     del g
 
     _crash_child(
@@ -329,13 +409,19 @@ def test_a_heterogeneous_property_keeps_its_types_across_replay(tmp_path, storag
         g = open_durable()
         g.cypher("MATCH (n:Item {id:1}) SET n.mixedish = 1")
         g.cypher("MATCH (n:Item {id:2}) SET n.mixedish = 'two'")
+        g.cypher("MATCH (n:Item {id:1}) SET n.mixedish = 4.5, n.note = 'later'")
+        g.cypher("MATCH (n:Item {id:2}) SET n.note = 'kept'")
         """,
         storage,
     )
 
     g = _open(tmp_path / "app.kgl", storage)
-    assert g.cypher("MATCH (n:Item {id:2}) RETURN n.mixedish AS m").scalar() == "two"
-    assert g.cypher("MATCH (n:Item {id:1}) RETURN n.mixedish AS m").scalar() == 1
+    _assert_mixed_intact(g, {1: 4.5, 2: "two"})
+    row = g.cypher("MATCH (n:Item) RETURN n.id AS id, n.note AS note, n.seed AS seed").to_list()
+    assert sorted((r["id"], r["note"], r["seed"]) for r in row) == [
+        (1, "later", 1),
+        (2, "kept", 2),
+    ]
 
 
 @pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)

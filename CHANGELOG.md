@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Crash recovery keeps every property value's type.** A property carrying
+  different types on different nodes — legal in a live graph, where a value is
+  a sum type and a columnar column simply demotes to mixed — came back from
+  WAL replay with all of its values rewritten into one type: an int alongside
+  a string on another node recovered as `'1'`, an int alongside a float as
+  `1.0`, and a `point()` as its WKT text. Replay folds a whole node type's
+  logged upserts into one bulk load whose columns are singly typed, and the
+  bulk loader's type promotion — correct for the data loads it was written
+  for — was silently converting cells on the recovery path. Replay now routes
+  only the columns that survive a load unchanged through it and writes the
+  rest one value at a time afterwards, for node and edge properties alike, so
+  a recovered graph is value-faithful. This was data loss no re-query could
+  undo: the coerced value was all that remained after the crash.
+- **Crash recovery keeps node ids and titles as themselves, and no longer
+  invents nodes.** The same coercion reached the identity columns: a node type
+  holding an integer id on one node and a string id on another recovered with
+  the integer id rewritten as text — and because an edge addresses its
+  endpoints by those ids, a stringified endpoint id matched nothing and the
+  loader vivified a stub node under it, so recovery *added* a node that never
+  existed. Mixed-type titles were rewritten the same way. Identity columns
+  cannot be held back from the bulk load, so replay now splits such a type's
+  rows by shape and loads each shape on its own; a type with uniform ids and
+  titles — the ordinary case — still replays in a single bulk call.
 - **A mutating statement against a saved (columnar) graph no longer copies the
   touched node type's whole column store.** Statement rollback works from an
   undo journal, and the journal's pre-image for a columnar property write used
