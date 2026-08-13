@@ -180,16 +180,24 @@ def _spawn_bolt_server(
     readonly: bool = False,
     extra_args: list[str] | None = None,
     env: dict[str, str] | None = None,
+    binary: Path | None = None,
 ):
     """Spawn `kglite-bolt-server` on an ephemeral port; return (proc, url).
     Caller is responsible for kill+wait on teardown via
     `_teardown_bolt_server`. The `extra_args` list is appended verbatim
     to the command line (e.g. ["--max-message-size", "1024"]); `env` is
     overlaid on the inherited environment (for the flags' env mirrors).
+
+    `binary` overrides which executable is spawned. It exists for the
+    benchmark suites, which pin an explicit copy of a release build: with
+    the default (`_BOLT_BINARY`) a concurrent `cargo build` of the other
+    profile flips `workspace_binary`'s newest-of-profile answer, so a
+    recorded number could silently come from a different profile than the
+    one the run reports.
     """
     port = _find_free_port()
     cmd = [
-        str(_BOLT_BINARY),
+        str(binary or _BOLT_BINARY),
         "--graph",
         str(fixture_path),
         "--bind",

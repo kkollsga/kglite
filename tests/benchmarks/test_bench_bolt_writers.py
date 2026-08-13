@@ -9,7 +9,9 @@ Two sweeps live here: `test_contended_writer_sweep` varies the writer count
 at one write per transaction, and `test_batch_size_sweep` varies the writes
 per transaction at a fixed writer count — the measurement behind the
 operator page's "batch more work into each transaction rather than adding
-writers".
+writers". A third cell, `test_checkpoint_under_contention`, holds the
+writer count fixed and adds a `CALL db.checkpoint()` thread — the price of
+durability under load, since a checkpoint pauses committing writers.
 
 The unit of work runs through `session.execute_write`, i.e. the
 driver-managed path that retries a `Neo.TransientError.*` failure by
@@ -47,6 +49,8 @@ Recorded numbers require a **release**-built `kglite-bolt-server`
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
+from pathlib import Path
 import shutil
 import threading
 import time
@@ -62,6 +66,15 @@ from tests.conftest import (
 neo4j = pytest.importorskip("neo4j")
 
 pytestmark = [pytest.mark.benchmark, pytest.mark.bolt_stress]
+
+#: Binary every cell spawns. Defaults to the shared newest-of-profile
+#: resolution; setting `KGLITE_BENCH_BOLT_BINARY` pins one explicit
+#: executable for the whole run. Recorded numbers use the pinned form with
+#: a *copy* of the release build, because a concurrent `cargo build` of the
+#: other profile would otherwise flip newest-of-profile mid-run and the
+#: recorded row could not say which profile produced it.
+_PINNED_BINARY = os.environ.get("KGLITE_BENCH_BOLT_BINARY")
+_BENCH_BINARY = Path(_PINNED_BINARY) if _PINNED_BINARY else _BOLT_BINARY
 
 
 #: OCC conflict status code. Classification is by code — never by exception
@@ -79,6 +92,13 @@ BATCH_CELLS = ((4, 1), (4, 10), (4, 100), (1, 1), (1, 100))
 
 #: Measurement window per cell, seconds.
 CELL_SECONDS = 5.0
+
+#: Checkpoint-under-contention cell: writers, and how often the checkpoint
+#: thread fires. N=4 is the contended series the batch sweep is about; ~1 s
+#: over a 5 s window gives four calls, each landing on a graph with writes
+#: since the last one (so the digest-skip never answers).
+CHECKPOINT_WRITERS = 4
+CHECKPOINT_PERIOD_S = 1.0
 
 #: Warmup cell (discarded): pays first-write / page-cache / JIT-ish costs.
 WARMUP_WRITERS = 2
@@ -114,6 +134,18 @@ class CellResult:
     slowest_op_attempts: int = 1
     #: CREATEs per committed transaction (the unit of work's batch size).
     batch: int = 1
+    #: `CALL db.checkpoint()` round-trip times, ms — one per call the
+    #: checkpoint thread made (empty in an un-checkpointed cell). This is
+    #: the writer-pause upper bound: `Session::save` holds the session lock
+    #: for its whole duration, so a contended writer waits at most this.
+    checkpoint_ms: list[float] = field(default_factory=list)
+    #: Calls that wrote the file vs. calls the digest-skip answered without
+    #: writing, classified from the verb's `message` column.
+    checkpoints_written: int = 0
+    checkpoints_skipped: int = 0
+    #: Anything the checkpoint thread saw that was neither: a raised
+    #: exception or an unrecognized message. Asserted empty.
+    checkpoint_errors: list[str] = field(default_factory=list)
 
     @property
     def committed_per_s(self) -> float:
@@ -154,8 +186,8 @@ def _percentile(values: list[float], pct: float) -> float:
 @pytest.fixture(scope="module")
 def _writer_fixture(tmp_path_factory):
     """Build the 10k-node graph once; yield the path each cell copies."""
-    if not _BOLT_BINARY.exists():
-        pytest.skip(f"bolt-server binary not built at {_BOLT_BINARY}")
+    if not _BENCH_BINARY.exists():
+        pytest.skip(f"bolt-server binary not built at {_BENCH_BINARY}")
     import pandas as pd
 
     import kglite
@@ -199,6 +231,7 @@ def _run_cell(
     seconds: float,
     tag: str,
     batch: int | None = None,
+    checkpoint_every: float | None = None,
 ) -> CellResult:
     """One cell: `writers` threads hammering `execute_write` for `seconds`.
 
@@ -209,6 +242,13 @@ def _run_cell(
     bare single-node `CREATE`. An integer K runs `_BATCH_QUERY` with K rows,
     including at K=1 — so the batch sweep's cells differ *only* in K, and
     the K=1 cell carries the same `UNWIND`/parameter overhead as K=100.
+
+    `checkpoint_every`, when set, adds one more thread on its own driver
+    session firing `CALL db.checkpoint()` at that period for the whole
+    window — the durability-under-load arm. It is deliberately *not* in the
+    start barrier: the writers' window must not wait on it, and its first
+    call lands one period into the window with writes already in flight.
+    The verb writes the served path, which is this cell's private copy.
     """
     rows_per_tx = 1 if batch is None else batch
     cell_graph = tmp_dir / f"cell_{tag}.kgl"
@@ -302,7 +342,47 @@ def _run_cell(
             if latencies and max(latencies) >= max(result.latencies_ms or [0.0]):
                 result.slowest_op_attempts = slowest_op_attempts
 
-    proc, url = _spawn_bolt_server(cell_graph)
+    def checkpointer(driver) -> None:
+        """Fire `CALL db.checkpoint()` every `checkpoint_every` seconds until
+        the window closes, timing each round-trip.
+
+        `stop.wait(period)` returns True the moment the window ends, so a
+        checkpoint is never issued after `stop.set()` — the timed calls all
+        overlap live writers, which is the point of the arm. The call is
+        auto-commit: the verb refuses to run inside an explicit transaction.
+        """
+        errors: list[str] = []
+        durations: list[float] = []
+        written = 0
+        skipped = 0
+        try:
+            with driver.session() as session:
+                while not stop.wait(checkpoint_every):
+                    t0 = time.perf_counter()
+                    try:
+                        record = session.run("CALL db.checkpoint() YIELD success, message").single()
+                    except Exception as e:  # noqa: BLE001
+                        errors.append(repr(e))
+                        continue
+                    durations.append((time.perf_counter() - t0) * 1000.0)
+                    message = record["message"]
+                    if not record["success"]:
+                        errors.append(f"success=false: {message!r}")
+                    elif message.startswith("checkpoint written"):
+                        written += 1
+                    elif message.startswith("skipped"):
+                        skipped += 1
+                    else:
+                        errors.append(f"unrecognized message: {message!r}")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"session: {e!r}")
+        with lock:
+            result.checkpoint_ms.extend(durations)
+            result.checkpoints_written += written
+            result.checkpoints_skipped += skipped
+            result.checkpoint_errors.extend(errors)
+
+    proc, url = _spawn_bolt_server(cell_graph, binary=_BENCH_BINARY)
     try:
         with neo4j.GraphDatabase.driver(url, auth=("neo4j", "password"), **_RETRY_KW) as driver:
             threads = [threading.Thread(target=worker, args=(driver, i), daemon=True) for i in range(writers)]
@@ -313,11 +393,21 @@ def _run_cell(
             except threading.BrokenBarrierError:
                 pass
             t_start = time.perf_counter()
+            ckpt = None
+            if checkpoint_every is not None:
+                ckpt = threading.Thread(target=checkpointer, args=(driver,), daemon=True)
+                ckpt.start()
             time.sleep(seconds)
             stop.set()
             for t in threads:
                 t.join(timeout=120)
+            # Elapsed is read before joining the checkpoint thread on
+            # purpose. A checkpoint in flight when the window closes would
+            # otherwise be added to the denominator and charge the
+            # checkpointed arm a throughput dip it did not have.
             result.elapsed_s = time.perf_counter() - t_start
+            if ckpt is not None:
+                ckpt.join(timeout=120)
 
             with driver.session() as session:
                 record = session.run(
@@ -332,7 +422,7 @@ def _run_cell(
 def _format_table(cells: list[CellResult]) -> str:
     lines = [
         "",
-        f"bolt contended writers — binary: {_BOLT_BINARY}",
+        f"bolt contended writers — binary: {_BENCH_BINARY}",
         f"{'N':>3} {'committed/s':>12} {'committed':>10} {'attempts':>9} {'retry_rate':>11} "
         f"{'p50_ms':>8} {'p95_ms':>8} {'p99_ms':>8} {'max_ms':>9} {'mean_ms':>8} "
         f"{'max_att':>8} {'slow_att':>9} {'exhaust':>8}",
@@ -351,7 +441,7 @@ def _format_table(cells: list[CellResult]) -> str:
 def _format_batch_table(cells: list[CellResult]) -> str:
     lines = [
         "",
-        f"bolt batch-size sweep — binary: {_BOLT_BINARY}",
+        f"bolt batch-size sweep — binary: {_BENCH_BINARY}",
         f"{'N':>3} {'K':>5} {'ops/s':>10} {'tx/s':>9} {'committed':>10} {'attempts':>9} "
         f"{'retry_rate':>11} {'p50_ms':>8} {'p95_ms':>8} {'max_ms':>9} {'exhaust':>8}",
     ]
@@ -363,6 +453,84 @@ def _format_batch_table(cells: list[CellResult]) -> str:
             f"{max(c.latencies_ms or [0.0]):>9.2f} {c.exhausted_conflicts:>8}"
         )
     return "\n".join(lines)
+
+
+def _format_checkpoint_table(cells: list[tuple[str, CellResult]]) -> str:
+    lines = [
+        "",
+        f"bolt checkpoint-under-contention (N={CHECKPOINT_WRITERS}) — binary: {_BENCH_BINARY}",
+        f"{'arm':>14} {'committed/s':>12} {'committed':>10} {'retry_rate':>11} "
+        f"{'p50_ms':>8} {'p95_ms':>8} {'max_ms':>9} "
+        f"{'ckpt_w':>7} {'ckpt_skip':>10} {'ckpt_p50_ms':>12} {'ckpt_max_ms':>12}",
+    ]
+    for arm, c in cells:
+        lines.append(
+            f"{arm:>14} {c.committed_per_s:>12.1f} {c.committed:>10} {c.retry_rate:>11.3f} "
+            f"{_percentile(c.latencies_ms, 50):>8.2f} {_percentile(c.latencies_ms, 95):>8.2f} "
+            f"{max(c.latencies_ms or [0.0]):>9.2f} "
+            f"{c.checkpoints_written:>7} {c.checkpoints_skipped:>10} "
+            f"{_percentile(c.checkpoint_ms, 50):>12.2f} {max(c.checkpoint_ms or [0.0]):>12.2f}"
+        )
+    if len(cells) == 2:
+        base, ckpt = cells[0][1].committed_per_s, cells[1][1].committed_per_s
+        dip = (base - ckpt) / base * 100.0 if base else 0.0
+        lines.append(f"  committed-throughput dip with checkpointing: {dip:+.1f}%")
+    return "\n".join(lines)
+
+
+def test_checkpoint_under_contention(_writer_fixture, tmp_path):
+    """What `CALL db.checkpoint()` costs the writers it interrupts.
+
+    `Session::save` holds the session lock for its whole duration (it
+    mutates the graph: metadata stamp, index keys, columnar consolidation),
+    so a checkpoint pauses committing writers rather than running beside
+    them. This cell prices that pause the only way that matters to an
+    operator: two otherwise-identical windows of N contended managed
+    writers, one with a thread firing the verb about once a second and one
+    without, and the difference in committed throughput.
+
+    Nothing numeric is asserted — same as every cell in this module. The
+    sanity invariants are the ones that would invalidate the number:
+    the landed==committed oracle survives concurrent saving, no
+    non-conflict error escaped, and the checkpointed arm really did write
+    the file more than once (a run where every call hit the digest-skip
+    would be a baseline wearing a checkpoint thread's clothes).
+
+    Recorded in `dev-docs/bench/results/results.csv` under
+    `bolt_checkpoint:*`; the docs' qualitative claim about checkpoint cost
+    is this measurement.
+    """
+    # Warmup cell — discarded.
+    _run_cell(_writer_fixture, tmp_path, WARMUP_WRITERS, WARMUP_SECONDS, "ckptwarm")
+
+    baseline = _run_cell(_writer_fixture, tmp_path, CHECKPOINT_WRITERS, CELL_SECONDS, "ckptbase")
+    checkpointed = _run_cell(
+        _writer_fixture,
+        tmp_path,
+        CHECKPOINT_WRITERS,
+        CELL_SECONDS,
+        "ckpton",
+        checkpoint_every=CHECKPOINT_PERIOD_S,
+    )
+
+    print(_format_checkpoint_table([("baseline", baseline), ("checkpointed", checkpointed)]))
+
+    for arm, c in (("baseline", baseline), ("checkpointed", checkpointed)):
+        assert c.hard_errors == [], f"{arm}: non-conflict errors: {c.hard_errors[:3]}"
+        assert c.committed > 0, f"{arm}: no writer committed"
+        # The oracle the whole arm rests on: a save running concurrently
+        # with commits must not lose or duplicate a committed write.
+        assert c.landed == c.committed, f"{arm}: landed {c.landed} != committed {c.committed}"
+        assert c.committed_per_s > 0
+
+    assert baseline.checkpoint_ms == [], "baseline arm must not have checkpointed"
+    assert checkpointed.checkpoint_errors == [], f"checkpoint errors: {checkpointed.checkpoint_errors[:3]}"
+    # Under continuous writes every call should find a new version, so a
+    # skip here means the writers stalled or the digest logic changed.
+    assert checkpointed.checkpoints_written >= 2, (
+        f"expected >=2 real checkpoint writes, got {checkpointed.checkpoints_written} "
+        f"written / {checkpointed.checkpoints_skipped} skipped"
+    )
 
 
 def test_contended_writer_sweep(_writer_fixture, tmp_path):
