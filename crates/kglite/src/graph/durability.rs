@@ -58,7 +58,15 @@
 //! commit. [`ensure_recovered`] is that refusal, shared so the two openers
 //! decide on identical terms.
 //!
+//! One route stays open even then, because [`load_file`] is deliberately
+//! unguarded (it is the primitive recovery itself is built on): load, mutate,
+//! save back. [`ensure_save_target_recovered`] closes it at the *save*, on the
+//! same predicate — a save whose outgoing `checkpoint_lsn` would leave frames
+//! in front of it is refused, which the four-step checkpoint order makes
+//! impossible for a durable owner's own checkpoint.
+//!
 //! [`open_or_create_graph`]: crate::graph::io::open::open_or_create_graph
+//! [`load_file`]: crate::graph::io::file::load_file
 
 use std::io;
 use std::path::Path;
@@ -245,8 +253,7 @@ pub fn ensure_recovered(
     checkpoint_path: &Path,
     checkpoint_lsn: u64,
 ) -> Result<(), DurableOpenError> {
-    let wpath = wal_path(checkpoint_path);
-    if unreplayed(&read_sidecar(&wpath)?, checkpoint_lsn) {
+    if let Some(wpath) = unrecovered_sidecar(checkpoint_path, checkpoint_lsn)? {
         return Err(DurableOpenError::Refused(format!(
             "the write-ahead log at '{}' holds commits this checkpoint does not contain, \
              and this open attaches no log — it would neither replay them nor keep them, \
@@ -260,8 +267,57 @@ pub fn ensure_recovered(
     Ok(())
 }
 
-/// The exit that is the same whichever open was refused: the frames are only
-/// discardable deliberately, by moving the sidecar out of the way.
+/// Refuse a **checkpoint write** to `checkpoint_path` while its sidecar holds
+/// frames that a graph stamped `checkpoint_lsn` would strand in front of it.
+///
+/// The save-side half of the same rule, for the route [`ensure_recovered`]
+/// cannot cover: [`load_file`] is deliberately unguarded, so a non-durable
+/// owner still *reads* a path whose sidecar runs ahead — and may then save back
+/// over it. That save neither stamps `checkpoint_lsn` nor truncates the log, so
+/// the frames outlive it and the next durable open replays them over the newer
+/// state: data that was saved comes back as an older commit. Refusing the save
+/// closes that without taking the read away.
+///
+/// `checkpoint_lsn` is the stamp the *outgoing* `.kgl` will carry, so the
+/// frames this refuses on are exactly the ones a later durable open would
+/// replay over it — replay is gated on that same stamp. A durable owner's
+/// checkpoint therefore passes by construction rather than by exemption: step 2
+/// of the checkpoint order ([`checkpoint_prologue`]) stamps `next_lsn - 1`
+/// before the save, which is at or above every frame in its own log.
+///
+/// [`load_file`]: crate::graph::io::file::load_file
+pub fn ensure_save_target_recovered(
+    checkpoint_path: &Path,
+    checkpoint_lsn: u64,
+) -> Result<(), DurableOpenError> {
+    if let Some(wpath) = unrecovered_sidecar(checkpoint_path, checkpoint_lsn)? {
+        return Err(DurableOpenError::Refused(format!(
+            "the write-ahead log at '{}' holds commits the graph being saved does not \
+             contain, and saving here would strand them: they sit past this checkpoint's \
+             log-sequence stamp, so a later durable open would replay them back over the \
+             state this save is about to write. Open the graph through a durable entry \
+             point (a durable graph handle, or a Session, at level 'full' or 'normal') to \
+             replay them first, {DISCARD_EXIT}",
+            wpath.display(),
+        )));
+    }
+    Ok(())
+}
+
+/// The one predicate both refusals ask, so an open and a save can never
+/// disagree about what counts as unrecovered: the sidecar path when it holds
+/// frames past `checkpoint_lsn`, `None` when it does not.
+fn unrecovered_sidecar(
+    checkpoint_path: &Path,
+    checkpoint_lsn: u64,
+) -> Result<Option<std::path::PathBuf>, DurableOpenError> {
+    let wpath = wal_path(checkpoint_path);
+    let frames = read_sidecar(&wpath)?;
+    Ok(unreplayed(&frames, checkpoint_lsn).then_some(wpath))
+}
+
+/// The exit that is the same whichever operation was refused: the frames are
+/// only discardable deliberately, by moving the sidecar out of the way.
 const DISCARD_EXIT: &str = "or move the sidecar aside first to deliberately discard those commits.";
 
 /// Read (do not truncate) whatever the last durable owner left behind. Torn

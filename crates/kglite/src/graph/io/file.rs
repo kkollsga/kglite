@@ -1540,7 +1540,7 @@ pub fn save_inmemory_with(graph: &mut Arc<DirGraph>, path: &str, fsync: bool) ->
 /// save-dispatch — the wheel (`KnowledgeGraph::save`), the MCP server,
 /// and the C ABI (`kglite_save_graph`) all route through it so dispatch
 /// + durability behaviour can't drift between bindings.
-pub fn save_graph(graph: &mut Arc<DirGraph>, path: &str) -> Result<(), String> {
+pub fn save_graph(graph: &mut Arc<DirGraph>, path: &str) -> Result<(), SaveError> {
     save_graph_with(graph, path, true)
 }
 
@@ -1549,12 +1549,24 @@ pub fn save_graph(graph: &mut Arc<DirGraph>, path: &str) -> Result<(), String> {
 /// disk-backed graphs persist through `DirGraph::save_disk`, which manages
 /// its own durability, so the flag does not apply to them. `fsync = false`
 /// is the fast, non-durable opt-out (atomic rename, no crash barrier).
-pub fn save_graph_with(graph: &mut Arc<DirGraph>, path: &str, fsync: bool) -> Result<(), String> {
+///
+/// Being the single dispatch, this is also where the *write-ahead* rule is
+/// enforced: a save that would strand unreplayed frames in front of the
+/// checkpoint it writes is refused before the path is touched
+/// ([`save_guard`], and [`SaveError::Refused`] for what a binding does with
+/// it). A durable owner's own checkpoint is never refused — its prologue
+/// stamps `checkpoint_lsn` first.
+pub fn save_graph_with(
+    graph: &mut Arc<DirGraph>,
+    path: &str,
+    fsync: bool,
+) -> Result<(), SaveError> {
+    save_guard::ensure_target_recovered(graph, path)?;
     if graph.graph.is_disk() {
         let dir = crate::graph::handle::make_dir_graph_mut_preserving_lineage(graph);
-        return dir.save_disk(path);
+        return dir.save_disk(path).map_err(SaveError::Io);
     }
-    save_inmemory_with(graph, path, fsync).map_err(|e| e.to_string())
+    save_inmemory_with(graph, path, fsync).map_err(|e| SaveError::Io(e.to_string()))
 }
 
 // ─── Load ────────────────────────────────────────────────────────────────────
@@ -2378,6 +2390,9 @@ fn load_portable_columnar(
 
 mod columns;
 use columns::{attach_portable_column_stores, load_column_sidecars};
+
+mod save_guard;
+pub use save_guard::SaveError;
 
 mod vector_persistence;
 

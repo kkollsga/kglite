@@ -370,10 +370,15 @@ pub mod api {
             export_embeddings_to_file, import_embeddings_from_file, EmbeddingExportFilter,
             ImportStats,
         };
-        /// `.kgl` load / save (the canonical persistence format).
+        /// `.kgl` load / save (the canonical persistence format). `save_graph`
+        /// and `save_graph_with` are the single save dispatch and report
+        /// `SaveError`, whose `Refused` variant is a save declined *before*
+        /// the path was touched — a write-ahead sidecar beside the target
+        /// holds commits this checkpoint would strand. Bindings map that to
+        /// their own class for a bad request, not to an I/O failure.
         pub use crate::graph::io::file::{
             load_file, load_kgl_bytes, prepare_save, save_graph, save_graph_with, write_kgl,
-            write_kgl_to, write_kgl_with,
+            write_kgl_to, write_kgl_with, SaveError,
         };
         pub use crate::graph::io::ntriples::{
             load_ntriples, Cancelled, NTriplesConfig, ProgressEvent, ProgressSink, ProgressValue,

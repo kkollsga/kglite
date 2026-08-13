@@ -637,9 +637,22 @@ impl KnowledgeGraph {
         // directory fsync (when `fsync`). Routing through the one shared
         // dispatch keeps the wheel / MCP server / C ABI from drifting. Release
         // the GIL for the heavy serialize+write.
+        //
+        // The dispatch also enforces the write-ahead rule: a save that would
+        // strand committed frames in front of the checkpoint it writes is
+        // refused before the file is touched. That is a `ValueError` — the
+        // class every other durability refusal raises (`kglite.open` at
+        // `durable='off'` over a live sidecar), and the one a caller catches
+        // to mean "this path is not a safe target as it stands" — while a
+        // genuine write failure stays an `IOError`.
         let inner = &mut self.inner;
         py.detach(move || io::save_graph_with(inner, path, fsync))
-            .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
+            .map_err(|error| match error {
+                io::SaveError::Refused(message) => {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
+                }
+                io::SaveError::Io(message) => PyErr::new::<pyo3::exceptions::PyIOError, _>(message),
+            })?;
 
         // Checkpoint step 4 (`kglite::api::durable::checkpoint_epilogue`): the
         // .kgl now holds the full current state, so discard the capture buffer

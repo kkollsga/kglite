@@ -652,6 +652,120 @@ def test_off_accepts_a_log_the_checkpoint_already_contains(tmp_path, level):
     assert g.cypher("MATCH (p:Person) RETURN p.name AS n").scalar() == "Alice"
 
 
+# ── the save side of the same rule ───────────────────────────────────
+#
+# ``kglite.load()`` is deliberately NOT guarded: it is the primitive durable
+# recovery is itself built on, and the documented way to read a graph another
+# process is writing durably, where a sidecar ahead of the checkpoint is the
+# steady state rather than a fault. So the hazard still reaches the disk from
+# the other end — load, mutate, ``save()`` back over the path — and is refused
+# there instead, which closes it without taking the read away.
+
+
+def _crashed_writer_leaves_a_commit(tmp_path) -> None:
+    """Seed ``app.kgl`` with ``age=1``, then leave a committed ``age=2`` in the
+    sidecar that no checkpoint contains — a durable writer that died between a
+    commit and its next ``save()``."""
+    g = _open(tmp_path / "app.kgl", "memory", durable="full")
+    g.cypher("CREATE (:Person {id: 1, name: 'Alice', age: 1})")
+    g.save()
+    del g  # release the single-writer lease before the child opens it
+
+    _crash_child(
+        tmp_path,
+        """
+        g = open_durable()
+        g.cypher("MATCH (p:Person {id: 1}) SET p.age = 2")
+        """,
+    )
+    assert (tmp_path / "app.kgl-wal").exists()
+
+
+def test_save_over_an_unreplayed_log_is_refused(tmp_path):
+    """The third route into the same corruption, measured end-to-end before
+    this refusal existed: ``kglite.load()`` returns the checkpoint (silently
+    missing ``age=2``), the caller writes ``age=3`` and saves — and because
+    that save neither stamps ``checkpoint_lsn`` nor truncates the sidecar, the
+    next durable open replayed the stale frame OVER it and ``age`` came back
+    as ``2``. Saved data, rolled back to an older commit, with no error
+    anywhere.
+
+    The save is now refused, and the refusal must name both ways out. Both are
+    then exercised below, because a refusal whose advertised remedy does not
+    work is worse than none."""
+    _crashed_writer_leaves_a_commit(tmp_path)
+    path = tmp_path / "app.kgl"
+
+    g = kglite.load(str(path))
+    assert g.cypher("MATCH (p:Person) RETURN p.age AS a").scalar() == 1, (
+        "load() reads the checkpoint alone — the committed frame is invisible to it"
+    )
+    g.cypher("MATCH (p:Person {id: 1}) SET p.age = 3")
+    with pytest.raises(ValueError) as excinfo:
+        g.save()
+    message = str(excinfo.value)
+    assert "app.kgl-wal" in message, "must name the sidecar that holds the commits"
+    assert "'full'" in message and "'normal'" in message, "must name the replaying levels"
+    assert "move the sidecar aside" in message, "must name the deliberate-discard exit"
+    del g
+
+    # Nothing was written and nothing was consumed: the checkpoint still holds
+    # what it did, and the commit is still there for the advertised route.
+    assert kglite.load(str(path)).cypher("MATCH (p:Person) RETURN p.age AS a").scalar() == 1
+    g = kglite.open(str(path), durable="full")
+    assert g.cypher("MATCH (p:Person) RETURN p.age AS a").scalar() == 2
+    g.cypher("MATCH (p:Person {id: 1}) SET p.age = 3")
+    g.save()  # the durable owner's checkpoint folds the log in and truncates it
+    del g
+
+    # …and once recovered, the same load → write → save round trip goes
+    # through, and survives a durable reopen.
+    g = kglite.load(str(path))
+    g.cypher("MATCH (p:Person {id: 1}) SET p.age = 4")
+    g.save()
+    del g
+    assert kglite.open(str(path), durable="full").cypher("MATCH (p:Person) RETURN p.age AS a").scalar() == 4
+
+
+def test_save_as_onto_a_path_whose_log_runs_ahead_is_refused(tmp_path):
+    """The target path's sidecar is what matters, not the origin's. Writing a
+    graph loaded from somewhere else over a path with unreplayed frames
+    orphans them in exactly the same way — the new checkpoint knows nothing
+    about them, and the next durable open replays them over it."""
+    _crashed_writer_leaves_a_commit(tmp_path)
+
+    other = kglite.KnowledgeGraph()
+    other.cypher("CREATE (:Person {id: 9, name: 'Elsewhere'})")
+    with pytest.raises(ValueError) as excinfo:
+        other.save(str(tmp_path / "app.kgl"))
+    assert "app.kgl-wal" in str(excinfo.value)
+
+    # A path with no sidecar at all is the common case and is untouched.
+    other.save(str(tmp_path / "fresh.kgl"))
+    assert (tmp_path / "fresh.kgl").exists()
+
+
+def test_save_over_crash_residue_still_works(tmp_path):
+    """What keeps the refusal non-vacuous in the other direction: frames the
+    checkpoint already folded in are the harmless residue of a crash between
+    the ``.kgl`` write and the log truncation. A refusal keyed on "the sidecar
+    is non-empty" would strand every such graph behind an error."""
+    path = tmp_path / "app.kgl"
+    wal = tmp_path / "app.kgl-wal"
+
+    g = _open(path, "memory", durable="full")
+    g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
+    residue = wal.read_bytes()  # the log one instant before the checkpoint
+    g.save()
+    del g
+    wal.write_bytes(residue)  # crash between the .kgl write and the truncation
+
+    g = kglite.load(str(path))
+    g.cypher("CREATE (:Person {id: 2, name: 'Bob'})")
+    g.save()
+    assert kglite.load(str(path)).cypher("MATCH (p:Person) RETURN count(*) AS c").scalar() == 2
+
+
 # ── durability levels ────────────────────────────────────────────────
 #
 # ``durable="normal"`` logs every commit but skips the per-commit barrier.

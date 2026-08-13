@@ -255,7 +255,8 @@ impl Session {
     pub fn save(&self, path: &str, fsync: bool) -> Result<(), String> {
         let mut guard = self.graph.lock().unwrap_or_else(|p| p.into_inner());
         let durable = self.checkpoint_prologue(&mut guard)?;
-        crate::graph::io::file::save_graph_with(&mut guard, path, fsync || durable)?;
+        crate::graph::io::file::save_graph_with(&mut guard, path, fsync || durable)
+            .map_err(|e| e.to_string())?;
         if durable {
             self.checkpoint_epilogue(&mut guard)?;
         }

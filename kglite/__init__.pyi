@@ -3613,6 +3613,18 @@ class KnowledgeGraph:
         Load it back with :func:`kglite.load` (accepts both files and
         directories).
 
+        **A path whose write-ahead log runs ahead of it is refused.** If a
+        ``<path>-wal`` sidecar beside the target still holds commits this graph
+        does not contain — a durable writer that died before its next
+        checkpoint — saving here would strand them: the sidecar outlives the
+        new file, and the next ``kglite.open(path, durable=...)`` replays those
+        commits back over what was just saved. ``save()`` raises ``ValueError``
+        instead, naming the sidecar and the two ways out: reopen the path
+        durably (``kglite.open(path, durable="full")``) to replay the commits
+        first, or move the sidecar aside to discard them deliberately. A graph
+        opened with ``durable=`` is never affected — its own checkpoint folds
+        its log in.
+
         Args:
             path: Output file path (typically ``*.kgl``). May be omitted if the
                 graph was opened via :func:`kglite.open` or :func:`kglite.load`,

@@ -131,6 +131,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deliberately unguarded: it is the primitive durable recovery is itself built
   on, and the way to read a graph another process is writing durably, where a
   sidecar running ahead of the checkpoint is the steady state.
+- **`load()` → mutate → `save()` over a live WAL sidecar is now refused
+  instead of being silently rolled back later.** `kglite.load(path)` (and
+  `kglite.open_session(path)`) read the checkpoint alone by design, so a path
+  whose sidecar still held commits the `.kgl` did not contain came back
+  missing them — and saving back over that path stranded the frames in front
+  of the new checkpoint, so the *next* durable open replayed them over it.
+  Measured end to end: a graph saved with `age=3` came back as `age=2`. The
+  save now refuses, in the single save dispatch
+  (`kglite::api::io::save_graph[_with]`, which the wheel, the MCP server, the
+  CLI, the C ABI and `Session::save` all route through), so every binding
+  gets the same refusal: `ValueError` in Python — the class every other
+  durability refusal already raises — naming the sidecar and both ways out
+  (reopen the path durably to replay the commits, or move the sidecar aside
+  to discard them deliberately). The rule is "the sidecar holds frames past
+  the `checkpoint_lsn` this save is about to write", which is exactly the set
+  a later durable open would replay over it; the target path's sidecar is what
+  counts, so a "save as" onto such a path is refused too. A durable owner's
+  own checkpoint is never refused, and not by an exemption: its prologue
+  stamps `checkpoint_lsn` before the write, so its frames are already at or
+  below the stamp. Crash residue (frames at or below the stamp) still saves
+  fine. `save_graph`/`save_graph_with` now return a typed `SaveError` whose
+  `Refused` variant means nothing was written, so a binding can map a refusal
+  to its own bad-request class instead of an I/O failure.
 
 ## [0.15.13] - 2026-08-12
 

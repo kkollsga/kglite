@@ -613,10 +613,13 @@ pub unsafe extern "C" fn kglite_save_graph(
                     }
                     KgliteStatusCode::Ok
                 }
-                Err(msg) => {
+                // A refusal (`SaveError::Refused`) reports FILE_IO too: the
+                // status set is ABI-frozen within this major, and the message
+                // names the sidecar and both ways out.
+                Err(error) => {
                     if !out_error_msg.is_null() {
                         unsafe {
-                            *out_error_msg = alloc_c_string(&msg);
+                            *out_error_msg = alloc_c_string(&error.to_string());
                         }
                     }
                     KgliteStatusCode::FileIo
@@ -874,10 +877,13 @@ pub unsafe extern "C" fn kglite_save_graph_durable(
                     }
                     KgliteStatusCode::Ok
                 }
-                Err(msg) => {
+                // A refusal (`SaveError::Refused`) reports FILE_IO too: the
+                // status set is ABI-frozen within this major, and the message
+                // names the sidecar and both ways out.
+                Err(error) => {
                     if !out_error_msg.is_null() {
                         unsafe {
-                            *out_error_msg = alloc_c_string(&msg);
+                            *out_error_msg = alloc_c_string(&error.to_string());
                         }
                     }
                     KgliteStatusCode::FileIo
