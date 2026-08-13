@@ -360,6 +360,12 @@ pub struct DirGraph {
     /// plan-cache key so a cached plan can never leak across graphs.
     #[serde(skip, default = "next_graph_id")]
     pub graph_id: u64,
+    /// High-water mark for engine-minted node ids — see
+    /// [`DirGraph::next_auto_node_id`]. Never serialized: it is re-derived
+    /// from `node_bound()` on first use, so a loaded `.kgl` starts above the
+    /// ids it holds without persisting (or format-breaking for) a counter.
+    #[serde(skip, default)]
+    pub(crate) next_auto_id: u32,
     /// Property key interner: maps InternedKey(u64) → original string.
     /// Populated during ingestion (add_nodes, CREATE, SET) and deserialization.
     /// Skipped during serde — rebuilt on load by the InternedKey Deserialize impl.
@@ -476,6 +482,55 @@ impl DirGraph {
         self.graph_id
     }
 
+    /// Mint the next **engine-assigned** node id, for a `CREATE` that supplied
+    /// no `id` property.
+    ///
+    /// ## Why this is not `node_bound()`
+    ///
+    /// It used to be. `StableDiGraph::node_bound` is an *index-space* bound,
+    /// not an allocator: it shrinks when the highest-indexed nodes are removed,
+    /// and it stalls while `add_node` refills previously-freed slots. So both
+    /// of these minted a live id a second time — silently, since the per-type
+    /// id index is a map and simply drops the loser:
+    ///
+    /// - `CREATE`×5, `DELETE` two, `CREATE`×3 → two nodes with id 5.
+    /// - `CREATE`, `DELETE`, `save()`, `load()`, `CREATE`×3 → *three* nodes
+    ///   sharing one id.
+    ///
+    /// That is engine-side identity corruption, and it is distinct from the
+    /// documented "uniqueness is opt-in" rule (CYPHER.md), which governs ids
+    /// the **caller** supplies: a caller who writes `{id: 1}` twice has asked
+    /// for two nodes and gets a `duplicate_id`-auditable graph, whereas a
+    /// caller who supplies no id has asked the engine for an identity and must
+    /// get a distinct one. It is also how the defect reaches durability: WAL
+    /// replay folds ops by `(node_type, id)`, so a duplicate id makes recovery
+    /// silently *merge* two nodes the live graph kept apart.
+    ///
+    /// The mark is a session-scoped high-water line rather than a persisted
+    /// counter: `max`-ing against `node_bound()` on every call re-seeds it
+    /// above a freshly loaded graph's own ids for free, so no `.kgl` field —
+    /// and no postcard format break — is needed. In the common no-delete case
+    /// the two advance in lockstep and the ids handed out are byte-identical
+    /// to the old ones (0, 1, 2, …).
+    pub(crate) fn next_auto_node_id(&mut self) -> Value {
+        let candidate = self.next_auto_id.max(self.graph.node_bound() as u32);
+        self.next_auto_id = candidate.saturating_add(1);
+        Value::UniqueId(candidate)
+    }
+
+    /// Keep the auto-id high-water mark above an id the *caller* supplied, so
+    /// a later engine-minted id cannot land on it. Cheap enough (one compare)
+    /// to call from every write path that accepts caller ids; a non-integer id
+    /// shares no value space with `UniqueId` and is ignored.
+    pub(crate) fn observe_explicit_id(&mut self, id: &Value) {
+        let seen = match id {
+            Value::UniqueId(u) => *u,
+            Value::Int64(i) if *i >= 0 && *i <= u32::MAX as i64 => *i as u32,
+            _ => return,
+        };
+        self.next_auto_id = self.next_auto_id.max(seen.saturating_add(1));
+    }
+
     /// Set the version directly. Used by [`crate::graph::session::Session::commit`]
     /// to bump the working DirGraph's version on commit-swap. Not
     /// for general use — mutation paths bump version through their
@@ -551,6 +606,7 @@ impl DirGraph {
     pub fn new() -> Self {
         DirGraph {
             graph_id: next_graph_id(),
+            next_auto_id: 0,
             graph: GraphBackend::new(),
             type_indices: TypeIndexStore::new(),
             schema_definition: None,
@@ -608,6 +664,7 @@ impl DirGraph {
     pub fn from_graph(graph: GraphBackend) -> Self {
         DirGraph {
             graph_id: next_graph_id(),
+            next_auto_id: 0,
             graph,
             type_indices: TypeIndexStore::new(),
             schema_definition: None,

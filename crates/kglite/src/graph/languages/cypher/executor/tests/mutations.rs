@@ -76,6 +76,59 @@ fn test_create_rejects_duplicate_primary_key() {
     assert_eq!(graph.graph.node_count(), 3);
 }
 
+/// Every id the *engine* mints must be unique — a `CREATE` with no `id`
+/// property asks the engine for an identity, so handing out one that is
+/// already live is engine-side identity corruption, not the documented
+/// "uniqueness is opt-in" behaviour (which is about ids the *caller*
+/// supplies).
+///
+/// The regression: the allocator was `Value::UniqueId(node_bound())`, and
+/// `StableDiGraph::node_bound` is neither monotonic nor injective — it
+/// shrinks when the highest nodes are deleted and stalls while freed slots
+/// are refilled. So `DELETE` followed by `CREATE` re-minted a live id, and
+/// the resulting duplicate is silently *merged* by WAL replay (recovery is
+/// keyed on `(node_type, id)`), turning it into durable data loss.
+#[test]
+fn test_auto_assigned_ids_are_never_reused_after_delete() {
+    fn run(g: &mut DirGraph, q: &str) {
+        let query = parser::parse_cypher(q).unwrap();
+        execute_mutable(
+            g,
+            &query,
+            HashMap::new(),
+            crate::graph::algorithms::Interrupt::default(),
+        )
+        .unwrap();
+    }
+    fn live_ids(g: &DirGraph) -> Vec<Value> {
+        g.graph
+            .node_indices()
+            .filter_map(|i| g.graph.node_view(i).map(|n| n.id().into_owned()))
+            .collect()
+    }
+
+    let mut graph = DirGraph::new();
+    for i in 0..5 {
+        run(&mut graph, &format!("CREATE (n:T {{tag: 'a{i}'}})"));
+    }
+    // Free two slots in the middle of the index space.
+    run(
+        &mut graph,
+        "MATCH (n:T) WHERE n.tag IN ['a3','a4'] DELETE n",
+    );
+    for i in 0..3 {
+        run(&mut graph, &format!("CREATE (n:T {{tag: 'b{i}'}})"));
+    }
+
+    let ids = live_ids(&graph);
+    let unique: std::collections::HashSet<&Value> = ids.iter().collect();
+    assert_eq!(
+        unique.len(),
+        ids.len(),
+        "engine-minted ids collided after DELETE: {ids:?}"
+    );
+}
+
 #[test]
 fn test_create_node_with_properties() {
     let mut graph = DirGraph::new();

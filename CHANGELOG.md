@@ -127,6 +127,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`CREATE` no longer hands out an `id` that another node already holds.** A
+  `CREATE` with no `id` property asks the engine for an identity, and the
+  allocator was `node_bound()` — an index-space bound, not a counter. It
+  shrinks when the highest-indexed nodes are deleted and stalls while freed
+  slots are refilled, so ordinary histories minted collisions: `CREATE`×5 →
+  `DELETE` two → `CREATE`×3 put two nodes on one id, and a `save()`/`load()`
+  across earlier deletes put *three* consecutive nodes on the same id. The
+  duplicates were silent in both directions that matter — `MATCH (n {id: X})`
+  returns only one node per id, and WAL replay folds ops by `(node_type, id)`,
+  so a durable graph *recovered* the collided nodes as one and lost the rest.
+  Ids are now drawn from a monotonic high-water mark that never reuses a value
+  and is re-seeded above a loaded graph's own ids, and a caller-supplied id
+  raises the mark so the engine cannot later mint it. Ids handed out by an
+  append-only workload are unchanged (`0, 1, 2, …`); after a delete the counter
+  keeps climbing instead of reusing the freed value. Uniqueness for ids the
+  *caller* supplies is unchanged and still opt-in (`define_schema`'s
+  `primary_key`, or `MERGE`).
 - **`kglite.open(path, durable=False)` no longer silently discards committed
   writes still sitting in the WAL sidecar.** Recovery used to be conditional on
   the level being asked for, so opening a crashed graph at `"off"` (or `False`)

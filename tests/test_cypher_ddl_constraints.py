@@ -183,11 +183,36 @@ def test_not_null_on_the_id_field_is_still_accepted(graph) -> None:
 
 
 def test_the_primary_key_route_actually_enforces_identity_uniqueness(graph) -> None:
-    """The route the rejection message names must work, under both spellings."""
+    """The route the rejection message names must work — under the `id` spelling."""
     graph.define_schema({"nodes": {"Person": {"primary_key": "id"}}})
-    for duplicate in ["CREATE (p:Person {id: 1})", "CREATE (p:Person {person_id: 1})"]:
-        with pytest.raises(Exception, match="duplicate primary key"):
-            graph.cypher(duplicate)
+    with pytest.raises(Exception, match="duplicate primary key"):
+        graph.cypher("CREATE (p:Person {id: 1})")
+
+
+def test_the_id_alias_spelling_does_not_reach_the_identity_field_on_create(graph) -> None:
+    """**Known gap, pinned deliberately** — the aliased spelling is not enforced,
+    because on `CREATE` it never becomes the identity in the first place.
+
+    `add_nodes(unique_id_field="person_id")` makes `person_id` the identity, and
+    reads honour that: `MATCH (p:Person {person_id: 1})` finds Alice and
+    `p.person_id` returns the identity. `CREATE` does not close the loop — it
+    only ever promotes a literal `id` property, so `{person_id: 99}` leaves the
+    node with an engine-minted id and the supplied key is silently dropped.
+
+    This assertion previously read as "both spellings are rejected" and passed
+    for an accidental reason: the fixture's ids are the dense `1, 2, 3`, and the
+    engine's auto-id was `node_bound()` — which for a 3-node graph is `3`, an id
+    that already existed. So the rejection came from the *auto* id colliding,
+    not from the alias resolving. Re-seat the fixture on non-dense ids (or fix
+    the allocator, as `next_auto_node_id` now does) and the old assertion fails.
+    Pinned in its true shape so the gap cannot close or widen unnoticed.
+    """
+    graph.define_schema({"nodes": {"Person": {"primary_key": "id"}}})
+    graph.cypher("CREATE (p:Person {person_id: 99})")
+
+    ids = sorted(d["id"] for d in graph.cypher("MATCH (p:Person) RETURN p.id AS id").to_dicts())
+    assert len(set(ids)) == len(ids), "the engine must not mint a duplicate identity"
+    assert 99 not in ids, "known gap changed — CREATE now honours the id alias; re-read the docstring"
 
 
 def test_relationship_constraint_is_rejected_by_name(graph) -> None:

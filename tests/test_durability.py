@@ -1103,3 +1103,121 @@ def test_sync_flushes_pending_ops_into_the_log(tmp_path):
     )
     g = _open(tmp_path / "app.kgl", "memory", durable="normal")
     assert g.cypher("MATCH (p:Person) RETURN p.name AS n").scalar() == "Alice"
+
+
+# ── recovery fidelity: the live graph is the oracle ──────────────────
+#
+# Every test above asks "did the data survive?". These ask the stronger
+# question the WAL actually promises: is the recovered graph the *same
+# graph* the crashed process had? Recovery folds ops by ``(node_type,
+# id)``, so anything that lets two live nodes share one id is silently
+# merged on replay — a node count that drops between the live session and
+# the recovered one.
+
+
+def _live_and_recovered(tmp_path, body, storage="memory"):
+    """Run *body* in a crashing child, returning ``(live, recovered)`` rows.
+
+    The child prints its own final state before dying, so the comparison is
+    against what the process actually had — not against what the test
+    author believed it would have. ``flush=True`` is load-bearing:
+    ``os._exit`` skips stdio flushing, so an unflushed print would silently
+    hand back an empty "live" side and make the oracle vacuous.
+    """
+    probe = "MATCH (n:T) RETURN n.id AS id, n.tag AS tag"
+    # Dedent *before* appending: `_child_script` dedents what it is given, and
+    # an unindented tail line would make the common prefix empty and leave the
+    # body's own indentation in the generated source.
+    script = _child_script(
+        tmp_path,
+        textwrap.dedent(body).strip()
+        + f"\nprint(sorted((d['id'], d['tag']) for d in g.cypher({probe!r}).to_dicts()), flush=True)",
+        storage,
+        "os._exit(0)",
+    )
+    done = subprocess.run([PYBIN, "-c", script], check=True, capture_output=True, env=dict(os.environ))
+    live = done.stdout.decode().strip().splitlines()[-1]
+    g = _open(tmp_path / "app.kgl", storage)
+    recovered = sorted((d["id"], d["tag"]) for d in g.cypher(probe).to_dicts())
+    return live, repr(recovered)
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_recovery_matches_live_across_delete_then_create(tmp_path, storage):
+    """``DELETE`` then ``CREATE`` must recover node-for-node.
+
+    This shape collides on a plain in-memory graph (covered in Rust by
+    ``test_auto_assigned_ids_are_never_reused_after_delete``) but happened
+    *not* to collide through a durable session, whose per-commit fork
+    reshapes the index space. It is pinned here anyway: the collision it
+    guards against depends on allocator internals, not on anything a caller
+    can see, so "durable mode is currently lucky" is not a property to leave
+    untested. The genuinely red case is the checkpoint test below.
+    """
+    live, recovered = _live_and_recovered(
+        tmp_path,
+        """
+        g = open_durable()
+        for i in range(5):
+            g.cypher("CREATE (:T {tag: 'a%d'})" % i)
+        g.cypher("MATCH (n:T) WHERE n.tag IN ['a3','a4'] DELETE n")
+        for i in range(3):
+            g.cypher("CREATE (:T {tag: 'b%d'})" % i)
+        """,
+        storage,
+    )
+    assert recovered == live
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_recovery_matches_live_across_checkpoint_then_create(tmp_path, storage):
+    """Same oracle across a checkpoint, which is where the id allocator has
+    to re-seed itself: the reopened graph must keep minting ids above the
+    ones the ``.kgl`` already holds. Before the fix this history put *three*
+    nodes on one id, and recovery kept one of them."""
+    live, recovered = _live_and_recovered(
+        tmp_path,
+        """
+        g = open_durable()
+        for i in range(6):
+            g.cypher("CREATE (:T {tag: 'a%d'})" % i)
+        g.cypher("MATCH (n:T) WHERE n.tag IN ['a1','a2'] DELETE n")
+        g.save()
+        del g
+        g = open_durable()
+        for i in range(3):
+            g.cypher("CREATE (:T {tag: 'c%d'})" % i)
+        """,
+        storage,
+    )
+    assert recovered == live
+
+
+def test_caller_supplied_duplicate_ids_are_merged_by_recovery(tmp_path):
+    """**Known limitation, pinned deliberately** — not an endorsement.
+
+    ``id`` uniqueness is opt-in (CYPHER.md: "two ``CREATE (:T {id: 'k'})``
+    make two nodes"), but the WAL names every entity — nodes, and both
+    endpoints of every edge — by its logical ``(node_type, id)``. A log in
+    which one id denotes two nodes is therefore not merely folded wrongly,
+    it is *unwritable*: there is no discriminator to carry. So a history
+    that duplicates a caller-supplied id recovers as one node.
+
+    This is asserted rather than left silent so the behaviour cannot change
+    unnoticed in either direction. The fix is a decision, not a patch —
+    either durable mode refuses the write it cannot log, or the WAL gains a
+    node identity independent of ``id`` — and until one is made, a durable
+    application that supplies its own ids should declare a primary key
+    (``define_schema``) or use ``MERGE``, both of which make the shape
+    unreachable.
+    """
+    live, recovered = _live_and_recovered(
+        tmp_path,
+        """
+        g = open_durable()
+        g.cypher("CREATE (:T {id: 1, tag: 'first'})")
+        g.cypher("CREATE (:T {id: 1, tag: 'second'})")
+        """,
+    )
+    assert live == "[(1, 'first'), (1, 'second')]"
+    assert recovered == "[(1, 'second')]", "known limitation changed — re-read the docstring"

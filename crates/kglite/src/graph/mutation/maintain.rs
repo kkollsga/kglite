@@ -457,6 +457,13 @@ pub fn add_nodes(
     let mut batch_claims: std::collections::HashSet<(UniqueConstraintKey, CompositeValue)> =
         std::collections::HashSet::new();
 
+    // Loaded ids raise the engine's auto-id high-water mark (applied once
+    // after the loop, so the borrow stays out of the hot row path). Without
+    // it, a load of sparse ids — one row with id 5 into an empty graph —
+    // leaves the mark at 0 and a later `CREATE` with no `id` walks up onto a
+    // live id. See `DirGraph::next_auto_node_id`.
+    let mut max_loaded_id: u32 = 0;
+
     for row_idx in 0..df_data.row_count() {
         let id = match df_data.get_value_by_index(row_idx, id_idx) {
             Some(Value::Null) => {
@@ -471,6 +478,14 @@ pub fn add_nodes(
                 continue;
             }
         };
+
+        match &id {
+            Value::UniqueId(u) => max_loaded_id = max_loaded_id.max(*u),
+            Value::Int64(i) if *i >= 0 && *i <= u32::MAX as i64 => {
+                max_loaded_id = max_loaded_id.max(*i as u32)
+            }
+            _ => {}
+        }
 
         if pk_enforced && !seen_pk_ids.insert(id.clone()) {
             return Err(format!(
@@ -508,6 +523,8 @@ pub fn add_nodes(
         let action = row_builder.action(graph, &df_data, row_idx, id, title, existing_idx);
         batch.add_action(action, graph)?;
     }
+
+    graph.observe_explicit_id(&Value::UniqueId(max_loaded_id));
 
     describe_skipped_rows(
         &mut errors,

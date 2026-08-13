@@ -872,9 +872,17 @@ fn create_node(
     // The `id` is the identity, not a duplicate property, so it is removed
     // from the property map (mirroring add_nodes, which does not store the
     // unique-id column as a property). Absent → auto-assign a fresh UniqueId.
-    let id = properties
-        .remove("id")
-        .unwrap_or_else(|| Value::UniqueId(graph.graph.node_bound() as u32));
+    // A caller-supplied id is taken as given (uniqueness is opt-in — see the
+    // PRIMARY KEY gate below); an absent one is *allocated*, and an allocator
+    // must never hand out a live id. See `DirGraph::next_auto_node_id` for the
+    // node_bound() reuse bug this replaced.
+    let id = match properties.remove("id") {
+        Some(explicit) => {
+            graph.observe_explicit_id(&explicit);
+            explicit
+        }
+        None => graph.next_auto_node_id(),
+    };
 
     // Determine title: use 'name' or 'title' property if present
     let title = properties
