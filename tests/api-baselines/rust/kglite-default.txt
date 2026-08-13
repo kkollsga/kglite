@@ -2240,7 +2240,7 @@ pub kglite::api::DirGraph::property_index_keys: alloc::vec::Vec<(alloc::string::
 pub kglite::api::DirGraph::property_indices: std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), kglite::graph::dir_graph::index_layer::LayeredIndex<kglite::datatypes::values::Value>>
 pub kglite::api::DirGraph::property_ndv_cache: alloc::sync::Arc<std::sync::poison::rwlock::RwLock<(u64, std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), usize>)>>
 pub kglite::api::DirGraph::range_index_keys: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
-pub kglite::api::DirGraph::range_indices: std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), alloc::collections::btree::map::BTreeMap<kglite::datatypes::values::Value, alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>>
+pub kglite::api::DirGraph::range_indices: std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), kglite::graph::dir_graph::range_index_layer::LayeredRangeIndex<kglite::datatypes::values::Value>>
 pub kglite::api::DirGraph::read_only: bool
 pub kglite::api::DirGraph::save_metadata: kglite::graph::schema::SaveMetadata
 pub kglite::api::DirGraph::schema_definition: core::option::Option<kglite::api::SchemaDefinition>
