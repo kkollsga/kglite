@@ -1001,20 +1001,71 @@ fn wide_columnar_into(graph: DirGraph) -> DirGraph {
 /// path deliberately clones no backend, so the counter reads zero whether the
 /// journal captured one pre-image or two hundred. The cost lives entirely
 /// inside the journal, so the counter has to as well.
+///
+/// **Phase 2 re-point.** The `NodeData` bound above is kept (a columnar SET
+/// must still not clone node weights), and the cost oracle it was written for
+/// is now stated in the mechanism that carries the cost: one
+/// `UndoEntry::ColumnarCell` per `(row, property)` the statement changed. The
+/// `ColumnarHandles` entry the old bound coexisted with is gone, so without the
+/// cell count this assertion would pass just as happily for a journal that
+/// captured the whole store — which is exactly what it did before Phase 2.
 #[test]
 fn a_columnar_set_journals_one_pre_image_per_changed_node() {
-    use crate::graph::storage::undo::{journal_node_pre_images, reset_journal_node_pre_images};
+    use crate::graph::storage::undo::{
+        journal_columnar_cells, journal_node_pre_images, reset_journal_columnar_cells,
+        reset_journal_node_pre_images,
+    };
 
     let mut graph = wide_columnar();
     reset_journal_node_pre_images();
+    reset_journal_columnar_cells();
     run(&mut graph, "MATCH (i:Item {id: 7}) SET i.priority = 3");
     let captured = journal_node_pre_images();
+    let cells = journal_columnar_cells();
 
     assert!(
         captured <= 2,
         "a one-row columnar SET captured {captured} node pre-images across \
          {WIDE_ITEMS} nodes of the type; it must be O(nodes changed), not \
          O(nodes of the type) — the handle-refresh sweep is being journalled"
+    );
+    assert_eq!(
+        cells, 1,
+        "a one-row, one-property columnar SET must journal exactly one cell \
+         pre-image across {WIDE_ITEMS} nodes of the type; {cells} means the \
+         capture is sized by something other than the change"
+    );
+}
+
+/// The cost oracle's second dimension: **properties**, not rows.
+///
+/// A three-property `SET` on one row journals three cells and nothing else. The
+/// arm above cannot see a per-statement or per-type constant (it would read 1
+/// either way); this one separates "one entry per changed cell" from "one entry
+/// per statement", which is the shape the replaced mechanism had.
+#[test]
+fn a_columnar_set_journals_one_cell_per_changed_property() {
+    use crate::graph::storage::undo::{journal_columnar_cells, reset_journal_columnar_cells};
+
+    let mut graph = wide_columnar();
+    reset_journal_columnar_cells();
+    run(
+        &mut graph,
+        "MATCH (i:Item {id: 7}) SET i.qty = 1, i.priority = 3, i.rank = 5",
+    );
+    assert_eq!(
+        journal_columnar_cells(),
+        3,
+        "three changed cells must journal three pre-images"
+    );
+
+    // Two rows x one property is the other axis.
+    reset_journal_columnar_cells();
+    run(&mut graph, "MATCH (i:Item) WHERE i.id < 2 SET i.qty = 9");
+    assert_eq!(
+        journal_columnar_cells(),
+        2,
+        "two changed rows must journal two pre-images, not {WIDE_ITEMS}"
     );
 }
 
@@ -1036,13 +1087,23 @@ fn a_columnar_set_journals_one_pre_image_per_changed_node() {
 /// no end-to-end test can cover.
 #[test]
 fn a_mapped_columnar_set_journals_one_pre_image_per_changed_node() {
-    use crate::graph::storage::undo::{journal_node_pre_images, reset_journal_node_pre_images};
+    use crate::graph::storage::undo::{
+        journal_columnar_cells, journal_node_pre_images, reset_journal_columnar_cells,
+        reset_journal_node_pre_images,
+    };
 
     let mut graph = wide_columnar_mapped();
     reset_journal_node_pre_images();
+    reset_journal_columnar_cells();
     run(&mut graph, "MATCH (i:Item {id: 7}) SET i.priority = 3");
     let captured = journal_node_pre_images();
+    let cells = journal_columnar_cells();
 
+    assert_eq!(
+        cells, 1,
+        "a one-row columnar SET on a mapped graph must journal exactly one \
+         cell pre-image, not {cells}"
+    );
     assert!(
         captured <= 2,
         "a one-row columnar SET on a mapped graph captured {captured} node \
@@ -1073,18 +1134,18 @@ fn a_plain_set_journals_one_pre_image_per_changed_node() {
     );
 }
 
-/// Two columnar writes in one statement must both be visible.
+/// Two columnar writes to the same cell in one statement must both be
+/// visible, and the second must win.
 ///
-/// The first write of a statement forks the master away from the undo
-/// journal's pre-image; the second finds it uniquely owned and mutates in
-/// place. Both must land, and a read after the statement must see the second
-/// value, not the first.
-///
-/// Before D1 Phase 3 this pinned a different mechanism: the first write forked
-/// away from `1 + N` node handles and registered the type for an end-of-clause
-/// re-point sweep, and the assertion was that the sweep had run. There is no
-/// sweep now — the store is the backend's and both writes land in it directly —
-/// but the observable is unchanged, which is the point of keeping the test.
+/// The mechanism has been rewritten twice under this assertion, which is why
+/// the assertion is what got kept. Pre-D1-Phase-3: the first write forked away
+/// from `1 + N` node handles and registered an end-of-clause re-point sweep.
+/// Post-Phase-3, pre-Phase-2: the first write forked away from the undo
+/// journal's whole-store pre-image and the second mutated the fork in place.
+/// Now: **neither write forks anything** — the journal holds one
+/// `UndoEntry::ColumnarCell` per write, both mutate the backend's own store in
+/// place, and reverse replay would restore the *first* capture if the statement
+/// failed. The observable is unchanged across all three.
 #[test]
 fn two_columnar_writes_in_one_statement_both_land() {
     let mut graph = wide_columnar();
@@ -1105,12 +1166,19 @@ fn two_columnar_writes_in_one_statement_both_land() {
         })
         .expect("fixture seeds qty = node index");
 
-    // Two SET clauses in one statement, same type and same property. The first
-    // forks away from the journal's pre-image; the second finds the fresh
-    // allocation uniquely owned and mutates IN PLACE.
+    // Two SET clauses in one statement, same type and same property. Both
+    // journal a cell pre-image and both mutate the master IN PLACE.
+    let allocation_before = Arc::as_ptr(graph.column_store("Item").expect("master"));
     run(
         &mut graph,
         "MATCH (n:Item {id: 1}) SET n.qty = 111 SET n.qty = 222",
+    );
+    assert!(
+        std::ptr::eq(
+            allocation_before,
+            Arc::as_ptr(graph.column_store("Item").expect("master"))
+        ),
+        "neither write may fork the master"
     );
 
     // Read back through the public route. Both writes must be visible.
@@ -1122,15 +1190,13 @@ fn two_columnar_writes_in_one_statement_both_land() {
          somewhere the read route does not resolve"
     );
 
-    // And between statements the master is uniquely owned again — the journal
-    // released its pre-image at commit, so the next statement's first write
-    // mutates in place instead of forking.
+    // And nothing but the backend holds the master.
     let master = graph.column_store("Item").expect("master");
     assert_eq!(
         Arc::strong_count(master),
         1,
-        "between statements nothing but the backend may hold the master, or \
-         every write still pays a whole-store copy"
+        "nothing but the backend may hold the master, or every write pays a \
+         whole-store copy"
     );
 }
 
@@ -1180,17 +1246,20 @@ fn no_node_holds_a_column_store_handle() {
 
 /// **Replaces `fork_detection_is_a_no_op_while_nodes_hold_strong_handles`.**
 ///
-/// The reference-count invariant the whole programme turns on, asserted in both
-/// directions (D1 Phase 3, plan step 5):
+/// The reference-count invariant the whole programme turns on. Phase 2
+/// strengthened it from "uniquely owned *between* statements" to "uniquely
+/// owned *always*, on a non-forked backend": the undo journal used to hold the
+/// pre-statement store, so mid-statement the count was ≥ 2 and `Arc::make_mut`
+/// forked; it now holds cell values only, so nothing but the backend ever owns
+/// the master and the write mutates it in place.
 ///
-/// - **under an open checkpoint** the undo journal holds the pre-statement
-///   store, so the count is ≥ 2 and `Arc::make_mut` forks — rollback has
-///   something pristine to restore;
-/// - **between statements** nothing else holds it, so the count is 1 and a
-///   one-row write mutates one row in place.
-///
-/// The first direction is also a `debug_assert!` at the write site; this pins
-/// the second, which no assertion inside the write can see.
+/// The in-statement half is asserted through **allocation identity**, which is
+/// the only way to see mid-statement ownership from outside the statement: an
+/// `Arc::make_mut` that forked would leave the backend pointing at a different
+/// allocation once the statement returned. The refcount alone cannot say that
+/// — it reads 1 either way, because the fork is what dropped the second
+/// handle. The `debug_assert!` inside `write_column_master` asserts the same
+/// property at the instant it holds.
 #[test]
 fn the_master_is_uniquely_owned_between_statements() {
     let mut graph = wide_columnar();
@@ -1200,14 +1269,46 @@ fn the_master_is_uniquely_owned_between_statements() {
         1,
         "precondition: uniquely owned before any statement"
     );
+    let allocation_before = Arc::as_ptr(graph.column_store("Item").expect("master"));
 
     run(&mut graph, "MATCH (n:Item {id: 1}) SET n.qty = 111");
 
     assert_eq!(
         Arc::strong_count(graph.column_store("Item").expect("master")),
         1,
-        "a committed statement must release the journal's pre-image, or the \
-         next statement forks the whole store again"
+        "a committed statement must leave nothing else holding the master"
+    );
+    assert!(
+        std::ptr::eq(
+            allocation_before,
+            Arc::as_ptr(graph.column_store("Item").expect("master"))
+        ),
+        "the statement replaced the master's allocation, so `Arc::make_mut` \
+         forked mid-statement: something held a second handle while the write \
+         ran and the write copied {WIDE_ITEMS} rows to change one cell"
+    );
+
+    // And the same across a statement that *fails*, where the journal is read
+    // rather than dropped. A replay that reinstalled a store would show here.
+    let allocation_before = Arc::as_ptr(graph.column_store("Item").expect("master"));
+    expect_failure(
+        &mut graph,
+        "MATCH (n:Item {id: 2}) SET n.qty = 222 \
+         WITH n MATCH (m:Item {id: 3}) SET m.qty = duration({months: 2147483648})",
+        None,
+    );
+    assert!(
+        std::ptr::eq(
+            allocation_before,
+            Arc::as_ptr(graph.column_store("Item").expect("master"))
+        ),
+        "a rolled-back statement must restore cells into the live store, not \
+         swap a pre-statement copy back in"
+    );
+    assert_eq!(
+        Arc::strong_count(graph.column_store("Item").expect("master")),
+        1,
+        "and must leave the master uniquely owned"
     );
     assert_eq!(
         graph
@@ -1227,41 +1328,35 @@ fn the_master_is_uniquely_owned_between_statements() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// PINNED DEFECT — store clones per statement (shape-convergence Phase 1)
+// The cell-grained journal: no store clone per statement
 // ─────────────────────────────────────────────────────────────────────
 
-/// **This test asserts a defect exists. Phase 2 MUST rewrite it to assert
-/// zero.**
+/// **The flipped Phase-1 pin** (was
+/// `a_columnar_statement_still_deep_clones_the_master_pinned_defect`).
 ///
-/// Every mutating statement's first columnar write hands the undo journal an
-/// `Arc::clone` of the touched type's master `ColumnStore`
-/// (`languages/cypher/executor/columnar_write.rs`, step 1 of `write_column_master`),
-/// which makes the `Arc::make_mut` two lines later deep-copy every column of
-/// that type — for a one-cell write. The journal drops at commit, the refcount
-/// returns to one, and the next statement pays again. Measured on 0.15.14: a
-/// single-row `SET` costs 4.3 µs on a fresh 50k×12 graph and 328 µs on the same
-/// graph after `save()`, a 76× tax that scales with the type's row count.
+/// Until Phase 2 every mutating statement's first columnar write handed the
+/// undo journal an `Arc::clone` of the touched type's master `ColumnStore`,
+/// which made the `Arc::make_mut` two lines later deep-copy every column of
+/// that type — for a one-cell write. The journal dropped at commit, the
+/// refcount returned to one, and the next statement paid again. Measured on
+/// 0.15.14: a single-row `SET` cost 4.3 µs on a fresh 50k×12 graph and 328 µs
+/// on the same graph after `save()`, a 76× tax scaling with the type's row
+/// count. Phase 1 pinned that as `(1, 1)` so it could not vanish unobserved;
+/// this is the same test with the number the fix produces.
 ///
-/// The clone is not merely tolerated today, it is *asserted*: the
-/// `debug_assert!` at the write site requires the master to fork away from the
-/// pre-image, because with the journal holding the pre-statement image that
-/// fork is the whole rollback-correctness argument.
+/// The mechanism now: the journal holds the changed cell's prior value
+/// (`UndoEntry::ColumnarCell`), never a handle on the store, so the master
+/// stays uniquely owned and `make_mut` mutates one cell in place. The
+/// `debug_assert!` at the write site asserts the same thing from inside;
+/// this asserts it from outside, where a copy performed for some *other*
+/// reason would also show up.
 ///
-/// **Phase 2 (cell-grained pre-images, `UndoEntry::ColumnarCell`) inverts
-/// both.** The journal will hold the changed cell's prior value instead of the
-/// whole store, the master stays uniquely owned through the statement,
-/// `make_mut` mutates in place, and this counter must read **0**. When that
-/// lands, this test goes red — that redness is the signal the fix arrived, and
-/// the required response is to rewrite the assertion to `0` and rename the
-/// test, never to delete or relax it. A defect that disappears silently is a
-/// gate that never proved it could fail.
-///
-/// Neither existing oracle can see this clone: `BACKEND_CLONE_NODES` counts
-/// backend copies (the journal deliberately clones no backend) and
-/// `JOURNAL_NODE_PRE_IMAGES` counts `NodeData` copies (a columnar property is
-/// not in a `NodeData`). Both read zero here, before and after the fix.
+/// Neither sibling oracle can see this: `BACKEND_CLONE_NODES` counts backend
+/// copies (the journal clones no backend) and `JOURNAL_NODE_PRE_IMAGES` counts
+/// `NodeData` copies (a columnar property is not in a `NodeData`). Both read
+/// zero here, before and after the fix.
 #[test]
-fn a_columnar_statement_still_deep_clones_the_master_pinned_defect() {
+fn a_columnar_statement_clones_no_store() {
     use crate::graph::storage::column_store::{column_store_clones, reset_column_store_clones};
 
     let mut graph = wide_columnar();
@@ -1276,17 +1371,16 @@ fn a_columnar_statement_still_deep_clones_the_master_pinned_defect() {
 
     assert_eq!(
         (first, second),
-        (1, 1),
-        "PINNED DEFECT: each columnar statement must (today) deep-clone the \
-         master column store exactly once — the journal holds the pre-image, so \
-         `Arc::make_mut` forks {WIDE_ITEMS} rows to write one cell. Reading \
-         (0, 0) means the cell-grained journal landed: rewrite this test to \
-         assert zero (see the doc comment), do not delete it. Reading anything \
-         else means the per-statement capture count changed and the cost model \
-         with it."
+        (0, 0),
+        "a columnar statement must copy no column store: writing one cell of a \
+         {WIDE_ITEMS}-row type copied ({first}, {second}) whole stores. A \
+         non-zero reading means something is holding a second handle on the \
+         master across the write — the O(rows x cols)-per-statement tax this \
+         phase removed, back again."
     );
 
-    // Non-vacuity: the writes landed, so the clones were paid for real work.
+    // Non-vacuity: the writes landed, so the zero is a cheap write and not a
+    // skipped one.
     assert_eq!(
         graph
             .graph
@@ -1300,6 +1394,263 @@ fn a_columnar_statement_still_deep_clones_the_master_pinned_defect() {
             .and_then(|n| n.get_property_value("qty")),
         Some(Value::Int64(222)),
     );
+}
+
+/// The same zero on the statement that **fails**, where the journal is not
+/// merely opened but actually read.
+///
+/// The committed arm above proves the capture is cheap; this proves the
+/// *restore* is too, and that the two together never fall back to copying the
+/// store. A rollback implementation that reinstalled a whole pre-statement
+/// store — the mechanism this phase replaced — would show up here and nowhere
+/// else.
+#[test]
+fn a_rolled_back_columnar_statement_clones_no_store() {
+    use crate::graph::storage::column_store::{column_store_clones, reset_column_store_clones};
+
+    let mut graph = wide_columnar();
+
+    reset_column_store_clones();
+    expect_failure(
+        &mut graph,
+        "MATCH (n:Item {id: 1}) SET n.qty = 111 \
+         WITH n MATCH (m:Item {id: 2}) SET m.qty = duration({months: 2147483648})",
+        None,
+    );
+    let cloned = column_store_clones();
+
+    assert_eq!(
+        cloned, 0,
+        "a rolled-back columnar statement copied {cloned} whole store(s); \
+         capture *and* replay must both be O(cells changed)"
+    );
+    // Non-vacuity: it really did roll back.
+    assert_eq!(
+        graph
+            .graph
+            .node_view(
+                graph
+                    .graph
+                    .node_indices()
+                    .find(|i| graph.graph.get_node_id(*i) == Some(Value::Int64(1)))
+                    .expect("node 1")
+            )
+            .and_then(|n| n.get_property_value("qty")),
+        Some(Value::Int64(1)),
+        "the fixture seeds qty = id, and the failed SET must not have stuck"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Cell-grained rollback fidelity
+// ─────────────────────────────────────────────────────────────────────
+//
+// The arms below exercise the three shapes a cell pre-image has to cover that
+// the whole-store pre-image covered for free: a write that grew the schema, a
+// cell written more than once, and a cell that was absent to begin with. Each
+// one is a way for `UndoEntry::ColumnarCell` / `ColumnarSchemaGrown` to be
+// individually wrong while every pre-existing arm stays green.
+
+/// A statement's first write, journalled and then rolled back.
+///
+/// The second clause fails while evaluating its value, which is after the
+/// first clause has already written — the shape the whole file is built on.
+const FAILS_AFTER_A_COLUMNAR_WRITE: &str = "WITH n MATCH (m:Item {id: 2}) \
+     SET m.qty = duration({months: 2147483648})";
+
+/// One `Item`'s property, read through the public node view.
+fn item_prop(graph: &DirGraph, id: i64, property: &str) -> Option<Value> {
+    let idx = graph
+        .graph
+        .node_indices()
+        .find(|i| graph.graph.get_node_id(*i) == Some(Value::Int64(id)))
+        .unwrap_or_else(|| panic!("no Item with id {id}"));
+    graph
+        .graph
+        .node_view(idx)
+        .and_then(|n| n.get_property_value(property))
+}
+
+/// A failed `SET` that introduced a **new** property must leave the type's
+/// column store exactly as wide as it was.
+///
+/// `ColumnStore::set` grows the schema and pushes a null-backfilled column when
+/// it meets an unknown key, and that growth is not a cell edit — restoring
+/// every cell would leave the empty column and the widened schema behind. The
+/// `fingerprint` oracle cannot see it (`row_properties` skips nulls, so an
+/// all-null column is invisible through every read surface), which is why the
+/// column count and the schema slot are asserted directly: this is the one
+/// residue of a columnar write that is real, persisted at the next `save()`,
+/// and unobservable through values.
+#[test]
+fn rollback_removes_a_column_a_failed_set_introduced() {
+    let fresh = crate::graph::schema::InternedKey::from_str("fresh");
+    let mut graph = wide_columnar();
+    let columns_before = graph.column_store("Item").expect("master").column_count();
+    assert!(
+        graph
+            .column_store("Item")
+            .expect("master")
+            .slot(fresh)
+            .is_none(),
+        "precondition: the fixture must not already have the property"
+    );
+    let before = fingerprint(&mut graph);
+
+    expect_failure(
+        &mut graph,
+        &format!("MATCH (n:Item {{id: 1}}) SET n.fresh = 7 {FAILS_AFTER_A_COLUMNAR_WRITE}"),
+        None,
+    );
+
+    let store = graph.column_store("Item").expect("master");
+    assert_eq!(
+        store.column_count(),
+        columns_before,
+        "a failed SET left the column it appended behind; the schema-growth \
+         undo entry is missing or truncating to the wrong width"
+    );
+    assert!(
+        store.slot(fresh).is_none(),
+        "a failed SET left the property in the type schema, so the next write \
+         resolves a slot that no longer has a column"
+    );
+    assert_eq!(item_prop(&graph, 1, "fresh"), None);
+    assert_eq!(fingerprint(&mut graph), before);
+}
+
+/// The non-vacuity control: the *same* statement, committed, really does grow
+/// the store — so the arm above is measuring an undo and not a write that
+/// never happened.
+#[test]
+fn a_committed_set_of_a_new_property_grows_the_store() {
+    let fresh = crate::graph::schema::InternedKey::from_str("fresh");
+    let mut graph = wide_columnar();
+    let columns_before = graph.column_store("Item").expect("master").column_count();
+
+    run(&mut graph, "MATCH (n:Item {id: 1}) SET n.fresh = 7");
+
+    let store = graph.column_store("Item").expect("master");
+    assert_eq!(
+        store.column_count(),
+        columns_before + 1,
+        "a SET of an unknown property must append exactly one column"
+    );
+    assert!(store.slot(fresh).is_some());
+    assert_eq!(item_prop(&graph, 1, "fresh"), Some(Value::Int64(7)));
+}
+
+/// A cell written **twice** in one failing statement comes back to its
+/// pre-statement value, not to the intermediate one.
+///
+/// Columnar cells are journalled with no first-touch dedup (see
+/// `storage/undo.rs`), so correctness here rests entirely on reverse replay
+/// landing the earliest capture last. A dedup that kept the *latest* capture —
+/// the natural mistake, and the one the weight-capture seam would suggest —
+/// restores `111` instead of the seeded value and nothing else in this file
+/// notices.
+#[test]
+fn rollback_restores_a_cell_written_twice_in_one_statement() {
+    let mut graph = wide_columnar();
+    let before = fingerprint(&mut graph);
+    assert_eq!(
+        item_prop(&graph, 1, "qty"),
+        Some(Value::Int64(1)),
+        "precondition: the fixture seeds qty = id"
+    );
+
+    expect_failure(
+        &mut graph,
+        &format!(
+            "MATCH (n:Item {{id: 1}}) SET n.qty = 111 SET n.qty = 222 \
+             {FAILS_AFTER_A_COLUMNAR_WRITE}"
+        ),
+        None,
+    );
+
+    assert_eq!(
+        item_prop(&graph, 1, "qty"),
+        Some(Value::Int64(1)),
+        "two writes to one cell must roll back to the pre-statement value; \
+         reading 111 means only the last capture survived, 222 means none did"
+    );
+    assert_eq!(fingerprint(&mut graph), before);
+}
+
+/// A cell that was **absent** before the statement must read absent again
+/// afterwards.
+///
+/// `prior: None` is restored by writing `Value::Null`, which is not the same
+/// bytes but is the same observation: `get` answers `None` for absent and null
+/// alike and `row_properties` skips both. This arm is what says the claim is
+/// true rather than merely argued — it checks the property read, the
+/// `row_properties`-derived master rows inside `fingerprint`, and the
+/// node-side view.
+///
+/// The column is grown by a *committed* statement on a different row first, so
+/// the schema-growth entry is not in play and this measures the null restore
+/// alone.
+#[test]
+fn rollback_restores_a_cell_to_absent() {
+    let mut graph = wide_columnar();
+    run(&mut graph, "MATCH (n:Item {id: 5}) SET n.extra = 'kept'");
+    assert_eq!(
+        item_prop(&graph, 1, "extra"),
+        None,
+        "precondition: the column exists but row 1's cell is empty"
+    );
+    let before = fingerprint(&mut graph);
+
+    expect_failure(
+        &mut graph,
+        &format!("MATCH (n:Item {{id: 1}}) SET n.extra = 'doomed' {FAILS_AFTER_A_COLUMNAR_WRITE}"),
+        None,
+    );
+
+    assert_eq!(
+        item_prop(&graph, 1, "extra"),
+        None,
+        "a cell that was absent must read absent after the rollback"
+    );
+    assert_eq!(
+        item_prop(&graph, 5, "extra"),
+        Some(Value::String("kept".into())),
+        "and the committed value on the other row must be untouched"
+    );
+    assert_eq!(fingerprint(&mut graph), before);
+}
+
+/// Every cell shape above, on the **mapped** backend.
+///
+/// Mapped is where a columnar write is most likely to go wrong and least
+/// likely to be noticed: its columns can be mmap-backed, so the write path has
+/// to bring one to heap before mutating it, and the pre-image is read through
+/// the same `get` that has an mmap fallback. The whole-store clone used to hide
+/// both — it produced a fully heap-resident copy before anything was written.
+#[test]
+fn mapped_columnar_cells_roll_back() {
+    let mut graph = wide_columnar_mapped();
+    run(&mut graph, "MATCH (n:Item {id: 5}) SET n.extra = 'kept'");
+    let before = fingerprint(&mut graph);
+    let columns_before = graph.column_store("Item").expect("master").column_count();
+
+    expect_failure(
+        &mut graph,
+        &format!(
+            "MATCH (n:Item {{id: 1}}) SET n.qty = 111 SET n.qty = 222, \
+             n.extra = 'doomed', n.fresh = 7 {FAILS_AFTER_A_COLUMNAR_WRITE}"
+        ),
+        None,
+    );
+
+    assert_eq!(item_prop(&graph, 1, "qty"), Some(Value::Int64(1)));
+    assert_eq!(item_prop(&graph, 1, "extra"), None);
+    assert_eq!(item_prop(&graph, 1, "fresh"), None);
+    assert_eq!(
+        graph.column_store("Item").expect("master").column_count(),
+        columns_before
+    );
+    assert_eq!(fingerprint(&mut graph), before);
 }
 
 /// The control: the same statement on a never-consolidated graph clones no
@@ -1576,13 +1927,13 @@ fn seeded_columnar_with_unique_qty() -> DirGraph {
 ///
 /// This is the shape with no `NodeWeight` entry behind it: the value goes into
 /// the master column store, so the node's weight never changes and the journal
-/// sees only the per-type `ColumnarHandles` entry. Until that entry started
-/// reporting the type as stale, the rebuild was reached only by accident —
-/// the handle-refresh sweep captured a pre-image for every node of the type,
-/// and each of those marked the type stale on the way past. Removing that
-/// per-node capture is what made the report explicit, and this test is what
-/// says so: without it a failed columnar `SET` leaves the claim it took behind
-/// and the claim it released free.
+/// sees only `UndoEntry::ColumnarCell` entries. Their replay is what reports
+/// the type into `stale_unique_indices`, and that report is the only thing
+/// driving the per-type unique rebuild. It has survived two rewrites of the
+/// mechanism underneath (the per-node handle sweep, then the per-type store
+/// pre-image, now the per-cell value) precisely because this test measures the
+/// claim rather than the mechanism: without the report a failed columnar `SET`
+/// leaves the claim it took behind and the claim it released free.
 #[test]
 fn rollback_restores_claims_moved_by_a_columnar_property_overwrite() {
     let mut graph = seeded_columnar_with_unique_qty();

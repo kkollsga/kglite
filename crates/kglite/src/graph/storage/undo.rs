@@ -54,6 +54,16 @@
 //!   touch wins, and the first touch is by definition the pre-statement
 //!   state. A five-property `SET n.a=…, n.b=…` therefore costs one
 //!   `NodeData` clone, not five.
+//! - **Columnar cell** pre-images ([`UndoEntry::ColumnarCell`]) are recorded
+//!   unconditionally, *without* the first-touch dedup above, and that is a
+//!   deliberate divergence rather than an oversight. Dedup exists to stop a
+//!   whole-entity clone being paid per property; a cell pre-image is one
+//!   `Option<Value>`, so the dedup would cost a per-(row, key) hash set to
+//!   save a pointer-sized copy. Correctness does not need it either: reverse
+//!   replay lands the *earliest* capture last, so a cell written twice in one
+//!   statement is restored to its pre-statement value regardless of how many
+//!   entries stand between. `replay_order_is_reverse_of_capture` pins the
+//!   ordering that argument rests on.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -63,7 +73,7 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use crate::datatypes::Value;
 use crate::graph::features::timeseries::NodeTimeseries;
 use crate::graph::schema::{
-    CompositeIndexKey, CompositeValue, EdgeData, IndexKey, InternedKey, NodeData,
+    CompositeIndexKey, CompositeValue, EdgeData, IndexKey, InternedKey, NodeData, TypeSchema,
 };
 use crate::graph::storage::column_store::ColumnStore;
 
@@ -80,6 +90,19 @@ thread_local! {
     /// which is the cost class the journal exists to remove, and this is the
     /// only counter that can see it.
     static JOURNAL_NODE_PRE_IMAGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// Columnar **cell** pre-images pushed into an undo journal since the last
+    /// reset.
+    ///
+    /// The successor of the `ColumnarHandles` cost model, and the counter that
+    /// states the new one: a columnar write must journal one entry per
+    /// `(row, key)` it changes, not one per node of the type and not one
+    /// whole-store handle. `JOURNAL_NODE_PRE_IMAGES` cannot see these (a
+    /// columnar property is not in a `NodeData`) and `COLUMN_STORE_CLONES`
+    /// (`storage/column_store.rs`) now reads zero on this path by design — so
+    /// without this counter the write path's journal cost would be
+    /// unobservable in either direction.
+    static JOURNAL_COLUMNAR_CELLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -91,6 +114,17 @@ pub(crate) fn reset_journal_node_pre_images() {
 #[cfg(test)]
 pub(crate) fn journal_node_pre_images() -> usize {
     JOURNAL_NODE_PRE_IMAGES.get()
+}
+
+#[cfg(test)]
+pub(crate) fn reset_journal_columnar_cells() {
+    JOURNAL_COLUMNAR_CELLS.set(0);
+}
+
+/// Columnar cell pre-images journalled on this thread since the last reset.
+#[cfg(test)]
+pub(crate) fn journal_columnar_cells() -> usize {
+    JOURNAL_COLUMNAR_CELLS.get()
 }
 
 /// A `Vec<NodeIndex>` bucket in one of `DirGraph`'s inverted indexes.
@@ -169,26 +203,126 @@ pub enum UndoEntry {
         node: usize,
         prior: Box<NodeTimeseries>,
     },
-    /// `execute_set`'s columnar fast path wrote through the master
-    /// `Arc<ColumnStore>` for `node_type`, forking it, and then re-pointed
-    /// every node of that type at the fork. `prior` is the master as it stood
-    /// before the statement's first such write; undo re-points them all back.
+    /// One cell of a type's master `ColumnStore` is about to be overwritten.
+    /// `prior` is the value that cell held before the statement's write; undo
+    /// writes it back.
     ///
-    /// **One entry per type per statement, not per node.** That is the whole
-    /// reason this variant exists: the refresh sweep touches every node of the
-    /// type, so journalling it through the ordinary weight-capture seam would
-    /// cost a `NodeData` clone per node of the type on every single-row `SET`.
-    /// The store itself needs no copy — `ColumnStore` has no interior
-    /// mutability and the fork already left `prior` pristine, so holding the
-    /// handle is the entire pre-image.
-    ColumnarHandles {
-        /// Keyed by `InternedKey`, not by name: the capture now happens inside
-        /// the storage backend (which has no interner), so every columnar
-        /// write — master fast path *and* per-node fallback — goes through one
-        /// place. The rollback arm resolves the name when it needs one.
+    /// **O(cells changed), which is the whole point.** The variant this
+    /// replaced (`ColumnarHandles`) held an `Arc` of the *whole store*, so the
+    /// `Arc::make_mut` at the write site deep-copied every column of the type
+    /// to change one cell — a 76-162× tax on every statement against a saved
+    /// graph, measured on 0.15.14. A cell pre-image is an `Option<Value>`, and
+    /// the master stays uniquely owned, so `make_mut` mutates in place.
+    ///
+    /// `prior: None` means the cell was absent *or* null before the write, and
+    /// undo restores it by writing `Value::Null`. The two are indistinguishable
+    /// on every read surface — `ColumnStore::get` returns `None` for both and
+    /// `row_properties` skips both — so the restore is observationally exact
+    /// even though it is not bit-exact.
+    ///
+    /// Keyed by `InternedKey`, not by name: capture happens inside the storage
+    /// backend, which has no interner. The rollback arm resolves the name when
+    /// it needs one.
+    ColumnarCell {
         node_type: InternedKey,
-        prior: Arc<ColumnStore>,
+        row_id: u32,
+        key: InternedKey,
+        prior: Option<Value>,
     },
+    /// A columnar write introduced a property the type's schema did not have,
+    /// so [`ColumnStore::set`] grew the schema and pushed a null-backfilled
+    /// column. Undo restores the prior schema `Arc` and truncates the columns
+    /// back.
+    ///
+    /// Captured *before* the paired [`ColumnarCell`](Self::ColumnarCell)
+    /// entries, so reverse replay runs it *after* them: the cells restore into
+    /// the new column while it still exists, and the column is then dropped.
+    ColumnarSchemaGrown {
+        node_type: InternedKey,
+        prior_schema: Arc<TypeSchema>,
+        prior_column_count: usize,
+    },
+}
+
+/// Which cells of a columnar row a property write is about to change.
+///
+/// The capture seam under all three columnar write sites — the Cypher master
+/// fast path, the five `impl_heap_column_writes!` writers, and `ForkedGraph` —
+/// needs the *keys*, not just the row: a cell-grained pre-image cannot be taken
+/// without knowing which cells are at risk.
+pub(crate) enum ColumnarWrite<'a> {
+    /// Exactly one cell.
+    Cell(InternedKey),
+    /// `replace_node_properties`' shape: every key currently present on the row
+    /// is nulled, then these keys are written.
+    ReplaceRow(&'a [InternedKey]),
+}
+
+/// The pre-images one columnar write needs, read off the store **before** the
+/// write and pushed into the journal after the store borrow ends.
+///
+/// Two-step rather than one because the journal and the store live in sibling
+/// fields of the same backend: capture borrows the store, `record` borrows the
+/// journal, and nothing borrows both at once.
+pub(crate) struct ColumnarPreImages {
+    /// `(key, value before the write)`, in capture order.
+    cells: Vec<(InternedKey, Option<Value>)>,
+    /// Schema and column count as they stood before the write, when the write
+    /// introduces at least one property the schema does not have yet. One entry
+    /// covers any number of new keys in the same write: replay truncates back
+    /// to `column_count` in a single step.
+    grown: Option<(Arc<TypeSchema>, usize)>,
+}
+
+impl ColumnarPreImages {
+    /// Read what `write` is about to overwrite on `row_id` of `store`.
+    pub(crate) fn capture(store: &ColumnStore, row_id: u32, write: ColumnarWrite<'_>) -> Self {
+        let mut cells = Vec::new();
+        let mut grows = false;
+        match write {
+            ColumnarWrite::Cell(key) => {
+                grows = store.slot(key).is_none();
+                cells.push((key, store.get(row_id, key)));
+            }
+            ColumnarWrite::ReplaceRow(keys) => {
+                // The writer nulls every present cell first; those keys are by
+                // definition already in the schema, so they cannot grow it.
+                for (key, value) in store.row_properties(row_id) {
+                    cells.push((key, Some(value)));
+                }
+                for &key in keys {
+                    grows |= store.slot(key).is_none();
+                    cells.push((key, store.get(row_id, key)));
+                }
+            }
+        }
+        Self {
+            cells,
+            grown: grows.then(|| (store.schema_arc(), store.column_count())),
+        }
+    }
+
+    /// Push the captured pre-images, schema entry first so reverse replay runs
+    /// it last.
+    pub(crate) fn record(self, journal: &mut UndoJournal, node_type: InternedKey, row_id: u32) {
+        if let Some((prior_schema, prior_column_count)) = self.grown {
+            journal.entries.push(UndoEntry::ColumnarSchemaGrown {
+                node_type,
+                prior_schema,
+                prior_column_count,
+            });
+        }
+        for (key, prior) in self.cells {
+            #[cfg(test)]
+            JOURNAL_COLUMNAR_CELLS.set(JOURNAL_COLUMNAR_CELLS.get() + 1);
+            journal.entries.push(UndoEntry::ColumnarCell {
+                node_type,
+                row_id,
+                key,
+                prior,
+            });
+        }
+    }
 }
 
 /// Buffer of inverse operations for exactly one statement.
@@ -205,11 +339,6 @@ pub struct UndoJournal {
     weighed_nodes: HashSet<NodeIndex>,
     /// Edge counterpart of `weighed_nodes`.
     weighed_edges: HashSet<EdgeIndex>,
-    /// Node types whose pre-statement master column store is already captured.
-    /// First touch wins, exactly like `weighed_nodes`: a statement can write
-    /// through the same master in several clauses, and only the first one saw
-    /// the pre-statement store.
-    forked_columnar_types: HashSet<InternedKey>,
 }
 
 impl UndoJournal {
@@ -332,28 +461,6 @@ impl UndoJournal {
         }
     }
 
-    /// The master column store for `node_type` is about to be forked by a
-    /// columnar write. `prior` is only taken on the statement's first fork of
-    /// that type, so the captured handle is the pre-statement one.
-    ///
-    /// Returns whether the capture happened, so the caller can skip the
-    /// `Arc::clone` on later writes of the same statement.
-    #[inline]
-    pub fn note_columnar_fork(
-        &mut self,
-        node_type: InternedKey,
-        prior: impl FnOnce() -> Option<Arc<ColumnStore>>,
-    ) -> bool {
-        if self.forked_columnar_types.insert(node_type) {
-            if let Some(prior) = prior() {
-                self.entries
-                    .push(UndoEntry::ColumnarHandles { node_type, prior });
-                return true;
-            }
-        }
-        false
-    }
-
     /// A node's timeseries was dropped.
     #[inline]
     pub fn note_timeseries_removed(&mut self, node: usize, prior: NodeTimeseries) {
@@ -446,6 +553,145 @@ mod tests {
             })
             .collect();
         assert_eq!(seen, vec![2, 1, 0]);
+    }
+
+    /// A columnar store with one row and two typed-as-mixed properties.
+    fn cell_store(interner: &mut StringInterner) -> (ColumnStore, InternedKey, InternedKey) {
+        let a = interner.get_or_intern("a");
+        let b = interner.get_or_intern("b");
+        let schema = Arc::new(crate::graph::schema::TypeSchema::from_keys([a, b]));
+        let mut store = ColumnStore::new_mixed(schema);
+        store.push_row(&[(a, Value::Int64(1)), (b, Value::Int64(2))]);
+        (store, a, b)
+    }
+
+    /// Two writes to the same cell in one statement produce two entries, and
+    /// reverse replay lands the *earlier* one last — which is why the columnar
+    /// capture needs no first-touch dedup (module doc).
+    #[test]
+    fn columnar_cells_are_not_deduplicated_and_replay_oldest_last() {
+        let mut interner = StringInterner::new();
+        let (mut store, a, _b) = cell_store(&mut interner);
+        let node_type = InternedKey::from_str("T");
+        let mut journal = UndoJournal::new();
+
+        ColumnarPreImages::capture(&store, 0, ColumnarWrite::Cell(a)).record(
+            &mut journal,
+            node_type,
+            0,
+        );
+        store.set(0, a, &Value::Int64(10), None);
+        ColumnarPreImages::capture(&store, 0, ColumnarWrite::Cell(a)).record(
+            &mut journal,
+            node_type,
+            0,
+        );
+        store.set(0, a, &Value::Int64(20), None);
+
+        // Replay them in order; the last write wins, and it is the oldest
+        // capture.
+        for entry in journal.into_replay_order() {
+            match entry {
+                UndoEntry::ColumnarCell {
+                    row_id, key, prior, ..
+                } => {
+                    store.set(row_id, key, &prior.unwrap_or(Value::Null), None);
+                }
+                other => panic!("unexpected entry: {other:?}"),
+            }
+        }
+        assert_eq!(
+            store.get(0, a),
+            Some(Value::Int64(1)),
+            "reverse replay must land the pre-statement capture last"
+        );
+    }
+
+    /// A write that introduces a new property captures the schema pre-image
+    /// *before* the cell, so reverse replay drops the column *after* restoring
+    /// into it.
+    #[test]
+    fn schema_growth_is_captured_before_its_cells() {
+        let mut interner = StringInterner::new();
+        let (store, _a, _b) = cell_store(&mut interner);
+        let fresh = interner.get_or_intern("fresh");
+        let node_type = InternedKey::from_str("T");
+        let mut journal = UndoJournal::new();
+
+        ColumnarPreImages::capture(&store, 0, ColumnarWrite::Cell(fresh)).record(
+            &mut journal,
+            node_type,
+            0,
+        );
+
+        let kinds: Vec<&'static str> = journal
+            .into_replay_order()
+            .map(|entry| match entry {
+                UndoEntry::ColumnarCell { .. } => "cell",
+                UndoEntry::ColumnarSchemaGrown {
+                    prior_column_count, ..
+                } => {
+                    assert_eq!(prior_column_count, 2, "the pre-growth column count");
+                    "schema"
+                }
+                other => panic!("unexpected entry: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["cell", "schema"],
+            "replay must restore the cell while its column still exists, then \
+             drop the column"
+        );
+    }
+
+    /// A write to a key already in the schema captures no schema entry — the
+    /// non-vacuity control for the test above.
+    #[test]
+    fn an_existing_key_captures_no_schema_entry() {
+        let mut interner = StringInterner::new();
+        let (store, a, _b) = cell_store(&mut interner);
+        let mut journal = UndoJournal::new();
+        ColumnarPreImages::capture(&store, 0, ColumnarWrite::Cell(a)).record(
+            &mut journal,
+            InternedKey::from_str("T"),
+            0,
+        );
+        assert_eq!(entries(journal).len(), 1);
+    }
+
+    /// `ReplaceRow` captures every cell present on the row plus every key the
+    /// write brings, so a rollback can restore both what was overwritten and
+    /// what was nulled.
+    #[test]
+    fn replace_row_captures_present_cells_and_incoming_keys() {
+        let mut interner = StringInterner::new();
+        let (store, a, b) = cell_store(&mut interner);
+        let fresh = interner.get_or_intern("fresh");
+        let mut journal = UndoJournal::new();
+        ColumnarPreImages::capture(&store, 0, ColumnarWrite::ReplaceRow(&[a, fresh])).record(
+            &mut journal,
+            InternedKey::from_str("T"),
+            0,
+        );
+
+        let mut cells: Vec<(InternedKey, Option<Value>)> = journal
+            .into_replay_order()
+            .filter_map(|entry| match entry {
+                UndoEntry::ColumnarCell { key, prior, .. } => Some((key, prior)),
+                UndoEntry::ColumnarSchemaGrown { .. } => None,
+                other => panic!("unexpected entry: {other:?}"),
+            })
+            .collect();
+        cells.sort_by_key(|(key, _)| key.as_u64());
+        let mut expected = vec![
+            (a, Some(Value::Int64(1))),
+            (b, Some(Value::Int64(2))),
+            (a, Some(Value::Int64(1))),
+            (fresh, None),
+        ];
+        expected.sort_by_key(|(key, _)| key.as_u64());
+        assert_eq!(cells, expected);
     }
 
     #[test]

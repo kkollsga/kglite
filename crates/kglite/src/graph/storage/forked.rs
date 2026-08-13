@@ -79,7 +79,7 @@ use crate::datatypes::Value;
 use crate::graph::core::iterators::GraphNodeIndices;
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use crate::graph::storage::column_store::ColumnStore;
-use crate::graph::storage::undo::UndoJournal;
+use crate::graph::storage::undo::{ColumnarPreImages, ColumnarWrite, UndoJournal};
 use crate::graph::storage::{GraphRead, GraphWrite, MemoryGraph};
 
 /// A writer's copy-on-write view over a base another holder is still reading.
@@ -343,22 +343,33 @@ impl ForkedGraph {
     /// Journal the pre-image a property write is about to overwrite — the
     /// overlay's counterpart of `impl_heap_pre_image_capture!`. Same two
     /// shapes, same reasoning (see that macro): a row-storage node journals a
-    /// `NodeData` clone, a columnar one journals the type's store `Arc`.
+    /// `NodeData` clone, a columnar one journals the prior value of each cell
+    /// the write names.
+    ///
+    /// The store read is `self.column_stores`, the overlay's own map, which is
+    /// what the write will mutate — so the pre-image is what *this writer*
+    /// would read back, not what the shared base holds.
     #[inline]
-    fn capture_property_pre_image(&mut self, idx: NodeIndex) {
+    fn capture_property_pre_image(&mut self, idx: NodeIndex, write: ColumnarWrite<'_>) {
         if self.undo.is_none() {
             return;
         }
         let Some(nd) = GraphRead::node_weight(self, idx) else {
             return;
         };
-        match nd.properties.columnar_row_id() {
+        let columnar = nd
+            .properties
+            .columnar_row_id()
+            .map(|row_id| (nd.node_type, row_id));
+        match columnar {
             None => self.capture_node_weight(idx),
-            Some(_) => {
-                let type_key = nd.node_type;
-                let prior = self.column_stores.get(&type_key).map(Arc::clone);
-                if let Some(journal) = self.undo.as_deref_mut() {
-                    journal.note_columnar_fork(type_key, || prior);
+            Some((type_key, row_id)) => {
+                let captured = self
+                    .column_stores
+                    .get(&type_key)
+                    .map(|store| ColumnarPreImages::capture(store, row_id, write));
+                if let (Some(captured), Some(journal)) = (captured, self.undo.as_deref_mut()) {
+                    captured.record(journal, type_key, row_id);
                 }
             }
         }
@@ -660,15 +671,18 @@ impl GraphWrite for ForkedGraph {
     }
 
     fn set_node_property(&mut self, idx: NodeIndex, key: InternedKey, value: Value) {
-        self.capture_property_pre_image(idx);
+        self.capture_property_pre_image(idx, ColumnarWrite::Cell(key));
         // Columnar: the value lives in the store, the node only holds a row id,
         // so nothing about the node diverges and no `NodeData` is copied.
         //
         // `Arc::make_mut` here sees the base's handle as well as the overlay's,
-        // so it copies the store — which is exactly right: the reader's base
-        // must keep the store it was forked with. That copy is the same
-        // per-statement pre-image cost a non-forked columnar write already pays
-        // (D1 Phase 4/5), not a new one this module introduces.
+        // so the *first* write per type copies the store — which is exactly
+        // right: the reader's base must keep the store it was forked with. It
+        // is once per fork, not once per statement: the copy the overlay now
+        // owns is uniquely held, so every later write mutates it in place. This
+        // is the one place the master legitimately forks after Phase 2, and it
+        // is why the write-site assertion in `columnar_write.rs` exempts a
+        // forked backend.
         if let Some((type_key, row_id)) = self.columnar_row_of(idx) {
             if let Some(store) = self.column_stores.get_mut(&type_key) {
                 Arc::make_mut(store).set(row_id, key, &value, None);
@@ -689,7 +703,7 @@ impl GraphWrite for ForkedGraph {
 
     fn remove_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
         let previous = GraphRead::get_node_property(self, idx, key);
-        self.capture_property_pre_image(idx);
+        self.capture_property_pre_image(idx, ColumnarWrite::Cell(key));
         if let Some((type_key, row_id)) = self.columnar_row_of(idx) {
             if let Some(store) = self.column_stores.get_mut(&type_key) {
                 Arc::make_mut(store).set(row_id, key, &Value::Null, None);
@@ -703,13 +717,21 @@ impl GraphWrite for ForkedGraph {
         GraphWrite::remove_node_property(self, idx, key)
     }
 
+    /// **Not `replace_all` semantics on a columnar row** — it writes `pairs`
+    /// over whatever is there and leaves every other cell alone, where the heap
+    /// backends null the row first. Pre-existing divergence, carried unchanged
+    /// through the cell-grained journal rather than silently altered by it.
     fn replace_node_properties(&mut self, idx: NodeIndex, pairs: Vec<(InternedKey, Value)>) {
-        self.capture_property_pre_image(idx);
         if self.columnar_row_of(idx).is_some() {
+            // Each delegated write captures its own cell pre-image, so there is
+            // nothing extra to journal here.
             for (key, value) in pairs {
                 GraphWrite::set_node_property(self, idx, key, value);
             }
             return;
+        }
+        if self.undo.is_some() {
+            self.capture_node_weight(idx);
         }
         if let Some(nd) = self.cow_node(idx) {
             nd.properties.replace_all(pairs);

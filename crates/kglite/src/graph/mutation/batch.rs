@@ -381,14 +381,19 @@ impl BatchProcessor {
     /// removed from the WAL.
     ///
     /// No undo obligation is dropped by that bypass: the pair is a logical
-    /// no-op for an existing node (same argument as above), the *created* rows
-    /// are captured structurally by [`GraphWrite::add_node`], and the master
-    /// store itself is restored from the rollback checkpoint's schema shell,
-    /// which does not park `column_stores`. No Cypher statement reaches this
-    /// funnel today in any case — the executor creates nodes through
-    /// `DirGraph::insert_node_routed` — so there is currently no journal
-    /// installed while it runs; the override is what keeps that safe if one
-    /// ever is.
+    /// no-op for an existing node (same argument as above), and the *created*
+    /// rows are captured structurally by [`GraphWrite::add_node`].
+    ///
+    /// The master store is **not** covered, and the comment here used to claim
+    /// the opposite: `column_stores` lives on the storage backend, which
+    /// `rollback::swap_data_scale` parks, so the schema shell never sees it and
+    /// cannot restore it. What restores a columnar write is the journal's own
+    /// cell entries — and this funnel emits none, because it swaps stores
+    /// wholesale rather than writing cells. That is safe only because no
+    /// Cypher statement reaches it: the executor creates nodes through
+    /// `DirGraph::insert_node_routed`, so no journal is ever installed while it
+    /// runs. A caller that changes that has to journal the store swap here
+    /// first.
     ///
     /// Returns `(rows awaiting reattachment, owned stores keyed by node type)`.
     fn detach_columnar_stores(

@@ -52,41 +52,59 @@
 //! explicit addition to [`swap_data_scale`] can introduce a correctness gap,
 //! and that is a change a reviewer is looking straight at.
 //!
-//! ## Columnar mode: one `Arc` per touched type, restored by the journal
+//! ## Columnar mode: one entry per changed cell, replayed into the live store
 //!
 //! The per-type master `ColumnStore` map lives on the **storage backend**
 //! (D1 Phase 3), which `swap_data_scale` swaps wholesale — so it is journal
 //! territory, not shell territory: the shell restore never sees it.
-//! [`UndoEntry::ColumnarHandles`] carries the pre-statement `Arc` for each type
-//! a statement wrote, and its replay reinstalls that one handle.
+//! [`UndoEntry::ColumnarCell`] carries the prior value of each `(row, key)` a
+//! statement overwrote, and its replay writes that value straight back into the
+//! live store. [`UndoEntry::ColumnarSchemaGrown`] is its companion for the one
+//! non-cell edit a `SET` can make: introducing a property the type's schema
+//! lacks, which grows the schema and appends a null-backfilled column.
 //!
-//! What makes that sufficient — the invariant, which is **asserted at the write
-//! site** (`columnar_write::write_column_master`) rather than argued here:
+//! What makes that sufficient:
 //!
-//! - `ColumnStore` has no interior mutability, and the only in-statement writer
-//!   of a master store goes through `Arc::make_mut`. The journal clones the
-//!   master into this entry *before* that call, so under an open checkpoint the
-//!   refcount is at least two and `make_mut` copies on write — the entry's
-//!   handle is the pristine pre-statement store. Before D1 Phase 3 the refcount
-//!   was above one for a different reason (every node held a handle), and the
-//!   journal's clone was incidental; now it is the mechanism.
-//! - With no checkpoint open nothing else holds the master, so `make_mut`
-//!   mutates one row in place. That is the point of the programme, and it is
-//!   why the capture-then-write ordering cannot be reversed.
+//! - The capture happens **before** the write, at all three columnar write
+//!   sites, because after the write the prior value exists nowhere. That
+//!   ordering is the entire correctness argument and it cannot be reversed.
+//! - Replay is in reverse capture order, so a cell written several times in one
+//!   statement is restored by its *earliest* capture — the pre-statement one —
+//!   and needs no first-touch dedup. A schema-growth entry captured before its
+//!   own cells replays after them, so the cells are restored into a column that
+//!   still exists and the column is dropped afterwards.
+//! - The journal holds **no handle on the store**, which is the inversion this
+//!   phase is: the master stays uniquely owned through the statement, so
+//!   `Arc::make_mut` at the write site mutates one cell in place instead of
+//!   deep-copying every column of the type. That direction is asserted at the
+//!   write site (`columnar_write::write_column_master`), which is also where
+//!   the one legitimate exception lives — a `Forked` backend shares its stores
+//!   with the base a reader holds, so its first write per type must copy.
 //! - `CREATE` and `DELETE` never reach a master store in memory mode: the
 //!   in-memory insert branch always builds a `Compact` node, and node removal
 //!   is a plain backend edit. Every other writer of the store map
 //!   (`enable_columnar`, `disable_columnar`, `vacuum`, the spill and bulk-batch
-//!   paths) runs outside the statement window.
+//!   paths) runs outside the statement window. So row *count* and tombstones
+//!   are statement-invariant and need no undo entry of their own — a property
+//!   the always-columnar flip will have to buy back explicitly.
 //!
-//! Restoring a type now costs one `Arc` move rather than a re-point of every
-//! node of that type — the same O(N_type) → O(1) collapse the write path got.
+//! Two documented residues, both observational no-ops:
+//!
+//! - A cell that was **absent** before the statement is restored by writing
+//!   `Value::Null`. `ColumnStore::get` answers `None` for absent and null
+//!   alike and `row_properties` skips both, so no read surface — including this
+//!   module's own `fingerprint` oracle — can tell the difference.
+//! - A rolled-back write whose value did not fit the column's type left the
+//!   column **demoted to `Mixed`** on its way in, and the restore puts the
+//!   value back without re-narrowing it. Values and reads are identical; only
+//!   the column's storage tag differs, in memory, until the next consolidation
+//!   re-derives it.
 //!
 //! One consequence to keep in view when touching this path: a columnar `SET`
 //! writes into the master, never into a node's weight, so it produces **no**
-//! `NodeWeight` entry for the node it changed. `ColumnarHandles` is the only
-//! entry that knows the type was written at all, which is why its replay is
-//! what reports the type into `stale_unique_indices`.
+//! `NodeWeight` entry for the node it changed. The columnar entries are the
+//! only ones that know the type was written at all, which is why their replay
+//! is what reports the type into `stale_unique_indices`.
 //!
 //! ## When the journal is not used
 //!
@@ -112,6 +130,7 @@ use std::collections::HashSet;
 use petgraph::graph::NodeIndex;
 
 use super::DirGraph;
+use crate::datatypes::Value;
 use crate::graph::storage::undo::{BucketId, UndoEntry, UndoJournal};
 use crate::graph::storage::{GraphRead, GraphWrite};
 
@@ -182,8 +201,8 @@ fn undo_bucket_append(members: Option<&mut Vec<NodeIndex>>, idx: NodeIndex) {
 ///
 /// - **`column_stores`** guarded the columnar-`SET` master side channel, but
 ///   fired on every graph that had ever been saved. Covered instead by the
-///   unparked shell restore plus journalled handle refresh; see the module
-///   doc.
+///   unparked shell restore plus the journalled cell pre-images; see the
+///   module doc.
 /// - **`property_indices` / `range_indices` / `composite_indices`** guarded
 ///   the absence of position undo for user-index buckets. That undo now
 ///   exists, recorded at the incremental-maintenance choke points in
@@ -515,31 +534,63 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
         UndoEntry::TimeseriesRemoved { node, prior } => {
             graph.timeseries_store.insert(node, *prior);
         }
-        UndoEntry::ColumnarHandles { node_type, prior } => {
-            // Reinstall the pre-statement store. The backend owns the map and
-            // `swap_data_scale` swaps the backend, so nothing else restores it;
-            // this entry is the whole story for a columnar write.
+        UndoEntry::ColumnarCell {
+            node_type,
+            row_id,
+            key,
+            prior,
+        } => {
+            // Write the prior value back into the live store. The backend owns
+            // the map and `swap_data_scale` swaps the backend, so nothing else
+            // restores it; these entries are the whole story for a columnar
+            // write.
             //
-            // `prior` is pristine by construction: `write_column_master`
-            // captured it *before* its `Arc::make_mut`, and holding it here is
-            // what made that call fork rather than mutate in place. One `Arc`
-            // move per touched type — no per-node work, because no node holds a
-            // store handle any more.
+            // `prior: None` restores as `Null`: `ColumnStore::get` answers
+            // `None` for absent-and-null alike and `row_properties` skips both,
+            // so the two are indistinguishable through every read surface —
+            // including the `rollback_tests::fingerprint` oracle, which reads
+            // the master rows directly.
             let Some(type_name) = graph.interner.try_resolve(node_type).map(str::to_string) else {
                 return;
             };
-            graph.install_column_store(&type_name, prior);
-            // A columnar `SET` lands in the master store, not in any node's
-            // weight, so it produces no `NodeWeight` entry for the node it
-            // changed — this entry is the only signal that a value under a
-            // declared unique constraint may have moved. Without it a failed
-            // columnar `SET` would leave the claim it took behind (a phantom
-            // occupant) or the claim it released free (a real duplicate
-            // admitted), which is exactly the failure mode `swap_data_scale`
-            // warns about for the parked `unique_indices`.
-            fallout.stale_unique_indices.insert(type_name);
+            if let Some(store) = GraphWrite::column_store_mut(&mut graph.graph, node_type) {
+                let value = prior.unwrap_or(Value::Null);
+                std::sync::Arc::make_mut(store).set(row_id, key, &value, None);
+            }
+            columnar_type_touched(fallout, type_name);
+        }
+        UndoEntry::ColumnarSchemaGrown {
+            node_type,
+            prior_schema,
+            prior_column_count,
+        } => {
+            // Replayed *after* the cell entries of the same write (they were
+            // captured later, so reverse replay runs them first): each new
+            // column is restored to its pre-statement content and only then
+            // dropped, which keeps the two entries independent of each other's
+            // internals.
+            let Some(type_name) = graph.interner.try_resolve(node_type).map(str::to_string) else {
+                return;
+            };
+            if let Some(store) = GraphWrite::column_store_mut(&mut graph.graph, node_type) {
+                std::sync::Arc::make_mut(store).restore_schema(prior_schema, prior_column_count);
+            }
+            columnar_type_touched(fallout, type_name);
         }
     }
+}
+
+/// Report a node type whose master column store the replay just wrote.
+///
+/// A columnar `SET` lands in the master store, not in any node's weight, so it
+/// produces no `NodeWeight` entry for the node it changed — the columnar undo
+/// entries are the *only* signal that a value under a declared unique
+/// constraint may have moved. Without the report a failed columnar `SET` would
+/// leave the claim it took behind (a phantom occupant) or the claim it released
+/// free (a real duplicate admitted), which is exactly the failure mode
+/// `swap_data_scale` warns about for the parked `unique_indices`.
+fn columnar_type_touched(fallout: &mut ReplayFallout, type_name: String) {
+    fallout.stale_unique_indices.insert(type_name);
 }
 
 /// Assert that a re-inserted entity landed on the slot it vacated.

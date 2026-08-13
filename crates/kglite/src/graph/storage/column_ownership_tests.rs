@@ -425,8 +425,8 @@ fn merge_key_read_matches_the_public_read() {
 
 /// A rolled-back statement must leave every surface on the pre-statement value.
 /// The columnar SET path emits no `NodeWeight` undo entry — its only signal is
-/// `UndoEntry::ColumnarHandles` — so this is the arm that proves the journal
-/// covers the master write at all.
+/// the per-cell `UndoEntry::ColumnarCell` — so this is the arm that proves the
+/// journal covers the master write at all.
 #[test]
 fn rollback_restores_every_read_surface() {
     let mut graph = seeded_columnar();

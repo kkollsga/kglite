@@ -10,6 +10,7 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::DirGraph;
+use crate::graph::storage::undo::{ColumnarPreImages, ColumnarWrite};
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::NodeIndex;
 use std::sync::Arc;
@@ -65,16 +66,15 @@ pub(super) struct ColumnMasterWrite<'a> {
 ///   mutated node is captured explicitly. Exactly one node — there is no
 ///   end-of-clause sweep any more, because no node holds a store handle to
 ///   re-point (D1 Phase 3).
-/// - **Undo**: the pre-statement master is captured once per type as
-///   [`UndoEntry::ColumnarHandles`], **before** the write. That ordering is
-///   load-bearing and is the whole rollback correctness argument:
-///   `Arc::make_mut` below forks *only* when someone else holds a handle, so
-///   the journal's clone is what keeps the pre-statement image pristine. With
-///   no checkpoint open nobody else holds one, `make_mut` mutates the single
-///   row in place, and the statement costs O(1) instead of O(N_type).
+/// - **Undo**: the cell's prior value is captured, **before** the write, as
+///   [`UndoEntry::ColumnarCell`]. That ordering is load-bearing — after the
+///   write the prior value is gone — but it no longer forces a copy of
+///   anything: the journal holds an `Option<Value>`, never a handle on the
+///   store, so the master stays uniquely owned and `Arc::make_mut` below
+///   mutates one cell in place whether or not a checkpoint is open.
 ///
-/// Both directions are asserted rather than argued — see the `debug_assert!`
-/// at the write itself and
+/// The uniquely-owned half is asserted rather than argued — see the
+/// `debug_assert!` at the write itself and
 /// `dir_graph::rollback_tests::the_master_is_uniquely_owned_between_statements`.
 pub(super) fn set_via_column_master(graph: &mut DirGraph, write: ColumnMasterWrite<'_>) -> bool {
     // Disk-backed graphs use a separate write path; the master `column_stores`
@@ -105,13 +105,13 @@ pub(super) fn set_via_column_master(graph: &mut DirGraph, write: ColumnMasterWri
 /// written" signal).
 ///
 /// Ordering is the correctness argument, not a detail:
-/// 1. clone the master into the undo journal — under an open checkpoint that
-///    clone is what makes step 3 fork instead of mutating the pre-statement
-///    image;
-/// 2. read the prior cell value, for the caller's result and for index
-///    maintenance;
-/// 3. `Arc::make_mut` and write — in place when nothing else holds a handle,
-///    which after D1 Phase 3 is the normal case between statements;
+/// 1. read the cell's prior value (and, if the write introduces a new
+///    property, the pre-growth schema) into the undo journal — after step 3
+///    the prior value no longer exists anywhere;
+/// 2. read the prior cell value again for the caller's result and for index
+///    maintenance — the journal's copy is consumed by the journal;
+/// 3. `Arc::make_mut` and write — **in place**, because nothing else holds the
+///    master, which is what makes a one-cell write cost O(1);
 /// 4. note the one mutated node for the WAL, since this bypasses the recorded
 ///    `GraphWrite` path.
 pub(super) fn write_column_master(
@@ -124,46 +124,44 @@ pub(super) fn write_column_master(
 ) -> Option<Option<crate::datatypes::values::Value>> {
     let type_key = crate::graph::schema::InternedKey::from_str(node_type);
 
-    // (1) Pre-image first. If the journal already holds an entry for this type
-    // it declines the clone, which is then dropped — returning the count to one
-    // so the rest of the statement mutates in place.
+    // (1) Pre-image first, and cell-grained: the journal takes the value this
+    // write is about to destroy, never a handle on the store holding it.
     //
     // Gated on the journal actually existing: an unjournalled statement (no
-    // open checkpoint) must not pay the store probe and the refcount round-trip
-    // for a pre-image nobody will read.
-    let captured_now = if graph.graph.undo_journal_mut().is_some() {
-        let prior_store = graph.graph.column_store(type_key).map(Arc::clone);
-        match (prior_store, graph.graph.undo_journal_mut()) {
-            (Some(prior_store), Some(journal)) => {
-                journal.note_columnar_fork(type_key, || Some(prior_store))
-            }
-            _ => false,
+    // open checkpoint) must not pay the store probe for a pre-image nobody
+    // will read.
+    if graph.graph.undo_journal_mut().is_some() {
+        let captured = graph
+            .graph
+            .column_store(type_key)
+            .map(|store| ColumnarPreImages::capture(store, row_id, ColumnarWrite::Cell(key)));
+        if let (Some(captured), Some(journal)) = (captured, graph.graph.undo_journal_mut()) {
+            captured.record(journal, type_key, row_id);
         }
-    } else {
-        false
-    };
+    }
 
+    // Read before the mutable borrow: a forked backend shares its stores with
+    // the base a reader is holding, so its first write per type legitimately
+    // copies (`storage/forked.rs`). Everywhere else the copy would be the
+    // defect this design removed.
+    let forked = graph.graph.is_forked();
     let master = graph.graph.column_store_mut(type_key)?;
     let prior_value = master.get(row_id, key); // (2)
-                                               // The rollback invariant, asserted at the exact point it matters.
-                                               //
-                                               // `captured_now` means *this* call handed the journal the allocation the
-                                               // master currently points at — so `make_mut` must fork away from it, or the
-                                               // statement is mutating the very image rollback would restore. Silent, and
-                                               // exactly the class `rollback.rs::swap_data_scale` warns about.
-                                               //
-                                               // Later writes in the same statement do *not* fork: the journal declined a
-                                               // second clone, so the master is uniquely owned and mutates in place. That
-                                               // is correct (the first write already moved it off the pre-image) and is
-                                               // why the assertion is keyed on `captured_now` rather than on whether a
-                                               // checkpoint is open.
+
+    // The rollback invariant, asserted at the exact point it matters — and it
+    // is the *inverse* of the pre-Phase-2 one. The journal used to hold the
+    // master's allocation, so the write had to fork away from it; now the
+    // journal holds only the cell's prior value, so a fork here would be a
+    // silent whole-store copy per statement (O(rows x cols) to write one cell)
+    // with nothing gained. On a non-forked backend the master is the backend's
+    // alone and the pointer must survive `make_mut` unchanged.
     let before = Arc::as_ptr(master);
     Arc::make_mut(master).set(row_id, key, value, None); // (3)
     debug_assert!(
-        !captured_now || !std::ptr::eq(before, Arc::as_ptr(master)),
-        "the first columnar write of a statement must fork the master away \
-         from the pre-image just handed to the undo journal; mutating it in \
-         place leaves rollback nothing pristine to restore"
+        forked || std::ptr::eq(before, Arc::as_ptr(master)),
+        "a columnar write on a non-forked backend must mutate the master in \
+         place; a fork here means something is holding a second handle and \
+         every statement is paying a whole-store copy"
     );
     graph.graph.note_recorded_node_upsert(node_idx); // (4)
     Some(prior_value)

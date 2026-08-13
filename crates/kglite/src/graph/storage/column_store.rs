@@ -655,7 +655,6 @@ impl TypedColumn {
     }
 
     /// Convert this column back to heap-backed storage.
-    #[allow(dead_code)] // Test-only chain (ColumnStore::materialize_to_heap).
     pub fn materialize_to_heap(&mut self) {
         match self {
             TypedColumn::Int64 { data, nulls } => {
@@ -1327,9 +1326,42 @@ impl ColumnStore {
 
     /// Resolve a property name to a column slot index.
     #[inline]
-    #[allow(dead_code)] // Test-only.
     pub fn slot(&self, key: InternedKey) -> Option<u16> {
         self.schema.slot(key)
+    }
+
+    /// The schema handle, for an undo pre-image that has to restore it.
+    ///
+    /// [`Self::set`] grows the schema through `Arc::make_mut` when it meets an
+    /// unknown key, so holding this `Arc` is a complete pre-image of the
+    /// pre-growth schema — no copy is taken here, and the growth is what forks
+    /// it. See [`UndoEntry::ColumnarSchemaGrown`](crate::graph::storage::undo::UndoEntry::ColumnarSchemaGrown).
+    #[inline]
+    pub fn schema_arc(&self) -> Arc<TypeSchema> {
+        Arc::clone(&self.schema)
+    }
+
+    /// Number of live property columns — the other half of the schema-growth
+    /// pre-image, because [`Self::set`] pushes exactly one column per new key.
+    #[inline]
+    pub fn column_count(&self) -> usize {
+        self.columns.len()
+    }
+
+    /// Undo a schema growth: reinstate `schema` and drop every column appended
+    /// past `column_count`.
+    ///
+    /// The inverse of the `None`-slot arm of [`Self::set`], and the only
+    /// caller is the rollback replay. Truncation is safe because that arm only
+    /// ever *pushes*: a slot index handed out before the growth still names the
+    /// same column afterwards.
+    pub fn restore_schema(&mut self, schema: Arc<TypeSchema>, column_count: usize) {
+        debug_assert!(
+            column_count <= self.columns.len(),
+            "a schema-growth undo can only shrink the column vector"
+        );
+        self.columns.truncate(column_count);
+        self.schema = schema;
     }
 
     /// Fast property access by pre-resolved slot index.
@@ -1384,6 +1416,18 @@ impl ColumnStore {
             }
         };
         let col = &mut self.columns[slot as usize];
+        // A file-backed column comes to heap before it is written, and only
+        // the column actually written does.
+        //
+        // `MmapOrVec::set` would happily write through the `map_mut` into the
+        // spill file, but this store's memory accounting (`heap_bytes`,
+        // `is_mapped`) and the spill/limit contract built on it are the
+        // Phase-4 subject; until that lands, a write leaves the column heap-
+        // resident exactly as it did when the whole store was cloned per
+        // statement — just bounded to one column instead of all of them.
+        if col.is_mapped() {
+            col.materialize_to_heap();
+        }
         if col.set(row_id, value).is_err() {
             self.demote_to_mixed(slot as usize);
             let _ = self.columns[slot as usize].set(row_id, value);

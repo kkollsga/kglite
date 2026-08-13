@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A mutating statement against a saved (columnar) graph no longer copies the
+  touched node type's whole column store.** Statement rollback works from an
+  undo journal, and the journal's pre-image for a columnar property write used
+  to be a handle on the type's entire `ColumnStore` — which is what made the
+  write itself deep-copy every column of that type to change one cell. The cost
+  was paid per statement, released at commit, and paid again by the next
+  statement, so it scaled with the type's row count and never amortised: an
+  ordinary single-row `SET` cost a small constant on a freshly built graph and
+  two orders of magnitude more on the same graph after `save()` or `load()`.
+  The journal now records the prior value of each `(row, property)` a statement
+  changes — plus one entry when a `SET` introduces a property the type did not
+  have, so a rolled-back statement also drops the column it appended — and the
+  store is mutated in place. Journal cost is O(cells changed) instead of
+  O(rows × columns); rollback fidelity is unchanged and pinned by new tests for
+  schema-growing writes, cells written more than once in one statement, and
+  cells that were absent before the statement. Writes taken while a `.copy()`
+  or a held query result is sharing the graph still copy once per type, as
+  before, because the reader's snapshot must keep the store it was given.
+- **A write to an mmap-backed (spilled or mapped-mode) column brings only that
+  column back to the heap**, where the whole-store copy above brought back
+  every column of the type. `set_memory_limit` is still defeated by repeated
+  writes — that contract is a separate fix — but the amount a write pulls back
+  is now bounded by the columns it actually touches.
+
 ## [0.15.14] - 2026-08-13
 
 ### Added

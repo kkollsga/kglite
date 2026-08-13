@@ -22,6 +22,7 @@ use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::disk::csr::TOMBSTONE_EDGE;
 use crate::graph::storage::disk::graph::DiskGraph;
+use crate::graph::storage::undo::{ColumnarPreImages, ColumnarWrite};
 use crate::graph::storage::{GraphRead, GraphWrite, MappedGraph, MemoryGraph};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::{EdgeIndexable, EdgeRef, IntoEdgeReferences, NodeIndexable};
@@ -399,29 +400,41 @@ macro_rules! impl_heap_pre_image_capture {
             ///   they capture here or a failed statement cannot restore the
             ///   value — which is what `rollback_tests::set_properties` caught
             ///   when this was missing.
-            /// - **columnar** → one `Arc` of the type's store, per type per
-            ///   statement, as `UndoEntry::ColumnarHandles`. Cloning a
-            ///   `NodeData` per node would reintroduce the O(N_type) cost the
-            ///   journal exists to remove, and there is nothing on the node to
-            ///   clone anyway.
+            /// - **columnar** → the prior value of each cell `write` names, as
+            ///   `UndoEntry::ColumnarCell` (plus one
+            ///   `UndoEntry::ColumnarSchemaGrown` when the write introduces a
+            ///   property the type's schema lacks). There is nothing on the
+            ///   node to clone — the value lives in the type's store — and
+            ///   capturing the *store* instead would make a one-cell write
+            ///   copy every column of the type, which is the cost class the
+            ///   journal exists to remove.
             ///
-            /// Holding that clone is also what makes the caller's
-            /// `Arc::make_mut` fork instead of mutating the pre-image.
+            /// The two-step capture (`ColumnarPreImages::capture` then
+            /// `record`) is what keeps the store borrow and the journal borrow
+            /// from overlapping; they are sibling fields of this backend.
             #[inline]
-            fn capture_property_pre_image(&mut self, idx: NodeIndex) {
+            fn capture_property_pre_image(&mut self, idx: NodeIndex, write: ColumnarWrite<'_>) {
                 if self.undo.is_none() {
                     return;
                 }
                 let Some(nd) = self.inner.node_weight(idx) else {
                     return;
                 };
-                match nd.properties.columnar_row_id() {
+                let columnar = nd
+                    .properties
+                    .columnar_row_id()
+                    .map(|row_id| (nd.node_type, row_id));
+                match columnar {
                     None => self.capture_node_weight(idx),
-                    Some(_) => {
-                        let type_key = nd.node_type;
-                        let prior = self.column_stores.get(&type_key).map(std::sync::Arc::clone);
-                        if let Some(journal) = self.undo.as_deref_mut() {
-                            journal.note_columnar_fork(type_key, || prior);
+                    Some((type_key, row_id)) => {
+                        let captured = self
+                            .column_stores
+                            .get(&type_key)
+                            .map(|store| ColumnarPreImages::capture(store, row_id, write));
+                        if let (Some(captured), Some(journal)) =
+                            (captured, self.undo.as_deref_mut())
+                        {
+                            captured.record(journal, type_key, row_id);
                         }
                     }
                 }
@@ -474,7 +487,7 @@ macro_rules! impl_heap_column_writes {
         }
 
         fn set_node_property(&mut self, idx: NodeIndex, key: InternedKey, value: Value) {
-            self.capture_property_pre_image(idx);
+            self.capture_property_pre_image(idx, ColumnarWrite::Cell(key));
             // Disjoint field borrows: the node lives in `inner`, its store in
             // `column_stores`.
             let Self {
@@ -496,7 +509,7 @@ macro_rules! impl_heap_column_writes {
         }
 
         fn set_node_property_if_absent(&mut self, idx: NodeIndex, key: InternedKey, value: Value) {
-            self.capture_property_pre_image(idx);
+            self.capture_property_pre_image(idx, ColumnarWrite::Cell(key));
             let Self {
                 inner,
                 column_stores,
@@ -518,7 +531,7 @@ macro_rules! impl_heap_column_writes {
         }
 
         fn remove_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
-            self.capture_property_pre_image(idx);
+            self.capture_property_pre_image(idx, ColumnarWrite::Cell(key));
             let Self {
                 inner,
                 column_stores,
@@ -539,7 +552,7 @@ macro_rules! impl_heap_column_writes {
         }
 
         fn clear_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
-            self.capture_property_pre_image(idx);
+            self.capture_property_pre_image(idx, ColumnarWrite::Cell(key));
             let Self {
                 inner,
                 column_stores,
@@ -564,7 +577,10 @@ macro_rules! impl_heap_column_writes {
         }
 
         fn replace_node_properties(&mut self, idx: NodeIndex, pairs: Vec<(InternedKey, Value)>) {
-            self.capture_property_pre_image(idx);
+            // Whole-row shape: every present cell is nulled below, then `pairs`
+            // are written, so the pre-image spans both sets.
+            let written: Vec<InternedKey> = pairs.iter().map(|(k, _)| *k).collect();
+            self.capture_property_pre_image(idx, ColumnarWrite::ReplaceRow(&written));
             let Self {
                 inner,
                 column_stores,
@@ -610,13 +626,14 @@ impl GraphWrite for MemoryGraph {
 
     /// Bypasses the undo journal as well as the WAL recorder.
     ///
-    /// The one caller is the columnar handle-refresh sweep, which re-points
-    /// every node of a type at a forked master store. Capturing a `NodeData`
-    /// pre-image for each of them would make a one-row `SET` cost one clone
-    /// per node *of the type* — the O(V+E)-per-write cost this journal exists
-    /// to remove, reintroduced at a smaller constant. The sweep's inverse is
-    /// journalled once per type instead, as
-    /// [`UndoEntry::ColumnarHandles`](crate::graph::storage::undo::UndoEntry::ColumnarHandles).
+    /// The one caller is `mutation::batch`'s columnar detach/reattach sweep,
+    /// which re-points every node of a type at a rebuilt master store.
+    /// Capturing a `NodeData` pre-image for each of them would make a
+    /// chunked `add_nodes` cost one clone per node *of the type* per chunk —
+    /// the O(V+E)-per-write cost this journal exists to remove, reintroduced
+    /// at a smaller constant. That sweep runs with no journal installed; see
+    /// `batch::detach_columnar_stores` for why that is what makes the bypass
+    /// sound.
     ///
     /// Nothing else may use this method to skip capture: a caller that
     /// changes a node's *content* silently is unrecoverable on rollback.

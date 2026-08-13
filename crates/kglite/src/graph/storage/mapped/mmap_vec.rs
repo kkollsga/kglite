@@ -699,7 +699,6 @@ impl<T: MmapPod> MmapOrVec<T> {
     }
 
     /// Convert from Mapped back to Heap. No-op if already heap.
-    #[allow(dead_code)] // Test-only chain (TypedColumn::materialize_to_heap).
     pub fn materialize_to_heap(&mut self) {
         if matches!(self, MmapOrVec::Heap { .. }) {
             return;
@@ -1203,7 +1202,6 @@ impl MmapBytes {
         Ok(())
     }
 
-    #[allow(dead_code)] // Test-only chain (TypedColumn::materialize_to_heap).
     pub fn materialize_to_heap(&mut self) {
         if matches!(self, MmapBytes::Heap { .. }) {
             return;
