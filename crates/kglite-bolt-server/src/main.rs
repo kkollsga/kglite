@@ -22,7 +22,7 @@ use kglite::api::storage::StorageMode;
 use crate::backend::{
     checkpoint_if_changed, CheckpointOutcome, CheckpointState, KgliteBackend, ServerIdentity,
 };
-use crate::startup::start_graph;
+use crate::startup::{start_graph, DurabilityRequest};
 
 mod auth;
 mod backend;
@@ -126,7 +126,7 @@ struct Cli {
     checkpoint_interval: Option<Duration>,
 
     /// What a committed write survives: `full`, `normal`, or `off`
-    /// [default: off].
+    /// [default: normal].
     ///
     /// `full` and `normal` attach a write-ahead log beside the served graph
     /// (`<graph>-wal`) and append every commit to it *before* the commit is
@@ -144,6 +144,12 @@ struct Cli {
     /// `off` — no log. Writes are process-local until `--save-on-exit`,
     /// `--checkpoint-interval` or `CALL db.checkpoint()` writes them back.
     ///
+    /// `normal` is the default because it is the level that is free: measured
+    /// at 4 contended writers, it cost nothing against `off` while `full` cost
+    /// 88% of committed throughput (one device barrier per commit, taken
+    /// inside the lock every commit already serializes on). Ask for `full`
+    /// when a power cut must not cost an acknowledged commit.
+    ///
     /// Recovery runs at startup whatever the level: a sidecar holding commits
     /// the graph file does not contain is replayed at `full`/`normal`, and at
     /// `off` it is a startup error rather than a server quietly missing them.
@@ -152,8 +158,10 @@ struct Cli {
     ///
     /// Refused with `--readonly` (a server that never writes has nothing to
     /// log) and for disk-mode graphs (a disk graph commits by publishing a
-    /// generation, so it keeps no logical log). Also settable as
-    /// `KGLITE_BOLT_DURABILITY=<level>`.
+    /// generation, so it keeps no logical log). Those two configurations serve
+    /// the *default* at `off` instead of refusing it, and say so in the log; a
+    /// level you asked for is still refused rather than quietly weakened. Also
+    /// settable as `KGLITE_BOLT_DURABILITY=<level>`.
     #[arg(long, value_name = "LEVEL", value_parser = parse_durability_level)]
     durability: Option<DurabilityLevel>,
 
@@ -253,13 +261,24 @@ const DURABILITY_ENV: &str = "KGLITE_BOLT_DURABILITY";
 /// The level this server logs at when neither the flag nor the environment
 /// says otherwise.
 ///
-/// `off` — today's behaviour, unchanged. Turning the log on by default would
-/// silently change what four other things mean: `--readonly` and disk-mode
-/// graphs would become startup errors, and a graph whose server was killed
-/// would refuse a later `off` open. The level that ships as the default is
-/// decided by R3.3's throughput measurement (see the program plan); this
-/// release makes durability opt-in and preserves every existing invocation.
-const DEFAULT_DURABILITY: DurabilityLevel = DurabilityLevel::Off;
+/// `normal` — a commit this server acknowledges survives the server process
+/// dying. The measurement that picked it (R3.3, `bolt_durability:*` in
+/// `dev-docs/bench/results/results.csv`): at 4 contended writers on a 10k-node
+/// graph, `normal` cost nothing measurable against `off` (the two runs
+/// straddled zero at ±8% noise) while `full` cost **88%** of committed
+/// throughput — one device barrier per commit, taken inside the session lock
+/// every Bolt commit already serializes on, which also drove p95 from 0.9 ms
+/// to 76 ms and the conflict rate from 1.5% to 17%. Power-loss safety is
+/// therefore opt-in (`--durability full`) rather than the default, and the
+/// default is the level that is free.
+///
+/// A **default** level is degraded rather than enforced where the
+/// configuration cannot carry a log: `--readonly` (nothing commits) and
+/// disk-mode graphs (no logical WAL exists for them) serve at `off` with a log
+/// line saying so. An explicitly requested level is still a startup error in
+/// both cases — an operator who typed `--durability full` must not be quietly
+/// given something weaker.
+const DEFAULT_DURABILITY: DurabilityLevel = DurabilityLevel::Normal;
 
 /// Read `name` as a boolean, accepting the spellings operators actually write.
 ///
@@ -443,6 +462,14 @@ struct Durability {
     /// checkpoint settings this one is not a background task but a property of
     /// the session itself, so it is resolved here and handed to startup.
     level: DurabilityLevel,
+    /// Whether [`Self::level`] is what the operator asked for (flag or
+    /// environment) rather than [`DEFAULT_DURABILITY`].
+    ///
+    /// It is the difference between a refusal and a degrade: a configuration
+    /// that cannot carry a log refuses an explicit request and serves an
+    /// implicit default at `off`. Without it, flipping the default would turn
+    /// `--readonly` and every disk-mode graph into a startup error.
+    level_requested: bool,
 }
 
 impl Durability {
@@ -455,18 +482,34 @@ impl Durability {
     /// The `--readonly` refusals run here, before the graph is touched, so an
     /// impossible configuration fails fast; the storage-mode refusals need the
     /// opened graph, so [`Self::ensure_supported`] is called again with it.
+    ///
+    /// A read-only server also degrades the *default* level to `off` here
+    /// rather than refusing it — see [`Durability::level_requested`].
     fn resolve(cli: &Cli) -> Result<Self> {
-        let resolved = Self {
+        let (level, level_requested) = match cli.durability {
+            Some(level) => (level, true),
+            None => match env_durability_level()? {
+                Some(level) => (level, true),
+                None => (DEFAULT_DURABILITY, false),
+            },
+        };
+        let mut resolved = Self {
             save_on_exit: cli.save_on_exit || env_flag(SAVE_ON_EXIT_ENV).unwrap_or(false),
             checkpoint_interval: match cli.checkpoint_interval {
                 Some(interval) => Some(interval),
                 None => env_checkpoint_interval()?,
             },
-            level: match cli.durability {
-                Some(level) => level,
-                None => env_durability_level()?.unwrap_or(DEFAULT_DURABILITY),
-            },
+            level,
+            level_requested,
         };
+        if resolved.level.logs() && cli.readonly && !resolved.level_requested {
+            tracing::info!(
+                default_level = resolved.level.name(),
+                "--readonly: serving at durability off (a read-only server never commits, \
+                 so there is nothing to log)"
+            );
+            resolved.level = DurabilityLevel::Off;
+        }
         resolved.ensure_supported(cli.readonly, None)?;
         Ok(resolved)
     }
@@ -672,7 +715,7 @@ async fn serve() -> Result<()> {
         .map(StorageMode::parse)
         .transpose()
         .map_err(|e| anyhow::anyhow!(e))?;
-    let durability = Durability::resolve(&cli)?;
+    let mut durability = Durability::resolve(&cli)?;
     // The graph is opened *and* wrapped in its session here: at a logging level
     // the two are one step, because recovering the write-ahead sidecar is part
     // of opening the path (see `startup::start_graph`).
@@ -680,9 +723,16 @@ async fn serve() -> Result<()> {
         &cli.graph,
         requested_mode,
         cli.readonly,
-        durability.level,
+        DurabilityRequest {
+            level: durability.level,
+            explicit: durability.level_requested,
+        },
         &mut |_| {},
     )?;
+    // Adopt whatever startup could actually serve: a disk graph degrades a
+    // *default* level to `off` there, and the shutdown flush below must not
+    // then call `sync()` on a session that has no log.
+    durability.level = started.level;
     // Bind the lease for the whole of `serve`. `_writer_lease` rather than
     // `_`: a bare `_` drops it here, releasing write ownership before the
     // first client connects. It is released by this binding going out of
@@ -1037,15 +1087,52 @@ mod tests {
         }
     }
 
-    /// The shipped default is `off` — today's behaviour, preserved. Pinned as
-    /// a test because flipping it silently changes what `--readonly`,
-    /// disk-mode graphs and every existing invocation do (see
-    /// [`DEFAULT_DURABILITY`]); the flip is R3.3's measured decision, and it
-    /// should have to edit a test that says so.
+    /// The shipped default is `normal`: a commit this server acknowledges
+    /// survives the process dying. Pinned as a test because the level decides
+    /// what an operator gets without asking, and because `full` — the level
+    /// that also survives power loss — costs 88% of committed throughput here
+    /// (R3.3, `bolt_durability:*` in the results CSV) and is therefore opt-in.
     #[test]
-    fn the_default_level_is_off() {
-        assert_eq!(DEFAULT_DURABILITY, DurabilityLevel::Off);
-        assert!(!DEFAULT_DURABILITY.logs());
+    fn the_default_level_is_normal() {
+        assert_eq!(DEFAULT_DURABILITY, DurabilityLevel::Normal);
+        assert!(DEFAULT_DURABILITY.logs());
+    }
+
+    /// A default level is degraded where it cannot be served, not enforced:
+    /// `--readonly` keeps working with no `--durability off` added to it.
+    ///
+    /// Mutation evidence: dropping the `!level_requested` guard from
+    /// `resolve` makes this fail with the readonly refusal.
+    #[test]
+    fn a_readonly_server_serves_the_default_level_at_off() {
+        let cli = Cli::parse_from(["kglite-bolt-server", "--graph", "g.kgl", "--readonly"]);
+        let resolved = Durability::resolve(&cli).expect(
+            "--readonly must not become a startup error the day the default starts logging",
+        );
+        assert_eq!(resolved.level, DurabilityLevel::Off);
+        assert!(!resolved.level_requested);
+    }
+
+    /// The other half: a level the operator typed is still refused with
+    /// `--readonly`, rather than silently weakened to what the default does.
+    #[test]
+    fn a_requested_level_is_still_refused_with_readonly() {
+        let cli = Cli::parse_from([
+            "kglite-bolt-server",
+            "--graph",
+            "g.kgl",
+            "--readonly",
+            "--durability",
+            "normal",
+        ]);
+        let error = Durability::resolve(&cli)
+            .err()
+            .map(|e| format!("{e:#}"))
+            .expect("an explicit level with --readonly is a startup error");
+        assert!(
+            error.contains("--durability normal") && error.contains("--readonly"),
+            "the refusal must name both flags: {error}"
+        );
     }
 
     #[test]

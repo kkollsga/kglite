@@ -90,8 +90,9 @@ Options:
                                unchanged graphs are skipped; same refusals)
   --durability <LEVEL>         What a committed write survives: full (power
                                loss), normal (this process dying), off — no log
-                               [default: off]. Also KGLITE_BOLT_DURABILITY=<level>;
-                               refused with --readonly and for disk-mode graphs
+                               [default: normal]. Also KGLITE_BOLT_DURABILITY=<level>;
+                               refused with --readonly and for disk-mode graphs,
+                               which serve the default at off instead
   --neo4j-compat               Report a Neo4j-compatible agent in the handshake
   --auth <USER:PASS>           Basic auth credentials
   --idle-timeout <SECS>        Per-session idle timeout

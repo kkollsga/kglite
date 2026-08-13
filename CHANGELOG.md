@@ -103,9 +103,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   final log flush before the exit save. Refused with `--readonly` (a server that
   never commits has nothing to log; `--durability off` beside `--readonly` is
   unchanged and fine) and for disk-mode graphs (a disk graph commits by
-  publishing an immutable generation, so it keeps no logical log). **The default
-  is `off`** — every existing invocation behaves exactly as before, and turning
-  the log on is opt-in this release.
+  publishing an immutable generation, so it keeps no logical log).
+
+  **The default is `normal`** — a commit this server acknowledges now survives
+  the server process dying, without any flag. The level was picked by
+  measurement, not preference: at 4 contended Bolt writers on a 10k-node graph,
+  `normal` cost nothing measurable against `off` (two runs straddled zero at
+  ±8% noise), while `full` cost **88%** of committed throughput — one device
+  barrier per commit, taken inside the session lock every Bolt commit already
+  serializes on, which also moved p95 latency from 0.9 ms to 76 ms and the
+  transaction-conflict rate from 1.5% to 17%. Power-loss safety is therefore
+  opt-in via `--durability full`, and the numbers live in
+  `tests/benchmarks/test_bench_bolt_writers.py::test_durability_sweep`.
+
+  Two consequences of the default, both deliberate: a served graph now grows a
+  `<graph>-wal` sidecar beside it (~95 bytes per single-node commit, truncated
+  by every checkpoint), and the configurations that cannot carry a log —
+  `--readonly` and disk-mode graphs — serve at `off` with a log line saying so
+  instead of failing to start. A level you *ask* for is still refused there,
+  rather than quietly weakened.
 
 ### Changed
 

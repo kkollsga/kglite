@@ -1,12 +1,18 @@
 """Durability surface of kglite-bolt-server — `--save-on-exit`, the signals
 that trigger it, the `CALL db.checkpoint()` verb, and `--checkpoint-interval`.
 
-The server's writes are process-local: they live in the served graph's
-in-memory state and reach the `.kgl` file only when something checkpoints
-them. `test_write_over_bolt_does_not_reach_the_file_without_save_on_exit`
-pins that baseline — every other test here measures against it, and without
-it a passing save-on-exit test could just be reading a write the server had
-persisted anyway.
+The server's writes are process-local *as far as the `.kgl` goes*: they live
+in the served graph's in-memory state and reach the file only when something
+checkpoints them. `test_write_over_bolt_does_not_reach_the_file_without_save_
+on_exit` pins that baseline at `--durability off` — every checkpoint test
+here measures against it, and without it a passing save-on-exit test could
+just be reading a write the server had persisted anyway.
+
+What a commit survives is the other axis, and the default moved along it:
+`--durability` defaults to `normal`, so an acknowledged commit outlives the
+server process even with nothing checkpointing. Tests about the *file* pass
+`--durability off` explicitly; tests about the *default* say so in their
+name.
 
 POSIX-gated: the graceful-stop helper delivers SIGINT/SIGTERM, which have no
 Windows equivalent that means "shut down cleanly".
@@ -132,11 +138,18 @@ def _run_server_binary(bolt_binary_path, args, env=None) -> subprocess.Completed
 
 def test_write_over_bolt_does_not_reach_the_file_without_save_on_exit(tmp_path):
     """The process-local baseline. A graceful SIGINT shutdown with no
-    `--save-on-exit` leaves the served file exactly as it was."""
+    `--save-on-exit` leaves the served file exactly as it was.
+
+    Pinned at an explicit `--durability off` because that is the model this
+    baseline is about: with no log, a write that never reached the file is
+    gone. The default level is `normal`, where the same write is in the
+    sidecar and comes back on the next start — a different property, tested
+    at `test_a_default_server_logs_at_normal`.
+    """
     _require_binary()
     fixture = tmp_path / "baseline.kgl"
     _build_bolt_fixture_graph(fixture)
-    proc, url = _spawn_bolt_server(fixture)
+    proc, url = _spawn_bolt_server(fixture, extra_args=["--durability", "off"])
     try:
         _write_marker(url)
         status = _graceful_stop_bolt_server(proc, signal.SIGINT)
@@ -326,11 +339,19 @@ def test_checkpoint_bounds_the_loss_window_across_a_sigkill(tmp_path):
     *before* `db.checkpoint()` survives a SIGKILL and a restart on the same
     file; a write made *after* it is gone. Neither half alone is evidence —
     the first without the second would also pass on a server that saved
-    everything continuously."""
+    everything continuously.
+
+    At `--durability off`, which is the level this window belongs to: with a
+    log the post-checkpoint write is *not* lost — it is replayed at the next
+    start, which is what `test_a_checkpoint_truncates_the_log_and_later_
+    commits_start_a_fresh_one` proves. Checkpointing bounds the loss window;
+    the log removes it.
+    """
     _require_binary()
     fixture = tmp_path / "loss-window.kgl"
     _build_bolt_fixture_graph(fixture)
-    proc, url = _spawn_bolt_server(fixture)
+    off = ["--durability", "off"]
+    proc, url = _spawn_bolt_server(fixture, extra_args=off)
     try:
         _write_marker(url, "Before")
         assert _checkpoint(url)["success"] is True
@@ -340,7 +361,7 @@ def test_checkpoint_bounds_the_loss_window_across_a_sigkill(tmp_path):
 
     # Restart on the same file — the server is the reader, so this also proves
     # the checkpointed file is servable and the dead process's lease is gone.
-    restarted, restarted_url = _spawn_bolt_server(fixture)
+    restarted, restarted_url = _spawn_bolt_server(fixture, extra_args=off)
     try:
         with neo4j.GraphDatabase.driver(restarted_url, auth=("neo4j", "password")) as driver:
             with driver.session() as session:
@@ -835,21 +856,35 @@ def test_without_the_log_the_same_commit_is_lost(tmp_path):
         _teardown_bolt_server(restarted)
 
 
-def test_a_default_server_does_not_log(tmp_path):
-    """The default is `off`: an invocation that says nothing about durability
-    behaves exactly as it did before the flag existed. Pinned separately from
-    the `off` test above because flipping the default is a decision, not an
-    implementation detail — see `DEFAULT_DURABILITY` in main.rs."""
+def test_a_default_server_logs_at_normal(tmp_path):
+    """The default is `normal`: an invocation that says nothing about
+    durability still keeps a committed write across the process dying.
+
+    Pinned separately from the parametrized `normal` test above because the
+    default is a decision, not an implementation detail — see
+    `DEFAULT_DURABILITY` in main.rs, and R3.3 for the measurement that chose
+    it. The `.kgl` itself is still untouched: the default bounds what a crash
+    costs, it does not checkpoint continuously.
+    """
     _require_binary()
     fixture = tmp_path / "wal-default.kgl"
     _build_bolt_fixture_graph(fixture)
+    untouched = _digest(fixture)
     proc, url = _spawn_bolt_server(fixture)
     try:
         _write_marker(url)
-        assert _wal_size(fixture) == 0, "the default must not attach a log"
+        assert _wal_size(fixture) > WAL_HEADER_BYTES, "the default must attach a log"
     finally:
-        _teardown_bolt_server(proc)
-    assert _marker_count_on_disk(fixture) == 0
+        _teardown_bolt_server(proc)  # SIGKILL: no shutdown path, no exit save
+    assert _digest(fixture) == untouched, "writes stay process-local until something checkpoints"
+
+    restarted, restarted_url = _spawn_bolt_server(fixture)
+    try:
+        assert _count_over_bolt(restarted_url, "Zed") == 1, (
+            "a commit acknowledged by a default server must survive that server dying"
+        )
+    finally:
+        _teardown_bolt_server(restarted)
 
 
 # ── Recovery on open is unconditional ───────────────────────────────────────
@@ -858,8 +893,13 @@ def test_a_default_server_does_not_log(tmp_path):
 def test_starting_at_off_over_an_unreplayed_log_is_refused(tmp_path, bolt_binary_path):
     """A logged commit that no checkpoint has folded in is *data*, and starting
     a server that neither replays nor keeps it would lose it at the next
-    checkpoint. Both spellings of "no log" are refused: the explicit `off` and
-    the default."""
+    checkpoint. Asking for `off` over such a log is therefore refused.
+
+    The default is not one of the ways to ask: it logs at `normal`, so the
+    same path started with no flag replays the commit instead — asserted here
+    beside the refusal, because "refused" is only the right answer for an
+    operator who typed `off`.
+    """
     _require_binary()
     fixture = tmp_path / "unreplayed.kgl"
     _build_bolt_fixture_graph(fixture)
@@ -869,15 +909,23 @@ def test_starting_at_off_over_an_unreplayed_log_is_refused(tmp_path, bolt_binary
     finally:
         _teardown_bolt_server(proc)
 
-    for args in (["--durability", "off"], []):
-        result = _run_server_binary(
-            bolt_binary_path,
-            ["--graph", str(fixture), "--port", "0", *args],
+    result = _run_server_binary(
+        bolt_binary_path,
+        ["--graph", str(fixture), "--port", "0", "--durability", "off"],
+    )
+    assert result.returncode != 0, f"off must refuse: {result.stdout}{result.stderr}"
+    combined = result.stdout + result.stderr
+    assert "-wal" in combined, combined
+    assert "'full' or 'normal'" in combined, combined
+
+    # The default recovers rather than refusing — the flip's whole point.
+    default_started, default_url = _spawn_bolt_server(fixture)
+    try:
+        assert _count_over_bolt(default_url, "Zed") == 1, (
+            "a default server must replay the unreplayed log, not refuse it"
         )
-        assert result.returncode != 0, f"args={args} must refuse: {result.stdout}{result.stderr}"
-        combined = result.stdout + result.stderr
-        assert "-wal" in combined, combined
-        assert "'full' or 'normal'" in combined, combined
+    finally:
+        _teardown_bolt_server(default_started)
 
     # Non-vacuity: the refusal is about the level, not a broken file — the same
     # path serves fine at a logging level, with the write.

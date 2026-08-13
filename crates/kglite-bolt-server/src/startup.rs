@@ -41,9 +41,28 @@ pub(crate) enum StartupStep {
     SessionOpened,
 }
 
+/// What the operator asked of the write-ahead log, and whether they asked.
+///
+/// The pair travels together because the two answers mean different things to
+/// a graph that cannot carry a log: an explicitly requested level is a startup
+/// error (the engine's, naming the reason), while the server's *default* level
+/// degrades to `off` so that serving a disk-mode graph does not stop working
+/// the day the default changes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DurabilityRequest {
+    pub(crate) level: DurabilityLevel,
+    /// False when `level` came from the server's default rather than from
+    /// `--durability` or its environment mirror.
+    pub(crate) explicit: bool,
+}
+
 /// A session ready to serve, plus the write ownership it depends on.
 pub(crate) struct StartedGraph {
     pub(crate) session: Session,
+    /// The level the session is actually logging at. Equal to the requested
+    /// level except where a default was degraded (see [`DurabilityRequest`]) —
+    /// the caller must serve and report *this* one, not what it asked for.
+    pub(crate) level: DurabilityLevel,
     pub(crate) disposition: OpenDisposition,
     /// The mode the served graph is actually in, read while startup still owns
     /// the graph alone. Read here rather than from a snapshot later because a
@@ -86,7 +105,7 @@ pub(crate) fn start_graph(
     path: &Path,
     requested_mode: Option<StorageMode>,
     readonly: bool,
-    durability: DurabilityLevel,
+    durability: DurabilityRequest,
     record: &mut dyn FnMut(StartupStep),
 ) -> Result<StartedGraph> {
     let writer_lease = if readonly {
@@ -102,24 +121,42 @@ pub(crate) fn start_graph(
         record(StartupStep::LeaseAcquired);
         Some(lease)
     };
-    let opened = open_or_create_graph_in_mode(path, requested_mode, durability)
+    let opened = open_or_create_graph_in_mode(path, requested_mode, durability.level)
         .with_context(|| format!("opening or creating {}", path.display()))?;
     record(StartupStep::GraphOpened);
     let live_mode = live_storage_mode(&opened.graph);
+    // The one refusal that becomes a degrade: a disk graph has no logical WAL
+    // at any level, so an operator who asked for one hears the engine's error
+    // below, while a graph merely inheriting the server's default is served
+    // unlogged rather than refused. Decided here because it is the first point
+    // where the *live* mode is known — `--storage` may have converted, and a
+    // graph opened without the flag reports whatever it was saved in.
+    let level = if durability.level.logs() && !durability.explicit && live_mode == StorageMode::Disk
+    {
+        tracing::info!(
+            default_level = durability.level.name(),
+            "disk-mode graph: serving at durability off (a disk graph commits by \
+             publishing a generation, so it carries no write-ahead log)"
+        );
+        DurabilityLevel::Off
+    } else {
+        durability.level
+    };
     // `opened.graph` is the only reference to this graph, which is what
     // `open_durable` requires: a shared Arc would be deep-cloned here and the
     // other holder would keep mutating an unlogged copy.
-    let session = Session::open_durable(opened.graph, &path.to_string_lossy(), durability)
-        .map_err(|e| {
+    let session =
+        Session::open_durable(opened.graph, &path.to_string_lossy(), level).map_err(|e| {
             anyhow::anyhow!(
                 "opening {} at --durability {}: {e}",
                 path.display(),
-                durability.name()
+                level.name()
             )
         })?;
     record(StartupStep::SessionOpened);
     Ok(StartedGraph {
         session,
+        level,
         disposition: opened.disposition,
         live_mode,
         converted_from: opened.converted_from,
@@ -133,6 +170,23 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A level the operator named — what every test here means unless it is
+    /// specifically about the default's degrade path.
+    fn explicit(level: DurabilityLevel) -> DurabilityRequest {
+        DurabilityRequest {
+            level,
+            explicit: true,
+        }
+    }
+
+    /// The server's default level, i.e. one nobody typed.
+    fn defaulted(level: DurabilityLevel) -> DurabilityRequest {
+        DurabilityRequest {
+            level,
+            explicit: false,
+        }
+    }
 
     /// Unique scratch directory, removed on drop. Mirrors `backend.rs`'s
     /// temp-path idiom rather than adding a dev-dependency for one test file.
@@ -173,7 +227,7 @@ mod tests {
             &scratch.graph_path(),
             Some(StorageMode::Memory),
             false,
-            DurabilityLevel::Off,
+            explicit(DurabilityLevel::Off),
             &mut |step| steps.push(step),
         )
         .expect("writable startup on a free path");
@@ -207,7 +261,7 @@ mod tests {
             &path,
             Some(StorageMode::Memory),
             false,
-            DurabilityLevel::Off,
+            explicit(DurabilityLevel::Off),
             &mut |step| steps.push(step),
         ) {
             Ok(_) => panic!("a second writable server must not open a leased graph"),
@@ -247,7 +301,13 @@ mod tests {
     }
 
     fn start(path: &Path, requested: Option<StorageMode>) -> Result<StartedGraph> {
-        start_graph(path, requested, false, DurabilityLevel::Off, &mut |_| {})
+        start_graph(
+            path,
+            requested,
+            false,
+            explicit(DurabilityLevel::Off),
+            &mut |_| {},
+        )
     }
 
     #[test]
@@ -293,7 +353,7 @@ mod tests {
                 &path,
                 Some(requested),
                 false,
-                DurabilityLevel::Off,
+                explicit(DurabilityLevel::Off),
                 &mut |step| steps.push(step),
             )
             .expect("portable conversion at startup");
@@ -351,7 +411,7 @@ mod tests {
             &path,
             Some(StorageMode::Memory),
             true,
-            DurabilityLevel::Off,
+            explicit(DurabilityLevel::Off),
             &mut |step| steps.push(step),
         )
         .expect("readonly startup beside a live writer");
@@ -419,7 +479,7 @@ mod tests {
             let path = scratch.graph_path();
             seed_graph(&path, StorageMode::Memory);
 
-            let first = start_graph(&path, None, false, level, &mut |_| {})
+            let first = start_graph(&path, None, false, explicit(level), &mut |_| {})
                 .expect("durable startup on a saved graph");
             commit_write(&first.session, "CREATE (:Person {id: 1, title: 'Zed'})");
             assert_eq!(person_count(&first.session), 1);
@@ -427,7 +487,7 @@ mod tests {
             // killed process would, leaving the commit only in the sidecar.
             drop(first);
 
-            let reopened = start_graph(&path, None, false, level, &mut |_| {})
+            let reopened = start_graph(&path, None, false, explicit(level), &mut |_| {})
                 .unwrap_or_else(|e| panic!("durable restart at {}: {e:#}", level.name()));
             assert_eq!(
                 person_count(&reopened.session),
@@ -449,12 +509,24 @@ mod tests {
         let path = scratch.graph_path();
         seed_graph(&path, StorageMode::Memory);
 
-        let durable = start_graph(&path, None, false, DurabilityLevel::Full, &mut |_| {})
-            .expect("durable startup on a saved graph");
+        let durable = start_graph(
+            &path,
+            None,
+            false,
+            explicit(DurabilityLevel::Full),
+            &mut |_| {},
+        )
+        .expect("durable startup on a saved graph");
         commit_write(&durable.session, "CREATE (:Person {id: 1, title: 'Zed'})");
         drop(durable);
 
-        let error = match start_graph(&path, None, false, DurabilityLevel::Off, &mut |_| {}) {
+        let error = match start_graph(
+            &path,
+            None,
+            false,
+            explicit(DurabilityLevel::Off),
+            &mut |_| {},
+        ) {
             Ok(_) => panic!("serving at off would silently drop the logged commit"),
             Err(error) => format!("{error:#}"),
         };
@@ -464,8 +536,70 @@ mod tests {
         );
 
         // Non-vacuity: the same path opens at a logging level, with the write.
-        let recovered = start_graph(&path, None, false, DurabilityLevel::Full, &mut |_| {})
-            .expect("the refusal is about the level, not the path");
+        let recovered = start_graph(
+            &path,
+            None,
+            false,
+            explicit(DurabilityLevel::Full),
+            &mut |_| {},
+        )
+        .expect("the refusal is about the level, not the path");
         assert_eq!(person_count(&recovered.session), 1);
+    }
+    /// A disk graph carries no logical log at any level, and after the
+    /// default flipped to `normal` that would make *every* disk-mode server
+    /// fail to start. The default degrades instead: the graph is served,
+    /// unlogged.
+    ///
+    /// Mutation evidence: passing `explicit(...)` here fails with the engine's
+    /// disk refusal, which is the next test.
+    #[test]
+    fn a_default_level_degrades_to_off_for_a_disk_graph() {
+        let scratch = ScratchDir::new("disk-default");
+        let path = scratch.0.join("disk-graph");
+
+        let started = start_graph(
+            &path,
+            Some(StorageMode::Disk),
+            false,
+            defaulted(DurabilityLevel::Normal),
+            &mut |_| {},
+        )
+        .expect("a disk graph must still be servable once the default logs");
+
+        assert_eq!(started.live_mode, StorageMode::Disk);
+        assert_eq!(
+            started.level,
+            DurabilityLevel::Off,
+            "the degraded level is what the caller must serve and report"
+        );
+        assert_eq!(
+            started.session.durability(),
+            None,
+            "a degraded session must carry no log at all"
+        );
+    }
+
+    /// The other half of the same rule: a level the operator *typed* is
+    /// refused for a disk graph rather than quietly weakened.
+    #[test]
+    fn an_explicit_level_is_still_refused_for_a_disk_graph() {
+        let scratch = ScratchDir::new("disk-explicit");
+        let path = scratch.0.join("disk-graph");
+
+        let error = match start_graph(
+            &path,
+            Some(StorageMode::Disk),
+            false,
+            explicit(DurabilityLevel::Normal),
+            &mut |_| {},
+        ) {
+            Ok(_) => panic!("an operator who asked for a log must not be given none"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(
+            error.contains("storage='disk'"),
+            "the refusal must name the reason: {error}"
+        );
     }
 }
