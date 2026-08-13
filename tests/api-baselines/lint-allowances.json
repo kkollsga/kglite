@@ -539,14 +539,6 @@
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:materialize_to_heap:pub fn materialize_to_heap(&mut self)@occurrence:1::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:materialize_to_heap:pub fn materialize_to_heap(&mut self)@occurrence:2::dead_code",
-      "classification": "dead-code"
-    },
-    {
       "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:new_mixed:pub fn new_mixed(schema: Arc<TypeSchema>) -> Self::dead_code",
       "classification": "dead-code"
     },
@@ -568,10 +560,6 @@
     },
     {
       "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:set_row_count:pub fn set_row_count(&mut self, n: u32)::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:slot:pub fn slot(&self, key: InternedKey) -> Option<u16>::dead_code",
       "classification": "dead-code"
     },
     {
@@ -664,14 +652,6 @@
     },
     {
       "identity": "crates/kglite/src/graph/storage/mapped/mmap_vec.rs::fn:flush_and_release_pages:pub fn flush_and_release_pages(&self) -> std::io::Result<()>@occurrence:2::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/storage/mapped/mmap_vec.rs::fn:materialize_to_heap:pub fn materialize_to_heap(&mut self)@occurrence:1::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/graph/storage/mapped/mmap_vec.rs::fn:materialize_to_heap:pub fn materialize_to_heap(&mut self)@occurrence:2::dead_code",
       "classification": "dead-code"
     },
     {

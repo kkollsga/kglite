@@ -1731,7 +1731,7 @@ impl ColumnStore {
     }
 
     /// Convert all columns back to heap-backed storage.
-    #[allow(dead_code)] // Test-only.
+    #[cfg(test)]
     pub fn materialize_to_heap(&mut self) {
         for col in &mut self.columns {
             col.materialize_to_heap();
