@@ -259,7 +259,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::try_fast_exists_check",
-      "lines": 208,
+      "lines": 206,
       "branches": 51,
       "nesting": 8
     },
@@ -301,16 +301,9 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/mod.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_single_clause",
-      "lines": 308,
+      "lines": 297,
       "branches": 45,
       "nesting": 2
-    },
-    {
-      "path": "crates/kglite/src/graph/languages/cypher/executor/return_clause.rs",
-      "qualified_name": "crate::CypherExecutor<'a>::execute_fused_order_by_top_k",
-      "lines": 236,
-      "branches": 40,
-      "nesting": 4
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/collection.rs",
@@ -371,8 +364,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/where_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::evaluate_predicate_tristate",
-      "lines": 321,
-      "branches": 87,
+      "lines": 319,
+      "branches": 86,
       "nesting": 6
     },
     {

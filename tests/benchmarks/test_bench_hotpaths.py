@@ -164,6 +164,21 @@ def test_bench_order_by_expr_limit(benchmark, hot_graph):
     )
 
 
+@pytest.mark.benchmark
+def test_bench_order_by_two_keys_limit(benchmark, hot_graph):
+    """Multi-key ORDER BY + LIMIT — the leaderboard/pagination shape.
+
+    Until 0.15.14 both top-K passes bailed on more than one sort item, so this
+    ran a full O(n log n) sort plus a full projection of all 50k rows (~8x the
+    single-key cell). It now takes the same bounded-heap path, with `low_card`
+    forcing 5000-way ties on the leading key so the second key does real work.
+    """
+    benchmark(
+        hot_graph.cypher,
+        "MATCH (n:Item) RETURN n.name, n.value ORDER BY n.low_card, n.value DESC LIMIT 25",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Mutation checkpoint selection
 # ---------------------------------------------------------------------------

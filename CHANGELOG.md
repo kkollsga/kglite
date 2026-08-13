@@ -230,6 +230,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fine. `save_graph`/`save_graph_with` now return a typed `SaveError` whose
   `Refused` variant means nothing was written, so a binding can map a refusal
   to its own bad-request class instead of an I/O failure.
+- **A fused `ORDER BY … LIMIT` no longer drops rows whose sort key is NULL.**
+  Both fused top-K executors skipped any row with a NULL key, while the
+  ordinary `ORDER BY` pipeline places NULLs by the openCypher/Neo4j 5+ rule
+  (`NULLS FIRST` for DESC, `NULLS LAST` for ASC, overridable per key). So
+  `ORDER BY score DESC LIMIT 10` over a partly-populated property returned the
+  *wrong ten rows* — the NULL-keyed rows that should have led the result were
+  silently discarded — and `LIMIT k` could return fewer than `k` rows when the
+  graph held `k` of them. Sort order is now defined in exactly one place
+  (`executor/ordering.rs`) and shared by the full sort, the streaming top-K
+  operator and both fused top-K executors, so the fused and unfused paths
+  cannot disagree; the corresponding orderings are pinned by golden expected
+  values in `tests/test_cypher_top_k_ordering.py`. Two further defects went
+  with it: a sort key written as an *expression over* a RETURN alias
+  (`RETURN n.x AS a … ORDER BY a + 1 LIMIT k`) fused into a clause that cannot
+  evaluate the alias and returned zero rows — that shape now declines to fuse;
+  and a RETURN column that is also the sort key was projected from the `f64`
+  the old heap ranked on, rounding integers past 2^53.
+
+### Changed
+
+- **Multi-key `ORDER BY … LIMIT` now takes the bounded-heap top-K path
+  (~7× on a 50k-node graph).** Both fusion passes required exactly one sort
+  item, so adding a tie-breaker to a leaderboard or paging query silently
+  bought a full `O(n log n)` sort plus a full projection of every row. They
+  now accept any number of keys, each with its own ASC/DESC and NULLS
+  placement, and rank through the shared comparator. A key written as a RETURN
+  alias resolves to that item's expression, so the alias spelling is no longer
+  slower than the property spelling, and that column is projected from the
+  computed key rather than re-evaluated. Measured (release build, min-of-N,
+  two agreeing runs against the published 0.15.13 wheel, 50k nodes, LIMIT 10):
+  two keys 10.9 ms → 1.64 ms (6.7×), three keys 11.6 ms → 2.35 ms (5.0×),
+  mixed `DESC, ASC` 12.4 ms → 1.65 ms (7.5×), a leading key with 5 000-way
+  ties 15.1 ms → 2.31 ms (6.5×), `LIMIT 1000` 11.1 ms → 2.37 ms (4.7×), and
+  the same query written over RETURN aliases 11.1 ms → 1.63 ms (6.8×). The
+  single-key cell — the path that already fused — improves 1.24 ms → 0.96 ms,
+  and `ORDER BY <alias> LIMIT` on one key 3.57 ms → 0.94 ms (3.8×). Control
+  cells are flat within 1%: the same two-key sort *without* `LIMIT` (14.41 ms →
+  14.49 ms) and an unrelated filtered count (1.38 ms → 1.39 ms).
 
 - **A point lookup on an id that does not exist no longer scans the whole node
   type.** `MATCH (n:Item {id: X})` (and the `WHERE n.id = X` / `$param` /

@@ -625,18 +625,9 @@ impl<'a> CypherExecutor<'a> {
             ),
             Clause::FusedOrderByTopK {
                 return_clause,
-                score_item_index,
-                descending,
+                sort_keys,
                 limit,
-                sort_expression,
-            } => self.execute_fused_order_by_top_k(
-                return_clause,
-                *score_item_index,
-                *descending,
-                *limit,
-                sort_expression.as_ref(),
-                result_set,
-            ),
+            } => self.execute_fused_order_by_top_k(return_clause, sort_keys, *limit, result_set),
             Clause::FusedMatchReturnAggregate {
                 match_clause,
                 return_clause,
@@ -823,8 +814,7 @@ impl<'a> CypherExecutor<'a> {
                 match_clause,
                 where_predicate,
                 return_clause,
-                sort_expression,
-                descending,
+                sort_keys,
                 limit,
             } => {
                 self.budget
@@ -833,8 +823,7 @@ impl<'a> CypherExecutor<'a> {
                     match_clause,
                     where_predicate.as_ref(),
                     return_clause,
-                    sort_expression,
-                    *descending,
+                    sort_keys,
                     *limit,
                 )
             }
@@ -906,6 +895,7 @@ pub mod helpers;
 pub mod load_csv;
 pub mod match_clause;
 pub mod match_execution;
+pub(crate) mod ordering;
 pub mod refresh_stats;
 pub mod regex_cache;
 pub mod return_clause;

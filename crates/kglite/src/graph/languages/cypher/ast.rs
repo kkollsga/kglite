@@ -171,20 +171,14 @@ pub enum Clause {
         distinct_count: bool,
     },
     /// Optimizer-generated: fuse RETURN + ORDER BY + LIMIT into a single
-    /// pass using a min-heap for O(n log k) instead of O(n log n).
-    /// Generalizes FusedVectorScoreTopK to ANY numeric sort expression.
+    /// pass using a bounded heap for O(n log k) instead of O(n log n).
+    /// Generalizes FusedVectorScoreTopK to ANY sort key tuple.
     FusedOrderByTopK {
         return_clause: ReturnClause,
-        /// Index of the sort-key item within `return_clause.items`
-        score_item_index: usize,
-        /// true = DESC (keep k largest), false = ASC (keep k smallest)
-        descending: bool,
+        /// One entry per ORDER BY item, in order (see [`FusedSortKey`]).
+        sort_keys: Vec<FusedSortKey>,
         /// LIMIT k value
         limit: usize,
-        /// Optional external sort expression (not in RETURN items).
-        /// When set, this expression is used for scoring instead of
-        /// `return_clause.items[score_item_index]`.
-        sort_expression: Option<Expression>,
     },
     /// Optimizer-generated: MATCH (n) RETURN count(n) → graph.node_count() in O(1).
     FusedCountAll {
@@ -251,8 +245,8 @@ pub enum Clause {
         match_clause: MatchClause,
         where_predicate: Option<Predicate>,
         return_clause: ReturnClause,
-        sort_expression: Expression,
-        descending: bool,
+        /// One entry per ORDER BY item, in order (see [`FusedSortKey`]).
+        sort_keys: Vec<FusedSortKey>,
         limit: usize,
     },
     /// Optimizer-generated: MATCH (s:A), (w:B) WHERE contains(s, w) → spatial-join operator.
@@ -666,6 +660,23 @@ impl OrderItem {
             NullsPlacement::First
         })
     }
+}
+
+/// One ORDER BY key inside a fused top-K clause, resolved at plan time.
+///
+/// Differs from [`OrderItem`] in two ways the fused executors depend on:
+/// `expression` is always evaluable against the *pre-projection* row (a key
+/// written as a RETURN alias is rewritten to that item's defining expression,
+/// and the planner refuses to fuse anything else that reads an alias), and
+/// `nulls` is the resolved placement rather than the optional modifier.
+#[derive(Debug, Clone)]
+pub struct FusedSortKey {
+    pub expression: Expression,
+    pub ascending: bool,
+    pub nulls: NullsPlacement,
+    /// Set when this key *is* a RETURN item — the executor then projects that
+    /// column from the computed sort key instead of re-evaluating it.
+    pub return_item: Option<usize>,
 }
 
 /// SKIP clause

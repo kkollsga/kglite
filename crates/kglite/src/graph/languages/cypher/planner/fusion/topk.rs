@@ -11,12 +11,71 @@ use crate::graph::languages::cypher::ast::*;
 // Fused RETURN + ORDER BY + LIMIT for vector_score
 // ============================================================================
 
-/// Fuse MATCH (n:Type) [WHERE ...] RETURN expr ORDER BY expr LIMIT k into a
-/// single-pass node scan with inline top-K selection. Avoids materializing all
-/// rows — scans nodes directly, evaluates sort key per node, maintains K-element
-/// heap. RETURN expressions are only evaluated for the K winners.
+/// Resolve an ORDER BY clause into fused sort keys, or `None` to bail.
 ///
-/// Pattern: MATCH (single node) [WHERE] RETURN (no agg, no distinct) ORDER BY LIMIT
+/// Each key must be evaluable in the *pre-projection* row scope, because both
+/// fused top-K executors rank rows before any RETURN item exists. A key written
+/// as a RETURN column name (`RETURN n.age AS a ORDER BY a`) is rewritten to that
+/// item's defining expression and remembers its index; anything else that reads
+/// a RETURN alias (`ORDER BY a + 1`, or an item that is itself an alias
+/// reference) is unevaluable there — it used to fuse and silently return zero
+/// rows — so it bails to the unfused ORDER BY pipeline.
+pub(crate) fn resolve_fused_sort_keys(
+    order_by: &OrderByClause,
+    return_items: &[ReturnItem],
+) -> Option<Vec<FusedSortKey>> {
+    let aliases: std::collections::HashSet<String> = return_items
+        .iter()
+        .filter_map(|item| item.alias.clone())
+        .collect();
+
+    let mut keys = Vec::with_capacity(order_by.items.len());
+    for order_item in &order_by.items {
+        let order_name = match &order_item.expression {
+            Expression::Variable(v) => v.clone(),
+            other => expression_to_column_name(other),
+        };
+        let matched = return_items
+            .iter()
+            .position(|item| return_item_column_name(item) == order_name);
+        let (expression, return_item) = match matched {
+            Some(idx) => (return_items[idx].expression.clone(), Some(idx)),
+            None => (order_item.expression.clone(), None),
+        };
+        if expression_touches_vars(&expression, &aliases) {
+            return None;
+        }
+        keys.push(FusedSortKey {
+            expression,
+            ascending: order_item.ascending,
+            nulls: order_item.effective_nulls(),
+            return_item,
+        });
+    }
+    Some(keys)
+}
+
+/// Fuse MATCH (n:Type) [WHERE ...] RETURN exprs ORDER BY keys LIMIT k into a
+/// single-pass node scan with inline top-K selection. Avoids materializing all
+/// rows — scans nodes directly, evaluates the sort-key tuple per node, maintains
+/// a K-element heap. RETURN expressions are only evaluated for the K winners.
+///
+/// **Precondition:** the fused executor ranks nodes before projecting, so every
+/// sort key must be evaluable against a bare node binding.
+///
+/// **Pattern:** `MATCH (single node) [WHERE] RETURN ORDER BY LIMIT` as the
+/// query's first clauses.
+///
+/// **Rewrite:** the four/five clauses collapse into one `FusedNodeScanTopK`
+/// carrying the resolved [`FusedSortKey`] tuple (any number of keys, each ASC
+/// or DESC with its own NULLS placement).
+///
+/// **Why-bail** (each leaves the clauses in place for the ordinary pipeline):
+/// the MATCH is not the first clause, or is not exactly one single-node
+/// edge-free pattern without path assignments; RETURN uses DISTINCT, an
+/// aggregate, or a function call (those need an evaluation context this scan
+/// does not build); a sort key reads a RETURN alias it is not equal to (see
+/// [`resolve_fused_sort_keys`]); LIMIT is not a positive integer literal.
 pub(crate) fn fuse_node_scan_top_k(query: &mut CypherQuery) {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
 
@@ -92,37 +151,20 @@ pub(crate) fn fuse_node_scan_top_k(query: &mut CypherQuery) {
             continue;
         }
 
-        // ORDER BY must have exactly 1 sort item, and the sort key must
-        // be evaluable in the MATCH's variable scope (graph vars + their
-        // properties) — RETURN aliases aren't visible to the fused
-        // top-K's sort-key evaluator, which would silently emit zero
-        // rows for shapes like `RETURN <expr> AS h ORDER BY h LIMIT k`.
-        // Caught by the differential harness against `string_concat`
-        // and `order by alias` shapes.
-        let sort_info = if let Clause::OrderBy(o) = &query.clauses[orderby_idx] {
-            if o.items.len() == 1 {
-                Some((o.items[0].expression.clone(), !o.items[0].ascending))
-            } else {
-                None
-            }
-        } else {
-            None
+        // Sort keys must be evaluable in the MATCH's variable scope (graph vars
+        // + their properties). `resolve_fused_sort_keys` rewrites a key written
+        // as a RETURN column into that item's expression and rejects any key
+        // that still reads a RETURN alias — those would silently emit zero rows
+        // for shapes like `RETURN <expr> AS h ORDER BY h + 1 LIMIT k`. Caught by
+        // the differential harness against `string_concat` and alias shapes.
+        let sort_keys = match (&query.clauses[orderby_idx], &query.clauses[return_idx]) {
+            (Clause::OrderBy(o), Clause::Return(r)) => resolve_fused_sort_keys(o, &r.items),
+            _ => None,
         };
-        let Some((sort_expr, descending)) = sort_info else {
+        let Some(sort_keys) = sort_keys else {
             i += 1;
             continue;
         };
-        if let Clause::Return(r) = &query.clauses[return_idx] {
-            let return_aliases: std::collections::HashSet<String> = r
-                .items
-                .iter()
-                .filter_map(|item| item.alias.clone())
-                .collect();
-            if expression_touches_vars(&sort_expr, &return_aliases) {
-                i += 1;
-                continue;
-            }
-        }
 
         // LIMIT must be positive literal integer
         let limit_val = if let Clause::Limit(l) = &query.clauses[limit_idx] {
@@ -168,8 +210,7 @@ pub(crate) fn fuse_node_scan_top_k(query: &mut CypherQuery) {
                 match_clause,
                 where_predicate,
                 return_clause,
-                sort_expression: sort_expr,
-                descending,
+                sort_keys,
                 limit,
             },
         );
@@ -321,9 +362,26 @@ pub(crate) fn expression_to_column_name(expr: &Expression) -> String {
 // General Top-K ORDER BY LIMIT Fusion
 // ============================================================================
 
-/// Fuse RETURN + ORDER BY + LIMIT into a single top-k heap pass.
-/// Generalizes `fuse_vector_score_order_limit` to any numeric sort expression.
-/// Runs after the vector_score-specific pass so it only handles non-vector_score cases.
+/// Fuse RETURN + ORDER BY + LIMIT anywhere in the pipeline into a single
+/// bounded-heap pass, so only the K winners are projected.
+///
+/// **Precondition:** the rows reaching the clause are the upstream pipeline's,
+/// unprojected — every sort key must be evaluable there.
+///
+/// **Pattern:** adjacent `RETURN`, `ORDER BY`, `LIMIT` clauses (a SKIP between
+/// ORDER BY and LIMIT does not match, so paging keeps the ordinary path).
+///
+/// **Rewrite:** one `FusedOrderByTopK` carrying the resolved
+/// [`FusedSortKey`] tuple — any number of keys, each with its own ASC/DESC and
+/// NULLS placement — and the literal limit.
+///
+/// **Why-bail** (each leaves the three clauses for the ordinary pipeline):
+/// RETURN uses DISTINCT, contains an aggregate (the heap ranks rows, not
+/// groups), or contains a window function (those need the whole result set to
+/// compute partitions/ranks); a sort key reads a RETURN alias it is not equal
+/// to (see [`resolve_fused_sort_keys`]); LIMIT is not a positive integer
+/// literal. `vector_score` shapes are already gone — `fuse_vector_score_order_limit`
+/// runs first and claims them for the HNSW-backed executor.
 pub(crate) fn fuse_order_by_top_k(query: &mut CypherQuery) {
     if query.clauses.len() < 3 {
         return;
@@ -348,7 +406,7 @@ pub(crate) fn fuse_order_by_top_k(query: &mut CypherQuery) {
         // Note: SKIP before LIMIT (RETURN, ORDER BY, SKIP, LIMIT) is already handled:
         // the pattern match above requires clauses[i+2] to be Limit, so SKIP at i+2 won't match.
 
-        let (score_idx, sort_expression) = if let Clause::Return(r) = &query.clauses[i] {
+        let sort_keys = if let Clause::Return(r) = &query.clauses[i] {
             // Don't fuse if RETURN has DISTINCT
             if r.distinct {
                 i += 1;
@@ -372,41 +430,19 @@ pub(crate) fn fuse_order_by_top_k(query: &mut CypherQuery) {
                 i += 1;
                 continue;
             }
-            // Find which RETURN item the ORDER BY references
-            let order_info = if let Clause::OrderBy(o) = &query.clauses[i + 1] {
-                if o.items.len() != 1 {
+            // Resolve every ORDER BY item against the RETURN items
+            let resolved = if let Clause::OrderBy(o) = &query.clauses[i + 1] {
+                resolve_fused_sort_keys(o, &r.items)
+            } else {
+                None
+            };
+            match resolved {
+                Some(keys) => keys,
+                None => {
                     i += 1;
                     continue;
                 }
-                let order_alias = match &o.items[0].expression {
-                    Expression::Variable(v) => v.clone(),
-                    other => expression_to_column_name(other),
-                };
-                // Try matching a RETURN item
-                let found = r
-                    .items
-                    .iter()
-                    .enumerate()
-                    .find(|(_, item)| return_item_column_name(item) == order_alias);
-                match found {
-                    Some((idx, _)) => (idx, None), // sort key is RETURN item
-                    None => {
-                        // Sort key not in RETURN — store expression directly
-                        (0, Some(o.items[0].expression.clone()))
-                    }
-                }
-            } else {
-                i += 1;
-                continue;
-            };
-            order_info
-        } else {
-            i += 1;
-            continue;
-        };
-        // Extract ORDER BY direction
-        let descending = if let Clause::OrderBy(o) = &query.clauses[i + 1] {
-            !o.items[0].ascending
+            }
         } else {
             i += 1;
             continue;
@@ -439,10 +475,8 @@ pub(crate) fn fuse_order_by_top_k(query: &mut CypherQuery) {
             i,
             Clause::FusedOrderByTopK {
                 return_clause,
-                score_item_index: score_idx,
-                descending,
+                sort_keys,
                 limit,
-                sort_expression,
             },
         );
 

@@ -2172,3 +2172,155 @@ fn test_absent_property_is_no_information_not_zero_selectivity() {
          same filter, however unselective the estimate"
     );
 }
+
+// ============================================================================
+// Multi-key top-K fusion
+// ============================================================================
+
+/// Optimize a query against an empty graph and return its clauses.
+fn optimized_clauses(query: &str) -> Vec<Clause> {
+    let mut parsed = parse_cypher(query).unwrap();
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut parsed, &graph, &params);
+    parsed.clauses
+}
+
+fn node_scan_top_k_keys(query: &str) -> Option<Vec<FusedSortKey>> {
+    optimized_clauses(query).into_iter().find_map(|c| match c {
+        Clause::FusedNodeScanTopK { sort_keys, .. } => Some(sort_keys),
+        _ => None,
+    })
+}
+
+fn order_by_top_k_keys(query: &str) -> Option<Vec<FusedSortKey>> {
+    optimized_clauses(query).into_iter().find_map(|c| match c {
+        Clause::FusedOrderByTopK { sort_keys, .. } => Some(sort_keys),
+        _ => None,
+    })
+}
+
+#[test]
+fn test_node_scan_top_k_fuses_multi_key_order_by() {
+    // Before 0.15.14 the pass required exactly one ORDER BY item, so this
+    // shape fell through to a full sort of every matching node.
+    let keys = node_scan_top_k_keys(
+        "MATCH (n:Item) RETURN n.title AS t ORDER BY n.p0 DESC, n.p1 ASC, n.p2 DESC LIMIT 10",
+    )
+    .expect("multi-key ORDER BY + LIMIT must fuse into FusedNodeScanTopK");
+    assert_eq!(keys.len(), 3, "every ORDER BY item becomes a sort key");
+    let directions: Vec<bool> = keys.iter().map(|k| k.ascending).collect();
+    assert_eq!(
+        directions,
+        vec![false, true, false],
+        "each key keeps its own direction"
+    );
+    let nulls: Vec<NullsPlacement> = keys.iter().map(|k| k.nulls).collect();
+    assert_eq!(
+        nulls,
+        vec![
+            NullsPlacement::First,
+            NullsPlacement::Last,
+            NullsPlacement::First
+        ],
+        "each key resolves its own default NULLS placement (DESC → First)"
+    );
+}
+
+#[test]
+fn test_top_k_keys_keep_explicit_nulls_placement() {
+    let keys =
+        node_scan_top_k_keys("MATCH (n:Item) RETURN n.title AS t ORDER BY n.p0 DESC NULLS LAST, n.p1 ASC NULLS FIRST LIMIT 5")
+            .expect("explicit NULLS modifiers must still fuse");
+    assert_eq!(
+        keys.iter().map(|k| k.nulls).collect::<Vec<_>>(),
+        vec![NullsPlacement::Last, NullsPlacement::First],
+        "an explicit NULLS modifier overrides the direction default"
+    );
+}
+
+#[test]
+fn test_top_k_sort_key_written_as_a_return_alias_resolves_to_its_expression() {
+    let keys = node_scan_top_k_keys(
+        "MATCH (n:Item) RETURN n.p0 AS a, n.p1 AS b ORDER BY a, b DESC LIMIT 5",
+    )
+    .expect("ORDER BY over RETURN aliases must fuse");
+    assert_eq!(keys.len(), 2);
+    for (i, key) in keys.iter().enumerate() {
+        assert!(
+            matches!(&key.expression, Expression::PropertyAccess { .. }),
+            "alias key {i} must be rewritten to the RETURN item's expression, \
+             which is what the pre-projection scan can evaluate"
+        );
+        assert_eq!(
+            key.return_item,
+            Some(i),
+            "the key remembers the RETURN item it projects"
+        );
+    }
+}
+
+#[test]
+fn test_top_k_bails_when_a_sort_key_reads_an_alias_it_is_not_equal_to() {
+    // `a` is only bound after projection, so `a + 1` evaluates to NULL in the
+    // fused scan's row scope — fusing this returned zero rows before 0.15.14.
+    assert!(
+        node_scan_top_k_keys("MATCH (n:Item) RETURN n.p0 AS a ORDER BY a + 1 LIMIT 5").is_none(),
+        "a computed expression over a RETURN alias must not fuse"
+    );
+    assert!(
+        order_by_top_k_keys("MATCH (n:Item) RETURN n.p0 AS a ORDER BY a + 1 LIMIT 5").is_none(),
+        "the generic pass must bail on the same shape"
+    );
+    // A RETURN item that is itself a reference to a sibling alias of the same
+    // RETURN is unevaluable too — `x` only exists after this projection runs.
+    assert!(
+        order_by_top_k_keys("MATCH (n:Item) RETURN n.p0 AS x, x AS y ORDER BY y LIMIT 5").is_none(),
+        "a matched RETURN item whose expression reads a sibling alias must bail"
+    );
+    // But an alias bound *upstream* by WITH is a real binding on the row, so
+    // that shape stays fusable.
+    assert!(
+        order_by_top_k_keys("MATCH (n:Item) WITH n.p0 AS x RETURN x AS y ORDER BY y LIMIT 5")
+            .is_some(),
+        "an upstream WITH alias is bound before RETURN and must still fuse"
+    );
+}
+
+#[test]
+fn test_generic_top_k_fuses_multi_key_order_by() {
+    let keys = order_by_top_k_keys(
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS n, b.age AS age \
+         ORDER BY b.age DESC, a.name ASC LIMIT 10",
+    )
+    .expect("multi-key ORDER BY + LIMIT must fuse into FusedOrderByTopK");
+    assert_eq!(keys.len(), 2);
+    assert_eq!(
+        keys.iter().map(|k| k.ascending).collect::<Vec<_>>(),
+        vec![false, true],
+        "mixed directions survive the rewrite"
+    );
+    // Written as properties rather than as the RETURN aliases, so they are
+    // their own expressions and project nothing.
+    assert!(keys.iter().all(|k| k.return_item.is_none()));
+
+    let aliased = order_by_top_k_keys(
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS n, b.age AS age \
+         ORDER BY age DESC, n ASC LIMIT 10",
+    )
+    .expect("the same shape written over RETURN aliases must fuse too");
+    assert_eq!(
+        aliased.iter().map(|k| k.return_item).collect::<Vec<_>>(),
+        vec![Some(1), Some(0)],
+        "each alias key remembers the RETURN item it projects"
+    );
+}
+
+#[test]
+fn test_top_k_still_bails_on_a_non_literal_limit() {
+    assert!(
+        node_scan_top_k_keys("MATCH (n:Item) RETURN n.title AS t ORDER BY n.p0, n.p1 LIMIT 1 + 1")
+            .is_none(),
+        "LIMIT must be a positive integer literal"
+    );
+}

@@ -2,10 +2,10 @@
 
 use super::super::ast::*;
 use super::helpers::*;
+use super::ordering::{compare_sort_keys, SortSpec, TopKCollector};
 use super::*;
 use crate::datatypes::values::Value;
 use crate::graph::schema::EmbeddingStore;
-use chrono::Datelike;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BinaryHeap, HashMap};
 
@@ -225,61 +225,15 @@ impl<'a> CypherExecutor<'a> {
             })
             .collect();
 
-        // Pre-compute effective nulls placement per item: explicit
-        // NULLS FIRST/LAST wins; otherwise ASC → Last, DESC → First
-        // (Neo4j 5+ defaults). 0.9.0 §2.
-        use crate::graph::languages::cypher::ast::NullsPlacement;
-        let nulls_placement: Vec<NullsPlacement> = clause
-            .items
-            .iter()
-            .map(|item| item.effective_nulls())
-            .collect();
+        // Direction + effective NULLS placement per item (explicit
+        // NULLS FIRST/LAST wins; otherwise ASC → Last, DESC → First —
+        // Neo4j 5+ defaults, 0.9.0 §2). The comparison itself lives in
+        // `ordering`, shared with every top-K path.
+        let specs: Vec<SortSpec> = clause.items.iter().map(SortSpec::from_order_item).collect();
 
-        // Create indices and sort them
+        // Create indices and sort them (stable — ties keep input order)
         let mut indices: Vec<usize> = (0..result_set.rows.len()).collect();
-        indices.sort_by(|&a, &b| {
-            for (i, item) in clause.items.iter().enumerate() {
-                let key_a = &sort_keys[a][i];
-                let key_b = &sort_keys[b][i];
-
-                // Explicit NULL handling — overrides compare_values' default
-                // (which puts NULL Less than everything). Honors per-item
-                // NULLS FIRST/LAST regardless of ASC/DESC.
-                let a_null = matches!(key_a, Value::Null);
-                let b_null = matches!(key_b, Value::Null);
-                let null_ordering = match (a_null, b_null) {
-                    (true, true) => std::cmp::Ordering::Equal,
-                    (true, false) => match nulls_placement[i] {
-                        NullsPlacement::First => std::cmp::Ordering::Less,
-                        NullsPlacement::Last => std::cmp::Ordering::Greater,
-                    },
-                    (false, true) => match nulls_placement[i] {
-                        NullsPlacement::First => std::cmp::Ordering::Greater,
-                        NullsPlacement::Last => std::cmp::Ordering::Less,
-                    },
-                    (false, false) => std::cmp::Ordering::Equal, // fall through to value compare
-                };
-                if null_ordering != std::cmp::Ordering::Equal {
-                    return null_ordering;
-                }
-                if a_null || b_null {
-                    continue; // both null after the match above; move to next sort item
-                }
-
-                if let Some(ordering) = crate::graph::core::filtering::compare_values(key_a, key_b)
-                {
-                    let ordering = if item.ascending {
-                        ordering
-                    } else {
-                        ordering.reverse()
-                    };
-                    if ordering != std::cmp::Ordering::Equal {
-                        return ordering;
-                    }
-                }
-            }
-            std::cmp::Ordering::Equal
-        });
+        indices.sort_by(|&a, &b| compare_sort_keys(&sort_keys[a], &sort_keys[b], &specs));
 
         // Reorder rows
         let mut sorted_rows = Vec::with_capacity(result_set.rows.len());
@@ -744,24 +698,27 @@ impl<'a> CypherExecutor<'a> {
     // Fused RETURN + ORDER BY + LIMIT (general top-k)
     // ========================================================================
 
-    /// Generalized top-k: score all rows with a min-heap of size k, then project
-    /// RETURN expressions only for the k surviving rows.
+    /// Generalized top-k: rank all rows in a bounded heap of size k, then
+    /// project RETURN expressions only for the k surviving rows.
     /// O(n log k) instead of O(n log n) sort + O(n) full RETURN projection.
+    ///
+    /// Ranking is [`compare_sort_keys`] over the whole key tuple —
+    /// the same comparison `execute_order_by` uses — so the fused plan and the
+    /// unfused `ORDER BY` + `LIMIT` pipeline select and order identical rows,
+    /// including ties, NULL keys and mixed-type keys.
     pub(super) fn execute_fused_order_by_top_k(
         &self,
         return_clause: &ReturnClause,
-        score_item_index: usize,
-        descending: bool,
+        sort_keys: &[FusedSortKey],
         limit: usize,
-        sort_expression: Option<&Expression>,
         result_set: ResultSet,
     ) -> Result<ResultSet, String> {
+        let columns: Vec<String> = return_clause
+            .items
+            .iter()
+            .map(return_item_column_name)
+            .collect();
         if result_set.rows.is_empty() || limit == 0 {
-            let columns: Vec<String> = return_clause
-                .items
-                .iter()
-                .map(return_item_column_name)
-                .collect();
             return Ok(ResultSet {
                 rows: Vec::new(),
                 columns,
@@ -769,205 +726,60 @@ impl<'a> CypherExecutor<'a> {
             });
         }
 
-        let score_expr = if let Some(expr) = sort_expression {
-            self.fold_constants_expr(expr)
-        } else {
-            self.fold_constants_expr(&return_clause.items[score_item_index].expression)
-        };
-
-        // Type check: if sort key is String, use a String-specific top-K path
-        // instead of the f64 heap. Avoids materializing ALL rows for large types.
-        {
-            let probe = self.evaluate_expression(&score_expr, &result_set.rows[0])?;
-            match probe {
-                Value::Float64(_)
-                | Value::Int64(_)
-                | Value::DateTime(_)
-                | Value::UniqueId(_)
-                | Value::Boolean(_)
-                | Value::Null => {} // Continue to f64 heap below
-                Value::String(_) => {
-                    // String top-K: maintain a sorted Vec of (String, row_index) pairs.
-                    // O(N * K) for small K — much faster than O(N log N) full sort.
-                    self.check_deadline()?;
-                    let mut top_k: Vec<(String, usize)> = Vec::with_capacity(limit + 1);
-                    for (i, row) in result_set.rows.iter().enumerate() {
-                        let val = self.evaluate_expression(&score_expr, row)?;
-                        let s = match val {
-                            Value::String(s) => s,
-                            _ => continue,
-                        };
-                        // Insert into sorted position
-                        let pos = if descending {
-                            top_k.partition_point(|(existing, _)| existing > &s)
-                        } else {
-                            top_k.partition_point(|(existing, _)| existing < &s)
-                        };
-                        if pos < limit {
-                            top_k.insert(pos, (s, i));
-                            if top_k.len() > limit {
-                                top_k.pop();
-                            }
-                        }
-                    }
-                    // Build result rows from top-K winners
-                    let folded_return_exprs: Vec<Expression> = return_clause
-                        .items
-                        .iter()
-                        .map(|item| self.fold_constants_expr(&item.expression))
-                        .collect();
-                    let columns: Vec<String> = return_clause
-                        .items
-                        .iter()
-                        .map(return_item_column_name)
-                        .collect();
-                    let mut final_rows = Vec::with_capacity(top_k.len());
-                    for &(_, row_idx) in &top_k {
-                        let row = &result_set.rows[row_idx];
-                        let mut projected = Bindings::with_capacity(columns.len());
-                        for (j, expr) in folded_return_exprs.iter().enumerate() {
-                            let val = self.evaluate_expression(expr, row)?;
-                            projected.insert(columns[j].clone(), val);
-                        }
-                        final_rows.push(ResultRow::from_projected(projected));
-                    }
-                    return Ok(ResultSet {
-                        rows: final_rows,
-                        columns,
-                        lazy_return_items: None,
-                    });
-                }
-                _ => {
-                    // Non-numeric, non-string: fall back to full sort
-                    let result = self.execute_return(return_clause, result_set)?;
-                    let order_clause = OrderByClause {
-                        items: vec![OrderItem {
-                            expression: return_clause.items[score_item_index].expression.clone(),
-                            ascending: !descending,
-                            nulls: None,
-                        }],
-                    };
-                    let result = self.execute_order_by(&order_clause, result)?;
-                    let limit_clause = LimitClause {
-                        count: Expression::Literal(Value::Int64(limit as i64)),
-                    };
-                    return self.execute_limit(&limit_clause, result);
-                }
-            }
-        }
-
-        // Phase 1: Score all rows, keep top-k in a min-heap.
-        // ScoredRowRef has reverse Ord → BinaryHeap acts as min-heap (smallest popped).
-        // DESC: keep k largest → push actual score, pop smallest survivor → correct.
-        // ASC: keep k smallest → negate score before insertion. Min-heap pops the
-        //      most negative (= largest actual), keeping k smallest actual scores.
-        self.check_deadline()?;
-        let mut heap: BinaryHeap<ScoredRowRef> = BinaryHeap::with_capacity(limit + 1);
-
-        for (i, row) in result_set.rows.iter().enumerate() {
-            let score_val = self.evaluate_expression(&score_expr, row)?;
-            let raw_score = match score_val {
-                Value::Float64(f) => f,
-                Value::Int64(n) => n as f64,
-                Value::DateTime(d) => d.num_days_from_ce() as f64,
-                Value::UniqueId(u) => u as f64,
-                Value::Boolean(b) => {
-                    if b {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                }
-                Value::Null => continue,
-                _ => continue,
-            };
-            let heap_score = if descending { raw_score } else { -raw_score };
-            heap.push(ScoredRowRef {
-                score: heap_score,
-                index: i,
-            });
-            if heap.len() > limit {
-                heap.pop();
-            }
-        }
-
-        // Phase 2: Extract winners and sort by actual score
-        let mut winners: Vec<ScoredRowRef> = heap.into_vec();
-        if descending {
-            winners.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.index.cmp(&b.index))
-            });
-        } else {
-            // Scores are negated; sort by ascending actual = descending negated
-            winners.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.index.cmp(&b.index))
-            });
-        }
-
-        // Phase 3: Project RETURN expressions only for the k winners
-        let columns: Vec<String> = return_clause
-            .items
+        let folded_keys: Vec<Expression> = sort_keys
             .iter()
-            .map(return_item_column_name)
+            .map(|key| self.fold_constants_expr(&key.expression))
             .collect();
-
-        // When sort_expression is set, the sort key is external to RETURN items —
-        // don't replace any RETURN item expression with the score expression.
-        let has_external_sort = sort_expression.is_some();
-        let folded_exprs: Vec<Expression> = return_clause
-            .items
+        let specs: Vec<SortSpec> = sort_keys
             .iter()
-            .enumerate()
-            .map(|(idx, item)| {
-                if idx == score_item_index && !has_external_sort {
-                    score_expr.clone()
-                } else {
-                    self.fold_constants_expr(&item.expression)
-                }
+            .map(|key| SortSpec {
+                ascending: key.ascending,
+                nulls: key.nulls,
             })
             .collect();
 
-        // Check whether the score column's original type is numeric
-        // and whether it's specifically Int64 (to preserve integer type).
-        let (score_is_numeric, score_is_int) = {
-            let probe = self.evaluate_expression(
-                &score_expr,
-                &result_set.rows[winners.first().map(|w| w.index).unwrap_or(0)],
-            )?;
-            (
-                matches!(probe, Value::Float64(_) | Value::Int64(_)),
-                matches!(probe, Value::Int64(_)),
-            )
-        };
+        // Phase 1: rank every row, retaining at most k.
+        self.check_deadline()?;
+        let mut collector: TopKCollector<usize> = TopKCollector::new(specs, limit);
+        let mut key_buf: Vec<Value> = Vec::with_capacity(folded_keys.len());
+        for (i, row) in result_set.rows.iter().enumerate() {
+            key_buf.clear();
+            for expr in &folded_keys {
+                key_buf.push(self.evaluate_expression(expr, row)?);
+            }
+            if collector.accepts(&key_buf, i) {
+                collector.push(key_buf.clone(), i, i);
+            }
+        }
+        let winners = collector.into_sorted();
+
+        // Phase 2: project RETURN expressions only for the k winners. A column
+        // that *is* a sort key reuses the computed key instead of a second
+        // evaluation.
+        let mut key_of_item: Vec<Option<usize>> = vec![None; return_clause.items.len()];
+        for (key_idx, key) in sort_keys.iter().enumerate() {
+            if let Some(item_idx) = key.return_item {
+                if key_of_item[item_idx].is_none() {
+                    key_of_item[item_idx] = Some(key_idx);
+                }
+            }
+        }
+        let folded_exprs: Vec<Expression> = return_clause
+            .items
+            .iter()
+            .map(|item| self.fold_constants_expr(&item.expression))
+            .collect();
 
         let mut rows = Vec::with_capacity(winners.len());
-        for winner in &winners {
-            let row = &result_set.rows[winner.index];
+        for (keys, row_index) in &winners {
+            let row = &result_set.rows[*row_index];
             let mut projected = Bindings::with_capacity(return_clause.items.len());
-            for (j, item) in return_clause.items.iter().enumerate() {
-                let key = return_item_column_name(item);
-                let val = if j == score_item_index && score_is_numeric && !has_external_sort {
-                    // Recover actual score (undo negation for ASC)
-                    let actual = if descending {
-                        winner.score
-                    } else {
-                        -winner.score
-                    };
-                    if score_is_int {
-                        Value::Int64(actual as i64)
-                    } else {
-                        Value::Float64(actual)
-                    }
-                } else {
-                    self.evaluate_expression(&folded_exprs[j], row)?
+            for (j, column) in columns.iter().enumerate() {
+                let val = match key_of_item[j] {
+                    Some(key_idx) => keys[key_idx].clone(),
+                    None => self.evaluate_expression(&folded_exprs[j], row)?,
                 };
-                projected.insert(key, val);
+                projected.insert(column.clone(), val);
             }
             rows.push(ResultRow {
                 node_bindings: row.node_bindings.clone(),

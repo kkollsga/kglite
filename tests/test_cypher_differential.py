@@ -684,6 +684,100 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) RETURN p.name AS n, p.city AS c ORDER BY p.city, p.name LIMIT 10",
         None,
     ),
+    # Multi-key ORDER BY + LIMIT. Before 0.15.14 both top-K passes bailed on
+    # more than one sort item, so these shapes only ever ran the full sort;
+    # the entries below pin the fused plan against it. `_normalize` sorts
+    # rows, so what these catch is the *selected set* — the emitted order is
+    # pinned by tests/test_cypher_top_k_ordering.py.
+    (
+        "order_by_two_keys_limit",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS n, p.city AS c ORDER BY p.city, p.age LIMIT 7",
+        None,
+    ),
+    (
+        "order_by_three_keys_limit",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS n ORDER BY p.city, p.age DESC, p.name LIMIT 6",
+        None,
+    ),
+    (
+        "order_by_two_keys_mixed_directions_limit",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS n, p.age AS age ORDER BY p.city DESC, p.age ASC LIMIT 8",
+        None,
+    ),
+    # First key ties on every row (all Persons share the type), so the
+    # emitted set is decided entirely by the second key.
+    (
+        "order_by_tie_on_first_key_resolved_by_second",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS n ORDER BY p.city, p.name LIMIT 4",
+        None,
+    ),
+    # NULLs in the leading key: `email` is None for odd-numbered persons.
+    # DESC defaults to NULLS FIRST, so the NULL-keyed rows ARE the winners —
+    # the fused paths used to drop them and return the wrong rows.
+    (
+        "order_by_null_first_key_desc_limit",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS n, p.email AS e ORDER BY p.email DESC, p.name LIMIT 5",
+        None,
+    ),
+    (
+        "order_by_null_first_key_asc_limit",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS n, p.email AS e ORDER BY p.email ASC, p.name LIMIT 5",
+        None,
+    ),
+    (
+        "order_by_null_second_key_limit",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS n, p.email AS e ORDER BY p.city, p.email LIMIT 9",
+        None,
+    ),
+    # LIMIT exceeds the number of non-NULL keys: the fused path used to emit
+    # fewer rows than the ordinary pipeline.
+    (
+        "order_by_null_key_limit_beyond_non_null_rows",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age > 35 RETURN p.name AS n, p.email AS e ORDER BY p.email DESC, p.name LIMIT 20",
+        None,
+    ),
+    (
+        "order_by_explicit_nulls_placement_two_keys",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS n, p.email AS e ORDER BY p.email DESC NULLS LAST, p.name ASC LIMIT 5",
+        None,
+    ),
+    # ORDER BY over projected aliases (both keys), and over an *expression*
+    # of an alias — the latter must not fuse (the alias is unbound before
+    # projection); it used to fuse and return zero rows.
+    (
+        "order_by_projected_aliases_limit",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.city AS c, p.age AS age ORDER BY c, age DESC LIMIT 6",
+        None,
+    ),
+    (
+        "order_by_expression_over_projected_alias_limit",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.age AS age ORDER BY age + 1 DESC LIMIT 5",
+        None,
+    ),
+    (
+        "order_by_two_keys_after_with_limit",
+        "social_graph",
+        "MATCH (p:Person) WITH p.city AS c, p.age AS age, p.name AS n RETURN n, c, age ORDER BY c, age DESC LIMIT 6",
+        None,
+    ),
+    (
+        "order_by_two_keys_over_edges_limit",
+        "social_graph",
+        "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.name AS an, b.name AS bn, r.tag AS tag "
+        "ORDER BY r.tag, b.name DESC LIMIT 10",
+        None,
+    ),
     # ── reorder_predicates_by_cost ──
     (
         "predicate_reorder",

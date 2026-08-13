@@ -2,6 +2,7 @@
 
 use super::super::ast::*;
 use super::helpers::*;
+use super::ordering::{SortSpec, TopKCollector};
 use super::*;
 use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::{

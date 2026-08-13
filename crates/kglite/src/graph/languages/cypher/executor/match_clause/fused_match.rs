@@ -1603,17 +1603,21 @@ impl<'a> CypherExecutor<'a> {
         })
     }
 
-    /// Fused MATCH (n:Type) [WHERE] RETURN expressions ORDER BY expr LIMIT k.
-    /// Single-pass scan: iterates nodes, evaluates sort key per node, maintains
-    /// K-element top-K via sorted Vec (insertion sort). RETURN expressions are
-    /// only evaluated for the K winners. Avoids materializing all rows.
+    /// Fused MATCH (n:Type) [WHERE] RETURN expressions ORDER BY keys LIMIT k.
+    /// Single-pass scan: iterates nodes, evaluates the sort-key tuple per node,
+    /// maintains a K-element heap. RETURN expressions are only evaluated for the
+    /// K winners. Avoids materializing all rows.
+    ///
+    /// Ranking is [`super::ordering::compare_sort_keys`] over the whole key tuple —
+    /// the same comparison `execute_order_by` uses — so the fused scan and the
+    /// unfused `ORDER BY` + `LIMIT` pipeline select and order identical rows,
+    /// including ties and NULL keys.
     pub(super) fn execute_fused_node_scan_top_k(
         &self,
         match_clause: &MatchClause,
         where_predicate: Option<&Predicate>,
         return_clause: &ReturnClause,
-        sort_expression: &Expression,
-        descending: bool,
+        sort_keys: &[FusedSortKey],
         limit: usize,
     ) -> Result<ResultSet, String> {
         use crate::graph::core::pattern_matching::PatternElement;
@@ -1629,7 +1633,17 @@ impl<'a> CypherExecutor<'a> {
         let node_indices = self.fused_scan_candidates(node_pattern)?;
 
         // Pre-fold expressions
-        let folded_sort = self.fold_constants_expr(sort_expression);
+        let folded_keys: Vec<Expression> = sort_keys
+            .iter()
+            .map(|key| self.fold_constants_expr(&key.expression))
+            .collect();
+        let specs: Vec<SortSpec> = sort_keys
+            .iter()
+            .map(|key| SortSpec {
+                ascending: key.ascending,
+                nulls: key.nulls,
+            })
+            .collect();
         let folded_where = where_predicate.map(|p| self.fold_constants_pred(p));
         let folded_where_ref = folded_where.as_ref();
 
@@ -1639,8 +1653,9 @@ impl<'a> CypherExecutor<'a> {
             .node_bindings
             .insert(node_var.to_string(), petgraph::graph::NodeIndex::new(0));
 
-        // Top-K: sorted Vec of (sort_value, node_idx). Insertion sort for small K.
-        let mut top_k: Vec<(Value, petgraph::graph::NodeIndex)> = Vec::with_capacity(limit + 1);
+        let mut collector: TopKCollector<petgraph::graph::NodeIndex> =
+            TopKCollector::new(specs, limit);
+        let mut key_buf: Vec<Value> = Vec::with_capacity(folded_keys.len());
 
         for (scan_count, &node_idx) in node_indices.iter().enumerate() {
             // Periodic deadline check
@@ -1662,33 +1677,20 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
 
-            // Evaluate sort key
-            let sort_val = self.evaluate_expression(&folded_sort, &eval_row)?;
-            if matches!(sort_val, Value::Null) {
-                continue;
+            // Evaluate the sort-key tuple; only a candidate that would enter
+            // the top-K pays for an owned key tuple.
+            key_buf.clear();
+            for expr in &folded_keys {
+                key_buf.push(self.evaluate_expression(expr, &eval_row)?);
             }
-
-            // Insert into top-K sorted Vec
-            let pos = if descending {
-                top_k.partition_point(|(existing, _)| {
-                    crate::graph::core::filtering::compare_values(existing, &sort_val)
-                        .is_some_and(|o| o != std::cmp::Ordering::Less)
-                })
-            } else {
-                top_k.partition_point(|(existing, _)| {
-                    crate::graph::core::filtering::compare_values(existing, &sort_val)
-                        .is_some_and(|o| o != std::cmp::Ordering::Greater)
-                })
-            };
-            if pos < limit {
-                top_k.insert(pos, (sort_val, node_idx));
-                if top_k.len() > limit {
-                    top_k.pop();
-                }
+            if collector.accepts(&key_buf, scan_count) {
+                collector.push(key_buf.clone(), scan_count, node_idx);
             }
         }
+        let winners = collector.into_sorted();
 
-        // Build RETURN expressions only for the K winners
+        // Build RETURN expressions only for the K winners. A column that *is* a
+        // sort key reuses the computed key instead of a second evaluation.
         let folded_return_exprs: Vec<Expression> = return_clause
             .items
             .iter()
@@ -1699,17 +1701,28 @@ impl<'a> CypherExecutor<'a> {
             .iter()
             .map(return_item_column_name)
             .collect();
+        let mut key_of_item: Vec<Option<usize>> = vec![None; return_clause.items.len()];
+        for (key_idx, key) in sort_keys.iter().enumerate() {
+            if let Some(item_idx) = key.return_item {
+                if key_of_item[item_idx].is_none() {
+                    key_of_item[item_idx] = Some(key_idx);
+                }
+            }
+        }
 
-        let mut result_rows = Vec::with_capacity(top_k.len());
-        for (_, winner_idx) in &top_k {
+        let mut result_rows = Vec::with_capacity(winners.len());
+        for (keys, winner_idx) in &winners {
             *eval_row
                 .node_bindings
                 .get_mut(node_var)
                 .expect("invariant: node_var binding inserted upstream") = *winner_idx;
             let mut projected = Bindings::with_capacity(columns.len());
-            for (j, expr) in folded_return_exprs.iter().enumerate() {
-                let val = self.evaluate_expression(expr, &eval_row)?;
-                projected.insert(columns[j].clone(), val);
+            for (j, column) in columns.iter().enumerate() {
+                let val = match key_of_item[j] {
+                    Some(key_idx) => keys[key_idx].clone(),
+                    None => self.evaluate_expression(&folded_return_exprs[j], &eval_row)?,
+                };
+                projected.insert(column.clone(), val);
             }
             result_rows.push(ResultRow::from_projected(projected));
         }
