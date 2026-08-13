@@ -57,20 +57,24 @@ pub fn apply<'q>(
 
     let mut collector: TopKCollector<ResultRow> = TopKCollector::new(specs, limit);
 
+    // Reused across rows: only a candidate that enters the top-K pays for an
+    // owned key tuple, and retention reuses the evicted entry's buffer.
+    let mut key_buf: Vec<Value> = Vec::with_capacity(folded_exprs.len());
+
     for (seq, row) in upstream.enumerate() {
         let row = row?;
 
-        let sort_keys: Vec<Value> = folded_exprs
-            .iter()
-            .map(|expr| {
+        key_buf.clear();
+        for expr in &folded_exprs {
+            key_buf.push(
                 executor
                     .evaluate_expression(expr, &row)
-                    .unwrap_or(Value::Null)
-            })
-            .collect();
+                    .unwrap_or(Value::Null),
+            );
+        }
 
-        if collector.accepts(&sort_keys, seq) {
-            collector.push(sort_keys, seq, row);
+        if collector.accepts(&key_buf, seq) {
+            collector.push(&key_buf, seq, row);
         }
     }
 

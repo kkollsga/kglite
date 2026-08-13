@@ -313,11 +313,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two keys 10.9 ms → 1.64 ms (6.7×), three keys 11.6 ms → 2.35 ms (5.0×),
   mixed `DESC, ASC` 12.4 ms → 1.65 ms (7.5×), a leading key with 5 000-way
   ties 15.1 ms → 2.31 ms (6.5×), `LIMIT 1000` 11.1 ms → 2.37 ms (4.7×), and
-  the same query written over RETURN aliases 11.1 ms → 1.63 ms (6.8×). The
-  single-key cell — the path that already fused — improves 1.24 ms → 0.96 ms,
-  and `ORDER BY <alias> LIMIT` on one key 3.57 ms → 0.94 ms (3.8×). Control
-  cells are flat within 1%: the same two-key sort *without* `LIMIT` (14.41 ms →
-  14.49 ms) and an unrelated filtered count (1.38 ms → 1.39 ms).
+  the same query written over RETURN aliases 11.1 ms → 1.63 ms (6.8×), and
+  `ORDER BY <alias> LIMIT` on one key 3.57 ms → 0.94 ms (3.8×). Single-key
+  `ORDER BY` — the path that already fused — improves in both directions:
+  ascending 1.47 ms → 0.94 ms (1.5×) and descending 2.75 ms → 1.75 ms (1.6×) at
+  `LIMIT 10`, 3.11 ms → 2.18 ms (1.4×) at `LIMIT 25`, a string key 2.15 ms →
+  1.59 ms (1.3×) and an expression key 3.51 ms → 2.43 ms (1.4×). Control cells
+  are flat within 1–4%: the same two-key sort *without* `LIMIT` (14.41 ms →
+  14.49 ms), a single-key `ORDER BY` without `LIMIT` (7.64 ms → 7.61 ms), an
+  unrelated filtered count (1.13 ms → 1.17 ms) and a group aggregation
+  (2.86 ms → 2.92 ms).
+
+  The descending figure above is a correction. The commit that landed the
+  multi-key path (`perf(planner): multi-key ORDER BY..LIMIT takes the top-K
+  path`) reported "single-key control improved 1.24 → 0.96 ms": that probe
+  measured the *ascending* cell only, and descending had in fact regressed
+  ~20% — one direction stood in for both. The two are not interchangeable.
+  Scanning a column that ascends with node order (`ORDER BY value DESC`, the
+  leaderboard shape) beats the retained worst on **every** row, so top-K
+  retention runs once per row rather than once per winner and its per-row cost
+  becomes the query's cost; ascending fills the heap and then rejects every
+  later row on one comparison. The retention path is now allocation-free
+  (the evicted entry's key buffer is reused, and the sort specs live on the
+  collector instead of inside every entry) and short-circuits through a
+  direction-folded `f64` stand-in for the leading key, with ties, NULLs,
+  strings and integers past 2^53 handed back to the one comparator. Both
+  directions are now benchmarked side by side in
+  `tests/benchmarks/test_bench_hotpaths.py`.
 
 - **A point lookup on an id that does not exist no longer scans the whole node
   type.** `MATCH (n:Item {id: X})` (and the `WHERE n.id = X` / `$param` /

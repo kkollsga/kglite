@@ -1684,7 +1684,7 @@ impl<'a> CypherExecutor<'a> {
                 key_buf.push(self.evaluate_expression(expr, &eval_row)?);
             }
             if collector.accepts(&key_buf, scan_count) {
-                collector.push(key_buf.clone(), scan_count, node_idx);
+                collector.push(&key_buf, scan_count, node_idx);
             }
         }
         let winners = collector.into_sorted();

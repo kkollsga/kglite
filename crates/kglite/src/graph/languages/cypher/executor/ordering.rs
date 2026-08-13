@@ -15,8 +15,6 @@
 use super::super::ast::{NullsPlacement, OrderItem};
 use crate::datatypes::values::Value;
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
-use std::sync::Arc;
 
 /// Per-key sort spec: direction plus the *resolved* NULLS placement
 /// (explicit `NULLS FIRST/LAST` if written, else ASC → Last, DESC → First —
@@ -69,7 +67,7 @@ pub(crate) fn compare_sort_keys(a: &[Value], b: &[Value], specs: &[SortSpec]) ->
             (false, false) => {}
         }
 
-        if let Some(ordering) = crate::graph::core::filtering::compare_values(key_a, key_b) {
+        if let Some(ordering) = compare_one(key_a, key_b) {
             let oriented = if spec.ascending {
                 ordering
             } else {
@@ -83,70 +81,124 @@ pub(crate) fn compare_sort_keys(a: &[Value], b: &[Value], specs: &[SortSpec]) ->
     Ordering::Equal
 }
 
-/// One retained candidate: its sort-key tuple, its input position (`seq`) and
-/// the caller's payload. `specs` rides along because `BinaryHeap` orders
-/// through `Ord`, which sees only the entries themselves.
+/// One key comparison. The three arms here are the same-type cases of
+/// [`crate::graph::core::filtering::compare_values`], repeated only so they
+/// inline: every other pair — cross-type numerics, dates, strings parsed as
+/// dates, incomparable types — falls through to that function, which remains
+/// the definition. Ordering semantics live in one place; this is a call-site
+/// shortcut, not a second rule set.
+#[inline]
+fn compare_one(a: &Value, b: &Value) -> Option<Ordering> {
+    match (a, b) {
+        (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y),
+        (Value::Int64(x), Value::Int64(y)) => Some(x.cmp(y)),
+        (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
+        _ => crate::graph::core::filtering::compare_values(a, b),
+    }
+}
+
+/// Direction-folded `f64` stand-in for the *first* sort key, or NaN when the
+/// key has no such stand-in (NULL, string, boolean, date, an actual NaN, or no
+/// key at all). `sign` is `-1.0` for a DESC first key, so a plain `partial_cmp`
+/// of two lanes is already better-first.
+///
+/// Only a strict Less/Greater from the lane is trusted; Equal and NaN hand the
+/// pair back to [`compare_sort_keys`]. That keeps the lane *exact*: `i64 → f64`
+/// is monotone (round-to-nearest never inverts an ordering), so it can never
+/// disagree about direction — it can only lose resolution above 2^53, and that
+/// shows up as Equal, which delegates. NULL placement, cross-type rules,
+/// later keys and the `seq` tiebreak are therefore all still decided by the
+/// one comparator.
+#[inline]
+fn fast_lane(keys: &[Value], sign: f64) -> f64 {
+    match keys.first() {
+        Some(Value::Float64(f)) => sign * f,
+        Some(Value::Int64(i)) => sign * (*i as f64),
+        Some(Value::UniqueId(u)) => sign * (*u as f64),
+        _ => f64::NAN,
+    }
+}
+
+/// One retained candidate: its sort-key tuple, its input position (`seq`), its
+/// [`fast_lane`] stand-in and the caller's payload.
 struct Entry<P> {
     keys: Vec<Value>,
     seq: usize,
+    lane: f64,
     payload: P,
-    specs: Arc<[SortSpec]>,
-}
-
-impl<P> Entry<P> {
-    /// Better-first rank. Ties on every key break by input position, so the
-    /// retained set and its order match a *stable* full sort exactly.
-    fn rank(&self, other: &Self) -> Ordering {
-        compare_sort_keys(&self.keys, &other.keys, &self.specs)
-            .then_with(|| self.seq.cmp(&other.seq))
-    }
-}
-
-impl<P> PartialEq for Entry<P> {
-    fn eq(&self, other: &Self) -> bool {
-        self.rank(other) == Ordering::Equal
-    }
-}
-
-impl<P> Eq for Entry<P> {}
-
-impl<P> PartialOrd for Entry<P> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<P> Ord for Entry<P> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // `BinaryHeap` is a max-heap and `rank` is better-first, so the root
-        // holds the *worst* retained entry — exactly what overflow evicts.
-        self.rank(other)
-    }
 }
 
 /// Bounded top-K heap: retains the `limit` best entries under
 /// [`compare_sort_keys`], in O(n log k) time and O(k) memory.
+///
+/// The heap is kept by hand rather than through `BinaryHeap<Entry>` for one
+/// measured reason: an *improving* key stream — `ORDER BY value DESC` over a
+/// column that ascends with scan order, i.e. a leaderboard over an
+/// append-ordered table — beats the current worst on **every** row, so the
+/// retention path runs n times, not k, and its per-row cost is the query's
+/// cost. Through `BinaryHeap` each retention allocated a fresh key `Vec`,
+/// dropped the evicted one, and bumped an `Arc<[SortSpec]>` refcount (the specs
+/// had to ride inside every entry, because `Ord` sees only the entries).
+/// Replacing the root in place reuses the evicted entry's key buffer and holds
+/// the specs once on the collector; the [`fast_lane`] shortcut then takes the
+/// comparisons themselves off the `Value` dispatch. `ordering::tests::
+/// top_k_retention_cost` reproduces the decomposition.
 pub(crate) struct TopKCollector<P> {
     limit: usize,
-    specs: Arc<[SortSpec]>,
-    heap: BinaryHeap<Entry<P>>,
+    specs: Vec<SortSpec>,
+    /// `-1.0` when the first key is DESC — see [`fast_lane`].
+    sign: f64,
+    /// Max-heap by *worst* entry: `heap[0]` is the first candidate to evict.
+    heap: Vec<Entry<P>>,
 }
 
 impl<P> TopKCollector<P> {
     pub(crate) fn new(specs: Vec<SortSpec>, limit: usize) -> Self {
+        // No specs means "every tuple ties, keep input order" — a NaN sign
+        // disables the lane so that stays true.
+        let sign = match specs.first() {
+            Some(spec) if spec.ascending => 1.0,
+            Some(_) => -1.0,
+            None => f64::NAN,
+        };
         TopKCollector {
             limit,
-            specs: specs.into(),
-            heap: BinaryHeap::with_capacity(limit.saturating_add(1).min(1024)),
+            specs,
+            sign,
+            heap: Vec::with_capacity(limit.min(1024)),
+        }
+    }
+
+    /// Better-first rank of two retained entries. Ties on every key break by
+    /// input position, so the retained set and its order match a *stable* full
+    /// sort exactly.
+    #[inline]
+    fn rank(&self, a: &Entry<P>, b: &Entry<P>) -> Ordering {
+        match a.lane.partial_cmp(&b.lane) {
+            Some(Ordering::Less) => Ordering::Less,
+            Some(Ordering::Greater) => Ordering::Greater,
+            _ => compare_sort_keys(&a.keys, &b.keys, &self.specs).then_with(|| a.seq.cmp(&b.seq)),
+        }
+    }
+
+    /// Better-first rank of a not-yet-retained candidate against an entry.
+    #[inline]
+    fn rank_candidate(&self, keys: &[Value], lane: f64, seq: usize, other: &Entry<P>) -> Ordering {
+        match lane.partial_cmp(&other.lane) {
+            Some(Ordering::Less) => Ordering::Less,
+            Some(Ordering::Greater) => Ordering::Greater,
+            _ => {
+                compare_sort_keys(keys, &other.keys, &self.specs).then_with(|| seq.cmp(&other.seq))
+            }
         }
     }
 
     /// Would `keys` at input position `seq` enter the current top-K?
     ///
-    /// Purely an allocation guard — [`push`](Self::push) is correct on its own,
-    /// evicting the worst entry on overflow. Callers evaluate sort keys into a
-    /// reusable buffer and only pay for an owned tuple when this returns true,
-    /// which is the difference between O(n) and O(k log n) key allocations.
+    /// Purely a work guard — [`push`](Self::push) is correct on its own and
+    /// re-checks, dropping a candidate that does not beat the worst retained
+    /// entry. Callers evaluate sort keys into a reusable buffer and only pay
+    /// for cloning the tuple when this returns true.
     pub(crate) fn accepts(&self, keys: &[Value], seq: usize) -> bool {
         if self.limit == 0 {
             return false;
@@ -154,36 +206,87 @@ impl<P> TopKCollector<P> {
         if self.heap.len() < self.limit {
             return true;
         }
-        match self.heap.peek() {
+        match self.heap.first() {
             Some(root) => {
-                compare_sort_keys(keys, &root.keys, &self.specs).then_with(|| seq.cmp(&root.seq))
-                    == Ordering::Less
+                self.rank_candidate(keys, fast_lane(keys, self.sign), seq, root) == Ordering::Less
             }
             None => true,
         }
     }
 
-    pub(crate) fn push(&mut self, keys: Vec<Value>, seq: usize, payload: P) {
+    /// Offer a candidate. Below capacity it is retained; at capacity it
+    /// replaces the worst retained entry if it ranks better, reusing that
+    /// entry's key buffer, and is dropped otherwise.
+    pub(crate) fn push(&mut self, keys: &[Value], seq: usize, payload: P) {
         if self.limit == 0 {
             return;
         }
-        self.heap.push(Entry {
-            keys,
-            seq,
-            payload,
-            specs: Arc::clone(&self.specs),
-        });
-        if self.heap.len() > self.limit {
-            self.heap.pop();
+        let lane = fast_lane(keys, self.sign);
+        if self.heap.len() < self.limit {
+            self.heap.push(Entry {
+                keys: keys.to_vec(),
+                seq,
+                lane,
+                payload,
+            });
+            self.sift_up(self.heap.len() - 1);
+            return;
+        }
+        if self.rank_candidate(keys, lane, seq, &self.heap[0]) != Ordering::Less {
+            return;
+        }
+        let root = &mut self.heap[0];
+        root.keys.clear();
+        root.keys.extend_from_slice(keys);
+        root.seq = seq;
+        root.lane = lane;
+        root.payload = payload;
+        self.sift_down(0);
+    }
+
+    /// Restore the heap upward from `idx`: an entry worse than its parent
+    /// rises toward the root.
+    fn sift_up(&mut self, mut idx: usize) {
+        while idx > 0 {
+            let parent = (idx - 1) / 2;
+            if self.rank(&self.heap[idx], &self.heap[parent]) != Ordering::Greater {
+                break;
+            }
+            self.heap.swap(idx, parent);
+            idx = parent;
+        }
+    }
+
+    /// Restore the heap downward from `idx`: an entry better than a child
+    /// sinks, so the worst retained entry stays at the root.
+    fn sift_down(&mut self, mut idx: usize) {
+        let len = self.heap.len();
+        loop {
+            let (left, right) = (2 * idx + 1, 2 * idx + 2);
+            let mut worst = idx;
+            if left < len && self.rank(&self.heap[left], &self.heap[worst]) == Ordering::Greater {
+                worst = left;
+            }
+            if right < len && self.rank(&self.heap[right], &self.heap[worst]) == Ordering::Greater {
+                worst = right;
+            }
+            if worst == idx {
+                return;
+            }
+            self.heap.swap(idx, worst);
+            idx = worst;
         }
     }
 
     /// Drain into result order — best first — as `(sort keys, payload)` pairs.
     /// The keys come back so callers can reuse them for RETURN items that *are*
     /// the sort key instead of re-evaluating the expression.
-    pub(crate) fn into_sorted(self) -> Vec<(Vec<Value>, P)> {
+    pub(crate) fn into_sorted(mut self) -> Vec<(Vec<Value>, P)> {
+        let specs = std::mem::take(&mut self.specs);
+        self.heap.sort_by(|a, b| {
+            compare_sort_keys(&a.keys, &b.keys, &specs).then_with(|| a.seq.cmp(&b.seq))
+        });
         self.heap
-            .into_sorted_vec()
             .into_iter()
             .map(|entry| (entry.keys, entry.payload))
             .collect()
@@ -220,7 +323,7 @@ mod tests {
         let mut collector: TopKCollector<usize> = TopKCollector::new(specs.to_vec(), limit);
         for (seq, keys) in rows.iter().enumerate() {
             if collector.accepts(keys, seq) {
-                collector.push(keys.clone(), seq, seq);
+                collector.push(keys, seq, seq);
             }
         }
         collector
@@ -228,6 +331,178 @@ mod tests {
             .into_iter()
             .map(|(_, payload)| payload)
             .collect()
+    }
+
+    /// Retention that allocates a fresh key tuple per replacement instead of
+    /// reusing the evicted entry's buffer — the isolate for the allocation
+    /// half of the [`top_k_retention_cost`] decomposition. Test-only.
+    fn push_no_reuse(c: &mut TopKCollector<usize>, keys: &[Value], seq: usize, payload: usize) {
+        if c.heap.len() < c.limit {
+            c.push(keys, seq, payload);
+            return;
+        }
+        let lane = fast_lane(keys, c.sign);
+        if c.rank_candidate(keys, lane, seq, &c.heap[0]) != Ordering::Less {
+            return;
+        }
+        c.heap[0] = Entry {
+            keys: keys.to_vec(),
+            seq,
+            lane,
+            payload,
+        };
+        c.sift_down(0);
+    }
+
+    /// min-of-rounds wall time for `f`, after 3 warmup rounds.
+    fn best<R>(rounds: usize, mut f: impl FnMut() -> R) -> std::time::Duration {
+        use std::time::Instant;
+        for _ in 0..3 {
+            std::hint::black_box(f());
+        }
+        let mut best = std::time::Duration::MAX;
+        for _ in 0..rounds {
+            let t = Instant::now();
+            std::hint::black_box(f());
+            let d = t.elapsed();
+            if d < best {
+                best = d;
+            }
+        }
+        best
+    }
+
+    /// Not a gate — the reproducible decomposition behind `TopKCollector`'s
+    /// shape. Run with `cargo test --release -p kglite --lib
+    /// top_k_retention_cost -- --ignored --nocapture`; debug-profile numbers
+    /// are meaningless. Reports min-of-30 for a 50k-row scan at k=10: an
+    /// improving DESC stream retains every row, so its per-row retention cost
+    /// is the whole cost, while ASC and the string column retain a handful.
+    #[test]
+    #[ignore]
+    fn top_k_retention_cost() {
+        let n = 50_000usize;
+        let numeric: Vec<Value> = (0..n).map(|i| Value::Float64(i as f64)).collect();
+        let strings: Vec<Value> = (0..n)
+            .map(|i| Value::String(format!("hc_{}", i % (n / 2))))
+            .collect();
+
+        let cmp = best(30, || {
+            let mut sink = 0usize;
+            for i in 0..n {
+                if compare_sort_keys(
+                    std::slice::from_ref(&numeric[i]),
+                    std::slice::from_ref(&numeric[(i + 7) % n]),
+                    &[desc()],
+                ) == Ordering::Less
+                {
+                    sink += 1;
+                }
+            }
+            sink
+        });
+        println!("compare_sort_keys x{n} (Float64):  min={cmp:>10.3?}");
+
+        for (label, col) in [("numeric", &numeric), ("string", &strings)] {
+            // Control: the caller-side loop with no collector at all.
+            let ctrl = best(30, || {
+                let mut buf: Vec<Value> = Vec::with_capacity(1);
+                let mut sink = 0usize;
+                for v in col.iter() {
+                    buf.clear();
+                    buf.push(v.clone());
+                    sink += buf.len();
+                }
+                sink
+            });
+            println!("{label:8} loop-only            min={ctrl:>10.3?}");
+
+            for (dir, spec) in [("asc", asc()), ("desc", desc())] {
+                let mut accepted = 0usize;
+                let full = best(30, || {
+                    let mut buf: Vec<Value> = Vec::with_capacity(1);
+                    accepted = 0;
+                    let mut c: TopKCollector<usize> = TopKCollector::new(vec![spec], 10);
+                    for (seq, v) in col.iter().enumerate() {
+                        buf.clear();
+                        buf.push(v.clone());
+                        if c.accepts(&buf, seq) {
+                            accepted += 1;
+                            c.push(&buf, seq, seq);
+                        }
+                    }
+                    c.into_sorted().len()
+                });
+                let no_reuse = best(30, || {
+                    let mut buf: Vec<Value> = Vec::with_capacity(1);
+                    let mut d: TopKCollector<usize> = TopKCollector::new(vec![spec], 10);
+                    for (seq, v) in col.iter().enumerate() {
+                        buf.clear();
+                        buf.push(v.clone());
+                        if d.accepts(&buf, seq) {
+                            push_no_reuse(&mut d, &buf, seq, seq);
+                        }
+                    }
+                    d.into_sorted().len()
+                });
+                println!(
+                    "{label:8} {dir:5} reuse={full:>10.3?} fresh_alloc={no_reuse:>10.3?} \
+                     accepted={accepted:6}"
+                );
+            }
+        }
+    }
+
+    /// The numeric fast lane may only ever *shortcut* the comparator, never
+    /// answer differently. These rows are built to hit every way it can lose
+    /// information: integers past 2^53 that collapse onto one `f64`, mixed
+    /// Int/Float/UniqueId keys in one column, NULLs, and heavy duplication so
+    /// the `seq` tiebreak decides.
+    ///
+    /// The first key stays *mutually comparable* on purpose. Mixing, say, a
+    /// string into a numeric key column makes `compare_sort_keys` intransitive
+    /// (incomparable pairs fall through to the next key), and an intransitive
+    /// comparator lets any heap disagree with any stable sort — a pre-existing
+    /// property of the mixed-type ordering rules, unrelated to the lane, which
+    /// hands every string/date/bool key straight back to the comparator.
+    #[test]
+    fn fast_lane_never_disagrees_with_the_full_sort() {
+        const BIG: i64 = (1i64 << 53) + 1;
+        let rows: Vec<Vec<Value>> = (0..400)
+            .map(|i| {
+                let key0 = match i % 6 {
+                    0 => Value::Int64(BIG + (i as i64 % 3)),
+                    1 => Value::Float64((i % 5) as f64),
+                    2 => Value::Int64((i % 5) as i64),
+                    3 => Value::UniqueId((i % 5) as u32),
+                    4 => Value::Null,
+                    _ => Value::Float64(f64::from(-(i % 4))),
+                };
+                vec![key0, Value::Int64((i % 11) as i64)]
+            })
+            .collect();
+
+        for specs in [
+            vec![asc()],
+            vec![desc()],
+            vec![asc(), desc()],
+            vec![desc(), asc()],
+            vec![
+                SortSpec {
+                    ascending: false,
+                    nulls: NullsPlacement::Last,
+                },
+                asc(),
+            ],
+        ] {
+            for limit in [1usize, 3, 17, 400] {
+                assert_eq!(
+                    collect_top_k(&rows, &specs, limit),
+                    full_sort(&rows, &specs, limit),
+                    "fast lane diverged from full sort at limit {limit} for {specs:?}"
+                );
+            }
+        }
     }
 
     #[test]

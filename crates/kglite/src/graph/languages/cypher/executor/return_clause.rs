@@ -748,7 +748,7 @@ impl<'a> CypherExecutor<'a> {
                 key_buf.push(self.evaluate_expression(expr, row)?);
             }
             if collector.accepts(&key_buf, i) {
-                collector.push(key_buf.clone(), i, i);
+                collector.push(&key_buf, i, i);
             }
         }
         let winners = collector.into_sorted();

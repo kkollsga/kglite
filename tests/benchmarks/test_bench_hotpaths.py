@@ -158,11 +158,35 @@ def test_bench_where_multi_prop(benchmark, hot_graph):
 
 
 @pytest.mark.benchmark
-def test_bench_order_by_expr_limit(benchmark, hot_graph):
-    """ORDER BY on an expression with LIMIT (top-K path)."""
+def test_bench_order_by_desc_limit(benchmark, hot_graph):
+    """Single-key numeric DESC + LIMIT — the *improving-stream* top-K shape.
+
+    `value` ascends with node order, so scanning DESC beats the retained worst
+    on every row: the top-K retention path runs 50 000 times, not 25, and its
+    per-row cost is the whole query's cost. That makes this cell, not its ASC
+    twin below, the one that moves when the collector's retention path changes
+    — 0.15.14's first cut regressed it ~20% while the ASC cell *improved* 1.4×,
+    and a probe that measured only ASC read the regression as an improvement.
+    Keep both directions.
+    """
     benchmark(
         hot_graph.cypher,
         "MATCH (n:Item) RETURN n.name, n.value ORDER BY n.value DESC LIMIT 25",
+    )
+
+
+@pytest.mark.benchmark
+def test_bench_order_by_asc_limit(benchmark, hot_graph):
+    """Single-key numeric ASC + LIMIT — the *rejecting-stream* twin.
+
+    Same query, opposite direction: the first 25 rows fill the heap and every
+    later row is rejected by one comparison, so this cell measures the
+    comparison path and the DESC cell above measures retention. They regress
+    independently.
+    """
+    benchmark(
+        hot_graph.cypher,
+        "MATCH (n:Item) RETURN n.name, n.value ORDER BY n.value ASC LIMIT 25",
     )
 
 
