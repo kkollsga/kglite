@@ -81,6 +81,43 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+#: The upstream changelog every note's "what changed" section must be read from.
+#: Three distinct releases, each with a lead sentence that appears nowhere else,
+#: so a note quoting the wrong one is detectable by string alone. Bold leads wrap
+#: across lines exactly as the real file's do — that wrapping is the reason a
+#: naive first-line read produces a truncated quote.
+CHANGELOG = """# Changelog
+
+## [Unreleased]
+
+## [0.17.0] - 2026-08-12
+
+### Fixed
+
+- **A join filtered on a type's title field is no longer planned as if the
+  filter matched everything.** The planner estimated a non-indexed equality
+  filter as `type_count / distinct_values` and the scan read the property map
+  only.
+
+- **`.statistics()` on a type's own title field returned nothing.** Same root
+  cause, same fix.
+
+## [0.16.0] - 2026-08-01
+
+### Changed
+
+- **A lost Bolt write conflict is now retriable.** The server returned a bare
+  failure where the driver expected a transient error.
+
+## [0.15.0] - 2026-07-27
+
+### Added
+
+- **Durability rungs land behind `save(durability=...)`.** Three rungs, one
+  knob.
+"""
+
+
 @pytest.fixture()
 def ecosystem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A minimal, fully consistent two-repo ecosystem at kglite 0.15.0."""
@@ -96,6 +133,7 @@ def ecosystem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     root = tmp_path / "eco"
     _write(root / "KGLite" / "Cargo.toml", '[workspace.package]\nversion = "0.15.0"\n')
+    _write(root / "KGLite" / "CHANGELOG.md", CHANGELOG)
     _write(
         root / "downstream" / "Cargo.toml",
         '[workspace.package]\nversion = "1.0.0"\n\n[workspace.dependencies]\nkglite = { version = "0.15.0" }\n',
@@ -503,7 +541,217 @@ def test_notify_is_idempotent_for_a_given_release(ecosystem: Path) -> None:
 
 
 # --------------------------------------------------------------------------
-# 7. Degradation when siblings are absent
+# 7. "What changed in this release" comes from the named release's CHANGELOG
+#
+# The defect these cover shipped three times: 0.15.11, 0.15.12 and 0.15.13 all
+# carried a byte-identical blurb describing 0.15.9's Rust-API break, because the
+# section was rendered from a hand-maintained constant that nothing forced to
+# move. A downstream reading it at face value plans a migration that does not
+# exist in the release it names — the failure manufactures work.
+# --------------------------------------------------------------------------
+
+
+def test_what_changed_quotes_the_named_releases_changelog_entry(ecosystem: Path) -> None:
+    code, out = run(ecosystem, "--upstream-version", "0.17.0", "--notify", "--dry-run")
+    assert code == 0, out
+    assert "What changed in this release" in out
+    assert "A join filtered on a type's title field is no longer planned" in out
+    assert "`.statistics()` on a type's own title field returned nothing." in out
+    # The neighbouring releases' entries must not leak in.
+    assert "retriable" not in out, out
+    assert "Durability rungs" not in out, out
+
+
+def test_a_different_release_gets_its_own_entry(ecosystem: Path) -> None:
+    """The other direction of the same proof: the quote tracks the version."""
+    code, out = run(ecosystem, "--upstream-version", "0.16.0", "--notify", "--dry-run")
+    assert code == 0, out
+    assert "A lost Bolt write conflict is now retriable." in out
+    assert "A join filtered on a type's title field" not in out, out
+
+
+def test_an_unresolvable_version_emits_no_what_changed_section(ecosystem: Path) -> None:
+    """The report's explicit ask: an absent blurb beats a silently wrong one."""
+    code, out = run(ecosystem, "--upstream-version", "0.18.0", "--notify", "--dry-run")
+    assert code == 0, out
+    assert "NOTIFY downstream" in out
+    assert "What changed in this release" not in out, out
+    assert "warning:" in out and "0.18.0" in out
+
+
+def test_a_note_never_carries_a_previous_releases_breaking_prose(ecosystem: Path) -> None:
+    """The staleness trap itself, as a contract.
+
+    Nothing in a note announcing 0.17.0 may quote 0.15.9's API-break prose —
+    the exact text three shipped notes carried. This fails on any design that
+    keeps a hand-edited highlight list, whatever its current contents.
+    """
+    _, out = run(ecosystem, "--upstream-version", "0.17.0", "--notify", "--dry-run")
+    for stale in (
+        "NodeData property readers removed",
+        "column_stores became accessors",
+        "1,789x",
+        "Saved-graph writes no longer sweep",
+    ):
+        assert stale not in out, f"note announcing 0.17.0 quoted 0.15.9 prose: {stale!r}"
+
+
+def test_breaking_symbols_are_scoped_to_the_release_that_broke_them(ecosystem: Path) -> None:
+    """Criterion 4 must not fire with a previous release's symbol set.
+
+    A repo referencing `NodeView` is affected by 0.15.9 and by no later release
+    that did not touch it; asserting otherwise is the same manufactured work as
+    the stale blurb, wearing the evidence section's clothes.
+    """
+    assert "NodeView" in vc.breaking_symbols_for("0.15.9")
+    assert vc.breaking_symbols_for("0.17.0") == []
+
+    _write(
+        ecosystem / "downstream" / "src" / "lib.rs",
+        "fn f(node: &kglite::api::NodeView<'_>) -> bool { node.title().is_some() }\n",
+    )
+    _, out = run(ecosystem, "--upstream-version", "0.17.0", "--notify", "--dry-run")
+    assert "touched by a breaking change" not in out, out
+
+
+# --------------------------------------------------------------------------
+# 8. Declaration vs citation — a version *pin* must move, a version *record*
+#    must not. Following the scan's advice on a provenance line falsifies it.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        # codingest/PARITY.md — a completed, verified migration record.
+        "The kglite 0.14.1 → 0.14.5 engine move and the NodeView/`set_node_property`\n"
+        "API migration left every digest byte-identical — verified, not assumed.",
+        # codingest/docs/mcp.md:63 — when a behaviour was introduced.
+        "Containment is `sandbox_root`, it is **opt-in**, and it was\n"
+        "introduced in kglite 0.14.5: with it, a swap outside the boundary is\n"
+        "refused and the active root does not move.",
+        # codingest/docs/mcp.md:73 — the same fact, phrased as a floor in prose.
+        # The cue ("onward") wraps onto the *next* line, which is why the
+        # classifier reads the whole sentence rather than the matched line.
+        "The boundary is real only from kglite 0.14.5\nonward, and only when you set `sandbox_root`.",
+        # A dated correction block.
+        "> **Correction (2026-07-31).** Earlier revisions of this page described\n"
+        "> the kglite 0.14.5 behaviour incorrectly.",
+        "We migrated at kglite 0.14.5 and the digests were unchanged.",
+        # A range wins over the word "floor": nothing can move a two-ended
+        # transition to the current version without rewriting which move
+        # actually happened. codingest/PARITY.md:13 is exactly this shape.
+        "The engine floor moved kglite 0.14.1 → 0.14.5, which the corpus verified.",
+    ],
+)
+def test_historical_citations_are_not_flagged_as_drift(ecosystem: Path, prose: str) -> None:
+    _write(ecosystem / "downstream" / "PARITY.md", f"# Parity\n\n{prose}\n")
+    code, out = run(ecosystem)
+    assert "STALE DOCUMENTED VERSIONS" not in out, out
+    assert code == 0, out
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "A thin KGLite 0.14.3 frontend.",
+        "Requires kglite 0.14.3 or newer.",
+        "The engine floor is kglite 0.14.3.",
+        "Install it with `pip install kglite==0.14.3`.",  # version-check: ignore
+        "Set the pin to kglite 0.14.3 before building.",
+        # `X+` is a floor written compactly, so it stays a declaration even
+        # inside a past-tense sentence that would otherwise read as a record.
+        "It was gated on kglite 0.14.3+ here.",
+    ],
+)
+def test_declarations_are_still_flagged(ecosystem: Path, prose: str) -> None:
+    """Non-vacuity in the other direction: the classifier must not exempt a pin.
+
+    A missed stale pin is worse than a false positive, so anything that is not
+    recognisably a record stays a finding.
+    """
+    _write(ecosystem / "downstream" / "README.md", f"# downstream\n\n{prose}\n")
+    _, out = run(ecosystem)
+    assert "STALE DOCUMENTED VERSIONS" in out, out
+    assert "0.14.3" in out
+
+
+def test_a_citation_is_classified_out_loud_not_dropped_silently(ecosystem: Path) -> None:
+    """A silent exemption is how a scanner goes quietly blind; it gets a class."""
+    _write(
+        ecosystem / "downstream" / "PARITY.md",
+        "# Parity\n\nThe kglite 0.14.1 → 0.14.5 engine move left every digest byte-identical.\n",
+    )
+    _, out = run(ecosystem)
+    assert "HISTORICAL CITATIONS" in out, out
+    assert "PARITY.md" in out
+
+
+def test_a_citation_alone_does_not_earn_a_note(ecosystem: Path) -> None:
+    """The delivered defect: three notes told codingest to rewrite its history."""
+    _write(
+        ecosystem / "downstream" / "PARITY.md",
+        "# Parity\n\nThe kglite 0.14.1 → 0.14.5 engine move left every digest byte-identical.\n",
+    )
+    _, out = run(ecosystem, "--notify", "--dry-run")
+    assert "NOTIFY" not in out, out
+    assert "SKIP   downstream" in out
+
+
+# --------------------------------------------------------------------------
+# 9. "Surface you actually reference" must cite code, not prose
+# --------------------------------------------------------------------------
+
+
+def test_symbol_evidence_cites_the_code_site_not_a_comment(ecosystem: Path) -> None:
+    """codingest's shape exactly: a `Cargo.toml` comment naming the migration,
+    and the real use in a `.rs` file the scan never reached."""
+    _write(
+        ecosystem / "downstream" / "Cargo.toml",
+        '[workspace.package]\nversion = "1.0.0"\n\n'
+        "# The `NodeData` -> `NodeView` API break from 0.15.9, migrated here.\n"
+        '[workspace.dependencies]\nkglite = { version = "0.15.0" }\n',
+    )
+    _write(
+        ecosystem / "downstream" / "src" / "rev.rs",
+        "/// Reads the node title.\n"
+        "fn title_is(node: &kglite::api::NodeView<'_>, name: &str) -> bool {\n"
+        "    node.title().as_ref() == name\n}\n",
+    )
+
+    code, out = run(ecosystem, "--notify", "--dry-run", "--breaking-symbol", "NodeView")
+    assert code == 0, out
+    assert "Breaking-change surface you actually reference" in out
+    assert "`NodeView` — in `src/rev.rs:2`" in out, out
+    assert "in `Cargo.toml`" not in out, out
+    # There are no declaration sites in this note, so it must not ask for any
+    # to be moved — the ask has to match the evidence it is based on.
+    assert "Move the sites above" not in out, out
+
+
+def test_a_symbol_only_ever_in_comments_is_not_a_reference(ecosystem: Path) -> None:
+    _write(
+        ecosystem / "downstream" / "Cargo.toml",
+        '[workspace.package]\nversion = "1.0.0"\n\n'
+        "# The `NodeData` -> `NodeView` API break from 0.15.9, migrated here.\n"
+        '[workspace.dependencies]\nkglite = { version = "0.15.0" }\n',
+    )
+    _write(
+        ecosystem / "downstream" / "src" / "rev.rs",
+        "// We used to call NodeView here.\n/* NodeView again */\nfn f() {}\n",
+    )
+    _write(
+        ecosystem / "downstream" / "notes.py",
+        '"""Historical note: NodeView replaced NodeData."""\n\n\ndef f() -> None:\n    pass\n',
+    )
+
+    _, out = run(ecosystem, "--notify", "--dry-run", "--breaking-symbol", "NodeView")
+    assert "touched by a breaking change" not in out, out
+    assert "SKIP   downstream" in out, out
+
+
+# --------------------------------------------------------------------------
+# 10. Degradation when siblings are absent
 # --------------------------------------------------------------------------
 
 

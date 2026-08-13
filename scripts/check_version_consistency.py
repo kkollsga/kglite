@@ -43,6 +43,11 @@ FINDING CATEGORIES
 ``exact-pin``
     A site pins an ecosystem package at an exact version that has been
     superseded. Not an error; it is the thing that silently rots.
+``citation``
+    Prose that *records* a version — "introduced in X", "the X → Y move",
+    "verified against X on <date>" — rather than requiring one. Classified and
+    listed, never reported as drift: telling a downstream to move a provenance
+    line to the current version asks it to falsify its own record.
 ``site``
     Inventory: a declaration living outside package metadata. Always listed,
     even when consistent, because these are the sites that *can* drift with
@@ -63,8 +68,14 @@ genuinely affected:
 * its declared range **excludes** the new version (blocked), or
 * it pins the upstream at a now-superseded exact version somewhere, or
 * a breaking change in this release touches a symbol the repo actually
-  references (approximated by scanning its sources for the symbols listed in
-  ``--breaking-symbol`` / the release config).
+  references (approximated by scanning its *code* — never comments or prose —
+  for the symbols ``BREAKING_SYMBOLS_BY_VERSION`` records against **this**
+  version, or the ones given with ``--breaking-symbol``).
+
+Each note's "what changed" section is read from the announced release's own
+``## [X.Y.Z]`` CHANGELOG entry. When that entry cannot be resolved the section
+is omitted and a warning goes to stderr: a blurb that is silently a different
+release's is worse than an absent one, and three shipped notes proved it.
 
 When a downstream is unaffected the run prints ``SKIP <repo>: <reason>`` and
 writes nothing. The decision *not* to notify is as much a feature as the note.
@@ -358,6 +369,9 @@ BINDING_SITES = {
 }
 DOC_SITES = {"docs", "docs-install"}
 ADVISORY_SITES = {"script", "source-string"}
+#: Prose that *records* a version rather than requiring one — see
+#: ``is_version_citation``. Reported as an adjudicated class, never as drift.
+CITATION_SITES = {"docs-citation"}
 
 
 @dataclasses.dataclass
@@ -704,6 +718,110 @@ SUPPRESS_MARKER = "version-check: ignore"
 _LEDGER_ROW = re.compile(r"^\|\s*\d{4}-\d{2}-\d{2}\s*\|")
 
 
+# ---- declaration vs citation ----------------------------------------------
+#
+# A version *declaration* — a pin, a documented floor, "requires >= X", an
+# install line — states what you must use, so it goes stale the moment a
+# release lands. A version *citation* — "introduced in X", "the X → Y move",
+# "verified against X", a dated correction — states what happened, and is true
+# forever. Telling a downstream to "move" one of those to the current version
+# asks them to falsify their own record; codingest's PARITY.md provenance line
+# was cited that way in three consecutive release notes.
+#
+# The classifier is deliberately conservative in one direction: anything it
+# cannot recognise as a record stays a finding, because a missed stale pin
+# costs more than a false positive that a human dismisses.
+
+#: Past-tense / provenance cues. Presence of one inside the sentence carrying
+#: the version means the sentence is talking about the past.
+#: The past-tense forms are deliberate. An earlier draft accepted
+#: ``ship(?:ped)? in`` and classified "these crates ship in lockstep" — a
+#: present-tense statement about policy — as a historical record.
+_CITATION_CUES = re.compile(
+    r"\b(introduced|added\s+in|landed\s+in|shipped\s+in|released\s+in|"
+    r"removed\s+in|deleted\s+in|renamed\s+in|fixed\s+in|broke\s+in|changed\s+in|"
+    r"migrat(?:ed|ion|ing)|verified|was|were|used\s+to|since|as\s+of|onwards?|"
+    r"previously|formerly|originally|earlier|historical\w*|history|no\s+longer|"
+    r"already|first\s+appeared|described|correction|moved\s+from|"
+    r"upgraded\s+from|bumped\s+from)\b",
+    re.IGNORECASE,
+)
+#: Cues that make a sentence a live requirement even if it is phrased in prose.
+#: These win over the citation cues, except against an explicit version range.
+_DECLARATION_CUES = re.compile(
+    r"\b(requires?|required|requirement|minimum|floor|pins?|pinned|depends?\s+on|"
+    r"needs?|install(?:s|ing|ation)?|upgrade\s+to|bump\s+to|move\s+to|must\s+be|"
+    r"at\s+least|or\s+newer|or\s+later|supported\s+version)\b",
+    re.IGNORECASE,
+)
+#: ``0.15.8 → 0.15.11``, ``0.15.8 -> 0.15.11``, ``0.15.8 to 0.15.11``. Two
+#: endpoints describe a completed transition; nothing can "move" a range to the
+#: current version without rewriting which move actually happened. This wins
+#: over the declaration cues, because "the engine floor moved 0.15.11 → 0.15.13"
+#: is a record of a bump, not a bump instruction.
+_VERSION_RANGE = re.compile(r"v?\d+\.\d+(?:\.\d+)?\s*(?:→|->|-->|=>|–|—|\bto\b)\s*v?\d+\.\d+")
+#: An ISO date anywhere in the surrounding prose dates the statement.
+_DATED_PROSE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+#: ``0.15.5+`` is a floor written compactly — a declaration, whatever else the
+#: sentence says.
+_FLOOR_SUFFIX = re.compile(r"^\s*\+")
+
+
+def _prose_context(lines: list[str], index: int) -> tuple[str, int]:
+    """The wrapped sentence around ``lines[index]``, and its start offset.
+
+    Markdown wraps sentences across lines, so the verb that dates a statement
+    ("…and it was\\nintroduced in kglite 0.15.5") routinely sits on a different
+    line from the version. Neighbours are joined only while the sentence is
+    unfinished — a preceding line that ends in terminal punctuation starts a new
+    thought and is not evidence about this one.
+    """
+    before: list[str] = []
+    i = index - 1
+    while i >= 0 and len(before) < 2:
+        prev = lines[i].strip()
+        if not prev or prev.endswith((".", "!", "?")) or prev.startswith(("#", "|", "```")):
+            break
+        before.insert(0, prev)
+        i -= 1
+    after: list[str] = []
+    tail = lines[index].strip()
+    j = index + 1
+    while j < len(lines) and len(after) < 2 and not tail.endswith((".", "!", "?")):
+        nxt = lines[j].strip()
+        if not nxt or nxt.startswith(("#", "|", "```")):
+            break
+        after.append(nxt)
+        tail = nxt
+        j += 1
+    head = " ".join(before)
+    line_start = len(head) + 1 if head else 0
+    return " ".join([*before, lines[index].strip(), *after]), line_start
+
+
+def _sentence_at(text: str, index: int) -> str:
+    """The sentence of ``text`` containing offset ``index``."""
+    starts = [m.end() for m in re.finditer(r"[.!?;:]\s+", text[:index])]
+    start = starts[-1] if starts else 0
+    m = re.search(r"[.!?;:]\s+", text[index:])
+    end = index + m.start() + 1 if m else len(text)
+    return text[start:end]
+
+
+def is_version_citation(lines: list[str], index: int, match: re.Match[str]) -> bool:
+    """True when this version mention records history rather than declaring a need."""
+    if _FLOOR_SUFFIX.match(lines[index][match.end() :]):
+        return False  # `0.15.5+` — a floor, not a record
+    context, line_start = _prose_context(lines, index)
+    lead_ws = len(lines[index]) - len(lines[index].lstrip())
+    sentence = _sentence_at(context, line_start + max(0, match.start() - lead_ws))
+    if _VERSION_RANGE.search(sentence):
+        return True
+    if _DECLARATION_CUES.search(sentence):
+        return False
+    return bool(_CITATION_CUES.search(sentence) or _DATED_PROSE.search(context))
+
+
 # ---- Gradle / Maven coordinates -------------------------------------------
 
 #: A Maven coordinate: ``io.github.kkollsga:kglite:0.15.9``. This is how the
@@ -842,7 +960,11 @@ def scan_docs(repo: str, path: Path, tracked: set[str]) -> list[Declaration]:
             if not _tracked(name, tracked) or (i, name.lower()) in seen:
                 continue
             seen.add((i, name.lower()))
-            out.append(Declaration(repo, path, i, name, "=" + m.group("spec"), "docs", s[:200], metadata=False))
+            # Prose is the only site where a version can be a *record* rather
+            # than a requirement, so it is the only site that gets classified.
+            # An install line is a declaration wherever it appears.
+            site = "docs-citation" if is_version_citation(lines, i - 1, m) else "docs"
+            out.append(Declaration(repo, path, i, name, "=" + m.group("spec"), site, s[:200], metadata=False))
     return out
 
 
@@ -1053,6 +1175,27 @@ def analyse(
                     continue
                 iv = d.interval
                 assert iv is not None
+                if d.site in CITATION_SITES:
+                    # Historical prose. Surfaced so the classification is
+                    # auditable — a silent exemption is how a scanner goes
+                    # blind — but never as something to change.
+                    if not iv.contains(current):
+                        findings.append(
+                            Finding(
+                                kind="citation",
+                                severity="info",
+                                repo=repo,
+                                package=pkg,
+                                message=(
+                                    f"{repo} prose records {pkg} {fmt_version(iv.lo)} as history "
+                                    f"(a migration, an introduction, a verified move), not as a "
+                                    f"requirement. Moving it to {fmt_version(current)} would "
+                                    f"falsify the record."
+                                ),
+                                declarations=[d],
+                            )
+                        )
+                    continue
                 is_doc = d.site in DOC_SITES
                 if not iv.contains(current):
                     if id(d) in floor_pins:
@@ -1134,6 +1277,8 @@ def analyse(
 
         # --- 4. inventory of declaration sites outside package metadata
         for d in group:
+            if d.site in CITATION_SITES:
+                continue  # reported as `citation`; not a drift surface
             if not d.metadata and d.site != "cargo-lock":
                 findings.append(
                     Finding(
@@ -1224,6 +1369,7 @@ KIND_TITLE = {
     "exact-pin": "SUPERSEDED EXACT PINS",
     "stale-docs": "STALE DOCUMENTED VERSIONS — prose naming a superseded version",
     "floor-test": "DELIBERATE FLOOR-TEST PINS (not findings; shown for audit)",
+    "citation": "HISTORICAL CITATIONS — prose recording a past version (classified, not flagged)",
     "acknowledged": "ACKNOWLEDGED HISTORICAL REFERENCES (adjudicated, no action)",
     "site": "DECLARATION SITES OUTSIDE PACKAGE METADATA (drift surface)",
 }
@@ -1234,6 +1380,7 @@ KIND_ORDER = [
     "exact-pin",
     "stale-docs",
     "floor-test",
+    "citation",
     "acknowledged",
     "site",
 ]
@@ -1279,33 +1426,140 @@ class NotifyDecision:
     touched_symbols: list[tuple[str, str]] = dataclasses.field(default_factory=list)
 
 
+#: Files a symbol reference can live in at all. Markdown, RST and text are
+#: absent on purpose: prose *naming* an API is not a call site.
+CODE_EXTS = {".rs", ".py", ".pyi", ".toml", ".java", ".kt", ".kts", ".c", ".h", ".cpp", ".hpp", ".go", ".js", ".ts"}
+
+#: Comment syntax per extension: (line marker, has C-style block comments,
+#: has Python triple-quoted strings).
+_COMMENT_STYLE: dict[str, tuple[str, bool, bool]] = {
+    ".rs": ("//", True, False),
+    ".java": ("//", True, False),
+    ".kt": ("//", True, False),
+    ".kts": ("//", True, False),
+    ".c": ("//", True, False),
+    ".h": ("//", True, False),
+    ".cpp": ("//", True, False),
+    ".hpp": ("//", True, False),
+    ".go": ("//", True, False),
+    ".js": ("//", True, False),
+    ".ts": ("//", True, False),
+    ".toml": ("#", False, False),
+    ".py": ("#", False, True),
+    ".pyi": ("#", False, True),
+}
+
+
+def _cut_at_marker(text: str, marker: str) -> str:
+    """Drop everything from an unquoted ``marker`` onwards."""
+    out: list[str] = []
+    quote: str | None = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                out.append(text[i : i + 2])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif text.startswith(marker, i):
+            break
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def code_lines(suffix: str, lines: list[str]) -> list[tuple[int, str]]:
+    """``(lineno, code)`` with comments and Python docstrings removed.
+
+    A symbol named in a comment is a *note about* an API, not a use of it — and
+    conflating the two produced the worst kind of evidence: codingest's release
+    note cited a `Cargo.toml` comment describing a finished migration while
+    missing the actual `NodeView` call site in `rev.rs`. The one hit offered was
+    the one that wasn't a reference.
+    """
+    marker, block_comments, docstrings = _COMMENT_STYLE.get(suffix, ("#", False, False))
+    out: list[tuple[int, str]] = []
+    in_block = False
+    in_doc: str | None = None
+    for i, raw in enumerate(lines, 1):
+        text = raw
+        if in_block:
+            end = text.find("*/")
+            if end < 0:
+                continue
+            text = text[end + 2 :]
+            in_block = False
+        if in_doc:
+            end = text.find(in_doc)
+            if end < 0:
+                continue
+            text = text[end + 3 :]
+            in_doc = None
+        if block_comments:
+            while True:
+                start = text.find("/*")
+                if start < 0:
+                    break
+                end = text.find("*/", start + 2)
+                if end < 0:
+                    text = text[:start]
+                    in_block = True
+                    break
+                text = text[:start] + text[end + 2 :]
+        if docstrings:
+            for q in ('"""', "'''"):
+                while True:
+                    start = text.find(q)
+                    if start < 0:
+                        break
+                    end = text.find(q, start + 3)
+                    if end < 0:
+                        text = text[:start]
+                        in_doc = q
+                        break
+                    text = text[:start] + text[end + 3 :]
+                if in_doc:
+                    break
+        text = _cut_at_marker(text, marker)
+        if text.strip():
+            out.append((i, text))
+    return out
+
+
 def find_symbol_uses(root: Path, symbols: list[str]) -> list[tuple[str, str]]:
-    """Which of ``symbols`` this repo's sources actually reference.
+    """Which of ``symbols`` this repo's *code* actually references.
 
     Approximates "a breaking change touches a surface it uses". Deliberately
-    source-only: docs and changelogs mentioning a symbol are not usage.
+    code-only: docs, changelogs and comments mentioning a symbol are not usage,
+    and citing one as evidence sends a maintainer to a line that needs nothing.
+    The hit is reported as ``path:line`` so the claim can be checked.
     """
     hits: list[tuple[str, str]] = []
     if not symbols:
         return hits
-    exts = {".rs", ".py", ".pyi", ".toml"}
     found: dict[str, str] = {}
-    for path in _iter_files(root):
-        if path.suffix not in exts or path.name in {"Cargo.lock", "CHANGELOG.md"}:
+    for path in sorted(_iter_files(root)):
+        if path.suffix not in CODE_EXTS or path.name in {"Cargo.lock"}:
             continue
         lines = _read(path)
         if lines is None:
             continue
-        text = "\n".join(lines)
-        for sym in symbols:
-            if sym in found:
-                continue
-            if sym in text:
-                try:
-                    rel = str(path.relative_to(root))
-                except ValueError:
-                    rel = str(path)
-                found[sym] = rel
+        remaining = [s for s in symbols if s not in found]
+        if not remaining:
+            break
+        try:
+            rel = str(path.relative_to(root))
+        except ValueError:
+            rel = str(path)
+        for lineno, code in code_lines(path.suffix, lines):
+            for sym in remaining:
+                if sym not in found and sym in code:
+                    found[sym] = f"{rel}:{lineno}"
     for sym in symbols:
         if sym in found:
             hits.append((sym, found[sym]))
@@ -1386,6 +1640,125 @@ def decide_notifications(
             )
         decisions.append(NotifyDecision(repo, False, [], skip_reason=skip))
     return decisions
+
+
+# ---- "what changed" — read from the announced release's CHANGELOG entry -----
+
+_CHANGELOG_RELEASE_RE = re.compile(r"^##\s*\[(?P<ver>[^\]]+)\]")
+_CHANGELOG_SUBSECTION_RE = re.compile(r"^###\s+(?P<name>.+?)\s*$")
+_CHANGELOG_BULLET_RE = re.compile(r"^-\s+(?P<text>.*)$")
+_BOLD_LEAD_RE = re.compile(r"^\*\*(?P<lead>.+?)\*\*", re.DOTALL)
+
+#: How many entries a note quotes before pointing at the file. A release with
+#: twenty bullets does not become twenty asks.
+MAX_HIGHLIGHTS = 8
+
+
+def changelog_entry(path: Path, version: tuple[int, int, int]) -> list[str] | None:
+    """The body lines of ``## [<version>]``, or None when there is no such entry.
+
+    None is a meaningful answer and the caller must honour it: a note that
+    cannot resolve its own release's entry carries no "what changed" section at
+    all. The alternative — falling back to whatever text is nearest to hand —
+    is the defect this function replaces.
+    """
+    lines = _read(path)
+    if lines is None:
+        return None
+    body: list[str] | None = None
+    for line in lines:
+        m = _CHANGELOG_RELEASE_RE.match(line)
+        if m:
+            if body is not None:
+                break  # next release heading ends the entry
+            if parse_version(m.group("ver")) == version:
+                body = []
+            continue
+        if body is not None:
+            body.append(line)
+    return body
+
+
+def summarise_changelog_entry(body: list[str], version: str) -> list[str]:
+    """Condense a changelog entry into one line per top-level bullet.
+
+    Each entry in this project's changelog opens with a bold lead sentence that
+    states the change; the paragraphs after it are evidence and measurement.
+    Quoting the lead verbatim keeps the note honest — it is the changelog's own
+    words about the release it names — while staying short enough to read in an
+    inbox. A bullet without a bold lead falls back to its first sentence.
+    """
+    picked: list[tuple[str, str]] = []
+    section = ""
+    current: list[str] | None = None
+
+    def flush() -> None:
+        nonlocal current
+        if current:
+            text = " ".join(part.strip() for part in current).strip()
+            lead = _lead_sentence(text)
+            if lead:
+                picked.append((section, lead))
+        current = None
+
+    for raw in body:
+        sub = _CHANGELOG_SUBSECTION_RE.match(raw)
+        if sub:
+            flush()
+            section = sub.group("name").strip()
+            continue
+        bullet = _CHANGELOG_BULLET_RE.match(raw)
+        if bullet and not raw[:1].isspace():
+            flush()
+            current = [bullet.group("text")]
+        elif current is not None:
+            if not raw.strip():
+                flush()
+            else:
+                current.append(raw)
+    flush()
+
+    out = [f"{sec}: {lead}" if sec else lead for sec, lead in picked[:MAX_HIGHLIGHTS]]
+    if len(picked) > MAX_HIGHLIGHTS:
+        out.append(f"…and {len(picked) - MAX_HIGHLIGHTS} further entr(ies) in `[{version}]` — read the CHANGELOG.")
+    return out
+
+
+def _lead_sentence(text: str) -> str:
+    m = _BOLD_LEAD_RE.match(text)
+    if m:
+        return " ".join(m.group("lead").split())
+    plain = " ".join(text.split())
+    first = re.split(r"(?<=[.!?])\s", plain, maxsplit=1)[0]
+    return first if len(first) <= 240 else first[:239].rstrip() + "…"
+
+
+def release_highlights(upstream_root: Path, upstream_version: tuple[int, int, int]) -> list[str]:
+    """What the announced release changed, condensed from its own entry.
+
+    Empty when the entry cannot be resolved — and that emptiness is the whole
+    point. Notes for 0.15.11, 0.15.12 and 0.15.13 all shipped 0.15.9's prose
+    because this text came from a constant that no release step had to touch;
+    an absent section is strictly better than a confidently wrong one.
+    """
+    ver = fmt_version(upstream_version)
+    path = upstream_root / "CHANGELOG.md"
+    body = changelog_entry(path, upstream_version)
+    if body is None:
+        print(
+            f"warning: no `## [{ver}]` section in {path} — the release notes will carry "
+            f'no "what changed" section rather than another release\'s.',
+            file=sys.stderr,
+        )
+        return []
+    highlights = summarise_changelog_entry(body, ver)
+    if not highlights:
+        print(
+            f"warning: the `## [{ver}]` entry in {path} has no bullet entries to quote; "
+            f'the release notes will carry no "what changed" section.',
+            file=sys.stderr,
+        )
+    return highlights
 
 
 def compose_note(
@@ -1475,7 +1848,10 @@ def compose_note(
         lines.append("")
 
     if highlights and not docs_only:
-        lines += ["**What changed in this release that can reach you:**", ""]
+        lines += [
+            f"**What changed in this release that can reach you** (lead lines of the `[{ver}]` CHANGELOG entry):",
+            "",
+        ]
         lines += [f"- {h}" for h in highlights]
         lines.append("")
 
@@ -1492,11 +1868,13 @@ def compose_note(
             f"stops needing maintenance). Nothing else here needs to change — your "
             f"manifests are already correct."
         )
-    else:
+    elif sites:
         lines.append(
             f"- Move the sites above to {ver} and refresh the lockfile. They sit outside "
             f"package metadata, so nothing in your own CI will notice they drifted."
         )
+    # A note whose only reason is a referenced breaking symbol has no sites to
+    # move; "move the sites above" pointed at nothing at all in that case.
     if decision.touched_symbols:
         lines.append(
             f"- Check those call sites against the `[{ver}]` CHANGELOG before upgrading; "
@@ -1560,35 +1938,44 @@ def run_notify(
 # Entry point
 # --------------------------------------------------------------------------
 
-#: Symbols whose *breaking* change in the current release could reach a
-#: downstream. Kept here (rather than parsed from CHANGELOG prose, which is not
-#: a machine contract) and refreshed at release time alongside the other
-#: captured constants. Empty is a valid state: a release with no breaking
-#: surface notifies only on range/pin grounds.
-DEFAULT_BREAKING_SYMBOLS: list[str] = [
+#: Symbols whose *breaking* change could reach a downstream, keyed by **the
+#: release that broke them**.
+#:
+#: The key is load-bearing, and it replaces a flat ``DEFAULT_BREAKING_SYMBOLS``
+#: list that was the 0.15.9 set and stayed the 0.15.9 set: every release after
+#: it asserted, in a downstream's inbox, that this release touched `NodeView`.
+#: Three notes shipped that claim about releases containing no such change. A
+#: symbol set that is not tied to the version it describes cannot go stale
+#: *visibly* — it just keeps being right about one release and wrong about all
+#: the others. Keyed, a release with no entry here simply does not fire the
+#: breaking-surface criterion, which is the correct behaviour for the common
+#: case (most releases break nothing).
+#:
+#: Add an entry when a release removes or changes a public symbol; never edit
+#: an existing release's set to mean "the current release".
+BREAKING_SYMBOLS_BY_VERSION: dict[str, list[str]] = {
     # 0.15.9 — D1/D2 Rust-API surgery (semver-major, shipped in a patch per
-    # project policy; Python and C surfaces are additive-only this release).
-    "NodeData::get_property",
-    "NodeData::property_iter",
-    "NodeData::properties_cloned",
-    "DirGraph::column_stores",
-    "NodeView",
-    "GraphBackend::Forked",
-    "GraphRead::node_view",
-    "resolve_node_property",
-]
+    # project policy; Python and C surfaces were additive-only that release).
+    "0.15.9": [
+        "NodeData::get_property",
+        "NodeData::property_iter",
+        "NodeData::properties_cloned",
+        "DirGraph::column_stores",
+        "NodeView",
+        "GraphBackend::Forked",
+        "GraphRead::node_view",
+        "resolve_node_property",
+    ],
+}
 
-DEFAULT_HIGHLIGHTS = [
-    "Saved-graph writes no longer sweep every node of the type: a one-row "
-    "columnar SET/REMOVE mutates one row in place, and MERGE into a saved "
-    "type dropped from 1,789x to 29.6x its fresh-graph cost.",
-    "Holding a query result, freeze(), Session, or open transaction across "
-    "a write no longer copies the graph: first-write cost at 1M nodes fell "
-    "from ~36ms to ~5us on plain graphs, and the fork allocates nothing.",
-    "The Rust API changed shape (NodeData property readers removed, "
-    "NodeView is the read route, DirGraph.column_stores became accessors); "
-    "Python and C surfaces are additive-only.",
-]
+
+def breaking_symbols_for(version: str) -> list[str]:
+    """The symbols this exact release broke, or ``[]``.
+
+    Deliberately an exact-version lookup with no fallback: inheriting the
+    previous release's set is precisely the defect this table exists to remove.
+    """
+    return list(BREAKING_SYMBOLS_BY_VERSION.get(version, []))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1619,7 +2006,7 @@ def main(argv: list[str] | None = None) -> int:
         "--breaking-symbol",
         action="append",
         default=None,
-        help="symbol broken by this release; repeatable (default: the current release's set)",
+        help="symbol broken by this release; repeatable (default: BREAKING_SYMBOLS_BY_VERSION[<version>], or none)",
     )
     p.add_argument("--date", default=None, help="date stamp for notes (default: today)")
     args = p.parse_args(argv)
@@ -1693,10 +2080,14 @@ def main(argv: list[str] | None = None) -> int:
     findings = analyse(decls, package_owner)
 
     if args.notify:
-        symbols = args.breaking_symbol if args.breaking_symbol is not None else DEFAULT_BREAKING_SYMBOLS
+        if args.breaking_symbol is not None:
+            symbols = args.breaking_symbol
+        else:
+            symbols = breaking_symbols_for(fmt_version(upstream_version))
         date = args.date or _dt.date.today().isoformat()
+        highlights = release_highlights(repos[UPSTREAM_REPO], upstream_version)
         decisions = decide_notifications(findings, decls, repos, upstream_version, symbols)
-        return run_notify(decisions, repos, upstream_version, date, DEFAULT_HIGHLIGHTS, args.dry_run)
+        return run_notify(decisions, repos, upstream_version, date, highlights, args.dry_run)
 
     if args.json:
         print(
