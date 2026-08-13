@@ -231,6 +231,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Refused` variant means nothing was written, so a binding can map a refusal
   to its own bad-request class instead of an I/O failure.
 
+- **A point lookup on an id that does not exist no longer scans the whole node
+  type.** `MATCH (n:Item {id: X})` (and the `WHERE n.id = X` / `$param` /
+  id-alias spellings) resolves through the per-type id index, but when the key
+  was absent the anchor treated the miss as "no index built" and fell through
+  to a full scan of the type — which could only ever re-derive the same empty
+  answer, at O(nodes) per absent key. Absent keys are the common case for
+  upsert probes and for `SET` / `MATCH` driven by an externally-sourced id
+  list, and the equivalent `IN`-on-id anchor already did this correctly.
+  Measured (release build, min-of-N, two agreeing runs against the published
+  0.15.13 wheel, controls flat): a missing-key lookup at 50k nodes 0.40 ms →
+  0.0024 ms (164×) and at 200k nodes 1.56 ms → 0.0023 ms (672×) — now flat in
+  graph size and at parity with a hit (0.0025 ms) — and `UNWIND` over 2 000
+  absent ids 809 ms → 0.54 ms (1 480×). Hit lookups, the same `UNWIND` over
+  present ids, and unrelated property scans are unchanged.
+- **An id stored as a whole-valued float is matchable by an integer literal
+  through the id index.** `CREATE (n:Doc {id: 5.0})` followed by
+  `MATCH (n:Doc {id: 5})` matched only because the anchor fell through to a
+  scan, whose comparison coerces across the numeric family; the index itself
+  declined the coercion, so the `WHERE n.id IN [5]` spelling returned nothing.
+  The index now coerces `Int64` / `UniqueId` queries against `Float64` keys the
+  same way value equality does, and all spellings agree.
+
 ## [0.15.13] - 2026-08-12
 
 ### Changed

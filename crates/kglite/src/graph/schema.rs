@@ -407,16 +407,29 @@ impl TypeIdIndex {
                 if let Some(&idx) = map.get(id) {
                     return Some(idx);
                 }
-                // Type coercion fallback
+                // Type coercion fallback. This must cover the same numeric
+                // family as `values_equal` (core/filtering.rs), which is what
+                // a type scan compares with: the id anchors in
+                // `try_index_lookup` treat a miss here as an empty result and
+                // never scan, so a coercion the index declines but the scan
+                // would have accepted is a lost row, not a slow one.
                 match id {
                     Value::Int64(i) => {
+                        if let Some(&idx) = map.get(&Value::Float64(*i as f64)) {
+                            return Some(idx);
+                        }
                         if *i >= 0 && *i <= u32::MAX as i64 {
                             map.get(&Value::UniqueId(*i as u32)).copied()
                         } else {
                             None
                         }
                     }
-                    Value::UniqueId(u) => map.get(&Value::Int64(*u as i64)).copied(),
+                    Value::UniqueId(u) => {
+                        if let Some(&idx) = map.get(&Value::Int64(*u as i64)) {
+                            return Some(idx);
+                        }
+                        map.get(&Value::Float64(*u as f64)).copied()
+                    }
                     Value::Float64(f) => {
                         if f.fract() == 0.0 {
                             let i = *f as i64;

@@ -211,3 +211,119 @@ def test_dict_and_list_of_dict_params_marshal_to_native_maps():
     kg.cypher("UNWIND $rows AS r CREATE (:Doc {id: r.id, name: r.nm})", params={"rows": rows})
     matched = kg.cypher("MATCH (d:Doc) WHERE d.id IN $ids RETURN count(d) AS c", params={"ids": [10, 11]}).scalar()
     assert matched == 2
+
+
+# ─── Absent-key point lookups (P1, write-perf program) ─────────────────────
+
+
+@pytest.mark.parametrize("mode", CREATE_MODES)
+def test_absent_id_point_lookup_returns_empty(mode, tmp_path):
+    """A point lookup on an id that does not exist returns nothing — in every
+    spelling, and identically to the hit spelling that does exist.
+
+    The anchor used to fall through to a full-type scan whenever the id index
+    could not resolve the key, conflating "index not built" with "key absent".
+    The scan could only ever return nothing, so this is a golden for the
+    behaviour the fast path must preserve: same rows, whatever the spelling.
+    """
+    kg = _new_kg(mode, tmp_path)
+    kg.cypher("UNWIND range(1, 50) AS i CREATE (:Doc {id: i, name: 'n' + toString(i)})")
+
+    # inline map, literal
+    assert kg.cypher("MATCH (n:Doc {id: 999}) RETURN n.name AS nm").to_list() == []
+    assert kg.cypher("MATCH (n:Doc {id: 7}) RETURN n.name AS nm").to_list() == [{"nm": "n7"}]
+
+    # inline map, parameter
+    assert kg.cypher("MATCH (n:Doc {id: $i}) RETURN n.name AS nm", params={"i": 999}).to_list() == []
+    assert kg.cypher("MATCH (n:Doc {id: $i}) RETURN n.name AS nm", params={"i": 7}).to_list() == [{"nm": "n7"}]
+
+    # WHERE equality
+    assert kg.cypher("MATCH (n:Doc) WHERE n.id = 999 RETURN n.name AS nm").to_list() == []
+    assert kg.cypher("MATCH (n:Doc) WHERE n.id = 7 RETURN n.name AS nm").to_list() == [{"nm": "n7"}]
+
+    # RETURN n (whole node) rather than a property
+    assert kg.cypher("MATCH (n:Doc {id: 999}) RETURN n").to_list() == []
+    assert len(kg.cypher("MATCH (n:Doc {id: 7}) RETURN n").to_list()) == 1
+
+    # aggregate over the miss
+    assert kg.cypher("MATCH (n:Doc {id: 999}) RETURN count(n) AS c").to_list() == [{"c": 0}]
+
+    # untyped point lookup
+    assert kg.cypher("MATCH (n {id: 999}) RETURN n.name AS nm").to_list() == []
+
+    # a miss combined with another predicate is still empty; a hit still
+    # honours the other predicate
+    assert kg.cypher("MATCH (n:Doc {id: 999}) WHERE n.name = 'n7' RETURN n.name AS nm").to_list() == []
+    assert kg.cypher("MATCH (n:Doc {id: 7}) WHERE n.name = 'n7' RETURN n.name AS nm").to_list() == [{"nm": "n7"}]
+    assert kg.cypher("MATCH (n:Doc {id: 7}) WHERE n.name = 'zzz' RETURN n.name AS nm").to_list() == []
+
+    # write path: SET on an absent key is a no-op, not an error
+    assert kg.cypher("MATCH (n:Doc {id: 999}) SET n.tag = 1 RETURN count(n) AS c").to_list() == [{"c": 0}]
+    assert kg.cypher("MATCH (n:Doc) WHERE n.tag IS NOT NULL RETURN count(n) AS c").to_list() == [{"c": 0}]
+
+
+@pytest.mark.parametrize("mode", CREATE_MODES)
+def test_unwind_mixed_hit_and_miss_ids_returns_exactly_the_hits(mode, tmp_path):
+    """`UNWIND` over a list mixing present and absent ids returns one row per
+    present id — the shape whose miss half cost 6.7 s over 16k absent ids."""
+    kg = _new_kg(mode, tmp_path)
+    kg.cypher("UNWIND range(1, 20) AS i CREATE (:Doc {id: i})")
+
+    ids = [1, 500, 2, 501, 3, 502]
+    assert kg.cypher("UNWIND $ids AS i MATCH (n:Doc {id: i}) RETURN n.id AS id", params={"ids": ids}).to_list() == [
+        {"id": 1},
+        {"id": 2},
+        {"id": 3},
+    ]
+    assert kg.cypher(
+        "UNWIND $ids AS i MATCH (n:Doc {id: i}) RETURN count(n) AS c", params={"ids": [900, 901, 902]}
+    ).to_list() == [{"c": 0}]
+    # IN-list anchor agrees with the point-lookup anchor
+    assert kg.cypher("MATCH (n:Doc) WHERE n.id IN $ids RETURN count(n) AS c", params={"ids": ids}).to_list() == [
+        {"c": 3}
+    ]
+
+
+def test_absent_string_id_and_alias_lookup_return_empty():
+    """String ids and a user-declared id alias (`add_nodes(..., 'starId')`)
+    take the same anchor: a miss is empty, a hit is unaffected."""
+    kg = KnowledgeGraph()
+    kg.cypher("CREATE (:Doc {id: 's1', v: 1}), (:Doc {id: 's2', v: 2})")
+    assert kg.cypher("MATCH (n:Doc {id: 'nope'}) RETURN n.v AS v").to_list() == []
+    assert kg.cypher("MATCH (n:Doc {id: 's2'}) RETURN n.v AS v").to_list() == [{"v": 2}]
+
+    df = pd.DataFrame({"starId": [1, 2, 3], "title": ["a", "b", "c"]})
+    kg.add_nodes(df, "Star", "starId", "title")
+    assert kg.cypher("MATCH (s:Star {starId: 99}) RETURN s.title AS t").to_list() == []
+    assert kg.cypher("MATCH (s:Star {starId: 2}) RETURN s.title AS t").to_list() == [{"t": "b"}]
+    # and after a write invalidates/rebuilds the index
+    kg.cypher("CREATE (:Star {id: 4, title: 'd'})")
+    assert kg.cypher("MATCH (s:Star {starId: 99}) RETURN s.title AS t").to_list() == []
+    assert kg.cypher("MATCH (s:Star {starId: 4}) RETURN s.title AS t").to_list() == [{"t": "d"}]
+
+
+def test_absent_id_lookup_after_delete_and_recreate():
+    """A deleted id must miss, and a recreated one must hit again — the index
+    invalidation path the fast-empty now depends on."""
+    kg = KnowledgeGraph()
+    kg.cypher("UNWIND range(1, 10) AS i CREATE (:Doc {id: i})")
+    assert kg.cypher("MATCH (n:Doc {id: 5}) RETURN count(n) AS c").to_list() == [{"c": 1}]
+
+    kg.cypher("MATCH (n:Doc {id: 5}) DETACH DELETE n")
+    assert kg.cypher("MATCH (n:Doc {id: 5}) RETURN count(n) AS c").to_list() == [{"c": 0}]
+    assert kg.cypher("MATCH (n:Doc {id: 6}) RETURN count(n) AS c").to_list() == [{"c": 1}]
+
+    kg.cypher("CREATE (:Doc {id: 5, name: 'back'})")
+    assert kg.cypher("MATCH (n:Doc {id: 5}) RETURN n.name AS nm").to_list() == [{"nm": "back"}]
+
+
+def test_absent_id_lookup_on_secondary_label():
+    """A node carrying `:Extra` as a *secondary* label stays reachable by id:
+    the queried label's id index covers primary members only, and the match
+    unions the secondary-label carriers in."""
+    kg = KnowledgeGraph()
+    kg.cypher("CREATE (:Person:Director {id: 1, name: 'Ada'})")
+    assert kg.cypher("MATCH (n:Director {id: 1}) RETURN n.name AS nm").to_list() == [{"nm": "Ada"}]
+    assert kg.cypher("MATCH (n:Director {id: 2}) RETURN n.name AS nm").to_list() == []
+    assert kg.cypher("MATCH (n:Person {id: 1}) RETURN n.name AS nm").to_list() == [{"nm": "Ada"}]
+    assert kg.cypher("MATCH (n:Person {id: 2}) RETURN n.name AS nm").to_list() == []

@@ -1084,6 +1084,29 @@ impl<'a> PatternExecutor<'a> {
 
     /// Try to use property indexes for faster node lookup.
     /// Returns None if no indexes cover the requested properties.
+    ///
+    /// `Some(v)` and `None` are not interchangeable: `None` sends
+    /// [`Self::find_matching_nodes`] into a scan of every node of the type,
+    /// `Some(v)` is taken verbatim (unioned with a filtered scan of the
+    /// queried label's secondary-label carriers, which no index covers). So
+    /// `Some(vec![])` is how an anchor says *proven empty, do not scan*.
+    ///
+    /// **A key miss on the id anchors is proven empty, not an unbuilt index.**
+    /// Both id anchors — `{id: IN [...]}` and the `{id: v}` / `{<alias>: v}`
+    /// equality below — read the per-type id index through
+    /// `DirGraph::lookup_by_id_readonly`, which self-heals: it builds and
+    /// caches the type's index on a miss (`IdIndexStore::lookup_or_build`,
+    /// issue #20). By the time it answers `None` the index therefore exists
+    /// and is authoritative over exactly the candidate set a scan would walk
+    /// (`type_indices`), so falling through could only ever re-derive the same
+    /// empty answer — at O(V) per absent key: 0.39 ms at 50k nodes and 1.56 ms
+    /// at 200k against ~2.5 µs for a hit, and 6.7 s for an UNWIND over 16k
+    /// absent ids. Empty also holds when the pattern carries further
+    /// predicates: a conjunction with one false conjunct is empty.
+    ///
+    /// This trust is what obliges `TypeIdIndex::get` to coerce over the same
+    /// numeric family as `values_equal` — a coercion the index declines but a
+    /// scan would have accepted is now a lost row, not a slow one.
     fn try_index_lookup(
         &self,
         node_type: &str,
@@ -1188,7 +1211,7 @@ impl<'a> PatternExecutor<'a> {
                 if let Some(idx) = self.graph.lookup_by_id_readonly(node_type, value) {
                     return Some(vec![idx]);
                 }
-                // Fall through: id_index not built yet, use scan below
+                return Some(Vec::new()); // key miss, not a missing index
             }
         }
 
@@ -2234,5 +2257,9 @@ impl<'a> PatternExecutor<'a> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "matcher_id_lookup_tests.rs"]
+mod id_lookup_tests;
 
 // ============================================================================

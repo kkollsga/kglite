@@ -274,6 +274,68 @@ def test_bench_node_lookup_while_arc_shared(benchmark, hot_graph):
     benchmark(share_then_lookup)
 
 
+# ---------------------------------------------------------------------------
+# Point lookup by id — hit vs absent key
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.benchmark
+def test_bench_point_lookup_id_hit(benchmark, hot_graph):
+    """`MATCH (n:Item {id: X})` for an id that exists — the control cell.
+
+    Answered by the per-type id index in O(1); flat in graph size. Read it
+    alongside the miss cell below: the two must stay within the same order of
+    magnitude, which is the whole point of the fix.
+    """
+    result = benchmark(hot_graph.cypher, "MATCH (n:Item {id: 1234}) RETURN n.name AS nm")
+    assert len(result.to_list()) == 1
+
+
+@pytest.mark.benchmark
+def test_bench_point_lookup_id_miss(benchmark, hot_graph):
+    """Same lookup for an id that does *not* exist.
+
+    The anchor used to fall through to a full-type scan whenever the id index
+    could not resolve the key, so every absent key cost O(V) to prove a result
+    that was always empty — 0.39 ms at 50k nodes and 1.56 ms at 200k, against
+    ~2.5 us for a hit. Absent keys are the common case for upsert probes and
+    for SET/MERGE over externally-sourced id lists.
+    """
+    result = benchmark(hot_graph.cypher, "MATCH (n:Item {id: 999999}) RETURN n.name AS nm")
+    assert result.to_list() == []
+
+
+@pytest.mark.benchmark
+def test_bench_unwind_point_lookup_misses(benchmark, hot_graph):
+    """200 absent ids through the UNWIND point-lookup shape.
+
+    Per-row amplification of the cell above: one full-type scan per unwound
+    id. The measured cliff was 6.7 s for 16k absent ids versus 6.5 ms for the
+    same count of hits.
+    """
+    ids = list(range(900_000, 900_200))
+    result = benchmark(
+        lambda: hot_graph.cypher(
+            "UNWIND $ids AS i MATCH (n:Item {id: i}) RETURN count(n) AS c",
+            params={"ids": ids},
+        )
+    )
+    assert result.to_list() == [{"c": 0}]
+
+
+@pytest.mark.benchmark
+def test_bench_unwind_point_lookup_hits(benchmark, hot_graph):
+    """The same UNWIND shape over 200 ids that all exist — control cell."""
+    ids = list(range(200))
+    result = benchmark(
+        lambda: hot_graph.cypher(
+            "UNWIND $ids AS i MATCH (n:Item {id: i}) RETURN count(n) AS c",
+            params={"ids": ids},
+        )
+    )
+    assert result.to_list() == [{"c": 200}]
+
+
 @pytest.mark.benchmark
 def test_bench_named_rel_match_count(benchmark, prop_edge_graph):
     """MATCH with a *named* edge variable over 100k property-heavy edges.
