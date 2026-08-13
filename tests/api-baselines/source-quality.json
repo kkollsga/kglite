@@ -504,15 +504,15 @@
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::add_connections",
-      "lines": 304,
-      "branches": 41,
+      "lines": 293,
+      "branches": 36,
       "nesting": 3
     },
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::add_nodes",
       "lines": 275,
-      "branches": 32,
+      "branches": 27,
       "nesting": 4
     },
     {

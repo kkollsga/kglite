@@ -284,6 +284,36 @@ impl RowBuilder<'_> {
     }
 }
 
+/// Parse the user-facing `conflict_handling` option shared by `add_nodes`
+/// and `add_connections`; `None` and `"update"` are the default mode.
+fn parse_conflict_mode(option: Option<&str>) -> Result<ConflictHandling, String> {
+    match option {
+        Some("replace") => Ok(ConflictHandling::Replace),
+        Some("skip") => Ok(ConflictHandling::Skip),
+        Some("preserve") => Ok(ConflictHandling::Preserve),
+        Some("sum") => Ok(ConflictHandling::Sum),
+        Some("update") | None => Ok(ConflictHandling::Update),
+        Some(other) => Err(format!(
+            "Unknown conflict handling mode: '{}'. Valid options: 'update' (default), 'replace', 'skip', 'preserve', 'sum'",
+            other
+        )),
+    }
+}
+
+/// Track the numeric ids a bulk load supplies, so the engine's auto-id
+/// high-water mark can be raised past them once after the row loop (see
+/// `DirGraph::next_auto_node_id` — an unraised mark would let a later
+/// bare `CREATE` mint a live id).
+fn note_loaded_id(max_loaded_id: &mut u32, id: &Value) {
+    match id {
+        Value::UniqueId(u) => *max_loaded_id = (*max_loaded_id).max(*u),
+        Value::Int64(i) if *i >= 0 && *i <= u32::MAX as i64 => {
+            *max_loaded_id = (*max_loaded_id).max(*i as u32)
+        }
+        _ => {}
+    }
+}
+
 pub fn add_nodes(
     graph: &mut DirGraph,
     df_data: DataFrame,
@@ -301,18 +331,7 @@ pub fn add_nodes(
     graph
         .prepare_disk_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
-    // Parse conflict handling option
-    let conflict_mode = match conflict_handling.as_deref() {
-        Some("replace") => ConflictHandling::Replace,
-        Some("skip") => ConflictHandling::Skip,
-        Some("preserve") => ConflictHandling::Preserve,
-        Some("sum") => ConflictHandling::Sum,
-        Some("update") | None => ConflictHandling::Update, // Default
-        Some(other) => return Err(format!(
-            "Unknown conflict handling mode: '{}'. Valid options: 'update' (default), 'replace', 'skip', 'preserve', 'sum'",
-            other
-        )),
-    };
+    let conflict_mode = parse_conflict_mode(conflict_handling.as_deref())?;
 
     let should_update_title = node_title_field.is_some();
     let title_field = node_title_field.unwrap_or_else(|| unique_id_field.clone());
@@ -479,13 +498,7 @@ pub fn add_nodes(
             }
         };
 
-        match &id {
-            Value::UniqueId(u) => max_loaded_id = max_loaded_id.max(*u),
-            Value::Int64(i) if *i >= 0 && *i <= u32::MAX as i64 => {
-                max_loaded_id = max_loaded_id.max(*i as u32)
-            }
-            _ => {}
-        }
+        note_loaded_id(&mut max_loaded_id, &id);
 
         if pk_enforced && !seen_pk_ids.insert(id.clone()) {
             return Err(format!(
@@ -740,18 +753,7 @@ pub fn add_connections(
     graph
         .prepare_disk_mutation()
         .map_err(|e| format!("disk mutation lease failed: {e}"))?;
-    // Parse conflict handling option
-    let conflict_mode = match conflict_handling.as_deref() {
-        Some("replace") => ConflictHandling::Replace,
-        Some("skip") => ConflictHandling::Skip,
-        Some("preserve") => ConflictHandling::Preserve,
-        Some("sum") => ConflictHandling::Sum,
-        Some("update") | None => ConflictHandling::Update, // Default
-        Some(other) => return Err(format!(
-            "Unknown conflict handling mode: '{}'. Valid options: 'update' (default), 'replace', 'skip', 'preserve', 'sum'",
-            other
-        )),
-    };
+    let conflict_mode = parse_conflict_mode(conflict_handling.as_deref())?;
 
     // Track errors
     let mut errors = Vec::new();

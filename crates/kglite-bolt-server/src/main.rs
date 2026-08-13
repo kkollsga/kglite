@@ -805,6 +805,54 @@ async fn serve() -> Result<()> {
 
     let addr = SocketAddr::new(cli.bind, cli.port);
 
+    let builder = configure_builder(&cli, backend)?;
+
+    tracing::info!(
+        %addr,
+        readonly = cli.readonly,
+        durability = durability.level.name(),
+        save_on_exit = durability.save_on_exit,
+        checkpoint_interval_secs = durability.checkpoint_interval.map(|d| d.as_secs()),
+        "Bolt server starting"
+    );
+    // Armed before the accept loop and stopped after it, the boltr idle-reaper
+    // shape: a task that only makes sense while the server is serving is owned
+    // by the same scope that serves.
+    let checkpoint_task = durability.checkpoint_interval.map(|interval| {
+        tracing::info!(
+            interval_secs = interval.as_secs(),
+            path = %served_path.display(),
+            "periodic checkpointing enabled"
+        );
+        spawn_checkpoint_task(
+            Arc::clone(&exit_session),
+            served_path.clone(),
+            checkpoint_state,
+            interval,
+        )
+    });
+
+    let serve_result = builder
+        .serve(addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("BoltServer::serve failed: {}", e));
+
+    tracing::info!("Bolt server stopped");
+    finish_shutdown(
+        &durability,
+        &exit_session,
+        &served_path,
+        checkpoint_task,
+        serve_result,
+    )
+    .await
+}
+
+/// Everything between `BoltServer::builder` and `serve`: session/message
+/// bounds, the SIGINT/SIGTERM shutdown future, idle timeout, TLS, and the
+/// `--auth basic` validator. Split from [`serve`] purely to keep each half
+/// readable; the ordering of these calls carries no invariants.
+fn configure_builder(cli: &Cli, backend: KgliteBackend) -> Result<BoltServer<KgliteBackend>> {
     let mut builder = BoltServer::builder(backend)
         .max_sessions(cli.max_sessions)
         .max_message_size(cli.max_message_size)
@@ -838,63 +886,33 @@ async fn serve() -> Result<()> {
         builder = builder.auth(crate::auth::BasicAuthValidator::new(user, pass));
         tracing::info!(user = %cli.auth_user.as_deref().unwrap_or(""), "wired --auth basic validator");
     }
+    Ok(builder)
+}
 
-    tracing::info!(
-        %addr,
-        readonly = cli.readonly,
-        durability = durability.level.name(),
-        save_on_exit = durability.save_on_exit,
-        checkpoint_interval_secs = durability.checkpoint_interval.map(|d| d.as_secs()),
-        "Bolt server starting"
-    );
-    // Armed before the accept loop and stopped after it, the boltr idle-reaper
-    // shape: a task that only makes sense while the server is serving is owned
-    // by the same scope that serves.
-    let checkpoint_task = durability.checkpoint_interval.map(|interval| {
-        tracing::info!(
-            interval_secs = interval.as_secs(),
-            path = %served_path.display(),
-            "periodic checkpointing enabled"
-        );
-        spawn_checkpoint_task(
-            Arc::clone(&exit_session),
-            served_path.clone(),
-            checkpoint_state,
-            interval,
-        )
-    });
-
-    let serve_result = builder
-        .serve(addr)
-        .await
-        .map_err(|e| anyhow::anyhow!("BoltServer::serve failed: {}", e));
-
-    tracing::info!("Bolt server stopped");
-    // Stop periodic checkpointing BEFORE the exit save, and wait for the task
-    // to actually be gone. `abort()` alone only *requests* cancellation: a
-    // task in the middle of a save is running synchronous code and cannot be
-    // cancelled until its next await point, so without the join a tick's save
-    // could still be in flight — or, worse, land after — the exit save.
-    // Awaiting the aborted handle resolves once the task has stopped, which
-    // makes the exit save the last write to the file by construction. (The
-    // join returns a cancellation `JoinError`; that is the expected result.)
+/// The shutdown tail of [`serve`], in its load-bearing order: stop-and-JOIN
+/// the checkpoint task (abort alone only requests cancellation — a task
+/// mid-save runs synchronous code and could otherwise land a tick's save
+/// after the exit save; awaiting the aborted handle makes the exit save the
+/// last write by construction), then the log's final barrier BEFORE any
+/// decision about saving (under `normal` the tail is in the page cache and
+/// shutdown is the one moment no further commit is coming; if the save then
+/// fails, the commits it could not write are already in the log for the next
+/// startup to replay), then the exit save — attempted on the failure path
+/// too, with a failed save exiting non-zero rather than being swallowed.
+async fn finish_shutdown(
+    durability: &Durability,
+    exit_session: &kglite::api::session::Session,
+    served_path: &Path,
+    checkpoint_task: Option<tokio::task::JoinHandle<()>>,
+    serve_result: Result<()>,
+) -> Result<()> {
     if let Some(task) = checkpoint_task {
         task.abort();
         let _ = task.await;
         tracing::info!("checkpoint-interval: stopped");
     }
-    // The log's final barrier, before any decision about saving. Under
-    // `normal` the tail of the log is in the page cache, which survives this
-    // process dying but not the machine dying, and shutdown is the one moment
-    // the server knows no further commit is coming — so it is worth paying a
-    // barrier that per-commit `normal` deliberately does not. Under `full`
-    // every frame is already on stable storage and this is a no-op; at `off`
-    // there is no log to flush and calling `sync` would be an error, so it is
-    // skipped rather than reported.
-    //
-    // Ordered before the exit save on purpose: if the save then fails, the
-    // commits it could not write are already on disk in the log for the next
-    // startup to replay.
+    // At `off` there is no log to flush and calling `sync` would be an
+    // error, so it is skipped rather than reported.
     let sync_result = if durability.level.logs() {
         exit_session
             .sync()
@@ -915,12 +933,8 @@ async fn serve() -> Result<()> {
     } else {
         Ok(())
     };
-    // Attempted whether or not `serve` returned an error: an operator who
-    // asked for an exit checkpoint wants one on the failure path too. Both
-    // results are reported; a failed save exits non-zero rather than being
-    // logged and swallowed.
     let save_result = if durability.save_on_exit {
-        run_exit_save(&exit_session, &served_path)
+        run_exit_save(exit_session, served_path)
             .inspect_err(|e| tracing::error!(error = %format!("{e:#}"), "save-on-exit FAILED"))
     } else {
         Ok(())
