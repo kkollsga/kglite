@@ -23,7 +23,7 @@ use boltr::server::{
 use boltr::types::{BoltDict, BoltValue};
 
 use kglite::api::session::CsvImportPolicy;
-use kglite::api::{cypher, DirGraph, Value};
+use kglite::api::{cypher, Value};
 
 use crate::error_map::kg_to_bolt;
 use crate::value_adapter;
@@ -285,8 +285,13 @@ impl TxMeta {
 }
 
 impl KgliteBackend {
-    /// Construct a backend. The DirGraph is wrapped in a
-    /// `session::Session` for shared-graph + commit-swap semantics.
+    /// Construct a backend around an already-opened session.
+    ///
+    /// The session arrives built rather than being constructed here because at
+    /// `--durability full`/`normal` its construction is part of opening the
+    /// path — the write-ahead sidecar is recovered into the graph inside the
+    /// writer lease, before any client can connect (see `startup::start_graph`).
+    ///
     /// `advertised_addr` (`host:port`, no scheme) is what `route()`
     /// returns to cluster-aware drivers using `neo4j://` URIs —
     /// they'll reconnect to this address for subsequent sessions,
@@ -294,7 +299,7 @@ impl KgliteBackend {
     /// this matches the bind address but should differ when bound
     /// to `0.0.0.0` behind a hostname or reverse proxy.
     pub fn new(
-        graph: DirGraph,
+        session: kglite::api::session::Session,
         graph_path: std::path::PathBuf,
         readonly: bool,
         advertised_addr: String,
@@ -302,7 +307,7 @@ impl KgliteBackend {
         identity: ServerIdentity,
     ) -> Self {
         Self {
-            session: Arc::new(kglite::api::session::Session::new(graph)),
+            session: Arc::new(session),
             graph_path,
             readonly,
             last_checkpoint_version: Arc::new(Mutex::new(None)),
@@ -731,20 +736,24 @@ impl BoltBackend for KgliteBackend {
                     "commit (with mutations)"
                 );
             }
-            // Any outcome this build does not recognise — `CommitOutcome` is
-            // `#[non_exhaustive]` — is a failure, never a silent success.
-            // `DurabilityFailed` (a WAL frame that could not be appended, so
-            // the commit was not published) lands here today; R3.2 gives it
-            // its own arm once this server can open a durable session at all.
+            // `--durability full`/`normal`: the frame could not be appended, so
+            // the engine did not publish the commit (append-then-publish — see
+            // `Session::commit`). The client must see FAILURE, because the
+            // alternative is a driver that returns success for a write the
+            // server deliberately discarded. `Backend` rather than `Query`: the
+            // statement was fine and re-running it may well work, but nothing
+            // about it can be fixed client-side, and the Neo4j taxonomy has no
+            // retriable class that means "the server's disk answered no".
             kglite::api::session::CommitOutcome::DurabilityFailed { ref error } => {
                 tracing::error!(
                     session_id = %session.0,
                     tx = %transaction.0,
                     error = %error,
-                    "commit rejected: the write could not be made durable"
+                    "commit rejected: the write could not be logged, so it was not applied"
                 );
                 return Err(BoltError::Backend(format!(
-                    "commit was not applied: {error}"
+                    "commit was NOT applied — the write-ahead log rejected it and the \
+                     server does not acknowledge writes it cannot log: {error}"
                 )));
             }
             kglite::api::session::CommitOutcome::ConflictDetected {
@@ -1427,7 +1436,7 @@ mod tests {
         let graph = new_dir_graph_in_mode(StorageMode::Disk, Some(&path))
             .expect("create disk-backed graph");
         let backend = KgliteBackend::new(
-            graph,
+            kglite::api::session::Session::new(graph),
             path.clone(),
             false,
             "127.0.0.1:0".into(),
@@ -1475,7 +1484,7 @@ mod tests {
     fn memory_backend_at(path: std::path::PathBuf, readonly: bool) -> KgliteBackend {
         let graph = new_dir_graph_in_mode(StorageMode::Memory, None).expect("create memory graph");
         KgliteBackend::new(
-            graph,
+            kglite::api::session::Session::new(graph),
             path,
             readonly,
             "127.0.0.1:0".into(),
@@ -1980,7 +1989,7 @@ mod tests {
         let graph = new_dir_graph_in_mode(StorageMode::Disk, Some(&path))
             .expect("create disk-backed graph");
         let backend = KgliteBackend::new(
-            graph,
+            kglite::api::session::Session::new(graph),
             path.clone(),
             false,
             "127.0.0.1:0".into(),

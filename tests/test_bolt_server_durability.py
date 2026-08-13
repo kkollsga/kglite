@@ -52,13 +52,18 @@ def _named_count_query(title: str) -> str:
     return f"MATCH (p:Person {{title: '{title}'}}) RETURN count(p) AS c"
 
 
-def _write_marker(url: str, title: str = "Zed") -> None:
+def _write_marker(url: str, title: str = "Zed", node_id: int = 99) -> None:
     """Commit one node through an explicit transaction, so the write is
-    definitely committed (not merely sent) before the server is signalled."""
+    definitely committed (not merely sent) before the server is signalled.
+
+    `node_id` is distinct per marker wherever two markers must coexist *after a
+    WAL replay*: the log records a mutation as an upsert keyed by `(type, id)`,
+    so two `CREATE`s sharing an id are two nodes live and one node replayed.
+    """
     with neo4j.GraphDatabase.driver(url, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             tx = session.begin_transaction()
-            tx.run(f"CREATE (:Person {{id: 99, title: '{title}', city: 'Tromso'}})")
+            tx.run(f"CREATE (:Person {{id: {node_id}, title: '{title}', city: 'Tromso'}})")
             tx.commit()
         # Read it back on a fresh session: the write is live in the server.
         with driver.session() as session:
@@ -718,3 +723,356 @@ def test_checkpoint_interval_and_the_verb_share_one_skip_state(tmp_path):
         assert message.startswith("skipped: graph unchanged since version "), message
     finally:
         _teardown_bolt_server(proc)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# --durability: the write-ahead log
+#
+# The three features above bound the loss window by *rewriting the whole
+# graph*; the log bounds it per commit. What every test here measures is what
+# survives a SIGKILL with **no checkpoint of any kind in between** — the
+# baseline test at the top of this file is the control: at `off`, that write is
+# gone.
+# ────────────────────────────────────────────────────────────────────────────
+
+# magic (4 bytes) + format version (1 byte). A truncated log is exactly this
+# long; anything more is at least one frame.
+WAL_HEADER_BYTES = 5
+
+
+def _wal_path(served):
+    """The sidecar beside `served`, derived the way the engine derives it."""
+    return served.parent / (served.name + "-wal")
+
+
+def _wal_size(served) -> int:
+    path = _wal_path(served)
+    return path.stat().st_size if path.exists() else 0
+
+
+def _count_over_bolt(url: str, title: str) -> int:
+    with neo4j.GraphDatabase.driver(url, auth=("neo4j", "password")) as driver:
+        with driver.session() as session:
+            return session.run(_named_count_query(title)).single()["c"]
+
+
+@pytest.mark.parametrize("level", ["full", "normal"])
+def test_a_logged_commit_survives_a_sigkill_with_no_checkpoint(tmp_path, level):
+    """The rung's headline. Commit over Bolt, SIGKILL the server — no exit
+    hook, no `db.checkpoint()`, no interval — and restart at the same level:
+    the write comes back out of the log.
+
+    `normal` is tested against a *process* kill, which is exactly what it
+    promises (the frame is in the kernel's page cache). Its OS-crash/power-loss
+    window is documented, not tested: nothing in a user-space test can take the
+    page cache away.
+    """
+    _require_binary()
+    fixture = tmp_path / f"wal-{level}.kgl"
+    _build_bolt_fixture_graph(fixture)
+    untouched = _digest(fixture)
+
+    proc, url = _spawn_bolt_server(fixture, extra_args=["--durability", level])
+    try:
+        _write_marker(url)
+        assert _wal_size(fixture) > WAL_HEADER_BYTES, "the commit must reach the log"
+    finally:
+        _teardown_bolt_server(proc)  # SIGKILL: no shutdown path, no exit save
+
+    assert _digest(fixture) == untouched, (
+        "no checkpoint ran, so the .kgl must be byte-identical — otherwise this test would prove nothing about the log"
+    )
+
+    restarted, restarted_url = _spawn_bolt_server(fixture, extra_args=["--durability", level])
+    try:
+        assert _count_over_bolt(restarted_url, "Zed") == 1, (
+            f"--durability {level} must replay the committed write at startup"
+        )
+    finally:
+        _teardown_bolt_server(restarted)
+
+
+def test_the_env_mirror_logs_the_same_way(tmp_path):
+    """`KGLITE_BOLT_DURABILITY=full` does what the flag does — the spelling a
+    Compose file or unit file can set."""
+    _require_binary()
+    fixture = tmp_path / "wal-env.kgl"
+    _build_bolt_fixture_graph(fixture)
+    env = {"KGLITE_BOLT_DURABILITY": "full"}
+
+    proc, url = _spawn_bolt_server(fixture, env=env)
+    try:
+        _write_marker(url)
+    finally:
+        _teardown_bolt_server(proc)
+
+    restarted, restarted_url = _spawn_bolt_server(fixture, env=env)
+    try:
+        assert _count_over_bolt(restarted_url, "Zed") == 1
+    finally:
+        _teardown_bolt_server(restarted)
+
+
+def test_without_the_log_the_same_commit_is_lost(tmp_path):
+    """The control for the two tests above, and the pinned default: `off` — the
+    level an invocation with no `--durability` gets — loses a committed write to
+    a SIGKILL, because nothing but a checkpoint ever writes the graph back."""
+    _require_binary()
+    fixture = tmp_path / "wal-off.kgl"
+    _build_bolt_fixture_graph(fixture)
+
+    proc, url = _spawn_bolt_server(fixture, extra_args=["--durability", "off"])
+    try:
+        _write_marker(url)
+        assert _wal_size(fixture) == 0, "level off must not create a log at all"
+    finally:
+        _teardown_bolt_server(proc)
+
+    restarted, restarted_url = _spawn_bolt_server(fixture, extra_args=["--durability", "off"])
+    try:
+        assert _count_over_bolt(restarted_url, "Zed") == 0
+    finally:
+        _teardown_bolt_server(restarted)
+
+
+def test_a_default_server_does_not_log(tmp_path):
+    """The default is `off`: an invocation that says nothing about durability
+    behaves exactly as it did before the flag existed. Pinned separately from
+    the `off` test above because flipping the default is a decision, not an
+    implementation detail — see `DEFAULT_DURABILITY` in main.rs."""
+    _require_binary()
+    fixture = tmp_path / "wal-default.kgl"
+    _build_bolt_fixture_graph(fixture)
+    proc, url = _spawn_bolt_server(fixture)
+    try:
+        _write_marker(url)
+        assert _wal_size(fixture) == 0, "the default must not attach a log"
+    finally:
+        _teardown_bolt_server(proc)
+    assert _marker_count_on_disk(fixture) == 0
+
+
+# ── Recovery on open is unconditional ───────────────────────────────────────
+
+
+def test_starting_at_off_over_an_unreplayed_log_is_refused(tmp_path, bolt_binary_path):
+    """A logged commit that no checkpoint has folded in is *data*, and starting
+    a server that neither replays nor keeps it would lose it at the next
+    checkpoint. Both spellings of "no log" are refused: the explicit `off` and
+    the default."""
+    _require_binary()
+    fixture = tmp_path / "unreplayed.kgl"
+    _build_bolt_fixture_graph(fixture)
+    proc, url = _spawn_bolt_server(fixture, extra_args=["--durability", "full"])
+    try:
+        _write_marker(url)
+    finally:
+        _teardown_bolt_server(proc)
+
+    for args in (["--durability", "off"], []):
+        result = _run_server_binary(
+            bolt_binary_path,
+            ["--graph", str(fixture), "--port", "0", *args],
+        )
+        assert result.returncode != 0, f"args={args} must refuse: {result.stdout}{result.stderr}"
+        combined = result.stdout + result.stderr
+        assert "-wal" in combined, combined
+        assert "'full' or 'normal'" in combined, combined
+
+    # Non-vacuity: the refusal is about the level, not a broken file — the same
+    # path serves fine at a logging level, with the write.
+    recovered, recovered_url = _spawn_bolt_server(fixture, extra_args=["--durability", "full"])
+    try:
+        assert _count_over_bolt(recovered_url, "Zed") == 1
+    finally:
+        _teardown_bolt_server(recovered)
+
+
+# ── Checkpoints and the log ─────────────────────────────────────────────────
+
+
+def test_a_checkpoint_truncates_the_log_and_later_commits_start_a_fresh_one(tmp_path):
+    """The four-step checkpoint order, observed from outside: flush → stamp →
+    write the `.kgl` → truncate the log. After `db.checkpoint()` the file holds
+    the write and the log is back to its header; the next commit lands in the
+    fresh log and is itself recovered by a restart."""
+    _require_binary()
+    fixture = tmp_path / "checkpoint-wal.kgl"
+    _build_bolt_fixture_graph(fixture)
+    proc, url = _spawn_bolt_server(fixture, extra_args=["--durability", "full"])
+    try:
+        _write_marker(url, "Before", node_id=101)
+        assert _wal_size(fixture) > WAL_HEADER_BYTES
+
+        assert _checkpoint(url)["success"] is True
+        assert _wal_size(fixture) == WAL_HEADER_BYTES, "a checkpoint folds the log into the .kgl and truncates it"
+        # The truncated sidecar is also what makes the file plainly openable
+        # again: nothing is left in front of the checkpoint.
+        assert _marker_count_on_disk(_snapshot(fixture, tmp_path), "Before") == 1
+
+        _write_marker(url, "After", node_id=102)
+        assert _wal_size(fixture) > WAL_HEADER_BYTES, "post-checkpoint commits use the fresh log"
+    finally:
+        _teardown_bolt_server(proc)  # SIGKILL: only the log can carry "After"
+
+    restarted, restarted_url = _spawn_bolt_server(fixture, extra_args=["--durability", "full"])
+    try:
+        assert _count_over_bolt(restarted_url, "Before") == 1, "the checkpointed write"
+        assert _count_over_bolt(restarted_url, "After") == 1, (
+            "with a log, the post-checkpoint write is no longer the loss window"
+        )
+    finally:
+        _teardown_bolt_server(restarted)
+
+
+def test_save_on_exit_flushes_and_truncates_the_log(tmp_path):
+    """A graceful stop under a log: the exit path flushes the log, the exit
+    save folds it into the `.kgl`, and the log is left truncated — so the next
+    start needs no recovery and the graph opens with no durability argument at
+    all."""
+    _require_binary()
+    fixture = tmp_path / "exit-save-wal.kgl"
+    _build_bolt_fixture_graph(fixture)
+    proc, url = _spawn_bolt_server(fixture, extra_args=["--durability", "normal", "--save-on-exit"])
+    try:
+        _write_marker(url)
+        status = _graceful_stop_bolt_server(proc, signal.SIGTERM)
+    finally:
+        if proc.poll() is None:
+            _teardown_bolt_server(proc)
+    assert status == 0, "a successful flush + exit save exits zero"
+    logs = proc.stdout.read().decode("utf-8", errors="replace") + proc.stderr.read().decode("utf-8", errors="replace")
+    assert "write-ahead log flushed" in logs, logs
+    assert _wal_size(fixture) == WAL_HEADER_BYTES
+    assert _marker_count_on_disk(fixture) == 1
+
+
+# ── Refusal matrix ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("level", ["full", "normal"])
+def test_a_logging_level_is_refused_with_readonly(bolt_binary_path, tmp_path, level):
+    """A read-only server never commits, so a log would only ever be empty."""
+    _require_binary()
+    fixture = tmp_path / "ro-wal.kgl"
+    _build_bolt_fixture_graph(fixture)
+    result = _run_server_binary(
+        bolt_binary_path,
+        ["--graph", str(fixture), "--port", "0", "--readonly", "--durability", level],
+    )
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "--readonly" in combined and "nothing to log" in combined, combined
+
+
+def test_the_env_mirror_is_refused_with_readonly(bolt_binary_path, tmp_path):
+    """The environment spelling too — the level is what conflicts, so a clap
+    `conflicts_with` on the argument could not express this rule anyway."""
+    _require_binary()
+    fixture = tmp_path / "ro-wal-env.kgl"
+    _build_bolt_fixture_graph(fixture)
+    result = _run_server_binary(
+        bolt_binary_path,
+        ["--graph", str(fixture), "--port", "0", "--readonly"],
+        env={"KGLITE_BOLT_DURABILITY": "full"},
+    )
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "--readonly" in combined and "KGLITE_BOLT_DURABILITY" in combined, combined
+
+
+def test_readonly_serves_fine_at_off(tmp_path):
+    """The other side of that rule: `off` is not a conflict, it is what every
+    read-only server already runs at."""
+    _require_binary()
+    fixture = tmp_path / "ro-off.kgl"
+    _build_bolt_fixture_graph(fixture)
+    proc, url = _spawn_bolt_server(fixture, readonly=True, extra_args=["--durability", "off"])
+    try:
+        with neo4j.GraphDatabase.driver(url, auth=("neo4j", "password")) as driver:
+            with driver.session() as session:
+                assert session.run("MATCH (p:Person) RETURN count(p) AS c").single()["c"] == 4
+    finally:
+        _teardown_bolt_server(proc)
+
+
+def test_durability_is_refused_for_a_disk_graph(bolt_binary_path, tmp_path):
+    """A disk graph commits by publishing an immutable generation, so it keeps
+    no logical log at any level. The refusal is the engine's; what matters here
+    is that it reaches the operator as a clean startup error."""
+    _require_binary()
+    disk_dir = tmp_path / "disk-graph"
+    g = kglite.KnowledgeGraph(storage="disk", path=str(disk_dir))
+    g.cypher("CREATE (:Person {id: 1, title: 'Alice'})")
+    g.save(str(disk_dir))
+    del g
+
+    result = _run_server_binary(
+        bolt_binary_path,
+        ["--graph", str(disk_dir), "--port", "0", "--durability", "full"],
+    )
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "storage='disk'" in combined, combined
+    assert "panicked" not in combined.lower(), combined
+
+
+@pytest.mark.parametrize("value", ["sometimes", "1", "true", "fsync", ""])
+def test_an_unknown_durability_level_is_a_startup_error(bolt_binary_path, tmp_path, value):
+    """A mistyped level fails startup rather than quietly logging nothing —
+    the same treatment `--checkpoint-interval` gives a malformed number."""
+    _require_binary()
+    fixture = tmp_path / "bad-level.kgl"
+    _build_bolt_fixture_graph(fixture)
+    result = _run_server_binary(
+        bolt_binary_path,
+        ["--graph", str(fixture), "--port", "0", "--durability", value],
+    )
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "full" in combined and "normal" in combined and "off" in combined, combined
+
+
+def test_an_unknown_env_durability_level_is_a_startup_error(bolt_binary_path, tmp_path):
+    _require_binary()
+    fixture = tmp_path / "bad-level-env.kgl"
+    _build_bolt_fixture_graph(fixture)
+    result = _run_server_binary(
+        bolt_binary_path,
+        ["--graph", str(fixture), "--port", "0"],
+        env={"KGLITE_BOLT_DURABILITY": "sometimes"},
+    )
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "KGLITE_BOLT_DURABILITY" in combined, combined
+
+
+def test_a_storage_conversion_keeps_the_log_recoverable(tmp_path):
+    """`--storage` converts the graph *in memory*, before the session exists, so
+    the `.kgl` on disk — and the `checkpoint_lsn` the replay is gated on — is
+    untouched until the first checkpoint. A converted server therefore logs and
+    recovers exactly like an unconverted one, and the checkpoint writes the
+    converted mode and truncates the log together."""
+    _require_binary()
+    fixture = tmp_path / "converted.kgl"
+    _build_bolt_fixture_graph(fixture)  # saved in memory mode
+    args = ["--storage", "mapped", "--durability", "full"]
+
+    proc, url = _spawn_bolt_server(fixture, extra_args=args)
+    try:
+        _write_marker(url)
+        assert _wal_size(fixture) > WAL_HEADER_BYTES
+    finally:
+        _teardown_bolt_server(proc)  # SIGKILL: only the log carries the write
+
+    restarted, restarted_url = _spawn_bolt_server(fixture, extra_args=args)
+    try:
+        assert _count_over_bolt(restarted_url, "Zed") == 1
+        assert _checkpoint(restarted_url)["success"] is True
+    finally:
+        _teardown_bolt_server(restarted)
+    assert _wal_size(fixture) == WAL_HEADER_BYTES
+    assert _marker_count_on_disk(fixture) == 1
+    assert kglite.open(str(fixture)).graph_info()["storage_mode"] == "mapped", (
+        "the checkpoint must record the mode the operator converted to"
+    )

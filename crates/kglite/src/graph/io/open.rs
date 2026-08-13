@@ -13,6 +13,7 @@ use crate::graph::io::file::load_file;
 use crate::graph::storage::mode::{
     convert_dir_graph_to_mode, live_storage_mode, new_dir_graph_in_mode, StorageMode,
 };
+use crate::graph::wal::DurabilityLevel;
 
 /// How [`open_or_create_graph`] obtained the returned graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,10 +367,23 @@ impl GraphFileIdentity {
 /// The graph comes back with **no write-ahead log attached**, so a path whose
 /// sidecar still holds unfolded frames is refused rather than opened — see
 /// [`crate::graph::durability::ensure_recovered`] for why that refusal covers
-/// reads as well as writes.
+/// reads as well as writes. A caller that *will* attach a log immediately
+/// afterwards wants [`open_or_create_graph_in_mode`], whose `attaching_log`
+/// argument stands the refusal down because that log is the recovery.
 pub fn open_or_create_graph(
     path: &Path,
     create_mode: Option<StorageMode>,
+) -> io::Result<OpenGraphResult> {
+    open_or_create_graph_logged(path, create_mode, DurabilityLevel::Off)
+}
+
+/// [`open_or_create_graph`], plus the caller's declaration of the log it is
+/// about to attach. Private because the two public entry points express the
+/// same choice in the vocabulary their own callers have.
+fn open_or_create_graph_logged(
+    path: &Path,
+    create_mode: Option<StorageMode>,
+    attaching_log: DurabilityLevel,
 ) -> io::Result<OpenGraphResult> {
     match std::fs::metadata(path) {
         Ok(_) => {
@@ -382,7 +396,9 @@ pub fn open_or_create_graph(
                     format!("graph path {} changed while it was loading", path.display()),
                 ));
             }
-            unrecovered_sidecar_check(path, graph.checkpoint_lsn)?;
+            if !attaching_log.logs() {
+                unrecovered_sidecar_check(path, graph.checkpoint_lsn)?;
+            }
             return Ok(OpenGraphResult {
                 graph,
                 disposition: OpenDisposition::Opened,
@@ -407,8 +423,13 @@ pub fn open_or_create_graph(
     // surviving a stale checkpoint, and worse-signposted: a fresh graph has
     // `checkpoint_lsn` 0, so every frame in it would replay over whatever this
     // caller saves here. Checked before the graph is created, so a refused
-    // disk-mode open leaves no directory behind.
-    unrecovered_sidecar_check(path, 0)?;
+    // disk-mode open leaves no directory behind. A caller attaching a log is
+    // exempt for the same reason as above — it replays the orphaned frames onto
+    // the fresh graph, which is recovery from a lost checkpoint rather than a
+    // rollback of a newer one.
+    if !attaching_log.logs() {
+        unrecovered_sidecar_check(path, 0)?;
+    }
     let graph = new_dir_graph_in_mode(mode, Some(path))
         .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
     Ok(OpenGraphResult {
@@ -448,11 +469,36 @@ fn unrecovered_sidecar_check(path: &Path, checkpoint_lsn: u64) -> io::Result<()>
 /// Requests that have no conversion (either disk direction) fail here with the
 /// reason and the alternative named, instead of serving a mode nobody asked
 /// for.
+///
+/// # `attaching_log`
+///
+/// The level of the write-ahead log the caller will attach to this graph
+/// *immediately* after this call — [`Session::open_durable`] or a binding's
+/// durable graph handle. [`DurabilityLevel::Off`] means none, and is what every
+/// caller without a durability story passes.
+///
+/// It is asked here because recovery-on-open is unconditional
+/// ([`crate::graph::durability`]): a sidecar holding frames this checkpoint does
+/// not contain makes a **log-less** open a refusal, since nothing would replay
+/// them and the first save over the path would strand them. A caller that
+/// attaches a log at a logging level *is* the recovery — `open_durable` replays
+/// those frames before the first commit — so for it the same sidecar is the
+/// normal state after a crash, not a fault. Declaring the level rather than
+/// inferring it keeps that decision at the one place that knows the answer: a
+/// server whose `--durability` is `off` still gets the refusal, and a graph
+/// created at a logging level over an orphaned sidecar replays it instead of
+/// discarding it.
+///
+/// The caller must actually attach the log. Passing a logging level and then
+/// not opening one leaves exactly the hazard the refusal exists to stop.
+///
+/// [`Session::open_durable`]: crate::graph::session::Session::open_durable
 pub fn open_or_create_graph_in_mode(
     path: &Path,
     requested: Option<StorageMode>,
+    attaching_log: DurabilityLevel,
 ) -> io::Result<OpenGraphResult> {
-    let mut opened = open_or_create_graph(path, requested)?;
+    let mut opened = open_or_create_graph_logged(path, requested, attaching_log)?;
     let Some(requested) = requested else {
         return Ok(opened);
     };
@@ -537,9 +583,10 @@ mod tests {
         checkpoint_with_pending_frame(&path, 0, 1, 1);
 
         // The MCP server's opener — no WAL awareness at all.
-        let refusal = open_or_create_graph_in_mode(&path, Some(StorageMode::Memory))
-            .err()
-            .expect("an open that attaches no log must not proceed over unfolded frames");
+        let refusal =
+            open_or_create_graph_in_mode(&path, Some(StorageMode::Memory), DurabilityLevel::Off)
+                .err()
+                .expect("an open that attaches no log must not proceed over unfolded frames");
         assert_eq!(refusal.kind(), io::ErrorKind::InvalidData);
         let message = refusal.to_string();
         assert!(message.contains("graph.kgl-wal"), "{message}");
@@ -552,6 +599,54 @@ mod tests {
         let mut recovered = crate::graph::io::file::load_file(&path.to_string_lossy()).unwrap();
         crate::graph::durability::open_log(&mut recovered, &path, DurabilityLevel::Full).unwrap();
         assert_eq!(age_of(&mut recovered), Some(Value::Int64(2)));
+    }
+
+    /// The other half of the same rule: a caller that says it is about to
+    /// attach a log opens the *identical* path fine, because its log is the
+    /// recovery. Both directions asserted here and above, so neither an
+    /// always-guard nor a never-guard implementation can pass: dropping the
+    /// `attaching_log.logs()` test makes this one fail, and inverting it makes
+    /// the refusal test above fail.
+    #[test]
+    fn a_caller_attaching_a_log_opens_the_same_stale_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("graph.kgl");
+        checkpoint_with_pending_frame(&path, 0, 1, 1);
+
+        for level in [DurabilityLevel::Full, DurabilityLevel::Normal] {
+            let opened = open_or_create_graph_in_mode(&path, Some(StorageMode::Memory), level)
+                .unwrap_or_else(|e| panic!("durable={} must open to recover: {e}", level.name()));
+            let mut graph = opened.graph;
+            // The frames are still there, and the log this caller now attaches
+            // replays them — the recovery the refusal was protecting.
+            assert_eq!(age_of(&mut graph), Some(Value::Int64(1)));
+            crate::graph::durability::open_log(&mut graph, &path, level).unwrap();
+            assert_eq!(age_of(&mut graph), Some(Value::Int64(2)));
+        }
+    }
+
+    /// A sidecar that outlived its checkpoint entirely: at `off` the creation
+    /// path refuses (the frames would be stranded in front of a brand-new
+    /// graph), and a caller attaching a log recovers them onto it instead.
+    #[test]
+    fn an_orphaned_sidecar_refuses_creation_but_replays_for_a_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("orphan.kgl");
+        let mut wal = Wal::open(wal_path(&path), SyncMode::Barrier).unwrap();
+        wal.append(&person_frame(1, 42)).unwrap();
+        drop(wal);
+
+        open_or_create_graph_in_mode(&path, Some(StorageMode::Memory), DurabilityLevel::Off)
+            .err()
+            .expect("creating over an orphaned sidecar strands its commits");
+
+        let opened =
+            open_or_create_graph_in_mode(&path, Some(StorageMode::Memory), DurabilityLevel::Full)
+                .expect("a durable creator recovers the orphaned commits");
+        assert_eq!(opened.disposition, OpenDisposition::Created);
+        let mut graph = opened.graph;
+        crate::graph::durability::open_log(&mut graph, &path, DurabilityLevel::Full).unwrap();
+        assert_eq!(age_of(&mut graph), Some(Value::Int64(42)));
     }
 
     /// Crash residue — frames the checkpoint already folded in — is not

@@ -10,6 +10,7 @@
 use crate::graph::{classify_io_error, GraphState, KgliteGraph};
 use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
+use kglite::api::durable::DurabilityLevel;
 use kglite::api::io::{open_or_create_graph_in_mode, GraphWriterLease};
 use kglite::api::storage::StorageMode;
 use std::ffi::{c_char, CStr};
@@ -264,7 +265,11 @@ pub unsafe extern "C" fn kglite_open_or_create_graph_in_mode(
                 }
             };
 
-            match open_or_create_graph_in_mode(Path::new(path_str), requested) {
+            // `DurabilityLevel::Off`: this entry point attaches no
+            // write-ahead log, so it inherits the unrecovered-sidecar refusal.
+            // A durable C-ABI open is a separate symbol when one ships.
+            match open_or_create_graph_in_mode(Path::new(path_str), requested, DurabilityLevel::Off)
+            {
                 Ok(opened) => {
                     unsafe {
                         *out_graph = GraphState::into_handle(opened.graph);

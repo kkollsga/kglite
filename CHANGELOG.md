@@ -83,8 +83,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loudly until a checkpoint folds the write in. Non-durable sessions are
   unaffected in behaviour and in cost.
 
+- **`kglite-bolt-server --durability {full,normal,off}` puts the write-ahead
+  log under the Bolt server** (env mirror: `KGLITE_BOLT_DURABILITY=<level>`).
+  Until now the server's writes were process-local until something rewrote the
+  whole graph — the exit save, a `db.checkpoint()`, or an interval tick — so a
+  `SIGKILL` between checkpoints lost every commit since the last one. At `full`
+  and `normal` each commit is appended to `<graph>-wal` **before** it is
+  acknowledged: `full` barriers the frame to the device (an acknowledged commit
+  survives power loss), `normal` hands it to the kernel (survives this process
+  dying — `SIGKILL`, an OOM-kill, a panic — but not an OS crash or power loss).
+  A commit whose frame cannot be written is **not applied** and the client is
+  told so, rather than acknowledging a write the server has discarded.
+  **Recovery runs at startup at every level**: at `full`/`normal` a sidecar
+  holding commits the graph file does not contain is replayed before the port
+  is bound, and at `off` it is a startup error naming both ways out — never a
+  server quietly serving a graph that is missing acknowledged writes. The three
+  existing checkpoint routes become true checkpoints under a log: each folds the
+  log into the `.kgl` and truncates it, and the graceful shutdown path takes a
+  final log flush before the exit save. Refused with `--readonly` (a server that
+  never commits has nothing to log; `--durability off` beside `--readonly` is
+  unchanged and fine) and for disk-mode graphs (a disk graph commits by
+  publishing an immutable generation, so it keeps no logical log). **The default
+  is `off`** — every existing invocation behaves exactly as before, and turning
+  the log on is opt-in this release.
+
 ### Changed
 
+- **`kglite::api::io::open_or_create_graph_in_mode` takes the durability level
+  the caller is about to attach** (breaking for direct Rust callers: pass
+  `DurabilityLevel::Off` for today's behaviour). The unrecovered-sidecar
+  refusal above is correct for an opener that attaches no log and wrong for one
+  that is about to — a server restarting at `--durability full` *must* be
+  allowed to open the very path that refusal protects, because its log is the
+  recovery. The level is declared rather than inferred, so an `off` open still
+  gets the refusal and a graph created at a logging level over an orphaned
+  sidecar replays it instead of discarding it. `open_or_create_graph` (the
+  creation-default entry point) is unchanged and attaches no log. The C ABI's
+  `kglite_open_or_create_graph_in_mode` signature is unchanged.
 - **`CommitOutcome` is now `#[non_exhaustive]`** (breaking for out-of-crate
   code that matches it exhaustively — add a catch-all arm). A commit can fail
   in ways that did not exist when a binding was written, and such an outcome

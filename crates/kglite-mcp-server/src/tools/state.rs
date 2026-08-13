@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use kglite::api::cypher::ValueCodec;
+use kglite::api::durable::DurabilityLevel;
 use kglite::api::introspection::compute_schema;
 use kglite::api::io::{open_or_create_graph_in_mode, GraphWriterLease, OpenDisposition};
 use kglite::api::storage::StorageMode;
@@ -166,7 +167,10 @@ impl GraphState {
                     .map_err(|e| anyhow::anyhow!("kglite writer lease failed: {e}"))?,
             )
         };
-        let opened = open_or_create_graph_in_mode(path, requested_mode)
+        // `DurabilityLevel::Off`: this server attaches no write-ahead log, so
+        // it takes the unrecovered-sidecar refusal rather than opening a graph
+        // that is silently missing another writer's committed frames.
+        let opened = open_or_create_graph_in_mode(path, requested_mode, DurabilityLevel::Off)
             .map_err(|e| anyhow::anyhow!("kglite graph open/create failed: {e}"))?;
         let kg = KnowledgeGraph::from_arc(opened.graph);
         let mut guard = write_lock(&self.inner);

@@ -1,19 +1,25 @@
-//! Graph startup: take cross-process write ownership of the graph path, then
-//! open it.
+//! Graph startup: take cross-process write ownership of the graph path, open
+//! it, and wrap it in the session the backend serves.
 //!
 //! Split out of `main` so the acquire-then-open *order* is testable. Ordering
 //! is the whole point of the lease: acquiring it after the read is a guard
 //! that lets the very race it exists to stop happen first.
+//!
+//! The session is built here rather than in the backend because at
+//! `--durability full`/`normal` its construction *is* part of opening the path:
+//! [`Session::open_durable`] recovers the write-ahead sidecar into the graph
+//! before the first client can connect, and it must happen inside the writer
+//! lease this module already takes.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+use kglite::api::durable::DurabilityLevel;
 use kglite::api::io::{open_or_create_graph_in_mode, GraphWriterLease, OpenDisposition};
-use kglite::api::storage::StorageMode;
-use kglite::api::DirGraph;
+use kglite::api::session::Session;
+use kglite::api::storage::{live_storage_mode, StorageMode};
 
 /// How long startup waits for another writer to release the graph.
 ///
@@ -32,12 +38,18 @@ const WRITER_LEASE_TIMEOUT: Duration = Duration::ZERO;
 pub(crate) enum StartupStep {
     LeaseAcquired,
     GraphOpened,
+    SessionOpened,
 }
 
-/// A graph ready to serve, plus the write ownership it depends on.
+/// A session ready to serve, plus the write ownership it depends on.
 pub(crate) struct StartedGraph {
-    pub(crate) graph: Arc<DirGraph>,
+    pub(crate) session: Session,
     pub(crate) disposition: OpenDisposition,
+    /// The mode the served graph is actually in, read while startup still owns
+    /// the graph alone. Read here rather than from a snapshot later because a
+    /// snapshot Arc held across a checkpoint turns its `Arc::make_mut` into a
+    /// deep clone of the whole graph.
+    pub(crate) live_mode: StorageMode,
     /// The mode the graph was in before `--storage` converted it, so startup
     /// can say so. `None` when nothing was converted.
     pub(crate) converted_from: Option<StorageMode>,
@@ -47,18 +59,34 @@ pub(crate) struct StartedGraph {
     pub(crate) writer_lease: Option<GraphWriterLease>,
 }
 
-/// Acquire write ownership (unless `readonly`), then open or create the graph
-/// in `requested_mode`.
+/// Acquire write ownership (unless `readonly`), open or create the graph in
+/// `requested_mode`, and wrap it in a session logging at `durability`.
 ///
 /// `requested_mode` is the operator's `--storage`, and it means the same thing
 /// on both branches: create a missing graph in it, and convert an existing one
 /// to it. `None` — no flag — means the checkpoint decides, matching
 /// `kglite.open(path)` with no `storage=`. A request with no conversion (either
 /// disk direction) fails startup rather than serving a different mode silently.
+///
+/// `durability` is the operator's `--durability`, and it travels into *both*
+/// steps for one reason: recovery. The open is told a log is coming so it does
+/// not refuse a sidecar holding commits the checkpoint lacks, and
+/// [`Session::open_durable`] then replays exactly those frames before the
+/// server binds its port. At `off` neither happens and the open keeps the
+/// refusal, which is what makes an operator who turns durability off over a
+/// crashed server's graph hear about it instead of serving a graph that is
+/// missing committed writes.
+///
+/// A `--storage` conversion is safe under a log because it is performed in
+/// memory, before the session exists: the `.kgl` on disk — and therefore the
+/// `checkpoint_lsn` the replay is gated on — is untouched until the first
+/// checkpoint, which then writes the converted graph and truncates the log
+/// together.
 pub(crate) fn start_graph(
     path: &Path,
     requested_mode: Option<StorageMode>,
     readonly: bool,
+    durability: DurabilityLevel,
     record: &mut dyn FnMut(StartupStep),
 ) -> Result<StartedGraph> {
     let writer_lease = if readonly {
@@ -74,12 +102,26 @@ pub(crate) fn start_graph(
         record(StartupStep::LeaseAcquired);
         Some(lease)
     };
-    let opened = open_or_create_graph_in_mode(path, requested_mode)
+    let opened = open_or_create_graph_in_mode(path, requested_mode, durability)
         .with_context(|| format!("opening or creating {}", path.display()))?;
     record(StartupStep::GraphOpened);
+    let live_mode = live_storage_mode(&opened.graph);
+    // `opened.graph` is the only reference to this graph, which is what
+    // `open_durable` requires: a shared Arc would be deep-cloned here and the
+    // other holder would keep mutating an unlogged copy.
+    let session = Session::open_durable(opened.graph, &path.to_string_lossy(), durability)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "opening {} at --durability {}: {e}",
+                path.display(),
+                durability.name()
+            )
+        })?;
+    record(StartupStep::SessionOpened);
     Ok(StartedGraph {
-        graph: opened.graph,
+        session,
         disposition: opened.disposition,
+        live_mode,
         converted_from: opened.converted_from,
         writer_lease,
     })
@@ -89,6 +131,7 @@ pub(crate) fn start_graph(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     /// Unique scratch directory, removed on drop. Mirrors `backend.rs`'s
@@ -130,13 +173,18 @@ mod tests {
             &scratch.graph_path(),
             Some(StorageMode::Memory),
             false,
+            DurabilityLevel::Off,
             &mut |step| steps.push(step),
         )
         .expect("writable startup on a free path");
 
         assert_eq!(
             steps,
-            vec![StartupStep::LeaseAcquired, StartupStep::GraphOpened]
+            vec![
+                StartupStep::LeaseAcquired,
+                StartupStep::GraphOpened,
+                StartupStep::SessionOpened
+            ]
         );
         assert!(
             started.writer_lease.is_some(),
@@ -155,9 +203,13 @@ mod tests {
         let mut steps = Vec::new();
         // `expect_err` is unavailable: `StartedGraph` holds a `DirGraph` and a
         // lease, neither of which is `Debug`.
-        let error = match start_graph(&path, Some(StorageMode::Memory), false, &mut |step| {
-            steps.push(step)
-        }) {
+        let error = match start_graph(
+            &path,
+            Some(StorageMode::Memory),
+            false,
+            DurabilityLevel::Off,
+            &mut |step| steps.push(step),
+        ) {
             Ok(_) => panic!("a second writable server must not open a leased graph"),
             Err(error) => error,
         };
@@ -186,8 +238,6 @@ mod tests {
     // Now the file decides when nothing is asked, and an explicit request is
     // either applied or refused.
 
-    use kglite::api::storage::live_storage_mode;
-
     /// Save a two-node graph at `path` in `mode`, then drop it.
     fn seed_graph(path: &Path, mode: StorageMode) {
         let mut graph = Arc::new(
@@ -197,7 +247,7 @@ mod tests {
     }
 
     fn start(path: &Path, requested: Option<StorageMode>) -> Result<StartedGraph> {
-        start_graph(path, requested, false, &mut |_| {})
+        start_graph(path, requested, false, DurabilityLevel::Off, &mut |_| {})
     }
 
     #[test]
@@ -208,7 +258,7 @@ mod tests {
 
         let started = start(&path, None).expect("startup on a mapped checkpoint");
         assert_eq!(
-            live_storage_mode(&started.graph),
+            started.live_mode,
             StorageMode::Mapped,
             "with no --storage the file decides, and this one recorded mapped"
         );
@@ -221,7 +271,7 @@ mod tests {
         seed_graph(&path, StorageMode::Mapped);
 
         let started = start(&path, Some(StorageMode::Mapped)).expect("agreeing request");
-        assert_eq!(live_storage_mode(&started.graph), StorageMode::Mapped);
+        assert_eq!(started.live_mode, StorageMode::Mapped);
         assert_eq!(
             started.converted_from, None,
             "nothing was converted, so nothing may be reported as converted"
@@ -239,12 +289,17 @@ mod tests {
             seed_graph(&path, recorded);
 
             let mut steps = Vec::new();
-            let started = start_graph(&path, Some(requested), false, &mut |step| steps.push(step))
-                .expect("portable conversion at startup");
+            let started = start_graph(
+                &path,
+                Some(requested),
+                false,
+                DurabilityLevel::Off,
+                &mut |step| steps.push(step),
+            )
+            .expect("portable conversion at startup");
 
             assert_eq!(
-                live_storage_mode(&started.graph),
-                requested,
+                started.live_mode, requested,
                 "the server must serve the mode the operator asked for"
             );
             assert_eq!(
@@ -254,7 +309,11 @@ mod tests {
             );
             assert_eq!(
                 steps,
-                vec![StartupStep::LeaseAcquired, StartupStep::GraphOpened],
+                vec![
+                    StartupStep::LeaseAcquired,
+                    StartupStep::GraphOpened,
+                    StartupStep::SessionOpened
+                ],
                 "converting must not disturb the acquire-then-open order"
             );
         }
@@ -288,16 +347,125 @@ mod tests {
         let held = GraphWriterLease::acquire(&path, Duration::ZERO).expect("writer lease");
 
         let mut steps = Vec::new();
-        let started = start_graph(&path, Some(StorageMode::Memory), true, &mut |step| {
-            steps.push(step)
-        })
+        let started = start_graph(
+            &path,
+            Some(StorageMode::Memory),
+            true,
+            DurabilityLevel::Off,
+            &mut |step| steps.push(step),
+        )
         .expect("readonly startup beside a live writer");
 
-        assert_eq!(steps, vec![StartupStep::GraphOpened]);
+        assert_eq!(
+            steps,
+            vec![StartupStep::GraphOpened, StartupStep::SessionOpened]
+        );
         assert!(
             started.writer_lease.is_none(),
             "a readonly server must not take write ownership"
         );
         drop(held);
+    }
+
+    // ── Durability ──────────────────────────────────────────────────────────
+
+    /// Commit one mutation the way the Bolt backend does — begin, mutate the
+    /// working copy, commit — so the write travels the path a durable session
+    /// logs.
+    fn commit_write(session: &Session, query: &str) {
+        use kglite::api::session::{execute_mut, CommitOutcome, ExecuteOptions};
+        let params = std::collections::HashMap::new();
+        let mut tx = session.begin();
+        execute_mut(
+            tx.working_mut().expect("a fresh transaction is writable"),
+            query,
+            &ExecuteOptions::eager(&params),
+        )
+        .expect("the mutation runs");
+        match session.commit(tx, true) {
+            CommitOutcome::Committed { .. } => {}
+            other => panic!("the commit must publish: {other:?}"),
+        }
+    }
+
+    fn person_count(session: &Session) -> i64 {
+        use kglite::api::session::{execute_read, ExecuteOptions};
+        let params = std::collections::HashMap::new();
+        let snapshot = session.snapshot();
+        let outcome = execute_read(
+            &snapshot,
+            "MATCH (p:Person) RETURN count(p) AS c",
+            &ExecuteOptions::eager(&params),
+        )
+        .expect("the count runs");
+        match outcome.result.rows.first().and_then(|row| row.first()) {
+            Some(kglite::api::Value::Int64(c)) => *c,
+            other => panic!("expected a count, got {other:?}"),
+        }
+    }
+
+    /// The headline of the rung, at the layer the server starts from: a
+    /// durable session whose process dies without ever checkpointing comes
+    /// back with its committed writes, because startup recovers the sidecar
+    /// before anything else happens.
+    ///
+    /// Mutation evidence: passing `DurabilityLevel::Off` for the *first*
+    /// session (nothing logged) or for the second (nothing replayed) both
+    /// drop the count back to 0.
+    #[test]
+    fn a_crashed_durable_session_replays_on_the_next_startup() {
+        for level in [DurabilityLevel::Full, DurabilityLevel::Normal] {
+            let scratch = ScratchDir::new("replay");
+            let path = scratch.graph_path();
+            seed_graph(&path, StorageMode::Memory);
+
+            let first = start_graph(&path, None, false, level, &mut |_| {})
+                .expect("durable startup on a saved graph");
+            commit_write(&first.session, "CREATE (:Person {id: 1, title: 'Zed'})");
+            assert_eq!(person_count(&first.session), 1);
+            // No checkpoint, no clean shutdown: drop everything exactly as a
+            // killed process would, leaving the commit only in the sidecar.
+            drop(first);
+
+            let reopened = start_graph(&path, None, false, level, &mut |_| {})
+                .unwrap_or_else(|e| panic!("durable restart at {}: {e:#}", level.name()));
+            assert_eq!(
+                person_count(&reopened.session),
+                1,
+                "a committed write must survive a crash-shaped restart at {} with no \
+                 checkpoint in between",
+                level.name()
+            );
+        }
+    }
+
+    /// The inherited half of the same rule: turning durability off over a
+    /// sidecar that still holds commits is refused at startup, not served as a
+    /// graph missing them. The refusal is the engine's; what is asserted here
+    /// is that the bolt server takes it rather than routing around it.
+    #[test]
+    fn startup_at_off_refuses_an_unrecovered_sidecar() {
+        let scratch = ScratchDir::new("off-refusal");
+        let path = scratch.graph_path();
+        seed_graph(&path, StorageMode::Memory);
+
+        let durable = start_graph(&path, None, false, DurabilityLevel::Full, &mut |_| {})
+            .expect("durable startup on a saved graph");
+        commit_write(&durable.session, "CREATE (:Person {id: 1, title: 'Zed'})");
+        drop(durable);
+
+        let error = match start_graph(&path, None, false, DurabilityLevel::Off, &mut |_| {}) {
+            Ok(_) => panic!("serving at off would silently drop the logged commit"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(
+            error.contains("graph.kgl-wal") && error.contains("'full' or 'normal'"),
+            "the refusal must name the sidecar and the way out: {error}"
+        );
+
+        // Non-vacuity: the same path opens at a logging level, with the write.
+        let recovered = start_graph(&path, None, false, DurabilityLevel::Full, &mut |_| {})
+            .expect("the refusal is about the level, not the path");
+        assert_eq!(person_count(&recovered.session), 1);
     }
 }

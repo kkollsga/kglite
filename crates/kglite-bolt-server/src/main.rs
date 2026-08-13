@@ -14,6 +14,7 @@ use boltr::server::BoltServer;
 use clap::{Parser, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
+use kglite::api::durable::DurabilityLevel;
 use kglite::api::io::OpenDisposition;
 use kglite::api::session::CsvImportPolicy;
 use kglite::api::storage::StorageMode;
@@ -124,6 +125,38 @@ struct Cli {
     )]
     checkpoint_interval: Option<Duration>,
 
+    /// What a committed write survives: `full`, `normal`, or `off`
+    /// [default: off].
+    ///
+    /// `full` and `normal` attach a write-ahead log beside the served graph
+    /// (`<graph>-wal`) and append every commit to it *before* the commit is
+    /// acknowledged, so the loss window stops being "everything since the last
+    /// checkpoint":
+    ///
+    /// `full` — an acknowledged commit survives power loss: the frame is
+    /// barriered to the device before COMMIT returns.
+    ///
+    /// `normal` — an acknowledged commit survives this **process** dying
+    /// (`SIGKILL`, an OOM-kill, a panic), because the frame is already in the
+    /// kernel's page cache. An OS crash or power loss can still lose the
+    /// commits made since the last checkpoint.
+    ///
+    /// `off` — no log. Writes are process-local until `--save-on-exit`,
+    /// `--checkpoint-interval` or `CALL db.checkpoint()` writes them back.
+    ///
+    /// Recovery runs at startup whatever the level: a sidecar holding commits
+    /// the graph file does not contain is replayed at `full`/`normal`, and at
+    /// `off` it is a startup error rather than a server quietly missing them.
+    /// A checkpoint (any of the three routes above) folds the log into the
+    /// `.kgl` and truncates it.
+    ///
+    /// Refused with `--readonly` (a server that never writes has nothing to
+    /// log) and for disk-mode graphs (a disk graph commits by publishing a
+    /// generation, so it keeps no logical log). Also settable as
+    /// `KGLITE_BOLT_DURABILITY=<level>`.
+    #[arg(long, value_name = "LEVEL", value_parser = parse_durability_level)]
+    durability: Option<DurabilityLevel>,
+
     /// Report a Neo4j-compatible product identifier in the Bolt handshake.
     ///
     /// Off by default: the server identifies honestly as
@@ -214,6 +247,20 @@ const SAVE_ON_EXIT_ENV: &str = "KGLITE_BOLT_SAVE_ON_EXIT";
 /// Environment variable mirroring `--checkpoint-interval`.
 const CHECKPOINT_INTERVAL_ENV: &str = "KGLITE_BOLT_CHECKPOINT_INTERVAL";
 
+/// Environment variable mirroring `--durability`.
+const DURABILITY_ENV: &str = "KGLITE_BOLT_DURABILITY";
+
+/// The level this server logs at when neither the flag nor the environment
+/// says otherwise.
+///
+/// `off` — today's behaviour, unchanged. Turning the log on by default would
+/// silently change what four other things mean: `--readonly` and disk-mode
+/// graphs would become startup errors, and a graph whose server was killed
+/// would refuse a later `off` open. The level that ships as the default is
+/// decided by R3.3's throughput measurement (see the program plan); this
+/// release makes durability opt-in and preserves every existing invocation.
+const DEFAULT_DURABILITY: DurabilityLevel = DurabilityLevel::Off;
+
 /// Read `name` as a boolean, accepting the spellings operators actually write.
 ///
 /// Parsed here rather than through clap's `env` support because clap would
@@ -288,6 +335,64 @@ fn env_checkpoint_interval() -> Result<Option<Duration>> {
         .map_err(|e| anyhow::anyhow!("{CHECKPOINT_INTERVAL_ENV}: {e}"))
 }
 
+/// Parse a durability level name.
+///
+/// Shared by clap's `value_parser` and the environment mirror, on the engine's
+/// own [`DurabilityLevel::from_name`], so the server cannot end up accepting a
+/// vocabulary the log itself does not speak. A bad value is a startup error
+/// rather than a warn-and-ignore: an operator who asked for durability and
+/// mistyped the level would otherwise get a server that silently logs nothing,
+/// which is the exact failure the flag exists to prevent.
+fn parse_durability_level(raw: &str) -> Result<DurabilityLevel, String> {
+    let trimmed = raw.trim();
+    DurabilityLevel::from_name(&trimmed.to_ascii_lowercase()).ok_or_else(|| {
+        format!(
+            "invalid durability level {trimmed:?}: expected one of {:?}",
+            DurabilityLevel::NAMES
+        )
+    })
+}
+
+/// Read the durability level from the environment, if set.
+///
+/// An empty value is "unset" (a Compose file's `KGLITE_BOLT_DURABILITY=` with
+/// nothing after it); anything else must parse, or startup fails naming the
+/// variable.
+fn env_durability_level() -> Result<Option<DurabilityLevel>> {
+    let Ok(raw) = std::env::var(DURABILITY_ENV) else {
+        return Ok(None);
+    };
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    parse_durability_level(&raw)
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("{DURABILITY_ENV}: {e}"))
+}
+
+/// Refuse a logging durability level for a server that cannot serve one.
+///
+/// `--readonly` is the flag-versus-flag case clap cannot express here, because
+/// `--readonly --durability off` is perfectly legal — the conflict is with the
+/// *level*, not with the argument being present — and because the environment
+/// spelling is invisible to clap either way.
+///
+/// The disk-mode refusal is the engine's ([`Session::open_durable`]) and is not
+/// duplicated here: it needs the opened graph, and its message already names
+/// the reason. What this function owes the operator is the two decisions that
+/// can be made before anything is opened.
+fn ensure_durability_supported(level: DurabilityLevel, readonly: bool) -> Result<()> {
+    if level.logs() && readonly {
+        anyhow::bail!(
+            "--durability {} (or {DURABILITY_ENV}) cannot be combined with --readonly: a \
+             read-only server never commits, so there is nothing to log — pass \
+             --durability off, or drop --readonly",
+            level.name()
+        );
+    }
+    Ok(())
+}
+
 /// Refuse a checkpointing feature in the configurations where writing the
 /// served graph back is either meaningless or harmful.
 ///
@@ -334,13 +439,18 @@ fn ensure_checkpointing_supported(
 struct Durability {
     save_on_exit: bool,
     checkpoint_interval: Option<Duration>,
+    /// The write-ahead level the served session logs at. Unlike the two
+    /// checkpoint settings this one is not a background task but a property of
+    /// the session itself, so it is resolved here and handed to startup.
+    level: DurabilityLevel,
 }
 
 impl Durability {
     /// Flag OR environment for each setting, the flag winning when both are
-    /// present — the `--neo4j-compat` precedent. A malformed interval is a
-    /// startup error (see [`parse_checkpoint_interval`]), never a silently
-    /// disabled checkpoint.
+    /// present — the `--neo4j-compat` precedent. A malformed interval or level
+    /// is a startup error (see [`parse_checkpoint_interval`] /
+    /// [`parse_durability_level`]), never a silently disabled checkpoint or a
+    /// silently unlogged server.
     ///
     /// The `--readonly` refusals run here, before the graph is touched, so an
     /// impossible configuration fails fast; the storage-mode refusals need the
@@ -352,6 +462,10 @@ impl Durability {
                 Some(interval) => Some(interval),
                 None => env_checkpoint_interval()?,
             },
+            level: match cli.durability {
+                Some(level) => level,
+                None => env_durability_level()?.unwrap_or(DEFAULT_DURABILITY),
+            },
         };
         resolved.ensure_supported(cli.readonly, None)?;
         Ok(resolved)
@@ -360,6 +474,7 @@ impl Durability {
     /// Refuse whichever features are enabled in a configuration that cannot
     /// serve them. `mode` is `None` before the graph is opened.
     fn ensure_supported(&self, readonly: bool, mode: Option<StorageMode>) -> Result<()> {
+        ensure_durability_supported(self.level, readonly)?;
         if self.save_on_exit {
             ensure_checkpointing_supported("--save-on-exit", SAVE_ON_EXIT_ENV, readonly, mode)?;
         }
@@ -558,39 +673,41 @@ async fn serve() -> Result<()> {
         .transpose()
         .map_err(|e| anyhow::anyhow!(e))?;
     let durability = Durability::resolve(&cli)?;
-    let started = start_graph(&cli.graph, requested_mode, cli.readonly, &mut |_| {})?;
+    // The graph is opened *and* wrapped in its session here: at a logging level
+    // the two are one step, because recovering the write-ahead sidecar is part
+    // of opening the path (see `startup::start_graph`).
+    let started = start_graph(
+        &cli.graph,
+        requested_mode,
+        cli.readonly,
+        durability.level,
+        &mut |_| {},
+    )?;
     // Bind the lease for the whole of `serve`. `_writer_lease` rather than
     // `_`: a bare `_` drops it here, releasing write ownership before the
     // first client connects. It is released by this binding going out of
     // scope, i.e. after `BoltServer::serve` returns at shutdown.
     let _writer_lease = started.writer_lease;
-    let dir_arc = started.graph;
     tracing::info!(
         disposition = match started.disposition {
             OpenDisposition::Opened => "opened",
             OpenDisposition::Created => "created",
         },
-        storage = kglite::api::storage::live_storage_mode(&dir_arc).as_str(),
+        storage = started.live_mode.as_str(),
         // Present only when `--storage` moved an existing graph off the mode it
         // was saved in. Logged because an operator who does not see the switch
         // cannot tell it from the flag being ignored, which is the failure this
         // path used to have.
         converted_from = started.converted_from.map(StorageMode::as_str),
+        durability = durability.level.name(),
         "graph ready; constructing Bolt server"
     );
     // The storage-mode half of the refusals: only now is the *live* mode known
     // (`--storage` may have converted, and a graph opened without the flag
-    // reports whatever it was saved in).
-    durability.ensure_supported(
-        cli.readonly,
-        Some(kglite::api::storage::live_storage_mode(&dir_arc)),
-    )?;
+    // reports whatever it was saved in). The durability level's own disk
+    // refusal has already fired inside `start_graph`, where the engine owns it.
+    durability.ensure_supported(cli.readonly, Some(started.live_mode))?;
 
-    // The backend stores the DirGraph behind its own Arc<Mutex<>> for
-    // commit-swap. Unwrap the Arc — if no
-    // other refs (typical for fresh load), try_unwrap succeeds;
-    // otherwise we deep-clone (one-time cost at boot).
-    let dir = Arc::try_unwrap(dir_arc).unwrap_or_else(|arc| (*arc).clone());
     // Address advertised in route() responses for neo4j:// (cluster-aware)
     // drivers. Default: format the bind
     // address; override via --advertise-addr.
@@ -618,7 +735,7 @@ async fn serve() -> Result<()> {
         "bolt handshake identity"
     );
     let backend = KgliteBackend::new(
-        dir,
+        started.session,
         cli.graph.clone(),
         cli.readonly,
         advertised_addr,
@@ -675,6 +792,7 @@ async fn serve() -> Result<()> {
     tracing::info!(
         %addr,
         readonly = cli.readonly,
+        durability = durability.level.name(),
         save_on_exit = durability.save_on_exit,
         checkpoint_interval_secs = durability.checkpoint_interval.map(|d| d.as_secs()),
         "Bolt server starting"
@@ -715,6 +833,38 @@ async fn serve() -> Result<()> {
         let _ = task.await;
         tracing::info!("checkpoint-interval: stopped");
     }
+    // The log's final barrier, before any decision about saving. Under
+    // `normal` the tail of the log is in the page cache, which survives this
+    // process dying but not the machine dying, and shutdown is the one moment
+    // the server knows no further commit is coming — so it is worth paying a
+    // barrier that per-commit `normal` deliberately does not. Under `full`
+    // every frame is already on stable storage and this is a no-op; at `off`
+    // there is no log to flush and calling `sync` would be an error, so it is
+    // skipped rather than reported.
+    //
+    // Ordered before the exit save on purpose: if the save then fails, the
+    // commits it could not write are already on disk in the log for the next
+    // startup to replay.
+    let sync_result = if durability.level.logs() {
+        exit_session
+            .sync()
+            .map_err(|e| anyhow::anyhow!("flushing the write-ahead log at shutdown: {e}"))
+            .inspect(|()| {
+                tracing::info!(
+                    durability = durability.level.name(),
+                    "write-ahead log flushed"
+                )
+            })
+            .inspect_err(|e| {
+                tracing::error!(
+                    error = %format!("{e:#}"),
+                    "write-ahead log flush FAILED — commits acknowledged since the last \
+                     checkpoint may not be on disk"
+                )
+            })
+    } else {
+        Ok(())
+    };
     // Attempted whether or not `serve` returned an error: an operator who
     // asked for an exit checkpoint wants one on the failure path too. Both
     // results are reported; a failed save exits non-zero rather than being
@@ -726,6 +876,7 @@ async fn serve() -> Result<()> {
         Ok(())
     };
     serve_result?;
+    sync_result?;
     save_result?;
     Ok(())
 }
@@ -829,6 +980,72 @@ mod tests {
                 "{junk:?} must be rejected, not guessed at — got {outcome:?}"
             );
         }
+    }
+
+    // ── --durability ────────────────────────────────────────────────────────
+
+    /// The vocabulary is the engine's, not a second list that could drift from
+    /// it, and the environment hands over whatever a unit file wrote.
+    #[test]
+    fn durability_accepts_every_engine_level() {
+        for name in DurabilityLevel::NAMES {
+            let parsed = parse_durability_level(name)
+                .unwrap_or_else(|e| panic!("{name} is an engine level: {e}"));
+            assert_eq!(parsed.name(), name);
+        }
+        assert_eq!(
+            parse_durability_level(" FULL \n").expect("case and whitespace are not typos"),
+            DurabilityLevel::Full
+        );
+    }
+
+    #[test]
+    fn durability_rejects_an_unknown_level_naming_the_accepted_ones() {
+        for junk in ["", "on", "true", "fsync", "none", "1"] {
+            let error = parse_durability_level(junk)
+                .err()
+                .unwrap_or_else(|| panic!("{junk:?} must not be guessed at"));
+            assert!(
+                error.contains("full") && error.contains("normal") && error.contains("off"),
+                "the refusal must list the levels that exist: {error}"
+            );
+        }
+    }
+
+    /// A read-only server never commits, so a log would only ever be empty —
+    /// and the operator who asked for one has misunderstood the deployment.
+    /// `off` beside `--readonly` stays legal, which is why this is a check on
+    /// the *level* rather than a clap `conflicts_with` on the argument.
+    #[test]
+    fn a_logging_level_is_refused_for_a_readonly_server() {
+        for level in [DurabilityLevel::Full, DurabilityLevel::Normal] {
+            let error = ensure_durability_supported(level, true)
+                .expect_err("a read-only server has nothing to log");
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("--readonly")
+                    && message.contains(level.name())
+                    && message.contains(DURABILITY_ENV),
+                "the refusal must name the level, its env mirror and --readonly: {message}"
+            );
+        }
+        ensure_durability_supported(DurabilityLevel::Off, true)
+            .expect("--readonly --durability off is the read-only server's normal shape");
+        for level in [DurabilityLevel::Full, DurabilityLevel::Normal] {
+            ensure_durability_supported(level, false)
+                .unwrap_or_else(|e| panic!("a writable server may log at {}: {e}", level.name()));
+        }
+    }
+
+    /// The shipped default is `off` — today's behaviour, preserved. Pinned as
+    /// a test because flipping it silently changes what `--readonly`,
+    /// disk-mode graphs and every existing invocation do (see
+    /// [`DEFAULT_DURABILITY`]); the flip is R3.3's measured decision, and it
+    /// should have to edit a test that says so.
+    #[test]
+    fn the_default_level_is_off() {
+        assert_eq!(DEFAULT_DURABILITY, DurabilityLevel::Off);
+        assert!(!DEFAULT_DURABILITY.logs());
     }
 
     #[test]

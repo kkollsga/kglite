@@ -1303,7 +1303,7 @@ pub fn kglite::api::io::load_kgl_bytes(data: &[u8]) -> core::io::error::Result<a
 pub fn kglite::api::io::load_ntriples(graph: &mut kglite::api::DirGraph, path: &str, config: &kglite::api::io::NTriplesConfig) -> core::result::Result<kglite::graph::io::ntriples::NTriplesStats, alloc::string::String>
 pub fn kglite::api::io::load_rdf(graph: &mut kglite::api::DirGraph, path: &str, config: &kglite::api::io::RdfConfig) -> core::result::Result<kglite::api::io::RdfStats, alloc::string::String>
 pub fn kglite::api::io::open_or_create_graph(path: &std::path::Path, create_mode: core::option::Option<kglite::api::storage::StorageMode>) -> core::io::error::Result<kglite::api::io::OpenGraphResult>
-pub fn kglite::api::io::open_or_create_graph_in_mode(path: &std::path::Path, requested: core::option::Option<kglite::api::storage::StorageMode>) -> core::io::error::Result<kglite::api::io::OpenGraphResult>
+pub fn kglite::api::io::open_or_create_graph_in_mode(path: &std::path::Path, requested: core::option::Option<kglite::api::storage::StorageMode>, attaching_log: kglite::api::durable::DurabilityLevel) -> core::io::error::Result<kglite::api::io::OpenGraphResult>
 pub fn kglite::api::io::pass_a_scan(source: &kglite::api::storage::DiskGraph, spec: &kglite::api::io::SubsetSpec) -> kglite::graph::mutation::subgraph_streaming::PassAResult
 pub fn kglite::api::io::pass_a_scan_to_file(source: &kglite::api::storage::DiskGraph, spec: &kglite::api::io::SubsetSpec, kept_edges_path: &std::path::Path) -> core::result::Result<kglite::graph::mutation::subgraph_streaming::PassAFileResult, alloc::string::String>
 pub fn kglite::api::io::prepare_save(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>)

@@ -261,6 +261,7 @@ def test_server_binary_help_flag(bolt_binary_path):
     assert "--port" in result.stdout
     assert "--readonly" in result.stdout
     assert "--save-on-exit" in result.stdout
+    assert "--durability" in result.stdout
     assert "--auth" in result.stdout
 
 
