@@ -5,10 +5,30 @@ graph_info diagnostics, and edge cases.
 """
 
 import pandas as pd
+import pytest
 
 import kglite
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def make_wide_graph(n=50_000, cols=12):
+    """`n` nodes with `cols` int properties — the shape a spill actually helps.
+
+    `make_graph`'s two properties on 1k nodes spill, but the heap residue
+    (tombstones, the id/title columns, the string `category` column) dominates
+    the reading, so a write that materialises a column back onto the heap is
+    invisible next to it. Twelve int columns over 50k rows put ~6 MB of
+    genuinely spillable data behind the limit, which is what makes the contract
+    below measurable.
+    """
+    g = kglite.KnowledgeGraph()
+    g.define_schema({"nodes": {"Item": {"primary_key": "id"}}})
+    data = {"id": range(n), "name": [f"item-{i}" for i in range(n)]}
+    for c in range(cols):
+        data[f"p{c}"] = [(i + c) % 977 for i in range(n)]
+    g.add_nodes(pd.DataFrame(data), "Item", "id", "name")
+    return g
 
 
 def make_graph(n=1000):
@@ -135,6 +155,91 @@ class TestSpillToDisk:
         pc = g.cypher("MATCH (n:Person) RETURN count(n) AS c").to_list()[0]["c"]
         assert ic == 500
         assert pc == 500
+
+
+# ── The spill contract across statement writes ───────────────────────────────
+#
+# Everything above spills and then *reads*. This asks the question none of them
+# ask: does a spilled graph stay spilled once you write to it?
+#
+# It does not, and that is a contract defect rather than a cost: `set_memory_
+# limit` is the only bound a caller can put on this engine's columnar heap, and
+# an ordinary point-lookup `SET` silently removes it. Mechanism (0.15.14):
+# the first columnar write of every statement hands the undo journal an
+# `Arc::clone` of the type's master `ColumnStore`, so the following
+# `Arc::make_mut` deep-clones it — and `MmapOrVec::clone` always produces a
+# `Heap` variant (`storage/mapped/mmap_vec.rs`). Every mmap-backed column is
+# copied into the heap by the clone, the spill files are abandoned, and nothing
+# re-enforces the limit afterwards. Measured: 1.65 MB → 7.99 MB against a 1 MB
+# limit, `columnar_is_mapped` True → False, after 20 single-row SETs.
+#
+# Fixed in Phase 4 of the shape-convergence program (Phase 2's cell-grained
+# undo journal removes the whole-store clone; Phase 4 bounds what remains and
+# re-enforces the limit post-statement).
+
+
+class TestSpillContractAcrossWrites:
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "0.15.14 defect: a statement write deep-clones the master column "
+            "store, materialising every mmap-backed column onto the heap, and "
+            "nothing re-enforces set_memory_limit afterwards. Fixed in "
+            "shape-convergence Phase 4 (see dev-docs/plans/shape-convergence.md, "
+            "'Phase 4 - Mapped/spill contract'). strict=True on purpose: when "
+            "the fix lands this goes RED, and the required response is to drop "
+            "the marker, not to loosen the assertions."
+        ),
+    )
+    def test_memory_limit_survives_statement_writes(self, tmp_path):
+        """A spilled graph must still be spilled after ordinary point writes.
+
+        The limit is set *before* `save()` deliberately. `set_memory_limit`
+        does not retroactively spill an already-columnar graph — that is
+        pinned, as current behaviour, by
+        `TestEdgeCases::test_set_limit_after_columnar` — so a limit set after
+        the save would leave the graph on the heap and this test would be
+        asserting nothing. Reached the same way by `save()`-then-limit-then-
+        `disable_columnar()`/`enable_columnar()`; all three shapes were measured
+        and produce identical numbers.
+
+        The post-spill heap reading is captured as the baseline rather than
+        compared against the limit itself: the residue that legitimately stays
+        on the heap (id/title columns, the `name` string column, tombstones)
+        already exceeds a 1 MB limit at this size. What must not happen is the
+        heap *growing* because a write pulled mapped columns back into it.
+        """
+        g = make_wide_graph()
+        g.set_memory_limit(1_000_000, spill_dir=str(tmp_path / "spill"))
+        g.save(str(tmp_path / "wide.kgl"))
+
+        spilled = g.graph_info()
+        assert spilled["columnar_is_mapped"] is True, (
+            "precondition: the fixture must actually spill, or the assertions below are vacuous"
+        )
+        baseline_heap = spilled["columnar_heap_bytes"]
+
+        # Warm the id index so the writes are writes, not a first-touch build.
+        g.cypher("MATCH (n:Item {id: 0}) RETURN n.id")
+        for i in range(20):
+            g.cypher("MATCH (n:Item {id: 7}) SET n.p0 = $v", params={"v": i})
+
+        after = g.graph_info()
+        assert after["columnar_is_mapped"] is True, (
+            "20 single-row SETs un-spilled the graph: columnar_is_mapped went "
+            f"True -> {after['columnar_is_mapped']}. set_memory_limit is the "
+            "only bound a caller can place on the columnar heap and an "
+            "ordinary write removed it."
+        )
+        assert after["columnar_heap_bytes"] <= baseline_heap * 1.1, (
+            f"columnar heap grew {baseline_heap} -> "
+            f"{after['columnar_heap_bytes']} bytes across 20 single-row SETs, "
+            "against a 1,000,000 byte limit; mapped columns are being copied "
+            "onto the heap by the write path"
+        )
+
+        # The writes themselves must still be correct, spilled or not.
+        assert g.cypher("MATCH (n:Item {id: 7}) RETURN n.p0 AS v").scalar() == 19
 
 
 # ── Unspill ──────────────────────────────────────────────────────────────────

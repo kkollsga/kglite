@@ -809,8 +809,39 @@ pub struct ColumnStore {
     mmap_store: Option<Arc<crate::graph::storage::mapped::column_store::MmapColumnStore>>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Whole-`ColumnStore` deep clones performed since the last reset.
+    ///
+    /// The third oracle in the family, and the one that closes the blind spot
+    /// the other two share. `BACKEND_CLONE_NODES` (`storage/backend.rs`) counts
+    /// nodes copied by a *backend* clone; `JOURNAL_NODE_PRE_IMAGES`
+    /// (`storage/undo.rs`) counts `NodeData` pre-images copied into an undo
+    /// journal. A columnar property lives in neither: it lives in a per-type
+    /// `Arc<ColumnStore>` the backend owns, so `Arc::make_mut` on it copies
+    /// every column of the type while both counters read zero. A whole
+    /// write-perf program measured this path without seeing the copy.
+    ///
+    /// Thread-local like its siblings: it sees clones performed on the calling
+    /// thread only, which is where every statement-scoped write happens.
+    static COLUMN_STORE_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_column_store_clones() {
+    COLUMN_STORE_CLONES.set(0);
+}
+
+/// Whole-`ColumnStore` deep clones on this thread since the last reset.
+#[cfg(test)]
+pub(crate) fn column_store_clones() -> usize {
+    COLUMN_STORE_CLONES.get()
+}
+
 impl Clone for ColumnStore {
     fn clone(&self) -> Self {
+        #[cfg(test)]
+        COLUMN_STORE_CLONES.set(COLUMN_STORE_CLONES.get() + 1);
         ColumnStore {
             schema: self.schema.clone(),
             columns: self.columns.clone(),

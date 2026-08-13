@@ -217,6 +217,132 @@ def test_bench_id_index_invalidation_on_create(benchmark, scaled_graphs_no_pk, s
     benchmark.pedantic(write, rounds=OV_ROUNDS, iterations=1, warmup_rounds=OV_WARMUP_ROUNDS)
 
 
+# ── the shape gap: fresh graphs are not the graphs users write to ────
+#
+# Every fixture above builds a graph and never persists it, so every cell above
+# measures the `Compact` (row) write path. That is the gap this whole file
+# missed: `save()` consolidates each type into a columnar master
+# `Arc<ColumnStore>`, and from then on a single-row `SET` takes a completely
+# different route — one that deep-clones the touched type's whole store per
+# statement, because the undo journal holds the second `Arc` handle and
+# `Arc::make_mut` therefore forks. The cost is O(rows_of_type × cols) per
+# statement and it never amortises.
+#
+# A full write-perf program ran against this file and reported flat curves,
+# which were true and beside the point: fresh-only fixtures cannot see a cost
+# that only exists after a save. Measured on the 0.15.14 wheel, single-row SET
+# at 50k x 12:
+#
+#     fresh  4.3 us  |  post-save  328 us  |  mapped ~3,020 us
+#
+# The three cells below close that gap. They are the Phase-3 verification
+# targets of the shape-convergence program (`dev-docs/plans/`): after the
+# cell-grained undo journal lands, post-save must come back within 2x of fresh
+# or the program stops for diagnosis.
+#
+# Not tracked by `make bench-check`, like everything else in this file — the
+# gate collects `test_bench_core.py` only, and on Linux it additionally runs
+# `--require-exact-set`, which *errors* on a benchmark present in the run but
+# absent from the baseline. New cells therefore belong here, not there, until a
+# release-boundary rebaseline promotes them.
+
+#: The Phase-0 grid's headline cell. Wide enough that the per-statement store
+#: clone is unmistakable (12 int columns x 50k rows ~ 6 MB copied to write one
+#: cell), small enough that the fixture builds in well under a second.
+SHAPE_SIZE = 50_000
+SHAPE_COLS = 12
+
+
+def _wide_graph(size: int = SHAPE_SIZE, cols: int = SHAPE_COLS) -> KnowledgeGraph:
+    """`size` nodes with `cols` int properties, plus id and name.
+
+    Int columns on purpose: they are what a `ColumnStore` types and packs, so
+    the clone they drive is the cheapest-per-row version of the defect. A
+    string-heavy shape would report a larger number for reasons that are about
+    strings rather than about the write path.
+    """
+    graph = KnowledgeGraph()
+    graph.define_schema({"nodes": {"Item": {"primary_key": "id"}}})
+    data: dict = {"id": range(size), "name": [f"item-{i}" for i in range(size)]}
+    for c in range(cols):
+        data[f"p{c}"] = [(i + c) % 977 for i in range(size)]
+    graph.add_nodes(pd.DataFrame(data), "Item", "id", "name")
+    graph.cypher("MATCH (n:Item {id: 0}) RETURN n.id")
+    return graph
+
+
+@pytest.mark.benchmark
+def test_bench_wide_set_fresh(benchmark):
+    """Single-row `SET` on a never-saved wide graph — the control.
+
+    Same statement, same shape, same size as the two cells below; the only
+    difference is that this graph has never been consolidated into column
+    stores. Without it the post-save number has nothing to be a ratio *of*, and
+    a machine-wide slowdown would be indistinguishable from a regression.
+    """
+    graph = _wide_graph()
+    counter = iter(range(1, 1 << 30))
+
+    def write():
+        graph.cypher("MATCH (n:Item {id: 7}) SET n.p0 = $v", params={"v": next(counter)})
+
+    benchmark(write)
+    assert not graph.is_columnar, "the control must not be columnar, or it is not a control"
+
+
+@pytest.mark.benchmark
+def test_bench_wide_set_after_save(benchmark, tmp_path):
+    """Single-row `SET` after `save()` — the cell the fresh fixtures hid.
+
+    `save()` is the shape change, not the I/O: it calls `enable_columnar`,
+    which is what puts the type behind a master `Arc<ColumnStore>`. The graph
+    handle is kept and written through afterwards, so the timed statement is an
+    ordinary point write on an ordinary application graph — one that has been
+    checkpointed once.
+    """
+    graph = _wide_graph()
+    graph.save(str(tmp_path / "wide.kgl"))
+    assert graph.is_columnar, "save() must have consolidated the type, or this cell is the control"
+    counter = iter(range(1, 1 << 30))
+
+    def write():
+        graph.cypher("MATCH (n:Item {id: 7}) SET n.p0 = $v", params={"v": next(counter)})
+
+    benchmark(write)
+
+
+@pytest.mark.benchmark
+def test_bench_wide_set_mapped(benchmark, tmp_path):
+    """Single-row `SET` on a mapped-mode graph — the worst arm, and a contract
+    defect as well as a cost.
+
+    Mapped mode holds columns in mmap-backed storage, so the per-statement
+    store clone copies them onto the *heap* (`MmapOrVec::clone` always yields
+    the `Heap` variant). The write is therefore both the slowest of the three
+    and the one that silently defeats `set_memory_limit`; the contract half is
+    pinned separately by
+    `tests/test_memory_management.py::TestSpillContractAcrossWrites`.
+
+    The fixture is built and saved through a plain handle first, then reopened
+    with `storage="mapped"`, so the bulk load never lands in the measurement.
+    """
+    path = tmp_path / "mapped.kgl"
+    seed = _wide_graph()
+    seed.save(str(path))
+    seed.close()
+
+    graph = kglite.open(str(path), storage="mapped")
+    assert graph.graph_info()["storage_mode"] == "mapped"
+    # Warm the id index so the measurement is the write, not a first touch.
+    graph.cypher("MATCH (n:Item {id: 0}) RETURN n.id")
+    counter = iter(range(1, 1 << 30))
+
+    def write():
+        graph.cypher("MATCH (n:Item {id: 7}) SET n.p0 = $v", params={"v": next(counter)})
+
+    benchmark(write)
+
+
 # ── durability levels: what does a commit actually cost? ─────────────
 #
 # `durable` picks what a committed mutation survives, and the levels differ

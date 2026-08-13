@@ -949,11 +949,32 @@ fn wide_columnar_mapped() -> DirGraph {
     wide_columnar_into(graph)
 }
 
-fn wide_columnar_into(mut graph: DirGraph) -> DirGraph {
+/// [`wide_columnar`]'s node set *without* the columnar consolidation — the
+/// never-saved shape.
+///
+/// Split out so the columnar cost guards can be paired with a control that
+/// differs in exactly one thing (whether a master store exists), rather than
+/// in fixture size as well.
+fn wide_plain() -> DirGraph {
+    let graph = wide_rows_into(DirGraph::new());
+    assert!(
+        !graph.is_columnar(),
+        "the control fixture must own no master column store, or it is not a \
+         control"
+    );
+    graph
+}
+
+fn wide_rows_into(mut graph: DirGraph) -> DirGraph {
     let rows: Vec<String> = (0..WIDE_ITEMS)
         .map(|i| format!("(:Item {{id: {i}, name: 'n{i}', qty: {i}}})"))
         .collect();
     run(&mut graph, &format!("CREATE {}", rows.join(", ")));
+    graph
+}
+
+fn wide_columnar_into(graph: DirGraph) -> DirGraph {
+    let mut graph = wide_rows_into(graph);
     graph.enable_columnar();
     assert!(
         graph.is_columnar(),
@@ -1202,6 +1223,107 @@ fn the_master_is_uniquely_owned_between_statements() {
             .and_then(|n| n.get_property_value("qty")),
         Some(crate::datatypes::Value::Int64(111)),
         "and the write must actually be visible"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// PINNED DEFECT — store clones per statement (shape-convergence Phase 1)
+// ─────────────────────────────────────────────────────────────────────
+
+/// **This test asserts a defect exists. Phase 2 MUST rewrite it to assert
+/// zero.**
+///
+/// Every mutating statement's first columnar write hands the undo journal an
+/// `Arc::clone` of the touched type's master `ColumnStore`
+/// (`languages/cypher/executor/columnar_write.rs`, step 1 of `write_column_master`),
+/// which makes the `Arc::make_mut` two lines later deep-copy every column of
+/// that type — for a one-cell write. The journal drops at commit, the refcount
+/// returns to one, and the next statement pays again. Measured on 0.15.14: a
+/// single-row `SET` costs 4.3 µs on a fresh 50k×12 graph and 328 µs on the same
+/// graph after `save()`, a 76× tax that scales with the type's row count.
+///
+/// The clone is not merely tolerated today, it is *asserted*: the
+/// `debug_assert!` at the write site requires the master to fork away from the
+/// pre-image, because with the journal holding the pre-statement image that
+/// fork is the whole rollback-correctness argument.
+///
+/// **Phase 2 (cell-grained pre-images, `UndoEntry::ColumnarCell`) inverts
+/// both.** The journal will hold the changed cell's prior value instead of the
+/// whole store, the master stays uniquely owned through the statement,
+/// `make_mut` mutates in place, and this counter must read **0**. When that
+/// lands, this test goes red — that redness is the signal the fix arrived, and
+/// the required response is to rewrite the assertion to `0` and rename the
+/// test, never to delete or relax it. A defect that disappears silently is a
+/// gate that never proved it could fail.
+///
+/// Neither existing oracle can see this clone: `BACKEND_CLONE_NODES` counts
+/// backend copies (the journal deliberately clones no backend) and
+/// `JOURNAL_NODE_PRE_IMAGES` counts `NodeData` copies (a columnar property is
+/// not in a `NodeData`). Both read zero here, before and after the fix.
+#[test]
+fn a_columnar_statement_still_deep_clones_the_master_pinned_defect() {
+    use crate::graph::storage::column_store::{column_store_clones, reset_column_store_clones};
+
+    let mut graph = wide_columnar();
+
+    reset_column_store_clones();
+    run(&mut graph, "MATCH (n:Item {id: 1}) SET n.qty = 111");
+    let first = column_store_clones();
+
+    reset_column_store_clones();
+    run(&mut graph, "MATCH (n:Item {id: 2}) SET n.qty = 222");
+    let second = column_store_clones();
+
+    assert_eq!(
+        (first, second),
+        (1, 1),
+        "PINNED DEFECT: each columnar statement must (today) deep-clone the \
+         master column store exactly once — the journal holds the pre-image, so \
+         `Arc::make_mut` forks {WIDE_ITEMS} rows to write one cell. Reading \
+         (0, 0) means the cell-grained journal landed: rewrite this test to \
+         assert zero (see the doc comment), do not delete it. Reading anything \
+         else means the per-statement capture count changed and the cost model \
+         with it."
+    );
+
+    // Non-vacuity: the writes landed, so the clones were paid for real work.
+    assert_eq!(
+        graph
+            .graph
+            .node_view(
+                graph
+                    .graph
+                    .node_indices()
+                    .find(|i| graph.graph.get_node_id(*i) == Some(Value::Int64(2)))
+                    .expect("node 2")
+            )
+            .and_then(|n| n.get_property_value("qty")),
+        Some(Value::Int64(222)),
+    );
+}
+
+/// The control: the same statement on a never-consolidated graph clones no
+/// store at all.
+///
+/// Without this arm the assertion above cannot distinguish "the columnar write
+/// path clones the master" from "something in every statement clones a store".
+/// It is also the arm that must keep reading 0 after Phase 2 — the fix moves
+/// the columnar number down to this one, it does not move this one.
+#[test]
+fn a_plain_statement_clones_no_column_store() {
+    use crate::graph::storage::column_store::{column_store_clones, reset_column_store_clones};
+
+    let mut graph = wide_plain();
+
+    reset_column_store_clones();
+    run(&mut graph, "MATCH (n:Item {id: 1}) SET n.qty = 111");
+    let cloned = column_store_clones();
+
+    assert_eq!(
+        cloned, 0,
+        "a statement on a graph with no master column store cloned {cloned} \
+         store(s); the counter must be reading the columnar write path and \
+         nothing else"
     );
 }
 
