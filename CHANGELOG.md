@@ -230,6 +230,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fine. `save_graph`/`save_graph_with` now return a typed `SaveError` whose
   `Refused` variant means nothing was written, so a binding can map a refusal
   to its own bad-request class instead of an I/O failure.
+- **`enable_columnar()`'s docstring example called `is_columnar` as a method.**
+  It is a property, so `assert graph.is_columnar()` — copied from `help()` —
+  raised `TypeError: 'bool' object is not callable`. The primary-store guide's
+  claim that there is no JVM binding is also gone: Java has been official since
+  0.15.9 (`io.github.kkollsga:kglite` on Maven Central).
+
 - **A fused `ORDER BY … LIMIT` no longer drops rows whose sort key is NULL.**
   Both fused top-K executors skipped any row with a NULL key, while the
   ordinary `ORDER BY` pipeline places NULLs by the openCypher/Neo4j 5+ rule
@@ -249,6 +255,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the old heap ranked on, rounding integers past 2^53.
 
 ### Changed
+
+- **Documented the write-amplification ladder, and what `save()` does to later
+  writes.** A graph that came from a `.kgl` file — `load()`, `open()`, or a
+  `save()` earlier in the same process — holds its properties in per-type column
+  stores, and there every mutating statement re-images the store of each type it
+  writes, once per statement however few rows it touched. Measured with 12
+  declared properties: ≈ 40 µs per single-row `SET` at 5 k nodes and ≈ 380 µs at
+  50 k, against ≈ 5 µs on a graph that has never been saved; an explicit
+  transaction does not amortize it, `CREATE` and reads are unaffected. This was
+  undocumented and is easy to walk into, so the data-loading guide gains a
+  write-throughput ladder (bulk loaders ≈ 1 µs/row → one multi-row statement
+  ≈ 1–2 µs/row → statement-per-row) with the batching mitigation measured at
+  ~80× on a 50 k graph, and the primary-store guide gains a section on the
+  regime itself, how to observe it (`is_columnar`,
+  `graph_info()['columnar_heap_bytes']`), and the `disable_columnar()` escape
+  hatch with its cost and its mapped/memory-limit caveats. The `is_columnar` and
+  `disable_columnar` docstrings carry the same facts. The data-loading guide also
+  now states the declared-schema-width cost: per-row scan cost tracks the
+  properties *declared* on the scanned type, not those the query reads
+  (≈ 10–15% more per row at 10 declared properties than at 2, even when the
+  extra ones are null everywhere).
 
 - **A range index no longer makes every write against a shared graph pay a
   full copy of the index (up to ~45× on the first write after a fork).**

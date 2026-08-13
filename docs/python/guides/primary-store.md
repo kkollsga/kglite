@@ -41,6 +41,48 @@ Uniqueness constraints are backed by a different structure whose cost interactio
 is not yet characterised. If your workload writes continuously *and* indexes or
 constrains, measure it rather than assuming flat cost.
 
+### Columnar mode is where every graph that has touched a file lives
+
+The second case deserves its own warning, because a primary store walks into it
+by construction rather than by choice. `save()` converts the live graph to
+columnar storage — the `.kgl` format is columnar — and it stays that way
+afterwards; a graph obtained from `kglite.load()` or `kglite.open()` starts
+there. So the open-write-checkpoint-keep-writing loop this page is about runs in
+the columnar write regime from its first statement onward.
+
+In that regime a mutating statement re-images the column store of each type it
+writes, once per statement, however few rows it touched. Measured on 0.15.13
+with 12 declared properties: ≈ 40 µs per single-row `SET` at 5 k nodes and
+≈ 380 µs at 50 k, against ≈ 5 µs on a graph that has never been saved, growing
+with node count and with the type's column count. `kglite.load()` and
+`kglite.open()` measure the same as a post-`save()` graph, and an explicit
+transaction does not amortize it — the term is per statement, not per commit.
+`CREATE` is unaffected (it appends a row rather than re-imaging), and so are
+reads.
+
+Two things follow, in this order:
+
+- **Batch mutations into multi-row statements.** One
+  `UNWIND $rows AS r MATCH … SET …` over 100 rows costs ≈ 0.5 ms where 100
+  single-row statements cost ≈ 38 ms — about 80× at 50 k nodes, about 30× at
+  5 k. This is the mitigation to reach for, and it is the same advice as
+  {doc}`data-loading`'s throughput ladder.
+- **Or leave columnar mode deliberately.** `graph.disable_columnar()` moves
+  properties back to per-node storage and restores the ≈ 5 µs write; it costs
+  one O(nodes) pass (≈ 11 ms at 50 k nodes) and the next `save()` then pays a
+  full columnar rebuild (≈ 21 ms at 50 k). Worth it for a long run of small
+  writes between checkpoints, not for a handful. **Do not do it on a
+  `storage="mapped"` graph or on any graph with `set_memory_limit()`** — both
+  depend on the column store, and reverting materialises file-backed columns
+  onto the heap, silently undoing the memory limit.
+
+`graph.is_columnar` reports which regime a graph is in, and
+`graph_info()['columnar_heap_bytes']` how much data sits in the stores. The
+per-statement re-image is a known cost, not a design point: the remedy is a
+narrower write journal (per-transaction or per-column pre-images), which is a
+storage-layer change rather than something to patch at the call site, so it is
+documented here until that lands.
+
 **Crash safety is the default.** `kglite.open(path)` opens in write-ahead-log
 mode wherever the storage mode supports it — the default in-memory backend and
 `storage="mapped"`. Each committed mutation appends one frame to a `<path>-wal`
@@ -369,8 +411,10 @@ What `disk` does not give you is a *smaller* unit of durability than a whole
 In-memory is the product; the disk modes are for exploring graphs too big for it,
 and that is the trade-off you are accepting.
 
-**There is no JVM or .NET binding.** Python and Rust are first-class. Everything
-else goes through the C ABI in `crates/kglite-c` — a supported boundary with a
+**Three bindings are maintained here; the rest you write.** Python and Rust are
+first-class, and Java is official since 0.15.9 (Panama/FFM over the C ABI, on
+Maven Central as `io.github.kkollsga:kglite`). Everything else — Go, JavaScript,
+.NET — goes through the C ABI in `crates/kglite-c`: a supported boundary with a
 generated header, but you are writing the binding. See {doc}`/rust/c-abi`.
 
 ## Deciding

@@ -1415,8 +1415,14 @@ class KnowledgeGraph:
     def is_columnar(self) -> bool:
         """Whether node properties are stored in columnar format.
 
-        Returns ``True`` if ``enable_columnar()`` has been called (or the graph
-        was loaded from a v3 ``.kgl`` file).
+        ``True`` after :meth:`enable_columnar`, after :meth:`save` — which
+        converts the live graph, since the ``.kgl`` format is columnar — and
+        for any graph that came from :func:`load` or :func:`open`.
+
+        Worth checking on a write-heavy graph: in columnar mode every mutating
+        statement re-images the column store of each type it writes, once per
+        statement, so single-row statements cost far more than the same updates
+        batched into one multi-row statement. See the primary-store guide.
         """
         ...
 
@@ -3458,9 +3464,16 @@ class KnowledgeGraph:
     def disable_columnar(self) -> None:
         """Convert columnar properties back to compact per-node storage.
 
-        This is the inverse of :meth:`enable_columnar`. Useful before
-        saving to ``.kgl`` format or when columnar storage is no longer
-        needed.
+        The inverse of :meth:`enable_columnar`. It also leaves the columnar
+        *write* regime, which a graph enters on :meth:`save` and is already in
+        when loaded from a file: per-node storage does not re-image a shared
+        column store per statement, so a long run of small writes gets much
+        cheaper. The revert costs one pass over the nodes, uses more memory,
+        and the next :meth:`save` re-enables columnar and pays a full rebuild.
+
+        Do not call it on a ``storage="mapped"`` graph or one with
+        :meth:`set_memory_limit` set — both depend on the column store, and
+        this materialises file-backed columns onto the heap.
         """
         ...
 

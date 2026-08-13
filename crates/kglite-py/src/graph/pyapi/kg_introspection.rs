@@ -87,7 +87,7 @@ impl KnowledgeGraph {
     /// Example:
     ///     ```python
     ///     graph.enable_columnar()
-    ///     assert graph.is_columnar()
+    ///     assert graph.is_columnar
     ///     ```
     fn enable_columnar(&mut self) {
         let graph = get_graph_mut(&mut self.inner);
@@ -111,8 +111,16 @@ impl KnowledgeGraph {
 
     /// Convert columnar properties back to compact per-node storage.
     ///
-    /// This is the inverse of enable_columnar(). Useful before saving
-    /// or when columnar storage is no longer needed.
+    /// The inverse of enable_columnar(). It also leaves the columnar *write*
+    /// regime, which a graph enters on save() and is already in when loaded
+    /// from a file: per-node storage does not re-image a shared column store
+    /// per statement, so a long run of small writes gets much cheaper. The
+    /// revert costs one pass over the nodes, uses more memory, and the next
+    /// save() re-enables columnar and pays a full rebuild.
+    ///
+    /// Do not call it on a storage="mapped" graph or one with a memory limit
+    /// set — both depend on the column store, and this materialises
+    /// file-backed columns onto the heap.
     fn disable_columnar(&mut self) {
         let graph = get_graph_mut(&mut self.inner);
         graph.disable_columnar();
@@ -145,6 +153,12 @@ impl KnowledgeGraph {
     }
 
     /// Returns True if any nodes use columnar property storage.
+    ///
+    /// True after enable_columnar(), after save() — which converts the live
+    /// graph, since the .kgl format is columnar — and for any graph that came
+    /// from load() or open(). In that mode every mutating statement re-images
+    /// the column store of each type it writes, once per statement, so batch
+    /// small writes into multi-row statements.
     #[getter]
     fn is_columnar(&self) -> bool {
         self.inner.is_columnar()

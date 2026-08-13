@@ -127,6 +127,16 @@ A `UserWarning` fires automatically when the report has skipped
 rows or `has_errors=True` — silent partial successes are surfaced
 without you needing to inspect the report.
 
+**Ingest the columns you query.** The per-row cost of a scan tracks
+the number of properties *declared* on the scanned type, not the
+number the query reads: a type with 10 declared properties costs
+roughly 10–15% more per row on a filter scan than the same type with
+2, even when the extra eight are null on every node, because each
+node's property block is sized to the full declared schema. Use
+`columns=[...]` / `skip_columns=[...]` to keep a hot type narrow, and
+put rarely-used optional properties on their own node type rather
+than widening one you scan constantly.
+
 ## Property Mapping
 
 When adding nodes, `unique_id_field` and `node_title_field` are **mapped** to `id` and `title`. The original column names become **aliases** — they work in Cypher queries and fluent `where()`, but results always use the canonical names.
@@ -342,6 +352,54 @@ result = graph.select('Prospect').where({'status': 'Inactive'}).update({
 updated_graph = result['graph']
 print(f"Updated {result['nodes_updated']} nodes")
 ```
+
+## Write throughput — pick the coarsest path that fits
+
+Every rung below writes the same data. They differ in how much
+per-statement machinery each row pays for. Measured on 0.15.13,
+release build, an in-memory graph of 50 k nodes with 12 declared
+properties:
+
+| How you write | Cost per row |
+|---|---|
+| `add_nodes` / `add_connections` (bulk) | ≈ 1 µs |
+| One statement, many rows (`UNWIND $rows AS r CREATE …`) | ≈ 1–2 µs |
+| One statement per row, on a graph built in this process | ≈ 3 µs (`CREATE`), ≈ 5 µs (`MATCH … SET`) |
+| One statement per row, on a graph that came from a `.kgl` file | ≈ 40 µs at 5 k nodes, ≈ 380 µs at 50 k — and it keeps growing |
+
+The first three rungs are flat in graph size; the last one is not,
+and it is the one long-running applications land in. A graph that
+came from a file — `kglite.load()`, `kglite.open()`, or your own
+earlier `save()` in the same process — holds its properties in
+per-type column stores, and **every mutating statement re-images the
+store of each type it writes, once per statement**, however few rows
+it touched. Wrapping the loop in `begin()` / `commit()` does not
+amortize that (measured: the same per-statement cost inside a
+transaction); batching into fewer statements does.
+
+So write per statement, not per row:
+
+```python
+rows = [{"id": 1, "lc": 10}, {"id": 2, "lc": 20}]  # ... 100 of them
+
+# 100 single-row statements on a 50 k-node graph loaded from disk:
+# ≈ 380 µs each, ≈ 38 ms for the loop.
+for row in rows:
+    graph.cypher("MATCH (n:Item {id: $id}) SET n.line_count = $lc", params=row)
+
+# The same 100 updates as one statement: ≈ 0.5 ms — about 80× less.
+graph.cypher(
+    "UNWIND $rows AS r MATCH (n:Item {id: r.id}) SET n.line_count = r.lc",
+    params={"rows": rows},
+)
+```
+
+One statement per batch is the right shape for any mutation —
+`UNWIND $rows AS r CREATE (:Item {id: r.id, …})` reads the same way.
+Reads are unaffected by the regime, and so is `CREATE`, which appends
+rows rather than re-imaging a store. The
+[primary store guide](primary-store.md) covers the regime itself —
+how to see which one a graph is in, and the escape hatch.
 
 ## Operation Reports
 
