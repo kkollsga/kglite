@@ -467,9 +467,11 @@ fn open(
         None if kg.inner.graph.is_disk() => DurabilityLevel::Off,
         None => DurabilityLevel::Full,
     };
-    if level.logs() {
-        setup_durable(&mut kg, &path, level)?;
-    }
+    // Called at every level, including `off`: recovery on open is a decision
+    // about the path's *data*, not only about how future writes are logged, and
+    // an `off` open over an unreplayed sidecar is refused rather than silently
+    // dropping committed writes. See `setup_durable`.
+    setup_durable(&mut kg, &path, level)?;
     Ok(kg)
 }
 
@@ -490,14 +492,23 @@ fn convert_open_graph_to_mode(
     )
 }
 
-/// Turn `kg` into a durable graph: replay any WAL frames committed since
-/// the last checkpoint onto the loaded graph, wrap its backend in the
-/// write-capture layer, and open the WAL for append.
+/// Attach durability to a freshly opened graph: replay any WAL frames
+/// committed since the last checkpoint, wrap the backend in the write-capture
+/// layer, and open the WAL for append.
+///
+/// **Called at every level, `off` included.** The sequence itself lives in
+/// `kglite::api::durable::open_log`, shared with the engine's `Session`, and it
+/// reads the sidecar even at `off` so an open over frames the checkpoint does
+/// not contain is refused instead of silently discarding them at the next
+/// `save()`. What stays here is the binding's half: the disk refusal (whose
+/// message names *this* API's alternative) and the mapping from refusal
+/// category to Python exception class.
 ///
 /// Storage-mode-agnostic by construction: the capture wrapper wraps the
 /// `GraphBackend` enum rather than a concrete backend, and both memory and
 /// mapped graphs mutate the same heap `StableDiGraph` underneath, so one
-/// capture path covers both. Disk is refused — see the error below.
+/// capture path covers both. Disk is refused at every logging level — see the
+/// error below.
 fn setup_durable(
     kg: &mut KnowledgeGraph,
     path: &str,
@@ -508,7 +519,7 @@ fn setup_durable(
     // deferred to a high-level durable-transaction api lift (roadmap Piece 2).
     use kglite_core::api::durable as wal;
 
-    if kg.inner.graph.is_disk() {
+    if level.logs() && kg.inner.graph.is_disk() {
         // `ValueError`, not one of the typed `kglite.*Error` classes, and that
         // is deliberate: `error_py`'s taxonomy reserves the typed hierarchy for
         // *engine* failures and keeps "argument-shape" rejections in their
@@ -535,37 +546,32 @@ fn setup_durable(
             level.name(),
         )));
     }
-    let sync = level
-        .sync_mode()
-        .expect("caller checks level.logs() before setup_durable");
 
-    let wpath = wal::wal_path(std::path::Path::new(path));
-    // Read (do not truncate) any frames committed since the last checkpoint.
-    let frames = wal::recover(&wpath)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+    // The whole recover → replay → wrap → open-for-append sequence, plus the
+    // `off`-over-unreplayed-frames refusal, in one shared call. The error
+    // classes are the binding's own: an unreadable sidecar is an `IOError`, a
+    // replay that cannot be applied is a `RuntimeError`, and a refusal joins
+    // the `durable=` rejections above in the built-in `ValueError` family.
+    let opened = wal::open_log(&mut kg.inner, std::path::Path::new(path), level).map_err(|e| {
+        let message = e.to_string();
+        match e {
+            wal::DurableOpenError::Io(_) => PyErr::new::<pyo3::exceptions::PyIOError, _>(message),
+            wal::DurableOpenError::Replay(_) => {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(message)
+            }
+            wal::DurableOpenError::Refused(_) => {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
+            }
+        }
+    })?;
 
-    // Replay onto the (unwrapped) loaded graph, then wrap so subsequent
-    // mutations are captured. Replaying before wrapping keeps the replay's
-    // own GraphWrite calls out of the capture buffer.
-    let dir = crate::graph::get_graph_mut(&mut kg.inner);
-    // Gate replay on what the checkpoint says it already contains. Frames at or
-    // below this LSN are a **stale prefix** — already folded into the `.kgl` we
-    // just loaded — and folding them again would roll properties back to their
-    // values as of an earlier commit. A graph with no durable history (or a
-    // `.kgl` written before the stamp existed) reports 0, i.e. replay
-    // everything, which is the pre-gate behaviour.
-    let checkpoint_lsn = dir.checkpoint_lsn;
-    let max_lsn = kglite_core::api::durable::apply_frames(dir, &frames, checkpoint_lsn)
-        .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
-    KnowledgeGraph::wrap_backend_for_durability(dir);
-
-    let walh = wal::Wal::open(wpath, sync)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-    kg.lifecycle.durable = Some(crate::graph::DurableState {
-        wal: walh,
-        next_lsn: max_lsn + 1,
-        level,
-    });
+    if let Some((walh, next_lsn)) = opened {
+        kg.lifecycle.durable = Some(crate::graph::DurableState {
+            wal: walh,
+            next_lsn,
+            level,
+        });
+    }
     Ok(())
 }
 

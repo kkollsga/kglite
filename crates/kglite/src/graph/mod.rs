@@ -12,6 +12,7 @@ pub mod blueprint;
 pub mod constraints;
 pub mod core;
 pub mod dir_graph;
+pub mod durability;
 pub mod embedder;
 pub mod embedding_carry;
 pub mod embeddings;

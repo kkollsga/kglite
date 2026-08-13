@@ -817,6 +817,17 @@ def open(
             - ``None`` (default) — ``"full"``, except on ``storage="disk"``
               where it resolves to ``"off"`` rather than raising.
 
+            **Recovery happens at every level, including ``"off"``.** Opening a
+            path is a decision about that path's data, not only about how future
+            writes are logged, so an ``"off"`` open over a ``<path>-wal`` sidecar
+            that still holds commits the checkpoint does not contain raises
+            ``ValueError`` instead of returning a graph that is missing them —
+            the next ``save()`` would truncate the log and destroy those commits.
+            Reopen at ``"full"`` or ``"normal"`` to replay them, or move the
+            sidecar aside to discard them deliberately. Sidecar frames the
+            checkpoint already contains (the residue of a crash between a
+            ``save()`` and its truncation) are harmless and open fine.
+
             **The levels are not uniform across storage modes:**
             ``storage="disk"`` supports only ``"off"``, and both ``"full"`` and
             ``"normal"`` raise ``ValueError`` there. A disk graph commits by

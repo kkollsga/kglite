@@ -11,12 +11,19 @@
 //!
 //! ## The three orders that are correctness, not preference
 //!
+//! Two of them are not session-specific and live in
+//! [`graph::durability`](crate::graph::durability), which this module calls and
+//! the Python wheel's durable `KnowledgeGraph` calls too — the open ordering
+//! (including the unconditional recovery-on-open refusal) and the two halves of
+//! the checkpoint. Only the second order below belongs to `Session`, because it
+//! is a property of how a session publishes a commit.
+//!
 //! 1. **Open: recover → replay → wrap → open-for-append.** Replay must happen
 //!    *before* the backend is wrapped for capture, or the replay's own
 //!    `GraphWrite` calls land in the capture buffer and get logged a second
 //!    time. Replay is gated on the loaded graph's `checkpoint_lsn`, so frames
 //!    already folded into the `.kgl` are skipped rather than rolled back over
-//!    newer state.
+//!    newer state. ([`durability::open_log`](crate::graph::durability::open_log))
 //!
 //! 2. **Commit: append *then* publish.** [`Session::commit`] appends the
 //!    frame between the OCC check and the `Arc` swap, so a failed append
@@ -33,6 +40,9 @@
 //!    truncates the log. `next_lsn` deliberately keeps climbing across the
 //!    truncation: restarting it would let a stale pre-checkpoint frame carry
 //!    the same LSN as a fresh one, making the replay gate meaningless.
+//!    ([`durability::checkpoint_prologue`](crate::graph::durability::checkpoint_prologue)
+//!    and
+//!    [`checkpoint_epilogue`](crate::graph::durability::checkpoint_epilogue))
 //!
 //! ## Lock ordering
 //!
@@ -59,10 +69,10 @@ use std::sync::{Arc, Mutex};
 
 use super::transaction::Session;
 use crate::graph::dir_graph::DirGraph;
-use crate::graph::mutation::wal_replay::apply_frames;
-use crate::graph::storage::recording::{resolve_ops, wrap_for_durability};
+use crate::graph::durability;
+use crate::graph::storage::recording::resolve_ops;
 use crate::graph::storage::GraphRead;
-use crate::graph::wal::{recover, wal_path, DurabilityLevel, Wal, WalFrame};
+use crate::graph::wal::{DurabilityLevel, Wal, WalFrame};
 
 /// Session-scoped durability state. Held by the [`Session`] rather than the
 /// graph because it owns an open `File`; see the module docs for the lock
@@ -160,74 +170,25 @@ impl Session {
             ));
         }
 
-        let wpath = wal_path(Path::new(checkpoint_path));
-        // Read (do not truncate) whatever the last session left behind. Torn
-        // tails stop the scan; see `wal::read_frames`.
-        let frames = recover(&wpath).map_err(|e| {
-            format!(
-                "failed to read the write-ahead log at '{}': {e}",
-                wpath.display()
-            )
-        })?;
-        let checkpoint_lsn = graph.checkpoint_lsn;
-
-        if !level.logs() {
-            // Recovery-on-open is unconditional: a sidecar carrying frames the
-            // loaded checkpoint does not contain is unrecovered data, and
-            // opening `off` over it would ignore those commits and then destroy
-            // them at the first checkpoint. Frames at or below `checkpoint_lsn`
-            // are a stale prefix already folded into the graph (the harmless
-            // residue of a crash between the `.kgl` write and the log
-            // truncation) and are not grounds to refuse.
-            if unreplayed(&frames, checkpoint_lsn) {
-                return Err(format!(
-                    "the write-ahead log at '{}' holds commits this checkpoint does not \
-                     contain, and durability level 'off' would neither replay them nor \
-                     keep them — the next Session::save would truncate the log and the \
-                     commits would be gone. Open with level 'full' or 'normal' to replay \
-                     and continue the log, or move the sidecar aside first to \
-                     deliberately discard those commits.",
-                    wpath.display(),
-                ));
-            }
-            return Ok(Session::from_arc(graph));
-        }
-
-        if graph.graph.is_recording() {
-            return Err(
-                "this graph is already wrapped for durable capture, which means another \
-                 durable owner (a durable KnowledgeGraph, or another Session) holds it. \
-                 Two owners over one write-ahead log interleave their log-sequence \
-                 numbers and each checkpoint invalidates the other's replay gate, so the \
-                 second open is refused. Take a non-durable snapshot for reads, or hand \
-                 ownership over instead of duplicating it."
-                    .to_string(),
-            );
-        }
-
-        let sync = level
-            .sync_mode()
-            .expect("level.logs() is true, so sync_mode is Some");
-
         let mut graph = graph;
-        let dir = Arc::make_mut(&mut graph);
-        // Replay BEFORE wrapping: the replay's own writes must not enter the
-        // capture buffer, or the next commit would log them all over again.
-        let max_lsn = apply_frames(dir, &frames, checkpoint_lsn)?;
-        wrap_for_durability(dir);
+        // Everything from here to the open log is the shared orchestration
+        // (`graph::durability`): recover → replay → wrap → open-for-append, plus
+        // the unconditional recovery-on-open refusal that makes `off` over an
+        // unreplayed sidecar an error rather than silent data loss. The wheel's
+        // durable `KnowledgeGraph` performs the same sequence through the same
+        // function, so the two cannot drift.
+        let opened = durability::open_log(&mut graph, Path::new(checkpoint_path), level)
+            .map_err(|e| e.to_string())?;
 
-        let wal = Wal::open(wpath.clone(), sync).map_err(|e| {
-            format!(
-                "failed to open the write-ahead log at '{}': {e}",
-                wpath.display()
-            )
-        })?;
+        let Some((wal, next_lsn)) = opened else {
+            return Ok(Session::from_arc(graph));
+        };
 
         Ok(Session::with_durable(
             graph,
             DurableState {
                 wal,
-                next_lsn: max_lsn + 1,
+                next_lsn,
                 level,
                 diverged: false,
                 #[cfg(test)]
@@ -342,18 +303,11 @@ impl Session {
         let Some(ds) = slot.as_mut() else {
             return Ok(false);
         };
-        // Force frames that are still only in the page cache onto stable
-        // storage BEFORE the checkpoint that supersedes them. Under `Full`
-        // this is the no-op it looks like; under `Normal` it is what stops a
-        // crash in the write→truncate window from leaving a *prefix* of the
-        // log, whose replay would roll properties back over the newer
-        // checkpoint.
-        ds.wal.sync().map_err(|e| e.to_string())?;
-        // `next_lsn` is the LSN the *next* frame will carry, so the newest
-        // frame folded into this snapshot is `next_lsn - 1`. A session that has
-        // logged nothing leaves the stamp at 0 — replay everything, which is
-        // the ungated behaviour.
-        Arc::make_mut(graph).checkpoint_lsn = ds.next_lsn.saturating_sub(1);
+        // Flush-then-stamp, shared with every other owner of a log; see
+        // `durability::checkpoint_prologue` for why the flush is load-bearing
+        // under `Normal` and how the stamp is derived.
+        durability::checkpoint_prologue(&mut ds.wal, ds.next_lsn, Arc::make_mut(graph))
+            .map_err(|e| e.to_string())?;
         Ok(true)
     }
 
@@ -369,10 +323,8 @@ impl Session {
         let Some(ds) = slot.as_mut() else {
             return Ok(());
         };
-        if let Some(rg) = Arc::make_mut(graph).graph.recording_mut() {
-            let _ = rg.take_ops();
-        }
-        ds.wal.reset().map_err(|e| e.to_string())?;
+        durability::checkpoint_epilogue(&mut ds.wal, Arc::make_mut(graph))
+            .map_err(|e| e.to_string())?;
         // The checkpoint just folded in everything a direct write left
         // unlogged, so the log describes the graph again.
         ds.diverged = false;
@@ -445,12 +397,6 @@ impl Session {
     }
 }
 
-/// Whether `frames` hold anything the checkpoint at `checkpoint_lsn` has not
-/// already folded in.
-fn unreplayed(frames: &[WalFrame], checkpoint_lsn: u64) -> bool {
-    frames.iter().any(|f| f.lsn > checkpoint_lsn)
-}
-
 // ────────────────────────────────────────────────────────────────────
 // Tests
 // ────────────────────────────────────────────────────────────────────
@@ -461,6 +407,7 @@ mod tests {
     use crate::graph::session::execute::{execute_mut, execute_read, ExecuteOptions};
     use crate::graph::session::CommitOutcome;
     use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+    use crate::graph::wal::{recover, wal_path};
     use std::collections::HashMap;
 
     fn params() -> HashMap<String, crate::datatypes::Value> {

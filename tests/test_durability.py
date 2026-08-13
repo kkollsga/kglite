@@ -590,6 +590,68 @@ def test_non_durable_open_writes_no_wal(tmp_path):
     assert not (tmp_path / "app.kgl-wal").exists()
 
 
+# ── recovery-on-open is unconditional ────────────────────────────────
+#
+# Opening a path is a decision about *that path's data*, not only about how
+# future writes will be logged. A sidecar holding commits the checkpoint does
+# not contain is unrecovered data at every level, so `off` — which would
+# neither replay them nor keep them past the next `save()` — is refused rather
+# than silently handing back a graph that is missing committed writes.
+
+
+@pytest.mark.parametrize("level", [False, "off"])
+def test_off_refuses_to_open_over_an_unreplayed_log(tmp_path, level):
+    """The data-loss shape this refusal exists for: a crashed durable session
+    leaves committed frames in the sidecar, and opening `off` used to ignore
+    them — the first later `save()` then truncated the log and the commits were
+    gone, with no error anywhere.
+
+    The refusal must name the sidecar and both ways out, and the recovery route
+    it advertises must actually work (asserted below the refusal)."""
+    _crash_child(
+        tmp_path,
+        """
+        g = open_durable()
+        g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
+        """,
+        "memory",
+    )
+    assert (tmp_path / "app.kgl-wal").exists()
+    assert not (tmp_path / "app.kgl").exists(), "the child never checkpointed"
+
+    with pytest.raises(ValueError) as excinfo:
+        kglite.open(str(tmp_path / "app.kgl"), durable=level)
+    message = str(excinfo.value)
+    assert "app.kgl-wal" in message, "must name the sidecar that holds the commits"
+    assert "'full'" in message and "'normal'" in message, "must name the replaying levels"
+
+    # The advertised route back: open at a logging level and the commits return.
+    g = kglite.open(str(tmp_path / "app.kgl"), durable="full")
+    assert g.cypher("MATCH (p:Person) RETURN p.name AS n").scalar() == "Alice"
+
+
+@pytest.mark.parametrize("level", [False, "off"])
+def test_off_accepts_a_log_the_checkpoint_already_contains(tmp_path, level):
+    """The other direction, and what keeps the refusal non-vacuous: a sidecar
+    whose frames are all at or below the checkpoint's `checkpoint_lsn` is the
+    *harmless residue* of a crash between the `.kgl` write and the log
+    truncation. Nothing is unrecovered, so `off` must still open — a refusal
+    keyed on "the sidecar is non-empty" would strand those graphs."""
+    path = tmp_path / "app.kgl"
+    wal = tmp_path / "app.kgl-wal"
+
+    g = _open(path, "memory", durable="full")
+    g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
+    residue = wal.read_bytes()  # the log as it stood one instant before save()
+    g.save()  # folds 'Alice' in, stamps checkpoint_lsn, truncates the log
+    del g  # release the single-writer lease
+
+    wal.write_bytes(residue)  # crash between the .kgl write and the truncation
+
+    g = kglite.open(str(path), durable=level)
+    assert g.cypher("MATCH (p:Person) RETURN p.name AS n").scalar() == "Alice"
+
+
 # ── durability levels ────────────────────────────────────────────────
 #
 # ``durable="normal"`` logs every commit but skips the per-commit barrier.

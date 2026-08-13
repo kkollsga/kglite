@@ -428,6 +428,14 @@ pub mod api {
     /// feature. The in-process WAL mechanism (distinct from the checkpoint
     /// save in `io`). Lifted in roadmap Piece 4.
     pub mod durable {
+        /// Binding-agnostic durable-open + checkpoint orchestration: the
+        /// recover→replay→wrap→append ordering every owner of a log performs at
+        /// open (`open_log`, which also enforces the unconditional
+        /// recovery-on-open refusal), and the two halves of the four-step
+        /// checkpoint that bracket a binding's own save.
+        pub use crate::graph::durability::{
+            checkpoint_epilogue, checkpoint_prologue, open_log, DurableOpenError,
+        };
         pub use crate::graph::mutation::wal_replay::apply_frames;
         pub use crate::graph::storage::recording::{
             resolve_ops, wrap_for_durability, RecordingGraph,

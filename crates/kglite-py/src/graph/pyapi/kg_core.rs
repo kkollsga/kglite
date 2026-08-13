@@ -611,47 +611,24 @@ impl KnowledgeGraph {
         self.lifecycle.source_path = Some(std::path::PathBuf::from(&effective));
         let path: &str = &effective;
 
-        // Force any WAL frames that are still only in the OS page cache onto
-        // stable storage BEFORE the checkpoint that supersedes them.
-        //
-        // **This is load-bearing for `durable="normal"`, not belt-and-braces.**
-        // The checkpoint below truncates the log, and replay folds whatever
-        // frames survive into net per-entity state. Under `full` every frame
-        // is already on disk at this point, so a crash in the write→truncate
-        // window leaves the *complete* frame set and replaying it reproduces
-        // exactly the checkpointed state — harmless, as the comment further
-        // down says. Under `normal` the tail may still be in the page cache,
-        // so the same crash can leave a *prefix*; folding that prefix over a
-        // newer checkpoint would roll properties back to their values as of
-        // an earlier commit, destroying data that was already durably saved.
-        // Syncing here restores the `full`-mode invariant — at checkpoint
-        // time the on-disk log is complete — and costs one barrier per
-        // save(), against a full serialize-and-fsync that is already running.
+        // Checkpoint steps 1–2, shared with every other owner of a log
+        // (`kglite::api::durable::checkpoint_prologue`): flush frames that are
+        // still only in the OS page cache — load-bearing under
+        // `durable="normal"`, where a crash in the write→truncate window would
+        // otherwise leave a *prefix* whose replay rolls properties back over
+        // this newer checkpoint — and then stamp how far this checkpoint has
+        // consumed the log, so a reopen can *gate* replay instead of trusting
+        // the log's extent. Any ops still sitting in the capture buffer are
+        // folded in by the serialize below and then dropped un-logged, so they
+        // consume no LSN and the stamp's arithmetic stays exact.
         if let Some(ds) = self.lifecycle.durable.as_mut() {
-            ds.wal
-                .sync()
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-        }
-
-        // Stamp how far this checkpoint has consumed the log, so a reopen can
-        // *gate* replay instead of trusting the log's extent.
-        //
-        // The barrier above stops a stale prefix from arising under a clean
-        // crash; it cannot make replay robust to one that arises any other way
-        // (an operator restoring an old sidecar from backup, a copied graph
-        // directory, a filesystem that resurrects a truncated file). The gate
-        // is anchored here, in the checkpoint, because the checkpoint is the
-        // only artifact that knows which frames it already contains.
-        //
-        // `next_lsn` is the LSN the *next* frame will carry, so the newest
-        // frame folded into this snapshot is `next_lsn - 1`; a session that has
-        // logged nothing leaves the stamp at 0 (replay everything, unchanged
-        // behaviour). Any ops still sitting in the capture buffer are folded in
-        // by the serialize below and then dropped un-logged, so they consume no
-        // LSN and the arithmetic stays exact.
-        if let Some(ds) = self.lifecycle.durable.as_ref() {
-            let checkpoint_lsn = ds.next_lsn.saturating_sub(1);
-            get_graph_mut(&mut self.inner).checkpoint_lsn = checkpoint_lsn;
+            let next_lsn = ds.next_lsn;
+            kglite_core::api::durable::checkpoint_prologue(
+                &mut ds.wal,
+                next_lsn,
+                get_graph_mut(&mut self.inner),
+            )
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
         }
 
         // Mode-aware durable save lives in core (`save_graph_with`): disk dir
@@ -664,29 +641,24 @@ impl KnowledgeGraph {
         py.detach(move || io::save_graph_with(inner, path, fsync))
             .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
 
-        // Durable checkpoint: the .kgl now holds the full current state, so
-        // discard the capture buffer (those ops are folded in) and truncate
-        // the WAL. Order matters — the .kgl write above succeeded before we
-        // truncate, and replay is idempotent, so a crash between the two
-        // only costs a harmless re-apply on the next open.
-        if self.lifecycle.durable.is_some() {
-            if let kglite_core::api::storage::GraphBackend::Recording(rg) =
-                &mut Arc::make_mut(&mut self.inner).graph
-            {
-                let _ = rg.take_ops();
-            }
-            if let Some(ds) = self.lifecycle.durable.as_mut() {
-                ds.wal
-                    .reset()
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-                // `next_lsn` deliberately keeps climbing across the truncation.
-                // Restarting it at 1 would make every post-checkpoint frame
-                // reuse LSNs a pre-checkpoint frame already spent, so the
-                // checkpoint stamp above could never distinguish a stale frame
-                // from a fresh one — and, since the stamp is taken as
-                // `next_lsn - 1`, the very next checkpoint would record 0 and
-                // the replay gate would be vacuous.
-            }
+        // Checkpoint step 4 (`kglite::api::durable::checkpoint_epilogue`): the
+        // .kgl now holds the full current state, so discard the capture buffer
+        // (those ops are folded in) and truncate the WAL. Order matters — the
+        // .kgl write above succeeded before we truncate, and replay is
+        // idempotent, so a crash between the two only costs a harmless re-apply
+        // on the next open. `next_lsn` is deliberately left climbing across the
+        // truncation: restarting it at 1 would make every post-checkpoint frame
+        // reuse an LSN a pre-checkpoint frame already spent, and the stamp above
+        // could never tell a stale frame from a fresh one.
+        if let Some(ds) = self.lifecycle.durable.as_mut() {
+            // `Arc::make_mut` rather than `get_graph_mut`: draining a capture
+            // buffer the save already folded in changes nothing a reader could
+            // observe, so it does not warrant a version bump.
+            kglite_core::api::durable::checkpoint_epilogue(
+                &mut ds.wal,
+                Arc::make_mut(&mut self.inner),
+            )
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
         }
         Ok(())
     }

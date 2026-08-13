@@ -336,19 +336,6 @@ impl KnowledgeGraph {
         self.embedder.as_ref()
     }
 
-    /// Wrap a `DirGraph`'s backend in the `Recording` write-capture layer
-    /// so mutations are buffered for the WAL. Idempotent. Used by
-    /// `kglite.open(..., durable=True)` after load / create.
-    pub(crate) fn wrap_backend_for_durability(dir: &mut DirGraph) {
-        use kglite_core::api::durable::RecordingGraph;
-        use kglite_core::api::storage::GraphBackend;
-        if matches!(dir.graph, GraphBackend::Recording(_)) {
-            return;
-        }
-        let inner = std::mem::replace(&mut dir.graph, GraphBackend::new());
-        dir.graph = GraphBackend::Recording(Box::new(RecordingGraph::new(inner)));
-    }
-
     /// Post-mutation bookkeeping for a Cypher write: make it durable, then
     /// run the pyapi-specific auto-vacuum and stats housekeeping.
     ///

@@ -90,6 +90,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in ways that did not exist when a binding was written, and such an outcome
   must reach the binding's error path rather than falling through to success.
 
+### Fixed
+
+- **`kglite.open(path, durable=False)` no longer silently discards committed
+  writes still sitting in the WAL sidecar.** Recovery used to be conditional on
+  the level being asked for, so opening a crashed graph at `"off"` (or `False`)
+  ignored every frame the checkpoint did not already contain — the graph came
+  back missing writes that had been acknowledged, with no error, and the first
+  later `save()` truncated the log and destroyed them for good. Recovery on open
+  is now unconditional: opening a path is a decision about that path's *data*,
+  not only about how future writes will be logged. An `"off"` open over a
+  sidecar holding unrecovered commits raises `ValueError` naming the sidecar and
+  both ways out (reopen at `"full"`/`"normal"` to replay them, or move the
+  sidecar aside to discard them deliberately). Frames the checkpoint already
+  contains — the harmless residue of a crash between a `save()` and its
+  truncation — are not grounds to refuse and still open at every level. The
+  wheel and the engine's `Session` now perform the same open sequence through
+  one shared function (`kglite::api::durable::open_log`), so the two cannot
+  disagree about what a sidecar means.
+
 ## [0.15.13] - 2026-08-12
 
 ### Changed
