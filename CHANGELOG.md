@@ -35,6 +35,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes), on a `--readonly` server, and for disk-mode graphs — the same
   reasons `--save-on-exit` refuses them. A save that fails is reported as a
   failure to the client, never a silent success.
+- **`kglite-bolt-server --checkpoint-interval <SECS>` checkpoints the served
+  graph on a timer** (env mirror: `KGLITE_BOLT_CHECKPOINT_INTERVAL=<secs>`),
+  bounding what a crash can lose to the writes since the last tick rather than
+  to the whole run. A background task saves the graph every SECS seconds and
+  logs the version it wrote; a tick whose graph is unchanged since the last
+  checkpoint — by this task *or* by `CALL db.checkpoint()`, which share one
+  recorded version — writes nothing, so an idle server does not rewrite its
+  file. The first checkpoint of a process always writes, because the file on
+  disk may predate the process. A failed tick is logged as an error and the
+  server keeps serving: degraded durability is worth saying loudly, not worth
+  disconnecting every client over. The interval is validated at startup (`0`
+  and anything that is not a whole number of seconds are refused, rather than
+  starting a server that silently never checkpoints), refused for `--readonly`
+  and for disk-mode graphs exactly as `--save-on-exit` is, and combinable with
+  it — the interval bounds the window while running, the exit save catches the
+  tail, and periodic checkpointing is stopped before the exit save runs.
 - **`SIGTERM` now triggers the same graceful shutdown as `SIGINT` in
   `kglite-bolt-server`.** Only Ctrl-C was wired, so `systemctl stop`,
   `docker stop` and a Kubernetes pod shutdown terminated the process through

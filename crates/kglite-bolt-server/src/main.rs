@@ -18,7 +18,9 @@ use kglite::api::io::OpenDisposition;
 use kglite::api::session::CsvImportPolicy;
 use kglite::api::storage::StorageMode;
 
-use crate::backend::{KgliteBackend, ServerIdentity};
+use crate::backend::{
+    checkpoint_if_changed, CheckpointOutcome, CheckpointState, KgliteBackend, ServerIdentity,
+};
 use crate::startup::start_graph;
 
 mod auth;
@@ -94,6 +96,33 @@ struct Cli {
     /// Also settable as `KGLITE_BOLT_SAVE_ON_EXIT=1`.
     #[arg(long, default_value_t = false, conflicts_with = "readonly")]
     save_on_exit: bool,
+
+    /// Checkpoint the served graph back to `--graph` every SECS seconds.
+    ///
+    /// Off by default, for the same reason `--save-on-exit` is: writes are
+    /// process-local until something checkpoints them, and periodically
+    /// overwriting the operator's file is a decision they should make. With
+    /// the flag, a background task saves the graph (fsync'd, atomic
+    /// temp+rename) on each tick and logs the version it wrote; a tick whose
+    /// graph is unchanged since the last checkpoint — by this task or by
+    /// `CALL db.checkpoint()` — writes nothing.
+    ///
+    /// Bounds the loss window rather than removing it: a crash loses at most
+    /// the writes since the last tick. A failed checkpoint is logged as an
+    /// error and the server keeps serving — degraded durability is worth
+    /// saying loudly, not worth dropping every connected client over.
+    ///
+    /// Refused for `--readonly` and for disk-mode graphs, exactly as
+    /// `--save-on-exit` is, and combinable with it (the interval bounds the
+    /// window while running; the exit save catches the tail). Also settable as
+    /// `KGLITE_BOLT_CHECKPOINT_INTERVAL=<secs>`.
+    #[arg(
+        long,
+        value_name = "SECS",
+        value_parser = parse_checkpoint_interval,
+        conflicts_with = "readonly"
+    )]
+    checkpoint_interval: Option<Duration>,
 
     /// Report a Neo4j-compatible product identifier in the Bolt handshake.
     ///
@@ -182,6 +211,9 @@ const NEO4J_COMPAT_ENV: &str = "KGLITE_BOLT_NEO4J_COMPAT";
 /// Environment variable mirroring `--save-on-exit`.
 const SAVE_ON_EXIT_ENV: &str = "KGLITE_BOLT_SAVE_ON_EXIT";
 
+/// Environment variable mirroring `--checkpoint-interval`.
+const CHECKPOINT_INTERVAL_ENV: &str = "KGLITE_BOLT_CHECKPOINT_INTERVAL";
+
 /// Read `name` as a boolean, accepting the spellings operators actually write.
 ///
 /// Parsed here rather than through clap's `env` support because clap would
@@ -207,35 +239,140 @@ fn env_flag(name: &str) -> Option<bool> {
     }
 }
 
-/// Refuse `--save-on-exit` in the configurations where an exit checkpoint is
-/// either meaningless or harmful.
+/// Parse a checkpoint interval in whole seconds.
 ///
-/// `mode` is `None` before the graph is opened (the readonly check needs
-/// nothing else) and `Some(live_mode)` afterwards. clap's
+/// Shared by clap's `value_parser` and the environment mirror so the two
+/// spellings cannot accept different things. Both rejections are startup
+/// errors rather than a warn-and-ignore (the treatment `env_flag` gives a
+/// malformed *boolean*): an operator who asked for periodic checkpoints and
+/// mistyped the number would otherwise get a server that silently never
+/// checkpoints, which is the exact failure the flag exists to prevent.
+///
+/// `0` is refused rather than treated as "disabled": tokio's `interval(0)`
+/// panics, and a zero-second interval reads as "checkpoint constantly", which
+/// would pin the session lock and stall every writer. Omitting the flag is how
+/// you disable it.
+fn parse_checkpoint_interval(raw: &str) -> Result<Duration, String> {
+    let trimmed = raw.trim();
+    let secs: u64 = trimmed.parse().map_err(|_| {
+        format!(
+            "invalid checkpoint interval {trimmed:?}: expected a whole number of \
+             seconds (for example 300)"
+        )
+    })?;
+    if secs == 0 {
+        return Err(
+            "invalid checkpoint interval 0: the interval must be at least 1 second — \
+             omit --checkpoint-interval (or KGLITE_BOLT_CHECKPOINT_INTERVAL) to \
+             disable periodic checkpoints"
+                .to_string(),
+        );
+    }
+    Ok(Duration::from_secs(secs))
+}
+
+/// Read the checkpoint interval from the environment, if set.
+///
+/// An empty value is "unset" (a Compose file's `KGLITE_BOLT_CHECKPOINT_INTERVAL=`
+/// with nothing after it); anything else must parse, or startup fails naming
+/// the variable.
+fn env_checkpoint_interval() -> Result<Option<Duration>> {
+    let Ok(raw) = std::env::var(CHECKPOINT_INTERVAL_ENV) else {
+        return Ok(None);
+    };
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    parse_checkpoint_interval(&raw)
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("{CHECKPOINT_INTERVAL_ENV}: {e}"))
+}
+
+/// Refuse a checkpointing feature in the configurations where writing the
+/// served graph back is either meaningless or harmful.
+///
+/// `flag`/`env_var` name the spelling the operator used, so the message points
+/// at what they typed. `mode` is `None` before the graph is opened (the
+/// readonly check needs nothing else) and `Some(live_mode)` afterwards. clap's
 /// `conflicts_with = "readonly"` already covers flag-versus-flag; the readonly
-/// arm here is what catches the *environment* spelling, which clap cannot see.
+/// arm here is what catches the *environment* spellings, which clap cannot see.
 ///
 /// Disk graphs are excluded deliberately: a disk save is an O(E) compaction
 /// that publishes a NEW generation, and nothing prunes the old ones — a server
 /// that checkpoints a disk graph grows the directory without bound. Mirrors
 /// the wheel's durable-mode restriction to the portable backends.
-fn ensure_save_on_exit_supported(readonly: bool, mode: Option<StorageMode>) -> Result<()> {
+fn ensure_checkpointing_supported(
+    flag: &str,
+    env_var: &str,
+    readonly: bool,
+    mode: Option<StorageMode>,
+) -> Result<()> {
     if readonly {
         anyhow::bail!(
-            "--save-on-exit (or KGLITE_BOLT_SAVE_ON_EXIT) cannot be combined with \
-             --readonly: a read-only server never changes the graph, so there is \
-             nothing to write back at exit"
+            "{flag} (or {env_var}) cannot be combined with --readonly: a read-only \
+             server never changes the graph, so there is nothing to write back"
         );
     }
     if mode == Some(StorageMode::Disk) {
         anyhow::bail!(
-            "--save-on-exit is not supported for disk-mode graphs: every disk save \
-             publishes a new on-disk generation and nothing prunes the old ones, so \
-             repeated checkpoints grow the directory without bound. Serve a `.kgl` \
-             graph (memory or mapped) if you want an exit checkpoint"
+            "{flag} is not supported for disk-mode graphs: every disk save publishes \
+             a new on-disk generation and nothing prunes the old ones, so repeated \
+             checkpoints grow the directory without bound. Serve a `.kgl` graph \
+             (memory or mapped) if you want checkpoints"
         );
     }
     Ok(())
+}
+
+/// When this server writes the served graph back: at shutdown, on a timer,
+/// both, or never.
+///
+/// Resolved once from the flags and their environment mirrors, so the two
+/// spellings of each setting are combined in exactly one place and the
+/// refusals below cannot end up applying to one spelling and not the other.
+#[derive(Clone, Copy, Debug)]
+struct Durability {
+    save_on_exit: bool,
+    checkpoint_interval: Option<Duration>,
+}
+
+impl Durability {
+    /// Flag OR environment for each setting, the flag winning when both are
+    /// present — the `--neo4j-compat` precedent. A malformed interval is a
+    /// startup error (see [`parse_checkpoint_interval`]), never a silently
+    /// disabled checkpoint.
+    ///
+    /// The `--readonly` refusals run here, before the graph is touched, so an
+    /// impossible configuration fails fast; the storage-mode refusals need the
+    /// opened graph, so [`Self::ensure_supported`] is called again with it.
+    fn resolve(cli: &Cli) -> Result<Self> {
+        let resolved = Self {
+            save_on_exit: cli.save_on_exit || env_flag(SAVE_ON_EXIT_ENV).unwrap_or(false),
+            checkpoint_interval: match cli.checkpoint_interval {
+                Some(interval) => Some(interval),
+                None => env_checkpoint_interval()?,
+            },
+        };
+        resolved.ensure_supported(cli.readonly, None)?;
+        Ok(resolved)
+    }
+
+    /// Refuse whichever features are enabled in a configuration that cannot
+    /// serve them. `mode` is `None` before the graph is opened.
+    fn ensure_supported(&self, readonly: bool, mode: Option<StorageMode>) -> Result<()> {
+        if self.save_on_exit {
+            ensure_checkpointing_supported("--save-on-exit", SAVE_ON_EXIT_ENV, readonly, mode)?;
+        }
+        if self.checkpoint_interval.is_some() {
+            ensure_checkpointing_supported(
+                "--checkpoint-interval",
+                CHECKPOINT_INTERVAL_ENV,
+                readonly,
+                mode,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 /// Write the served graph back to `path`, fsync'd.
@@ -255,6 +392,84 @@ fn run_exit_save(session: &kglite::api::session::Session, path: &Path) -> Result
         "save-on-exit complete"
     );
     Ok(())
+}
+
+/// Spawn the `--checkpoint-interval` task: write the served graph back every
+/// `interval`, skipping ticks whose graph has not changed.
+///
+/// Shares the backend's checkpoint state rather than counting its own saves,
+/// so a `CALL db.checkpoint()` at version N makes the next tick a skip and
+/// vice versa — one recorded version, two routes to it.
+///
+/// A failing tick is logged at error and the loop continues. Durability that
+/// has degraded (a full disk, a path that went read-only) is worth saying
+/// loudly every interval; it is not worth tearing down a serving process and
+/// every connected client over, which would turn a recoverable disk problem
+/// into an outage *and* discard the graph the checkpoint failed to save.
+fn spawn_checkpoint_task(
+    session: Arc<kglite::api::session::Session>,
+    path: PathBuf,
+    state: CheckpointState,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        // Delay, not tokio's default Burst. `Session::save` holds the session
+        // lock for the whole write, so a save that outruns the interval is
+        // precisely the case Burst handles worst: it answers one slow
+        // checkpoint by firing every missed tick back-to-back, stalling
+        // writers again for each. Delay re-bases the schedule on when the slow
+        // tick finished, so consecutive checkpoints stay at least `interval`
+        // apart no matter how long a save takes.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // `interval` completes its first tick immediately; consume it so the
+        // first checkpoint lands one interval in. Checkpointing at startup
+        // would rewrite the operator's file before a single client had
+        // connected — a write nobody asked for and nothing to save.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            match checkpoint_if_changed(&session, &path, &state) {
+                Ok(CheckpointOutcome::Written(version)) => tracing::info!(
+                    path = %path.display(),
+                    graph_version = version,
+                    "checkpoint-interval: graph written"
+                ),
+                // Debug, not info: on an idle server every tick skips, and an
+                // hourly reminder that nothing changed is not worth a default
+                // log line. The writes are what an operator needs to see.
+                Ok(CheckpointOutcome::Skipped(version)) => tracing::debug!(
+                    graph_version = version,
+                    "checkpoint-interval: skipped (graph unchanged since the last checkpoint)"
+                ),
+                Err(e) => tracing::error!(
+                    path = %path.display(),
+                    error = %e,
+                    "checkpoint-interval: save FAILED — the server keeps serving, but \
+                     writes since the last successful checkpoint are not on disk"
+                ),
+            }
+        }
+    })
+}
+
+/// Read `--tls-cert` + `--tls-key` into a boltr TLS configuration, so drivers
+/// can connect via `bolt+s://` or `neo4j+s://`.
+///
+/// The cert/key are read once at startup; reloading requires a restart. For HA
+/// setups the typical pattern is a reverse proxy (nginx, Caddy) terminating
+/// TLS instead.
+fn read_tls_config(cert_path: &Path, key_path: &Path) -> Result<boltr::server::TlsConfig> {
+    // rustls 0.23+ requires a process-wide crypto provider. Install `ring`
+    // once at startup; ignore the result — duplicate installation is benign
+    // (only the first wins).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let cert_pem = std::fs::read(cert_path)
+        .with_context(|| format!("reading TLS cert {}", cert_path.display()))?;
+    let key_pem = std::fs::read(key_path)
+        .with_context(|| format!("reading TLS key {}", key_path.display()))?;
+    boltr::server::TlsConfig::from_pem(&cert_pem, &key_pem)
+        .map_err(|e| anyhow::anyhow!("invalid TLS cert/key: {}", e))
 }
 
 /// Resolve when the supervisor asks this process to stop.
@@ -342,13 +557,7 @@ async fn serve() -> Result<()> {
         .map(StorageMode::parse)
         .transpose()
         .map_err(|e| anyhow::anyhow!(e))?;
-    // Flag OR environment, like `--neo4j-compat`. The readonly refusal runs
-    // before the graph is touched so an impossible configuration fails fast;
-    // the storage-mode refusal needs the opened graph and runs below.
-    let save_on_exit = cli.save_on_exit || env_flag(SAVE_ON_EXIT_ENV).unwrap_or(false);
-    if save_on_exit {
-        ensure_save_on_exit_supported(cli.readonly, None)?;
-    }
+    let durability = Durability::resolve(&cli)?;
     let started = start_graph(&cli.graph, requested_mode, cli.readonly, &mut |_| {})?;
     // Bind the lease for the whole of `serve`. `_writer_lease` rather than
     // `_`: a bare `_` drops it here, releasing write ownership before the
@@ -369,12 +578,13 @@ async fn serve() -> Result<()> {
         converted_from = started.converted_from.map(StorageMode::as_str),
         "graph ready; constructing Bolt server"
     );
-    if save_on_exit {
-        ensure_save_on_exit_supported(
-            cli.readonly,
-            Some(kglite::api::storage::live_storage_mode(&dir_arc)),
-        )?;
-    }
+    // The storage-mode half of the refusals: only now is the *live* mode known
+    // (`--storage` may have converted, and a graph opened without the flag
+    // reports whatever it was saved in).
+    durability.ensure_supported(
+        cli.readonly,
+        Some(kglite::api::storage::live_storage_mode(&dir_arc)),
+    )?;
 
     // The backend stores the DirGraph behind its own Arc<Mutex<>> for
     // commit-swap. Unwrap the Arc — if no
@@ -421,6 +631,10 @@ async fn serve() -> Result<()> {
     // save cannot race another process taking write ownership.
     let exit_session = backend.session_handle();
     let served_path = backend.graph_path().to_path_buf();
+    // Cloned out for the same reason: the periodic task outlives the move of
+    // the backend into the server, and must record its saves in the backend's
+    // own skip-state so the verb and the task agree on what is already on disk.
+    let checkpoint_state = backend.checkpoint_state();
 
     let addr = SocketAddr::new(cli.bind, cli.port);
 
@@ -435,22 +649,8 @@ async fn serve() -> Result<()> {
         builder = builder.idle_timeout(Duration::from_secs(secs));
     }
 
-    // When --tls-cert + --tls-key are set, wrap the listener in TLS so drivers can connect via bolt+s://
-    // or neo4j+s://. The cert/key are read once at startup; reload
-    // requires a restart. For HA setups the typical pattern is a
-    // reverse proxy (nginx, Caddy) terminating TLS instead.
     if let (Some(cert_path), Some(key_path)) = (cli.tls_cert.as_ref(), cli.tls_key.as_ref()) {
-        // rustls 0.23+ requires a process-wide crypto provider.
-        // Install `ring` once at startup; ignore the result —
-        // duplicate installation is benign (only the first wins).
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let cert_pem = std::fs::read(cert_path)
-            .with_context(|| format!("reading TLS cert {}", cert_path.display()))?;
-        let key_pem = std::fs::read(key_path)
-            .with_context(|| format!("reading TLS key {}", key_path.display()))?;
-        let tls_config = boltr::server::TlsConfig::from_pem(&cert_pem, &key_pem)
-            .map_err(|e| anyhow::anyhow!("invalid TLS cert/key: {}", e))?;
-        builder = builder.tls(tls_config);
+        builder = builder.tls(read_tls_config(cert_path, key_path)?);
         tracing::info!(
             cert = %cert_path.display(),
             key = %key_path.display(),
@@ -475,20 +675,51 @@ async fn serve() -> Result<()> {
     tracing::info!(
         %addr,
         readonly = cli.readonly,
-        save_on_exit,
+        save_on_exit = durability.save_on_exit,
+        checkpoint_interval_secs = durability.checkpoint_interval.map(|d| d.as_secs()),
         "Bolt server starting"
     );
+    // Armed before the accept loop and stopped after it, the boltr idle-reaper
+    // shape: a task that only makes sense while the server is serving is owned
+    // by the same scope that serves.
+    let checkpoint_task = durability.checkpoint_interval.map(|interval| {
+        tracing::info!(
+            interval_secs = interval.as_secs(),
+            path = %served_path.display(),
+            "periodic checkpointing enabled"
+        );
+        spawn_checkpoint_task(
+            Arc::clone(&exit_session),
+            served_path.clone(),
+            checkpoint_state,
+            interval,
+        )
+    });
+
     let serve_result = builder
         .serve(addr)
         .await
         .map_err(|e| anyhow::anyhow!("BoltServer::serve failed: {}", e));
 
     tracing::info!("Bolt server stopped");
+    // Stop periodic checkpointing BEFORE the exit save, and wait for the task
+    // to actually be gone. `abort()` alone only *requests* cancellation: a
+    // task in the middle of a save is running synchronous code and cannot be
+    // cancelled until its next await point, so without the join a tick's save
+    // could still be in flight — or, worse, land after — the exit save.
+    // Awaiting the aborted handle resolves once the task has stopped, which
+    // makes the exit save the last write to the file by construction. (The
+    // join returns a cancellation `JoinError`; that is the expected result.)
+    if let Some(task) = checkpoint_task {
+        task.abort();
+        let _ = task.await;
+        tracing::info!("checkpoint-interval: stopped");
+    }
     // Attempted whether or not `serve` returned an error: an operator who
     // asked for an exit checkpoint wants one on the failure path too. Both
     // results are reported; a failed save exits non-zero rather than being
     // logged and swallowed.
-    let save_result = if save_on_exit {
+    let save_result = if durability.save_on_exit {
         run_exit_save(&exit_session, &served_path)
             .inspect_err(|e| tracing::error!(error = %format!("{e:#}"), "save-on-exit FAILED"))
     } else {
@@ -503,34 +734,171 @@ async fn serve() -> Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn save_on_exit_is_refused_for_a_readonly_server() {
-        let error = ensure_save_on_exit_supported(true, None)
-            .expect_err("a read-only server has nothing to save");
-        let message = format!("{error:#}");
-        assert!(
-            message.contains("--readonly") && message.contains("--save-on-exit"),
-            "the refusal must name both flags: {message}"
-        );
+    /// A unique scratch directory for a test that writes a real `.kgl`.
+    /// Process id + nanosecond clock so parallel test threads (and parallel
+    /// `cargo test` invocations) cannot collide.
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("kglite-bolt-{tag}-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
     }
 
+    /// Both checkpointing features refuse the same two configurations, and the
+    /// refusal names the spelling the operator actually used.
     #[test]
-    fn save_on_exit_is_refused_for_a_disk_graph() {
-        let error = ensure_save_on_exit_supported(false, Some(StorageMode::Disk))
-            .expect_err("disk-mode exit saves grow the directory without bound");
-        let message = format!("{error:#}");
-        assert!(
-            message.contains("disk-mode") && message.contains("generation"),
-            "the refusal must carry the reason, not just the verdict: {message}"
-        );
-    }
-
-    #[test]
-    fn save_on_exit_is_allowed_for_the_portable_modes() {
-        for mode in [StorageMode::Memory, StorageMode::Mapped] {
-            ensure_save_on_exit_supported(false, Some(mode))
-                .unwrap_or_else(|e| panic!("{} must support an exit save: {e:#}", mode.as_str()));
+    fn checkpointing_is_refused_for_a_readonly_server() {
+        for (flag, env) in [
+            ("--save-on-exit", SAVE_ON_EXIT_ENV),
+            ("--checkpoint-interval", CHECKPOINT_INTERVAL_ENV),
+        ] {
+            let error = ensure_checkpointing_supported(flag, env, true, None)
+                .expect_err("a read-only server has nothing to save");
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("--readonly") && message.contains(flag) && message.contains(env),
+                "the refusal must name the flag, its env mirror and --readonly: {message}"
+            );
         }
+    }
+
+    #[test]
+    fn checkpointing_is_refused_for_a_disk_graph() {
+        for (flag, env) in [
+            ("--save-on-exit", SAVE_ON_EXIT_ENV),
+            ("--checkpoint-interval", CHECKPOINT_INTERVAL_ENV),
+        ] {
+            let error = ensure_checkpointing_supported(flag, env, false, Some(StorageMode::Disk))
+                .expect_err("disk-mode checkpoints grow the directory without bound");
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("disk-mode") && message.contains("generation"),
+                "the refusal must carry the reason, not just the verdict: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn checkpointing_is_allowed_for_the_portable_modes() {
+        for mode in [StorageMode::Memory, StorageMode::Mapped] {
+            ensure_checkpointing_supported("--save-on-exit", SAVE_ON_EXIT_ENV, false, Some(mode))
+                .unwrap_or_else(|e| panic!("{} must support an exit save: {e:#}", mode.as_str()));
+            ensure_checkpointing_supported(
+                "--checkpoint-interval",
+                CHECKPOINT_INTERVAL_ENV,
+                false,
+                Some(mode),
+            )
+            .unwrap_or_else(|e| {
+                panic!("{} must support periodic checkpoints: {e:#}", mode.as_str())
+            });
+        }
+    }
+
+    #[test]
+    fn checkpoint_interval_accepts_whole_seconds() {
+        assert_eq!(
+            parse_checkpoint_interval("300").expect("a plain integer is the documented spelling"),
+            Duration::from_secs(300)
+        );
+        // The environment hands over whatever the unit file wrote, whitespace
+        // and all.
+        assert_eq!(
+            parse_checkpoint_interval(" 1 \n").expect("surrounding whitespace is not a typo"),
+            Duration::from_secs(1)
+        );
+    }
+
+    /// Zero and junk are startup errors, not a warn-and-ignore: a server that
+    /// silently never checkpoints is the failure the flag exists to prevent.
+    #[test]
+    fn checkpoint_interval_rejects_zero_and_junk() {
+        let zero = parse_checkpoint_interval("0").expect_err("0 would checkpoint continuously");
+        assert!(
+            zero.contains("at least 1 second") && zero.contains("--checkpoint-interval"),
+            "the refusal must say what to write instead: {zero}"
+        );
+        for junk in ["", "abc", "5s", "1.5", "-1", "300 seconds"] {
+            let outcome = parse_checkpoint_interval(junk);
+            assert!(
+                outcome.is_err(),
+                "{junk:?} must be rejected, not guessed at — got {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_interval_junk_reports_what_was_typed() {
+        let error = parse_checkpoint_interval("5s").expect_err("units are not supported");
+        assert!(
+            error.contains("\"5s\"") && error.contains("whole number of seconds"),
+            "the error must quote the value and name the accepted form: {error}"
+        );
+    }
+
+    /// The first checkpoint of a process writes even though the graph has not
+    /// changed since it was loaded — the on-disk file may predate the process,
+    /// so there is no version comparison worth trusting yet. Mutation
+    /// evidence: seeding the state with `Some(session.version())` (the shape a
+    /// "skip the first tick too" implementation would have) turns the first
+    /// call into `Skipped` and fails this test's first assertion.
+    #[test]
+    fn first_checkpoint_writes_then_unchanged_ones_skip() {
+        let dir = scratch_dir("first-tick");
+        let path = dir.join("served.kgl");
+
+        let graph = kglite::api::storage::new_dir_graph_in_mode(StorageMode::Memory, None)
+            .expect("memory graph");
+        let session = kglite::api::session::Session::new(graph);
+        let state: CheckpointState = Arc::new(std::sync::Mutex::new(None));
+
+        let first = checkpoint_if_changed(&session, &path, &state).expect("first checkpoint");
+        assert_eq!(
+            first,
+            CheckpointOutcome::Written(session.version()),
+            "the first checkpoint of a process must write whatever the file holds"
+        );
+        assert!(path.exists(), "a Written outcome must produce the file");
+
+        let second = checkpoint_if_changed(&session, &path, &state).expect("second checkpoint");
+        assert_eq!(
+            second,
+            CheckpointOutcome::Skipped(session.version()),
+            "an unchanged graph must not be rewritten"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A failed checkpoint leaves the recorded version untouched, so the next
+    /// one still writes rather than skipping work that never reached disk.
+    #[test]
+    fn a_failed_checkpoint_does_not_record_a_version() {
+        let dir = scratch_dir("failed-tick");
+        let unwritable = dir.join("no-such-directory").join("served.kgl");
+
+        let graph = kglite::api::storage::new_dir_graph_in_mode(StorageMode::Memory, None)
+            .expect("memory graph");
+        let session = kglite::api::session::Session::new(graph);
+        let state: CheckpointState = Arc::new(std::sync::Mutex::new(None));
+
+        checkpoint_if_changed(&session, &unwritable, &state)
+            .expect_err("a save into a missing directory must be reported");
+        assert_eq!(
+            *state.lock().expect("uncontended"),
+            None,
+            "a failed checkpoint must not record its version"
+        );
+
+        let retry = checkpoint_if_changed(&session, &dir.join("served.kgl"), &state)
+            .expect("the retry writes");
+        assert!(matches!(retry, CheckpointOutcome::Written(_)));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The exit save writes a file a later open can read back, and reports a
@@ -539,15 +907,7 @@ mod tests {
     /// `Ok(())` and fails the second half of this test.
     #[test]
     fn exit_save_writes_the_graph_and_reports_failure() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "kglite-bolt-exit-save-{}-{nonce}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let dir = scratch_dir("exit-save");
         let path = dir.join("served.kgl");
 
         let graph = kglite::api::storage::new_dir_graph_in_mode(StorageMode::Memory, None)

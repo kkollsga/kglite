@@ -85,6 +85,9 @@ Options:
   --save-on-exit               Save the served graph back to --graph on SIGINT/SIGTERM
                                (also KGLITE_BOLT_SAVE_ON_EXIT=1; refused with
                                --readonly and for disk-mode graphs)
+  --checkpoint-interval <SECS> Save the served graph back to --graph every SECS
+                               (also KGLITE_BOLT_CHECKPOINT_INTERVAL=<secs>;
+                               unchanged graphs are skipped; same refusals)
   --neo4j-compat               Report a Neo4j-compatible agent in the handshake
   --auth <USER:PASS>           Basic auth credentials
   --idle-timeout <SECS>        Per-session idle timeout

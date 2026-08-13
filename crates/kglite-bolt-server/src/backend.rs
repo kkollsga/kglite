@@ -150,14 +150,21 @@ pub struct KgliteBackend {
     /// Server-wide `--readonly` flag. Rejects begin_transaction and
     /// auto-commit mutations.
     readonly: bool,
-    /// Graph version at the last *successful* `db.checkpoint()` in this
-    /// process, or `None` until one has run — so the first checkpoint of a
-    /// process always writes, whatever the on-disk file happens to hold.
+    /// Graph version at the last *successful* checkpoint in this process, or
+    /// `None` until one has run — so the first checkpoint of a process always
+    /// writes, whatever the on-disk file happens to hold.
+    ///
+    /// Shared (not owned) because two routes checkpoint the same graph: the
+    /// `db.checkpoint()` verb and `--checkpoint-interval`'s periodic task,
+    /// which holds a clone of this handle. One skip-state for both is the
+    /// point — a verb call at version N must make the next tick skip, and a
+    /// tick at version N must make the next verb call report the skip. Two
+    /// counters would each re-save what the other just wrote.
     ///
     /// The mutex is held across the save itself, which serializes concurrent
-    /// checkpoints: two clients asking at once produce one write and one
+    /// checkpoints: two callers asking at once produce one write and one
     /// skip, never two interleaved saves of the same graph.
-    last_checkpoint_version: Mutex<Option<u64>>,
+    last_checkpoint_version: CheckpointState,
     /// Per-transaction state. Keyed by `TransactionHandle.0`. The
     /// outer mutex is brief-acquire-only (lookup/insert/remove); the
     /// per-tx work happens inside the inner mutex. See struct doc on
@@ -298,7 +305,7 @@ impl KgliteBackend {
             session: Arc::new(kglite::api::session::Session::new(graph)),
             graph_path,
             readonly,
-            last_checkpoint_version: Mutex::new(None),
+            last_checkpoint_version: Arc::new(Mutex::new(None)),
             transactions: Arc::new(Mutex::new(HashMap::new())),
             session_counter: AtomicU64::new(0),
             tx_counter: AtomicU64::new(0),
@@ -318,6 +325,15 @@ impl KgliteBackend {
     /// Where a checkpoint of this server's graph is written.
     pub(crate) fn graph_path(&self) -> &std::path::Path {
         &self.graph_path
+    }
+
+    /// The checkpoint skip-state, cloned out for the periodic checkpoint task.
+    ///
+    /// The clone is the whole point: the task and the `db.checkpoint()` verb
+    /// must read and write the *same* recorded version, so whichever route
+    /// saved last suppresses the other's redundant re-save.
+    pub(crate) fn checkpoint_state(&self) -> CheckpointState {
+        Arc::clone(&self.last_checkpoint_version)
     }
 
     /// Warn when a client whose driver gates on the agent prefix connects while
@@ -925,6 +941,65 @@ fn _query_appears_multi_statement(query: &str) -> bool {
     false
 }
 
+/// Graph version at the last successful checkpoint of this process, shared by
+/// every route that checkpoints the served graph (`db.checkpoint()` and the
+/// `--checkpoint-interval` task). `None` until one has run.
+///
+/// A plain `Mutex` rather than an atomic because the lock is deliberately held
+/// *across* the save — that is what serializes two concurrent checkpoints into
+/// one write plus one skip.
+pub(crate) type CheckpointState = Arc<Mutex<Option<u64>>>;
+
+/// What a checkpoint did, and at which graph version.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CheckpointOutcome {
+    /// The graph was written to the served path at this version.
+    Written(u64),
+    /// The graph was unchanged since the last successful checkpoint at this
+    /// version, so nothing was written.
+    Skipped(u64),
+}
+
+/// Save `session` to `path` unless it is unchanged since the last successful
+/// checkpoint recorded in `last`.
+///
+/// The one place a checkpoint of the served graph happens. Both routes call
+/// it — the `db.checkpoint()` verb (which adds the wire refusals and result
+/// shape) and the periodic task (which adds logging) — so the skip rule, the
+/// lock discipline and the version-recording order cannot drift apart between
+/// them.
+///
+/// **First call always writes.** `last` starts at `None` for the process, and
+/// the on-disk file may predate this process entirely (an operator's stale
+/// `.kgl`, or a graph mutated and never checkpointed by a previous run), so
+/// there is nothing on disk a version comparison could trust. The first
+/// checkpoint of a process establishes the correspondence the skips then rely
+/// on.
+///
+/// **Version read before the save, never after.** A commit landing between the
+/// read and the save's lock acquisition makes the recorded version one behind
+/// what reached disk, so the next checkpoint re-saves — a redundant write.
+/// Recording afterwards fails the other way: that same commit would be
+/// recorded as saved when it was not, and the next checkpoint would skip it.
+///
+/// A failed save leaves the recorded version untouched, so a later retry still
+/// writes.
+pub(crate) fn checkpoint_if_changed(
+    session: &kglite::api::session::Session,
+    path: &std::path::Path,
+    last: &Mutex<Option<u64>>,
+) -> Result<CheckpointOutcome, String> {
+    // Held across the save — see the type alias' doc comment.
+    let mut last = last.lock().unwrap_or_else(|p| p.into_inner());
+    let version = session.version();
+    if *last == Some(version) {
+        return Ok(CheckpointOutcome::Skipped(version));
+    }
+    session.save(&path.to_string_lossy(), true)?;
+    *last = Some(version);
+    Ok(CheckpointOutcome::Written(version))
+}
+
 /// Output columns of `db.checkpoint()`, in declaration order — the shape
 /// Neo4j's own `db.checkpoint()` yields, so a client can call it the same way.
 const CHECKPOINT_COLUMNS: [&str; 2] = ["success", "message"];
@@ -1082,13 +1157,10 @@ impl KgliteBackend {
     /// disk-mode graphs are `Forbidden`, for the same reasons `--save-on-exit`
     /// refuses them at startup.
     ///
-    /// **Digest-skip.** The graph version is read *before* the save, never
-    /// after. A commit that lands between the read and the save's lock
-    /// acquisition then makes the recorded version one behind what reached
-    /// disk, so the next checkpoint re-saves — a redundant write. Recording
-    /// the version afterwards would fail the other way: a commit landing in
-    /// the same window would be recorded as saved when it was not, and the
-    /// next checkpoint would skip, losing it.
+    /// **Digest-skip** and the save itself are [`checkpoint_if_changed`]'s —
+    /// shared with the `--checkpoint-interval` task, against the same recorded
+    /// version, so a periodic tick and a client call never re-save each
+    /// other's work.
     ///
     /// A failed save is `Backend` (fail-closed: the client is told the
     /// checkpoint did not happen) and leaves the recorded version untouched,
@@ -1127,44 +1199,44 @@ impl KgliteBackend {
             ));
         }
 
-        // Held across the save — see the field's doc comment.
-        let mut last = self
-            .last_checkpoint_version
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let version = self.session.version();
-        if *last == Some(version) {
-            tracing::debug!(
-                graph_version = version,
-                "db.checkpoint(): skipped (graph unchanged since the last checkpoint)"
-            );
-            return Ok(checkpoint_stream(
-                call,
-                format!("skipped: graph unchanged since version {version}"),
-                "r",
-                started,
-            ));
-        }
-        self.session
-            .save(&self.graph_path.to_string_lossy(), true)
-            .map_err(|e| {
-                BoltError::Backend(format!(
-                    "db.checkpoint() failed writing {}: {e}",
-                    self.graph_path.display()
+        let outcome = checkpoint_if_changed(
+            &self.session,
+            &self.graph_path,
+            &self.last_checkpoint_version,
+        )
+        .map_err(|e| {
+            BoltError::Backend(format!(
+                "db.checkpoint() failed writing {}: {e}",
+                self.graph_path.display()
+            ))
+        })?;
+        match outcome {
+            CheckpointOutcome::Skipped(version) => {
+                tracing::debug!(
+                    graph_version = version,
+                    "db.checkpoint(): skipped (graph unchanged since the last checkpoint)"
+                );
+                Ok(checkpoint_stream(
+                    call,
+                    format!("skipped: graph unchanged since version {version}"),
+                    "r",
+                    started,
                 ))
-            })?;
-        *last = Some(version);
-        tracing::info!(
-            path = %self.graph_path.display(),
-            graph_version = version,
-            "db.checkpoint(): graph written"
-        );
-        Ok(checkpoint_stream(
-            call,
-            format!("checkpoint written: version {version}"),
-            "w",
-            started,
-        ))
+            }
+            CheckpointOutcome::Written(version) => {
+                tracing::info!(
+                    path = %self.graph_path.display(),
+                    graph_version = version,
+                    "db.checkpoint(): graph written"
+                );
+                Ok(checkpoint_stream(
+                    call,
+                    format!("checkpoint written: version {version}"),
+                    "w",
+                    started,
+                ))
+            }
+        }
     }
 
     /// Auto-commit path: take a snapshot, delegate to
