@@ -1623,6 +1623,17 @@ impl GraphWrite for GraphBackend {
     }
 
     #[inline]
+    fn set_node_title(&mut self, idx: NodeIndex, value: Value) {
+        match self {
+            Self::Memory(g) => GraphWrite::set_node_title(unique_heap_backend(g), idx, value),
+            Self::Forked(g) => GraphWrite::set_node_title(g.as_mut(), idx, value),
+            Self::Mapped(g) => GraphWrite::set_node_title(unique_heap_backend(g), idx, value),
+            Self::Disk(g) => GraphWrite::set_node_title(g.as_mut(), idx, value),
+            Self::Recording(rg) => GraphWrite::set_node_title(rg.as_mut(), idx, value),
+        }
+    }
+
+    #[inline]
     fn set_node_property_if_absent(&mut self, idx: NodeIndex, key: InternedKey, value: Value) {
         match self {
             Self::Memory(g) => {

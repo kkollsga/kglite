@@ -242,6 +242,51 @@ pub enum UndoEntry {
         prior_schema: Arc<TypeSchema>,
         prior_column_count: usize,
     },
+    /// A statement appended rows to a type's master store — one per node it
+    /// created, now that construction is columnar. Undo truncates the store
+    /// back to `prior_row_count` and drops any column the appended rows'
+    /// unseen keys grew the schema by.
+    ///
+    /// Rows are a stack: only the tail can be appended and only the tail is
+    /// removed, so the truncation is exact rather than approximate, and it
+    /// restores the *next* row id as well as the row count — a node created
+    /// again after a rollback lands on the row its rolled-back predecessor
+    /// vacated, which is the columnar half of the petgraph slot-identity
+    /// guarantee `NodeAdded` gives.
+    ///
+    /// Schema growth travels in the same entry rather than a companion
+    /// [`ColumnarSchemaGrown`](Self::ColumnarSchemaGrown), because
+    /// [`ColumnStore::push_row`] can do both in one call and a single entry
+    /// cannot be replayed in the wrong order relative to itself.
+    ColumnarRowsAppended {
+        node_type: InternedKey,
+        prior_row_count: u32,
+        prior_schema: Arc<TypeSchema>,
+        prior_column_count: usize,
+        /// The statement introduced the type's store itself. Undo drops it
+        /// rather than leaving an empty one behind — the same distinction
+        /// [`BucketAppended`](Self::BucketAppended) draws with
+        /// `bucket_was_new`, and for the same reason: an empty-but-present
+        /// store is observable (`is_columnar`, `graph_info`, the rollback
+        /// fingerprint's master rows).
+        store_was_new: bool,
+    },
+    /// A statement overwrote a row's reserved `__title__` cell. Undo writes the
+    /// prior title back; `None` restores `Value::Null`, which is what an absent
+    /// title reads as anyway.
+    ///
+    /// Titles need their own variant because the title column is addressed by
+    /// its reserved position rather than by an `InternedKey` slot, so
+    /// [`ColumnarCell`](Self::ColumnarCell) cannot name it.
+    ColumnarTitle {
+        node_type: InternedKey,
+        row_id: u32,
+        prior: Option<Value>,
+    },
+    /// A statement tombstoned a row — the columnar half of deleting a node.
+    /// Undo clears the flag; the row's values were hidden, never overwritten,
+    /// so nothing else has to be restored.
+    ColumnarTombstone { node_type: InternedKey, row_id: u32 },
 }
 
 /// Which cells of a columnar row a property write is about to change.
@@ -322,6 +367,49 @@ impl ColumnarPreImages {
                 prior,
             });
         }
+    }
+}
+
+/// The pre-image one columnar **row append** needs, read off the store before
+/// the append and pushed into the journal after the store borrow ends.
+///
+/// Same two-step shape as [`ColumnarPreImages`] and for the same reason: the
+/// journal and the store are sibling fields of one backend, so capture borrows
+/// the store and `record` borrows the journal, never both at once.
+pub(crate) struct ColumnarAppendPreImage {
+    row_count: u32,
+    schema: Arc<TypeSchema>,
+    column_count: usize,
+}
+
+impl ColumnarAppendPreImage {
+    /// Read the store's length and schema as they stand before the append.
+    #[inline]
+    pub(crate) fn capture(store: &ColumnStore) -> Self {
+        Self {
+            row_count: store.row_count(),
+            schema: store.schema_arc(),
+            column_count: store.column_count(),
+        }
+    }
+
+    /// Push the captured pre-image. `store_was_new` is read before the store is
+    /// created, not from the store itself, which is why it arrives here rather
+    /// than in [`Self::capture`].
+    #[inline]
+    pub(crate) fn record(
+        self,
+        journal: &mut UndoJournal,
+        node_type: InternedKey,
+        store_was_new: bool,
+    ) {
+        journal.entries.push(UndoEntry::ColumnarRowsAppended {
+            node_type,
+            prior_row_count: self.row_count,
+            prior_schema: self.schema,
+            prior_column_count: self.column_count,
+            store_was_new,
+        });
     }
 }
 
@@ -459,6 +547,28 @@ impl UndoJournal {
         for (pos, idx) in hits {
             self.note_bucket_removed(bucket.clone(), idx, pos);
         }
+    }
+
+    /// A row's reserved title cell is about to be overwritten.
+    #[inline]
+    pub fn note_columnar_title(
+        &mut self,
+        node_type: InternedKey,
+        row_id: u32,
+        prior: Option<Value>,
+    ) {
+        self.entries.push(UndoEntry::ColumnarTitle {
+            node_type,
+            row_id,
+            prior,
+        });
+    }
+
+    /// A row of `node_type`'s master store was tombstoned by a node deletion.
+    #[inline]
+    pub fn note_columnar_tombstone(&mut self, node_type: InternedKey, row_id: u32) {
+        self.entries
+            .push(UndoEntry::ColumnarTombstone { node_type, row_id });
     }
 
     /// A node's timeseries was dropped.

@@ -657,6 +657,17 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         self.inner.set_node_property(idx, key, value);
     }
 
+    /// A title write is a logical mutation like any other property write, and
+    /// on a columnar node it no longer passes through `node_weight_mut` — so
+    /// it is recorded here or it never reaches the log.
+    #[inline]
+    fn set_node_title(&mut self, idx: NodeIndex, value: Value) {
+        if self.inner.node_weight(idx).is_some() {
+            self.ops.push(RawOp::UpsertNode(idx));
+        }
+        self.inner.set_node_title(idx, value);
+    }
+
     #[inline]
     fn set_node_property_if_absent(
         &mut self,

@@ -254,6 +254,39 @@ def test_set_and_delete_survive_crash(tmp_path, storage):
 
 
 @pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_create_set_delete_in_one_session_recover_exactly(tmp_path, storage):
+    """Every write shape a statement can take, captured and replayed exactly.
+
+    Since construction became columnar, a ``CREATE`` appends a row to the
+    type's master store rather than building a row-shaped node, and a
+    ``DELETE`` tombstones one — neither of which passes through the
+    ``node_weight_mut`` seam the WAL recorder originally hooked. A create is
+    still recorded by ``add_node``, a property write by
+    ``set_node_property``, and a title write by ``set_node_title``; this runs
+    all of them in one durable session and compares the recovered graph
+    against what the crashing process actually had, so a capture that stopped
+    seeing any one of them shows up as a difference rather than as a plausible
+    graph.
+    """
+    live, recovered = _live_and_recovered(
+        tmp_path,
+        """
+        g = open_durable()
+        g.cypher("CREATE (:T {id: 1, tag: 'one'})")
+        g.cypher("CREATE (:T {id: 2, tag: 'two'})")
+        g.cypher("CREATE (:T {id: 3, tag: 'three'})")
+        g.cypher("MATCH (n:T {id: 2}) SET n.tag = 'edited'")
+        g.cypher("MATCH (n:T {id: 3}) DETACH DELETE n")
+        g.cypher("CREATE (:T {id: 4, tag: 'four'})")
+        g.cypher("MATCH (n:T {id: 4}) SET n.name = 'retitled'")
+        """,
+        storage,
+    )
+    assert recovered == live, f"recovered {recovered} != live {live}"
+    assert "'edited'" in live and "(3," not in live, f"the fixture is not exercising SET/DELETE: {live}"
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
 def test_typed_columns_do_not_change_what_the_wal_replays(tmp_path, storage):
     """A column's storage type must not be visible to WAL capture or replay.
 

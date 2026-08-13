@@ -1508,10 +1508,22 @@ impl DirGraph {
         // sidecar or the in-memory `.kgl` section).
     }
 
-    /// Convert all node properties from Compact to Columnar storage.
-    /// Properties are moved into per-type `ColumnStore` instances.
-    /// This reduces memory usage by eliminating per-node `Value` enum overhead
-    /// for homogeneous typed columns.
+    /// Consolidate every node's properties into its type's `ColumnStore`.
+    ///
+    /// **This is the internal consolidation primitive, not a mode switch.**
+    /// Properties are columnar from construction (`dir_graph::node_write`,
+    /// `mutation::batch`), so on a settled graph this call has nothing to do
+    /// and says so in O(N) — the fast path below. What it still *does* is
+    /// rebuild: it is the one pass that reclaims rows deleted nodes left
+    /// behind, restores ascending row order after a create reused a freed
+    /// petgraph slot, and re-derives every column's type from the type's
+    /// metadata. Its callers are `save()` (where those three are the
+    /// difference between a lean, correctly-bound file and a corrupt one),
+    /// `vacuum`, `unspill`, and `enable_disk_mode`.
+    ///
+    /// The public `enable_columnar()` on the Python surface is a thin wrapper
+    /// over this and is scheduled for deletion — there is no longer a regime
+    /// for a caller to enable.
     ///
     /// Idempotent fast path: returns early when (a) every live node
     /// is already in `PropertyStorage::Columnar`, AND (b) every
@@ -1559,6 +1571,9 @@ impl DirGraph {
             // read-only and the guard drops at the end of this block.
             let _guard = self.graph.begin_query();
             let backend = &self.graph;
+            // Rows a type has handed out so far, walking nodes in ascending
+            // index order — the order the file is written and read back in.
+            let mut next_row: HashMap<InternedKey, u32> = HashMap::new();
             let any_drift = self
                 .graph
                 .node_indices()
@@ -1566,22 +1581,42 @@ impl DirGraph {
                 .any(|n| match &n.properties {
                     PropertyStorage::Columnar(row) => {
                         let row_id = row.row_id();
-                        match backend.column_store(n.node_type) {
-                            Some(graph_store) => {
-                                // An in-place title write (Cypher `SET n.title`,
-                                // add_nodes update/replace, connection titles)
-                                // sets the inline `node.title` but not the
-                                // columnar `__title__`. Detect that divergence
-                                // so we rebuild and consolidate the fresh title
-                                // (the title-only path doesn't clone the store,
-                                // so it wouldn't otherwise register as drift —
-                                // petekSuite bug 2). A consolidated/loaded node
-                                // has `node.title == Null`, so no false drift.
-                                !matches!(n.title, Value::Null)
-                                    && graph_store.get_title(row_id).as_ref() != Some(&n.title)
+                        // **Row order is part of the saved format.** The `.kgl`
+                        // column section carries rows positionally, and the load
+                        // path binds row k of a type to that type's k-th node in
+                        // ascending node-index order — so a store whose rows are
+                        // not in that order serializes every row against the
+                        // wrong node (ids, titles and properties all shift, and
+                        // the edges then appear to connect different nodes:
+                        // petekSuite bug 4). `rebuild_column_stores` sorts by
+                        // node index, which is what makes save-order equal
+                        // load-order; this check is what decides the rebuild is
+                        // needed. Rows are appended in creation order, and a
+                        // creation reuses a freed petgraph slot, so any
+                        // delete-then-create pair can put them out of order.
+                        let expected = next_row.entry(n.node_type).or_insert(0);
+                        let out_of_order = row_id != *expected;
+                        *expected += 1;
+                        out_of_order
+                            || match backend.column_store(n.node_type) {
+                                Some(graph_store) => {
+                                    // A title written onto the inline
+                                    // `node.title` rather than through the
+                                    // store's `__title__` column. Every
+                                    // in-engine title write goes through the
+                                    // store now (`GraphWrite::set_node_title`),
+                                    // so this fires only for the fallback that
+                                    // takes when a type has no store to write
+                                    // through — but it is what consolidates
+                                    // that node's title, so it stays
+                                    // (petekSuite bug 2). A consolidated/loaded
+                                    // node has `node.title == Null`, so no
+                                    // false drift.
+                                    !matches!(n.title, Value::Null)
+                                        && graph_store.get_title(row_id).as_ref() != Some(&n.title)
+                                }
+                                None => true,
                             }
-                            None => true,
-                        }
                     }
                     _ => true,
                 });
@@ -1603,6 +1638,14 @@ impl DirGraph {
                 .sum();
             let orphaned_rows = total_store_rows != self.graph.node_count() as u64;
             if !any_drift && !orphaned_rows {
+                // The stores are already the shape a save wants, but the
+                // *memory limit* still has to be honoured: this is the call
+                // that spills, and taking the fast path used to skip the
+                // spill with it. Harmless while a fresh graph always rebuilt
+                // here; a silent contract break once construction is columnar
+                // and the fast path is the normal case
+                // (`test_spill_when_over_limit`).
+                self.maybe_spill_columns();
                 return;
             }
         }
@@ -1747,49 +1790,13 @@ impl DirGraph {
         }
         drop(first_pass_guard);
 
-        // Spill to disk if over memory limit
-        if let Some(limit) = self.memory_limit {
-            let total: usize = stores.values().map(|s| s.heap_bytes()).sum();
-            if total > limit {
-                let spill_dir = self.spill_dir.clone().unwrap_or_else(|| {
-                    std::env::temp_dir().join(format!(
-                        "kglite_spill_{}_{:x}",
-                        std::process::id(),
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_nanos()
-                    ))
-                });
-                // Register spill dir for cleanup on drop
-                if let Ok(mut dirs) = self.temp_dirs.lock() {
-                    dirs.push(spill_dir.clone());
-                }
-                // Spill stores from largest to smallest until under limit
-                let mut by_size: Vec<_> = stores
-                    .iter()
-                    .map(|(t, s)| (t.clone(), s.heap_bytes()))
-                    .collect();
-                by_size.sort_by_key(|s| std::cmp::Reverse(s.1));
-                let mut remaining = total;
-                for (type_name, bytes) in by_size {
-                    if remaining <= limit {
-                        break;
-                    }
-                    let type_dir = spill_dir.join(&type_name);
-                    if let Some(store) = stores.get_mut(&type_name) {
-                        if store
-                            .materialize_to_files(&type_dir, &self.interner)
-                            .is_ok()
-                        {
-                            remaining -= bytes;
-                        }
-                    }
-                }
-            }
-        }
-
         self.install_rebuilt_column_stores(stores, &row_ids);
+        // Spill to disk if over the memory limit. Through the one spill
+        // routine, on the installed stores — this used to be a second copy of
+        // `maybe_spill_columns` operating on the local map, which meant the
+        // rebuild path and the standalone path could drift on which directory
+        // they used and which store they picked first.
+        self.maybe_spill_columns();
     }
 
     /// Second pass of the rebuild: publish the stores onto the backend and
@@ -1830,8 +1837,15 @@ impl DirGraph {
         }
     }
 
-    /// Convert all Columnar properties back to Compact.
-    /// Used when a caller needs a self-contained non-columnar graph.
+    /// Move every columnar row back onto its node, and drop the stores.
+    ///
+    /// **Internal, and half of a pair.** No caller wants a row-shaped graph as
+    /// an end state any more; what the two live callers want is the *round
+    /// trip* — `vacuum` and `unspill` use `disable_columnar` +
+    /// `enable_columnar` to rebuild every store from live nodes, which is how
+    /// dead rows are reclaimed and how a spilled store comes back to the heap.
+    /// The public `disable_columnar()` is a thin wrapper scheduled for
+    /// deletion with its partner.
     pub fn disable_columnar(&mut self) {
         // Per **type**, not per node. A node and its store are both owned by
         // the backend, so a `node_weight_mut` borrow cannot also read the
@@ -2130,10 +2144,7 @@ impl DirGraph {
                 (s.row_count() as usize) > live
             });
             if columnar_orphaned {
-                let saved_limit = self.memory_limit.take();
-                self.disable_columnar();
-                self.enable_columnar();
-                self.memory_limit = saved_limit;
+                self.rebuild_columns_under_suspended_limit();
             }
             return HashMap::new();
         }
@@ -2227,17 +2238,41 @@ impl DirGraph {
         // Rebuild all indexes from the compacted graph
         self.reindex();
 
-        // Rebuild columnar stores if active — old stores have orphaned rows
-        // from deleted nodes. The disable/enable cycle reads only live nodes,
-        // producing fresh ColumnStores with no dead rows.
+        // Rebuild the columnar stores: the old ones carry orphaned rows from
+        // deleted nodes, and every row id the compaction just invalidated. The
+        // disable/enable cycle reads only live nodes, producing fresh
+        // `ColumnStore`s with no dead rows.
+        //
+        // Still gated, and the gate still has a false arm — narrowly. Every
+        // *construction* funnel is columnar now (Cypher `CREATE`, the bulk
+        // batch path, the loaders), so this is true for any graph a user
+        // built; what can still own no store is a graph assembled by a direct
+        // `GraphWrite::add_node` (the RDF loader, and the Rust tests that build
+        // fixtures that way), whose nodes hold their properties inline.
+        // Converting one here would be a shape change, not a compaction, so
+        // the gate stays.
         if self.is_columnar() {
-            let saved_limit = self.memory_limit.take();
-            self.disable_columnar();
-            self.enable_columnar();
-            self.memory_limit = saved_limit;
+            self.rebuild_columns_under_suspended_limit();
         }
 
         old_to_new
+    }
+
+    /// Rebuild every column store from live nodes, with the memory limit taken
+    /// out of the way for the duration.
+    ///
+    /// `vacuum`'s columnar half, shared by its two exits. The limit is
+    /// suspended because the round trip goes through the heap by construction —
+    /// `disable_columnar` reads every row back onto its node — so leaving the
+    /// limit installed would re-spill each store as the rebuild passed it, only
+    /// for the next statement's write to pull it back. Restoring the limit
+    /// afterwards leaves the graph heap-resident, which is the documented
+    /// behaviour (`test_vacuum_columnar_with_memory_limit`).
+    fn rebuild_columns_under_suspended_limit(&mut self) {
+        let saved_limit = self.memory_limit.take();
+        self.disable_columnar();
+        self.enable_columnar();
+        self.memory_limit = saved_limit;
     }
 
     /// Check if auto-vacuum should run and trigger it if so.
@@ -2256,11 +2291,13 @@ impl DirGraph {
     /// [`Self::graph_info`] and [`Self::check_auto_vacuum`] so the number a
     /// caller reads and the number the trigger acts on cannot drift apart.
     ///
-    /// `live` counts nodes of the type, not columnar rows specifically, so on
-    /// a graph whose types carry a mix of columnar and non-columnar nodes it
-    /// can exceed `total` — hence every consumer subtracts saturating. That
-    /// mix under-reports garbage (never over-reports it, so it cannot cause a
-    /// spurious vacuum) and disappears once construction is columnar.
+    /// `live` counts nodes of the type, not columnar rows specifically. That
+    /// used to under-report garbage on a graph whose types carried a mix of
+    /// columnar and row-shaped nodes; construction is columnar, so the two
+    /// counts describe the same population and the census is exact. The
+    /// saturating subtraction every consumer does is kept for the transient
+    /// shapes that still exist (a `Map`-staged node mid-ingest), where it fails
+    /// towards *not* vacuuming.
     pub(crate) fn columnar_row_census(&self) -> (usize, usize) {
         let total = self
             .graph

@@ -2731,8 +2731,9 @@ COLUMNAR_MUTATION_QUERIES: list[tuple[str, str, str]] = [
         "MATCH (p:Person) RETURN p.person_id AS pid, p.touched AS touched ORDER BY pid",
     ),
     (
-        # `name` is the title alias, so it lives in the node's title field and
-        # not in the store — the node-private `Arc::make_mut` route.
+        # `name` is the title alias, so it lands in the store's reserved
+        # `__title__` column rather than in a schema slot — a different write
+        # route from every other case here.
         "columnar_set_title_alias_multi_row",
         "MATCH (p:Person) SET p.name = 'Same' RETURN count(p) AS n",
         "MATCH (p:Person) RETURN p.person_id AS pid, p.name AS name ORDER BY pid",
@@ -2746,11 +2747,13 @@ COLUMNAR_MUTATION_QUERIES: list[tuple[str, str, str]] = [
 
 
 def _build_columnar_mutation_graph() -> kglite.KnowledgeGraph:
-    """`_build_mutation_graph()` in the shape a saved graph takes.
+    """`_build_mutation_graph()` after the consolidation pass a save runs.
 
-    `enable_columnar()` is what `save()` calls, and nothing but an explicit
-    `disable_columnar()` undoes it — so "has been saved once" is a permanent
-    property of a live graph and every later write runs in this shape.
+    The two are the same shape: properties are columnar from construction, and
+    `enable_columnar()` — what `save()` calls — is an idempotent consolidation
+    over a graph that is already in that shape. Kept as its own builder because
+    the corpus below exercises the *consolidated* store (one contiguous run of
+    rows, no growth history), which is what a loaded graph carries.
     """
     g = _build_mutation_graph()
     g.enable_columnar()
@@ -2761,18 +2764,20 @@ def _build_columnar_mutation_graph() -> kglite.KnowledgeGraph:
 def test_columnar_mutation_fixture_is_actually_columnar() -> None:
     """Non-vacuity guard for the corpus below.
 
-    If `enable_columnar()` ever stopped converting the fixture, every case in
-    `COLUMNAR_MUTATION_QUERIES` would silently become a second run of
-    `MUTATION_QUERIES` and prove nothing about columnar storage.
+    The corpus is only about columnar storage if its fixture reads properties
+    out of a column store. This used to be asserted as a *difference* — the
+    plain builder owning zero rows and the consolidated one three — because a
+    graph became columnar only when it was saved. Both arms carry the rows now,
+    so the guard asserts the property directly on each.
     """
     fresh = _build_mutation_graph()
-    assert fresh.graph_info()["columnar_total_rows"] == 0, (
-        "the row-storage fixture must own no column-store rows, or the "
-        "comparison arm below is comparing two columnar graphs"
+    assert fresh.graph_info()["columnar_total_rows"] == 3, (
+        "the fixture must read its properties through a column store, or every "
+        "case below proves nothing about columnar storage"
     )
     columnar = _build_columnar_mutation_graph()
     assert columnar.graph_info()["columnar_total_rows"] == 3, (
-        "enable_columnar() must move all three Person rows into a column store"
+        "consolidation must leave all three Person rows in the store"
     )
 
 

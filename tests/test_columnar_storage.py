@@ -63,11 +63,19 @@ def multi_type_graph():
 
 class TestColumnarBasic:
     def test_enable_disable_flag(self, person_graph):
-        assert not person_graph.is_columnar
-        person_graph.enable_columnar()
+        """A graph is columnar from construction; disable/enable still round-trips.
+
+        The premise changed, not the mechanism: this used to open with
+        ``assert not person_graph.is_columnar``, because a freshly built graph
+        held row-shaped properties until its first save. Construction is
+        columnar in every storage mode now, so the flag starts True and what is
+        left to pin is that the explicit toggle still moves it both ways.
+        """
         assert person_graph.is_columnar
         person_graph.disable_columnar()
         assert not person_graph.is_columnar
+        person_graph.enable_columnar()
+        assert person_graph.is_columnar
 
     def test_enable_idempotent(self, person_graph):
         person_graph.enable_columnar()
@@ -75,6 +83,7 @@ class TestColumnarBasic:
         assert person_graph.is_columnar
 
     def test_disable_on_non_columnar(self, person_graph):
+        person_graph.disable_columnar()
         person_graph.disable_columnar()  # no-op, should not crash
         assert not person_graph.is_columnar
 
@@ -324,14 +333,18 @@ class TestV3Roundtrip:
             header = f.read(5)
         assert header == b"RGF\x05\x02"
 
-    def test_save_auto_columnar(self, person_graph, tmp_path):
-        """save() auto-enables columnar for non-columnar graphs (stays columnar)."""
-        assert not person_graph.is_columnar
+    def test_save_does_not_change_the_write_regime(self, person_graph, tmp_path):
+        """A graph is columnar before its first save, after it, and on reload.
+
+        This used to be ``test_save_auto_columnar``: it asserted that save()
+        *converted* a non-columnar graph, which is precisely the shape change
+        the convergence programme removed. What survives is the round-trip —
+        the shape is the same on all three sides of a save/load.
+        """
+        assert person_graph.is_columnar
         fp = str(tmp_path / "auto.kgl")
         person_graph.save(fp)
-        # Graph is now columnar after save (no disable step)
         assert person_graph.is_columnar
-        # Loaded graph is also columnar
         kg2 = kglite.load(fp)
         assert kg2.is_columnar
 

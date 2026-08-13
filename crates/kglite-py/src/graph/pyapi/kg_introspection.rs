@@ -193,8 +193,15 @@ impl KnowledgeGraph {
         let graph = get_graph_mut(&mut self.inner);
 
         let tombstones_before = graph.graph.node_bound() - graph.graph.node_count();
-        let was_columnar = graph.is_columnar();
+        // "Were the columnar stores rebuilt?" used to be answered by "is this
+        // graph columnar at all?", which was a fair proxy only while a graph
+        // could be non-columnar. Every graph owns stores from its first node
+        // now, so the proxy would answer `true` for a vacuum that reclaimed
+        // nothing. Read the row count instead: a rebuild is exactly what drops
+        // the rows deleted nodes left behind.
+        let rows_before = graph.graph_info().columnar_total_rows;
         let old_to_new = graph.vacuum();
+        let columnar_rebuilt = graph.graph_info().columnar_total_rows != rows_before;
         let nodes_remapped = old_to_new.len();
 
         // Reset selection — indices have changed
@@ -206,7 +213,7 @@ impl KnowledgeGraph {
             let result = PyDict::new(py);
             result.set_item("nodes_remapped", nodes_remapped)?;
             result.set_item("tombstones_removed", tombstones_before)?;
-            result.set_item("columnar_rebuilt", was_columnar)?;
+            result.set_item("columnar_rebuilt", columnar_rebuilt)?;
             Ok(result.into())
         })
     }

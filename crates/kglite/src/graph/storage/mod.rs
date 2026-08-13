@@ -580,6 +580,26 @@ pub trait GraphWrite: GraphRead {
     /// Replace the whole property set (Replace conflict mode).
     fn replace_node_properties(&mut self, idx: NodeIndex, pairs: Vec<(InternedKey, Value)>);
 
+    /// Write a node's title.
+    ///
+    /// The sixth member of the family above, and it exists for the same reason
+    /// they do: a columnar node's title lives in its store's reserved
+    /// `__title__` column, not in the inline `NodeData.title` field, so a title
+    /// write needs the backend's store and the node's `row_id` at once.
+    ///
+    /// It used to be written inline unconditionally, with `enable_columnar`
+    /// detecting the divergence at `save()` time and rebuilding every store to
+    /// consolidate it. That single save-side chokepoint was cheap only while a
+    /// per-path master write was expensive; it is not any more, and paying an
+    /// O(N) rebuild on the next save for one title write is the opposite of a
+    /// bargain. The default below keeps the inline write for backends with no
+    /// per-type store to write through.
+    fn set_node_title(&mut self, idx: NodeIndex, value: Value) {
+        if let Some(node) = self.node_weight_mut(idx) {
+            node.title = value;
+        }
+    }
+
     /// Insert a new node, returning its assigned index.
     fn add_node(&mut self, data: NodeData) -> NodeIndex;
 

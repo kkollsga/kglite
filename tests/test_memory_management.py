@@ -398,11 +398,19 @@ class TestUnspill:
         after = g.cypher("MATCH (n:Item) RETURN n.title, n.value ORDER BY n.value").to_list()
         assert before == after
 
-    def test_unspill_noop_when_not_columnar(self):
-        """Unspill on a non-columnar graph is a no-op."""
+    def test_unspill_noop_when_nothing_is_spilled(self):
+        """Unspill on a graph that never spilled is a no-op.
+
+        Was ``test_unspill_noop_when_not_columnar``: a graph with no column
+        stores is no longer a shape that exists, so the no-op case it meant to
+        cover is "columnar but heap-resident", which is what it now builds.
+        """
         g = make_graph(10)
+        assert g.graph_info()["columnar_is_mapped"] is False
         g.unspill()  # should not crash
-        assert not g.is_columnar
+        assert g.is_columnar
+        assert g.graph_info()["columnar_is_mapped"] is False
+        assert g.cypher("MATCH (n:Item) RETURN count(n) AS c").to_list()[0]["c"] == 10
 
     def test_unspill_preserves_memory_limit(self):
         """Memory limit is restored after unspill."""
@@ -465,13 +473,20 @@ class TestVacuumColumnar:
         assert info["columnar_total_rows"] == info["columnar_live_rows"]
         assert info["node_tombstones"] == 0
 
-    def test_vacuum_noop_without_columnar(self):
-        """Vacuum on non-columnar graph doesn't set columnar_rebuilt."""
+    def test_vacuum_without_garbage_reports_no_rebuild(self):
+        """A vacuum with nothing to reclaim doesn't report a columnar rebuild.
+
+        Was ``test_vacuum_noop_without_columnar``. Every graph owns column
+        stores now, so "no rebuild" can no longer be produced by having no
+        stores — it has to be produced by having no garbage, which is the case
+        the flag was always meant to describe.
+        """
         g = make_graph(500)
         g.set_auto_vacuum(None)
-        g.cypher("MATCH (n:Item) WHERE n.value < 300 DETACH DELETE n")
         result = g.vacuum()
         assert result["columnar_rebuilt"] is False
+        info = g.graph_info()
+        assert info["columnar_total_rows"] == info["columnar_live_rows"] == 500
 
     def test_vacuum_preserves_query_results(self):
         """Queries return correct data after vacuum rebuilds columnar."""
@@ -508,13 +523,19 @@ class TestVacuumColumnar:
 
 
 class TestGraphInfoColumnar:
-    def test_columnar_rows_with_no_columnar(self):
-        """Non-columnar graph reports 0 for columnar metrics."""
+    def test_columnar_metrics_are_populated_from_construction(self):
+        """A freshly built graph already reports its columnar metrics.
+
+        Was ``test_columnar_rows_with_no_columnar``, which asserted the zeroes a
+        graph reported before its first save. Construction is columnar, so the
+        rows are there from the start; what still reads as it did is
+        ``columnar_is_mapped``, since nothing has spilled.
+        """
         g = make_graph(100)
         info = g.graph_info()
-        assert info["columnar_total_rows"] == 0
-        assert info["columnar_live_rows"] == 0
-        assert info["columnar_heap_bytes"] == 0
+        assert info["columnar_total_rows"] == 100
+        assert info["columnar_live_rows"] == 100
+        assert info["columnar_heap_bytes"] > 0
         assert info["columnar_is_mapped"] is False
 
     def test_columnar_rows_match_after_enable(self):

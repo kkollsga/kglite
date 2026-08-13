@@ -1027,52 +1027,121 @@ fn no_code_reaches_a_node_held_column_store_handle() {
 
 // ── The save fast path (D1 risk 1) ────────────────────────────────────────
 
-/// A second `save()` on an unmodified graph must **not** rebuild the stores.
+/// Saving a freshly built graph must **not** rebuild the stores — and neither
+/// must saving it again.
 ///
-/// `enable_columnar`'s idempotence guard used to detect a node-private fork by
-/// `Arc::ptr_eq`; Phase 3 deleted that check because the fork is no longer
-/// expressible. The plan flagged the replacement reasoning (inline-title
-/// divergence + orphaned rows) as *believed* sufficient — risk 1 — so this
-/// counts rebuilds instead of trusting it. Losing the fast path costs a full
-/// O(N) rebuild on every save (~257 s at wiki100m).
+/// The first half is what the always-columnar flip buys: a graph is built in
+/// the shape it is saved in, so the consolidation pass has nothing to
+/// consolidate and `save()` no longer changes the write regime. Before the
+/// flip the first `enable_columnar` rebuilt every store (the assertion here
+/// used to *require* that, as the only way to tell a skipped rebuild from a
+/// graph that had never been columnar).
+///
+/// The second half is the idempotence guard whose replacement reasoning D1
+/// risk 1 flagged as *believed* sufficient — counted rather than trusted,
+/// because losing the fast path costs a full O(N) rebuild on every save
+/// (~257 s at wiki100m).
 #[test]
-fn a_second_save_of_an_unmodified_graph_skips_the_rebuild() {
+fn saving_a_freshly_built_graph_skips_the_rebuild() {
     use crate::graph::dir_graph::COLUMNAR_REBUILDS;
     let rebuilds = || COLUMNAR_REBUILDS.with(|c| c.get());
 
     let mut graph = docs_fixture();
+    assert!(
+        graph.is_columnar(),
+        "construction must already be columnar, or this test measures nothing"
+    );
 
     let before = rebuilds();
     graph.enable_columnar();
-    let first = rebuilds();
-    assert_eq!(
-        first - before,
-        1,
-        "the first enable_columnar must rebuild, or this test cannot tell a \
-         skipped rebuild from a graph that was never columnar"
-    );
-
     graph.enable_columnar();
     assert_eq!(
         rebuilds(),
-        first,
-        "a second save of an unmodified graph must take the fast path; a \
-         rebuild here means the idempotence guard regressed and every save \
-         pays O(N)"
+        before,
+        "a save of an unmodified graph must take the fast path; a rebuild here \
+         means construction and the saved shape disagree, or the idempotence \
+         guard regressed, and every save pays O(N)"
     );
 
     // And the guard must still *fire* when it should — otherwise "no rebuild"
-    // would be trivially true and the assertion above would be vacuous.
-    run(
-        &mut graph,
-        "MATCH (n:Item) WHERE n.id = 1 SET n.title = 'moved'",
-    );
+    // would be trivially true and the assertion above would be vacuous. A
+    // delete is the drift that survives the flip: it leaves the node's row
+    // behind, and consolidation is what keeps that row out of the saved file.
+    run(&mut graph, "MATCH (n:Item) WHERE n.id = 1 DELETE n");
     graph.enable_columnar();
     assert_eq!(
         rebuilds(),
-        first + 1,
-        "an inline-title write must still be detected as drift and rebuild"
+        before + 1,
+        "an orphaned row must still be detected as drift and rebuild"
     );
+}
+
+/// A create that reuses a freed petgraph slot puts the type's rows out of
+/// ascending-node-index order, and the consolidation pass must notice.
+///
+/// Row order is part of the `.kgl` format: the column section is positional and
+/// the load path binds row k of a type to that type's k-th node in ascending
+/// index order. `rebuild_column_stores` sorts by node index, which is what makes
+/// the two orders agree — so the drift check has to be what decides the rebuild
+/// happens. It did not have to be, while a fresh graph rebuilt on every save
+/// regardless; the moment the fast path became the normal case, a
+/// delete-then-create pair started serializing every row against the wrong node
+/// (`test_runtime_write_bugs.py::test_recreate_after_delete_is_fresh`, which
+/// saw it as edges connecting different nodes after a reload).
+#[test]
+fn a_row_appended_out_of_index_order_is_detected_as_drift() {
+    use crate::graph::dir_graph::COLUMNAR_REBUILDS;
+    use crate::graph::schema::PropertyStorage;
+    let rebuilds = || COLUMNAR_REBUILDS.with(|c| c.get());
+
+    let mut graph = docs_fixture();
+    // Free slot 0, then consolidate so the store is dense and in order again.
+    run(&mut graph, "MATCH (n:Item) WHERE n.id = 1 DETACH DELETE n");
+    graph.enable_columnar();
+    let settled = rebuilds();
+    graph.enable_columnar();
+    assert_eq!(
+        rebuilds(),
+        settled,
+        "precondition: the graph must be settled"
+    );
+
+    // The create takes the freed slot 0 but the appended row is last.
+    run(&mut graph, "CREATE (:Item {id: 99, title: 'late'})");
+    let out_of_order = graph
+        .graph
+        .node_indices()
+        .filter_map(|idx| graph.graph.node_weight(idx))
+        .filter_map(|node| match &node.properties {
+            PropertyStorage::Columnar(row) => Some(row.row_id()),
+            _ => None,
+        })
+        .enumerate()
+        .any(|(position, row_id)| row_id as usize != position);
+    assert!(
+        out_of_order,
+        "precondition: the create must have produced an out-of-order row, or \
+         this test cannot see whether the drift check catches one"
+    );
+
+    graph.enable_columnar();
+    assert_eq!(
+        rebuilds(),
+        settled + 1,
+        "an out-of-order row must be detected as drift; without the rebuild the \
+         save writes every row against the wrong node"
+    );
+    let ordered = graph
+        .graph
+        .node_indices()
+        .filter_map(|idx| graph.graph.node_weight(idx))
+        .filter_map(|node| match &node.properties {
+            PropertyStorage::Columnar(row) => Some(row.row_id()),
+            _ => None,
+        })
+        .enumerate()
+        .all(|(position, row_id)| row_id as usize == position);
+    assert!(ordered, "the rebuild must restore ascending row order");
 }
 
 /// A one-row `SET` on a saved type must touch one row, whatever N is.

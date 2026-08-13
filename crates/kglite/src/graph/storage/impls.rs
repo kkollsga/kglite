@@ -439,6 +439,35 @@ macro_rules! impl_heap_pre_image_capture {
                     }
                 }
             }
+
+            /// Hide the master row a just-removed node owned, and journal the
+            /// flip.
+            ///
+            /// The columnar half of a node deletion. Without it the row stays
+            /// readable — `DETACH DELETE` would leave a ghost that an id lookup
+            /// or a `MERGE` could still bind — and the store's live count would
+            /// disagree with the type's node count for reasons no consumer
+            /// could distinguish from a create.
+            ///
+            /// The row's values are not cleared: a tombstone hides a row on
+            /// every read surface, and leaving the bytes in place is what makes
+            /// [`UndoEntry::ColumnarTombstone`] a flag flip rather than a row
+            /// pre-image. Consolidation (`enable_columnar`, `vacuum`) is what
+            /// finally reclaims them, so they never reach a saved file.
+            #[inline]
+            fn tombstone_removed_row(&mut self, removed: &NodeData) {
+                let Some(row_id) = removed.properties.columnar_row_id() else {
+                    return;
+                };
+                let type_key = removed.node_type;
+                let Some(store) = self.column_stores.get_mut(&type_key) else {
+                    return;
+                };
+                std::sync::Arc::make_mut(store).tombstone(row_id);
+                if let Some(journal) = self.undo.as_deref_mut() {
+                    journal.note_columnar_tombstone(type_key, row_id);
+                }
+            }
         }
     };
 }
@@ -484,6 +513,55 @@ macro_rules! impl_heap_column_writes {
         #[inline]
         fn clear_column_stores(&mut self) {
             self.column_stores.clear();
+        }
+
+        /// Write the node's title through its store's reserved `__title__`
+        /// column, leaving the inline field on its `Null` sentinel.
+        ///
+        /// The inline field is *not* also written: two copies of a title is
+        /// what `enable_columnar`'s drift check existed to reconcile, and
+        /// keeping the store authoritative is what lets a save skip the
+        /// rebuild. A node with no store for its type (row storage, or a type
+        /// whose store was dropped) falls back to the inline write.
+        fn set_node_title(&mut self, idx: NodeIndex, value: Value) {
+            let columnar = self.inner.node_weight(idx).and_then(|nd| {
+                nd.properties
+                    .columnar_row_id()
+                    .map(|row_id| (nd.node_type, row_id))
+            });
+            let Some((type_key, row_id)) = columnar else {
+                if let Some(nd) = self.inner.node_weight_mut(idx) {
+                    nd.title = value;
+                }
+                return;
+            };
+            if !self.column_stores.contains_key(&type_key) {
+                if let Some(nd) = self.inner.node_weight_mut(idx) {
+                    nd.title = value;
+                }
+                return;
+            }
+            if self.undo.is_some() {
+                let prior = self
+                    .column_stores
+                    .get(&type_key)
+                    .and_then(|store| store.get_title(row_id));
+                if let Some(journal) = self.undo.as_deref_mut() {
+                    journal.note_columnar_title(type_key, row_id, prior);
+                }
+            }
+            let wrote = self
+                .column_stores
+                .get_mut(&type_key)
+                .is_some_and(|store| std::sync::Arc::make_mut(store).set_title(row_id, &value));
+            if !wrote {
+                // The row is out of the title column's range — a store shape
+                // that cannot hold the write. Fall back through the recorded,
+                // journalled node path rather than dropping it.
+                if let Some(nd) = GraphWrite::node_weight_mut(self, idx) {
+                    nd.title = value;
+                }
+            }
         }
 
         fn set_node_property(&mut self, idx: NodeIndex, key: InternedKey, value: Value) {
@@ -676,6 +754,7 @@ impl GraphWrite for MemoryGraph {
         if let Some(journal) = self.undo.as_deref_mut() {
             journal.note_node_removed(idx, removed.clone());
         }
+        self.tombstone_removed_row(&removed);
         Some(removed)
     }
 
@@ -1204,6 +1283,7 @@ impl GraphWrite for MappedGraph {
         if let Some(journal) = self.undo.as_deref_mut() {
             journal.note_node_removed(idx, removed.clone());
         }
+        self.tombstone_removed_row(&removed);
         Some(removed)
     }
 

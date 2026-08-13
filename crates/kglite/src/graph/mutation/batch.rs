@@ -11,9 +11,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-/// `(node, node type, row id)` for every node whose columnar row reference has
-/// to be (re)attached once a mapped/disk append finishes.
-type DeferredColumnarRows = Vec<(NodeIndex, String, u32)>;
+/// `(node, row id)` for every node whose columnar row reference has to be
+/// attached once the append finishes.
+type DeferredColumnarRows = Vec<(NodeIndex, u32)>;
 
 /// Column stores held outright (refcount 1) for the duration of a mapped/disk
 /// append, keyed by node type — see `BatchProcessor::detach_columnar_stores`.
@@ -184,76 +184,57 @@ impl BatchProcessor {
     fn flush_chunk(&mut self, graph: &mut DirGraph) -> Result<BatchStats, String> {
         let start = Instant::now();
         let mut stats = BatchStats::default();
-        let mapped = graph.graph.is_mapped() || graph.graph.is_disk();
-
-        // In mapped mode, we use a two-pass approach to avoid O(n²) Arc cloning:
-        // Pass 1: detach existing nodes' Arc refs, push all rows into owned ColumnStores
-        // Pass 2: wrap stores back in Arc, assign refs to all nodes (old + new)
+        // Two passes, on every backend, to avoid O(n²) Arc cloning:
+        // Pass 1: take each affected type's store out of the graph and push all
+        //         rows into it while it is uniquely owned.
+        // Pass 2: wrap the stores back in Arc, install them, and point every
+        //         created node at its row.
         //
-        // This avoids Arc::make_mut cloning the entire store when existing nodes
-        // hold shared references.
+        // This avoids Arc::make_mut cloning the entire store per row. The pair
+        // used to run for mapped/disk only, with memory building row-shaped
+        // `Compact` nodes instead; construction is columnar in every mode now
+        // (see `dir_graph::node_write`), so there is one path.
         let mut deferred_columnar: DeferredColumnarRows = Vec::new();
-        let mut owned_stores: OwnedColumnStores = if mapped {
-            Self::detach_columnar_stores(&self.creates_interned, graph)
-        } else {
-            HashMap::new()
-        };
+        let mut owned_stores: OwnedColumnStores =
+            Self::detach_columnar_stores(&self.creates_interned, graph);
 
         // Process pre-interned creates (fast path — no string interning needed)
         for creation in self.creates_interned.drain(..) {
             let type_key = graph.interner.get_or_intern(&creation.node_type);
 
-            let mut node_data = if mapped {
-                NodeData::new_preinterned(
-                    creation.id,
-                    creation.title,
-                    type_key,
-                    creation.properties,
-                )
-            } else {
-                let schema: Option<Arc<_>> = graph.type_schemas.get(&creation.node_type).cloned();
-                if let Some(ref ts) = schema {
-                    NodeData::new_compact_preinterned(
-                        creation.id,
-                        creation.title,
-                        type_key,
-                        creation.properties,
-                        ts,
-                    )
-                } else {
-                    NodeData::new_preinterned(
-                        creation.id,
-                        creation.title,
-                        type_key,
-                        creation.properties,
-                    )
-                }
-            };
-
-            // Mapped mode: push into owned ColumnStore (pass 1)
-            let mapped_row_id = if mapped {
-                let interned_props = node_data
-                    .properties
-                    .drain_to_interned_pairs(&graph.interner);
-                let store = owned_stores
-                    .entry(creation.node_type.clone())
-                    .or_insert_with(|| {
-                        let schema = graph
-                            .type_schemas
-                            .get(&creation.node_type)
-                            .cloned()
-                            .unwrap_or_else(|| Arc::new(crate::graph::schema::TypeSchema::new()));
-                        let meta = graph
-                            .node_type_metadata
-                            .get(&creation.node_type)
-                            .cloned()
-                            .unwrap_or_default();
+            // Pass 1: push into the owned ColumnStore. The row is pushed
+            // straight from the interned pairs the caller handed us — the
+            // properties used to be folded into a `NodeData`'s `HashMap` first
+            // and drained back out into a `Vec` here, a map allocation and a
+            // round trip per node created, which cost nothing while only the
+            // mapped and disk paths took it and costs every ingest now.
+            let row_id = {
+                // `contains_key` + `get_mut` rather than `entry`, which would
+                // take an owned key and so allocate the type name once per
+                // *row* rather than once per type.
+                if !owned_stores.contains_key(&creation.node_type) {
+                    let schema = graph
+                        .type_schemas
+                        .get(&creation.node_type)
+                        .cloned()
+                        .unwrap_or_else(|| Arc::new(crate::graph::schema::TypeSchema::new()));
+                    let meta = graph
+                        .node_type_metadata
+                        .get(&creation.node_type)
+                        .cloned()
+                        .unwrap_or_default();
+                    owned_stores.insert(
+                        creation.node_type.clone(),
                         crate::graph::storage::column_store::ColumnStore::new(
                             schema,
                             &meta,
                             &graph.interner,
-                        )
-                    });
+                        ),
+                    );
+                }
+                let store = owned_stores
+                    .get_mut(&creation.node_type)
+                    .expect("just inserted");
                 // A key this store's schema has never seen appends one column
                 // inside `push_row`, back-filled with nulls. This used to
                 // rebuild the whole store instead — every row already in the
@@ -261,22 +242,22 @@ impl BatchProcessor {
                 // over a widening ingest stream. See
                 // `DirGraph::ensure_column_store_for_push`, which carried the
                 // same rebuild for the Cypher create path.
-                store.push_id(&node_data.id);
-                store.push_title(&node_data.title);
-                let row_id = store.push_row(&interned_props);
-                node_data.id = Value::Null;
-                node_data.title = Value::Null;
-                node_data.properties = PropertyStorage::Map(HashMap::new());
-                Some(row_id)
-            } else {
-                None
+                store.push_id(&creation.id);
+                store.push_title(&creation.title);
+                store.push_row(&creation.properties)
             };
 
+            // id/title live in the store's reserved columns; the inline fields
+            // carry the `Null` sentinel every columnar producer leaves.
+            let node_data = NodeData {
+                id: Value::Null,
+                title: Value::Null,
+                node_type: type_key,
+                properties: PropertyStorage::Columnar(ColumnarRow::new(row_id)),
+            };
             let node_idx = GraphWrite::add_node(&mut graph.graph, node_data);
 
-            if let Some(row_id) = mapped_row_id {
-                deferred_columnar.push((node_idx, creation.node_type.clone(), row_id));
-            }
+            deferred_columnar.push((node_idx, row_id));
 
             // Statement-rollback capture. No Cypher path reaches this batch
             // funnel today (the Cypher executor creates nodes only through
@@ -364,16 +345,18 @@ impl BatchProcessor {
     /// no-op for an existing node (same argument as above), and the *created*
     /// rows are captured structurally by [`GraphWrite::add_node`].
     ///
-    /// The master store is **not** covered, and the comment here used to claim
-    /// the opposite: `column_stores` lives on the storage backend, which
-    /// `rollback::swap_data_scale` parks, so the schema shell never sees it and
-    /// cannot restore it. What restores a columnar write is the journal's own
-    /// cell entries — and this funnel emits none, because it swaps stores
-    /// wholesale rather than writing cells. That is safe only because no
-    /// Cypher statement reaches it: the executor creates nodes through
-    /// `DirGraph::insert_node_routed`, so no journal is ever installed while it
-    /// runs. A caller that changes that has to journal the store swap here
-    /// first.
+    /// The master store's *contents* are not covered by cell entries — this
+    /// funnel emits none, because it swaps stores wholesale rather than writing
+    /// cells, and `column_stores` lives on the storage backend, which
+    /// `rollback::swap_data_scale` parks so the schema shell cannot restore it.
+    /// What it does journal, when a checkpoint happens to be open, is the
+    /// append pre-image per affected type: the swap only ever *appends* rows to
+    /// the store it took out, so truncating back to the captured length undoes
+    /// the whole chunk. No Cypher statement reaches this funnel today (the
+    /// executor creates nodes through `DirGraph::insert_node_routed`), so the
+    /// capture is defensive rather than load-bearing — but it is what makes a
+    /// future `CALL` procedure that does route bulk ingest through here
+    /// reversible instead of silently surviving a rollback.
     ///
     /// Returns `(rows awaiting reattachment, owned stores keyed by node type)`.
     fn detach_columnar_stores(
@@ -384,6 +367,7 @@ impl BatchProcessor {
         let mut owned_stores: OwnedColumnStores = HashMap::new();
         let affected_types: HashSet<String> = creates.iter().map(|c| c.node_type.clone()).collect();
         for node_type in &affected_types {
+            let store_was_new = graph.column_store(node_type).is_none();
             // D1 Phase 3: no detach pass. The old code stripped every existing
             // node's `PropertyStorage` purely so `Arc::try_unwrap` below could
             // succeed — nodes held strong handles and would otherwise force a
@@ -398,10 +382,45 @@ impl BatchProcessor {
                     .cloned()
                     .unwrap_or_default();
                 store.materialize_for_append(&meta, &graph.interner);
+                // After the materialization, never across it: it re-derives the
+                // store's columns, so a pre-image taken on the far side names a
+                // schema that no longer describes them.
+                Self::journal_append_pre_image(graph, node_type, &store, store_was_new);
                 owned_stores.insert(node_type.clone(), store);
+            } else {
+                // A type whose store this chunk creates: the undo is to drop it.
+                Self::journal_append_pre_image(
+                    graph,
+                    node_type,
+                    &crate::graph::storage::column_store::ColumnStore::new(
+                        Arc::new(crate::graph::schema::TypeSchema::new()),
+                        &HashMap::new(),
+                        &graph.interner,
+                    ),
+                    store_was_new,
+                );
             }
         }
         owned_stores
+    }
+
+    /// Journal the pre-image that reverses this chunk's appends to one type's
+    /// store, when a statement checkpoint is open. No-op otherwise, which is
+    /// every call today — see [`Self::detach_columnar_stores`].
+    fn journal_append_pre_image(
+        graph: &mut DirGraph,
+        node_type: &str,
+        store: &crate::graph::storage::column_store::ColumnStore,
+        store_was_new: bool,
+    ) {
+        if graph.graph.undo_journal_mut().is_none() {
+            return;
+        }
+        let type_key = graph.interner.get_or_intern(node_type);
+        let captured = crate::graph::storage::undo::ColumnarAppendPreImage::capture(store);
+        if let Some(journal) = graph.graph.undo_journal_mut() {
+            captured.record(journal, type_key, store_was_new);
+        }
     }
 
     /// Pass 2 of the mapped/disk columnar append: publish the owned stores
@@ -426,16 +445,12 @@ impl BatchProcessor {
         for (node_type, store) in owned_stores {
             graph.install_column_store(&node_type, Arc::new(store));
         }
-        // Assign Arc refs to all nodes (existing + newly created).
-        // For disk mode, also update the DiskNodeSlot.row_id directly:
-        // node_weight_mut() materializes into an arena that gets cleared on
-        // the next call, so the property assignment alone doesn't persist
-        // the per-type row_id back to the slot. Without this, slot.row_id
-        // keeps the slot-index value assigned by add_node().
-        for (node_idx, _node_type, row_id) in deferred_columnar {
-            if let Some(node) = GraphWrite::node_weight_mut_silent(&mut graph.graph, node_idx) {
-                node.properties = PropertyStorage::Columnar(ColumnarRow::new(row_id));
-            }
+        // Disk only, in effect: `node_weight_mut()` materializes a `NodeData`
+        // into an arena that the next call clears, so the `Columnar` row
+        // reference the create loop put on the node does not reach the disk
+        // slot — `update_row_id` is what persists it. A no-op on the heap
+        // backends, where the node itself already carries the row.
+        for (node_idx, row_id) in deferred_columnar {
             GraphWrite::update_row_id(&mut graph.graph, node_idx, row_id);
         }
         // No disk-side sync: `install_column_store` above wrote into the
@@ -610,9 +625,7 @@ impl BatchProcessor {
         provisional_key: InternedKey,
     ) {
         let set_title = |graph: &mut DirGraph, value: Value| {
-            if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
-                node.title = value;
-            }
+            GraphWrite::set_node_title(&mut graph.graph, node_idx, value);
         };
         match conflict_mode {
             ConflictHandling::Skip => unreachable!(),
@@ -674,6 +687,16 @@ impl BatchProcessor {
                 }
             }
         }
+
+        // Honour the memory limit once the whole batch has landed — not per
+        // chunk, which would re-spill a store the next chunk is about to append
+        // to. This is what makes an in-process mapped graph actually mapped:
+        // `StorageMode::Mapped` is `memory_limit = Some(0)`, and until the
+        // limit was enforced somewhere on the ingest path, a mapped graph built
+        // by `add_nodes` stayed wholly on the heap until its first write
+        // (measured during the shape-convergence programme's Phase 4). A no-op
+        // when no limit is set, which is the default-mode path.
+        graph.maybe_spill_columns();
 
         Ok((total_stats, self.metrics))
     }

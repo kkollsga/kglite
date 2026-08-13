@@ -80,13 +80,20 @@
 //!   write site (`columnar_write::write_column_master`), which is also where
 //!   the one legitimate exception lives — a `Forked` backend shares its stores
 //!   with the base a reader holds, so its first write per type must copy.
-//! - `CREATE` and `DELETE` never reach a master store in memory mode: the
-//!   in-memory insert branch always builds a `Compact` node, and node removal
-//!   is a plain backend edit. Every other writer of the store map
-//!   (`enable_columnar`, `disable_columnar`, `vacuum`, the spill and bulk-batch
-//!   paths) runs outside the statement window. So row *count* and tombstones
-//!   are statement-invariant and need no undo entry of their own — a property
-//!   the always-columnar flip will have to buy back explicitly.
+//! - `CREATE` and `DELETE` **do** reach a master store, in every mode, since
+//!   construction became columnar: a create appends a row and a delete
+//!   tombstones one, both inside the statement window. Neither is a cell edit,
+//!   so each has its own entry — [`UndoEntry::ColumnarRowsAppended`] and
+//!   [`UndoEntry::ColumnarTombstone`] — and between them the store's *length*
+//!   and its *liveness bitmap* are restored as exactly as its cells are. Rows
+//!   are append-only, so the truncation also restores the next row id: a node
+//!   re-created after a rollback lands on the vacated row rather than leaking a
+//!   hole, which is the columnar half of the petgraph slot identity below.
+//!   Every *other* writer of the store map (`enable_columnar`,
+//!   `disable_columnar`, `vacuum`, the spill and bulk-batch paths) still runs
+//!   outside the statement window, so those need no entry — and the bulk-batch
+//!   path, which swaps stores wholesale, journals its own append pre-image
+//!   before doing so should a caller ever run it under an open checkpoint.
 //!
 //! Two documented residues, both observational no-ops:
 //!
@@ -574,6 +581,54 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
             };
             if let Some(store) = GraphWrite::column_store_mut(&mut graph.graph, node_type) {
                 std::sync::Arc::make_mut(store).restore_schema(prior_schema, prior_column_count);
+            }
+            columnar_type_touched(fallout, type_name);
+        }
+        UndoEntry::ColumnarRowsAppended {
+            node_type,
+            prior_row_count,
+            prior_schema,
+            prior_column_count,
+            store_was_new,
+        } => {
+            // Rows first, then the columns the append's unseen keys grew:
+            // `truncate_rows` shortens every column that still exists, and
+            // `restore_schema` then drops the ones that should not exist at
+            // all. Both are truncations of a stack, so a statement that
+            // appended twice replays as two shrinking steps and lands on the
+            // pre-statement length exactly.
+            let Some(type_name) = graph.interner.try_resolve(node_type).map(str::to_string) else {
+                return;
+            };
+            if store_was_new {
+                GraphWrite::take_column_store(&mut graph.graph, node_type);
+            } else if let Some(store) = GraphWrite::column_store_mut(&mut graph.graph, node_type) {
+                let store = std::sync::Arc::make_mut(store);
+                store.truncate_rows(prior_row_count);
+                store.restore_schema(prior_schema, prior_column_count);
+            }
+            columnar_type_touched(fallout, type_name);
+        }
+        UndoEntry::ColumnarTitle {
+            node_type,
+            row_id,
+            prior,
+        } => {
+            let Some(type_name) = graph.interner.try_resolve(node_type).map(str::to_string) else {
+                return;
+            };
+            if let Some(store) = GraphWrite::column_store_mut(&mut graph.graph, node_type) {
+                let value = prior.unwrap_or(Value::Null);
+                std::sync::Arc::make_mut(store).set_title(row_id, &value);
+            }
+            columnar_type_touched(fallout, type_name);
+        }
+        UndoEntry::ColumnarTombstone { node_type, row_id } => {
+            let Some(type_name) = graph.interner.try_resolve(node_type).map(str::to_string) else {
+                return;
+            };
+            if let Some(store) = GraphWrite::column_store_mut(&mut graph.graph, node_type) {
+                std::sync::Arc::make_mut(store).untombstone(row_id);
             }
             columnar_type_touched(fallout, type_name);
         }

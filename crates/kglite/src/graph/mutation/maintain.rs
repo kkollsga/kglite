@@ -1469,16 +1469,12 @@ fn update_node_titles(
 ) -> Result<(), String> {
     if let Some(title_idx) = source_title_idx {
         if let Some(title) = df_data.get_value_by_index(row_idx, title_idx) {
-            if let Some(node) = graph.get_node_mut(source_idx) {
-                node.title = title;
-            }
+            GraphWrite::set_node_title(&mut graph.graph, source_idx, title);
         }
     }
     if let Some(title_idx) = target_title_idx {
         if let Some(title) = df_data.get_value_by_index(row_idx, title_idx) {
-            if let Some(node) = graph.get_node_mut(target_idx) {
-                node.title = title;
-            }
+            GraphWrite::set_node_title(&mut graph.graph, target_idx, title);
         }
     }
     Ok(())

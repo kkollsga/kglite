@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A copy of a spilled graph no longer writes into the original's columns.**
+  A graph that has spilled its columns to disk keeps reading them through their
+  file mappings, and a copy of that graph — `.copy()`, a transaction fork, a
+  held query result — inherited the same spill directory *and the same file
+  names*. The moment the copy spilled anything of its own it overwrote the
+  original's column files, and the original then read the copy's values back
+  through its mapping: a write on one graph appearing on another, which is the
+  one thing copy-on-write must never do. Each column store now spills under its
+  own name, re-drawn whenever the store is copied.
+- **A node created after a deletion is saved against itself.** The `.kgl`
+  column section is positional: row *k* of a node type belongs to that type's
+  *k*-th node. A creation reuses a deleted node's slot but appends its row at
+  the end, so a delete-then-create pair left the two orders disagreeing, and
+  every row after the divergence was saved against the wrong node — ids,
+  titles and properties all shifted by one, and the edges consequently appeared
+  to connect different nodes after a reload. The consolidation pass has always
+  sorted rows to match; what was missing was noticing that it needed to run.
+
 - **Crash recovery keeps every property value's type.** A property carrying
   different types on different nodes — legal in a live graph, where a value is
   a sum type and a columnar column simply demotes to mixed — came back from
@@ -110,6 +128,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Every graph is columnar from its first node; `save()` no longer changes the
+  write regime.** A graph used to be built one way and saved another: node
+  properties were laid out per node, in a row, and only the first `save()` (or
+  an explicit `enable_columnar()`) rebuilt them into the per-type column stores
+  the file format, the memory limit and the mapped/disk modes all require. That
+  made "has been saved once" a permanent, invisible property of a live graph —
+  writes cost differently on either side of it, and a defect reachable only on
+  one side was a defect most testing never reached. Node creation is now
+  columnar on every path and in every storage mode (Cypher `CREATE` and
+  `MERGE`, `add_nodes` and every frame-shaped ingest built on it, WAL replay,
+  the N-Triples loader), so a freshly built graph and a reloaded one are the
+  same shape and `is_columnar` reports `True` from the first node. `save()`
+  becomes a consolidation pass that a settled graph skips outright, rather than
+  a mandatory O(N) rebuild. `enable_columnar()` / `disable_columnar()` remain,
+  and remain meaningful — the pair is what reclaims the rows deleted nodes
+  leave behind and what brings a spilled store back to the heap — but neither
+  switches a mode any more.
+- **A node's title is written where the node's other values are.** A `SET
+  n.title` / `SET n.name`, an `add_nodes` update or replace, and a connection
+  title all used to write onto the node itself, leaving the column store's copy
+  stale until the next `save()` noticed the divergence and rebuilt every store
+  to reconcile it. Title writes now go through the store like any other value,
+  so a title write no longer costs the next save a full rebuild. One
+  user-visible consequence: `SET n = {…}` clears a node's title when the map
+  omits it, on every graph. It always did so on a graph that had not been
+  saved, and never did on one that had; the two now agree, on the
+  never-saved behaviour.
+- **`vacuum()`'s `columnar_rebuilt` reports whether rows were actually
+  reclaimed.** It used to report whether the graph was columnar at all, which
+  was a fair proxy only while a graph could be non-columnar. A vacuum with no
+  dead rows to reclaim now reports `False`.
+- **A graph built in-process with `storage="mapped"` is actually mapped.**
+  `storage="mapped"` is a zero memory limit, but nothing enforced it on the
+  ingest path, so an in-process mapped graph stayed wholly heap-resident until
+  its first write — only a `load()` ever produced mapped columns. Measured on a
+  20,000-row three-column build: 589 kB heap-resident before, 20 kB after (the
+  tombstone bitmap, which has no file form).
 - **Adding a property that a node type has never carried no longer rebuilds the
   type's column store.** Every newly seen property key used to re-push every row
   already stored into a fresh store, so an ingest stream whose columns widen

@@ -701,6 +701,32 @@ impl GraphWrite for ForkedGraph {
         GraphWrite::set_node_property(self, idx, key, value);
     }
 
+    /// Titles follow properties: on a columnar node they live in the store's
+    /// reserved column, so the overlay writes them there — copying the store
+    /// once per type on the first write, exactly as `set_node_property` does,
+    /// so the base a reader is holding keeps its own titles.
+    fn set_node_title(&mut self, idx: NodeIndex, value: Value) {
+        if let Some((type_key, row_id)) = self.columnar_row_of(idx) {
+            if self.undo.is_some() {
+                let prior = self
+                    .column_stores
+                    .get(&type_key)
+                    .and_then(|store| store.get_title(row_id));
+                if let Some(journal) = self.undo.as_deref_mut() {
+                    journal.note_columnar_title(type_key, row_id, prior);
+                }
+            }
+            if let Some(store) = self.column_stores.get_mut(&type_key) {
+                if Arc::make_mut(store).set_title(row_id, &value) {
+                    return;
+                }
+            }
+        }
+        if let Some(nd) = self.cow_node(idx) {
+            nd.title = value;
+        }
+    }
+
     fn remove_node_property(&mut self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
         let previous = GraphRead::get_node_property(self, idx, key);
         self.capture_property_pre_image(idx, ColumnarWrite::Cell(key));

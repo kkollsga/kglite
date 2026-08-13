@@ -753,7 +753,7 @@ fn mapped_column_set_writes_through_to_the_file() {
 
     // The write is in the file, not only in a private overlay: read the raw
     // i64 image back off disk.
-    let bytes = std::fs::read(dir.path().join("age.i64")).unwrap();
+    let bytes = std::fs::read(store.spill_subdir(dir.path()).join("age.i64")).unwrap();
     let cell = i64::from_le_bytes(bytes[7 * 8..8 * 8].try_into().unwrap());
     assert_eq!(cell, 4242, "the mapped write never reached the spill file");
 }
@@ -1083,7 +1083,7 @@ fn a_typed_id_column_spills_to_a_file() {
         .expect("materialize");
 
     assert!(
-        dir.path().join("__id__.i64").exists(),
+        store.spill_subdir(dir.path()).join("__id__.i64").exists(),
         "no __id__ file written"
     );
     assert!(
@@ -1094,4 +1094,48 @@ fn a_typed_id_column_spills_to_a_file() {
     for i in 0..64i64 {
         assert_eq!(store.get_id(i as u32), Some(Value::Int64(i)));
     }
+}
+
+/// Two stores that came from one `clone()` must not spill into the same files.
+///
+/// A graph's spill directory is copied by every clone of it — `copy()`, a
+/// transaction fork, a held view — so a per-*type* spill path puts two live
+/// stores on the same bytes. Because a spilled column is read back through its
+/// file mapping, the loser then reads the winner's values: a copy's write
+/// showing up in the original, which is the failure
+/// `test_phase5_parity.py::test_graph_copy_cow_correctness_mapped` sees from
+/// the outside. Asserted here on the primitive, where the mechanism is.
+#[test]
+fn a_cloned_store_spills_to_its_own_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut interner = StringInterner::new();
+    let age = interner.get_or_intern("age");
+    let schema = Arc::new(TypeSchema::from_keys(vec![age]));
+    let meta = HashMap::from([("age".to_string(), "int64".to_string())]);
+
+    let mut original = ColumnStore::new(schema, &meta, &interner);
+    for i in 0..64i64 {
+        original.push_row(&[(age, Value::Int64(i))]);
+    }
+    let mut copy = original.clone();
+
+    original
+        .materialize_to_files(dir.path(), &interner)
+        .unwrap();
+    // The copy diverges *after* the clone and spills to the same root.
+    copy.set(7, age, &Value::Int64(4242), None);
+    copy.materialize_to_files(dir.path(), &interner).unwrap();
+
+    assert_ne!(
+        original.spill_subdir(dir.path()),
+        copy.spill_subdir(dir.path()),
+        "a clone must draw its own spill path, or the two stores overwrite \
+         each other's columns"
+    );
+    assert_eq!(
+        original.get(7, age),
+        Some(Value::Int64(7)),
+        "the copy's spill overwrote the original's column file"
+    );
+    assert_eq!(copy.get(7, age), Some(Value::Int64(4242)));
 }

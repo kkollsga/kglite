@@ -80,11 +80,50 @@ class TestIncrementalColumnar:
         graph.add_nodes(df, "Item", "nid", "name")
         assert graph.is_columnar
 
-    def test_default_mode_not_columnar(self):
+    def test_mapped_construction_actually_maps(self):
+        """An in-process mapped graph is file-backed once its ingest lands.
+
+        ``storage="mapped"`` is ``memory_limit = 0``, and until the limit was
+        enforced on the ingest path a mapped graph built in-process stayed
+        wholly on the heap — only a *load* ever produced mapped columns. The
+        heap assertion is what makes this more than a flag check: the flag reads
+        ``any(column is mapped)``, so it can be True while most of the data is
+        still resident.
+        """
+        graph = KnowledgeGraph(storage="mapped")
+        rows = 20_000
+        df = pd.DataFrame(
+            {
+                "nid": range(rows),
+                "name": [f"N{i}" for i in range(rows)],
+                "v": [float(i) for i in range(rows)],
+            }
+        )
+        graph.add_nodes(df, "Item", "nid", "name")
+
+        info = graph.graph_info()
+        assert info["memory_limit"] == 0
+        assert info["columnar_is_mapped"] is True
+        # One byte per row of tombstone bitmap is the heap floor; the id, name
+        # and value columns are all read through their mapping.
+        assert info["columnar_heap_bytes"] <= 2 * rows, info["columnar_heap_bytes"]
+        assert graph.cypher("MATCH (n:Item) WHERE n.v > 19998 RETURN count(n) AS c").to_list()[0]["c"] == 1
+
+    def test_default_mode_is_columnar_from_construction(self):
+        """Default mode is columnar from its first node — no save required.
+
+        This test used to assert the opposite (``test_default_mode_not_columnar``).
+        The behaviour it pinned was the shape split the convergence programme
+        removed: a default-mode graph built row-shaped properties and only
+        became columnar when ``save()`` rebuilt them, so every graph changed
+        write regime the first time it was saved. Both storage modes now build
+        the same shape, which is what makes the mapped assertion above a parity
+        check rather than a mode difference.
+        """
         graph = KnowledgeGraph()
         df = pd.DataFrame({"nid": [1], "name": ["A"]})
         graph.add_nodes(df, "Item", "nid", "name")
-        assert not graph.is_columnar
+        assert graph.is_columnar
 
     def test_save_load_roundtrip_preserves_data(self, tmp_path):
         graph = KnowledgeGraph(storage="mapped")

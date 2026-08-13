@@ -273,6 +273,16 @@ fn upsert_node_rows(
     exact: &[String],
     rows: &[UpsertRow],
 ) -> Result<(), String> {
+    // Declare the held-back columns *before* the bulk create, not after. The
+    // create is what builds the type's `ColumnStore`, and it types each column
+    // from the type's declared metadata — so a column whose declaration arrives
+    // afterwards is instead typed from whichever exact value happens to be
+    // written into it first. For a property that mixes an int and a float that
+    // is the difference between a `Mixed` column that returns both values as
+    // logged and a `Float64` column that promotes the int on the way in
+    // (`int_and_float_under_one_property_do_not_promote`). Latent on
+    // mapped/disk before construction became columnar; universal after.
+    declare_exact_node_columns(graph, node_type, exact, rows);
     let df = build_dataframe(&["id", "title"], framed, rows)?;
     add_nodes(
         graph,
@@ -284,6 +294,41 @@ fn upsert_node_rows(
     )?;
     apply_exact_node_props(graph, node_type, exact, rows);
     Ok(())
+}
+
+/// Declare each held-back column on the node type — its own value's type when
+/// the column is single-typed (a `Point`, say, which has no frame column but
+/// one clear type), `"mixed"` when it is not — and register its key on the
+/// type's schema so the store the bulk create builds carries a column of that
+/// type from the start.
+///
+/// Skipping the metadata half would also leave a replayed property out of the
+/// type's catalogue, which on a disk graph decides what `save()` persists.
+fn declare_exact_node_columns(
+    graph: &mut DirGraph,
+    node_type: &str,
+    exact: &[String],
+    rows: &[UpsertRow],
+) {
+    if exact.is_empty() {
+        return;
+    }
+    let mut declared: HashMap<String, String> = HashMap::new();
+    for col in exact {
+        declared.insert(
+            col.clone(),
+            declared_type_name(rows.iter().filter_map(|(_, _, p)| p.get(col))),
+        );
+    }
+    graph.upsert_node_type_metadata(node_type, declared);
+    // `get_or_intern`, never `InternedKey::from_str`: a hash-only key cannot be
+    // resolved back to a string at save time, and the property vanishes on
+    // reload.
+    let keys: Vec<_> = exact
+        .iter()
+        .map(|col| graph.interner.get_or_intern(col))
+        .collect();
+    graph.ensure_type_schema_keys(node_type, &keys);
 }
 
 /// Write the held-back columns onto each node with their logged `Value`
@@ -298,20 +343,8 @@ fn apply_exact_node_props(
     if exact.is_empty() {
         return;
     }
-    // Declare the property on the type the way a live `SET` does — its own
-    // value's type when the column is single-typed (a `Point`, say, which
-    // has no frame column but one clear type), `"mixed"` when it is not.
-    // Skipping this would leave a replayed property out of the type's
-    // metadata, which on a disk graph decides what `save()` persists.
-    let mut declared: HashMap<String, String> = HashMap::new();
-    for col in exact {
-        declared.insert(
-            col.clone(),
-            declared_type_name(rows.iter().filter_map(|(_, _, p)| p.get(col))),
-        );
-    }
-    graph.upsert_node_type_metadata(node_type, declared);
-
+    // The declaration ran before the bulk create — see
+    // `declare_exact_node_columns` for why the order is load-bearing.
     for (id, _, props) in rows {
         let Some(idx) = graph.lookup_by_id(node_type, id) else {
             continue;

@@ -584,6 +584,60 @@ impl TypedColumn {
         }
     }
 
+    /// Drop every row past `len`.
+    ///
+    /// The inverse of a tail of [`Self::push`] calls, and only that: a column
+    /// is a stack, so truncation is exact for rows the same statement appended
+    /// and meaningless for anything else. `Str` needs three buffers cut in
+    /// step — `offsets` keeps its `len + 1` fence post, `data` loses the bytes
+    /// past the surviving fence, and the relocation overlay drops keys that no
+    /// longer name a row — because a stale entry there would resurface under
+    /// the next row pushed onto the same index.
+    pub(crate) fn truncate_rows(&mut self, len: usize) {
+        if len >= self.len() {
+            return;
+        }
+        match self {
+            TypedColumn::Int64 { data, nulls } => {
+                data.truncate(len);
+                nulls.truncate(len);
+            }
+            TypedColumn::Float64 { data, nulls } => {
+                data.truncate(len);
+                nulls.truncate(len);
+            }
+            TypedColumn::UniqueId { data, nulls } => {
+                data.truncate(len);
+                nulls.truncate(len);
+            }
+            TypedColumn::Bool { data, nulls } => {
+                data.truncate(len);
+                nulls.truncate(len);
+            }
+            TypedColumn::Date { data, nulls } => {
+                data.truncate(len);
+                nulls.truncate(len);
+            }
+            TypedColumn::Str {
+                offsets,
+                data,
+                nulls,
+                relocated,
+            } => {
+                let keep_bytes = if len < offsets.len() {
+                    offsets.get(len) as usize
+                } else {
+                    data.len()
+                };
+                offsets.truncate(len + 1);
+                data.truncate(keep_bytes);
+                nulls.truncate(len);
+                relocated.retain(|row, _| (*row as usize) < len);
+            }
+            TypedColumn::Mixed { data } => data.truncate(len),
+        }
+    }
+
     /// Whether this column's data is currently file-backed.
     pub fn is_mapped(&self) -> bool {
         match self {
@@ -861,6 +915,33 @@ pub struct ColumnStore {
     /// Optional mmap-backed store for disk mode. When present, get/get_id/get_title
     /// delegate to this instead of the TypedColumn arrays above.
     mmap_store: Option<Arc<crate::graph::storage::mapped::column_store::MmapColumnStore>>,
+    /// Scratch slot→value-index buffer reused by [`Self::push_row`]. Never
+    /// carries state between calls; a field only so the allocation is not paid
+    /// once per row created.
+    slot_scratch: Vec<u32>,
+    /// Process-unique tag for this store's spill files.
+    ///
+    /// A spill writes one file per column under the graph's spill directory,
+    /// and a graph's spill directory is *copied* by every clone of it — a
+    /// `copy()`, a transaction fork, a held view. Two stores writing
+    /// `<spill>/<Type>/<column>` therefore overwrite each other's bytes, and
+    /// because a spilled column is read back through its file mapping, the
+    /// loser silently reads the winner's values: a copy's write appearing in
+    /// the original, which is the one thing copy-on-write must never do
+    /// (`test_phase5_parity.py::test_graph_copy_cow_correctness_mapped`).
+    ///
+    /// The token is re-drawn by `Clone`, not copied, so the store a
+    /// copy-on-write hands out never shares a path with the one it came from.
+    /// Re-spilling the *same* store reuses its own token, which is what keeps
+    /// a repeatedly-enforced memory limit from growing the spill directory.
+    spill_token: u64,
+}
+
+/// Source of [`ColumnStore::spill_token`] values.
+static NEXT_SPILL_TOKEN: AtomicU64 = AtomicU64::new(0);
+
+fn next_spill_token() -> u64 {
+    NEXT_SPILL_TOKEN.fetch_add(1, Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -931,6 +1012,9 @@ impl Clone for ColumnStore {
             title_column: self.title_column.clone(),
             overflow_offsets: self.overflow_offsets.clone(),
             overflow_data: self.overflow_data.clone(),
+            slot_scratch: Vec::new(),
+            // Re-drawn, never copied — see the field's documentation.
+            spill_token: next_spill_token(),
         }
     }
 }
@@ -962,6 +1046,8 @@ impl ColumnStore {
             overflow_offsets: None,
             overflow_data: None,
             mmap_store: None,
+            slot_scratch: Vec::new(),
+            spill_token: next_spill_token(),
         }
     }
 
@@ -981,6 +1067,8 @@ impl ColumnStore {
             overflow_offsets: None,
             overflow_data: None,
             mmap_store: None,
+            slot_scratch: Vec::new(),
+            spill_token: next_spill_token(),
         }
     }
 
@@ -1000,6 +1088,8 @@ impl ColumnStore {
             overflow_offsets: None,
             overflow_data: None,
             mmap_store: Some(mmap_store),
+            slot_scratch: Vec::new(),
+            spill_token: next_spill_token(),
         }
     }
 
@@ -1358,17 +1448,26 @@ impl ColumnStore {
             }
         }
 
-        // Build slot→value lookup to push values directly (avoids null-then-overwrite).
-        let mut slot_values: Vec<Option<&Value>> = vec![None; self.columns.len()];
-        for (key, value) in values {
+        // Build a slot→value lookup so each column is pushed once, directly,
+        // rather than null-then-overwritten. The scratch buffer is a field
+        // rather than a local `Vec`: this runs once per node created, on every
+        // ingest path, and a fresh allocation per row was measurable against
+        // the row-shaped construction it replaced. `u32::MAX` marks a column
+        // this row carries no value for.
+        const NONE: u32 = u32::MAX;
+        let mut slot_values = std::mem::take(&mut self.slot_scratch);
+        slot_values.clear();
+        slot_values.resize(self.columns.len(), NONE);
+        for (index, (key, _)) in values.iter().enumerate() {
             if let Some(slot) = self.schema.slot(*key) {
-                slot_values[slot as usize] = Some(value);
+                slot_values[slot as usize] = index as u32;
             }
         }
 
-        for (slot, slot_val) in slot_values.iter().enumerate() {
+        for (slot, &value_index) in slot_values.iter().enumerate() {
             let col = &mut self.columns[slot];
-            if let Some(value) = slot_val {
+            if value_index != NONE {
+                let value = &values[value_index as usize].1;
                 if col.push(value).is_err() {
                     // Type mismatch or storage growth failure: preserve the
                     // row through the infallible heap-backed fallback.
@@ -1379,6 +1478,7 @@ impl ColumnStore {
                 col.push_null();
             }
         }
+        self.slot_scratch = slot_values;
 
         // Keep id/title columns in sync (push null placeholders for property-only rows)
         if let Some(ref mut col) = self.id_column {
@@ -1587,6 +1687,62 @@ impl ColumnStore {
         }
     }
 
+    /// Bring a tombstoned row back. The inverse of [`Self::tombstone`], for the
+    /// rollback of a `DELETE` that failed later in its statement — the row's
+    /// values were never overwritten, only hidden, so clearing the flag is the
+    /// whole restore.
+    pub fn untombstone(&mut self, row_id: u32) {
+        if let Some(t) = self.tombstones.get_mut(row_id as usize) {
+            *t = false;
+        }
+    }
+
+    /// Whether `row_id` is tombstoned. Out-of-range rows read as live, matching
+    /// the `unwrap_or(false)` every reader here uses.
+    #[inline]
+    pub fn is_tombstoned(&self, row_id: u32) -> bool {
+        self.tombstones
+            .get(row_id as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Drop every row past `row_count`, restoring the store to the length it
+    /// had before a statement appended to it.
+    ///
+    /// The inverse of a tail of [`Self::push_row`] calls
+    /// ([`UndoEntry::ColumnarRowsAppended`](crate::graph::storage::undo::UndoEntry::ColumnarRowsAppended)).
+    /// Exact rather than approximate: rows are only ever appended, so the rows
+    /// past `row_count` are precisely the ones the statement created, and
+    /// truncating restores the next `push_row`'s row id too — a re-created node
+    /// after a rollback lands on the row the rolled-back one vacated instead of
+    /// leaking a hole.
+    ///
+    /// An mmap-backed store is never in a position to need this: a row cannot
+    /// be appended to one until `materialize_for_append` has made it owned.
+    pub fn truncate_rows(&mut self, row_count: u32) {
+        if row_count >= self.row_count {
+            return;
+        }
+        debug_assert!(
+            self.mmap_store.is_none(),
+            "an mmap-backed store cannot have been appended to, so it cannot \
+             need a row truncation"
+        );
+        let len = row_count as usize;
+        for col in &mut self.columns {
+            col.truncate_rows(len);
+        }
+        if let Some(col) = self.id_column.as_mut() {
+            col.truncate_rows(len);
+        }
+        if let Some(col) = self.title_column.as_mut() {
+            col.truncate_rows(len);
+        }
+        self.tombstones.truncate(len);
+        self.row_count = row_count;
+    }
+
     /// Check if a row has a property (non-null, non-tombstoned).
     #[allow(dead_code)] // Test-only.
     pub fn contains(&self, row_id: u32, key: InternedKey) -> bool {
@@ -1676,6 +1832,10 @@ impl ColumnStore {
         dir: &Path,
         interner: &StringInterner,
     ) -> io::Result<()> {
+        // One directory per *store instance*, not per type: two stores of the
+        // same type can be live at once (a graph and a copy of it), and they
+        // must not write each other's column files. See `spill_token`.
+        let dir = &self.spill_subdir(dir);
         std::fs::create_dir_all(dir)?;
         for (slot, ik) in self.schema.iter() {
             let col_name = interner.resolve(ik);
@@ -1691,6 +1851,12 @@ impl ColumnStore {
             col.materialize_to_file(dir, "__title__")?;
         }
         Ok(())
+    }
+
+    /// Where [`Self::materialize_to_files`] puts this store's column files,
+    /// given the graph's spill root. See [`Self::spill_token`](#structfield).
+    pub(crate) fn spill_subdir(&self, root: &Path) -> std::path::PathBuf {
+        root.join(self.spill_token.to_string())
     }
 
     /// Flush dirty pages of every mmap-backed underlying file to disk and

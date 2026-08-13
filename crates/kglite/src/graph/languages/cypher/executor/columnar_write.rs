@@ -44,12 +44,15 @@ pub(super) struct ColumnMasterWrite<'a> {
 /// `Columnar` nodes, for a `Columnar` node whose type is absent from
 /// `column_stores`, and for `title`/`name`.
 ///
-/// `title`/`name` are excluded deliberately: the fallthrough sets the inline
-/// `node.title`, and `enable_columnar` detects that inline override on save
-/// (it differs from the stale `__title__` column) and rebuilds, consolidating
-/// the fresh title. That single save-side chokepoint covers every title-write
-/// path — Cypher `SET`, `add_nodes` update/replace, connection titles —
-/// without per-path master writes (petekSuite bug 2).
+/// `title`/`name` are still excluded, but no longer because the title lives
+/// somewhere else: the fallthrough now writes it through
+/// [`GraphWrite::set_node_title`](crate::graph::storage::GraphWrite::set_node_title),
+/// which lands in the store's reserved `__title__` column for every title-write
+/// path (Cypher `SET`, `add_nodes` update/replace, connection titles). The
+/// save-side consolidation chokepoint that used to reconcile an inline override
+/// against a stale column — and rebuilt every store to do it (petekSuite bug 2)
+/// — has nothing left to reconcile. The exclusion here is a routing detail: a
+/// title is not a schema slot, so it cannot go through the cell writer below.
 ///
 /// The property name is interned into the graph's `StringInterner` *before*
 /// `column_stores` is borrowed. The per-node path gets this free via
@@ -175,17 +178,27 @@ pub(super) fn write_column_master(
     // The rollback invariant, asserted at the exact point it matters — and it
     // is the *inverse* of the pre-Phase-2 one. The journal used to hold the
     // master's allocation, so the write had to fork away from it; now the
-    // journal holds only the cell's prior value, so a fork here would be a
-    // silent whole-store copy per statement (O(rows x cols) to write one cell)
-    // with nothing gained. On a non-forked backend the master is the backend's
-    // alone and the pointer must survive `make_mut` unchanged.
+    // journal holds only the cell's prior value, so a copy here would be a
+    // silent whole-store clone per statement (O(rows x cols) to write one cell)
+    // with nothing gained.
+    //
+    // Three holders are legitimate and only these three: a `Forked` backend
+    // shares its stores with the base a reader holds; a whole-`DirGraph` clone
+    // (`fork_transaction`, the clone checkpoint, a held view) shares them with
+    // its twin; and nothing else, because `UndoEntry` has no variant that can
+    // hold an `Arc<ColumnStore>` at all — the property this phase's design
+    // rests on is enforced by the type, not by this line. What the assert still
+    // catches is a *fourth* holder appearing where the store was uniquely
+    // owned: the count is read before the write, so a copy taken from a
+    // uniquely-owned master fails here loudly. The behavioural gate is the
+    // clone counter (`rollback_tests::a_columnar_statement_clones_no_store`).
+    let shared = Arc::strong_count(master) > 1;
     let before = Arc::as_ptr(master);
     Arc::make_mut(master).set(row_id, key, value, declared_type.as_deref()); // (3)
     debug_assert!(
-        forked || std::ptr::eq(before, Arc::as_ptr(master)),
-        "a columnar write on a non-forked backend must mutate the master in \
-         place; a fork here means something is holding a second handle and \
-         every statement is paying a whole-store copy"
+        forked || shared || std::ptr::eq(before, Arc::as_ptr(master)),
+        "a columnar write copied a master that nothing else was holding; \
+         `Arc::make_mut` on a uniquely-owned handle must mutate in place"
     );
     graph.graph.note_recorded_node_upsert(node_idx); // (4)
     Some(prior_value)

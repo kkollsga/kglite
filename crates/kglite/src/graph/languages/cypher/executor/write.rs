@@ -1212,15 +1212,17 @@ fn existing_property_keys(
                     .collect()
             })
             .unwrap_or_default();
-        // The *inline* title field, not `NodeView::title()`: on a columnar node
-        // it is the mapped-mode Null sentinel, so resolving it would add `name`
-        // to the clear-list on saved graphs where today it is absent. A real
-        // memory-vs-mapped parity gap, but closing it is a behaviour change,
-        // not a re-route.
+        // Resolved through `NodeView::title()`, not off the inline field. The
+        // inline field is the `Null` sentinel on every columnar node — which is
+        // now every node — so reading it directly would drop `name` from the
+        // clear-list altogether and let a title survive `SET n = {…}`. Reading
+        // through the store keeps the behaviour a never-saved graph had before
+        // construction became columnar, and closes the memory-vs-mapped parity
+        // gap this comment used to record.
         if graph
             .graph
             .node_view(*node_idx)
-            .is_some_and(|node| !matches!(node.data().title, Value::Null))
+            .is_some_and(|node| !matches!(*node.title(), Value::Null))
             && !keys.iter().any(|key| key == "name" || key == "title")
         {
             keys.push("name".to_string());
@@ -1261,9 +1263,10 @@ fn set_node_property_direct(
         return false;
     }
     let set_title = |graph: &mut crate::graph::dir_graph::DirGraph, v: Value| {
-        if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
-            node.title = v;
-        }
+        // Through the backend, not onto the inline field: a columnar node's
+        // title belongs in its store's reserved column, and every node is
+        // columnar from construction.
+        GraphWrite::set_node_title(&mut graph.graph, node_idx, v);
     };
     match property {
         "title" => set_title(graph, value),
@@ -1975,10 +1978,14 @@ fn execute_remove(
                         prior
                     } else if graph.graph.node_weight(*node_idx).is_some() {
                         if property == "name" || property == "title" {
-                            let old = graph
-                                .get_node_mut(*node_idx)
-                                .map(|node| std::mem::replace(&mut node.title, Value::Null))
-                                .unwrap_or(Value::Null);
+                            // Read the *resolved* title (a columnar node keeps
+                            // it in its store's reserved column, with the
+                            // inline field on the `Null` sentinel) and clear it
+                            // through the same backend seam a `SET` writes it
+                            // through, so the removal reaches the store instead
+                            // of nulling an already-null field.
+                            let old = graph.graph.get_node_title(*node_idx).unwrap_or(Value::Null);
+                            GraphWrite::set_node_title(&mut graph.graph, *node_idx, Value::Null);
                             let key = InternedKey::from_str("name");
                             GraphWrite::remove_node_property(&mut graph.graph, *node_idx, key);
                             (!matches!(old, Value::Null)).then_some(old)

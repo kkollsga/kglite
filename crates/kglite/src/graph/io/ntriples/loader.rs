@@ -614,15 +614,20 @@ fn build_columns(
         )?;
     } else {
         // Mapped mode now goes through the `Some(log_writer)` arm above
-        // (the disk path). The prior `enable_columnar()` per-entity loop
-        // was the 7× bottleneck vs disk builds and has been retired for
-        // N-Triples builds. Memory mode lands here and intentionally
-        // does nothing — its columnar conversion is triggered on demand
-        // elsewhere.
+        // (the disk path). The prior `enable_columnar()` *per-entity* loop was
+        // the 7× bottleneck vs disk builds and has been retired for N-Triples
+        // builds. Memory mode lands here, and consolidates once: this is the
+        // bulk O(N) pass, run at the end of the build rather than per entity,
+        // and it is the same pass the first `save()` would otherwise run. It is
+        // here because a loaded graph must come out in the shape every other
+        // construction path produces — leaving these nodes row-shaped would
+        // make an N-Triples graph the one graph whose write regime still
+        // changed the first time it was saved.
         debug_assert!(
             !graph.graph.is_mapped(),
             "mapped load_ntriples must populate prop_log and use build_columns_direct"
         );
+        graph.enable_columnar();
     }
 
     // Free everything not needed for Phase 2+3 to maximize page cache.

@@ -2399,7 +2399,8 @@ class KnowledgeGraph:
             dict with keys:
                 - ``nodes_remapped``: Number of nodes that were remapped
                 - ``tombstones_removed``: Number of tombstone slots reclaimed
-                - ``columnar_rebuilt``: Whether columnar stores were rebuilt
+                - ``columnar_rebuilt``: Whether the rebuild reclaimed columnar
+                  rows (rows left behind by deleted nodes)
 
         Example::
 
