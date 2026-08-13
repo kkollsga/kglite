@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version is for. Refused at startup for `--readonly` (nothing to write back)
   and for disk-mode graphs (every disk save publishes a new generation and
   nothing prunes them).
+- **`CALL db.checkpoint()` over Bolt writes the served graph back on demand**,
+  returning Neo4j's `success, message` shape (an optional `YIELD` of either or
+  both columns is honoured). This is a **bolt-server verb, not a Cypher
+  procedure**: it is recognised and executed by the server, so it exists only
+  over Bolt — embedded bindings keep their own save calls, and the engine's
+  procedure list is unchanged. A checkpoint whose graph has not changed since
+  the last one *in this process* is skipped and says so; the first call of a
+  process always writes. Refused inside an explicit transaction (a checkpoint
+  writes the committed graph, which excludes that transaction's uncommitted
+  writes), on a `--readonly` server, and for disk-mode graphs — the same
+  reasons `--save-on-exit` refuses them. A save that fails is reported as a
+  failure to the client, never a silent success.
 - **`SIGTERM` now triggers the same graceful shutdown as `SIGINT` in
   `kglite-bolt-server`.** Only Ctrl-C was wired, so `systemctl stop`,
   `docker stop` and a Kubernetes pod shutdown terminated the process through

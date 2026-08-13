@@ -150,6 +150,14 @@ pub struct KgliteBackend {
     /// Server-wide `--readonly` flag. Rejects begin_transaction and
     /// auto-commit mutations.
     readonly: bool,
+    /// Graph version at the last *successful* `db.checkpoint()` in this
+    /// process, or `None` until one has run — so the first checkpoint of a
+    /// process always writes, whatever the on-disk file happens to hold.
+    ///
+    /// The mutex is held across the save itself, which serializes concurrent
+    /// checkpoints: two clients asking at once produce one write and one
+    /// skip, never two interleaved saves of the same graph.
+    last_checkpoint_version: Mutex<Option<u64>>,
     /// Per-transaction state. Keyed by `TransactionHandle.0`. The
     /// outer mutex is brief-acquire-only (lookup/insert/remove); the
     /// per-tx work happens inside the inner mutex. See struct doc on
@@ -290,6 +298,7 @@ impl KgliteBackend {
             session: Arc::new(kglite::api::session::Session::new(graph)),
             graph_path,
             readonly,
+            last_checkpoint_version: Mutex::new(None),
             transactions: Arc::new(Mutex::new(HashMap::new())),
             session_counter: AtomicU64::new(0),
             tx_counter: AtomicU64::new(0),
@@ -503,6 +512,17 @@ impl BoltBackend for KgliteBackend {
                  issue separate RUNs)"
                     .into(),
             ));
+        }
+
+        // `CALL db.checkpoint()` is a *bolt-layer verb*, not an engine
+        // procedure: the Cypher executor has no session, no `&mut` graph and
+        // no served path to write to, and CALL is classified as a read — so
+        // an engine procedure would also slip straight past `--readonly`.
+        // Intercepting here is what gives the verb the three things it needs
+        // (the session, the served path, the readonly flag), and it runs
+        // before parameter decoding because the verb takes none.
+        if let Some(call) = parse_checkpoint_call(trimmed) {
+            return self.run_checkpoint(&call, transaction.is_some());
         }
 
         // Decode params (C.3). Errors here are genuine client errors
@@ -905,6 +925,118 @@ fn _query_appears_multi_statement(query: &str) -> bool {
     false
 }
 
+/// Output columns of `db.checkpoint()`, in declaration order — the shape
+/// Neo4j's own `db.checkpoint()` yields, so a client can call it the same way.
+const CHECKPOINT_COLUMNS: [&str; 2] = ["success", "message"];
+
+/// A recognized `CALL db.checkpoint()` invocation and the columns it asked
+/// for (all of [`CHECKPOINT_COLUMNS`] when there is no `YIELD`).
+#[derive(Debug, PartialEq, Eq)]
+struct CheckpointCall {
+    columns: Vec<&'static str>,
+}
+
+/// Strip `keyword` from the front of `input`, case-insensitively, requiring a
+/// word boundary after it; returns the remainder with leading whitespace
+/// trimmed.
+///
+/// The boundary check is what stops `CALLS ...` or `YIELDing` from being read
+/// as the keyword plus a remainder.
+fn strip_keyword_ci<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    if !input.get(..keyword.len())?.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let rest = &input[keyword.len()..];
+    match rest.chars().next() {
+        Some(c) if c.is_alphanumeric() || c == '_' => None,
+        _ => Some(rest.trim_start()),
+    }
+}
+
+/// Recognize exactly `CALL db.checkpoint()`, optionally followed by a `YIELD`
+/// naming a subset of [`CHECKPOINT_COLUMNS`]; `None` for anything else.
+///
+/// **Deliberately narrow.** Keywords and the procedure name are matched
+/// case-insensitively (Cypher keywords are, and every driver spells the
+/// procedure lowercase anyway), surrounding whitespace and one trailing `;`
+/// are tolerated — but arguments inside the parentheses, an unknown or
+/// repeated `YIELD` column, an alias (`YIELD success AS ok`), or a differently
+/// *cased* column name all fall through to the engine, which answers with its
+/// standard "Unknown procedure 'db.checkpoint'". That is the intended
+/// behaviour, not a gap: YIELD names are Cypher identifiers, and quietly
+/// re-casing one would hand the driver a record whose key is not the key the
+/// client asked for. Only the exact verb is a bolt-layer verb.
+fn parse_checkpoint_call(query: &str) -> Option<CheckpointCall> {
+    let mut body = query.trim();
+    if let Some(stripped) = body.strip_suffix(';') {
+        body = stripped.trim_end();
+    }
+    let rest = strip_keyword_ci(body, "call")?;
+    let rest = strip_keyword_ci(rest, "db.checkpoint")?;
+    let rest = rest.strip_prefix('(')?.trim_start();
+    let rest = rest.strip_prefix(')')?.trim_start();
+    if rest.is_empty() {
+        return Some(CheckpointCall {
+            columns: CHECKPOINT_COLUMNS.to_vec(),
+        });
+    }
+    let yielded = strip_keyword_ci(rest, "yield")?;
+    let mut columns: Vec<&'static str> = Vec::with_capacity(CHECKPOINT_COLUMNS.len());
+    for raw in yielded.split(',') {
+        let name = raw.trim();
+        let canonical = CHECKPOINT_COLUMNS.iter().find(|column| **column == name)?;
+        if columns.contains(canonical) {
+            return None;
+        }
+        columns.push(*canonical);
+    }
+    Some(CheckpointCall { columns })
+}
+
+/// Build the single-record result a `db.checkpoint()` call answers with,
+/// projected onto the columns the client yielded.
+///
+/// `success` is always `true`: every way a checkpoint can fail — refused,
+/// or a save error — returns a Bolt FAILURE instead, so a record that reaches
+/// the client is a record about a checkpoint that either wrote or was
+/// deliberately skipped. `type` distinguishes the two ("w" wrote, "r" didn't).
+fn checkpoint_stream(
+    call: &CheckpointCall,
+    message: String,
+    type_str: &str,
+    started: Instant,
+) -> ResultStream {
+    let values: Vec<BoltValue> = call
+        .columns
+        .iter()
+        .map(|column| {
+            debug_assert!(
+                CHECKPOINT_COLUMNS.contains(column),
+                "parse_checkpoint_call yielded an unknown column: {column}"
+            );
+            if *column == CHECKPOINT_COLUMNS[0] {
+                BoltValue::Boolean(true)
+            } else {
+                BoltValue::String(message.clone())
+            }
+        })
+        .collect();
+    ResultStream {
+        metadata: ResultMetadata {
+            columns: call.columns.iter().map(|c| (*c).to_string()).collect(),
+            extra: BoltDict::new(),
+        },
+        records: vec![BoltRecord { values }],
+        summary: BoltDict::from([
+            ("type".to_string(), BoltValue::String(type_str.to_string())),
+            (
+                "t_last".to_string(),
+                BoltValue::Integer(started.elapsed().as_millis() as i64),
+            ),
+        ]),
+    }
+}
+
 impl KgliteBackend {
     /// Build the canonical `ExecuteOptions` the bolt-server uses for
     /// every query. Eager rows (`lazy_eligible: false`) — bolt-server
@@ -935,6 +1067,104 @@ impl KgliteBackend {
         // single chokepoint for both the auto-commit and in-transaction paths.
         opts.csv_import = self.csv_import.clone();
         opts
+    }
+
+    /// Run the `db.checkpoint()` verb: write the served graph back to the
+    /// path it came from, fsync'd, and report what happened.
+    ///
+    /// **Refusals, in order.** Inside an explicit transaction the call is a
+    /// `Protocol` error: a checkpoint saves the *session's* committed graph,
+    /// which by definition does not contain the calling transaction's
+    /// uncommitted writes — so a client that ran it inside a transaction
+    /// would get a file that silently omits the work it just did, and a
+    /// success record saying otherwise. There is no correct answer to give,
+    /// so the honest move is to refuse and name the reason. `--readonly` and
+    /// disk-mode graphs are `Forbidden`, for the same reasons `--save-on-exit`
+    /// refuses them at startup.
+    ///
+    /// **Digest-skip.** The graph version is read *before* the save, never
+    /// after. A commit that lands between the read and the save's lock
+    /// acquisition then makes the recorded version one behind what reached
+    /// disk, so the next checkpoint re-saves — a redundant write. Recording
+    /// the version afterwards would fail the other way: a commit landing in
+    /// the same window would be recorded as saved when it was not, and the
+    /// next checkpoint would skip, losing it.
+    ///
+    /// A failed save is `Backend` (fail-closed: the client is told the
+    /// checkpoint did not happen) and leaves the recorded version untouched,
+    /// so a later retry still writes.
+    fn run_checkpoint(
+        &self,
+        call: &CheckpointCall,
+        in_transaction: bool,
+    ) -> Result<ResultStream, BoltError> {
+        let started = Instant::now();
+        if in_transaction {
+            return Err(BoltError::Protocol(
+                "db.checkpoint() cannot run inside an explicit transaction — it \
+                 writes the committed graph, which does not include this \
+                 transaction's uncommitted writes; COMMIT first, then call it \
+                 in auto-commit"
+                    .into(),
+            ));
+        }
+        if self.readonly {
+            return Err(BoltError::Forbidden(
+                "server is read-only — db.checkpoint() rejected (--readonly flag)".into(),
+            ));
+        }
+        // Bound to a `let` so the snapshot Arc it borrows is dropped right
+        // here: a snapshot alive across the save below would turn the save's
+        // `Arc::make_mut` into a deep clone of the whole graph (see
+        // `Session::save`).
+        let mode = kglite::api::storage::live_storage_mode(&self.session.snapshot());
+        if mode == kglite::api::storage::StorageMode::Disk {
+            return Err(BoltError::Forbidden(
+                "db.checkpoint() is not supported for disk-mode graphs: every disk \
+                 save publishes a new on-disk generation and nothing prunes the old \
+                 ones, so repeated checkpoints grow the directory without bound"
+                    .into(),
+            ));
+        }
+
+        // Held across the save — see the field's doc comment.
+        let mut last = self
+            .last_checkpoint_version
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let version = self.session.version();
+        if *last == Some(version) {
+            tracing::debug!(
+                graph_version = version,
+                "db.checkpoint(): skipped (graph unchanged since the last checkpoint)"
+            );
+            return Ok(checkpoint_stream(
+                call,
+                format!("skipped: graph unchanged since version {version}"),
+                "r",
+                started,
+            ));
+        }
+        self.session
+            .save(&self.graph_path.to_string_lossy(), true)
+            .map_err(|e| {
+                BoltError::Backend(format!(
+                    "db.checkpoint() failed writing {}: {e}",
+                    self.graph_path.display()
+                ))
+            })?;
+        *last = Some(version);
+        tracing::info!(
+            path = %self.graph_path.display(),
+            graph_version = version,
+            "db.checkpoint(): graph written"
+        );
+        Ok(checkpoint_stream(
+            call,
+            format!("checkpoint written: version {version}"),
+            "w",
+            started,
+        ))
     }
 
     /// Auto-commit path: take a snapshot, delegate to
@@ -1132,11 +1362,18 @@ mod tests {
     }
 
     fn memory_backend() -> KgliteBackend {
+        memory_backend_at(unique_disk_path().join("memory.kgl"), false)
+    }
+
+    /// A memory-mode backend serving `path` — which, unlike
+    /// [`memory_backend`]'s, is a real writable location, so a checkpoint can
+    /// actually land there.
+    fn memory_backend_at(path: std::path::PathBuf, readonly: bool) -> KgliteBackend {
         let graph = new_dir_graph_in_mode(StorageMode::Memory, None).expect("create memory graph");
         KgliteBackend::new(
             graph,
-            unique_disk_path().join("memory.kgl"),
-            false,
+            path,
+            readonly,
             "127.0.0.1:0".into(),
             CsvImportPolicy::Denied,
             ServerIdentity::default(),
@@ -1386,5 +1623,277 @@ mod tests {
         );
         assert!(!matches("neo4j-python/6.2.0"));
         assert!(!matches(""));
+    }
+
+    // ---- `CALL db.checkpoint()` (Phase 2) --------------------------------
+
+    fn unique_kgl_path(tag: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "kglite-bolt-checkpoint-{tag}-{}-{nonce}.kgl",
+            std::process::id()
+        ))
+    }
+
+    async fn run_checkpoint_query(
+        backend: &KgliteBackend,
+        session: &SessionHandle,
+        query: &str,
+    ) -> Result<ResultStream, BoltError> {
+        backend
+            .execute(session, query, &HashMap::new(), &BoltDict::new(), None)
+            .await
+    }
+
+    fn summary_type(stream: &ResultStream) -> String {
+        match stream.summary.get("type") {
+            Some(BoltValue::String(t)) => t.clone(),
+            other => panic!("expected a string summary type, got {other:?}"),
+        }
+    }
+
+    fn checkpoint_message(stream: &ResultStream) -> String {
+        let index = stream
+            .metadata
+            .columns
+            .iter()
+            .position(|c| c == "message")
+            .expect("result carries a message column");
+        match &stream.records[0].values[index] {
+            BoltValue::String(m) => m.clone(),
+            other => panic!("expected a string message, got {other:?}"),
+        }
+    }
+
+    /// Every spelling the intercept must recognize, with the columns it
+    /// projects. Case, spacing, a trailing `;` and a `YIELD` subset in any
+    /// order are all tolerated — the YIELD order is the client's, not ours.
+    #[test]
+    fn checkpoint_normalization_accepts_the_verbs_spellings() {
+        let both = vec!["success", "message"];
+        let cases: &[(&str, Vec<&str>)] = &[
+            ("CALL db.checkpoint()", both.clone()),
+            ("call db.checkpoint()", both.clone()),
+            ("  CALL   db.checkpoint( )  ", both.clone()),
+            ("CALL db.checkpoint();", both.clone()),
+            ("CALL db.checkpoint()  ;  ", both.clone()),
+            ("CALL DB.CheckPoint()", both.clone()),
+            ("CALL db.checkpoint() YIELD success, message", both.clone()),
+            ("call db.checkpoint() yield success,message", both.clone()),
+            (
+                "CALL db.checkpoint() YIELD message, success",
+                vec!["message", "success"],
+            ),
+            ("CALL db.checkpoint() YIELD success", vec!["success"]),
+            ("CALL db.checkpoint() YIELD message;", vec!["message"]),
+        ];
+        for (query, expected) in cases {
+            let call = parse_checkpoint_call(query)
+                .unwrap_or_else(|| panic!("must be recognized as the checkpoint verb: {query:?}"));
+            assert_eq!(&call.columns, expected, "columns for {query:?}");
+        }
+    }
+
+    /// Everything else falls through to the engine, which answers "Unknown
+    /// procedure 'db.checkpoint'". Arguments, aliases, unknown or repeated
+    /// YIELD columns, and a differently *cased* column name are all deliberate
+    /// fall-throughs: re-casing a YIELD identifier would hand the driver a
+    /// record key the client never asked for.
+    #[test]
+    fn checkpoint_normalization_rejects_everything_else() {
+        let cases = [
+            "CALL db.checkpoint(true)",
+            "CALL db.checkpoint('/tmp/other.kgl')",
+            "CALL db.checkpoints()",
+            "CALL db.checkpoint",
+            "CALL db.labels()",
+            "CALLdb.checkpoint()",
+            "CALL db.checkpoint() YIELD",
+            "CALL db.checkpoint() YIELD success, other",
+            "CALL db.checkpoint() YIELD Success",
+            "CALL db.checkpoint() YIELD success AS ok",
+            "CALL db.checkpoint() YIELD success, success",
+            "CALL db.checkpoint() RETURN 1",
+            "CALL db.checkpoint() YIELD success, message RETURN success",
+            "RETURN 'CALL db.checkpoint()' AS s",
+            "MATCH (n) RETURN n",
+        ];
+        for query in cases {
+            assert_eq!(
+                parse_checkpoint_call(query),
+                None,
+                "must fall through to the engine: {query:?}"
+            );
+        }
+    }
+
+    /// The digest-skip, and its mutation check: a checkpoint after an
+    /// unchanged graph must skip, and a checkpoint after a *committed write*
+    /// must save again. Without the second half a parser that always skipped
+    /// would pass.
+    #[tokio::test]
+    async fn checkpoint_writes_then_skips_until_the_graph_changes() {
+        let path = unique_kgl_path("skip");
+        let backend = memory_backend_at(path.clone(), false);
+        let session = SessionHandle("checkpoint-session".into());
+        mutate_and_finish(&backend, &session, "CREATE (:Person {id: 1})", true).await;
+        let saved_version = backend.session.version();
+
+        let first = run_checkpoint_query(&backend, &session, "CALL db.checkpoint()")
+            .await
+            .expect("first checkpoint");
+        assert_eq!(summary_type(&first), "w", "a real save is a write");
+        assert_eq!(
+            checkpoint_message(&first),
+            format!("checkpoint written: version {saved_version}")
+        );
+        assert!(path.exists(), "the checkpoint must reach the served path");
+        let first_written = std::fs::metadata(&path)
+            .expect("checkpoint file metadata")
+            .modified()
+            .expect("modification time");
+
+        let second = run_checkpoint_query(&backend, &session, "CALL db.checkpoint()")
+            .await
+            .expect("second checkpoint");
+        assert_eq!(summary_type(&second), "r", "a skip did not write");
+        assert_eq!(
+            checkpoint_message(&second),
+            format!("skipped: graph unchanged since version {saved_version}")
+        );
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("checkpoint file metadata")
+                .modified()
+                .expect("modification time"),
+            first_written,
+            "a skipped checkpoint must not rewrite the file"
+        );
+
+        // Mutation check: bump the version and the next call must save.
+        mutate_and_finish(&backend, &session, "CREATE (:Person {id: 2})", true).await;
+        let bumped_version = backend.session.version();
+        assert_ne!(
+            bumped_version, saved_version,
+            "the write bumped the version"
+        );
+        let third = run_checkpoint_query(&backend, &session, "CALL db.checkpoint()")
+            .await
+            .expect("third checkpoint");
+        assert_eq!(summary_type(&third), "w");
+        assert_eq!(
+            checkpoint_message(&third),
+            format!("checkpoint written: version {bumped_version}")
+        );
+
+        drop(backend);
+        std::fs::remove_file(&path).expect("remove checkpoint fixture");
+    }
+
+    /// A `YIELD` subset projects exactly those columns, in the client's order.
+    #[tokio::test]
+    async fn checkpoint_projects_the_yielded_columns() {
+        let path = unique_kgl_path("yield");
+        let backend = memory_backend_at(path.clone(), false);
+        let session = SessionHandle("yield-session".into());
+
+        let stream = run_checkpoint_query(
+            &backend,
+            &session,
+            "CALL db.checkpoint() YIELD message, success",
+        )
+        .await
+        .expect("checkpoint with a reordered YIELD");
+        assert_eq!(stream.metadata.columns, vec!["message", "success"]);
+        assert_eq!(stream.records.len(), 1);
+        assert!(matches!(stream.records[0].values[0], BoltValue::String(_)));
+        assert_eq!(stream.records[0].values[1], BoltValue::Boolean(true));
+
+        drop(backend);
+        std::fs::remove_file(&path).expect("remove checkpoint fixture");
+    }
+
+    /// Inside an explicit transaction the verb is refused: it would write the
+    /// committed graph, which does not contain the caller's uncommitted work.
+    #[tokio::test]
+    async fn checkpoint_inside_a_transaction_is_refused() {
+        let path = unique_kgl_path("in-tx");
+        let backend = memory_backend_at(path.clone(), false);
+        let session = SessionHandle("tx-session".into());
+        let tx = backend
+            .begin_transaction(&session, &BoltDict::new())
+            .await
+            .expect("begin");
+        backend
+            .execute_in_tx(&tx.0, "CREATE (:Person {id: 1})", HashMap::new())
+            .expect("tx mutation");
+
+        let err = backend
+            .execute(
+                &session,
+                "CALL db.checkpoint()",
+                &HashMap::new(),
+                &BoltDict::new(),
+                Some(&tx),
+            )
+            .await
+            .expect_err("db.checkpoint() inside a transaction must be refused");
+        assert!(
+            matches!(&err, BoltError::Protocol(msg) if msg.contains("explicit transaction")),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            !path.exists(),
+            "a refused checkpoint must not have written anything"
+        );
+    }
+
+    /// `--readonly` refuses the verb by name, the same way it refuses writes.
+    #[tokio::test]
+    async fn checkpoint_is_refused_on_a_readonly_server() {
+        let path = unique_kgl_path("readonly");
+        let backend = memory_backend_at(path.clone(), true);
+        let session = SessionHandle("ro-session".into());
+
+        let err = run_checkpoint_query(&backend, &session, "CALL db.checkpoint()")
+            .await
+            .expect_err("a read-only server must refuse the checkpoint verb");
+        assert!(
+            matches!(&err, BoltError::Forbidden(msg) if msg.contains("--readonly")),
+            "unexpected error: {err:?}"
+        );
+        assert!(!path.exists(), "a refused checkpoint writes nothing");
+    }
+
+    /// Disk graphs are excluded: every disk save publishes a generation and
+    /// nothing prunes them.
+    #[tokio::test]
+    async fn checkpoint_is_refused_for_a_disk_graph() {
+        let path = unique_disk_path();
+        let graph = new_dir_graph_in_mode(StorageMode::Disk, Some(&path))
+            .expect("create disk-backed graph");
+        let backend = KgliteBackend::new(
+            graph,
+            path.clone(),
+            false,
+            "127.0.0.1:0".into(),
+            CsvImportPolicy::Denied,
+            ServerIdentity::default(),
+        );
+        let session = SessionHandle("disk-session".into());
+
+        let err = run_checkpoint_query(&backend, &session, "CALL db.checkpoint()")
+            .await
+            .expect_err("a disk graph must refuse the checkpoint verb");
+        assert!(
+            matches!(&err, BoltError::Forbidden(msg) if msg.contains("generation")),
+            "unexpected error: {err:?}"
+        );
+
+        drop(backend);
+        std::fs::remove_dir_all(path).expect("remove disk checkpoint fixture");
     }
 }

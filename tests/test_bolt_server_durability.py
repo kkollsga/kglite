@@ -1,5 +1,5 @@
-"""Durability surface of kglite-bolt-server — `--save-on-exit` and the
-signals that trigger it.
+"""Durability surface of kglite-bolt-server — `--save-on-exit`, the signals
+that trigger it, and the `CALL db.checkpoint()` verb.
 
 The server's writes are process-local: they live in the served graph's
 in-memory state and reach the `.kgl` file only when something checkpoints
@@ -44,23 +44,27 @@ def _require_binary():
         pytest.skip(_BOLT_SKIP_REASON)
 
 
-def _write_marker(url: str) -> None:
+def _named_count_query(title: str) -> str:
+    return f"MATCH (p:Person {{title: '{title}'}}) RETURN count(p) AS c"
+
+
+def _write_marker(url: str, title: str = "Zed") -> None:
     """Commit one node through an explicit transaction, so the write is
     definitely committed (not merely sent) before the server is signalled."""
     with neo4j.GraphDatabase.driver(url, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             tx = session.begin_transaction()
-            tx.run("CREATE (:Person {id: 99, title: 'Zed', city: 'Tromso'})")
+            tx.run(f"CREATE (:Person {{id: 99, title: '{title}', city: 'Tromso'}})")
             tx.commit()
         # Read it back on a fresh session: the write is live in the server.
         with driver.session() as session:
-            assert session.run(MARKER_QUERY).single()["c"] == 1
+            assert session.run(_named_count_query(title)).single()["c"] == 1
 
 
-def _marker_count_on_disk(path) -> int:
+def _marker_count_on_disk(path, title: str = "Zed") -> int:
     """Reopen the served `.kgl` in-process and count the marker node."""
     g = kglite.open(str(path))
-    return g.cypher(MARKER_QUERY).scalar()
+    return g.cypher(_named_count_query(title)).scalar()
 
 
 def _run_server_binary(bolt_binary_path, args, env=None) -> subprocess.CompletedProcess:
@@ -216,3 +220,188 @@ def test_save_on_exit_is_refused_for_a_disk_graph(bolt_binary_path, tmp_path):
     assert result.returncode != 0
     combined = result.stdout + result.stderr
     assert "disk-mode" in combined and "generation" in combined, combined
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# CALL db.checkpoint() — the on-demand verb (bolt-only; see p2-red.txt for
+# what this query did before the intercept existed)
+# ────────────────────────────────────────────────────────────────────────────
+
+CHECKPOINT = "CALL db.checkpoint()"
+
+
+def _checkpoint(url: str, query: str = CHECKPOINT):
+    """Run the verb on a fresh driver session and return the single record."""
+    with neo4j.GraphDatabase.driver(url, auth=("neo4j", "password")) as driver:
+        with driver.session() as session:
+            return session.run(query).single()
+
+
+def test_checkpoint_returns_the_neo4j_result_shape(tmp_path):
+    """Columns `success, message` with one record — the shape Neo4j's own
+    `db.checkpoint()` yields, so a client can consume it identically."""
+    _require_binary()
+    fixture = tmp_path / "shape.kgl"
+    _build_bolt_fixture_graph(fixture)
+    proc, url = _spawn_bolt_server(fixture)
+    try:
+        record = _checkpoint(url)
+        assert list(record.keys()) == ["success", "message"]
+        assert record["success"] is True
+        assert record["message"].startswith("checkpoint written: version "), record["message"]
+        # An explicit YIELD projects exactly what it asked for, in its order.
+        yielded = _checkpoint(url, "CALL db.checkpoint() YIELD message, success")
+        assert list(yielded.keys()) == ["message", "success"]
+        assert yielded["success"] is True
+    finally:
+        _teardown_bolt_server(proc)
+
+
+def test_checkpoint_writes_the_committed_graph_to_the_served_file(tmp_path):
+    """The point of the verb. The server is then SIGKILLed — a killed process
+    runs no exit hook, so the write can only have reached the file through the
+    checkpoint."""
+    _require_binary()
+    fixture = tmp_path / "verb-write.kgl"
+    _build_bolt_fixture_graph(fixture)
+    proc, url = _spawn_bolt_server(fixture)
+    try:
+        _write_marker(url)
+        assert _checkpoint(url)["success"] is True
+    finally:
+        _teardown_bolt_server(proc)
+    assert _marker_count_on_disk(fixture) == 1, "the checkpoint must write the committed graph back"
+
+
+def test_checkpoint_bounds_the_loss_window_across_a_sigkill(tmp_path):
+    """The documented loss window, proven in both directions: a write made
+    *before* `db.checkpoint()` survives a SIGKILL and a restart on the same
+    file; a write made *after* it is gone. Neither half alone is evidence —
+    the first without the second would also pass on a server that saved
+    everything continuously."""
+    _require_binary()
+    fixture = tmp_path / "loss-window.kgl"
+    _build_bolt_fixture_graph(fixture)
+    proc, url = _spawn_bolt_server(fixture)
+    try:
+        _write_marker(url, "Before")
+        assert _checkpoint(url)["success"] is True
+        _write_marker(url, "After")
+    finally:
+        _teardown_bolt_server(proc)  # SIGKILL: no shutdown path, no exit save
+
+    # Restart on the same file — the server is the reader, so this also proves
+    # the checkpointed file is servable and the dead process's lease is gone.
+    restarted, restarted_url = _spawn_bolt_server(fixture)
+    try:
+        with neo4j.GraphDatabase.driver(restarted_url, auth=("neo4j", "password")) as driver:
+            with driver.session() as session:
+                before = session.run(_named_count_query("Before")).single()["c"]
+                after = session.run(_named_count_query("After")).single()["c"]
+    finally:
+        _teardown_bolt_server(restarted)
+    assert before == 1, "a write committed before the checkpoint must survive the crash"
+    assert after == 0, "a write committed after the checkpoint is the documented loss window"
+
+
+def test_checkpoint_skips_when_the_graph_has_not_changed(tmp_path):
+    """Digest-skip: the second checkpoint of an unchanged graph reports the
+    skip and leaves the file untouched (mtime, byte-for-byte)."""
+    _require_binary()
+    fixture = tmp_path / "skip.kgl"
+    _build_bolt_fixture_graph(fixture)
+    proc, url = _spawn_bolt_server(fixture)
+    try:
+        _write_marker(url)
+        first = _checkpoint(url)
+        assert first["message"].startswith("checkpoint written: version "), first["message"]
+        stat_after_write = fixture.stat()
+
+        second = _checkpoint(url)
+        assert second["success"] is True
+        assert second["message"].startswith("skipped: graph unchanged since version "), second["message"]
+        assert fixture.stat().st_mtime_ns == stat_after_write.st_mtime_ns, (
+            "a skipped checkpoint must not rewrite the served file"
+        )
+
+        # Mutation check: a further write makes the next checkpoint save again.
+        _write_marker(url, "Later")
+        third = _checkpoint(url)
+        assert third["message"].startswith("checkpoint written: version "), third["message"]
+    finally:
+        _teardown_bolt_server(proc)
+    assert _marker_count_on_disk(fixture, "Later") == 1
+
+
+def test_checkpoint_is_refused_on_a_readonly_server(tmp_path):
+    """`--readonly` refuses the verb with the exact Neo4j security code, and
+    writes nothing."""
+    _require_binary()
+    fixture = tmp_path / "readonly.kgl"
+    _build_bolt_fixture_graph(fixture)
+    before = fixture.stat().st_mtime_ns
+    proc, url = _spawn_bolt_server(fixture, readonly=True)
+    try:
+        with neo4j.GraphDatabase.driver(url, auth=("neo4j", "password")) as driver:
+            with driver.session() as session:
+                with pytest.raises(neo4j.exceptions.Forbidden) as excinfo:
+                    session.run(CHECKPOINT).single()
+    finally:
+        _teardown_bolt_server(proc)
+    assert excinfo.value.code == "Neo.ClientError.Security.Forbidden"
+    assert "--readonly" in excinfo.value.message
+    assert fixture.stat().st_mtime_ns == before, "a refused checkpoint writes nothing"
+
+
+def test_checkpoint_is_refused_for_a_disk_graph_over_the_wire(tmp_path):
+    """A disk graph serves normally; only the checkpoint verb is refused, for
+    the same unbounded-generation reason `--save-on-exit` refuses at startup."""
+    _require_binary()
+    disk_dir = tmp_path / "disk-verb"
+    g = kglite.KnowledgeGraph(storage="disk", path=str(disk_dir))
+    g.cypher("CREATE (:Person {id: 1, title: 'Alice'})")
+    g.save(str(disk_dir))
+    del g
+
+    proc, url = _spawn_bolt_server(disk_dir)
+    try:
+        with neo4j.GraphDatabase.driver(url, auth=("neo4j", "password")) as driver:
+            with driver.session() as session:
+                # The graph itself is perfectly queryable — the refusal is
+                # specific to the verb, not to serving a disk graph.
+                assert session.run("MATCH (n:Person) RETURN count(n) AS c").single()["c"] == 1
+                with pytest.raises(neo4j.exceptions.Forbidden) as excinfo:
+                    session.run(CHECKPOINT).single()
+    finally:
+        _teardown_bolt_server(proc)
+    assert excinfo.value.code == "Neo.ClientError.Security.Forbidden"
+    assert "generation" in excinfo.value.message
+
+
+def test_checkpoint_is_refused_inside_an_explicit_transaction(tmp_path):
+    """A checkpoint writes the *committed* graph, which by definition excludes
+    the calling transaction's uncommitted writes — so running it there would
+    report success over a file missing the work just done. Refused, and the
+    transaction is still usable afterwards."""
+    _require_binary()
+    fixture = tmp_path / "in-tx.kgl"
+    _build_bolt_fixture_graph(fixture)
+    before = fixture.stat().st_mtime_ns
+    proc, url = _spawn_bolt_server(fixture)
+    try:
+        with neo4j.GraphDatabase.driver(url, auth=("neo4j", "password")) as driver:
+            with driver.session() as session:
+                tx = session.begin_transaction()
+                tx.run("CREATE (:Person {id: 99, title: 'Zed'})")
+                with pytest.raises(neo4j.exceptions.ClientError) as excinfo:
+                    tx.run(CHECKPOINT).single()
+                tx.rollback()
+        assert fixture.stat().st_mtime_ns == before, "a refused checkpoint writes nothing"
+        # COMMIT-then-checkpoint is the supported spelling, and still works.
+        _write_marker(url)
+        assert _checkpoint(url)["success"] is True
+    finally:
+        _teardown_bolt_server(proc)
+    assert excinfo.value.code == "Neo.ClientError.Request.Invalid"
+    assert "explicit transaction" in excinfo.value.message
+    assert _marker_count_on_disk(fixture) == 1
