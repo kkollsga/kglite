@@ -416,6 +416,15 @@ Before any perf-related change:
    - **Every capture carries unchanged-path control cells**; they are the
      machine-drift meter. A *control* that regresses means the instrument
      moved, not the code — re-measure, don't bisect.
+   - **A control needs margin over its own resolution, and immunity from what
+     it anchors** (doctrine R11 corollary, 2026-08-13). Require the control's
+     median at **≥2×** the capture's noise floor — a control at ~1× the floor
+     measures nothing — and prefer the slowest query *measured* stable across
+     the last dependency move: a control chosen because "our source can't
+     touch it" silently expires when the thing that moves is a dependency.
+     A control that moves **deterministically** across repeated re-measures is
+     not instrument wander — "re-measure" cannot resolve it; the control's
+     premise is void and the control must be replaced.
    - **Measure a claim two independent ways** (two holders, two call routes)
      before believing it. A `WHERE` clause silently disqualifying the lazy path
      was invisible to either route alone and showed up only as disagreement
