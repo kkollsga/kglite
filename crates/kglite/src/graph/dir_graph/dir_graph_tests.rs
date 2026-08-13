@@ -551,3 +551,104 @@ mod overwrite_index_freshness_tests {
         );
     }
 }
+
+/// The range index must fork by pointer, not by copy — the same structural
+/// property `property_indices` gets from [`super::index_layer::LayeredIndex`].
+///
+/// Held-view first write at 100k measured 0.889 ms with a range index against
+/// 0.048 ms with an equality index (P4, 2026-08-13): the whole gap was the
+/// plain `BTreeMap` being deep-cloned on the copy-on-write fork.
+#[cfg(test)]
+mod range_index_fork_tests {
+    use super::*;
+    use crate::datatypes::Value;
+    use crate::graph::session::{execute_mut, ExecuteOptions};
+
+    fn run(graph: &mut DirGraph, query: &str) {
+        let params = HashMap::new();
+        let opts = ExecuteOptions::eager(&params);
+        execute_mut(graph, query, &opts).unwrap_or_else(|e| panic!("`{query}` failed: {e}"));
+    }
+
+    fn indexed_graph() -> DirGraph {
+        let mut graph = DirGraph::new();
+        run(
+            &mut graph,
+            "UNWIND range(0, 999) AS i CREATE (:Item {id: i, qty: i % 97})",
+        );
+        graph.create_range_index("Item", "qty");
+        graph
+    }
+
+    fn bucket_ptr(graph: &DirGraph, value: i64) -> *const petgraph::graph::NodeIndex {
+        graph
+            .range_indices
+            .get(&("Item".to_string(), "qty".to_string()))
+            .expect("range index present")
+            .get(&Value::Int64(value))
+            .expect("bucket present")
+            .as_ptr()
+    }
+
+    /// A fork shares the range index's buckets outright.
+    ///
+    /// `as_ptr` on the members `Vec` is the observation: a deep-cloned
+    /// `BTreeMap` reallocates every bucket, a shared immutable level hands both
+    /// sides the same allocation.
+    #[test]
+    fn a_fork_shares_the_range_index_buckets() {
+        let graph = indexed_graph();
+        let fork = graph.clone();
+
+        for value in [0i64, 13, 96] {
+            assert_eq!(
+                bucket_ptr(&graph, value),
+                bucket_ptr(&fork, value),
+                "bucket {value} was copied by the fork instead of shared"
+            );
+        }
+    }
+
+    /// ...and the writer's edits stay invisible to the reader that forced the
+    /// fork, which is what makes the sharing safe.
+    #[test]
+    fn a_write_after_the_fork_leaves_the_readers_buckets_alone() {
+        let mut writer = indexed_graph();
+        let reader = writer.clone();
+
+        run(&mut writer, "MATCH (n:Item {id: 5}) SET n.qty = 500");
+
+        let key = ("Item".to_string(), "qty".to_string());
+        let reader_bucket = reader.range_indices[&key]
+            .get(&Value::Int64(5))
+            .expect("the reader keeps its pre-write bucket");
+        assert!(
+            reader_bucket.len() > 1,
+            "the reader's bucket must still hold every pre-write member"
+        );
+        assert!(
+            reader.range_indices[&key].get(&Value::Int64(500)).is_none(),
+            "the reader must not see the writer's new bucket"
+        );
+        assert!(
+            writer.range_indices[&key]
+                .get(&Value::Int64(500))
+                .is_some_and(|members| members.len() == 1),
+            "the writer's new bucket must exist on its side"
+        );
+
+        // Ordered iteration is what a range index is for: the merged view must
+        // still come out sorted, tombstones and overlays included.
+        let values: Vec<i64> = writer.range_indices[&key]
+            .iter()
+            .filter_map(|(value, _)| match value {
+                Value::Int64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let mut sorted = values.clone();
+        sorted.sort_unstable();
+        assert_eq!(values, sorted, "the merged iteration must stay ordered");
+        assert_eq!(values.last(), Some(&500));
+    }
+}

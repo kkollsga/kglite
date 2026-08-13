@@ -499,7 +499,7 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
             }
             BucketId::RangeValue { key, value } => {
                 if let Some(btree) = graph.range_indices.get_mut(&key) {
-                    let members = btree.entry(value).or_default();
+                    let members = btree.entry_or_default(&value);
                     let pos = pos.min(members.len());
                     members.insert(pos, idx);
                 }

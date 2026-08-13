@@ -61,13 +61,16 @@ type Level<K> = HashMap<K, Option<Vec<NodeIndex>>>;
 
 /// How many levels may stack before a mutation flattens them.
 ///
+/// Shared with [`super::range_index_layer`], which is the same mechanism over
+/// ordered levels and wants the same tuning decision, not a second one.
+///
 /// Matches `type_index_layer::MAX_LAYER_DEPTH` and
 /// `id_index_layer::MAX_CHAIN_DEPTH` for the same measured reason: the flatten
 /// is O(index), so its amortised cost is `|index| / K` per fork, and K = 8 put a
 /// spike of ~5x the median into one round in eight (D2 Phase 3 residual profile
 /// §B). A stack only grows while a reader is continuously held; any mutation
 /// with nothing shared folds it back to one level.
-const MAX_LAYER_DEPTH: usize = 32;
+pub(super) const MAX_LAYER_DEPTH: usize = 32;
 
 /// A user index's `value -> members` map.
 ///

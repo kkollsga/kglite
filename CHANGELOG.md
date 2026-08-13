@@ -250,6 +250,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A range index no longer makes every write against a shared graph pay a
+  full copy of the index (up to ~45× on the first write after a fork).**
+  `property_indices` and `composite_indices` have been stacks of shared,
+  immutable levels since 0.15.9, so forking a graph that carries them copies
+  pointers. `range_indices` was still a plain `BTreeMap`, so any graph with a
+  `CREATE RANGE INDEX` (or `create_range_index`) deep-copied the whole B-tree —
+  one value key and one posting list per distinct value — every time a write
+  followed a held result view, a `copy()`, or any other outstanding reader.
+  It is now the same level stack over ordered levels, so an unforked graph
+  reads through the plain B-tree exactly as before and a fork shares it.
+  Measured on this machine, release build, against the 0.15.13 wheel on the
+  same interpreter (two agreeing runs each): first write with a view held over
+  a 50k-node graph with a 50k-value range index **622.35 µs → 13.79 µs median**
+  (45×), landing on the equality-index control's 13.96 µs; at 100k nodes
+  **0.932 ms → 0.061 ms mean / 0.920 ms → 0.033 ms median**, against an
+  equality-index control of 0.053 ms and a no-index floor of 0.032 ms that both
+  stayed put. The read path is untouched: an indexed range scan measured
+  2.14 ms before and after, beside an unindexed control of 4.16 → 4.24 ms and a
+  point-lookup control of 4.7 → 4.6 µs. Rollback behaviour is unchanged —
+  `range_indices` is still parked by the statement checkpoint and restored by
+  the undo journal's per-bucket inverse edits, now pinned with a fork
+  outstanding.
+
 - **Multi-key `ORDER BY … LIMIT` now takes the bounded-heap top-K path
   (~7× on a 50k-node graph).** Both fusion passes required exactly one sort
   item, so adding a tie-breaker to a leaderboard or paging query silently

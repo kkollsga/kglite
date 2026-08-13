@@ -250,7 +250,7 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
         }
     }
     for ((node_type, property), btree) in &graph.range_indices {
-        for (value, members) in btree {
+        for (value, members) in btree.iter() {
             user_indexes.push((
                 format!("range {node_type}.{property}"),
                 format!("{value:?}"),
@@ -1260,6 +1260,85 @@ fn rollback_restores_index_bucket_order_not_just_membership() {
         bucket_before,
         "the evicted member must come back at its original position"
     );
+}
+
+/// The range-index counterpart of the bucket-order pin above, run **with a
+/// fork outstanding** — the configuration the layered range index introduced.
+///
+/// `range_indices` is *parked* by `swap_data_scale`: the shell restore does not
+/// cover it, so a failed statement's range buckets are put back one inverse
+/// edit at a time by `rollback::apply` (`BucketAppended` / `BucketRemoved`).
+/// Since the index became a level stack, those inverse edits run against an
+/// **overlay** level whenever a reader is holding the base — the writer's
+/// `get_mut` / `entry_or_default` materialise the merged bucket into the
+/// overlay first. This pins both halves: the writer is restored exactly
+/// (position included), and the reader that forced the fork never sees either
+/// the failed write or its reversal.
+#[test]
+fn a_rolled_back_statement_restores_the_parked_range_index_under_a_fork() {
+    let mut graph = seeded_indexed();
+    run(&mut graph, "MATCH (n:Item {id: 3}) SET n.qty = 10");
+    let bucket_before = range_bucket(&graph, "qty", Value::Int64(10));
+    assert_eq!(
+        bucket_before.len(),
+        2,
+        "the fixture needs a range bucket with two members to have an order at all"
+    );
+
+    // The fork: a held reader, which is what makes the writer's next edit
+    // land in a fresh level over a shared base.
+    let reader = graph.clone();
+    let reader_before = range_bucket(&reader, "qty", Value::Int64(10));
+
+    let before = fingerprint(&mut graph);
+    let error = expect_failure(
+        &mut graph,
+        "MATCH (n:Item {id: 1}) SET n.qty = 999 \
+         WITH n MATCH (m:Item {id: 2}) SET m.bad = duration({months: 2147483648})",
+        None,
+    );
+    let after = fingerprint(&mut graph);
+
+    assert_eq!(before, after, "statement must roll back.\nerror: {error}");
+    assert_eq!(
+        range_bucket(&graph, "qty", Value::Int64(10)),
+        bucket_before,
+        "the evicted member must come back at its original position in the range bucket"
+    );
+    assert!(
+        range_bucket(&graph, "qty", Value::Int64(999)).is_empty(),
+        "the failed statement's new range bucket must be gone"
+    );
+    assert_eq!(
+        range_bucket(&reader, "qty", Value::Int64(10)),
+        reader_before,
+        "the reader must not have seen the write or its reversal"
+    );
+
+    // The index still answers ordered range scans after the round trip.
+    let scanned = graph
+        .lookup_range(
+            "Item",
+            "qty",
+            std::ops::Bound::Unbounded,
+            std::ops::Bound::Unbounded,
+        )
+        .expect("the range index survives the rollback");
+    assert_eq!(
+        scanned.len(),
+        3,
+        "every seeded Item must still be reachable through the range index"
+    );
+}
+
+/// One `Item` **range**-index bucket's members, in bucket order.
+fn range_bucket(graph: &DirGraph, property: &str, value: Value) -> Vec<usize> {
+    graph
+        .range_indices
+        .get(&("Item".to_string(), property.to_string()))
+        .and_then(|btree| btree.get(&value))
+        .map(|members| members.iter().map(|idx| idx.index()).collect())
+        .unwrap_or_default()
 }
 
 /// One `Item` property-index bucket's members, in bucket order.

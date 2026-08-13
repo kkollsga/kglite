@@ -653,14 +653,18 @@ pub(crate) fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> 
     // ...and for `type_indices`, whose buckets are stacks of shared levels
     // (D2). Per bucket this is an `Arc::get_mut` probe plus an O(delta) merge.
     graph.type_indices.try_compact();
-    // ...and the two user index families, same mechanism over their
-    // `value -> members` maps (`dir_graph/index_layer.rs`). One probe per
+    // ...and the three user index families, same mechanism over their
+    // `value -> members` maps (`dir_graph/index_layer.rs`, and
+    // `dir_graph/range_index_layer.rs` for the ordered one). One probe per
     // declared index, and the loops do not run at all on the overwhelmingly
     // common graph that has no user index.
     for index in graph.property_indices.values_mut() {
         index.try_compact();
     }
     for index in graph.composite_indices.values_mut() {
+        index.try_compact();
+    }
+    for index in graph.range_indices.values_mut() {
         index.try_compact();
     }
     graph

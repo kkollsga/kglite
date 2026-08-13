@@ -1092,7 +1092,7 @@ fn journal_bucket_evictions(
             if &key.0 != node_type {
                 continue;
             }
-            for (value, members) in btree {
+            for (value, members) in btree.iter() {
                 if members.iter().any(|idx| nodes_to_delete.contains(idx)) {
                     evictions.push((
                         BucketId::RangeValue {
@@ -1294,10 +1294,7 @@ pub(crate) fn detach_delete_nodes(
             .collect();
         for key in range_keys {
             if let Some(value_map) = graph.range_indices.get_mut(&key) {
-                for indices in value_map.values_mut() {
-                    indices.retain(|idx| !nodes_to_delete.contains(idx));
-                }
-                value_map.retain(|_, indices| !indices.is_empty());
+                value_map.retain_members_pruning_empty(|idx| !nodes_to_delete.contains(idx));
             }
         }
         // A deleted node must give up its UNIQUE tuples, or the value stays

@@ -15,6 +15,8 @@ full round stays comfortably under pytest-benchmark's calibration
 budget. Run with: make bench (or pytest tests/benchmarks/ -m benchmark).
 """
 
+import itertools
+
 import pandas as pd
 import pytest
 
@@ -193,6 +195,56 @@ def test_bench_single_node_create_delete_large_graph(benchmark, hot_graph):
         hot_graph.cypher("MATCH (n:Scratch {id: 9999999}) DELETE n")
 
     benchmark(cycle)
+
+
+def _fork_then_write(graph, counter):
+    """One round of "hold a view, then write" — the copy-on-write fork shape.
+
+    `select` re-shares the Arc, so the `SET` that follows is a *first* write
+    against a shared base and pays whatever the fork costs.
+
+    The write alternates one node between two values rather than minting a new
+    one per round: the index keeps a constant size over the thousands of rounds
+    pytest-benchmark runs, so the cell measures the fork instead of the index
+    growing under it.
+    """
+    holder = graph.select("Item")
+    value = 900_000 + (next(counter) % 2)
+    graph.cypher(
+        "MATCH (n:Item {id: 1234}) SET n.rank_val = $v",
+        params={"v": value},
+    )
+    del holder
+
+
+@pytest.mark.benchmark
+def test_bench_held_view_write_with_range_index(benchmark, hot_graph):
+    """First write after a fork, with a **range** index on the written property.
+
+    `range_indices` was a plain `BTreeMap` deep-cloned by every fork, so this
+    cell measured 0.93 ms at 100k against 0.05 ms for the same shape with an
+    equality index (P4, 2026-08-13). It now shares its levels like the other
+    index families; the equality cell below is its control, and the two must
+    stay within a small factor of each other.
+    """
+    hot_graph.build_id_indices(["Item"])
+    hot_graph.create_range_index("Item", "rank_val")
+    counter = itertools.count()
+    benchmark(_fork_then_write, hot_graph, counter)
+
+
+@pytest.mark.benchmark
+def test_bench_held_view_write_with_eq_index(benchmark, hot_graph):
+    """Control for the cell above: identical shape, equality index instead.
+
+    `property_indices` has been layered since D2, so this cell is the floor the
+    range cell is measured against — a regression in *both* is machine drift,
+    a regression in one is the index.
+    """
+    hot_graph.build_id_indices(["Item"])
+    hot_graph.create_index("Item", "rank_val")
+    counter = itertools.count()
+    benchmark(_fork_then_write, hot_graph, counter)
 
 
 @pytest.mark.benchmark

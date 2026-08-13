@@ -5,6 +5,7 @@
 //! embedding stores, connection-type metadata, and schema definitions.
 
 use self::index_layer::LayeredIndex;
+use self::range_index_layer::LayeredRangeIndex;
 use crate::datatypes::values::Value;
 use crate::graph::constraints::{NamedConstraint, UniqueConstraintKey};
 use crate::graph::schema::{
@@ -68,6 +69,7 @@ pub mod index_layer;
 mod indexes;
 mod labels;
 mod node_write;
+pub mod range_index_layer;
 pub(crate) mod rollback;
 mod schema_ops;
 
@@ -111,10 +113,16 @@ pub struct DirGraph {
     /// Persisted list of composite index keys so indexes can be rebuilt on load
     #[serde(default)]
     pub composite_index_keys: Vec<CompositeIndexKey>,
-    /// B-Tree range indexes for ordered lookups: (node_type, property) -> BTreeMap<Value, [NodeIndex]>
+    /// B-Tree range indexes for ordered lookups: (node_type, property) -> value -> [node_indices]
     /// Skipped during serialization — rebuilt from `range_index_keys` on load.
+    ///
+    /// A [`LayeredRangeIndex`]: `index_layer`'s level stack over **ordered**
+    /// levels, so a fork shares the B-tree instead of copying it while
+    /// `lookup_range` still walks values in order. Held-view first write at
+    /// 100k measured 0.889 ms against an equality index's 0.048 ms before this
+    /// (P4) — the gap was the copy.
     #[serde(skip)]
-    pub range_indices: HashMap<IndexKey, std::collections::BTreeMap<Value, Vec<NodeIndex>>>,
+    pub range_indices: HashMap<IndexKey, LayeredRangeIndex<Value>>,
     /// Persisted list of range index keys so indexes can be rebuilt on load
     #[serde(default)]
     pub range_index_keys: Vec<IndexKey>,

@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use super::index_layer::LayeredIndex;
+use super::range_index_layer::LayeredRangeIndex;
 use super::{DirGraph, IndexStats};
 use crate::datatypes::values::Value;
 use crate::graph::schema::{CompositeIndexKey, CompositeValue, IndexKey, InternedKey};
@@ -239,7 +240,8 @@ impl DirGraph {
         }
 
         let count = index.len();
-        self.range_indices.insert(key, index);
+        self.range_indices
+            .insert(key, LayeredRangeIndex::from(index));
         count
     }
 
@@ -715,7 +717,7 @@ impl DirGraph {
             }
             self.note_range_append(&key, &value, node_idx);
             if let Some(btree) = self.range_indices.get_mut(&key) {
-                btree.entry(value).or_default().push(node_idx);
+                btree.entry_or_default(&value).push(node_idx);
             }
         }
 
@@ -827,7 +829,7 @@ impl DirGraph {
             }
             self.note_range_append(&key, &landed, node_idx);
             if let Some(btree) = self.range_indices.get_mut(&key) {
-                btree.entry(landed.clone()).or_default().push(node_idx);
+                btree.entry_or_default(&landed).push(node_idx);
             }
         }
 
