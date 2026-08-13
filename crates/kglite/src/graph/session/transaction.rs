@@ -55,7 +55,17 @@ impl DirGraph {
 pub struct Session {
     /// Inner Arc allows cheap reader snapshots; outer Mutex allows
     /// atomic commit-swap.
-    graph: Mutex<Arc<DirGraph>>,
+    pub(super) graph: Mutex<Arc<DirGraph>>,
+    /// Write-ahead-log state for a session opened via
+    /// [`Session::open_durable`]; `None` for every ordinary session.
+    ///
+    /// It lives here rather than on `DirGraph` because it owns an open `File`
+    /// and `DirGraph` must stay `Clone`. **The lock is only ever taken while
+    /// [`graph`](Self::graph)'s lock is already held, or on its own — never
+    /// the other way round.** That ordering is what makes "append the frame,
+    /// then publish the Arc" indivisible for concurrent committers. See
+    /// [`super::durable`].
+    pub(super) durable: Mutex<Option<super::durable::DurableState>>,
 }
 
 /// Serialized mutable access to a Session graph. The guard holds the Session
@@ -86,17 +96,19 @@ impl DerefMut for SessionWriteGuard<'_> {
 impl Session {
     /// Construct from an owned DirGraph.
     pub fn new(graph: DirGraph) -> Self {
-        Self {
-            graph: Mutex::new(Arc::new(graph)),
-        }
+        Self::from_arc(Arc::new(graph))
     }
 
     /// Construct from an existing Arc<DirGraph>. Used when the
     /// caller already shares the graph via Arc (e.g. wrapping
     /// `KnowledgeGraph.inner`).
+    ///
+    /// The session is **not** durable; see [`Session::open_durable`] for the
+    /// write-ahead-logged constructor.
     pub fn from_arc(graph: Arc<DirGraph>) -> Self {
         Self {
             graph: Mutex::new(graph),
+            durable: Mutex::new(None),
         }
     }
 
@@ -122,7 +134,28 @@ impl Session {
     /// Arc, so the unique mutable path is reachable when no reader snapshot
     /// is alive. Readers that already hold a snapshot remain on the
     /// prior graph; new snapshots wait for this short write guard.
+    ///
+    /// # Not for durable sessions
+    ///
+    /// A session opened via [`Session::open_durable`] **refuses** this path —
+    /// its mutations are captured by the recording backend but nothing drains
+    /// that buffer into a WAL frame, and the next copy-on-write fork resets
+    /// it, so the write would apply and then vanish on a crash. Callers with
+    /// an error channel check [`Session::check_direct_write_allowed`] first.
+    ///
+    /// This signature has none: it returns a guard, and a guard cannot carry a
+    /// refusal. Panicking is not an option and silently dropping the write is
+    /// the very hazard being closed, so the refusal is **latched** instead —
+    /// the durable session records that the log no longer describes the graph,
+    /// and every subsequent durability operation fails loudly:
+    /// [`commit`](Self::commit) returns [`CommitOutcome::DurabilityFailed`]
+    /// and [`sync`](Session::sync) errors, until a [`save`](Self::save)
+    /// checkpoint folds the direct write in and starts a fresh log. The
+    /// mutation is never lost, and it is never mistaken for a logged one.
+    /// (Giving this method a fallible signature would ripple through the C ABI
+    /// and wheel call sites; that is the rung where it belongs, not this one.)
     pub fn write(&self) -> SessionWriteGuard<'_> {
+        self.mark_diverged();
         SessionWriteGuard {
             guard: self.graph.lock().unwrap_or_else(|p| p.into_inner()),
         }
@@ -150,10 +183,21 @@ impl Session {
     /// `&mut DirGraph` and the atomicity guarantee (an error publishes
     /// nothing) depends on mutating a copy. Since D2 that fork is O(changes),
     /// and skipping the swap is what the caller actually observes.
+    ///
+    /// # Not for durable sessions
+    ///
+    /// Like [`write`](Self::write), and for the same reason: the closure's
+    /// mutations are captured but never drained into a WAL frame. The refusal
+    /// cannot travel in-band either — `E` is the *caller's* error type and the
+    /// engine cannot construct one — so this path latches the session exactly
+    /// as `write` does, and every later durability operation fails until a
+    /// checkpoint repairs it. Callers that own an error channel check
+    /// [`Session::check_direct_write_allowed`] before calling.
     pub fn transact<T, E>(
         &self,
         operation: impl FnOnce(&mut DirGraph) -> Result<T, E>,
     ) -> Result<T, E> {
+        self.mark_diverged();
         let mut guard = self.graph.lock().unwrap_or_else(|p| p.into_inner());
         let current_version = guard.version();
         let mut working = guard.fork_transaction();
@@ -193,9 +237,29 @@ impl Session {
     /// that may publish to `path` must hold its own
     /// [`GraphWriterLease`](crate::graph::io::open::GraphWriterLease) across
     /// the whole open/mutate/save interval.
+    /// # Durable sessions
+    ///
+    /// For a session opened via [`Session::open_durable`] this method is the
+    /// **checkpoint**, and it runs the four-step order the format requires:
+    /// flush the log → stamp `checkpoint_lsn` into the graph being written →
+    /// write the `.kgl` → drop the capture buffer and truncate the log. The
+    /// `graph::session::durable` module documents why each step sits where it
+    /// does.
+    ///
+    /// `fsync=false` is **overridden to true** on a durable session, silently
+    /// and deliberately: the checkpoint destroys the log that would otherwise
+    /// still describe those commits, so pairing a maybe-not-on-disk checkpoint
+    /// with a destroyed log would let one crash lose both. (The Python wheel
+    /// warns as well as overriding; the engine has no warning channel, so the
+    /// contract is stated here.)
     pub fn save(&self, path: &str, fsync: bool) -> Result<(), String> {
         let mut guard = self.graph.lock().unwrap_or_else(|p| p.into_inner());
-        crate::graph::io::file::save_graph_with(&mut guard, path, fsync)
+        let durable = self.checkpoint_prologue(&mut guard)?;
+        crate::graph::io::file::save_graph_with(&mut guard, path, fsync || durable)?;
+        if durable {
+            self.checkpoint_epilogue(&mut guard)?;
+        }
+        Ok(())
     }
 
     /// Begin a new read-write transaction. The snapshot is taken
@@ -260,6 +324,17 @@ impl Session {
                 current_version,
                 base_version,
             };
+        }
+
+        // Durable sessions log the commit BEFORE publishing it. A frame that
+        // could not be appended means the caller must not be told the write
+        // happened, so the Arc swap below is skipped entirely — the working
+        // copy is dropped and the graph is exactly as it was. (The wheel's
+        // apply-then-log ordering can only report the same failure *after* the
+        // mutation is visible; this is the stronger half of the rung.) No-op
+        // for a non-durable session.
+        if let Err(error) = self.log_working_commit(&mut working) {
+            return CommitOutcome::DurabilityFailed { error };
         }
 
         // Bump from the *current* version (not the possibly-stale base) so the
@@ -373,7 +448,13 @@ impl Transaction {
 
 /// Outcome of [`Session::commit`]. Bindings inspect this to decide
 /// what to surface to their consumers.
+///
+/// `#[non_exhaustive]`: a commit can fail in ways that did not exist when a
+/// binding was written — [`DurabilityFailed`](Self::DurabilityFailed) is the
+/// first — and an outcome a binding does not recognise must reach its error
+/// path, not its success path. Downstream matches carry a catch-all arm.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum CommitOutcome {
     /// Read-only-then-commit / no mutations happened. Cheap path.
     NoWritesNoOp,
@@ -388,6 +469,15 @@ pub enum CommitOutcome {
         current_version: u64,
         base_version: u64,
     },
+    /// **Durable sessions only.** The commit's write-ahead-log frame could not
+    /// be appended, so the commit was not published: the graph is unchanged,
+    /// the version did not move, and the working copy is dropped (lost).
+    ///
+    /// This is a hard failure, not a retriable conflict — the disk, not
+    /// another writer, said no. A binding surfaces it as an IO/backend error;
+    /// re-running the unit of work will hit the same wall until the underlying
+    /// problem is cleared.
+    DurabilityFailed { error: String },
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -873,8 +963,8 @@ mod tests {
                             match s.commit(tx, /* check_occ = */ true) {
                                 CommitOutcome::Committed { .. } => break,
                                 CommitOutcome::ConflictDetected { .. } => continue,
-                                CommitOutcome::NoWritesNoOp => {
-                                    panic!("materialised tx must commit as a write")
+                                other => {
+                                    panic!("materialised tx must commit as a write: {other:?}")
                                 }
                             }
                         }

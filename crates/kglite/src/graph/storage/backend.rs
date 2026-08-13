@@ -167,6 +167,55 @@ impl GraphBackend {
         GraphBackend::Memory(Arc::new(MemoryGraph::new()))
     }
 
+    /// Whether this backend is wrapped in the WAL write-capture layer, i.e.
+    /// whether some owner is logging its mutations.
+    ///
+    /// The durable machinery reads and reaches into the capture layer from
+    /// several places; those questions are answered here, on the dispatcher,
+    /// rather than by re-matching the variant at each site.
+    #[inline]
+    pub(crate) fn is_recording(&self) -> bool {
+        matches!(self, GraphBackend::Recording(_))
+    }
+
+    /// The write-capture layer, if this backend is wrapped in one.
+    ///
+    /// Read-side only, and therefore test-only: the production durable paths
+    /// all *drain* the buffer and use [`recording_mut`](Self::recording_mut).
+    /// This exists so the durable session's replay-before-wrap ordering has an
+    /// observable — a graph wrapped before its WAL replay carries every
+    /// replayed op in this buffer, which nothing else can see.
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn recording(&self) -> Option<&RecordingGraph<GraphBackend>> {
+        match self {
+            GraphBackend::Recording(rg) => Some(rg),
+            _ => None,
+        }
+    }
+
+    /// Mutable access to the write-capture layer, if this backend is wrapped
+    /// in one. The durable commit and checkpoint paths drain the op buffer
+    /// through this.
+    #[inline]
+    pub(crate) fn recording_mut(&mut self) -> Option<&mut RecordingGraph<GraphBackend>> {
+        match self {
+            GraphBackend::Recording(rg) => Some(rg),
+            _ => None,
+        }
+    }
+
+    /// Wrap this backend in the write-capture layer, idempotently. See
+    /// [`crate::graph::storage::recording::wrap_for_durability`] for the
+    /// `DirGraph`-shaped entry point every binding calls.
+    pub(crate) fn wrap_for_durability(&mut self) {
+        if self.is_recording() {
+            return;
+        }
+        let inner = std::mem::replace(self, GraphBackend::new());
+        *self = GraphBackend::Recording(Box::new(RecordingGraph::new(inner)));
+    }
+
     /// Whether a proven-infallible mutation may commit without a full rollback
     /// checkpoint. Recording/durable wrappers deliberately return false even
     /// when their inner backend is memory: their post-write WAL lifecycle is a

@@ -429,7 +429,9 @@ pub mod api {
     /// save in `io`). Lifted in roadmap Piece 4.
     pub mod durable {
         pub use crate::graph::mutation::wal_replay::apply_frames;
-        pub use crate::graph::storage::recording::{resolve_ops, RecordingGraph};
+        pub use crate::graph::storage::recording::{
+            resolve_ops, wrap_for_durability, RecordingGraph,
+        };
         pub use crate::graph::wal::{recover, wal_path, DurabilityLevel, SyncMode, Wal, WalFrame};
     }
 

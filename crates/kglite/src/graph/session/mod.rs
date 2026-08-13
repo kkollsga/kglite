@@ -43,12 +43,17 @@
 //!   `output_format`, `explain` flags that callers need for
 //!   serialization decisions.
 //! - [`CommitOutcome`] — `NoWritesNoOp` / `Committed` /
-//!   `ConflictDetected` so the binding maps to its own error type
-//!   (PyErr / BoltError / etc.).
+//!   `ConflictDetected` / `DurabilityFailed` so the binding maps to
+//!   its own error type (PyErr / BoltError / etc.).
+//! - [`Session::open_durable`] + [`Session::sync`] — the write-ahead
+//!   log wired through the session: commits append a frame before
+//!   they publish, and [`Session::save`] is the four-step checkpoint.
+//!   See [`durable`] for the orderings that are correctness.
 
 pub use self::execute::{execute_mut, execute_read, ExecuteOptions, ExecuteOutcome};
 pub use self::transaction::{CommitOutcome, Session, Transaction};
 
+pub(crate) mod durable;
 pub(crate) mod execute;
 #[cfg(test)]
 mod plan_cache_cost_tests;

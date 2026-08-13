@@ -731,6 +731,22 @@ impl BoltBackend for KgliteBackend {
                     "commit (with mutations)"
                 );
             }
+            // Any outcome this build does not recognise — `CommitOutcome` is
+            // `#[non_exhaustive]` — is a failure, never a silent success.
+            // `DurabilityFailed` (a WAL frame that could not be appended, so
+            // the commit was not published) lands here today; R3.2 gives it
+            // its own arm once this server can open a durable session at all.
+            kglite::api::session::CommitOutcome::DurabilityFailed { ref error } => {
+                tracing::error!(
+                    session_id = %session.0,
+                    tx = %transaction.0,
+                    error = %error,
+                    "commit rejected: the write could not be made durable"
+                );
+                return Err(BoltError::Backend(format!(
+                    "commit was not applied: {error}"
+                )));
+            }
             kglite::api::session::CommitOutcome::ConflictDetected {
                 current_version,
                 base_version,
@@ -764,6 +780,22 @@ impl BoltBackend for KgliteBackend {
                          current version {current_version}). Retry the transaction."
                     ),
                 });
+            }
+            // `CommitOutcome` is `#[non_exhaustive]`: an outcome this build
+            // does not recognise reaches the error path, never the success
+            // path. Fail closed — the engine only ever adds outcomes that mean
+            // "not published".
+            ref other => {
+                tracing::error!(
+                    session_id = %session.0,
+                    tx = %transaction.0,
+                    outcome = ?other,
+                    "commit returned an outcome this build does not recognise"
+                );
+                return Err(BoltError::Backend(
+                    "commit returned an unrecognised outcome; the transaction was not applied"
+                        .to_string(),
+                ));
             }
         }
 

@@ -896,6 +896,7 @@ pub fn kglite::api::durable::apply_frames(graph: &mut kglite::api::DirGraph, fra
 pub fn kglite::api::durable::recover(path: &std::path::Path) -> core::io::error::Result<alloc::vec::Vec<kglite::api::durable::WalFrame>>
 pub fn kglite::api::durable::resolve_ops(raw: &[kglite::graph::storage::recording::RawOp], graph: &impl kglite::api::GraphRead, interner: &kglite::api::StringInterner, secondary_labels: impl core::ops::function::Fn(petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<alloc::string::String>) -> alloc::vec::Vec<kglite::graph::wal::MutationOp>
 pub fn kglite::api::durable::wal_path(checkpoint: &std::path::Path) -> std::path::PathBuf
+pub fn kglite::api::durable::wrap_for_durability(dir: &mut kglite::api::DirGraph)
 pub mod kglite::api::embeddings
 pub struct kglite::api::embeddings::EmbeddingIngestReport
 pub kglite::api::embeddings::EmbeddingIngestReport::dimension: usize
@@ -1389,12 +1390,14 @@ pub fn kglite::api::param::json_object_to_value_map(map: &serde_json::map::Map<a
 pub fn kglite::api::param::json_value_to_kglite_value(v: &serde_json::value::Value) -> kglite::datatypes::values::Value
 pub fn kglite::api::param::kglite_value_to_json(v: &kglite::datatypes::values::Value) -> serde_json::value::Value
 pub mod kglite::api::session
-pub enum kglite::api::session::CommitOutcome
+#[non_exhaustive] pub enum kglite::api::session::CommitOutcome
 pub kglite::api::session::CommitOutcome::Committed
 pub kglite::api::session::CommitOutcome::Committed::new_version: u64
 pub kglite::api::session::CommitOutcome::ConflictDetected
 pub kglite::api::session::CommitOutcome::ConflictDetected::base_version: u64
 pub kglite::api::session::CommitOutcome::ConflictDetected::current_version: u64
+pub kglite::api::session::CommitOutcome::DurabilityFailed
+pub kglite::api::session::CommitOutcome::DurabilityFailed::error: alloc::string::String
 pub kglite::api::session::CommitOutcome::NoWritesNoOp
 impl core::fmt::Debug for kglite::api::session::CommitOutcome
 pub fn kglite::api::session::CommitOutcome::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -1447,6 +1450,11 @@ pub fn kglite::api::session::Session::snapshot(&self) -> alloc::sync::Arc<kglite
 pub fn kglite::api::session::Session::transact<T, E>(&self, operation: impl core::ops::function::FnOnce(&mut kglite::api::DirGraph) -> core::result::Result<T, E>) -> core::result::Result<T, E>
 pub fn kglite::api::session::Session::version(&self) -> u64
 pub fn kglite::api::session::Session::write(&self) -> kglite::graph::session::transaction::SessionWriteGuard<'_>
+impl kglite::api::session::Session
+pub fn kglite::api::session::Session::check_direct_write_allowed(&self) -> core::result::Result<(), alloc::string::String>
+pub fn kglite::api::session::Session::durability(&self) -> core::option::Option<kglite::api::durable::DurabilityLevel>
+pub fn kglite::api::session::Session::open_durable(graph: alloc::sync::Arc<kglite::api::DirGraph>, checkpoint_path: &str, level: kglite::api::durable::DurabilityLevel) -> core::result::Result<kglite::api::session::Session, alloc::string::String>
+pub fn kglite::api::session::Session::sync(&self) -> core::result::Result<(), alloc::string::String>
 pub struct kglite::api::session::Transaction
 impl kglite::api::session::Transaction
 pub fn kglite::api::session::Transaction::base_version(&self) -> u64

@@ -170,6 +170,24 @@ impl<G: GraphRead + Clone> Clone for RecordingGraph<G> {
     }
 }
 
+/// Wrap `dir`'s backend in the [`RecordingGraph`] write-capture layer so every
+/// mutation that crosses the `GraphWrite` seam is buffered for the WAL.
+/// Idempotent — an already-wrapped graph is left alone.
+///
+/// Storage-mode-agnostic by construction: the wrapper wraps the
+/// [`GraphBackend`](crate::graph::storage::backend::GraphBackend) *enum* rather
+/// than a concrete backend, so one capture path
+/// covers memory and mapped alike. (Disk is refused a rung earlier, by the
+/// durable-open path, because it has no logical WAL at all.)
+///
+/// Lifted out of the wheel: `Session::open_durable` and every non-Rust binding
+/// that opens a durable graph need exactly this, byte for byte, so it is core
+/// rather than per-binding (CLAUDE.md's boundary principle — "anything two or
+/// more wrappers would write identically belongs in `kglite::api`").
+pub fn wrap_for_durability(dir: &mut crate::graph::dir_graph::DirGraph) {
+    dir.graph.wrap_for_durability();
+}
+
 /// Resolve buffered [`RawOp`]s into string-keyed, identity-keyed
 /// [`MutationOp`]s, reading final node/edge state from `graph` and
 /// resolving interned keys through `interner`. Upserts whose node/edge

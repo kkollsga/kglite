@@ -56,6 +56,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docker stop` and a Kubernetes pod shutdown terminated the process through
   the default handler — no connection shutdown, and (with the flag above) no
   exit save. Both signals now run one shutdown path.
+- **Durable sessions in the Rust API: `Session::open_durable(graph, path,
+  level)`.** The engine has shipped the write-ahead log itself since 0.14, but
+  the orchestration around it lived only in the Python wheel; it is now part of
+  `kglite::api::session`, so every binding gets the same behaviour instead of
+  reimplementing it. `open_durable` performs the whole open ordering — recover
+  the sidecar, replay the frames the loaded checkpoint does not already contain,
+  *then* wrap the backend for write capture (replaying after the wrap would log
+  every recovered op a second time), then open the log for append.
+  `Session::commit` appends the transaction's frame **between the OCC check and
+  the publish**, so a log that cannot be written blocks the commit rather than
+  reporting success over an unlogged write; the new
+  `CommitOutcome::DurabilityFailed { error }` says so, and the graph, its
+  version and its readers are untouched. `Session::save` becomes the four-step
+  checkpoint (flush the log → stamp `checkpoint_lsn` → write the `.kgl` →
+  truncate the log), and forces `fsync` on a durable session because it
+  destroys the log that would otherwise still describe those commits. New
+  `Session::sync()` takes the on-demand barrier that makes level `normal`
+  usable, and `Session::durability()` reports the level. Refusals are explicit:
+  disk-mode graphs at any logging level, a graph another durable owner already
+  wrapped, and — the data-safety one — level `off` over a sidecar holding
+  commits the checkpoint does not contain, which would otherwise be ignored and
+  then truncated away. `Session::write` / `Session::transact` are not logged
+  paths and are documented as unsupported on a durable session; taking one
+  anyway now latches the session so every later durability operation fails
+  loudly until a checkpoint folds the write in. Non-durable sessions are
+  unaffected in behaviour and in cost.
+
+### Changed
+
+- **`CommitOutcome` is now `#[non_exhaustive]`** (breaking for out-of-crate
+  code that matches it exhaustively — add a catch-all arm). A commit can fail
+  in ways that did not exist when a binding was written, and such an outcome
+  must reach the binding's error path rather than falling through to success.
 
 ## [0.15.13] - 2026-08-12
 
