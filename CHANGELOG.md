@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cells that were absent before the statement. Writes taken while a `.copy()`
   or a held query result is sharing the graph still copy once per type, as
   before, because the reader's snapshot must keep the store it was given.
+  Measured (release build vs the published 0.15.14 wheel, two agreeing runs,
+  flat controls): single-row `SET` after `save()` 327.9 → 4.3–5.0 µs at
+  50k×12 columns (~70×) and 683.5 → 4.3 µs at 100k (~155×) — parity with a
+  never-saved graph at every size and column count measured; the same
+  statements inside one transaction 355 → 14–45 µs; a spilled graph's
+  single-row `SET` 4,961 → 4.4 µs with its mapping intact.
 - **`add_nodes(conflict_handling="replace")` drops the properties the batch
   omits even while a query result or a `.copy()` is holding the graph.** On a
   saved (columnar) graph in that state the write went through a separate code
