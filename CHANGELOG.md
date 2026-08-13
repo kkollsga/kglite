@@ -131,6 +131,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of failing to start. A level you *ask* for is still refused there,
   rather than quietly weakened.
 
+
 ### Changed
 
 - **`kglite::api::io::open_or_create_graph_in_mode` takes the durability level
@@ -149,112 +150,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in ways that did not exist when a binding was written, and such an outcome
   must reach the binding's error path rather than falling through to success.
 
-### Fixed
-
-- **`CREATE` no longer hands out an `id` that another node already holds.** A
-  `CREATE` with no `id` property asks the engine for an identity, and the
-  allocator was `node_bound()` — an index-space bound, not a counter. It
-  shrinks when the highest-indexed nodes are deleted and stalls while freed
-  slots are refilled, so ordinary histories minted collisions: `CREATE`×5 →
-  `DELETE` two → `CREATE`×3 put two nodes on one id, and a `save()`/`load()`
-  across earlier deletes put *three* consecutive nodes on the same id. The
-  duplicates were silent in both directions that matter — `MATCH (n {id: X})`
-  returns only one node per id, and WAL replay folds ops by `(node_type, id)`,
-  so a durable graph *recovered* the collided nodes as one and lost the rest.
-  Ids are now drawn from a monotonic high-water mark that never reuses a value
-  and is re-seeded above a loaded graph's own ids, and a caller-supplied id
-  raises the mark so the engine cannot later mint it. Ids handed out by an
-  append-only workload are unchanged (`0, 1, 2, …`); after a delete the counter
-  keeps climbing instead of reusing the freed value. Uniqueness for ids the
-  *caller* supplies is unchanged and still opt-in (`define_schema`'s
-  `primary_key`, or `MERGE`).
-- **`kglite.open(path, durable=False)` no longer silently discards committed
-  writes still sitting in the WAL sidecar.** Recovery used to be conditional on
-  the level being asked for, so opening a crashed graph at `"off"` (or `False`)
-  ignored every frame the checkpoint did not already contain — the graph came
-  back missing writes that had been acknowledged, with no error, and the first
-  later `save()` truncated the log and destroyed them for good. Recovery on open
-  is now unconditional: opening a path is a decision about that path's *data*,
-  not only about how future writes will be logged. An `"off"` open over a
-  sidecar holding unrecovered commits raises `ValueError` naming the sidecar and
-  both ways out (reopen at `"full"`/`"normal"` to replay them, or move the
-  sidecar aside to discard them deliberately). Frames the checkpoint already
-  contains — the harmless residue of a crash between a `save()` and its
-  truncation — are not grounds to refuse and still open at every level. The
-  wheel and the engine's `Session` now perform the same open sequence through
-  one shared function (`kglite::api::durable::open_log`), so the two cannot
-  disagree about what a sidecar means.
-- **A server-style open over an unrecovered WAL sidecar no longer lets a later
-  durable open replay stale frames over newer saved data.** The MCP server, the
-  Bolt server and the CLI open graphs through
-  `kglite::api::io::open_or_create_graph[_in_mode]`, which read the `.kgl`
-  checkpoint alone and attach no log. Over a path whose sidecar still held
-  frames the checkpoint had not folded in — a durable writer that died between
-  a commit and its next checkpoint — that open silently returned a graph
-  missing those commits, and any subsequent save made it worse rather than
-  better: the save stamps no `checkpoint_lsn` and truncates nothing, so the
-  stale frames survived *in front of* the newer checkpoint and the next durable
-  open replayed them back over it, reverting saved state to an older commit.
-  These openers now refuse such a path on the same terms as `durable="off"`
-  (`kglite::api::durable::ensure_recovered`, shared with the wheel's refusal),
-  naming the sidecar and both ways out: open it through a durable entry point
-  to replay the frames, or move the sidecar aside to discard them
-  deliberately. The refusal covers read-only opens too, because an opener that
-  may later publish cannot be told apart from one that only looks, and it
-  covers a sidecar found beside a *missing* checkpoint, where a fresh graph
-  would replay every frame in it. Frames at or below `checkpoint_lsn` — crash
-  residue between a save and its truncation — still open fine. `load_file` is
-  deliberately unguarded: it is the primitive durable recovery is itself built
-  on, and the way to read a graph another process is writing durably, where a
-  sidecar running ahead of the checkpoint is the steady state.
-- **`load()` → mutate → `save()` over a live WAL sidecar is now refused
-  instead of being silently rolled back later.** `kglite.load(path)` (and
-  `kglite.open_session(path)`) read the checkpoint alone by design, so a path
-  whose sidecar still held commits the `.kgl` did not contain came back
-  missing them — and saving back over that path stranded the frames in front
-  of the new checkpoint, so the *next* durable open replayed them over it.
-  Measured end to end: a graph saved with `age=3` came back as `age=2`. The
-  save now refuses, in the single save dispatch
-  (`kglite::api::io::save_graph[_with]`, which the wheel, the MCP server, the
-  CLI, the C ABI and `Session::save` all route through), so every binding
-  gets the same refusal: `ValueError` in Python — the class every other
-  durability refusal already raises — naming the sidecar and both ways out
-  (reopen the path durably to replay the commits, or move the sidecar aside
-  to discard them deliberately). The rule is "the sidecar holds frames past
-  the `checkpoint_lsn` this save is about to write", which is exactly the set
-  a later durable open would replay over it; the target path's sidecar is what
-  counts, so a "save as" onto such a path is refused too. A durable owner's
-  own checkpoint is never refused, and not by an exemption: its prologue
-  stamps `checkpoint_lsn` before the write, so its frames are already at or
-  below the stamp. Crash residue (frames at or below the stamp) still saves
-  fine. `save_graph`/`save_graph_with` now return a typed `SaveError` whose
-  `Refused` variant means nothing was written, so a binding can map a refusal
-  to its own bad-request class instead of an I/O failure.
-- **`enable_columnar()`'s docstring example called `is_columnar` as a method.**
-  It is a property, so `assert graph.is_columnar()` — copied from `help()` —
-  raised `TypeError: 'bool' object is not callable`. The primary-store guide's
-  claim that there is no JVM binding is also gone: Java has been official since
-  0.15.9 (`io.github.kkollsga:kglite` on Maven Central).
-
-- **A fused `ORDER BY … LIMIT` no longer drops rows whose sort key is NULL.**
-  Both fused top-K executors skipped any row with a NULL key, while the
-  ordinary `ORDER BY` pipeline places NULLs by the openCypher/Neo4j 5+ rule
-  (`NULLS FIRST` for DESC, `NULLS LAST` for ASC, overridable per key). So
-  `ORDER BY score DESC LIMIT 10` over a partly-populated property returned the
-  *wrong ten rows* — the NULL-keyed rows that should have led the result were
-  silently discarded — and `LIMIT k` could return fewer than `k` rows when the
-  graph held `k` of them. Sort order is now defined in exactly one place
-  (`executor/ordering.rs`) and shared by the full sort, the streaming top-K
-  operator and both fused top-K executors, so the fused and unfused paths
-  cannot disagree; the corresponding orderings are pinned by golden expected
-  values in `tests/test_cypher_top_k_ordering.py`. Two further defects went
-  with it: a sort key written as an *expression over* a RETURN alias
-  (`RETURN n.x AS a … ORDER BY a + 1 LIMIT k`) fused into a clause that cannot
-  evaluate the alias and returned zero rows — that shape now declines to fuse;
-  and a RETURN column that is also the sort key was projected from the `f64`
-  the old heap ranked on, rounding integers past 2^53.
-
-### Changed
 
 - **Documented the write-amplification ladder, and what `save()` does to later
   writes.** A graph that came from a `.kgl` file — `load()`, `open()`, or a
@@ -397,6 +292,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   declined the coercion, so the `WHERE n.id IN [5]` spelling returned nothing.
   The index now coerces `Int64` / `UniqueId` queries against `Float64` keys the
   same way value equality does, and all spellings agree.
+
+
+### Fixed
+
+- **`CREATE` no longer hands out an `id` that another node already holds.** A
+  `CREATE` with no `id` property asks the engine for an identity, and the
+  allocator was `node_bound()` — an index-space bound, not a counter. It
+  shrinks when the highest-indexed nodes are deleted and stalls while freed
+  slots are refilled, so ordinary histories minted collisions: `CREATE`×5 →
+  `DELETE` two → `CREATE`×3 put two nodes on one id, and a `save()`/`load()`
+  across earlier deletes put *three* consecutive nodes on the same id. The
+  duplicates were silent in both directions that matter — `MATCH (n {id: X})`
+  returns only one node per id, and WAL replay folds ops by `(node_type, id)`,
+  so a durable graph *recovered* the collided nodes as one and lost the rest.
+  Ids are now drawn from a monotonic high-water mark that never reuses a value
+  and is re-seeded above a loaded graph's own ids, and a caller-supplied id
+  raises the mark so the engine cannot later mint it. Ids handed out by an
+  append-only workload are unchanged (`0, 1, 2, …`); after a delete the counter
+  keeps climbing instead of reusing the freed value. Uniqueness for ids the
+  *caller* supplies is unchanged and still opt-in (`define_schema`'s
+  `primary_key`, or `MERGE`).
+- **`kglite.open(path, durable=False)` no longer silently discards committed
+  writes still sitting in the WAL sidecar.** Recovery used to be conditional on
+  the level being asked for, so opening a crashed graph at `"off"` (or `False`)
+  ignored every frame the checkpoint did not already contain — the graph came
+  back missing writes that had been acknowledged, with no error, and the first
+  later `save()` truncated the log and destroyed them for good. Recovery on open
+  is now unconditional: opening a path is a decision about that path's *data*,
+  not only about how future writes will be logged. An `"off"` open over a
+  sidecar holding unrecovered commits raises `ValueError` naming the sidecar and
+  both ways out (reopen at `"full"`/`"normal"` to replay them, or move the
+  sidecar aside to discard them deliberately). Frames the checkpoint already
+  contains — the harmless residue of a crash between a `save()` and its
+  truncation — are not grounds to refuse and still open at every level. The
+  wheel and the engine's `Session` now perform the same open sequence through
+  one shared function (`kglite::api::durable::open_log`), so the two cannot
+  disagree about what a sidecar means.
+- **A server-style open over an unrecovered WAL sidecar no longer lets a later
+  durable open replay stale frames over newer saved data.** The MCP server, the
+  Bolt server and the CLI open graphs through
+  `kglite::api::io::open_or_create_graph[_in_mode]`, which read the `.kgl`
+  checkpoint alone and attach no log. Over a path whose sidecar still held
+  frames the checkpoint had not folded in — a durable writer that died between
+  a commit and its next checkpoint — that open silently returned a graph
+  missing those commits, and any subsequent save made it worse rather than
+  better: the save stamps no `checkpoint_lsn` and truncates nothing, so the
+  stale frames survived *in front of* the newer checkpoint and the next durable
+  open replayed them back over it, reverting saved state to an older commit.
+  These openers now refuse such a path on the same terms as `durable="off"`
+  (`kglite::api::durable::ensure_recovered`, shared with the wheel's refusal),
+  naming the sidecar and both ways out: open it through a durable entry point
+  to replay the frames, or move the sidecar aside to discard them
+  deliberately. The refusal covers read-only opens too, because an opener that
+  may later publish cannot be told apart from one that only looks, and it
+  covers a sidecar found beside a *missing* checkpoint, where a fresh graph
+  would replay every frame in it. Frames at or below `checkpoint_lsn` — crash
+  residue between a save and its truncation — still open fine. `load_file` is
+  deliberately unguarded: it is the primitive durable recovery is itself built
+  on, and the way to read a graph another process is writing durably, where a
+  sidecar running ahead of the checkpoint is the steady state.
+- **`load()` → mutate → `save()` over a live WAL sidecar is now refused
+  instead of being silently rolled back later.** `kglite.load(path)` (and
+  `kglite.open_session(path)`) read the checkpoint alone by design, so a path
+  whose sidecar still held commits the `.kgl` did not contain came back
+  missing them — and saving back over that path stranded the frames in front
+  of the new checkpoint, so the *next* durable open replayed them over it.
+  Measured end to end: a graph saved with `age=3` came back as `age=2`. The
+  save now refuses, in the single save dispatch
+  (`kglite::api::io::save_graph[_with]`, which the wheel, the MCP server, the
+  CLI, the C ABI and `Session::save` all route through), so every binding
+  gets the same refusal: `ValueError` in Python — the class every other
+  durability refusal already raises — naming the sidecar and both ways out
+  (reopen the path durably to replay the commits, or move the sidecar aside
+  to discard them deliberately). The rule is "the sidecar holds frames past
+  the `checkpoint_lsn` this save is about to write", which is exactly the set
+  a later durable open would replay over it; the target path's sidecar is what
+  counts, so a "save as" onto such a path is refused too. A durable owner's
+  own checkpoint is never refused, and not by an exemption: its prologue
+  stamps `checkpoint_lsn` before the write, so its frames are already at or
+  below the stamp. Crash residue (frames at or below the stamp) still saves
+  fine. `save_graph`/`save_graph_with` now return a typed `SaveError` whose
+  `Refused` variant means nothing was written, so a binding can map a refusal
+  to its own bad-request class instead of an I/O failure.
+- **`enable_columnar()`'s docstring example called `is_columnar` as a method.**
+  It is a property, so `assert graph.is_columnar()` — copied from `help()` —
+  raised `TypeError: 'bool' object is not callable`. The primary-store guide's
+  claim that there is no JVM binding is also gone: Java has been official since
+  0.15.9 (`io.github.kkollsga:kglite` on Maven Central).
+
+- **A fused `ORDER BY … LIMIT` no longer drops rows whose sort key is NULL.**
+  Both fused top-K executors skipped any row with a NULL key, while the
+  ordinary `ORDER BY` pipeline places NULLs by the openCypher/Neo4j 5+ rule
+  (`NULLS FIRST` for DESC, `NULLS LAST` for ASC, overridable per key). So
+  `ORDER BY score DESC LIMIT 10` over a partly-populated property returned the
+  *wrong ten rows* — the NULL-keyed rows that should have led the result were
+  silently discarded — and `LIMIT k` could return fewer than `k` rows when the
+  graph held `k` of them. Sort order is now defined in exactly one place
+  (`executor/ordering.rs`) and shared by the full sort, the streaming top-K
+  operator and both fused top-K executors, so the fused and unfused paths
+  cannot disagree; the corresponding orderings are pinned by golden expected
+  values in `tests/test_cypher_top_k_ordering.py`. Two further defects went
+  with it: a sort key written as an *expression over* a RETURN alias
+  (`RETURN n.x AS a … ORDER BY a + 1 LIMIT k`) fused into a clause that cannot
+  evaluate the alias and returned zero rows — that shape now declines to fuse;
+  and a RETURN column that is also the sort key was projected from the `f64`
+  the old heap ranked on, rounding integers past 2^53.
+
 
 ## [0.15.13] - 2026-08-12
 
