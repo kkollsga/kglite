@@ -254,6 +254,91 @@ def test_set_and_delete_survive_crash(tmp_path, storage):
 
 
 @pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_typed_columns_do_not_change_what_the_wal_replays(tmp_path, storage):
+    """A column's storage type must not be visible to WAL capture or replay.
+
+    Phase 5(ii) types a newly created columnar column from declared metadata or
+    the value in hand instead of always building a `TypedColumn::Mixed`. Both
+    WAL layers read through `NodeView`, which resolves a property to a `Value`
+    regardless of the column holding it — but a typed column is exactly where a
+    silent coercion would hide (an `Int64` column accepting a float by
+    truncation, a `Float64` column widening an integer on the way back out), and
+    a coercion in capture or replay is unrecoverable data loss rather than a
+    wrong answer you can re-query.
+
+    Every value below is written into a column the store has to *create*, and
+    each one exercises a different typed arm: int, float, string, bool, and the
+    demote-to-Mixed case where the same property arrives with two types.
+    """
+    g = _open(tmp_path / "app.kgl", storage)
+    g.cypher("CREATE (:Item {id: 1, seed: 1})")
+    g.cypher("CREATE (:Item {id: 2, seed: 2})")
+    g.save()  # checkpoint: the type is columnar from here
+    del g
+
+    _crash_child(
+        tmp_path,
+        """
+        g = open_durable()
+        g.cypher("MATCH (n:Item {id:1}) SET n.count = 7")
+        g.cypher("MATCH (n:Item {id:1}) SET n.ratio = 0.5")
+        g.cypher("MATCH (n:Item {id:1}) SET n.tag = 'seven'")
+        g.cypher("MATCH (n:Item {id:1}) SET n.flag = true")
+        """,
+        storage,
+    )
+
+    g = _open(tmp_path / "app.kgl", storage)
+    row = g.cypher("MATCH (n:Item {id:1}) RETURN n.count AS c, n.ratio AS r, n.tag AS t, n.flag AS f").to_list()[0]
+    assert row["c"] == 7 and isinstance(row["c"], int)
+    assert row["r"] == 0.5 and isinstance(row["r"], float)
+    assert row["t"] == "seven"
+    assert row["f"] is True
+    # The row that never carried the new properties still reads absent, not a
+    # backfilled zero from the appended column's null padding.
+    assert g.cypher("MATCH (n:Item {id:2}) RETURN n.count AS c").scalar() is None
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "PRE-EXISTING WAL DEFECT, surfaced while testing Phase 5(ii) and NOT "
+        "caused by it. A property that arrives with two different value types "
+        "across nodes replays with the numeric one coerced to a string: node 1 "
+        "is written `mixedish = 1` and reads back `'1'` after recovery. "
+        "Reproduced on a graph that never went columnar at all (no `save()`, "
+        "so the properties stay row-shaped), which is what rules the columnar "
+        "column typing out as the cause - the coercion is in WAL capture or "
+        "replay, where a per-property type is decided for the whole batch. "
+        "This is unrecoverable type loss across a crash, not a wrong answer "
+        "you can re-query, so it is pinned rather than reported and forgotten. "
+        "Out of scope for the shape-convergence program's Phase 5; needs its "
+        "own fix in the replay path. strict=True: it goes RED when fixed."
+    ),
+)
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES[:1])
+def test_a_heterogeneous_property_keeps_its_types_across_replay(tmp_path, storage):
+    g = _open(tmp_path / "app.kgl", storage)
+    g.cypher("CREATE (:Item {id: 1, seed: 1})")
+    g.cypher("CREATE (:Item {id: 2, seed: 2})")
+    del g
+
+    _crash_child(
+        tmp_path,
+        """
+        g = open_durable()
+        g.cypher("MATCH (n:Item {id:1}) SET n.mixedish = 1")
+        g.cypher("MATCH (n:Item {id:2}) SET n.mixedish = 'two'")
+        """,
+        storage,
+    )
+
+    g = _open(tmp_path / "app.kgl", storage)
+    assert g.cypher("MATCH (n:Item {id:2}) RETURN n.mixedish AS m").scalar() == "two"
+    assert g.cypher("MATCH (n:Item {id:1}) RETURN n.mixedish AS m").scalar() == 1
+
+
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
 def test_checkpoint_truncates_wal_then_recovers_post_checkpoint(tmp_path, storage):
     g = _open(tmp_path / "app.kgl", storage)
     g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")

@@ -254,33 +254,13 @@ impl BatchProcessor {
                             &graph.interner,
                         )
                     });
-                // Extend columns if schema grew (new columns in this batch)
-                let current_schema = graph.type_schemas.get(&creation.node_type).cloned();
-                if let Some(ref cs) = current_schema {
-                    if store.schema().len() < cs.len() {
-                        let meta = graph
-                            .node_type_metadata
-                            .get(&creation.node_type)
-                            .cloned()
-                            .unwrap_or_default();
-                        let old_store = std::mem::replace(
-                            store,
-                            crate::graph::storage::column_store::ColumnStore::new(
-                                cs.clone(),
-                                &meta,
-                                &graph.interner,
-                            ),
-                        );
-                        for rid in 0..old_store.row_count() {
-                            // Always push id/title — use Null as fallback to keep
-                            // columns in sync with row_count
-                            store.push_id(&old_store.get_id(rid).unwrap_or(Value::Null));
-                            store.push_title(&old_store.get_title(rid).unwrap_or(Value::Null));
-                            let props = old_store.row_properties(rid);
-                            store.push_row(&props);
-                        }
-                    }
-                }
+                // A key this store's schema has never seen appends one column
+                // inside `push_row`, back-filled with nulls. This used to
+                // rebuild the whole store instead — every row already in the
+                // chunk re-pushed on every newly-seen key, which is quadratic
+                // over a widening ingest stream. See
+                // `DirGraph::ensure_column_store_for_push`, which carried the
+                // same rebuild for the Cypher create path.
                 store.push_id(&node_data.id);
                 store.push_title(&node_data.title);
                 let row_id = store.push_row(&interned_props);

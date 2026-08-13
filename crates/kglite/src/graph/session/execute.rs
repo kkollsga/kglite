@@ -448,6 +448,15 @@ pub fn execute_mut(
         // same transaction re-plans against the mutated state; the eventual
         // commit recomputes the live version independently (see Session::commit).
         graph.bump_version();
+        // Re-enforce `set_memory_limit` over what the statement just wrote.
+        // A write that *creates* a column — a SET for a property the type has
+        // never carried — puts O(rows) of fresh heap behind a limit that was
+        // last checked at consolidation time, and before this nothing looked
+        // again: the only bound a caller can place on the columnar heap could
+        // be escaped by writing one new property, permanently. A no-op (one
+        // `Option` test) when no limit is set, and an O(columns) heap sum when
+        // one is; the materialisation only runs when the sum is over.
+        graph.maybe_spill_columns();
         r
     } else {
         cypher::CypherExecutor::with_params(graph, &params, opts.deadline)

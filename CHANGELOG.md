@@ -52,11 +52,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   went 1.65 MB → 7.99 MB and lost the mapping entirely. A query result or
   `.copy()` holding the graph still forks the store to a heap copy for the
   writer, leaving the reader's mapped bytes untouched.
-  Two limits remain, unchanged and now pinned by tests: a `SET` for a property
-  the type has no column for appends an untyped column that cannot be mmap'd
-  at all, and neither can a column a type-mismatched `SET` demotes; and a
-  graph's id column is held in that same untyped form, so it stays on the heap
-  (1.6 MB at 50k rows) whatever the limit says.
+  One limit remains, unchanged and pinned by a test: a column a type-mismatched
+  `SET` demotes becomes untyped and cannot be mmap'd — correctness over memory,
+  and bounded by how rare a genuinely heterogeneous property is.
+- **`set_memory_limit` now holds across writes that create a property, and the
+  columnar heap floor dropped by 1.6 MB at 50k rows.** A columnar column had
+  only ever been given a storage type when it was built from a type's declared
+  metadata; every write that had to *create* one — a `SET` for a property the
+  type had never carried, and the id column of every graph — built an untyped
+  column instead, which holds one boxed value per row and has no file
+  representation at all, so nothing could spill it. Writing five new properties
+  to a spilled 50k-row graph grew its heap by 8 MB against a 1 MB limit, and the
+  id column alone was a permanent 1.6 MB the limit could never touch. A created
+  column is now typed from the type's declared metadata when it has any and from
+  the value being written otherwise, and a completed mutating statement
+  re-enforces the limit — so twenty new properties on that fixture now peak at
+  0.95 MB against the same 1 MB limit, and the at-rest floor is the tombstone
+  bitmap alone (50 kB).
+- **A `CREATE` naming a property the schema declares is no longer rejected as a
+  typo.** The unknown-property guard read only the property metadata built up
+  from values already written, so a property declared through `define_schema`
+  (`required`, `optional`, `types`, a primary key, a `unique` tuple) but not yet
+  stored was reported as `Unknown property 'x' on T. Did you mean ...?`. Since a
+  `CREATE` is how such a property would come to be written, the rejection was
+  self-perpetuating: a Cypher statement stream could not grow a type's schema,
+  whatever the caller had declared. The guard is unchanged for properties nobody
+  declared, which is the typo case it exists for.
+- **Deleting nodes and creating replacements no longer hides fragmentation from
+  auto-vacuum.** The trigger measured free graph slots, which a later create
+  takes back, so replacement churn left dead property rows accumulating at a
+  reported fragmentation of zero — measured at 43% dead rows on a 2,000-node
+  type after 1,500 delete/create pairs. It now also measures the rows no live
+  node points at, and vacuums on whichever kind of fragmentation is worse.
+
+### Changed
+
+- **Adding a property that a node type has never carried no longer rebuilds the
+  type's column store.** Every newly seen property key used to re-push every row
+  already stored into a fresh store, so an ingest stream whose columns widen
+  over time paid for all the rows already loaded, again, per new column; the
+  rebuild also dropped deleted rows' tombstones, resurrecting them. A new
+  property now appends a single column. Measured on a 500-row batch introducing
+  one new property: 44.6 µs/row with 5k rows already present, 147.1 at 20k and
+  558.4 at 80k, against 18.3 / 41.6 / 131.3 after the change — the remaining
+  growth is the batch loader's existing per-row cost and tracks the row-shaped
+  path within 8% at 80k.
 
 ## [0.15.14] - 2026-08-13
 

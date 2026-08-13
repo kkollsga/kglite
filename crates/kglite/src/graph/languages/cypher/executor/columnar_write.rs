@@ -145,6 +145,30 @@ pub(super) fn write_column_master(
     // copies (`storage/forked.rs`). Everywhere else the copy would be the
     // defect this design removed.
     let forked = graph.graph.is_forked();
+
+    // Column typing for a property the store has no column for yet. Declared
+    // metadata wins over the value in hand, because it knows `float64` when the
+    // first value that happens to arrive is an integer — and a column typed
+    // wrong is a column the next write demotes to `Mixed`, which cannot be
+    // spilled. Resolved only on that cold path: the steady-state SET writes an
+    // existing column and never pays the lookup.
+    let declared_type: Option<String> = {
+        let needs_column = graph
+            .graph
+            .column_store(type_key)
+            .is_some_and(|store| store.slot(key).is_none());
+        if needs_column {
+            graph.interner.try_resolve(key).and_then(|name| {
+                graph
+                    .node_type_metadata
+                    .get(node_type)
+                    .and_then(|props| props.get(name))
+                    .cloned()
+            })
+        } else {
+            None
+        }
+    };
     let master = graph.graph.column_store_mut(type_key)?;
     let prior_value = master.get(row_id, key); // (2)
 
@@ -156,7 +180,7 @@ pub(super) fn write_column_master(
     // with nothing gained. On a non-forked backend the master is the backend's
     // alone and the pointer must survive `make_mut` unchanged.
     let before = Arc::as_ptr(master);
-    Arc::make_mut(master).set(row_id, key, value, None); // (3)
+    Arc::make_mut(master).set(row_id, key, value, declared_type.as_deref()); // (3)
     debug_assert!(
         forked || std::ptr::eq(before, Arc::as_ptr(master)),
         "a columnar write on a non-forked backend must mutate the master in \

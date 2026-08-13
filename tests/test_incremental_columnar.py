@@ -132,3 +132,90 @@ class TestNTriplesColumnar:
         r = graph.cypher('MATCH (n {nid: "Q42"})-[:P27]->(m) RETURN m.title').to_df()
         assert len(r) == 1
         assert r["m.title"][0] == "United Kingdom"
+
+
+class TestAppendingToALoadedDiskGraph:
+    """A `CREATE` into a graph loaded from disk appends to a store that still
+    reads through its mmap base, and that store must be made fully owned first.
+
+    `push_id` / `push_title` build their overlay columns starting at row zero.
+    Alongside a live mmap base those overlays are offset by the whole existing
+    row count *and* shadow the mapped originals on every read, so a single
+    `CREATE` re-points the first node's id and title at the new node's and
+    blanks every other node's. Measured on a three-node fixture before the fix:
+    `[(1, 'z'), (2, None), (3, None), (None, None)]` for what should be
+    `[(1, 'a'), (2, 'b'), (3, 'c'), (9, 'z')]`.
+
+    The bulk ingest funnel has always called `materialize_for_append`; the
+    Cypher create funnel did not, and what kept the damage off this path was
+    that the id column used to be untyped — which made the unified disk-column
+    writer skip the type entirely rather than serialize the misalignment.
+    Typing the id column (so it can be spilled) removed that accident, so the
+    invariant is now enforced where it belongs.
+    """
+
+    def _seeded(self, tmp_path):
+        path = str(tmp_path / "g")
+        graph = KnowledgeGraph(storage="disk", path=path)
+        graph.add_nodes(
+            pd.DataFrame({"id": [1, 2, 3], "name": ["a", "b", "c"], "v": [10, 20, 30]}),
+            "Item",
+            "id",
+            "name",
+        )
+        graph.save(path)
+        del graph
+        return path
+
+    @staticmethod
+    def _rows(graph):
+        return sorted(
+            (r["i"], r["t"], r["v"])
+            for r in graph.cypher("MATCH (n:Item) RETURN n.id AS i, n.title AS t, n.v AS v").to_list()
+        )
+
+    def test_create_does_not_disturb_the_loaded_rows(self, tmp_path):
+        import kglite
+
+        path = self._seeded(tmp_path)
+        graph = kglite.open(path)
+        graph.cypher("CREATE (:Item {id: 9, name: 'z', v: 90})")
+
+        assert self._rows(graph) == [(1, "a", 10), (2, "b", 20), (3, "c", 30), (9, "z", 90)]
+
+        graph.save()
+        del graph
+        assert self._rows(kglite.load(path)) == [
+            (1, "a", 10),
+            (2, "b", 20),
+            (3, "c", 30),
+            (9, "z", 90),
+        ]
+
+    def test_create_with_a_new_property_grows_the_schema_in_place(self, tmp_path):
+        """The same funnel, with the appended-column path also exercised.
+
+        `fresh` has to be *declared* for the `CREATE` to name it: the planner's
+        unknown-property guard is a deliberate typo-guard. What changed is that
+        declaring it through `define_schema` now lifts the guard — until this
+        phase the declaration was ignored, because the guard read only the
+        property metadata accumulated from values already written, so a Cypher
+        statement stream could not grow a type's schema at all.
+        """
+        import kglite
+
+        path = self._seeded(tmp_path)
+        graph = kglite.open(path)
+        graph.define_schema({"nodes": {"Item": {"optional": ["fresh"]}}})
+        graph.cypher("CREATE (:Item {id: 9, name: 'z', v: 90, fresh: 5})")
+
+        assert self._rows(graph) == [(1, "a", 10), (2, "b", 20), (3, "c", 30), (9, "z", 90)]
+        assert graph.cypher("MATCH (n:Item {id: 9}) RETURN n.fresh AS f").scalar() == 5
+        # A property the older rows never carried reads absent, not backfilled.
+        assert graph.cypher("MATCH (n:Item {id: 1}) RETURN n.fresh AS f").scalar() is None
+
+        graph.save()
+        del graph
+        reloaded = kglite.load(path)
+        assert self._rows(reloaded) == [(1, "a", 10), (2, "b", 20), (3, "c", 30), (9, "z", 90)]
+        assert reloaded.cypher("MATCH (n:Item {id: 9}) RETURN n.fresh AS f").scalar() == 5

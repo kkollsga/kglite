@@ -143,6 +143,28 @@ const UNIX_EPOCH_DATE: NaiveDate = match NaiveDate::from_ymd_opt(1970, 1, 1) {
 };
 
 impl TypedColumn {
+    /// The dense-column tag `type_str` names, or `None` when it names nothing
+    /// this store can hold densely.
+    ///
+    /// `node_type_metadata` is not a controlled vocabulary — it carries
+    /// whatever `Value::type_name`, a DataFrame dtype or a `define_schema`
+    /// declaration wrote — so a caller that wants to *prefer* declared metadata
+    /// over the value in hand needs to know when the metadata is unusable
+    /// rather than silently getting `Mixed`, which is the one shape that
+    /// cannot be spilled. Matching is case-insensitive (metadata stores
+    /// "Int64", "String", etc.).
+    pub fn canonical_type_str(type_str: &str) -> Option<&'static str> {
+        Some(match type_str.to_ascii_lowercase().as_str() {
+            "int64" => "int64",
+            "float64" => "float64",
+            "uniqueid" => "uniqueid",
+            "bool" | "boolean" => "bool",
+            "date" | "datetime" => "date",
+            "string" => "string",
+            _ => return None,
+        })
+    }
+
     /// Create an empty column of the given type based on metadata type string.
     /// Matching is case-insensitive (metadata stores "Int64", "String", etc.).
     pub fn from_type_str(type_str: &str) -> Self {
@@ -175,6 +197,39 @@ impl TypedColumn {
             },
             _ => TypedColumn::Mixed { data: Vec::new() },
         }
+    }
+
+    /// The [`from_type_str`](Self::from_type_str) tag a value would need.
+    ///
+    /// The column-typing rule for every write site that creates a column
+    /// *without* declared metadata to consult — a `SET` for a property the
+    /// type has never carried, a `push_row` whose key is new to the store,
+    /// the id column. Those sites used to fall through to
+    /// `TypedColumn::Mixed`, which is 24-32 B/row of `Value` enums, has no
+    /// file representation at all (`materialize_to_file` is a no-op for it),
+    /// and therefore cannot be spilled or mapped — so a `set_memory_limit`
+    /// could be escaped by writing one new property. The same mapping is what
+    /// the disk create path already computes into `node_type_metadata` via
+    /// `Value::type_name`.
+    ///
+    /// Values with no dense representation (`List`, `Map`, `Point`, `Duration`,
+    /// `Timestamp`, graph entities) and `Null` — which carries no type
+    /// evidence — still answer `"mixed"`.
+    pub fn type_str_for_value(value: &Value) -> &'static str {
+        match value {
+            Value::Int64(_) => "int64",
+            Value::Float64(_) => "float64",
+            Value::UniqueId(_) => "uniqueid",
+            Value::Boolean(_) => "bool",
+            Value::DateTime(_) => "date",
+            Value::String(_) => "string",
+            _ => "mixed",
+        }
+    }
+
+    /// An empty column typed to hold `value`. See [`Self::type_str_for_value`].
+    pub fn for_value(value: &Value) -> Self {
+        Self::from_type_str(Self::type_str_for_value(value))
     }
 
     /// Number of rows in this column.
@@ -824,6 +879,20 @@ thread_local! {
     /// Thread-local like its siblings: it sees clones performed on the calling
     /// thread only, which is where every statement-scoped write happens.
     static COLUMN_STORE_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// Rows appended by [`ColumnStore::push_row`] since the last reset.
+    ///
+    /// The growth oracle. A store whose schema grew used to be *rebuilt*
+    /// row-by-row — `ensure_column_store_for_push` and the mapped arm of
+    /// `BatchProcessor::flush_chunk` both re-pushed every existing row into a
+    /// fresh store on every newly-seen key — so a stream that widens its key
+    /// set was O(rows x cols) per new key rather than amortized O(1) per row.
+    /// A clone counter cannot see that: the rebuild moved the old store out by
+    /// value and never cloned it. This counts the actual unit of the work.
+    ///
+    /// Non-vacuous by construction: *every* row push increments it, so a
+    /// reintroduced rebuild shows up as the row count instead of one.
+    static COLUMN_STORE_ROW_PUSHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -835,6 +904,17 @@ pub(crate) fn reset_column_store_clones() {
 #[cfg(test)]
 pub(crate) fn column_store_clones() -> usize {
     COLUMN_STORE_CLONES.get()
+}
+
+#[cfg(test)]
+pub(crate) fn reset_column_store_row_pushes() {
+    COLUMN_STORE_ROW_PUSHES.set(0);
+}
+
+/// Rows appended by `push_row` on this thread since the last reset.
+#[cfg(test)]
+pub(crate) fn column_store_row_pushes() -> usize {
+    COLUMN_STORE_ROW_PUSHES.get()
 }
 
 impl Clone for ColumnStore {
@@ -966,11 +1046,21 @@ impl ColumnStore {
 
     // ─── Id/Title column methods (mapped mode only) ──────────────────────
 
-    /// Push a node ID value into the id column. Creates a Mixed column if None.
+    /// Push a node ID value into the id column, creating the column typed from
+    /// the first value pushed if it does not exist yet.
+    ///
+    /// The id column used to be born `TypedColumn::Mixed` unconditionally, and
+    /// `Mixed` is heap-only — `materialize_to_file` is a no-op for it, so no
+    /// `__id__` file was ever written and the column could not leave the heap.
+    /// On a 50k-row type that was 1.6 MB of unspillable floor (32 B per row of
+    /// `Value` enum), the dominant term in what a `set_memory_limit` could not
+    /// hold; as an `Int64` column the same ids are 450 kB and spill.
+    /// A heterogeneous id set still demotes to `Mixed` through the fallback
+    /// below, which is where it belongs.
     pub fn push_id(&mut self, value: &Value) {
         let col = self
             .id_column
-            .get_or_insert_with(|| TypedColumn::Mixed { data: Vec::new() });
+            .get_or_insert_with(|| TypedColumn::for_value(value));
         if col.push(value).is_err() {
             // Type mismatch or storage growth failure: this API is
             // intentionally infallible, so fall back to a heap Mixed column.
@@ -1169,6 +1259,13 @@ impl ColumnStore {
         self.row_count
     }
 
+    /// Whether this store still reads through an mmap base. Rows may not be
+    /// appended while it does — see [`Self::materialize_for_append`].
+    #[inline]
+    pub(crate) fn has_mmap_base(&self) -> bool {
+        self.mmap_store.is_some()
+    }
+
     /// Convert an mmap-backed store into a fully owned store before rows are
     /// appended. Append overlays start at row zero, so keeping the mmap base
     /// alongside them would misalign id/title/property columns and make a
@@ -1211,10 +1308,55 @@ impl ColumnStore {
         &self.schema
     }
 
+    /// Append one column for `key`, typed from `value` and back-filled with a
+    /// null for every row already in the store. Returns the new slot.
+    ///
+    /// The append half of schema growth, shared by [`Self::push_row`] and
+    /// [`Self::set`]. O(rows) once per column and O(1) per row thereafter,
+    /// which is what makes a widening ingest stream amortized-flat; the
+    /// alternative these two replaced was rebuilding the whole store per newly
+    /// seen key. Only ever *pushes*, so a slot handed out before the growth
+    /// still names the same column afterwards — the precondition
+    /// [`Self::restore_schema`] relies on to undo it by truncation.
+    fn append_column(&mut self, key: InternedKey, value: &Value) -> u16 {
+        self.append_column_typed(key, TypedColumn::type_str_for_value(value))
+    }
+
+    /// [`Self::append_column`] with the column type named outright.
+    fn append_column_typed(&mut self, key: InternedKey, type_str: &str) -> u16 {
+        debug_assert_eq!(
+            self.columns.len(),
+            self.schema.len(),
+            "columns and schema must stay 1:1 for slot indices to be column indices"
+        );
+        let slot = Arc::make_mut(&mut self.schema).add_key(key);
+        let mut col = TypedColumn::from_type_str(type_str);
+        for _ in 0..self.row_count {
+            col.push_null();
+        }
+        self.columns.push(col);
+        slot
+    }
+
     /// Append a row of property values. Returns the row_id for this row.
     /// `values` is a list of (InternedKey, Value) pairs.
+    ///
+    /// A key the store's schema has never seen **grows the schema** and
+    /// appends a column for it (see [`Self::append_column`]). It used to be
+    /// dropped on the floor here instead, silently, which made this the one
+    /// write primitive that could lose a caller's data outright; the callers
+    /// papered over it by rebuilding the entire store whenever the type schema
+    /// had grown, paying O(rows x cols) per new key to avoid a silent drop.
     pub fn push_row(&mut self, values: &[(InternedKey, Value)]) -> u32 {
+        #[cfg(test)]
+        COLUMN_STORE_ROW_PUSHES.set(COLUMN_STORE_ROW_PUSHES.get() + 1);
         let row_id = self.row_count;
+
+        for (key, value) in values {
+            if self.schema.slot(*key).is_none() {
+                self.append_column(*key, value);
+            }
+        }
 
         // Build slot→value lookup to push values directly (avoids null-then-overwrite).
         let mut slot_values: Vec<Option<&Value>> = vec![None; self.columns.len()];
@@ -1403,16 +1545,18 @@ impl ColumnStore {
         let slot = match self.schema.slot(key) {
             Some(s) => s,
             None => {
-                // New property — extend schema and add a column
-                let s = Arc::make_mut(&mut self.schema).add_key(key);
-                let type_str = type_meta.unwrap_or("mixed");
-                let mut col = TypedColumn::from_type_str(type_str);
-                // Backfill nulls for existing rows
-                for _ in 0..self.row_count {
-                    col.push_null();
-                }
-                self.columns.push(col);
-                s
+                // New property — extend schema and add a column. The column is
+                // typed from `type_meta` when the type has declared metadata
+                // for this key (which knows `float64` even when the first value
+                // that arrives is an integer), and otherwise from the value in
+                // hand. `"mixed"` used to be unconditional here, and `Mixed` is
+                // the one column shape with no file representation — so a
+                // single `SET` of a new property escaped `set_memory_limit`
+                // permanently, at 24-32 B per row of the type.
+                let type_str = type_meta
+                    .and_then(TypedColumn::canonical_type_str)
+                    .unwrap_or_else(|| TypedColumn::type_str_for_value(value));
+                self.append_column_typed(key, type_str)
             }
         };
         let col = &mut self.columns[slot as usize];

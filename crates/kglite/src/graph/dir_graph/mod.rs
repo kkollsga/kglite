@@ -1896,54 +1896,66 @@ impl DirGraph {
         self.graph.has_column_stores()
     }
 
-    /// Ensure a ColumnStore exists for `node_type` with a schema covering all
-    /// the keys in `type_schemas[node_type]`. If the schema has grown since the
-    /// store was created, the store is rebuilt (existing data migrated).
-    /// Call `ensure_type_schema_keys()` first to register new keys.
+    /// Ensure a ColumnStore exists for `node_type`, creating an empty one on
+    /// the type's registered `TypeSchema` if it does not. Call
+    /// `ensure_type_schema_keys()` first to register new keys.
+    ///
+    /// **Schema growth does not rebuild the store.** A key the store's own
+    /// schema has never seen appends one column inside
+    /// [`ColumnStore::push_row`](crate::graph::storage::column_store::ColumnStore::push_row),
+    /// back-filled with nulls — O(rows) once per column, amortized O(1) per
+    /// row. This used to re-push every existing row into a fresh store on
+    /// every newly-seen key instead, which made a stream that widens its key
+    /// set quadratic in the rows already present, and dropped the tombstone
+    /// bitmap on the way across so a row deleted before the growth came back
+    /// to life. The store's schema may therefore lag or re-order the
+    /// registered `TypeSchema`; nothing indexes one by the other's slots
+    /// (columnar rows carry a row id, and every read resolves its slot through
+    /// the store's own schema).
     pub fn ensure_column_store_for_push(
         &mut self,
         node_type: &str,
     ) -> &mut crate::graph::storage::column_store::ColumnStore {
         use crate::graph::storage::column_store::ColumnStore;
 
-        let current_schema = self
-            .type_schemas
-            .get(node_type)
-            .cloned()
-            .unwrap_or_else(|| Arc::new(TypeSchema::new()));
-
-        let need_create = if let Some(existing) = self.column_store(node_type) {
-            // Rebuild if the TypeSchema has more keys than the store's schema
-            existing.schema().len() < current_schema.len()
-        } else {
-            true
-        };
-
-        if need_create {
+        if self.column_store(node_type).is_none() {
+            let schema = self
+                .type_schemas
+                .get(node_type)
+                .cloned()
+                .unwrap_or_else(|| Arc::new(TypeSchema::new()));
             let meta = self
                 .node_type_metadata
                 .get(node_type)
                 .cloned()
                 .unwrap_or_default();
+            let store = ColumnStore::new(schema, &meta, &self.interner);
+            self.install_column_store(node_type, Arc::new(store));
+        }
 
-            if let Some(old_arc) = self.take_column_store(node_type) {
-                // Migrate existing data to new store with extended schema
-                let old_store = Arc::try_unwrap(old_arc).unwrap_or_else(|a| (*a).clone());
-                let mut new_store = ColumnStore::new(current_schema, &meta, &self.interner);
-                // Re-push all existing rows (including id/title columns)
-                for row_id in 0..old_store.row_count() {
-                    if let Some(id_val) = old_store.get_id(row_id) {
-                        new_store.push_id(&id_val);
-                    }
-                    if let Some(title_val) = old_store.get_title(row_id) {
-                        new_store.push_title(&title_val);
-                    }
-                    let props = old_store.row_properties(row_id);
-                    new_store.push_row(&props);
-                }
-                self.install_column_store(node_type, Arc::new(new_store));
-            } else {
-                let store = ColumnStore::new(current_schema, &meta, &self.interner);
+        // An mmap-backed store must become owned before a row is appended.
+        // `push_id`/`push_title` create their overlay columns at row zero, so
+        // alongside a live mmap base every appended id/title lands `row_count`
+        // rows too early — the overlay then shadows the mapped originals on
+        // every read, and a save serializes a title column shorter than the
+        // rows it advertises. `BatchProcessor::detach_columnar_stores` makes
+        // the same call for the bulk funnel; this funnel (Cypher CREATE and
+        // the N-Triples loader) never did, and was covered for it only by the
+        // unified disk-column writer skipping any type whose id column was
+        // `Mixed` — which every store's was, until they were typed.
+        // O(rows) once per store: afterwards there is no mmap base to check.
+        if self
+            .column_store(node_type)
+            .is_some_and(|store| store.has_mmap_base())
+        {
+            let meta = self
+                .node_type_metadata
+                .get(node_type)
+                .cloned()
+                .unwrap_or_default();
+            if let Some(arc) = self.take_column_store(node_type) {
+                let mut store = Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone());
+                store.materialize_for_append(&meta, &self.interner);
                 self.install_column_store(node_type, Arc::new(store));
             }
         }
@@ -2236,6 +2248,33 @@ impl DirGraph {
     /// - `fragmentation_ratio` exceeds the threshold
     ///
     /// Returns true if vacuum was triggered.
+    /// Rows held by every per-type `ColumnStore`, and how many of them a live
+    /// node still points at: `(total, live)`.
+    ///
+    /// The columnar half of the fragmentation picture, and the only one that
+    /// sees garbage produced by *replacement*. Shared by
+    /// [`Self::graph_info`] and [`Self::check_auto_vacuum`] so the number a
+    /// caller reads and the number the trigger acts on cannot drift apart.
+    ///
+    /// `live` counts nodes of the type, not columnar rows specifically, so on
+    /// a graph whose types carry a mix of columnar and non-columnar nodes it
+    /// can exceed `total` — hence every consumer subtracts saturating. That
+    /// mix under-reports garbage (never over-reports it, so it cannot cause a
+    /// spurious vacuum) and disappears once construction is columnar.
+    pub(crate) fn columnar_row_census(&self) -> (usize, usize) {
+        let total = self
+            .graph
+            .column_stores_iter()
+            .map(|(_, s)| s.row_count() as usize)
+            .sum();
+        let live = self
+            .column_stores_by_name()
+            .into_iter()
+            .map(|(t, _)| self.type_indices.get(t).map(|v| v.len()).unwrap_or(0))
+            .sum();
+        (total, live)
+    }
+
     pub fn check_auto_vacuum(&mut self) -> bool {
         let threshold = match self.auto_vacuum_threshold {
             Some(t) => t,
@@ -2246,12 +2285,33 @@ impl DirGraph {
         let node_bound = self.graph.node_bound();
         let tombstones = node_bound - node_count;
 
-        if tombstones <= 100 {
+        // Columnar garbage is a second, independent kind of fragmentation, and
+        // the node-slot count cannot stand in for it. A delete leaves a dead
+        // row behind in the type's store; a *later create* takes the freed
+        // petgraph slot, so `node_bound - node_count` returns to zero while the
+        // store keeps both the dead row and a fresh one. Measured on the disk
+        // backend (already always-columnar): 1,500 delete/create pairs over a
+        // 2,000-node type left 3,500 rows for 2,000 live nodes — 43% garbage —
+        // at `fragmentation_ratio` 0.000. Deletes alone are tracked correctly
+        // by the node count, which is why this stayed invisible until
+        // replacement churn was measured.
+        let (columnar_total, columnar_live) = self.columnar_row_census();
+        let columnar_dead = columnar_total.saturating_sub(columnar_live);
+
+        // The small-graph floor applies to whichever kind of garbage there is.
+        if tombstones.max(columnar_dead) <= 100 {
             return false;
         }
 
-        let ratio = tombstones as f64 / node_bound as f64;
-        if ratio > threshold {
+        let ratio = |dead: usize, bound: usize| {
+            if bound == 0 {
+                0.0
+            } else {
+                dead as f64 / bound as f64
+            }
+        };
+        let worst = ratio(tombstones, node_bound).max(ratio(columnar_dead, columnar_total));
+        if worst > threshold {
             self.vacuum();
             true
         } else {
@@ -2266,6 +2326,7 @@ impl DirGraph {
     /// - `fragmentation_ratio` approaching 1.0 means most storage is wasted
     /// - A ratio above 0.3 is a good threshold for calling vacuum()
     pub fn graph_info(&self) -> GraphInfo {
+        let (columnar_total, columnar_live) = self.columnar_row_census();
         let node_count = self.graph.node_count();
         let node_bound = self.graph.node_bound();
         let edge_count = self.graph.edge_count();
@@ -2284,16 +2345,8 @@ impl DirGraph {
             type_count: self.type_indices.len(),
             property_index_count: self.property_indices.len(),
             composite_index_count: self.composite_indices.len(),
-            columnar_total_rows: self
-                .graph
-                .column_stores_iter()
-                .map(|(_, s)| s.row_count() as usize)
-                .sum(),
-            columnar_live_rows: self
-                .column_stores_by_name()
-                .into_iter()
-                .map(|(t, _)| self.type_indices.get(t).map(|v| v.len()).unwrap_or(0))
-                .sum(),
+            columnar_total_rows: columnar_total,
+            columnar_live_rows: columnar_live,
             columnar_heap_bytes: self
                 .graph
                 .column_stores_iter()

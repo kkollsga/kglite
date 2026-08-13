@@ -5,7 +5,6 @@ graph_info diagnostics, and edge cases.
 """
 
 import pandas as pd
-import pytest
 
 import kglite
 
@@ -189,10 +188,14 @@ class TestSpillToDisk:
 # files are process-owned temp files — a mapped load copies each column into
 # its own `temp_dir/column_N.ext` first — so the byte belongs in them.
 #
-# What the limit still cannot hold is recorded below in
-# `test_new_column_from_set_escapes_the_limit`: a column that does not exist
-# yet, or one a type-mismatched SET demotes, becomes `TypedColumn::Mixed`, and
-# `Mixed` cannot be mmap'd at all.
+# Phase 5(ii) closed the last hole, pinned below in
+# `test_new_column_from_set_stays_inside_the_limit`: a column that does not
+# exist yet is now typed from declared metadata or the value in hand rather
+# than born `Mixed`, so it can be spilled, and a completed mutating statement
+# re-enforces the limit so something does spill it. A type-mismatched SET still
+# demotes its column to `Mixed` — correctness over memory — and `Mixed` still
+# cannot be mmap'd; that residue is deliberate and bounded by how rare a
+# genuinely heterogeneous property is.
 
 
 class TestSpillContractAcrossWrites:
@@ -209,21 +212,22 @@ class TestSpillContractAcrossWrites:
         and produce identical numbers.
 
         The post-spill heap reading is captured as the baseline rather than
-        compared against the limit itself, because a floor of this fixture is
-        genuinely unspillable and already exceeds 1 MB on its own. Measured
-        composition of the 1,650,000 B baseline at 50k rows:
+        compared against the limit itself, so that a regression which stopped
+        spilling some column would show up as growth even while staying under
+        the limit. Measured composition of the 50,000 B baseline at 50k rows:
 
-        * 1,600,000 B — the **id column**, held as `TypedColumn::Mixed`
-          (`size_of::<Value>()` = 32 B/row). `materialize_to_file` is a no-op
-          for `Mixed`, so no `__id__` file is ever written and the column
-          cannot leave the heap. Typing it is Phase 5(ii) of the
-          shape-convergence plan (every write site passes `type_meta: None`);
-          as an `Int64` column it would be 450,000 B and spillable.
         * 50,000 B — the tombstone `Vec<bool>`, one byte per row, heap by
-          construction.
-        * 0 B — the twelve `p*` int columns and the `name`/title string column:
-          all three parts of each (`.i64`/`.off`/`.str`, `.null`) are spilled
-          to files and read through the mapping.
+          construction. This is the whole floor.
+        * 0 B — the twelve `p*` int columns, the `tag`/`name` string columns
+          **and the `__id__` column**: all parts of each (`.i64`/`.off`/`.str`,
+          `.null`) are spilled to files and read through the mapping.
+
+        The floor was 1,650,000 B through 0.15.14, because the id column was
+        born `TypedColumn::Mixed` (32 B/row of `Value` enum) and
+        `materialize_to_file` is a no-op for `Mixed` — no `__id__` file was
+        ever written and the column could not leave the heap. Phase 5(ii) types
+        it from the first id pushed, which both drops 1.6 MB and puts the whole
+        fixture under its own limit for the first time.
 
         What must not happen is the heap *growing* because a write pulled
         mapped columns back into it.
@@ -241,11 +245,12 @@ class TestSpillContractAcrossWrites:
         # without this, a regression that stopped spilling the `p*` columns
         # (+450,000 B each) or the title column (+938,898 B) would raise the
         # baseline and the growth assertion below would still pass.
-        assert baseline_heap <= 1_700_000, (
+        assert baseline_heap <= 60_000, (
             f"the at-rest columnar heap is {baseline_heap} B against a "
             "1,000,000 B limit; the documented unspillable floor at this size "
-            "is the Mixed id column (1,600,000 B) plus tombstones (50,000 B). "
-            "Something that used to spill no longer does."
+            "is the tombstone bitmap alone (50,000 B). Something that used to "
+            "spill no longer does — most likely a column born "
+            "`TypedColumn::Mixed`, which has no file representation."
         )
 
         # Warm the id index so the writes are writes, not a first-touch build.
@@ -304,42 +309,62 @@ class TestSpillContractAcrossWrites:
         assert h.cypher("MATCH (n:Item {id: 7}) RETURN n.tag AS v").scalar() == "rewritten"
         assert h.cypher("MATCH (n:Item {id: 8}) RETURN n.tag AS v").scalar() == "tag-8"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "A SET for a property the store has no column for appends a "
-            "TypedColumn::Mixed (32 B/row, one Value per row) and Mixed cannot "
-            "be mmap'd, so nothing can spill it and nothing re-enforces the "
-            "limit afterwards. The remedy is Phase 5(ii) of the "
-            "shape-convergence plan — type the appended column from "
-            "node_type_metadata / the value in hand instead of passing "
-            "type_meta: None at every write site. strict=True: when that lands "
-            "this goes RED and the marker comes off."
-        ),
-    )
-    def test_new_column_from_set_escapes_the_limit(self, tmp_path):
-        """Writing a *new* property to a spilled graph is still unbounded.
+    def test_new_column_from_set_stays_inside_the_limit(self, tmp_path):
+        """Writing *new* properties to a spilled graph stays bounded.
 
         Phase 4 fixed the write to an existing typed column: it now writes
-        through the mapping. A write that has to *create* the column is a
-        different shape — the column is born on the heap as `Mixed`, and
-        `Mixed` has no file representation, so re-running the spill would
-        reclaim nothing. Measured at 50k rows: 1,650,000 B at rest, then
-        +1,600,000 B per new property, against a 1,000,000 B limit.
+        through the mapping. A write that has to *create* the column was a
+        different shape and, until Phase 5(ii), an unbounded one: every write
+        site passed `type_meta: None`, so the column was born
+        `TypedColumn::Mixed`; `Mixed` has no file representation at all
+        (`materialize_to_file` is a no-op for it), so re-running the spill would
+        reclaim nothing — and nothing re-ran it anyway. Measured at 50k rows on
+        0.15.14: 1,650,000 B at rest, then +1,600,000 B per new property against
+        a 1,000,000 B limit, forever.
+
+        Two changes close it, and this cell needs both. The appended column is
+        typed from declared metadata or the value in hand, so it *can* be
+        spilled; and a completed mutating statement re-enforces the limit, so
+        something does. The assertion is therefore the contract itself —
+        `columnar_heap_bytes <= memory_limit` — rather than the growth-versus-
+        baseline proxy this test carried while the unspillable floor was above
+        the limit and no absolute assertion was available.
+
+        The reading sawtooths on purpose: the spill fires when the sum goes
+        over, not on every appended column, so the heap climbs a column at a
+        time (~450 kB each here) and drops back to the floor when it crosses.
+        Twenty new properties is what makes that non-vacuous — five could
+        finish under the limit without a single reclamation, twenty cannot
+        (the old shape would be ~33 MB).
         """
+        limit = 1_000_000
         g = make_wide_graph()
-        g.set_memory_limit(1_000_000, spill_dir=str(tmp_path / "spill"))
+        g.set_memory_limit(limit, spill_dir=str(tmp_path / "spill"))
         g.save(str(tmp_path / "wide.kgl"))
         baseline_heap = g.graph_info()["columnar_heap_bytes"]
+        assert g.graph_info()["columnar_is_mapped"] is True, "precondition: the fixture must actually spill"
+        assert baseline_heap <= limit, "precondition: the at-rest floor must fit under the limit"
 
-        for j in range(5):
-            g.cypher(f"MATCH (n:Item {{id: 7}}) SET n.fresh{j} = 1")
+        peak = baseline_heap
+        for j in range(20):
+            g.cypher(f"MATCH (n:Item {{id: 7}}) SET n.fresh{j} = {j}")
+            peak = max(peak, g.graph_info()["columnar_heap_bytes"])
 
-        after = g.graph_info()["columnar_heap_bytes"]
-        assert after <= baseline_heap * 1.1, (
-            f"columnar heap grew {baseline_heap} -> {after} bytes across 5 "
-            "SETs of new properties, against a 1,000,000 byte limit"
+        assert peak <= limit, (
+            f"columnar heap reached {peak} bytes against a {limit} byte limit "
+            f"across 20 SETs of new properties (at rest: {baseline_heap}). "
+            "Either the appended column is not spillable — check it is not "
+            "TypedColumn::Mixed — or nothing re-enforces the limit after a "
+            "statement that created one."
         )
+        assert g.graph_info()["columnar_is_mapped"] is True
+
+        # The writes are still writes, and a re-spill must not smear one row's
+        # value across its neighbours.
+        assert g.cypher("MATCH (n:Item {id: 7}) RETURN n.fresh19 AS v").scalar() == 19
+        assert g.cypher("MATCH (n:Item {id: 7}) RETURN n.fresh0 AS v").scalar() == 0
+        assert g.cypher("MATCH (n:Item {id: 8}) RETURN n.fresh0 AS v").scalar() is None
+        assert g.cypher("MATCH (n:Item {id: 8}) RETURN n.p0 AS v").scalar() == 8
 
 
 # ── Unspill ──────────────────────────────────────────────────────────────────

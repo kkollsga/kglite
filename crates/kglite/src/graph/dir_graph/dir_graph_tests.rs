@@ -652,3 +652,218 @@ mod range_index_fork_tests {
         assert_eq!(values.last(), Some(&500));
     }
 }
+
+/// `ensure_column_store_for_push` used to rebuild the whole store whenever the
+/// registered `TypeSchema` had grown past the store's own — every existing row
+/// re-pushed into a fresh store, per newly-seen key. With `ColumnStore::push_row`
+/// appending its own columns that rebuild is not merely an optimisation
+/// opportunity, it is wrong work: it is O(rows x cols) on a path whose contract
+/// is one row.
+#[cfg(test)]
+mod ensure_column_store_for_push_tests {
+    use super::*;
+    use crate::datatypes::Value;
+    use crate::graph::storage::column_store::{
+        column_store_row_pushes, reset_column_store_row_pushes,
+    };
+
+    fn push(graph: &mut DirGraph, node_type: &str, pairs: &[(&str, Value)]) -> u32 {
+        let interned: Vec<(InternedKey, Value)> = pairs
+            .iter()
+            .map(|(k, v)| (graph.interner.get_or_intern(k), v.clone()))
+            .collect();
+        let keys: Vec<InternedKey> = interned.iter().map(|(k, _)| *k).collect();
+        graph.ensure_type_schema_keys(node_type, &keys);
+        let store = graph.ensure_column_store_for_push(node_type);
+        store.push_row(&interned)
+    }
+
+    #[test]
+    fn a_widening_key_set_never_rebuilds_the_store() {
+        let mut g = DirGraph::new();
+        for i in 0..50i64 {
+            push(&mut g, "Item", &[("p0", Value::Int64(i))]);
+        }
+
+        reset_column_store_row_pushes();
+        // Three statements, each introducing a property the type has never
+        // carried. Before the append path this cost 51 + 52 + 53 row pushes.
+        push(
+            &mut g,
+            "Item",
+            &[("p0", Value::Int64(50)), ("p1", Value::Int64(1))],
+        );
+        push(
+            &mut g,
+            "Item",
+            &[("p0", Value::Int64(51)), ("p2", Value::Int64(2))],
+        );
+        push(
+            &mut g,
+            "Item",
+            &[("p0", Value::Int64(52)), ("p3", Value::Int64(3))],
+        );
+        assert_eq!(
+            column_store_row_pushes(),
+            3,
+            "growing a type's schema rebuilt its ColumnStore row by row"
+        );
+
+        // ... and nothing was lost or shifted by the growth.
+        let store = g.column_store("Item").expect("store");
+        let p0 = InternedKey::from_str("p0");
+        assert_eq!(store.row_count(), 53);
+        for i in 0..53u32 {
+            assert_eq!(store.get(i, p0), Some(Value::Int64(i as i64)));
+        }
+        assert_eq!(
+            store.get(50, InternedKey::from_str("p1")),
+            Some(Value::Int64(1))
+        );
+        assert_eq!(
+            store.get(51, InternedKey::from_str("p2")),
+            Some(Value::Int64(2))
+        );
+        assert_eq!(
+            store.get(52, InternedKey::from_str("p3")),
+            Some(Value::Int64(3))
+        );
+        // Rows that predate a column read as absent.
+        assert_eq!(store.get(0, InternedKey::from_str("p1")), None);
+    }
+
+    #[test]
+    fn a_rebuild_would_have_resurrected_tombstoned_rows() {
+        // The rebuild loop re-pushed `0..row_count` and never carried the
+        // tombstone bitmap across, so a row deleted before a schema growth came
+        // back as a live row. `materialize_for_append`, the other migrate-style
+        // copy in the store, does re-tombstone — the two disagreed.
+        let mut g = DirGraph::new();
+        for i in 0..8i64 {
+            push(&mut g, "Item", &[("p0", Value::Int64(i))]);
+        }
+        Arc::make_mut(g.column_store_mut("Item").expect("store")).tombstone(3);
+        assert_eq!(g.column_store("Item").expect("store").live_count(), 7);
+
+        push(
+            &mut g,
+            "Item",
+            &[("p0", Value::Int64(8)), ("fresh", Value::Int64(1))],
+        );
+
+        let store = g.column_store("Item").expect("store");
+        assert_eq!(
+            store.live_count(),
+            8,
+            "a schema growth resurrected a tombstoned row"
+        );
+        assert_eq!(store.get(3, InternedKey::from_str("p0")), None);
+    }
+}
+
+/// Auto-vacuum's trigger, and the kind of garbage it could not see.
+///
+/// `node_bound - node_count` counts *free petgraph slots*, which a later
+/// create takes back. A columnar row does not work that way: a delete leaves
+/// its row behind and a create appends a new one, so replacement churn grows
+/// the store without ever moving the node-slot reading off zero. Measured on
+/// the disk backend, which is already always-columnar: 1,500 delete/create
+/// pairs over a 2,000-node type left 3,500 rows for 2,000 live nodes at
+/// `fragmentation_ratio` 0.000. Under the always-columnar flip that becomes
+/// every graph's steady state.
+#[cfg(test)]
+mod auto_vacuum_trigger_tests {
+    use super::*;
+    use crate::datatypes::{DataFrame, Value};
+
+    fn columnar_items(n: i64) -> DirGraph {
+        let mut g = DirGraph::new();
+        let rows: Vec<Vec<Value>> = (1..=n)
+            .map(|i| {
+                vec![
+                    Value::Int64(i),
+                    Value::String(format!("t{i}")),
+                    Value::Int64(i * 10),
+                ]
+            })
+            .collect();
+        let df = DataFrame::from_cypher_rows(
+            vec!["id".to_string(), "title".to_string(), "c0".to_string()],
+            rows,
+        )
+        .unwrap();
+        crate::graph::mutation::maintain::add_nodes(
+            &mut g,
+            df,
+            "Item".to_string(),
+            "id".to_string(),
+            Some("title".to_string()),
+            None,
+        )
+        .unwrap();
+        g.enable_columnar();
+        g
+    }
+
+    /// Rows in the store that no live node points at, with the petgraph slot
+    /// count reading clean — the churn residue, reproduced directly.
+    fn orphan_rows(g: &mut DirGraph, count: usize) {
+        let key = g.interner.get_or_intern("c0");
+        let store = g.ensure_column_store_for_push("Item");
+        for i in 0..count {
+            store.push_id(&Value::Int64(1_000_000 + i as i64));
+            store.push_title(&Value::String(format!("dead{i}")));
+            store.push_row(&[(key, Value::Int64(-1))]);
+        }
+    }
+
+    #[test]
+    fn columnar_garbage_triggers_a_vacuum_that_reclaims_it() {
+        let mut g = columnar_items(200);
+        g.auto_vacuum_threshold = Some(0.3);
+        orphan_rows(&mut g, 150);
+
+        let (total, live) = g.columnar_row_census();
+        assert_eq!((total, live), (350, 200), "fixture drift");
+        assert_eq!(
+            g.graph.node_bound() - g.graph.node_count(),
+            0,
+            "precondition: the node-slot reading must be clean, or this test is \
+             measuring the old trigger"
+        );
+
+        assert!(
+            g.check_auto_vacuum(),
+            "43% of the type's rows are garbage and auto-vacuum did not fire: \
+             the trigger is reading free petgraph slots, which replacement \
+             churn returns to zero"
+        );
+        let (total, live) = g.columnar_row_census();
+        assert_eq!(
+            (total, live),
+            (200, 200),
+            "the vacuum fired but reclaimed no columnar rows"
+        );
+        // The live data is untouched by the reclamation.
+        assert_eq!(g.graph.node_count(), 200);
+    }
+
+    #[test]
+    fn a_clean_store_does_not_trigger_a_vacuum() {
+        // Non-vacuity's other half: the trigger must still say no.
+        let mut g = columnar_items(200);
+        g.auto_vacuum_threshold = Some(0.3);
+        assert!(!g.check_auto_vacuum());
+
+        // ... and garbage under the small-graph floor is not worth a rebuild.
+        orphan_rows(&mut g, 40);
+        assert!(!g.check_auto_vacuum());
+
+        // ... nor is garbage below the ratio threshold.
+        let mut g = columnar_items(2000);
+        g.auto_vacuum_threshold = Some(0.3);
+        orphan_rows(&mut g, 300);
+        assert!(!g.check_auto_vacuum());
+        assert_eq!(g.columnar_row_census(), (2300, 2000));
+    }
+}

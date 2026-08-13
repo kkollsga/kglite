@@ -364,6 +364,32 @@ pub fn did_you_mean(input: &str, candidates: &[&str]) -> String {
 /// Built-in fields that are always valid on any node type.
 const BUILTIN_FIELDS: &[&str] = &["id", "title", "name", "type"];
 
+/// Whether `property` is named by the *declared* schema for `node_type`.
+///
+/// `node_type_metadata` records what has been written, not what was declared,
+/// so a property a caller declared through `define_schema` but has not stored
+/// yet is missing from it — and the unknown-property guard below would then
+/// reject the very write that was going to store it. Mirrors
+/// `planner::schema_check::property_is_declared`; keep the two in step.
+fn property_is_declared(
+    node_type: &str,
+    property: &str,
+    schema_def: Option<&SchemaDefinition>,
+) -> bool {
+    let Some(node) = schema_def.and_then(|s| s.node_schemas.get(node_type)) else {
+        return false;
+    };
+    node.required_fields.iter().any(|f| f == property)
+        || node.optional_fields.iter().any(|f| f == property)
+        || node.field_types.contains_key(property)
+        || node.primary_key.as_deref() == Some(property)
+        || node
+            .unique
+            .iter()
+            .flatten()
+            .any(|tuple| tuple.iter().any(|f| f == property))
+}
+
 /// Validate a node creation against the locked schema.
 ///
 /// Checks:
@@ -413,7 +439,7 @@ pub fn validate_node_creation(
                     get_value_type_name(prop_value)
                 ));
             }
-        } else {
+        } else if !property_is_declared(label, prop_name, schema_def) {
             let known: Vec<&str> = type_props.keys().map(|s| s.as_str()).collect();
             let hint = did_you_mean(prop_name, &known);
             let mut sorted: Vec<&str> = known;
@@ -541,6 +567,7 @@ pub fn validate_property_set(
     property: &str,
     value: &Value,
     node_type_metadata: &HashMap<String, HashMap<String, String>>,
+    schema_def: Option<&SchemaDefinition>,
 ) -> Result<(), String> {
     // Built-in fields are always allowed
     if BUILTIN_FIELDS.contains(&property) {
@@ -569,7 +596,7 @@ pub fn validate_property_set(
                 get_value_type_name(value)
             ));
         }
-    } else {
+    } else if !property_is_declared(node_type, property, schema_def) {
         let known: Vec<&str> = type_props.keys().map(|s| s.as_str()).collect();
         let hint = did_you_mean(property, &known);
         let mut sorted: Vec<&str> = known;

@@ -129,7 +129,7 @@ def _parity_query(kg: KnowledgeGraph) -> list[tuple]:
 # Changing this digest without a format bump is a refactor bug — the
 # whole point of this test is to trip loudly when the `.kgl` byte layout
 # silently drifts.
-GOLDEN_V3_DIGEST = "8530421e1cae813387b0368b41ae3a95ebc2e953775964bf6841d4fb65fa2f94"
+GOLDEN_V3_DIGEST = "459eeecdb65eb641cc3e1cba62ec1ef6c50583d426b6184e4cb781e15204649e"
 
 # Phase A.1 / C5 cleared this set on the v3 → v4 format break. The
 # new v4 loader rejects v3 files (per the user-decided hard break
@@ -144,6 +144,16 @@ GOLDEN_V3_DIGEST = "8530421e1cae813387b0368b41ae3a95ebc2e953775964bf6841d4fb65fa
 # back to a working v4 era.
 ACCEPTABLE_DIGESTS: frozenset[str] = frozenset(
     {
+        # Demoted from GOLDEN_V3_DIGEST by the shape-convergence program's
+        # Phase 5(ii): `ColumnStore::push_id` now types the `__id__` column
+        # from the first id pushed instead of always building a
+        # `TypedColumn::Mixed`. Integer ids therefore serialize as a raw LE
+        # i64 array + null bytes under the existing `"int64"` column tag,
+        # rather than a postcard-encoded `Vec<Value>` under `"mixed"`. **No
+        # format change**: both tags are v5 tags the loader already reads and
+        # round-trips, so every previously written `.kgl` still loads. What
+        # moved is which tag this fixture's id column uses.
+        "8530421e1cae813387b0368b41ae3a95ebc2e953775964bf6841d4fb65fa2f94",
         # Initial v5/Postcard digest before nested mixed-value column payloads
         # were moved through the same explicit codec selection.
         "527754e18881505d307eda6057a8635bd325091f3b70fe4966f3889ee4de37da",

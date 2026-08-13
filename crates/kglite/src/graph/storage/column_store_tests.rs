@@ -866,3 +866,232 @@ fn a_held_reader_is_isolated_from_a_mapped_write_through() {
          come past this assertion"
     );
 }
+
+// ── Schema growth without a rebuild (Phase 5(i)) ─────────────────────────────
+//
+// `push_row` used to build its slot→value lookup from `self.schema.slot(key)`
+// and drop every key the lookup missed — silently, with no error and no
+// counter. Its callers compensated by *rebuilding the whole store* whenever the
+// registered type schema had grown: `ensure_column_store_for_push` and the
+// mapped arm of `BatchProcessor::flush_chunk` both re-pushed every existing row
+// into a fresh store, O(rows x cols) per newly-seen key. A stream that widens
+// its key set over time therefore paid quadratically for the privilege, and a
+// caller that pushed a key without registering it first simply lost the data.
+
+#[test]
+fn push_row_appends_a_column_for_a_key_the_schema_has_never_seen() {
+    let (schema, meta, interner) = make_schema_and_meta();
+    let mut store = ColumnStore::new(schema, &meta, &interner);
+
+    let name_key = InternedKey::from_str("name");
+    let fresh_key = InternedKey::from_str("nickname");
+    let width = store.column_count();
+
+    store.push_row(&[(name_key, Value::String("Alice".into()))]);
+    store.push_row(&[
+        (name_key, Value::String("Bob".into())),
+        (fresh_key, Value::String("Bobby".into())),
+    ]);
+
+    // (a) no data loss — the value the schema had no slot for survives.
+    assert_eq!(
+        store.get(1, fresh_key),
+        Some(Value::String("Bobby".into())),
+        "push_row dropped a value whose key was not in the store's schema"
+    );
+    // The row that predates the column reads as absent, not as garbage.
+    assert_eq!(store.get(0, fresh_key), None);
+    assert_eq!(store.get(0, name_key), Some(Value::String("Alice".into())));
+    assert_eq!(store.get(1, name_key), Some(Value::String("Bob".into())));
+
+    // Exactly one column was appended, and the pre-existing slots still name
+    // the same columns (the precondition `restore_schema` undoes by truncating).
+    assert_eq!(store.column_count(), width + 1);
+    assert_eq!(store.slot(name_key), Some(0));
+    assert_eq!(store.slot(fresh_key), Some(width as u16));
+
+    // The appended column is typed from the value in hand, not `Mixed`.
+    assert_eq!(store.column_type_str(width), Some("string"));
+}
+
+#[test]
+fn push_row_types_an_appended_column_from_the_value_in_hand() {
+    let (schema, meta, interner) = make_schema_and_meta();
+    let mut store = ColumnStore::new(schema, &meta, &interner);
+    let width = store.column_count();
+
+    store.push_row(&[(InternedKey::from_str("score"), Value::Int64(7))]);
+    store.push_row(&[(InternedKey::from_str("ratio"), Value::Float64(0.5))]);
+    store.push_row(&[(InternedKey::from_str("flag"), Value::Boolean(true))]);
+    // No type evidence — `Mixed` is the honest answer, not a guess.
+    store.push_row(&[(InternedKey::from_str("blank"), Value::Null)]);
+
+    assert_eq!(store.column_type_str(width), Some("int64"));
+    assert_eq!(store.column_type_str(width + 1), Some("float64"));
+    assert_eq!(store.column_type_str(width + 2), Some("bool"));
+    assert_eq!(store.column_type_str(width + 3), Some("mixed"));
+}
+
+#[test]
+fn growing_the_key_set_over_a_stream_pushes_each_row_exactly_once() {
+    // The amortized-O(1) contract, measured rather than argued. Before the
+    // append path this test read 1 + 2 + ... + rows-per-key pushes, because
+    // every newly-seen key re-pushed the whole store.
+    let mut interner = StringInterner::new();
+    let base = interner.get_or_intern("base");
+    let schema = Arc::new(TypeSchema::from_keys(vec![base]));
+    let mut store = ColumnStore::new(schema, &HashMap::new(), &interner);
+
+    const ROWS: usize = 200;
+    let keys: Vec<InternedKey> = (0..ROWS)
+        .map(|i| interner.get_or_intern(&format!("k{i}")))
+        .collect();
+
+    crate::graph::storage::column_store::reset_column_store_row_pushes();
+    for (i, key) in keys.iter().enumerate() {
+        store.push_row(&[
+            (base, Value::Int64(i as i64)),
+            (*key, Value::Int64(i as i64)),
+        ]);
+    }
+    assert_eq!(
+        crate::graph::storage::column_store::column_store_row_pushes(),
+        ROWS,
+        "a widening key set re-pushed existing rows: the store is being rebuilt \
+         per new key instead of appending one column"
+    );
+
+    // ... and every row still reads back exactly what it carried.
+    for (i, key) in keys.iter().enumerate() {
+        assert_eq!(store.get(i as u32, base), Some(Value::Int64(i as i64)));
+        assert_eq!(store.get(i as u32, *key), Some(Value::Int64(i as i64)));
+        if i > 0 {
+            assert_eq!(store.get(i as u32 - 1, *key), None);
+        }
+    }
+}
+
+// ── Typed columns at creation (Phase 5(ii)) ──────────────────────────────────
+
+#[test]
+fn set_types_a_new_column_from_the_value_when_metadata_is_silent() {
+    let (schema, meta, interner) = make_schema_and_meta();
+    let mut store = ColumnStore::new(schema, &meta, &interner);
+    let width = store.column_count();
+
+    store.push_row(&[(InternedKey::from_str("name"), Value::String("A".into()))]);
+    // Every production write site passes `type_meta: None` today; the column
+    // must still come out typed, because `Mixed` cannot be spilled.
+    assert!(store.set(0, InternedKey::from_str("hits"), &Value::Int64(3), None));
+
+    assert_eq!(store.column_type_str(width), Some("int64"));
+    assert_eq!(
+        store.get(0, InternedKey::from_str("hits")),
+        Some(Value::Int64(3))
+    );
+}
+
+#[test]
+fn set_prefers_declared_metadata_over_the_value_in_hand() {
+    // A `float64` property whose first written value happens to be an integer
+    // must not create an `Int64` column that the next 0.5 demotes to `Mixed`.
+    let (schema, meta, interner) = make_schema_and_meta();
+    let mut store = ColumnStore::new(schema, &meta, &interner);
+    let width = store.column_count();
+
+    store.push_row(&[(InternedKey::from_str("name"), Value::String("A".into()))]);
+    let key = InternedKey::from_str("rate");
+    assert!(store.set(0, key, &Value::Int64(1), Some("float64")));
+    assert_eq!(store.column_type_str(width), Some("float64"));
+
+    assert!(store.set(0, key, &Value::Float64(0.5), None));
+    assert_eq!(store.column_type_str(width), Some("float64"));
+    assert_eq!(store.get(0, key), Some(Value::Float64(0.5)));
+}
+
+#[test]
+fn a_type_mismatched_set_still_demotes_to_mixed() {
+    // Correctness over memory: typing the column at creation must not turn a
+    // heterogeneous property into a lost or coerced write.
+    let (schema, meta, interner) = make_schema_and_meta();
+    let mut store = ColumnStore::new(schema, &meta, &interner);
+    let width = store.column_count();
+
+    store.push_row(&[(InternedKey::from_str("name"), Value::String("A".into()))]);
+    store.push_row(&[(InternedKey::from_str("name"), Value::String("B".into()))]);
+
+    let key = InternedKey::from_str("mixedish");
+    assert!(store.set(0, key, &Value::Int64(1), None));
+    assert_eq!(store.column_type_str(width), Some("int64"));
+    assert!(store.set(1, key, &Value::String("two".into()), None));
+    assert_eq!(store.column_type_str(width), Some("mixed"));
+
+    assert_eq!(store.get(0, key), Some(Value::Int64(1)));
+    assert_eq!(store.get(1, key), Some(Value::String("two".into())));
+}
+
+#[test]
+fn the_id_column_is_typed_from_the_first_id_pushed() {
+    let (schema, meta, interner) = make_schema_and_meta();
+
+    let mut ints = ColumnStore::new(Arc::clone(&schema), &meta, &interner);
+    for i in 0..4i64 {
+        ints.push_id(&Value::Int64(i));
+        ints.push_row(&[]);
+    }
+    assert_eq!(
+        ints.id_type_str(),
+        Some("int64"),
+        "the id column is still born Mixed — 32 B/row that cannot be spilled"
+    );
+    for i in 0..4i64 {
+        assert_eq!(ints.get_id(i as u32), Some(Value::Int64(i)));
+    }
+
+    let mut strs = ColumnStore::new(Arc::clone(&schema), &meta, &interner);
+    strs.push_id(&Value::String("Q42".into()));
+    strs.push_row(&[]);
+    assert_eq!(strs.id_type_str(), Some("string"));
+    assert_eq!(strs.get_id(0), Some(Value::String("Q42".into())));
+
+    // Heterogeneous ids still land in `Mixed`, without losing a value.
+    let mut mixed = ColumnStore::new(schema, &meta, &interner);
+    mixed.push_id(&Value::Int64(1));
+    mixed.push_row(&[]);
+    mixed.push_id(&Value::String("Q7".into()));
+    mixed.push_row(&[]);
+    assert_eq!(mixed.id_type_str(), Some("mixed"));
+    assert_eq!(mixed.get_id(0), Some(Value::Int64(1)));
+    assert_eq!(mixed.get_id(1), Some(Value::String("Q7".into())));
+}
+
+#[test]
+fn a_typed_id_column_spills_to_a_file() {
+    // The point of typing it: `materialize_to_file` is a no-op for `Mixed`, so
+    // a Mixed id column is a permanent heap floor that `set_memory_limit`
+    // cannot touch.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (schema, meta, interner) = make_schema_and_meta();
+    let mut store = ColumnStore::new(schema, &meta, &interner);
+    for i in 0..64i64 {
+        store.push_id(&Value::Int64(i));
+        store.push_row(&[(InternedKey::from_str("age"), Value::Int64(i))]);
+    }
+    let before = store.heap_bytes();
+    store
+        .materialize_to_files(dir.path(), &interner)
+        .expect("materialize");
+
+    assert!(
+        dir.path().join("__id__.i64").exists(),
+        "no __id__ file written"
+    );
+    assert!(
+        store.heap_bytes() < before,
+        "spilling reclaimed nothing: {before} -> {}",
+        store.heap_bytes()
+    );
+    for i in 0..64i64 {
+        assert_eq!(store.get_id(i as u32), Some(Value::Int64(i)));
+    }
+}

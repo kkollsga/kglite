@@ -1261,6 +1261,35 @@ fn validate_label(label: &str, graph: &DirGraph) -> Result<(), SchemaError> {
     })
 }
 
+/// Whether `property` is named by the graph's *declared* schema for
+/// `node_type` — `define_schema`'s `required` / `optional` / `types`, the
+/// declared primary key, and any `unique` tuple.
+///
+/// `node_type_metadata` is observed, not declared: it is populated from the
+/// values that have actually been written, so a property a caller declared up
+/// front but has not stored yet is absent from it. Reading only that map made
+/// the typo-guard reject `CREATE (n:Item {p1: 1})` on a type whose schema
+/// declares `p1` — a declaration the user wrote precisely to say "this property
+/// is expected". The guard itself is deliberate for *undeclared* properties and
+/// stays; this closes the case where the answer is written down.
+fn property_is_declared(node_type: &str, property: &str, graph: &DirGraph) -> bool {
+    let Some(schema) = graph.schema_definition.as_ref() else {
+        return false;
+    };
+    let Some(node) = schema.node_schemas.get(node_type) else {
+        return false;
+    };
+    node.required_fields.iter().any(|f| f == property)
+        || node.optional_fields.iter().any(|f| f == property)
+        || node.field_types.contains_key(property)
+        || node.primary_key.as_deref() == Some(property)
+        || node
+            .unique
+            .iter()
+            .flatten()
+            .any(|tuple| tuple.iter().any(|f| f == property))
+}
+
 fn validate_property(node_type: &str, property: &str, graph: &DirGraph) -> Result<(), SchemaError> {
     if BUILTIN_FIELDS.contains(&property) {
         return Ok(());
@@ -1271,6 +1300,9 @@ fn validate_property(node_type: &str, property: &str, graph: &DirGraph) -> Resul
         return Ok(());
     };
     if type_props.is_empty() || type_props.contains_key(property) {
+        return Ok(());
+    }
+    if property_is_declared(node_type, property, graph) {
         return Ok(());
     }
     let candidates: Vec<&str> = type_props.keys().map(|s| s.as_str()).collect();
@@ -1306,6 +1338,58 @@ mod tests {
         g.upsert_connection_type_metadata("KNOWS", "Person", "Person", HashMap::new());
         g.upsert_connection_type_metadata("AUTHORED", "Person", "Paper", HashMap::new());
         g
+    }
+
+    /// A property the graph's schema *declares* is not a typo, even though the
+    /// type has never carried a value for it.
+    ///
+    /// The unknown-property guard reads `node_type_metadata`, which is built
+    /// from values that were actually written. So the first `CREATE` naming a
+    /// declared-but-unwritten property was rejected with "Did you mean ...?" —
+    /// and since a `CREATE` is how the property would come to be written, the
+    /// rejection was self-perpetuating: a Cypher statement stream literally
+    /// could not grow a type's schema, whatever the caller declared.
+    #[test]
+    fn a_declared_property_is_not_a_typo() {
+        use crate::graph::schema::{NodeSchemaDefinition, SchemaDefinition, SchemaInstall};
+
+        let mut g = graph_with_schema();
+        let mut declared = SchemaDefinition::default();
+        let mut person = NodeSchemaDefinition {
+            required_fields: vec!["age".to_string()],
+            optional_fields: vec!["nickname".to_string()],
+            ..Default::default()
+        };
+        person
+            .field_types
+            .insert("height".to_string(), "float64".to_string());
+        person.unique = Some(vec![vec!["passport".to_string()]]);
+        declared.node_schemas.insert("Person".to_string(), person);
+        g.set_schema(declared, SchemaInstall::Replace)
+            .expect("schema installs on an empty graph");
+
+        for query in [
+            "CREATE (n:Person {nickname: 'Al'})",
+            "CREATE (n:Person {height: 1.8})",
+            "CREATE (n:Person {passport: 'X1'})",
+            "MATCH (n:Person {nickname: 'Al'}) RETURN n",
+        ] {
+            let q = parse_cypher(query).unwrap();
+            assert!(
+                validate_schema(&q, &g).is_ok(),
+                "declared property rejected by the typo-guard: {query} -> {:?}",
+                validate_schema(&q, &g).unwrap_err().message
+            );
+        }
+
+        // The guard itself is unchanged for a property nobody declared.
+        let q = parse_cypher("CREATE (n:Person {nicknmae: 'Al'})").unwrap();
+        let err = validate_schema(&q, &g).expect_err("undeclared property must still be rejected");
+        assert!(
+            err.message.contains("Unknown property 'nicknmae'"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

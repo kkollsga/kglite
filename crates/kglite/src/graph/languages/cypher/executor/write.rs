@@ -1441,6 +1441,7 @@ fn execute_set(
                             property,
                             &value,
                             &graph.node_type_metadata,
+                            graph.schema_definition.as_ref(),
                         )?;
                     }
 
