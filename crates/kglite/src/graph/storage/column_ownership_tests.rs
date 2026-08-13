@@ -1124,3 +1124,94 @@ fn a_one_row_columnar_set_leaves_every_other_row_untouched() {
         );
     }
 }
+
+/// Rewrite `Item {id: 1}` through `add_nodes` replace-mode with a batch that
+/// carries `c0` and nothing else — so `c1` is the property the caller expects
+/// to be gone afterwards.
+fn replace_item_one_with_c0_only(graph: &mut DirGraph) {
+    let df = DataFrame::from_cypher_rows(
+        vec!["id".to_string(), "c0".to_string()],
+        vec![vec![Value::Int64(1), Value::String("replaced".into())]],
+    )
+    .unwrap();
+    crate::graph::mutation::maintain::add_nodes(
+        graph,
+        df,
+        "Item".to_string(),
+        "id".to_string(),
+        None,
+        Some("replace".to_string()),
+    )
+    .unwrap();
+}
+
+/// `replace_node_properties` is replace-**all** on every backend, including the
+/// overlay a held result view forks the writer into.
+///
+/// `add_nodes(conflict_handling="replace")` promises the row is rewritten, not
+/// merged: a property the batch omits is gone afterwards. `ForkedGraph`'s
+/// columnar arm wrote the incoming pairs over the row and left every other cell
+/// exactly where it was, where both heap backends null the row first
+/// (`impl_heap_column_writes!`). So holding a view turned a replace into an
+/// update — a wrong read, not a slow one — and only on a saved (columnar)
+/// graph.
+///
+/// The unforked run above the fork is the control: it is the semantics the
+/// forked run has to match, and it passed on both sides of the fix, so a
+/// failure there means the *reference* moved rather than the overlay.
+#[test]
+fn a_forked_columnar_replace_drops_the_properties_it_omits() {
+    use crate::graph::handle::make_dir_graph_mut;
+
+    const C1: &str = "MATCH (n:Item) WHERE n.id = 1 RETURN n.c1";
+    const C0: &str = "MATCH (n:Item) WHERE n.id = 1 RETURN n.c0";
+
+    let mut control = seeded_columnar();
+    assert_eq!(
+        read_one(&control, C1),
+        Value::Int64(10),
+        "precondition: the fixture row carries the property the batch will omit"
+    );
+    replace_item_one_with_c0_only(&mut control);
+    assert_eq!(
+        read_one(&control, C0),
+        Value::String("replaced".into()),
+        "control: the batch's own property is written"
+    );
+    assert_eq!(
+        read_one(&control, C1),
+        Value::Null,
+        "control: replace-mode drops a property the batch omits"
+    );
+
+    let mut writer = Arc::new(seeded_columnar());
+    let reader = Arc::clone(&writer);
+    let graph = make_dir_graph_mut(&mut writer);
+    assert!(
+        graph.graph.is_forked(),
+        "precondition: a held view must fork the writer, or this is a second \
+         run of the control"
+    );
+    replace_item_one_with_c0_only(graph);
+    assert!(
+        graph.graph.is_forked(),
+        "precondition: the replace must land on the overlay, not after a flatten"
+    );
+    assert_eq!(
+        read_one(graph, C0),
+        Value::String("replaced".into()),
+        "the batch's own property is written on the overlay too"
+    );
+    assert_eq!(
+        read_one(graph, C1),
+        Value::Null,
+        "a replace on a forked columnar row must drop the properties the batch \
+         omits, exactly as the unforked control does"
+    );
+
+    assert_eq!(
+        read_one(&reader, C1),
+        Value::Int64(10),
+        "and the held view keeps the row it was forked with"
+    );
+}

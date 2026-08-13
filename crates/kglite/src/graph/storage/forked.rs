@@ -717,21 +717,31 @@ impl GraphWrite for ForkedGraph {
         GraphWrite::remove_node_property(self, idx, key)
     }
 
-    /// **Not `replace_all` semantics on a columnar row** — it writes `pairs`
-    /// over whatever is there and leaves every other cell alone, where the heap
-    /// backends null the row first. Pre-existing divergence, carried unchanged
-    /// through the cell-grained journal rather than silently altered by it.
+    /// Replace-**all**: every cell present on the row is nulled, then `pairs`
+    /// are written — arm for arm what `impl_heap_column_writes!` does, so a
+    /// held view cannot turn a caller's replace into an update.
     fn replace_node_properties(&mut self, idx: NodeIndex, pairs: Vec<(InternedKey, Value)>) {
-        if self.columnar_row_of(idx).is_some() {
-            // Each delegated write captures its own cell pre-image, so there is
-            // nothing extra to journal here.
+        // Whole-row shape: the pre-image has to span the nulled cells as well
+        // as the incoming keys, which is exactly `ReplaceRow`.
+        let written: Vec<InternedKey> = pairs.iter().map(|(k, _)| *k).collect();
+        self.capture_property_pre_image(idx, ColumnarWrite::ReplaceRow(&written));
+        if let Some((type_key, row_id)) = self.columnar_row_of(idx) {
+            let Some(store) = self.column_stores.get_mut(&type_key) else {
+                return;
+            };
+            let store = Arc::make_mut(store);
+            let existing: Vec<_> = store
+                .row_properties(row_id)
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect();
+            for key in existing {
+                store.set(row_id, key, &Value::Null, None);
+            }
             for (key, value) in pairs {
-                GraphWrite::set_node_property(self, idx, key, value);
+                store.set(row_id, key, &value, None);
             }
             return;
-        }
-        if self.undo.is_some() {
-            self.capture_node_weight(idx);
         }
         if let Some(nd) = self.cow_node(idx) {
             nd.properties.replace_all(pairs);

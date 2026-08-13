@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cells that were absent before the statement. Writes taken while a `.copy()`
   or a held query result is sharing the graph still copy once per type, as
   before, because the reader's snapshot must keep the store it was given.
+- **`add_nodes(conflict_handling="replace")` drops the properties the batch
+  omits even while a query result or a `.copy()` is holding the graph.** On a
+  saved (columnar) graph in that state the write went through a separate code
+  path that merged the incoming columns over the existing row instead of
+  rewriting it, so a property left out of the batch survived — a replace
+  silently behaving as an update, and only when a view happened to be held.
 - **A write to an mmap-backed (spilled or mapped-mode) column brings only that
   column back to the heap**, where the whole-store copy above brought back
   every column of the type. `set_memory_limit` is still defeated by repeated

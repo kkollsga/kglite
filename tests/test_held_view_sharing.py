@@ -246,6 +246,44 @@ def test_a_failed_statement_rolls_back_while_a_view_is_held(
     del view
 
 
+def test_replace_mode_drops_omitted_properties_while_a_view_is_held(
+    graph: kglite.KnowledgeGraph,
+) -> None:
+    """``conflict_handling='replace'`` rewrites the row, view held or not.
+
+    The overlay has its own property writers, and its replace arm merged instead
+    of replacing on a columnar (saved) graph: a property the batch omitted
+    survived, so holding a result view silently downgraded a replace into an
+    update. Nothing else in this file writes through ``add_nodes``, so no test
+    reached that writer.
+
+    ``enable_columnar()`` is the precondition, not decoration — the defect was
+    columnar-only, and the row-storage path has always replaced correctly.
+    """
+    import pandas as pd
+
+    graph.enable_columnar()
+    view = graph.cypher(WIDE_QUERY)
+    assert graph.cypher("MATCH (n:Item {id: 5}) RETURN n.qty AS qty").to_list()[0]["qty"] is not None
+
+    graph.add_nodes(
+        pd.DataFrame({"id": [5], "name": ["replaced"]}),
+        node_type="Item",
+        unique_id_field="id",
+        conflict_handling="replace",
+    )
+    assert kglite._backend_is_forked(graph) is True, (
+        "the batch write happened while a lazy view was alive, so it must have "
+        "forked; False here means this is a re-run of the unforked path"
+    )
+
+    row = graph.cypher("MATCH (n:Item {id: 5}) RETURN n.name AS name, n.qty AS qty").to_list()[0]
+    assert row["name"] == "replaced"
+    assert row["qty"] is None, "replace-mode must drop a property the batch omits, view held or not"
+
+    del view
+
+
 def test_copy_does_not_share_a_backend_with_its_source(graph: kglite.KnowledgeGraph) -> None:
     """`g.copy()` forks *from* `g`, so `g` becomes somebody else's base.
 

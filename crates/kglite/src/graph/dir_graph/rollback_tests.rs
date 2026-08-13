@@ -2192,3 +2192,83 @@ fn forked_statements_copy_zero_nodes_except_one_flatten() {
     // any of it.
     assert_eq!(reader.graph.node_count(), fixture_nodes);
 }
+
+/// A replace-all write on a forked columnar row must roll back the cells it
+/// **nulled**, not just the ones it wrote.
+///
+/// `GraphWrite::replace_node_properties` is the only write whose pre-image
+/// spans keys the caller never mentioned: it clears the row first, so a journal
+/// that captured the incoming keys alone would restore the batch's own columns
+/// and leave every omitted property permanently null — a rolled-back statement
+/// deleting data. Reached through the trait rather than through Cypher because
+/// its one caller is `add_nodes` replace-mode (`mutation::batch`), which is not
+/// a statement and opens no checkpoint of its own; the checkpoint here is what
+/// a caller running it inside one would get.
+///
+/// The forked fixture is the point: the overlay's arm is a separate
+/// implementation from the two heap writers, and until 2026-08-13 it was not
+/// replace-all at all, so nothing had ever journalled a `ReplaceRow` on it.
+#[test]
+fn a_replace_write_on_a_forked_columnar_row_rolls_back_the_cells_it_nulled() {
+    use crate::graph::dir_graph::rollback::StatementCheckpoint;
+    use crate::graph::handle::make_dir_graph_mut;
+    use crate::graph::storage::GraphWrite;
+    use std::sync::Arc;
+
+    let mut writer = Arc::new(seeded_columnar());
+    let _reader = Arc::clone(&writer);
+    let graph = make_dir_graph_mut(&mut writer);
+    assert!(
+        graph.graph.is_forked(),
+        "precondition: a held view must fork the writer"
+    );
+
+    let idx = graph
+        .lookup_by_id("Item", &Value::Int64(1))
+        .expect("the fixture must carry Item id 1");
+    // Interned before the fingerprint so the write, not the interning, is what
+    // the comparison is about.
+    let name = graph.interner.get_or_intern("name");
+    let fresh = graph.interner.get_or_intern("fresh");
+
+    let before = fingerprint(&mut graph.clone());
+
+    let checkpoint = StatementCheckpoint::open(graph);
+    GraphWrite::replace_node_properties(
+        &mut graph.graph,
+        idx,
+        vec![
+            (name, Value::String("replaced".into())),
+            (fresh, Value::Int64(42)),
+        ],
+    );
+
+    // Non-vacuity: the write has to have nulled `qty` and grown the schema,
+    // or the rollback below is restoring nothing.
+    let mid = fingerprint(&mut graph.clone());
+    assert_ne!(before, mid, "the replace must have changed the graph");
+    let row = graph
+        .graph
+        .node_weight(idx)
+        .and_then(|node| match &node.properties {
+            PropertyStorage::Columnar(row) => Some(row.row_id()),
+            _ => None,
+        })
+        .expect("the fixture node must be a columnar row");
+    let qty = graph.interner.get_or_intern("qty");
+    let store = graph.column_store("Item").expect("master store");
+    assert!(
+        store.get(row, qty).is_none(),
+        "precondition: the replace must have dropped the property it omitted, \
+         or this test cannot see whether the rollback restores it"
+    );
+
+    checkpoint.rollback(graph);
+
+    assert_eq!(
+        fingerprint(&mut graph.clone()),
+        before,
+        "a rolled-back replace must restore the whole row — the cells it wrote \
+         and the ones it nulled"
+    );
+}
