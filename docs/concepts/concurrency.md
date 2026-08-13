@@ -63,6 +63,16 @@ generation exists.
   driver-managed transactions, and what that does to throughput and latency as
   writers are added — is stated in
   [Bolt server → Write concurrency](../operators/bolt-server.md#write-concurrency).
+- A session can also be **durable**: `Session::open_durable(graph, path, level)`
+  recovers the path's write-ahead sidecar before the session serves anyone, and
+  every later commit appends its frame between the OCC check and the Arc swap,
+  so a frame that cannot be written blocks the publish instead of following it.
+  Concurrency is unchanged — one owner per path, readers still on snapshots —
+  but the commit point now includes an append, and at `full` a device barrier
+  taken inside the lock all writers serialize on. Bolt exposes the level as
+  `--durability`; see
+  [Bolt server → Durability](../operators/bolt-server.md#durability) for the
+  per-level loss windows and the measured cost.
 - MCP uses the native session pipeline; writable workbench mode is explicit.
 - A new binding owns async/runtime scheduling but should reuse
   `kglite::api::session` rather than creating a second lock/transaction model.
@@ -83,6 +93,17 @@ deterministically, then required to both land via driver retry), and the
 contended-writer load test `tests/benchmarks/test_bench_bolt_writers.py`
 (writer-count sweep producing the throughput/retry/latency curve behind the
 operator contract). All three are opt-in (`-m bolt_stress`).
+
+Durability under that same model is pinned by
+`tests/test_bolt_server_durability.py` (`-m bolt`): child-process
+`SIGKILL`-and-restart tests at each `--durability` level, with `off` as the
+control that loses the commit; the unconditional recovery-on-open behaviour and
+its `off`-over-an-unreplayed-log refusal; and that a checkpoint truncates the
+log while post-checkpoint commits still recover. `tests/test_durability.py` and
+`tests/test_durable_save.py` cover the same engine surface from the embedded
+side. The cost of each level — why the Bolt default is `normal` — is the
+`test_durability_sweep` cell of the benchmark above, alongside
+`test_checkpoint_under_contention`.
 
 See [Python transactions](../python/transactions.md),
 [Rust session](../rust/session.md), and [Architecture](architecture.md).

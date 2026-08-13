@@ -54,6 +54,63 @@ snapshot continue seeing it after commit; new snapshots see the committed graph.
 Pass `check_occ=true` in production so a transaction based on a stale version
 returns `ConflictDetected`. Last-writer-wins is not a safe default.
 
+`CommitOutcome` is `#[non_exhaustive]` — match a catch-all arm, not only the
+variants that existed when you wrote the binding.
+
+## Durable sessions
+
+`Session::open_durable(graph, checkpoint_path, level)` builds a session that
+appends every commit to the path's write-ahead sidecar. It performs the whole
+open ordering, so a binding does not re-derive it: recover the sidecar, replay
+the frames the loaded checkpoint does not already contain, *then* wrap the
+backend for write capture, then open the log for append.
+
+```rust
+use kglite::api::durable::DurabilityLevel;
+
+let session = Session::open_durable(graph, "/data/app.kgl", DurabilityLevel::Normal)?;
+match session.commit(tx, true) {
+    CommitOutcome::DurabilityFailed { error } => { /* IO/backend error, not retriable */ }
+    _ => {}
+}
+session.sync()?;                 // on-demand barrier: what makes `Normal` usable
+session.save("/data/app.kgl", true)?;  // checkpoint: folds the log in and truncates it
+```
+
+Contract points a binding has to honour:
+
+- **The frame is appended between the OCC check and the publish.** A log that
+  cannot be written blocks the commit rather than reporting success over an
+  unlogged write; `CommitOutcome::DurabilityFailed { error }` says so, and the
+  graph, its version and its readers are untouched. Surface it as an
+  IO/backend error, not as a retriable conflict — re-running hits the same
+  wall.
+- **`save` is the checkpoint**: flush the log, stamp `checkpoint_lsn`, write
+  the file, truncate the log. Its signature is unchanged, and it forces
+  `fsync` on a durable session because it destroys the log that would
+  otherwise still describe those commits.
+- **`write()` / `transact` are not logged paths** and are unsupported on a
+  durable session. Taking one anyway latches the session: every later
+  durability operation fails loudly until a checkpoint folds the direct write
+  in. Callers with an error channel check
+  `Session::check_direct_write_allowed` first; bindings should route mutations
+  through `begin`/`commit` instead.
+- **One durable owner per path.** A durable `Session` and a durable
+  `KnowledgeGraph` over the same path are not a supported pair — the split
+  checkpoint/next-LSN state is what the replay gate reads.
+- **Refusals are explicit**, not silent degradation: disk-mode graphs at any
+  logging level, a path another durable owner already wrapped, and — the
+  data-safety one — level `Off` over a sidecar holding commits the checkpoint
+  does not contain. Recovery on open is unconditional; a non-durable open of
+  such a path is an error rather than a graph quietly missing acknowledged
+  writes.
+
+`Session::durability()` reports the level (`None` when the session logs
+nothing). Non-durable sessions are unaffected in behaviour and in cost.
+Levels, per-level loss windows and the measured cost of each are in
+[Bolt server → Durability](../operators/bolt-server.md#durability), whose
+`--durability` flag is this API's only server-side consumer.
+
 ## Binding models
 
 - Python exposes direct `KnowledgeGraph`, explicit `Session`,
@@ -86,6 +143,7 @@ exposing that mode.
 
 - `graph/session/execute.rs` — options/outcome and canonical pipeline.
 - `graph/session/transaction.rs` — `Session`, `Transaction`, OCC, snapshots.
+- `graph/session/durable.rs` — `open_durable`, `sync`, the checkpoint order.
 - `api::session` — supported public re-exports.
 - `crates/kglite-py/src/graph/pyapi/` — Python wrapper.
 - `crates/kglite-bolt-server/src/backend.rs` — Bolt wrapper.

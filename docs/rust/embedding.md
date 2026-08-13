@@ -42,7 +42,7 @@ use std::collections::HashMap;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load a graph file written by ANY kglite binding —
     // Python's `kg.save("graph.kgl")`, the bolt-server's
-    // `CALL db.checkpoint("graph.kgl")`, etc. The on-disk
+    // `CALL db.checkpoint()` over Bolt, etc. The on-disk
     // .kgl format is the portable cross-binding contract.
     let graph = load_file("graph.kgl")?;
 
@@ -142,12 +142,17 @@ snapshot/working CoW + OCC live here exactly once.
 - `Session::new(dir)` + `session.begin()` / `session.commit(tx,
   true)` — the snapshot/working CoW transaction model. OCC is
   opt-in per commit; pass `true` for production semantics.
+- `Session::open_durable(dir, path, level)` — the same session with a
+  write-ahead log under it: the sidecar is recovered before the session
+  serves anyone, and each commit's frame is appended before the publish.
 - `CommitOutcome::{NoWritesNoOp, Committed { new_version },
-  ConflictDetected { current_version, base_version }}` — what
-  your binding maps to its consumer-facing error type.
+  ConflictDetected { current_version, base_version },
+  DurabilityFailed { error }}` — what your binding maps to its
+  consumer-facing error type. The enum is `#[non_exhaustive]`, so match a
+  catch-all arm as well.
 
 See `docs/rust/session.md` for the full session
-abstraction guide.
+abstraction guide, including the durable-session contract.
 
 ### Dataset loaders
 

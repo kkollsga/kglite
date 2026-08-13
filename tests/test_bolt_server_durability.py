@@ -835,9 +835,9 @@ def test_the_env_mirror_logs_the_same_way(tmp_path):
 
 
 def test_without_the_log_the_same_commit_is_lost(tmp_path):
-    """The control for the two tests above, and the pinned default: `off` — the
-    level an invocation with no `--durability` gets — loses a committed write to
-    a SIGKILL, because nothing but a checkpoint ever writes the graph back."""
+    """The control for the two tests above: `off` — which has to be asked for,
+    the default being `normal` — loses a committed write to a SIGKILL, because
+    without a log nothing but a checkpoint ever writes the graph back."""
     _require_binary()
     fixture = tmp_path / "wal-off.kgl"
     _build_bolt_fixture_graph(fixture)

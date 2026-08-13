@@ -11,14 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`kglite-bolt-server --save-on-exit` writes the served graph back to
   `--graph` when the server shuts down** (env mirror:
-  `KGLITE_BOLT_SAVE_ON_EXIT=1`). A Bolt server's writes are process-local —
-  they live in the served graph's in-memory state and previously reached the
-  file only if a client saved it some other way — so a stopped server lost
+  `KGLITE_BOLT_SAVE_ON_EXIT=1`). A Bolt server's writes used to be
+  process-local — they lived in the served graph's in-memory state and reached
+  the file only if a client saved it some other way — so a stopped server lost
   every write it had accepted. With the flag, shutdown runs one fsync'd,
   atomic save and logs the saved graph version; a failed save is logged as an
-  error *and* exits non-zero, so a supervisor sees it. This is not a
-  durability guarantee: `SIGKILL`, a crash or a power loss still lose
-  everything since the last save, and because connections are not drained a
+  error *and* exits non-zero, so a supervisor sees it. What it is not is a
+  substitute for the write-ahead log added below: at `--durability off` a
+  `SIGKILL`, a crash or a power loss still lose everything since the last save,
+  and this flag only covers the two signals a graceful shutdown gets. Under the
+  default `--durability normal` those commits are in the sidecar and the next
+  start replays them, and the exit save's job becomes folding the log into the
+  file (which it now does, after flushing it) rather than being the only thing
+  standing between a stop and data loss. Because connections are not drained a
   commit that races shutdown can land after it — which is what the logged
   version is for. Refused at startup for `--readonly` (nothing to write back)
   and for disk-mode graphs (every disk save publishes a new generation and
@@ -37,8 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure to the client, never a silent success.
 - **`kglite-bolt-server --checkpoint-interval <SECS>` checkpoints the served
   graph on a timer** (env mirror: `KGLITE_BOLT_CHECKPOINT_INTERVAL=<secs>`),
-  bounding what a crash can lose to the writes since the last tick rather than
-  to the whole run. A background task saves the graph every SECS seconds and
+  bounding what an unlogged crash can lose to the writes since the last tick
+  rather than to the whole run — and, under the write-ahead log added below,
+  bounding instead how much sidecar a run accumulates and how long its replay
+  takes, since every checkpoint truncates the log. A background task saves the
+  graph every SECS seconds and
   logs the version it wrote; a tick whose graph is unchanged since the last
   checkpoint — by this task *or* by `CALL db.checkpoint()`, which share one
   recorded version — writes nothing, so an idle server does not rewrite its
