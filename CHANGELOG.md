@@ -245,6 +245,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   graph size and at parity with a hit (0.0025 ms) — and `UNWIND` over 2 000
   absent ids 809 ms → 0.54 ms (1 480×). Hit lookups, the same `UNWIND` over
   present ids, and unrelated property scans are unchanged.
+- **`IN` membership no longer costs `O(rows × |list|)`.** Every one of the five
+  places that answer `x IN <list>` — the pattern matcher's pushed-down
+  `IN` matcher, the `EXISTS` fast path's inline property check, and the
+  executor's `In` / `InLiteralSet` / `InExpression` predicates — walked the
+  whole list per row with a coercing comparison, so a selective filter over a
+  big list spent all its time proving non-matches. The `InLiteralSet` form
+  advertised an O(1) `HashSet`, but `Value`'s structural hashing cannot
+  express the numeric coercion the comparison performs, so it kept a linear
+  fallback behind the set and every non-matching row paid it. All five sites
+  now share one coercion-normalized membership set, built once per query: keys
+  fold `Int64` / `UniqueId` / integral `Float64` together and match a
+  single-element JSON list string to its inner string, exactly as value
+  equality does, with a documented fallback for the values where that equality
+  is not injective (magnitudes past 2^53, NaN, non-scalars). Lists of 8
+  elements or fewer keep the previous linear scan, so short `IN` lists cannot
+  regress. Three-valued (Kleene) NULL semantics are unchanged at every site.
+  Two further defects surfaced with it: the fused `MATCH … WHERE` path — the
+  common shape — never constant-folded its predicate, so an all-literal list
+  never reached the indexed form at all and a `$param` list was re-cloned per
+  row; and `IN` over a general list expression cloned the entire list for
+  every row. Measured (release build, min-of-N, two agreeing runs against the
+  published 0.15.13 wheel, 50k rows): a 1 000-element param list 137 ms →
+  0.63 ms (217×), 16 000 elements 1 884 ms → 2.22 ms (849×), 64 000 elements
+  3 506 ms → 6.73 ms (521×); the literal-list spelling 136 ms → 0.65 ms
+  (209×); strings 164 ms → 1.06 ms at 1 000 (154×) and 2 121 ms → 8.10 ms at
+  16 000 (262×); a projected `WITH … WHERE v IN [...]` 213 ms → 4.56 ms (47×);
+  and a shape that re-resolves its pattern per row (a deferred `{name: var}`
+  alongside a 1 000-element `IN`) 28.1 s → 0.10 s (279×). Control cells — an
+  8-element `IN`, a 2-element `IN`, a range predicate, an equality predicate
+  and a bare count — are flat within 4%.
+- **A string of the exact form `["]` no longer panics the engine.** Value
+  equality treats a single-element JSON list string (`["Oslo"]`) as equal to
+  its inner string by slicing off the four delimiter bytes; on a three-byte
+  string whose delimiters overlap, that slice ran backwards and aborted the
+  query thread. `RETURN '["]' IN ['x']` was enough to trigger it.
 - **An id stored as a whole-valued float is matchable by an integer literal
   through the id index.** `CREATE (n:Doc {id: 5.0})` followed by
   `MATCH (n:Doc {id: 5})` matched only because the anchor fell through to a

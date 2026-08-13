@@ -273,12 +273,14 @@ fn decode_matcher(matcher: &mut PropertyMatcher, codec: &ValueCodec) {
                 *matcher = PropertyMatcher::Equals(d);
             }
         }
+        // Decoding rewrites the values, so the membership index has to be
+        // rebuilt from them — hence a replacement rather than in-place edits.
         PropertyMatcher::In(vs) => {
-            for v in vs.iter_mut() {
-                if let Some(d) = codec.decode_value(v) {
-                    *v = d;
-                }
-            }
+            let decoded = vs
+                .iter()
+                .map(|v| codec.decode_value(v).unwrap_or_else(|| v.clone()))
+                .collect();
+            *matcher = PropertyMatcher::In(decoded);
         }
         // EqualsParam/EqualsVar/EqualsNodeProp resolve at runtime (not literals);
         // range/comparison/StartsWith matchers are planner-pushed (post-decode)

@@ -1513,7 +1513,9 @@ impl<'a> PatternExecutor<'a> {
             // EqualsVar / EqualsNodeProp should be resolved to Equals before
             // pattern matching. If they reach here unresolved, no match is possible.
             PropertyMatcher::EqualsVar(_) | PropertyMatcher::EqualsNodeProp { .. } => false,
-            PropertyMatcher::In(values) => values.iter().any(|v| values_equal(value, v)),
+            // One coercion-normalized probe against the set the planner built
+            // with the pattern — not a scan of the list per candidate node.
+            PropertyMatcher::In(values) => values.matches(value),
             PropertyMatcher::GreaterThan(threshold) => {
                 compare_values(value, threshold) == Some(std::cmp::Ordering::Greater)
             }

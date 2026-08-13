@@ -1103,6 +1103,94 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WHERE p.id = 7 RETURN count(p) AS n",
         None,
     ),
+    # ── IN membership above the indexing threshold ──
+    # Lists longer than the linear/indexed cut-off take the coercion-
+    # normalized MembershipSet instead of a per-row `values_equal` scan, and
+    # constant folding on the fused MATCH+WHERE path rewrites both the
+    # all-literal and the `$param` list into the indexed form. Optimised must
+    # equal naive for every element shape the normalization folds: the
+    # numeric family, NULL elements, mixed types, and a NULL-valued property.
+    (
+        "in_big_literal_list",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age IN [22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 99] RETURN p.name AS n ORDER BY n",
+        None,
+    ),
+    (
+        "in_big_param_list",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age IN $ages RETURN p.name AS n ORDER BY n",
+        {"ages": [22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 99]},
+    ),
+    (
+        "in_big_list_numeric_coercion",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age IN $ages RETURN count(p) AS n",
+        {"ages": [22.0, 24.0, 26.5, 28, 30, 32, 34, 36, 38, 40, 99]},
+    ),
+    (
+        "in_big_list_mixed_types",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age IN [22, '24', 26.0, true, null, 30, 32, 34, 36, 38, 40] RETURN count(p) AS n",
+        None,
+    ),
+    (
+        "in_big_list_with_null_element",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age IN [22, 24, 26, 28, 30, 32, 34, 36, 38, 40, null] RETURN p.name AS n ORDER BY n",
+        None,
+    ),
+    (
+        "not_in_big_list_with_null_element",
+        "social_graph",
+        "MATCH (p:Person) WHERE NOT p.age IN [22, 24, 26, 28, 30, 32, 34, 36, 38, 40, null] RETURN count(p) AS n",
+        None,
+    ),
+    # `email` is NULL on odd-numbered persons: a NULL left-hand side must
+    # stay UNKNOWN (never TRUE) whichever membership strategy runs.
+    (
+        "in_big_list_null_property",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.email IN $emails RETURN count(p) AS n",
+        {
+            "emails": [
+                "person2@test.com",
+                "person4@test.com",
+                "person6@test.com",
+                "person8@test.com",
+                "person10@test.com",
+                "person12@test.com",
+                "person14@test.com",
+                "person16@test.com",
+                "person18@test.com",
+                "person20@test.com",
+                None,
+            ]
+        },
+    ),
+    # `n.id` is stored as a UniqueId; the list is integral floats, which only
+    # match through the numeric normalization.
+    (
+        "in_big_list_id_float_coercion",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.id IN $ids RETURN count(p) AS n",
+        {"ids": [3.0, 7.0, 11.0, 15.0, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5]},
+    ),
+    # A list bound by WITH is a general RHS expression (`InExpression`), not a
+    # foldable literal — the per-row path, checked against the same corpus.
+    (
+        "in_list_expression_rhs",
+        "social_graph",
+        "MATCH (p:Person) WITH p, [22, 24, 26, 28, 30, 32, 34, 36, 38, 40, null] AS ages "
+        "WHERE p.age IN ages RETURN count(p) AS n",
+        None,
+    ),
+    (
+        "in_big_list_post_with_projection",
+        "social_graph",
+        "MATCH (p:Person) WITH p.age AS a WHERE a IN [22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 99] RETURN count(a) AS n",
+        None,
+    ),
     # ── Parameterized scalar with arithmetic ──
     (
         "param_arithmetic",

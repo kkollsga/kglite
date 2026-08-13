@@ -7,6 +7,7 @@
 //! CypherExecutor struct + orchestration; the MATCH machinery lives here.
 
 use super::*;
+use crate::graph::core::membership::MembershipSet;
 
 impl<'a> CypherExecutor<'a> {
     // ========================================================================
@@ -37,12 +38,12 @@ impl<'a> CypherExecutor<'a> {
                             // Check projected scalars (WITH/UNWIND ... AS varName)
                             if let Some(val) = row.projected.get(name) {
                                 if matches!(val, Value::Null) {
-                                    *matcher = PropertyMatcher::In(Vec::new());
+                                    *matcher = PropertyMatcher::In(MembershipSet::default());
                                 } else {
                                     *matcher = PropertyMatcher::Equals(val.clone());
                                 }
                             } else {
-                                *matcher = PropertyMatcher::In(Vec::new());
+                                *matcher = PropertyMatcher::In(MembershipSet::default());
                             }
                         }
                         PropertyMatcher::EqualsNodeProp { var, prop } => {
@@ -77,7 +78,7 @@ impl<'a> CypherExecutor<'a> {
                                     *matcher = PropertyMatcher::Equals(v);
                                 }
                                 _ => {
-                                    *matcher = PropertyMatcher::In(Vec::new());
+                                    *matcher = PropertyMatcher::In(MembershipSet::default());
                                 }
                             }
                         }

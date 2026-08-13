@@ -799,11 +799,9 @@ impl<'a> CypherExecutor<'a> {
                             PropertyMatcher::Equals(expected) => val.as_deref().is_some_and(|v| {
                                 crate::graph::core::filtering::values_equal(v, expected)
                             }),
-                            PropertyMatcher::In(values) => val.as_deref().is_some_and(|v| {
-                                values
-                                    .iter()
-                                    .any(|exp| crate::graph::core::filtering::values_equal(v, exp))
-                            }),
+                            PropertyMatcher::In(values) => {
+                                val.as_deref().is_some_and(|v| values.matches(v))
+                            }
                             // Complex matchers — fall back to slow path
                             _ => return None,
                         };

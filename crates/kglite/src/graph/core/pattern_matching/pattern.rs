@@ -3,6 +3,7 @@
 // Supports patterns like: (p:Play)-[:HAS_PROSPECT]->(pr:Prospect)-[:BECAME_DISCOVERY]->(d:Discovery)
 
 use crate::datatypes::values::Value;
+use crate::graph::core::membership::MembershipSet;
 use crate::graph::schema::InternedKey;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use std::collections::HashMap;
@@ -355,7 +356,12 @@ pub enum PropertyMatcher {
     },
     /// IN-list matching: value must be one of these values.
     /// Pushed from `WHERE n.prop IN [v1, v2, ...]` by the planner.
-    In(Vec<Value>),
+    ///
+    /// A [`MembershipSet`] rather than a bare `Vec<Value>`: the list is
+    /// probed once per candidate node, so the coercion-normalized index is
+    /// built once here instead of re-scanning the list per row. Derefs to
+    /// `&[Value]`, so planner code that inspects the values is unaffected.
+    In(MembershipSet),
     /// Comparison matchers: pushed from `WHERE n.prop > val` etc. by the planner.
     /// Enables filter pushdown into MATCH and range index acceleration.
     GreaterThan(Value),

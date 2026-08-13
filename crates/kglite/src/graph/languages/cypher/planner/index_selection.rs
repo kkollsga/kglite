@@ -482,10 +482,9 @@ fn extract_from_predicate(
                         // Replace the surviving WHERE with the O(1) HashSet form
                         // so the safety-net re-filter doesn't re-parse the list
                         // per row — matching the speed of a literal `IN [...]`.
-                        let set: std::collections::HashSet<Value> = values.into_iter().collect();
                         return Some(Predicate::InLiteralSet {
                             expr: expr.clone(),
-                            values: set,
+                            values: crate::graph::core::membership::MembershipSet::new(values),
                         });
                     }
                 }
@@ -949,7 +948,12 @@ pub(super) fn apply_in_property_to_patterns(
                     if props.contains_key(property) {
                         return false;
                     }
-                    props.insert(property.to_string(), PropertyMatcher::In(values));
+                    props.insert(
+                        property.to_string(),
+                        PropertyMatcher::In(crate::graph::core::membership::MembershipSet::new(
+                            values,
+                        )),
+                    );
                     return true;
                 }
             }

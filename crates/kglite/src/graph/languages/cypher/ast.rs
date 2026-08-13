@@ -2,6 +2,7 @@
 // Full Cypher AST definitions
 
 use crate::datatypes::values::Value;
+use crate::graph::core::membership::MembershipSet;
 use crate::graph::core::pattern_matching::Pattern;
 
 // ============================================================================
@@ -353,11 +354,18 @@ pub enum Predicate {
         expr: Expression,
         list: Vec<Expression>,
     },
-    /// Optimized IN with pre-evaluated literal values (produced by constant folding).
-    /// Uses HashSet for O(1) membership testing instead of per-row linear scan.
+    /// Optimized IN with pre-evaluated values, produced by constant folding
+    /// (an all-literal list, or a `$param` / other row-independent list
+    /// expression resolved once before the row loop).
+    ///
+    /// The [`MembershipSet`] is built once and probed per row, so both the
+    /// hit *and* the miss path are one hash lookup. The predecessor here was
+    /// a `HashSet<Value>` with a `values_equal` linear scan behind it, which
+    /// made every non-matching row pay `O(|list|)` — the whole cost of a
+    /// selective `IN` over a big list.
     InLiteralSet {
         expr: Expression,
-        values: std::collections::HashSet<Value>,
+        values: MembershipSet,
     },
     StartsWith {
         expr: Expression,

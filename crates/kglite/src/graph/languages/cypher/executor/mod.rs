@@ -439,11 +439,20 @@ impl<'a> CypherExecutor<'a> {
             // - Only single-pattern MATCH: multi-pattern MATCH (e.g., (a), (b))
             //   has WHERE predicates that reference variables from later patterns
             //   that aren't bound yet during the first pattern's expansion.
-            let inline_where = if let Clause::Match(mc) = clause {
+            //
+            // The predicate is constant-folded once here, exactly as the
+            // materialized `execute_where` and the fused aggregate paths do
+            // it. Without that fold this path evaluated the raw AST per row,
+            // so an all-literal `IN [...]` never became the indexed
+            // `InLiteralSet` form and a `IN $param` re-cloned the parameter
+            // list for every candidate — the fused path is the common shape
+            // (`MATCH (n:T) WHERE … RETURN …`), so it was the one paying the
+            // full `O(rows × |list|)` scan.
+            let folded_inline_where = if let Clause::Match(mc) = clause {
                 if result_set.rows.is_empty() && mc.patterns.len() == 1 {
                     if let Some(Clause::Where(w)) = query.clauses.get(i + 1) {
                         skip_clause[i + 1] = true;
-                        Some(&w.predicate)
+                        Some(self.fold_constants_pred(&w.predicate))
                     } else {
                         None
                     }
@@ -453,6 +462,7 @@ impl<'a> CypherExecutor<'a> {
             } else {
                 None
             };
+            let inline_where = folded_inline_where.as_ref();
 
             // Streaming-pipeline path: when enabled, try to absorb a
             // contiguous run of clauses (typically `WITH/RETURN(group,

@@ -336,6 +336,93 @@ def test_bench_unwind_point_lookup_hits(benchmark, hot_graph):
     assert result.to_list() == [{"c": 200}]
 
 
+# ---------------------------------------------------------------------------
+# IN membership over a large list
+# ---------------------------------------------------------------------------
+#
+# Membership used to be O(rows x |list|) at every evaluation site: 71 ms for a
+# 1 000-element list over 50k rows, 576 ms at 16 000, 7.4 s at 64 000. The two
+# list sizes below bracket that curve — with a coercion-normalized set they
+# must be within a small constant of each other, not 8x apart. The small-list
+# and range cells are the controls: neither goes through the index, so a
+# regression there is the instrument, not the fix.
+
+
+@pytest.mark.benchmark
+def test_bench_in_param_list_1k(benchmark, hot_graph):
+    """`WHERE n.p4 IN $vals` with 1 000 elements over 50k rows (param form)."""
+    vals = list(range(1_000))
+    result = benchmark(
+        lambda: hot_graph.cypher(
+            "MATCH (n:Item) WHERE n.rank_val IN $vals RETURN count(n) AS c",
+            params={"vals": vals},
+        )
+    )
+    assert result.to_list() == [{"c": 1_000}]
+
+
+@pytest.mark.benchmark
+def test_bench_in_param_list_16k(benchmark, hot_graph):
+    """The same shape with 16 000 elements — 16x the list, ~1x the work."""
+    vals = list(range(16_000))
+    result = benchmark(
+        lambda: hot_graph.cypher(
+            "MATCH (n:Item) WHERE n.rank_val IN $vals RETURN count(n) AS c",
+            params={"vals": vals},
+        )
+    )
+    assert result.to_list() == [{"c": 16_000}]
+
+
+@pytest.mark.benchmark
+def test_bench_in_literal_list_1k(benchmark, hot_graph):
+    """The literal-list form of the 1 000-element cell.
+
+    A literal list reaches the executor as `Predicate::In`; on the fused
+    MATCH+WHERE path it was never constant-folded, so it stayed a per-row
+    linear scan even though the folded `InLiteralSet` form existed.
+    """
+    literal = "[" + ", ".join(str(i) for i in range(1_000)) + "]"
+    result = benchmark(lambda: hot_graph.cypher(f"MATCH (n:Item) WHERE n.rank_val IN {literal} RETURN count(n) AS c"))
+    assert result.to_list() == [{"c": 1_000}]
+
+
+@pytest.mark.benchmark
+def test_bench_in_string_list_1k(benchmark, hot_graph):
+    """String membership, 1 000 elements — strings cost ~3.3x integers."""
+    vals = [f"hc_{i}" for i in range(1_000)]
+    result = benchmark(
+        lambda: hot_graph.cypher(
+            "MATCH (n:Item) WHERE n.high_card IN $vals RETURN count(n) AS c",
+            params={"vals": vals},
+        )
+    )
+    assert result.to_list() == [{"c": 2_000}]
+
+
+@pytest.mark.benchmark
+def test_bench_in_small_list(benchmark, hot_graph):
+    """Control: an 8-element list stays on the linear scan — no index built."""
+    vals = list(range(8))
+    result = benchmark(
+        lambda: hot_graph.cypher(
+            "MATCH (n:Item) WHERE n.rank_val IN $vals RETURN count(n) AS c",
+            params={"vals": vals},
+        )
+    )
+    assert result.to_list() == [{"c": 8}]
+
+
+@pytest.mark.benchmark
+def test_bench_range_predicate_scan(benchmark, hot_graph):
+    """Control: the same scan with a range predicate instead of IN."""
+    result = benchmark(
+        hot_graph.cypher,
+        "MATCH (n:Item) WHERE n.rank_val < 1000 RETURN count(n) AS c",
+    )
+    assert result.to_list() == [{"c": 1_000}]
+
+
 @pytest.mark.benchmark
 def test_bench_named_rel_match_count(benchmark, prop_edge_graph):
     """MATCH with a *named* edge variable over 100k property-heavy edges.

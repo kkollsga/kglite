@@ -9,6 +9,7 @@ pub mod calculations;
 pub mod data_retrieval;
 pub mod filtering;
 pub mod iterators;
+pub mod membership;
 pub mod pattern_matching;
 pub mod statistics;
 pub mod traversal;

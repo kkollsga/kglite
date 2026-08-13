@@ -414,7 +414,7 @@ fn compile_type_in(
 
 fn compile_type_in_literal_set(
     expr: &Expression,
-    values: &std::collections::HashSet<Value>,
+    values: &crate::graph::core::membership::MembershipSet,
     edge_var: &str,
 ) -> Option<RelEdgePredicate> {
     if !is_type_call_on(expr, edge_var) {

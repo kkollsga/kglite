@@ -5,6 +5,7 @@ use super::helpers::*;
 use super::*;
 use crate::datatypes::values::Value;
 use crate::graph::algorithms::vector as vs;
+use crate::graph::core::membership::{self, MembershipSet};
 use crate::graph::core::pattern_matching::{MatchBinding, PatternExecutor, PatternMatch};
 use crate::graph::storage::GraphRead;
 use std::collections::HashSet;
@@ -592,15 +593,19 @@ impl<'a> CypherExecutor<'a> {
                 if matches!(val, Value::Null) {
                     return Ok(None);
                 }
+                // Reaching here means the list is genuinely per-row: constant
+                // folding rewrites an all-literal (or row-independent) list to
+                // `InLiteralSet` with a prepared MembershipSet. There is no
+                // list to index — every element has to be evaluated for this
+                // row regardless — so the elements are probed one at a time,
+                // through the same shared rule, keeping the early exit.
                 let mut saw_null = false;
                 for item in list {
                     let item_val = self.evaluate_expression(item, row)?;
-                    if matches!(item_val, Value::Null) {
-                        saw_null = true;
-                        continue;
-                    }
-                    if crate::graph::core::filtering::values_equal(&val, &item_val) {
-                        return Ok(Some(true));
+                    match membership::probe_element(&val, &item_val) {
+                        Some(true) => return Ok(Some(true)),
+                        Some(false) => {}
+                        None => saw_null = true,
                     }
                 }
                 if saw_null {
@@ -610,22 +615,18 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             Predicate::InLiteralSet { expr, values } => {
-                // Same Kleene rules as Predicate::In; the only difference is
-                // that `values` is a HashSet of pre-evaluated literals, so we
-                // detect a NULL element by checking `values.contains(&Value::Null)`
-                // once up front instead of per iteration.
+                // Same Kleene rules as Predicate::In; the difference is that
+                // `values` is a pre-built MembershipSet, so both the match and
+                // the no-match answer cost one coercion-normalized probe —
+                // and the NULL element is a flag read rather than a scan.
                 let val = self.evaluate_expression(expr, row)?;
                 if matches!(val, Value::Null) {
                     return Ok(None);
                 }
-                let matched = values.contains(&val)
-                    || values
-                        .iter()
-                        .any(|v| crate::graph::core::filtering::values_equal(v, &val));
-                if matched {
+                if values.matches(&val) {
                     return Ok(Some(true));
                 }
-                if values.contains(&Value::Null) {
+                if values.has_null() {
                     return Ok(None);
                 }
                 Ok(Some(false))
@@ -805,22 +806,20 @@ impl<'a> CypherExecutor<'a> {
                 if matches!(list_val, Value::Null) {
                     return Ok(None);
                 }
-                let items = parse_list_value(&list_val);
-                let mut saw_null = false;
-                for item in &items {
-                    if matches!(item, Value::Null) {
-                        saw_null = true;
-                        continue;
+                // Borrow the list where it already is a list. The previous
+                // `parse_list_value(&list_val)` cloned every element of the
+                // whole list for every row; only the string-encoded form
+                // needs parsing at all. A row-*independent* list never gets
+                // here — constant folding turns it into `InLiteralSet`.
+                let parsed;
+                let items: &[Value] = match &list_val {
+                    Value::List(items) => items,
+                    other => {
+                        parsed = parse_list_value(other);
+                        &parsed
                     }
-                    if crate::graph::core::filtering::values_equal(&val, item) {
-                        return Ok(Some(true));
-                    }
-                }
-                if saw_null {
-                    Ok(None)
-                } else {
-                    Ok(Some(false))
-                }
+                };
+                Ok(membership::kleene_contains_linear(&val, items))
             }
         }
     }
@@ -1366,8 +1365,9 @@ impl<'a> CypherExecutor<'a> {
                 let folded_expr = self.fold_constants_expr(expr);
                 let folded_list: Vec<Expression> =
                     list.iter().map(|i| self.fold_constants_expr(i)).collect();
-                // If all items are literals, convert to InLiteralSet for O(1) lookup
-                let all_literal: Option<std::collections::HashSet<Value>> = folded_list
+                // If all items are literals, convert to InLiteralSet so the
+                // list is indexed once instead of walked per row.
+                let all_literal: Option<Vec<Value>> = folded_list
                     .iter()
                     .map(|item| {
                         if let Expression::Literal(v) = item {
@@ -1380,7 +1380,7 @@ impl<'a> CypherExecutor<'a> {
                 if let Some(values) = all_literal {
                     Predicate::InLiteralSet {
                         expr: folded_expr,
-                        values,
+                        values: MembershipSet::new(values),
                     }
                 } else {
                     Predicate::In {
@@ -1403,10 +1403,27 @@ impl<'a> CypherExecutor<'a> {
                 pattern: self.fold_constants_expr(pattern),
             },
             Predicate::Exists { .. } => pred.clone(),
-            Predicate::InExpression { expr, list_expr } => Predicate::InExpression {
-                expr: self.fold_constants_expr(expr),
-                list_expr: self.fold_constants_expr(list_expr),
-            },
+            Predicate::InExpression { expr, list_expr } => {
+                let folded_expr = self.fold_constants_expr(expr);
+                let folded_list = self.fold_constants_expr(list_expr);
+                // A row-independent RHS — a `$param`, a literal list, any
+                // expression that folds to one — is resolved and indexed
+                // here, once, instead of being re-evaluated and re-cloned for
+                // every row. `Value::Null` is deliberately left alone:
+                // `x IN null` is UNKNOWN, which an empty set would answer as
+                // false. A string-encoded list also stays on the
+                // `InExpression` path, which is what knows how to parse it.
+                if let Expression::Literal(Value::List(items)) = &folded_list {
+                    return Predicate::InLiteralSet {
+                        expr: folded_expr,
+                        values: MembershipSet::new(items.clone()),
+                    };
+                }
+                Predicate::InExpression {
+                    expr: folded_expr,
+                    list_expr: folded_list,
+                }
+            }
             Predicate::LabelCheck { .. } => pred.clone(),
         }
     }
