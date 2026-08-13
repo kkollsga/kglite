@@ -140,6 +140,13 @@ pub struct KgliteBackend {
     /// `session.commit(tx, check_occ)` which handles the OCC
     /// version bump + Arc swap atomically.
     session: Arc<kglite::api::session::Session>,
+    /// The path this graph was served from — where a checkpoint writes.
+    ///
+    /// Held here rather than only in `main` because the checkpoint routes
+    /// (the exit save, and the `db.checkpoint()` verb) target the served
+    /// graph by definition: a save destination that could differ from what
+    /// the backend is serving is a footgun, not a feature.
+    graph_path: std::path::PathBuf,
     /// Server-wide `--readonly` flag. Rejects begin_transaction and
     /// auto-commit mutations.
     readonly: bool,
@@ -273,6 +280,7 @@ impl KgliteBackend {
     /// to `0.0.0.0` behind a hostname or reverse proxy.
     pub fn new(
         graph: DirGraph,
+        graph_path: std::path::PathBuf,
         readonly: bool,
         advertised_addr: String,
         csv_import: CsvImportPolicy,
@@ -280,6 +288,7 @@ impl KgliteBackend {
     ) -> Self {
         Self {
             session: Arc::new(kglite::api::session::Session::new(graph)),
+            graph_path,
             readonly,
             transactions: Arc::new(Mutex::new(HashMap::new())),
             session_counter: AtomicU64::new(0),
@@ -288,6 +297,18 @@ impl KgliteBackend {
             csv_import,
             identity,
         }
+    }
+
+    /// The shared session, cloned out so a caller can still reach the served
+    /// graph after the backend is moved into `BoltServer::serve` — which is
+    /// the only way to run a save *after* the accept loop has finished.
+    pub(crate) fn session_handle(&self) -> Arc<kglite::api::session::Session> {
+        Arc::clone(&self.session)
+    }
+
+    /// Where a checkpoint of this server's graph is written.
+    pub(crate) fn graph_path(&self) -> &std::path::Path {
+        &self.graph_path
     }
 
     /// Warn when a client whose driver gates on the agent prefix connects while
@@ -1073,6 +1094,7 @@ mod tests {
             .expect("create disk-backed graph");
         let backend = KgliteBackend::new(
             graph,
+            path.clone(),
             false,
             "127.0.0.1:0".into(),
             CsvImportPolicy::Denied,
@@ -1113,6 +1135,7 @@ mod tests {
         let graph = new_dir_graph_in_mode(StorageMode::Memory, None).expect("create memory graph");
         KgliteBackend::new(
             graph,
+            unique_disk_path().join("memory.kgl"),
             false,
             "127.0.0.1:0".into(),
             CsvImportPolicy::Denied,

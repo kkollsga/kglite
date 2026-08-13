@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`kglite-bolt-server --save-on-exit` writes the served graph back to
+  `--graph` when the server shuts down** (env mirror:
+  `KGLITE_BOLT_SAVE_ON_EXIT=1`). A Bolt server's writes are process-local —
+  they live in the served graph's in-memory state and previously reached the
+  file only if a client saved it some other way — so a stopped server lost
+  every write it had accepted. With the flag, shutdown runs one fsync'd,
+  atomic save and logs the saved graph version; a failed save is logged as an
+  error *and* exits non-zero, so a supervisor sees it. This is not a
+  durability guarantee: `SIGKILL`, a crash or a power loss still lose
+  everything since the last save, and because connections are not drained a
+  commit that races shutdown can land after it — which is what the logged
+  version is for. Refused at startup for `--readonly` (nothing to write back)
+  and for disk-mode graphs (every disk save publishes a new generation and
+  nothing prunes them).
+- **`SIGTERM` now triggers the same graceful shutdown as `SIGINT` in
+  `kglite-bolt-server`.** Only Ctrl-C was wired, so `systemctl stop`,
+  `docker stop` and a Kubernetes pod shutdown terminated the process through
+  the default handler — no connection shutdown, and (with the flag above) no
+  exit save. Both signals now run one shutdown path.
+
 ## [0.15.13] - 2026-08-12
 
 ### Changed

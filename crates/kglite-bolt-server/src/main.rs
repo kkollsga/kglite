@@ -5,7 +5,7 @@
 //! optional basic authentication, and graceful shutdown.
 
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -74,6 +74,26 @@ struct Cli {
     /// Reject all mutation queries at the execute boundary.
     #[arg(long, default_value_t = false)]
     readonly: bool,
+
+    /// Write the served graph back to `--graph` when the server shuts down.
+    ///
+    /// Off by default: this server's writes are process-local until something
+    /// checkpoints them, and an unasked-for write to the operator's file at
+    /// exit is not a default worth having. With the flag, `SIGINT` and
+    /// `SIGTERM` run a final save (fsync'd, atomic temp+rename) before the
+    /// process exits; a failed save is logged as an error AND exits non-zero,
+    /// so a supervisor sees the failure instead of a clean stop.
+    ///
+    /// Not a durability guarantee: `SIGKILL`, a power loss, or a crash lose
+    /// everything since the last checkpoint, and because connections are not
+    /// drained a commit racing shutdown can land *after* the save — the saved
+    /// graph version is logged so that case is diagnosable.
+    ///
+    /// Refused for `--readonly` (nothing to save) and for disk-mode graphs
+    /// (every disk save publishes a new generation and nothing prunes them).
+    /// Also settable as `KGLITE_BOLT_SAVE_ON_EXIT=1`.
+    #[arg(long, default_value_t = false, conflicts_with = "readonly")]
+    save_on_exit: bool,
 
     /// Report a Neo4j-compatible product identifier in the Bolt handshake.
     ///
@@ -159,6 +179,9 @@ struct Cli {
 /// Environment variable mirroring `--neo4j-compat`.
 const NEO4J_COMPAT_ENV: &str = "KGLITE_BOLT_NEO4J_COMPAT";
 
+/// Environment variable mirroring `--save-on-exit`.
+const SAVE_ON_EXIT_ENV: &str = "KGLITE_BOLT_SAVE_ON_EXIT";
+
 /// Read `name` as a boolean, accepting the spellings operators actually write.
 ///
 /// Parsed here rather than through clap's `env` support because clap would
@@ -182,6 +205,96 @@ fn env_flag(name: &str) -> Option<bool> {
             None
         }
     }
+}
+
+/// Refuse `--save-on-exit` in the configurations where an exit checkpoint is
+/// either meaningless or harmful.
+///
+/// `mode` is `None` before the graph is opened (the readonly check needs
+/// nothing else) and `Some(live_mode)` afterwards. clap's
+/// `conflicts_with = "readonly"` already covers flag-versus-flag; the readonly
+/// arm here is what catches the *environment* spelling, which clap cannot see.
+///
+/// Disk graphs are excluded deliberately: a disk save is an O(E) compaction
+/// that publishes a NEW generation, and nothing prunes the old ones — a server
+/// that checkpoints a disk graph grows the directory without bound. Mirrors
+/// the wheel's durable-mode restriction to the portable backends.
+fn ensure_save_on_exit_supported(readonly: bool, mode: Option<StorageMode>) -> Result<()> {
+    if readonly {
+        anyhow::bail!(
+            "--save-on-exit (or KGLITE_BOLT_SAVE_ON_EXIT) cannot be combined with \
+             --readonly: a read-only server never changes the graph, so there is \
+             nothing to write back at exit"
+        );
+    }
+    if mode == Some(StorageMode::Disk) {
+        anyhow::bail!(
+            "--save-on-exit is not supported for disk-mode graphs: every disk save \
+             publishes a new on-disk generation and nothing prunes the old ones, so \
+             repeated checkpoints grow the directory without bound. Serve a `.kgl` \
+             graph (memory or mapped) if you want an exit checkpoint"
+        );
+    }
+    Ok(())
+}
+
+/// Write the served graph back to `path`, fsync'd.
+///
+/// The graph version is logged next to the path because shutdown does not
+/// drain in-flight connections: a commit that lands after this save is lost,
+/// and comparing the logged version against the client's last committed
+/// version is how an operator tells that apart from a save that never ran.
+fn run_exit_save(session: &kglite::api::session::Session, path: &Path) -> Result<()> {
+    tracing::info!(path = %path.display(), "save-on-exit: writing the served graph back");
+    session
+        .save(&path.to_string_lossy(), true)
+        .map_err(|e| anyhow::anyhow!("save-on-exit failed writing {}: {e}", path.display()))?;
+    tracing::info!(
+        path = %path.display(),
+        graph_version = session.version(),
+        "save-on-exit complete"
+    );
+    Ok(())
+}
+
+/// Resolve when the supervisor asks this process to stop.
+///
+/// Both SIGINT (a terminal Ctrl-C) and SIGTERM (`systemctl stop`, `docker
+/// stop`, a Kubernetes pod shutdown) run the *same* graceful path. Waiting on
+/// SIGINT alone would leave every supervised deployment terminating through
+/// the default SIGTERM handler, which kills the process outright — no
+/// connection shutdown and, with `--save-on-exit`, no exit save.
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    match signal(SignalKind::terminate()) {
+        Ok(mut sigterm) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT received; shutting down"),
+                _ = sigterm.recv() => tracing::info!("SIGTERM received; shutting down"),
+            }
+        }
+        Err(e) => {
+            // Registration can only fail on a platform/permission problem.
+            // Degrade to SIGINT rather than refusing to serve, but say so:
+            // silently serving without the SIGTERM path is exactly the
+            // failure this function exists to remove.
+            tracing::warn!(
+                error = %e,
+                "could not install a SIGTERM handler; only SIGINT will shut down gracefully"
+            );
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("SIGINT received; shutting down");
+        }
+    }
+}
+
+/// Non-unix has no SIGTERM; Ctrl-C is the whole surface.
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!("SIGINT received; shutting down");
 }
 
 fn init_tracing() {
@@ -229,6 +342,13 @@ async fn serve() -> Result<()> {
         .map(StorageMode::parse)
         .transpose()
         .map_err(|e| anyhow::anyhow!(e))?;
+    // Flag OR environment, like `--neo4j-compat`. The readonly refusal runs
+    // before the graph is touched so an impossible configuration fails fast;
+    // the storage-mode refusal needs the opened graph and runs below.
+    let save_on_exit = cli.save_on_exit || env_flag(SAVE_ON_EXIT_ENV).unwrap_or(false);
+    if save_on_exit {
+        ensure_save_on_exit_supported(cli.readonly, None)?;
+    }
     let started = start_graph(&cli.graph, requested_mode, cli.readonly, &mut |_| {})?;
     // Bind the lease for the whole of `serve`. `_writer_lease` rather than
     // `_`: a bare `_` drops it here, releasing write ownership before the
@@ -249,6 +369,12 @@ async fn serve() -> Result<()> {
         converted_from = started.converted_from.map(StorageMode::as_str),
         "graph ready; constructing Bolt server"
     );
+    if save_on_exit {
+        ensure_save_on_exit_supported(
+            cli.readonly,
+            Some(kglite::api::storage::live_storage_mode(&dir_arc)),
+        )?;
+    }
 
     // The backend stores the DirGraph behind its own Arc<Mutex<>> for
     // commit-swap. Unwrap the Arc — if no
@@ -281,19 +407,29 @@ async fn serve() -> Result<()> {
         neo4j_compat,
         "bolt handshake identity"
     );
-    let backend = KgliteBackend::new(dir, cli.readonly, advertised_addr, csv_import, identity);
+    let backend = KgliteBackend::new(
+        dir,
+        cli.graph.clone(),
+        cli.readonly,
+        advertised_addr,
+        csv_import,
+        identity,
+    );
+    // Keep the served graph reachable after the backend moves into the
+    // server: `serve` consumes the builder, and the exit hook below runs once
+    // the accept loop is done — while `_writer_lease` is still held, so the
+    // save cannot race another process taking write ownership.
+    let exit_session = backend.session_handle();
+    let served_path = backend.graph_path().to_path_buf();
 
     let addr = SocketAddr::new(cli.bind, cli.port);
 
     let mut builder = BoltServer::builder(backend)
         .max_sessions(cli.max_sessions)
         .max_message_size(cli.max_message_size)
-        .shutdown(async {
-            // Single SIGINT triggers graceful shutdown. Subsequent SIGINTs
-            // bypass this and let tokio's default handler abort.
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("SIGINT received; shutting down");
-        });
+        // A single SIGINT or SIGTERM triggers graceful shutdown. Subsequent
+        // signals bypass this and let the default handler abort.
+        .shutdown(shutdown_signal());
 
     if let Some(secs) = cli.idle_timeout {
         builder = builder.idle_timeout(Duration::from_secs(secs));
@@ -336,12 +472,98 @@ async fn serve() -> Result<()> {
         tracing::info!(user = %cli.auth_user.as_deref().unwrap_or(""), "wired --auth basic validator");
     }
 
-    tracing::info!(%addr, readonly = cli.readonly, "Bolt server starting");
-    builder
+    tracing::info!(
+        %addr,
+        readonly = cli.readonly,
+        save_on_exit,
+        "Bolt server starting"
+    );
+    let serve_result = builder
         .serve(addr)
         .await
-        .map_err(|e| anyhow::anyhow!("BoltServer::serve failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("BoltServer::serve failed: {}", e));
 
     tracing::info!("Bolt server stopped");
+    // Attempted whether or not `serve` returned an error: an operator who
+    // asked for an exit checkpoint wants one on the failure path too. Both
+    // results are reported; a failed save exits non-zero rather than being
+    // logged and swallowed.
+    let save_result = if save_on_exit {
+        run_exit_save(&exit_session, &served_path)
+            .inspect_err(|e| tracing::error!(error = %format!("{e:#}"), "save-on-exit FAILED"))
+    } else {
+        Ok(())
+    };
+    serve_result?;
+    save_result?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_on_exit_is_refused_for_a_readonly_server() {
+        let error = ensure_save_on_exit_supported(true, None)
+            .expect_err("a read-only server has nothing to save");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("--readonly") && message.contains("--save-on-exit"),
+            "the refusal must name both flags: {message}"
+        );
+    }
+
+    #[test]
+    fn save_on_exit_is_refused_for_a_disk_graph() {
+        let error = ensure_save_on_exit_supported(false, Some(StorageMode::Disk))
+            .expect_err("disk-mode exit saves grow the directory without bound");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("disk-mode") && message.contains("generation"),
+            "the refusal must carry the reason, not just the verdict: {message}"
+        );
+    }
+
+    #[test]
+    fn save_on_exit_is_allowed_for_the_portable_modes() {
+        for mode in [StorageMode::Memory, StorageMode::Mapped] {
+            ensure_save_on_exit_supported(false, Some(mode))
+                .unwrap_or_else(|e| panic!("{} must support an exit save: {e:#}", mode.as_str()));
+        }
+    }
+
+    /// The exit save writes a file a later open can read back, and reports a
+    /// failure rather than logging one. Mutation evidence: dropping the
+    /// `map_err` in `run_exit_save` makes the unwritable-path case pass
+    /// `Ok(())` and fails the second half of this test.
+    #[test]
+    fn exit_save_writes_the_graph_and_reports_failure() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "kglite-bolt-exit-save-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("served.kgl");
+
+        let graph = kglite::api::storage::new_dir_graph_in_mode(StorageMode::Memory, None)
+            .expect("memory graph");
+        let session = kglite::api::session::Session::new(graph);
+        run_exit_save(&session, &path).expect("exit save on a writable path");
+        assert!(path.exists(), "the exit save must produce the served file");
+
+        let unwritable = dir.join("no-such-directory").join("served.kgl");
+        let error = run_exit_save(&session, &unwritable)
+            .expect_err("a save into a missing directory must be reported");
+        assert!(
+            format!("{error:#}").contains("save-on-exit failed"),
+            "the error must identify the exit save: {error:#}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

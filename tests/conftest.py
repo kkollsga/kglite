@@ -1,6 +1,7 @@
 """Shared fixtures for kglite test suite."""
 
 import importlib.util
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -174,11 +175,17 @@ def _build_bolt_fixture_graph(path: Path) -> None:
     g.save(str(path))
 
 
-def _spawn_bolt_server(fixture_path: Path, readonly: bool = False, extra_args: list[str] | None = None):
+def _spawn_bolt_server(
+    fixture_path: Path,
+    readonly: bool = False,
+    extra_args: list[str] | None = None,
+    env: dict[str, str] | None = None,
+):
     """Spawn `kglite-bolt-server` on an ephemeral port; return (proc, url).
     Caller is responsible for kill+wait on teardown via
     `_teardown_bolt_server`. The `extra_args` list is appended verbatim
-    to the command line (e.g. ["--max-message-size", "1024"]).
+    to the command line (e.g. ["--max-message-size", "1024"]); `env` is
+    overlaid on the inherited environment (for the flags' env mirrors).
     """
     port = _find_free_port()
     cmd = [
@@ -194,7 +201,12 @@ def _spawn_bolt_server(fixture_path: Path, readonly: bool = False, extra_args: l
         cmd.append("--readonly")
     if extra_args:
         cmd.extend(extra_args)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, **env} if env else None,
+    )
     url = f"bolt://127.0.0.1:{port}"
     try:
         _wait_for_listener("127.0.0.1", port, deadline_s=10.0)
@@ -212,6 +224,31 @@ def _teardown_bolt_server(proc) -> None:
     except subprocess.TimeoutExpired:
         proc.terminate()
         proc.wait(timeout=2)
+
+
+def _graceful_stop_bolt_server(proc, sig=None, timeout: float = 20.0) -> int:
+    """Ask the server to shut down the way a supervisor does, and wait.
+
+    POSIX only (Windows has no SIGINT/SIGTERM delivery to a child that means
+    "shut down gracefully"); callers gate on ``os.name == "posix"``.
+
+    Deliberately NOT a variant of `_teardown_bolt_server`, which SIGKILLs
+    first: a killed server never runs its shutdown path, so it cannot test
+    anything that happens *during* one. On timeout the process is killed and
+    the failure is raised — an exit-hook that hangs must fail the test, not
+    quietly become a leaked process.
+
+    Returns the exit status.
+    """
+    import signal as _signal
+
+    proc.send_signal(_signal.SIGINT if sig is None else sig)
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+        raise
 
 
 def _bolt_binary_available() -> bool:

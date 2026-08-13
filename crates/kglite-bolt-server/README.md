@@ -82,6 +82,9 @@ Options:
   --bind <ADDR>                Bind address [default: 127.0.0.1]
   --port <PORT>                Port [default: 7687]
   --readonly                   Reject mutations
+  --save-on-exit               Save the served graph back to --graph on SIGINT/SIGTERM
+                               (also KGLITE_BOLT_SAVE_ON_EXIT=1; refused with
+                               --readonly and for disk-mode graphs)
   --neo4j-compat               Report a Neo4j-compatible agent in the handshake
   --auth <USER:PASS>           Basic auth credentials
   --idle-timeout <SECS>        Per-session idle timeout
