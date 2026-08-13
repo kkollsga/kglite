@@ -707,3 +707,162 @@ fn packed_column_names_cannot_escape_temp_root() {
         );
     }
 }
+
+// ── Mapped columns stay mapped across writes (Phase 4 contract) ─────────────
+//
+// `set_memory_limit` is the only bound a caller can place on the columnar
+// heap. A spilled column that comes back to the heap the first time it is
+// written removes that bound silently — the limit is not re-enforced anywhere
+// after a statement, so the heap only ever grows. `MmapOrVec::set` writes
+// through `map_mut` into the backing file, and every writable mapped column
+// lives in a process-owned spill/temp directory that is removed on drop
+// (never a user's `.kgl`), so the write belongs in the file.
+
+/// A `set` on a file-backed column writes through the mapping instead of
+/// pulling the column onto the heap, and the new byte reaches the file.
+#[test]
+fn mapped_column_set_writes_through_to_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let (schema, meta, interner) = make_schema_and_meta();
+    let mut store = ColumnStore::new(schema, &meta, &interner);
+
+    let age_key = InternedKey::from_str("age");
+    let name_key = InternedKey::from_str("name");
+    for i in 0..128i64 {
+        store.push_row(&[
+            (name_key, Value::String(format!("n{i}"))),
+            (age_key, Value::Int64(i)),
+        ]);
+    }
+    store.materialize_to_files(dir.path(), &interner).unwrap();
+    assert!(store.is_mapped(), "precondition: the fixture must spill");
+    let mapped_heap = store.heap_bytes();
+
+    assert!(store.set(7, age_key, &Value::Int64(4242), None));
+
+    assert_eq!(store.get(7, age_key), Some(Value::Int64(4242)));
+    assert!(
+        store.is_mapped(),
+        "a single-cell SET un-mapped the store: set_memory_limit's bound is gone"
+    );
+    assert_eq!(
+        store.heap_bytes(),
+        mapped_heap,
+        "the touched column was copied onto the heap instead of written through"
+    );
+
+    // The write is in the file, not only in a private overlay: read the raw
+    // i64 image back off disk.
+    let bytes = std::fs::read(dir.path().join("age.i64")).unwrap();
+    let cell = i64::from_le_bytes(bytes[7 * 8..8 * 8].try_into().unwrap());
+    assert_eq!(cell, 4242, "the mapped write never reached the spill file");
+}
+
+/// Restoring a cell pre-image (what statement rollback does) travels the same
+/// route as the write it undoes, so a rollback on a spilled graph is
+/// symmetric and does not un-map it either.
+#[test]
+fn mapped_column_cell_restore_is_symmetric() {
+    let dir = tempfile::tempdir().unwrap();
+    let (schema, meta, interner) = make_schema_and_meta();
+    let mut store = ColumnStore::new(schema, &meta, &interner);
+
+    let age_key = InternedKey::from_str("age");
+    let name_key = InternedKey::from_str("name");
+    for i in 0..128i64 {
+        store.push_row(&[
+            (name_key, Value::String(format!("n{i}"))),
+            (age_key, Value::Int64(i)),
+        ]);
+    }
+    store.materialize_to_files(dir.path(), &interner).unwrap();
+    let mapped_heap = store.heap_bytes();
+    let prior = store.get(9, age_key);
+
+    store.set(9, age_key, &Value::Int64(-1), None);
+    // Undo: the journal replays the pre-image through the same `set`.
+    store.set(9, age_key, prior.as_ref().unwrap_or(&Value::Null), None);
+
+    assert_eq!(store.get(9, age_key), Some(Value::Int64(9)));
+    assert!(store.is_mapped(), "rollback un-mapped the store");
+    assert_eq!(store.heap_bytes(), mapped_heap);
+}
+
+/// String columns park updates in the `relocated` overlay rather than
+/// rewriting `offsets`, so they must also keep their mapping — the overlay is
+/// the bounded per-changed-cell residue, not a whole-column copy.
+#[test]
+fn mapped_str_column_set_keeps_its_mapping() {
+    let dir = tempfile::tempdir().unwrap();
+    let (schema, meta, interner) = make_schema_and_meta();
+    let mut store = ColumnStore::new(schema, &meta, &interner);
+
+    let name_key = InternedKey::from_str("name");
+    for i in 0..128i64 {
+        store.push_row(&[(name_key, Value::String(format!("name-{i}")))]);
+    }
+    store.materialize_to_files(dir.path(), &interner).unwrap();
+    assert!(store.is_mapped());
+    let mapped_heap = store.heap_bytes();
+
+    store.set(3, name_key, &Value::String("rewritten".into()), None);
+
+    assert_eq!(
+        store.get(3, name_key),
+        Some(Value::String("rewritten".into()))
+    );
+    assert!(store.is_mapped());
+    assert!(
+        store.heap_bytes() <= mapped_heap + 64,
+        "a one-cell string SET grew the heap by {} bytes",
+        store.heap_bytes() - mapped_heap
+    );
+}
+
+/// A held reader sharing the store's `Arc` is isolated from a mapped
+/// write-through: `Arc::make_mut` hands the *writer* a fresh clone, and
+/// `MmapOrVec::clone` always yields a `Heap` buffer, so the writer never
+/// touches the bytes the reader is mapping. Without that, an in-place mapped
+/// write would mutate a page a frozen graph or a held result view is still
+/// iterating.
+///
+/// The residue this pins in passing: it is the *writer* that leaves the
+/// mapping behind, not the reader. A first write under a held view therefore
+/// un-maps the master and moves it onto the heap — the pre-existing
+/// fork-copy cost (D2), unchanged by the write-through, and the one shape in
+/// which `set_memory_limit` still loses its bound.
+#[test]
+fn a_held_reader_is_isolated_from_a_mapped_write_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let (schema, meta, interner) = make_schema_and_meta();
+    let mut store = ColumnStore::new(schema, &meta, &interner);
+
+    let age_key = InternedKey::from_str("age");
+    for i in 0..128i64 {
+        store.push_row(&[(age_key, Value::Int64(i))]);
+    }
+    store.materialize_to_files(dir.path(), &interner).unwrap();
+
+    let mut master = Arc::new(store);
+    let held = Arc::clone(&master);
+
+    Arc::make_mut(&mut master).set(5, age_key, &Value::Int64(999), None);
+
+    assert_eq!(master.get(5, age_key), Some(Value::Int64(999)));
+    assert_eq!(
+        held.get(5, age_key),
+        Some(Value::Int64(5)),
+        "the mapped write reached a held reader's bytes"
+    );
+    assert!(!Arc::ptr_eq(&master, &held));
+    assert!(
+        held.is_mapped(),
+        "the reader kept the mapping; the writer took the heap copy"
+    );
+    assert!(
+        !master.is_mapped(),
+        "the fork copy is heap-backed — this is the D2 fork cost, pinned here \
+         so a future change that shares the mapping across the fork has to \
+         come past this assertion"
+    );
+}

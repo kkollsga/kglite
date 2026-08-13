@@ -39,11 +39,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path that merged the incoming columns over the existing row instead of
   rewriting it, so a property left out of the batch survived — a replace
   silently behaving as an update, and only when a view happened to be held.
-- **A write to an mmap-backed (spilled or mapped-mode) column brings only that
-  column back to the heap**, where the whole-store copy above brought back
-  every column of the type. `set_memory_limit` is still defeated by repeated
-  writes — that contract is a separate fix — but the amount a write pulls back
-  is now bounded by the columns it actually touches.
+- **A write to an mmap-backed (spilled or mapped-mode) column no longer brings
+  it back to the heap at all, so `set_memory_limit` survives ordinary writes.**
+  The whole-store copy above brought every column of the type onto the heap on
+  the first write of every statement; removing it left the single touched
+  column still being copied. It is now written *through* its mapping instead —
+  the byte lands in the spill file, which is a process-owned temporary file in
+  every case (a mapped `open()` copies each column into its own temp file
+  before mapping it, so no write ever reaches a user's `.kgl`), and the graph
+  stays spilled with its heap flat. Measured at 50k rows × 12 columns under a
+  1 MB limit: 1.65 MB before and after twenty single-row `SET`s, where 0.15.14
+  went 1.65 MB → 7.99 MB and lost the mapping entirely. A query result or
+  `.copy()` holding the graph still forks the store to a heap copy for the
+  writer, leaving the reader's mapped bytes untouched.
+  Two limits remain, unchanged and now pinned by tests: a `SET` for a property
+  the type has no column for appends an untyped column that cannot be mmap'd
+  at all, and neither can a column a type-mismatched `SET` demotes; and a
+  graph's id column is held in that same untyped form, so it stays on the heap
+  (1.6 MB at 50k rows) whatever the limit says.
 
 ## [0.15.14] - 2026-08-13
 

@@ -1416,18 +1416,19 @@ impl ColumnStore {
             }
         };
         let col = &mut self.columns[slot as usize];
-        // A file-backed column comes to heap before it is written, and only
-        // the column actually written does.
+        // A file-backed column is written **through its mapping** — it is not
+        // pulled onto the heap first. `MmapOrVec::set` writes into the
+        // `map_mut` region, and every writable mapped column here lives in a
+        // process-owned spill/temp directory that `DirGraph`'s `temp_dirs`
+        // removes on drop — never a user's `.kgl` (a mapped *load* copies each
+        // column into `temp_dir/column_N.ext` before mapping it). So the byte
+        // belongs in that file, and `set_memory_limit`'s bound survives the
+        // write: `heap_bytes` for the touched column stays 0 instead of
+        // growing by the whole column, permanently, with nothing to re-enforce
+        // the limit afterwards.
         //
-        // `MmapOrVec::set` would happily write through the `map_mut` into the
-        // spill file, but this store's memory accounting (`heap_bytes`,
-        // `is_mapped`) and the spill/limit contract built on it are the
-        // Phase-4 subject; until that lands, a write leaves the column heap-
-        // resident exactly as it did when the whole store was cloned per
-        // statement — just bounded to one column instead of all of them.
-        if col.is_mapped() {
-            col.materialize_to_heap();
-        }
+        // Only a type mismatch materialises: `demote_to_mixed` rebuilds the
+        // column as a heap `Vec<Value>`, because `Mixed` cannot be mmap'd.
         if col.set(row_id, value).is_err() {
             self.demote_to_mixed(slot as usize);
             let _ = self.columns[slot as usize].set(row_id, value);
