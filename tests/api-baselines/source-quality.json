@@ -175,8 +175,8 @@
     {
       "path": "crates/kglite/src/graph/io/file.rs",
       "qualified_name": "crate::load_disk_dir",
-      "lines": 338,
-      "branches": 60,
+      "lines": 217,
+      "branches": 39,
       "nesting": 6
     },
     {
@@ -497,9 +497,9 @@
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::add_nodes",
-      "lines": 275,
-      "branches": 27,
-      "nesting": 4
+      "lines": 233,
+      "branches": 19,
+      "nesting": 3
     },
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",

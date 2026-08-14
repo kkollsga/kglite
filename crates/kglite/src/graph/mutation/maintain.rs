@@ -306,6 +306,104 @@ fn note_loaded_id(max_loaded_id: &mut u32, id: &Value) {
     }
 }
 
+/// Merge this call's column types into the node type's metadata and register
+/// the id/title field aliases, appending one message to `errors` for every
+/// column whose type disagrees with the stored schema. Cold once-per-call
+/// prologue of `add_nodes`, split out to keep that function under the
+/// complexity ceiling.
+fn install_node_type_metadata(
+    graph: &mut DirGraph,
+    node_type: &str,
+    df_data: &DataFrame,
+    unique_id_field: &str,
+    title_field: &str,
+    should_update_title: bool,
+    errors: &mut Vec<String>,
+) {
+    let df_column_types = get_column_types(df_data);
+
+    // Check for type mismatches if metadata already exists
+    if let Some(existing_meta) = graph.get_node_type_metadata(node_type) {
+        for (col_name, col_type) in &df_column_types {
+            if let Some(existing_type) = existing_meta.get(col_name) {
+                if existing_type != col_type {
+                    errors.push(format!(
+                        "Type mismatch for property '{}': existing schema has '{}', but data has '{}'",
+                        col_name, existing_type, col_type
+                    ));
+                }
+            }
+        }
+    }
+
+    // Upsert node type metadata (merges new column types into existing)
+    graph.upsert_node_type_metadata(node_type, df_column_types);
+
+    // Record original field name aliases so users can query by original column name
+    if unique_id_field != "id" {
+        graph
+            .id_field_aliases_mut()
+            .insert(node_type.to_string(), unique_id_field.to_string());
+    }
+    // Only register the title alias when the caller explicitly named one.
+    // Otherwise a follow-up add_nodes(..., node_title_field=None) would
+    // silently rebind the alias to unique_id_field, making `s.id` resolve
+    // to the stored title.
+    if should_update_title && title_field != "title" {
+        graph
+            .title_field_aliases_mut()
+            .insert(node_type.to_string(), title_field.to_string());
+    }
+}
+
+/// Build the `TypeSchema` for this call's property columns plus any active
+/// provenance keys, and store or extend the node type's schema with it.
+/// Returns the interned provenance stamps every row of the batch receives.
+/// Cold once-per-call prologue of `add_nodes`.
+fn install_type_schema(
+    graph: &mut DirGraph,
+    node_type: &str,
+    property_columns: &[(String, usize)],
+) -> Vec<(InternedKey, Value)> {
+    // Build TypeSchema from DataFrame columns for compact storage
+    let mut schema_keys: Vec<InternedKey> = property_columns
+        .iter()
+        .map(|(col_name, _)| graph.interner.get_or_intern(col_name))
+        .collect();
+    // Register every active reserved key so compact and columnar stores can
+    // persist the complete engine-owned provenance stamp.
+    let provenance_stamps: Vec<(InternedKey, Value)> = if graph.auto_timestamp_for(node_type) {
+        graph
+            .provenance_props()
+            .into_iter()
+            .map(|(name, value)| (graph.interner.get_or_intern(name), value))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    schema_keys.extend(provenance_stamps.iter().map(|(key, _)| *key));
+    let type_schema = Arc::new(TypeSchema::from_keys(schema_keys));
+
+    // Store or extend the schema for this node type
+    let existing = graph.type_schemas.get(node_type).cloned();
+    if let Some(existing_schema) = existing {
+        // Extend the existing schema with any new keys
+        let mut merged = (*existing_schema).clone();
+        for (_, key) in type_schema.iter() {
+            merged.add_key(key);
+        }
+        let merged_arc = Arc::new(merged);
+        graph
+            .type_schemas_mut()
+            .insert(node_type.to_string(), merged_arc);
+    } else {
+        graph
+            .type_schemas_mut()
+            .insert(node_type.to_string(), type_schema);
+    }
+    provenance_stamps
+}
+
 pub fn add_nodes(
     graph: &mut DirGraph,
     df_data: DataFrame,
@@ -332,40 +430,15 @@ pub fn add_nodes(
     // Track errors
     let mut errors = Vec::new();
 
-    let df_column_types = get_column_types(&df_data);
-
-    // Check for type mismatches if metadata already exists
-    if let Some(existing_meta) = graph.get_node_type_metadata(&node_type) {
-        for (col_name, col_type) in &df_column_types {
-            if let Some(existing_type) = existing_meta.get(col_name) {
-                if existing_type != col_type {
-                    errors.push(format!(
-                        "Type mismatch for property '{}': existing schema has '{}', but data has '{}'",
-                        col_name, existing_type, col_type
-                    ));
-                }
-            }
-        }
-    }
-
-    // Upsert node type metadata (merges new column types into existing)
-    graph.upsert_node_type_metadata(&node_type, df_column_types);
-
-    // Record original field name aliases so users can query by original column name
-    if unique_id_field != "id" {
-        graph
-            .id_field_aliases_mut()
-            .insert(node_type.clone(), unique_id_field.clone());
-    }
-    // Only register the title alias when the caller explicitly named one.
-    // Otherwise a follow-up add_nodes(..., node_title_field=None) would
-    // silently rebind the alias to unique_id_field, making `s.id` resolve
-    // to the stored title.
-    if should_update_title && title_field != "title" {
-        graph
-            .title_field_aliases_mut()
-            .insert(node_type.clone(), title_field.clone());
-    }
+    install_node_type_metadata(
+        graph,
+        &node_type,
+        &df_data,
+        &unique_id_field,
+        &title_field,
+        should_update_title,
+        &mut errors,
+    );
 
     // The per-row conflict check reads the type's live id index. Building it
     // here (a no-op once it exists) replaces the `TypeLookup` snapshot, which
@@ -399,42 +472,7 @@ pub fn add_nodes(
         })
         .collect();
 
-    // Build TypeSchema from DataFrame columns for compact storage
-    let mut schema_keys: Vec<InternedKey> = property_columns
-        .iter()
-        .map(|(col_name, _)| graph.interner.get_or_intern(col_name))
-        .collect();
-    // Register every active reserved key so compact and columnar stores can
-    // persist the complete engine-owned provenance stamp.
-    let provenance_stamps: Vec<(InternedKey, Value)> = if graph.auto_timestamp_for(&node_type) {
-        graph
-            .provenance_props()
-            .into_iter()
-            .map(|(name, value)| (graph.interner.get_or_intern(name), value))
-            .collect()
-    } else {
-        Vec::new()
-    };
-    schema_keys.extend(provenance_stamps.iter().map(|(key, _)| *key));
-    let type_schema = Arc::new(TypeSchema::from_keys(schema_keys));
-
-    // Store or extend the schema for this node type
-    let existing = graph.type_schemas.get(&node_type).cloned();
-    if let Some(existing_schema) = existing {
-        // Extend the existing schema with any new keys
-        let mut merged = (*existing_schema).clone();
-        for (_, key) in type_schema.iter() {
-            merged.add_key(key);
-        }
-        let merged_arc = Arc::new(merged);
-        graph
-            .type_schemas_mut()
-            .insert(node_type.clone(), merged_arc);
-    } else {
-        graph
-            .type_schemas_mut()
-            .insert(node_type.clone(), type_schema);
-    }
+    let provenance_stamps = install_type_schema(graph, &node_type, &property_columns);
 
     // Pre-intern property column keys once (avoids re-interning per row)
     let interned_columns: Vec<(InternedKey, usize)> = property_columns
@@ -2039,509 +2077,16 @@ pub fn update_node_properties(
 mod edge_spec_tests;
 
 #[cfg(test)]
-mod connection_property_tests {
-    use super::*;
-
-    fn docs(graph: &mut DirGraph, ids: &[i64]) {
-        let rows: Vec<Vec<Value>> = ids.iter().map(|i| vec![Value::Int64(*i)]).collect();
-        let df = DataFrame::from_cypher_rows(vec!["id".to_string()], rows).unwrap();
-        add_nodes(
-            graph,
-            df,
-            "Doc".to_string(),
-            "id".to_string(),
-            Some("id".to_string()),
-            None,
-        )
-        .unwrap();
-    }
-
-    /// **Golden — an edge property column that is null in every row must leave
-    /// no trace.** Not on the edge, not in the connection type's
-    /// `property_types` (which is serialized into `.kgl` and pinned by the
-    /// golden-hash test), and not in the persisted interner table.
-    ///
-    /// This is the contract that constrains any rewrite of `extract_props`:
-    /// the obvious "resolve the columns once, write a value per column" shape
-    /// stores a `Null` for the empty column and silently widens every
-    /// downstream consumer's property set.
-    ///
-    /// Both passes are covered: row 1 connects two existing nodes (Pass A),
-    /// row 2 names a target that does not exist yet, so it is deferred,
-    /// vivified as a stub (Pass B) and replayed through the *same*
-    /// `extract_props` (Pass C).
-    #[test]
-    fn all_null_edge_property_column_stores_nothing() {
-        let mut graph = DirGraph::new();
-        docs(&mut graph, &[1, 2, 3]);
-
-        let df = DataFrame::from_cypher_rows(
-            vec![
-                "src".to_string(),
-                "tgt".to_string(),
-                "weight".to_string(),
-                "note".to_string(),
-            ],
-            vec![
-                vec![
-                    Value::Int64(1),
-                    Value::Int64(2),
-                    Value::Int64(7),
-                    Value::Null,
-                ],
-                // Target 99 does not exist — deferred, vivified, replayed.
-                vec![
-                    Value::Int64(3),
-                    Value::Int64(99),
-                    Value::Int64(9),
-                    Value::Null,
-                ],
-            ],
-        )
-        .unwrap();
-
-        let report = add_connections(
-            &mut graph,
-            df,
-            "LINKS".to_string(),
-            "Doc".to_string(),
-            "src".to_string(),
-            "Doc".to_string(),
-            "tgt".to_string(),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(report.connections_created, 2, "both passes must connect");
-
-        let weight = InternedKey::from_str("weight");
-        let note = InternedKey::from_str("note");
-        let mut seen = 0;
-        for data in graph.graph.edge_weights() {
-            seen += 1;
-            assert!(
-                data.properties.iter().any(|(k, _)| *k == weight),
-                "populated column must be stored"
-            );
-            assert!(
-                !data.properties.iter().any(|(k, _)| *k == note),
-                "all-null column must not be stored on the edge"
-            );
-        }
-        assert_eq!(seen, 2);
-
-        let meta = graph
-            .connection_type_metadata
-            .get("LINKS")
-            .expect("connection type registered");
-        assert!(meta.property_types.contains_key("weight"));
-        assert!(
-            !meta.property_types.contains_key("note"),
-            "all-null column must not enter the connection type's property list"
-        );
-
-        assert!(graph.interner.iter().any(|(_, s)| s == "weight"));
-        assert!(
-            !graph.interner.iter().any(|(_, s)| s == "note"),
-            "all-null column must not enter the persisted interner table"
-        );
-    }
-}
+#[path = "maintain_connection_property_tests.rs"]
+mod connection_property_tests;
 
 #[cfg(test)]
-mod id_index_tests {
-    use super::*;
-
-    /// Regression (issue #20): after `add_nodes`, the type's `id_indices`
-    /// entry must be present so the read path (`lookup_by_id_readonly`, used
-    /// by `MATCH (n {id:X})` and the `MERGE` match) is O(1). Pre-fix the
-    /// index was removed and never rebuilt for reads, so id-equality lookups
-    /// fell back to an O(node-position) linear scan (e.g. ~26µs for a high-id
-    /// node on 30k rows vs ~0.9µs after the fix).
-    #[test]
-    fn add_nodes_builds_id_index() {
-        let mut g = DirGraph::new();
-        let rows: Vec<Vec<Value>> = (0..1000).map(|i| vec![Value::Int64(i)]).collect();
-        let df = DataFrame::from_cypher_rows(vec!["id".to_string()], rows).unwrap();
-        add_nodes(
-            &mut g,
-            df,
-            "Person".to_string(),
-            "id".to_string(),
-            Some("id".to_string()),
-            None,
-        )
-        .unwrap();
-
-        assert!(
-            g.id_indices.contains_key("Person"),
-            "id_index must be built after add_nodes so reads are O(1), not a linear scan"
-        );
-        // The index resolves a high-position id without a scan.
-        assert!(g
-            .lookup_by_id_readonly("Person", &Value::Int64(999))
-            .is_some());
-    }
-
-    #[test]
-    fn add_nodes_collision_preflight_leaves_graph_unchanged() {
-        let mut g = DirGraph::new();
-        let incoming = "CollisionType";
-        g.interner
-            .try_register(
-                crate::graph::schema::InternedKey::from_str(incoming),
-                "conflicting-existing",
-            )
-            .unwrap();
-        let before_interner: Vec<_> = g
-            .interner
-            .iter()
-            .map(|(key, value)| (key, value.to_string()))
-            .collect();
-        let df = DataFrame::from_cypher_rows(vec!["id".to_string()], vec![vec![Value::Int64(1)]])
-            .unwrap();
-        let err = add_nodes(
-            &mut g,
-            df,
-            incoming.to_string(),
-            "id".to_string(),
-            None,
-            None,
-        )
-        .unwrap_err();
-        assert!(err.contains("hash collision"));
-        assert_eq!(g.graph.node_count(), 0);
-        assert!(g.node_type_metadata.is_empty());
-        assert!(g.type_indices.is_empty());
-        assert_eq!(
-            g.interner
-                .iter()
-                .map(|(key, value)| (key, value.to_string()))
-                .collect::<Vec<_>>(),
-            before_interner
-        );
-    }
-
-    /// A declared-PRIMARY-KEY type rejects a within-batch duplicate id; a
-    /// clean batch loads. Undeclared types keep the permissive default.
-    #[test]
-    fn add_nodes_rejects_within_batch_pk_duplicate() {
-        use crate::graph::schema::{NodeSchemaDefinition, SchemaDefinition, SchemaInstall};
-
-        let mut g = DirGraph::new();
-        let mut schema = SchemaDefinition::new();
-        schema.add_node_schema(
-            "Person".to_string(),
-            NodeSchemaDefinition {
-                primary_key: Some("id".to_string()),
-                ..Default::default()
-            },
-        );
-        g.set_schema(schema, SchemaInstall::Merge)
-            .expect("schema install");
-
-        let dup = DataFrame::from_cypher_rows(
-            vec!["id".to_string()],
-            vec![
-                vec![Value::Int64(1)],
-                vec![Value::Int64(2)],
-                vec![Value::Int64(2)],
-            ],
-        )
-        .unwrap();
-        let err = add_nodes(
-            &mut g,
-            dup,
-            "Person".to_string(),
-            "id".to_string(),
-            Some("id".to_string()),
-            None,
-        )
-        .unwrap_err();
-        assert!(err.contains("duplicate primary key"), "got: {err}");
-
-        // A clean batch on the same declared-PK type succeeds.
-        let clean = DataFrame::from_cypher_rows(
-            vec!["id".to_string()],
-            vec![vec![Value::Int64(10)], vec![Value::Int64(11)]],
-        )
-        .unwrap();
-        let report = add_nodes(
-            &mut g,
-            clean,
-            "Person".to_string(),
-            "id".to_string(),
-            Some("id".to_string()),
-            None,
-        );
-        assert!(report.is_ok(), "clean batch should load: {report:?}");
-    }
-
-    /// Partial-update guarantee (load-bearing contract): `conflict_handling =
-    /// Update` writes only the columns present in the batch, leaving other
-    /// properties of the existing node untouched. A reload can re-assert a
-    /// subset of fields without clobbering fields another writer owns.
-    #[test]
-    fn add_nodes_update_is_partial() {
-        let mut g = DirGraph::new();
-        // Seed: id + status + notes.
-        let seed = DataFrame::from_cypher_rows(
-            vec!["id".to_string(), "status".to_string(), "notes".to_string()],
-            vec![vec![
-                Value::Int64(1),
-                Value::String("in_progress".into()),
-                Value::String("agent work".into()),
-            ]],
-        )
-        .unwrap();
-        add_nodes(
-            &mut g,
-            seed,
-            "Task".to_string(),
-            "id".to_string(),
-            Some("id".to_string()),
-            None,
-        )
-        .unwrap();
-
-        // Reload: only id + spec_link (the "research re-assert").
-        let reload = DataFrame::from_cypher_rows(
-            vec!["id".to_string(), "spec_link".to_string()],
-            vec![vec![Value::Int64(1), Value::String("AlgoSpec-7".into())]],
-        )
-        .unwrap();
-        add_nodes(
-            &mut g,
-            reload,
-            "Task".to_string(),
-            "id".to_string(),
-            Some("id".to_string()),
-            Some("update".to_string()),
-        )
-        .unwrap();
-
-        let idx = g.lookup_by_id("Task", &Value::Int64(1)).unwrap();
-        let node = g.graph.node_view(idx).unwrap();
-        // Agent-owned fields preserved; new field added.
-        assert_eq!(
-            node.get_field_ref("status").as_deref(),
-            Some(&Value::String("in_progress".into())),
-            "status must survive a partial update"
-        );
-        assert_eq!(
-            node.get_field_ref("notes").as_deref(),
-            Some(&Value::String("agent work".into())),
-            "notes must survive a partial update"
-        );
-        assert_eq!(
-            node.get_field_ref("spec_link").as_deref(),
-            Some(&Value::String("AlgoSpec-7".into())),
-            "the new field must be written"
-        );
-    }
-
-    /// Regression (issue #20): the read path self-heals. When the index is
-    /// *absent* for a type (the state CREATE / DELETE leave it in), the very
-    /// first `lookup_by_id_readonly` — a `&self` call — must build and cache
-    /// the index, so every subsequent id-equality lookup is O(1) instead of
-    /// the old O(node-position) linear scan that re-ran on each read.
-    #[test]
-    fn readonly_lookup_self_heals_when_index_absent() {
-        let mut g = DirGraph::new();
-        let rows: Vec<Vec<Value>> = (0..1000).map(|i| vec![Value::Int64(i)]).collect();
-        let df = DataFrame::from_cypher_rows(vec!["id".to_string()], rows).unwrap();
-        add_nodes(
-            &mut g,
-            df,
-            "Person".to_string(),
-            "id".to_string(),
-            Some("id".to_string()),
-            None,
-        )
-        .unwrap();
-
-        // Simulate the post-CREATE / post-DELETE state: index invalidated.
-        g.id_indices.remove("Person");
-        assert!(!g.id_indices.contains_key("Person"));
-
-        // A read-only lookup must still find the node...
-        assert!(g
-            .lookup_by_id_readonly("Person", &Value::Int64(999))
-            .is_some());
-        // ...and must have cached the index so the next read is O(1).
-        assert!(
-            g.id_indices.contains_key("Person"),
-            "read path must build + cache the id_index on a miss (issue #20)"
-        );
-        // A genuinely absent id still resolves to None (no false positives).
-        assert!(g
-            .lookup_by_id_readonly("Person", &Value::Int64(424242))
-            .is_none());
-    }
-}
+#[path = "maintain_id_index_tests.rs"]
+mod id_index_tests;
 
 #[cfg(test)]
-mod replace_connections_tests {
-    use super::*;
-
-    fn doc_entity_graph() -> DirGraph {
-        let mut g = DirGraph::new();
-        let docs = DataFrame::from_cypher_rows(
-            vec!["id".to_string()],
-            vec![vec![Value::Int64(1)], vec![Value::Int64(2)]],
-        )
-        .unwrap();
-        add_nodes(
-            &mut g,
-            docs,
-            "Doc".to_string(),
-            "id".to_string(),
-            Some("id".to_string()),
-            None,
-        )
-        .unwrap();
-        let ents = DataFrame::from_cypher_rows(
-            vec!["id".to_string()],
-            vec![
-                vec![Value::String("A".into())],
-                vec![Value::String("B".into())],
-                vec![Value::String("C".into())],
-            ],
-        )
-        .unwrap();
-        add_nodes(
-            &mut g,
-            ents,
-            "Entity".to_string(),
-            "id".to_string(),
-            Some("id".to_string()),
-            None,
-        )
-        .unwrap();
-        g
-    }
-
-    fn edges_df(pairs: &[(i64, &str)]) -> DataFrame {
-        let rows: Vec<Vec<Value>> = pairs
-            .iter()
-            .map(|(s, t)| vec![Value::Int64(*s), Value::String((*t).into())])
-            .collect();
-        DataFrame::from_cypher_rows(vec!["s".to_string(), "t".to_string()], rows).unwrap()
-    }
-
-    fn count_edges_of_type(g: &DirGraph, node_type: &str, id: i64, conn: &str) -> usize {
-        let idx = g
-            .lookup_by_id_readonly(node_type, &Value::Int64(id))
-            .unwrap();
-        let key = InternedKey::from_str(conn);
-        g.graph
-            .edges_directed_filtered(idx, petgraph::Direction::Outgoing, Some(key))
-            .filter(|e| e.connection_type() == key)
-            .count()
-    }
-
-    fn add_mentions(g: &mut DirGraph, pairs: &[(i64, &str)]) {
-        add_connections(
-            g,
-            edges_df(pairs),
-            "MENTIONS".to_string(),
-            "Doc".to_string(),
-            "s".to_string(),
-            "Entity".to_string(),
-            "t".to_string(),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-    }
-
-    fn replace_mentions(g: &mut DirGraph, pairs: &[(i64, &str)]) {
-        replace_connections(
-            g,
-            edges_df(pairs),
-            "MENTIONS".to_string(),
-            "Doc".to_string(),
-            "s".to_string(),
-            "Entity".to_string(),
-            "t".to_string(),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-    }
-
-    /// The defining behaviour: a source's edges of the named type become
-    /// exactly the supplied set — stale edges are pruned, new ones added.
-    #[test]
-    fn replace_sets_exact_edge_set() {
-        let mut g = doc_entity_graph();
-        add_mentions(&mut g, &[(1, "A"), (1, "B")]);
-        assert_eq!(count_edges_of_type(&g, "Doc", 1, "MENTIONS"), 2);
-
-        replace_mentions(&mut g, &[(1, "B"), (1, "C")]);
-        assert_eq!(count_edges_of_type(&g, "Doc", 1, "MENTIONS"), 2);
-    }
-
-    /// Only sources present in the input are pruned; other sources keep
-    /// their edges, and edges of other types from the same source survive.
-    #[test]
-    fn replace_is_scoped_to_input_sources_and_type() {
-        let mut g = doc_entity_graph();
-        add_mentions(&mut g, &[(1, "A"), (2, "A")]);
-        add_connections(
-            &mut g,
-            edges_df(&[(1, "B")]),
-            "CITES".to_string(),
-            "Doc".to_string(),
-            "s".to_string(),
-            "Entity".to_string(),
-            "t".to_string(),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-
-        replace_mentions(&mut g, &[(1, "C")]);
-
-        assert_eq!(count_edges_of_type(&g, "Doc", 1, "MENTIONS"), 1);
-        // doc 2 (absent from the input) keeps its MENTIONS edge.
-        assert_eq!(count_edges_of_type(&g, "Doc", 2, "MENTIONS"), 1);
-        // The CITES edge from doc 1 is a different type — untouched.
-        assert_eq!(count_edges_of_type(&g, "Doc", 1, "CITES"), 1);
-    }
-
-    /// Validation runs before any prune — a bad column errors with the
-    /// graph's existing edges intact.
-    #[test]
-    fn replace_validates_before_pruning() {
-        let mut g = doc_entity_graph();
-        add_mentions(&mut g, &[(1, "A")]);
-        let bad = DataFrame::from_cypher_rows(
-            vec!["s".to_string(), "wrong".to_string()],
-            vec![vec![Value::Int64(1), Value::String("B".into())]],
-        )
-        .unwrap();
-        let err = replace_connections(
-            &mut g,
-            bad,
-            "MENTIONS".to_string(),
-            "Doc".to_string(),
-            "s".to_string(),
-            "Entity".to_string(),
-            "t".to_string(),
-            None,
-            None,
-            None,
-        );
-        assert!(err.is_err());
-        // The pre-existing edge must not have been pruned.
-        assert_eq!(count_edges_of_type(&g, "Doc", 1, "MENTIONS"), 1);
-    }
-}
+#[path = "maintain_replace_connections_tests.rs"]
+mod replace_connections_tests;
 
 #[cfg(test)]
 #[path = "maintain_delete_id_index_tests.rs"]

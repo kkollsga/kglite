@@ -104,7 +104,8 @@ fn sorted_props(props: &HashMap<String, Value>) -> Vec<(String, String)> {
     out
 }
 
-fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
+/// Every live node as a `NodeFingerprint`, sorted by petgraph slot.
+fn fingerprint_nodes(graph: &DirGraph) -> Vec<NodeFingerprint> {
     let mut nodes = Vec::new();
     for idx in graph.graph.node_indices().collect::<Vec<_>>() {
         let Some(node) = graph.graph.node_view(idx) else {
@@ -126,7 +127,11 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
         ));
     }
     nodes.sort();
+    nodes
+}
 
+/// Every live edge as an `EdgeFingerprint`, sorted by petgraph slot.
+fn fingerprint_edges(graph: &DirGraph) -> Vec<EdgeFingerprint> {
     let mut edges = Vec::new();
     for eidx in graph.graph.edge_indices().collect::<Vec<_>>() {
         let (Some((src, tgt)), Some(edge)) = (
@@ -144,6 +149,100 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
         ));
     }
     edges.sort();
+    edges
+}
+
+/// Master column-store rows per node type, sorted by node type.
+fn fingerprint_column_masters(graph: &DirGraph) -> Vec<(String, MasterRows)> {
+    let mut column_masters: Vec<(String, MasterRows)> = graph
+        .column_stores_by_name()
+        .into_iter()
+        .map(|(node_type, store)| {
+            let rows: MasterRows = (0..store.row_count())
+                .map(|row| {
+                    let mut props: PropPairs = store
+                        .row_properties(row)
+                        .into_iter()
+                        .map(|(key, value)| {
+                            (
+                                graph.interner.resolve(key).to_string(),
+                                format!("{value:?}"),
+                            )
+                        })
+                        .collect();
+                    props.sort();
+                    (
+                        row,
+                        format!("{:?}", store.get_id(row)),
+                        format!("{:?}", store.get_title(row)),
+                        props,
+                    )
+                })
+                .collect();
+            (node_type.to_string(), rows)
+        })
+        .collect();
+    column_masters.sort();
+    column_masters
+}
+
+/// Which columnar row each node slot points at, sorted by slot.
+fn fingerprint_columnar_rows(graph: &DirGraph) -> Vec<(usize, u32)> {
+    let mut columnar_rows: Vec<(usize, u32)> = Vec::new();
+    for idx in graph.graph.node_indices().collect::<Vec<_>>() {
+        // Deliberately the raw `NodeData`: what this fingerprints is the node's
+        // *row identity*, not its property values.
+        let Some(node) = graph.graph.node_weight(idx) else {
+            continue;
+        };
+        let PropertyStorage::Columnar(row) = &node.properties else {
+            continue;
+        };
+        // A node carries a row id, not a store handle (D1 Phase 3), so the
+        // identity worth fingerprinting is which row it points at.
+        columnar_rows.push((idx.index(), row.row_id()));
+    }
+    columnar_rows.sort();
+    columnar_rows
+}
+
+/// Every property/range/composite index bucket as `(index, value, members)`.
+fn fingerprint_user_indexes(graph: &DirGraph) -> Vec<(String, String, Vec<usize>)> {
+    let mut user_indexes: Vec<(String, String, Vec<usize>)> = Vec::new();
+    for ((node_type, property), value_map) in &graph.property_indices {
+        for (value, members) in value_map.iter() {
+            user_indexes.push((
+                format!("property {node_type}.{property}"),
+                format!("{value:?}"),
+                members.iter().map(|idx| idx.index()).collect(),
+            ));
+        }
+    }
+    for ((node_type, property), btree) in &graph.range_indices {
+        for (value, members) in btree.iter() {
+            user_indexes.push((
+                format!("range {node_type}.{property}"),
+                format!("{value:?}"),
+                members.iter().map(|idx| idx.index()).collect(),
+            ));
+        }
+    }
+    for ((node_type, properties), comp_map) in &graph.composite_indices {
+        for (value, members) in comp_map.iter() {
+            user_indexes.push((
+                format!("composite {node_type}.{}", properties.join("+")),
+                format!("{value:?}"),
+                members.iter().map(|idx| idx.index()).collect(),
+            ));
+        }
+    }
+    user_indexes.sort();
+    user_indexes
+}
+
+fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
+    let nodes = fingerprint_nodes(graph);
+    let edges = fingerprint_edges(graph);
 
     let mut type_indices: Vec<(String, Vec<usize>)> = graph
         .type_indices
@@ -230,81 +329,9 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
     }
     id_lookup.sort();
 
-    let mut column_masters: Vec<(String, MasterRows)> = graph
-        .column_stores_by_name()
-        .into_iter()
-        .map(|(node_type, store)| {
-            let rows: MasterRows = (0..store.row_count())
-                .map(|row| {
-                    let mut props: PropPairs = store
-                        .row_properties(row)
-                        .into_iter()
-                        .map(|(key, value)| {
-                            (
-                                graph.interner.resolve(key).to_string(),
-                                format!("{value:?}"),
-                            )
-                        })
-                        .collect();
-                    props.sort();
-                    (
-                        row,
-                        format!("{:?}", store.get_id(row)),
-                        format!("{:?}", store.get_title(row)),
-                        props,
-                    )
-                })
-                .collect();
-            (node_type.to_string(), rows)
-        })
-        .collect();
-    column_masters.sort();
-
-    let mut columnar_rows: Vec<(usize, u32)> = Vec::new();
-    for idx in graph.graph.node_indices().collect::<Vec<_>>() {
-        // Deliberately the raw `NodeData`: what this fingerprints is the node's
-        // *row identity*, not its property values.
-        let Some(node) = graph.graph.node_weight(idx) else {
-            continue;
-        };
-        let PropertyStorage::Columnar(row) = &node.properties else {
-            continue;
-        };
-        // A node carries a row id, not a store handle (D1 Phase 3), so the
-        // identity worth fingerprinting is which row it points at.
-        columnar_rows.push((idx.index(), row.row_id()));
-    }
-    columnar_rows.sort();
-
-    let mut user_indexes: Vec<(String, String, Vec<usize>)> = Vec::new();
-    for ((node_type, property), value_map) in &graph.property_indices {
-        for (value, members) in value_map.iter() {
-            user_indexes.push((
-                format!("property {node_type}.{property}"),
-                format!("{value:?}"),
-                members.iter().map(|idx| idx.index()).collect(),
-            ));
-        }
-    }
-    for ((node_type, property), btree) in &graph.range_indices {
-        for (value, members) in btree.iter() {
-            user_indexes.push((
-                format!("range {node_type}.{property}"),
-                format!("{value:?}"),
-                members.iter().map(|idx| idx.index()).collect(),
-            ));
-        }
-    }
-    for ((node_type, properties), comp_map) in &graph.composite_indices {
-        for (value, members) in comp_map.iter() {
-            user_indexes.push((
-                format!("composite {node_type}.{}", properties.join("+")),
-                format!("{value:?}"),
-                members.iter().map(|idx| idx.index()).collect(),
-            ));
-        }
-    }
-    user_indexes.sort();
+    let column_masters = fingerprint_column_masters(graph);
+    let columnar_rows = fingerprint_columnar_rows(graph);
+    let user_indexes = fingerprint_user_indexes(graph);
 
     Fingerprint {
         version: graph.version,
