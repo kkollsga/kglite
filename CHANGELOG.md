@@ -380,6 +380,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A transaction's first write no longer copies every column of the type it
+  touches.** A `begin()`/`commit()` block runs against a working copy that
+  shares its column stores with the graph it forked from, so the first write
+  inside the transaction has to make its own copy before it can mutate —
+  isolation depends on it. That copy was whole-store: a one-cell `SET` inside a
+  transaction deep-copied *every* column of the node type, so the cost of
+  opening a transaction scaled with the type's width as well as its length.
+  Columns are now shared individually and copied one at a time, so the write
+  copies the column it writes and nothing else. Measured on a 50 k-row `Item`
+  with 20 `SET`s per transaction, per-statement overhead above the same graph's
+  non-transactional `SET`: **1 / 4 / 12 / 24 columns → 11.2 / 12.5 / 16.6 /
+  23.4 µs before, 0.43 / 0.48 / 0.45 / 0.47 µs after** — flat in width instead
+  of growing at ~0.5 µs per column, and 26–49× cheaper at 12 and 24 columns.
+  The transaction fork itself went from 462 µs to 10 µs at 50 k × 24, and from
+  968 µs to 18 µs at 100 k × 24. A held view or `copy()` that writes gets the
+  same reduction. The cost is one atomic uniqueness check per column write,
+  which shows up on the bulk-write shapes as **+5.3 % on a 100 k-row mass
+  `SET` (23.1 → 24.4 ms) and +6 % on a wide 1 k-node `CREATE` batch (3.02 →
+  3.21 ms)**.
+
 - **Two concurrent transactions could be served each other's query plans, and
   one plan shape turned that into a wrong answer.** The Cypher plan cache
   decides "same graph, same state" from `(graph_id, version)`, and a

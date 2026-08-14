@@ -27,7 +27,7 @@ use std::sync::atomic::AtomicU64;
 /// Fixed-size columns use `MmapOrVec<T>` which can be heap- or file-backed.
 /// String columns use `MmapOrVec<u64>` for offsets and `MmapBytes` for UTF-8 data.
 /// Mixed columns use plain `Vec<Value>` (not mmap-eligible).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum TypedColumn {
     Int64 {
         data: MmapOrVec<i64>,
@@ -69,6 +69,79 @@ pub enum TypedColumn {
     /// Fallback for heterogeneous columns — stores boxed Values directly.
     /// Cannot be mmap'd, but preserves correctness.
     Mixed { data: Vec<Value> },
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `TypedColumn` deep copies performed since the last reset.
+    ///
+    /// The **unit oracle** of the copy-on-write family, and the one the
+    /// store-level counter cannot express. `COLUMN_STORE_CLONES` counts
+    /// `ColumnStore` copies, which was the right unit while a store copy meant
+    /// copying every column it held; since the columns became individually
+    /// shared it no longer is — a store copy is now a handful of refcount
+    /// bumps, and the cost that matters is *which columns the copy actually
+    /// deep-copied*. A shared store forked for a one-cell write must copy
+    /// exactly one column; the store counter reads 1 whether it copied one
+    /// column or twenty-five.
+    ///
+    /// Thread-local like its siblings: it sees copies performed on the calling
+    /// thread only, which is where every statement-scoped write happens.
+    static COLUMN_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_column_clones() {
+    COLUMN_CLONES.set(0);
+}
+
+/// Individual columns deep-copied on this thread since the last reset.
+#[cfg(test)]
+pub(crate) fn column_clones() -> usize {
+    COLUMN_CLONES.get()
+}
+
+/// Hand-written so the copy can be counted — see [`COLUMN_CLONES`]. The arms
+/// are exactly what `#[derive(Clone)]` produced.
+impl Clone for TypedColumn {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        COLUMN_CLONES.set(COLUMN_CLONES.get() + 1);
+        match self {
+            Self::Int64 { data, nulls } => Self::Int64 {
+                data: data.clone(),
+                nulls: nulls.clone(),
+            },
+            Self::Float64 { data, nulls } => Self::Float64 {
+                data: data.clone(),
+                nulls: nulls.clone(),
+            },
+            Self::UniqueId { data, nulls } => Self::UniqueId {
+                data: data.clone(),
+                nulls: nulls.clone(),
+            },
+            Self::Bool { data, nulls } => Self::Bool {
+                data: data.clone(),
+                nulls: nulls.clone(),
+            },
+            Self::Date { data, nulls } => Self::Date {
+                data: data.clone(),
+                nulls: nulls.clone(),
+            },
+            Self::Str {
+                offsets,
+                data,
+                nulls,
+                relocated,
+            } => Self::Str {
+                offsets: offsets.clone(),
+                data: data.clone(),
+                nulls: nulls.clone(),
+                relocated: relocated.clone(),
+            },
+            Self::Mixed { data } => Self::Mixed { data: data.clone() },
+        }
+    }
 }
 
 #[cfg(test)]

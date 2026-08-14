@@ -14,6 +14,8 @@
 mod typed_column;
 
 pub use typed_column::TypedColumn;
+#[cfg(test)]
+pub(crate) use typed_column::{column_clones, reset_column_clones};
 use typed_column::{MMAP_THRESHOLD, NEXT_TEMP_COLUMN_FILE};
 
 use crate::datatypes::values::Value;
@@ -38,16 +40,36 @@ use std::sync::Arc;
 pub struct ColumnStore {
     /// Schema mapping property keys to slot indices (the type's shared `TypeSchema`)
     schema: Arc<TypeSchema>,
-    /// One column per property key, indexed by slot index from schema
-    columns: Vec<TypedColumn>,
+    /// One column per property key, indexed by slot index from schema.
+    ///
+    /// **Individually shared, and that is the fork seam.** A store is owned
+    /// behind an `Arc` by the backend, so every copy-on-write fork of a graph
+    /// — a transaction's `working_mut`, a held view, `copy()` — makes two
+    /// graphs point at one store and the first write on either side has to
+    /// privatise it. Sharing at the *column* keeps that privatisation sized by
+    /// the write: cloning the store is one refcount bump per column, and only
+    /// the column a write touches is deep-copied
+    /// ([`Self::column_mut`]). Held whole, a one-cell `SET` inside a
+    /// transaction copied every column of the type — 406 µs on a 50 k x 24
+    /// graph whose unshared write costs 4.5 µs.
+    ///
+    /// Read through the slice (the `Arc` derefs); mutate only through
+    /// [`Self::column_mut`] / [`Self::columns_mut`], never by reaching for
+    /// `Arc::make_mut` at a call site.
+    columns: Vec<Arc<TypedColumn>>,
     /// Number of rows (nodes of this type)
     row_count: u32,
     /// Tombstone bitmap: true = row deleted
     tombstones: Vec<bool>,
     /// Node ID column (mapped mode only). When present, NodeData.id is Value::Null sentinel.
-    id_column: Option<TypedColumn>,
+    ///
+    /// Shared like [`Self::columns`] and for the same reason: it is O(rows),
+    /// so a store copy must not deep-copy it either.
+    id_column: Option<Arc<TypedColumn>>,
     /// Node title column (mapped mode only). When present, NodeData.title is Value::Null sentinel.
-    title_column: Option<TypedColumn>,
+    ///
+    /// Shared like [`Self::columns`]; see [`Self::id_column`].
+    title_column: Option<Arc<TypedColumn>>,
     /// Overflow bag for sparse properties: offset array + data blob.
     overflow_offsets: Option<MmapOrVec<u64>>,
     overflow_data: Option<MmapBytes>,
@@ -142,6 +164,13 @@ pub(crate) fn column_store_row_pushes() -> usize {
     COLUMN_STORE_ROW_PUSHES.get()
 }
 
+/// **Copies the store, shares its data.** Every O(rows) field —
+/// [`columns`](ColumnStore::columns), the two sidecars, the overflow bag — is
+/// behind an `Arc` or an `MmapOrVec` handle, so this is a refcount bump per
+/// column rather than a copy of the type. The deep copy happens later and one
+/// column at a time, at [`ColumnStore::column_mut`], for the columns a write
+/// actually touches. `tombstones` is the one plain `Vec` left; it is one byte
+/// per row against a column's eight-plus, and nothing shares it.
 impl Clone for ColumnStore {
     fn clone(&self) -> Self {
         #[cfg(test)]
@@ -159,9 +188,12 @@ impl Clone for ColumnStore {
             slot_scratch: Vec::new(),
             // Re-drawn, never copied — see the field's documentation.
             spill_token: next_spill_token(),
-            // `MmapOrVec::clone` always yields a `Heap` variant, so a clone of
-            // a spilled store is fully back on the heap: the clone has grown
-            // spillable bytes by construction and owes a spill check.
+            // Conservative, and it has to be: a column privatised later by
+            // `column_mut` comes back as a `Heap` variant (`MmapOrVec::clone`
+            // yields one), so a copy of a spilled store can grow spillable
+            // bytes at any write and owes a spill check from the moment it
+            // exists. The sharing above is what makes that a *possible* growth
+            // rather than a certain one; `true` is still the safe answer.
             spillable_growth: true,
         }
     }
@@ -182,7 +214,7 @@ impl ColumnStore {
                 .get(prop_name)
                 .map(|s| s.as_str())
                 .unwrap_or("mixed");
-            columns.push(TypedColumn::from_type_str(type_str));
+            columns.push(Arc::new(TypedColumn::from_type_str(type_str)));
         }
         ColumnStore {
             schema,
@@ -204,7 +236,7 @@ impl ColumnStore {
     #[allow(dead_code)] // Test-only.
     pub fn new_mixed(schema: Arc<TypeSchema>) -> Self {
         let columns = (0..schema.len())
-            .map(|_| TypedColumn::Mixed { data: Vec::new() })
+            .map(|_| Arc::new(TypedColumn::Mixed { data: Vec::new() }))
             .collect();
         ColumnStore {
             schema,
@@ -300,9 +332,10 @@ impl ColumnStore {
     /// below, which is where it belongs.
     pub fn push_id(&mut self, value: &Value) {
         self.spillable_growth = true;
-        let col = self
-            .id_column
-            .get_or_insert_with(|| TypedColumn::for_value(value));
+        let col = Arc::make_mut(
+            self.id_column
+                .get_or_insert_with(|| Arc::new(TypedColumn::for_value(value))),
+        );
         if col.push(value).is_err() {
             // Type mismatch or storage growth failure: this API is
             // intentionally infallible, so fall back to a heap Mixed column.
@@ -318,12 +351,14 @@ impl ColumnStore {
     /// Push a node title value into the title column. Creates a Str column if None.
     pub fn push_title(&mut self, value: &Value) {
         self.spillable_growth = true;
-        let col = self.title_column.get_or_insert_with(|| TypedColumn::Str {
-            offsets: MmapOrVec::from_vec(vec![0u64]),
-            data: MmapBytes::new(),
-            nulls: MmapOrVec::new(),
-            relocated: rustc_hash::FxHashMap::default(),
-        });
+        let col = Arc::make_mut(self.title_column.get_or_insert_with(|| {
+            Arc::new(TypedColumn::Str {
+                offsets: MmapOrVec::from_vec(vec![0u64]),
+                data: MmapBytes::new(),
+                nulls: MmapOrVec::new(),
+                relocated: rustc_hash::FxHashMap::default(),
+            })
+        }));
         if col.push(value).is_err() {
             // Type mismatch or storage growth failure: explicit heap fallback.
             let mut mixed = Vec::with_capacity(col.len() + 1);
@@ -358,12 +393,14 @@ impl ColumnStore {
                 for i in 0..row_count {
                     mixed.push(ms.get_title(i).unwrap_or(Value::Null));
                 }
-                self.title_column = Some(TypedColumn::Mixed { data: mixed });
+                self.title_column = Some(Arc::new(TypedColumn::Mixed { data: mixed }));
             } else {
                 return false;
             }
         }
-        let col = self.title_column.as_mut().unwrap();
+        let col = self
+            .title_column_mut()
+            .expect("just materialized above when it was None");
         if (row_id as usize) >= col.len() {
             return false;
         }
@@ -579,7 +616,7 @@ impl ColumnStore {
         for _ in 0..self.row_count {
             col.push_null();
         }
-        self.columns.push(col);
+        self.columns.push(Arc::new(col));
         slot
     }
 
@@ -621,14 +658,16 @@ impl ColumnStore {
         }
 
         for (slot, &value_index) in slot_values.iter().enumerate() {
-            let col = &mut self.columns[slot];
+            let col = Arc::make_mut(&mut self.columns[slot]);
             if value_index != NONE {
                 let value = &values[value_index as usize].1;
                 if col.push(value).is_err() {
                     // Type mismatch or storage growth failure: preserve the
                     // row through the infallible heap-backed fallback.
                     self.demote_to_mixed(slot);
-                    let _ = self.columns[slot].push(value);
+                    if let Some(col) = self.column_mut(slot) {
+                        let _ = col.push(value);
+                    }
                 }
             } else {
                 col.push_null();
@@ -637,13 +676,14 @@ impl ColumnStore {
         self.slot_scratch = slot_values;
 
         // Keep id/title columns in sync (push null placeholders for property-only rows)
-        if let Some(ref mut col) = self.id_column {
-            if col.len() < self.row_count as usize + 1 {
+        let target_len = self.row_count as usize + 1;
+        if let Some(col) = self.id_column_mut() {
+            if col.len() < target_len {
                 col.push_null();
             }
         }
-        if let Some(ref mut col) = self.title_column {
-            if col.len() < self.row_count as usize + 1 {
+        if let Some(col) = self.title_column_mut() {
+            if col.len() < target_len {
                 col.push_null();
             }
         }
@@ -901,7 +941,7 @@ impl ColumnStore {
                 self.append_column_typed(key, type_str)
             }
         };
-        let col = &mut self.columns[slot as usize];
+        let col = Arc::make_mut(&mut self.columns[slot as usize]);
         // A file-backed column is written **through its mapping** — it is not
         // pulled onto the heap first. `MmapOrVec::set` writes into the
         // `map_mut` region, and every writable mapped column here lives in a
@@ -917,7 +957,9 @@ impl ColumnStore {
         // column as a heap `Vec<Value>`, because `Mixed` cannot be mmap'd.
         if col.set(row_id, value).is_err() {
             self.demote_to_mixed(slot as usize);
-            let _ = self.columns[slot as usize].set(row_id, value);
+            if let Some(col) = self.column_mut(slot as usize) {
+                let _ = col.set(row_id, value);
+            }
         }
         true
     }
@@ -972,13 +1014,13 @@ impl ColumnStore {
              need a row truncation"
         );
         let len = row_count as usize;
-        for col in &mut self.columns {
+        for col in self.columns_mut() {
             col.truncate_rows(len);
         }
-        if let Some(col) = self.id_column.as_mut() {
+        if let Some(col) = self.id_column_mut() {
             col.truncate_rows(len);
         }
-        if let Some(col) = self.title_column.as_mut() {
+        if let Some(col) = self.title_column_mut() {
             col.truncate_rows(len);
         }
         self.tombstones.truncate(len);
@@ -1134,7 +1176,7 @@ impl ColumnStore {
         for i in 0..old_col.len() {
             mixed_data.push(old_col.get(i as u32).unwrap_or(Value::Null));
         }
-        self.columns[slot] = TypedColumn::Mixed { data: mixed_data };
+        self.columns[slot] = Arc::new(TypedColumn::Mixed { data: mixed_data });
     }
 
     /// Materialize all columns to file-backed mmap in the given directory.
@@ -1148,17 +1190,18 @@ impl ColumnStore {
         // must not write each other's column files. See `spill_token`.
         let dir = &self.spill_subdir(dir);
         std::fs::create_dir_all(dir)?;
-        for (slot, ik) in self.schema.iter() {
+        let schema = Arc::clone(&self.schema);
+        for (slot, ik) in schema.iter() {
             let col_name = interner.resolve(ik);
-            if let Some(col) = self.columns.get_mut(slot as usize) {
+            if let Some(col) = self.column_mut(slot as usize) {
                 col.materialize_to_file(dir, col_name)?;
             }
         }
         // Spill id/title columns too
-        if let Some(ref mut col) = self.id_column {
+        if let Some(col) = self.id_column_mut() {
             col.materialize_to_file(dir, "__id__")?;
         }
-        if let Some(ref mut col) = self.title_column {
+        if let Some(col) = self.title_column_mut() {
             col.materialize_to_file(dir, "__title__")?;
         }
         // Every spillable byte this store had is now file-backed. Until one of
@@ -1215,13 +1258,13 @@ impl ColumnStore {
     #[cfg(test)]
     pub fn materialize_to_heap(&mut self) {
         self.spillable_growth = true;
-        for col in &mut self.columns {
+        for col in self.columns_mut() {
             col.materialize_to_heap();
         }
-        if let Some(ref mut col) = self.id_column {
+        if let Some(col) = self.id_column_mut() {
             col.materialize_to_heap();
         }
-        if let Some(ref mut col) = self.title_column {
+        if let Some(col) = self.title_column_mut() {
             col.materialize_to_heap();
         }
     }
@@ -1288,18 +1331,54 @@ impl ColumnStore {
     }
 
     /// Access columns for introspection (e.g., getting type tags).
-    pub fn columns_ref(&self) -> &[TypedColumn] {
-        &self.columns
+    pub fn columns_ref(&self) -> impl ExactSizeIterator<Item = &TypedColumn> {
+        self.columns.iter().map(|col| &**col)
+    }
+
+    /// One column by slot index, for introspection.
+    pub fn column(&self, slot: usize) -> Option<&TypedColumn> {
+        self.columns.get(slot).map(|col| &**col)
+    }
+
+    /// The one way a column is mutated: privatise it, then hand out `&mut`.
+    ///
+    /// `Arc::make_mut` here is what makes a shared store's write cost
+    /// O(rows of the written column) instead of O(rows x columns) — see the
+    /// [`columns`](Self::columns) field. Every mutating path goes through this
+    /// or [`Self::columns_mut`]; a call site that reaches for the `Arc`
+    /// directly reintroduces the whole-store copy one column at a time.
+    #[inline]
+    fn column_mut(&mut self, slot: usize) -> Option<&mut TypedColumn> {
+        self.columns.get_mut(slot).map(Arc::make_mut)
+    }
+
+    /// [`Self::column_mut`] for the paths that genuinely touch every column
+    /// (spill, materialise, truncate) and therefore privatise every column.
+    #[inline]
+    fn columns_mut(&mut self) -> impl Iterator<Item = &mut TypedColumn> {
+        self.columns.iter_mut().map(Arc::make_mut)
     }
 
     /// Access the optional id sidecar column.
     pub fn id_column_ref(&self) -> Option<&TypedColumn> {
-        self.id_column.as_ref()
+        self.id_column.as_deref()
+    }
+
+    /// [`Self::column_mut`] for the id sidecar.
+    #[inline]
+    fn id_column_mut(&mut self) -> Option<&mut TypedColumn> {
+        self.id_column.as_mut().map(Arc::make_mut)
+    }
+
+    /// [`Self::column_mut`] for the title sidecar.
+    #[inline]
+    fn title_column_mut(&mut self) -> Option<&mut TypedColumn> {
+        self.title_column.as_mut().map(Arc::make_mut)
     }
 
     /// Access the optional title sidecar column.
     pub fn title_column_ref(&self) -> Option<&TypedColumn> {
-        self.title_column.as_ref()
+        self.title_column.as_deref()
     }
 
     /// Raw bytes of the overflow_offsets array (u64 values, native
@@ -1338,21 +1417,21 @@ impl ColumnStore {
     #[allow(dead_code)]
     pub fn replace_columns(&mut self, columns: Vec<TypedColumn>) {
         self.spillable_growth = true;
-        self.columns = columns;
+        self.columns = columns.into_iter().map(Arc::new).collect();
     }
 
     /// Replace the id sidecar column.
     #[allow(dead_code)]
     pub fn replace_id_column(&mut self, col: TypedColumn) {
         self.spillable_growth = true;
-        self.id_column = Some(col);
+        self.id_column = Some(Arc::new(col));
     }
 
     /// Replace the title sidecar column.
     #[allow(dead_code)]
     pub fn replace_title_column(&mut self, col: TypedColumn) {
         self.spillable_growth = true;
-        self.title_column = Some(col);
+        self.title_column = Some(Arc::new(col));
     }
 
     /// Replace the overflow bag (offsets + data blob).
@@ -1390,7 +1469,7 @@ impl ColumnStore {
     /// (since `materialize_to_files` skips Mixed).
     #[allow(dead_code)]
     pub fn column_values_mixed(&self, slot: usize) -> Option<&Vec<Value>> {
-        match self.columns.get(slot)? {
+        match &**self.columns.get(slot)? {
             TypedColumn::Mixed { data } => Some(data),
             _ => None,
         }
@@ -1447,7 +1526,7 @@ impl ColumnStore {
 
         for (slot, ik) in self.schema.iter() {
             let col_name = interner.resolve(ik);
-            let col = &self.columns[slot as usize];
+            let col = &*self.columns[slot as usize];
             if col.len() < self.row_count as usize {
                 // Schema growth and mmap-to-owned mutation can leave a typed
                 // column shorter than the store. Persist a dense, null-padded
@@ -1464,14 +1543,14 @@ impl ColumnStore {
         }
 
         // Write id/title columns with reserved names
-        if let Some(ref col) = self.id_column {
+        if let Some(col) = self.id_column.as_deref() {
             let mut padded = col.clone();
             while padded.len() < self.row_count as usize {
                 padded.push_null();
             }
             Self::write_packed_column(&mut buf, "__id__", &padded, codec, int_encoding)?;
         }
-        if let Some(ref col) = self.title_column {
+        if let Some(col) = self.title_column.as_deref() {
             let mut padded = col.clone();
             while padded.len() < self.row_count as usize {
                 padded.push_null();
@@ -1787,14 +1866,14 @@ impl ColumnStore {
                 let col = Self::unpack_column(
                     &type_tag, data_blob, row_count, temp_dir, &col_name, codec,
                 )?;
-                store.id_column = Some(col);
+                store.id_column = Some(Arc::new(col));
                 continue;
             }
             if col_name == "__title__" {
                 let col = Self::unpack_column(
                     &type_tag, data_blob, row_count, temp_dir, &col_name, codec,
                 )?;
-                store.title_column = Some(col);
+                store.title_column = Some(Arc::new(col));
                 continue;
             }
 
@@ -1829,7 +1908,7 @@ impl ColumnStore {
                 Self::unpack_column(&type_tag, data_blob, row_count, temp_dir, &col_name, codec)?;
 
             if slot < store.columns.len() {
-                store.columns[slot] = col;
+                store.columns[slot] = Arc::new(col);
             }
         }
 

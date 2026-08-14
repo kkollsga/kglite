@@ -149,7 +149,7 @@ pub fn write_unified_columns(
 
         for (slot, ik) in store.schema().iter() {
             let s = slot as usize;
-            let col = match store.columns_ref().get(s) {
+            let col = match store.column(s) {
                 Some(c) => c,
                 None => continue,
             };
@@ -407,7 +407,6 @@ fn plan_region(cursor: usize, bytes: &[u8]) -> (RegionMeta, usize) {
 fn store_has_mixed(store: &ColumnStore) -> bool {
     if store
         .columns_ref()
-        .iter()
         .any(|c| matches!(c, TypedColumn::Mixed { .. }))
     {
         return true;

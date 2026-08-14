@@ -866,10 +866,12 @@ fn mapped_str_column_set_keeps_its_mapping() {
 /// iterating.
 ///
 /// The residue this pins in passing: it is the *writer* that leaves the
-/// mapping behind, not the reader. A first write under a held view therefore
-/// un-maps the master and moves it onto the heap — the pre-existing
-/// fork-copy cost (D2), unchanged by the write-through, and the one shape in
-/// which `set_memory_limit` still loses its bound.
+/// mapping behind, not the reader — **for the column it wrote, and only that
+/// column**. Columns are individually shared, so the fork copies the one
+/// column the write privatises and the writer keeps its mapping on every
+/// other. Before that, the whole store was copied and the writer's entire
+/// type landed on the heap, which is the shape in which `set_memory_limit`
+/// lost its bound over columns nothing had touched.
 #[test]
 fn a_held_reader_is_isolated_from_a_mapped_write_through() {
     let dir = tempfile::tempdir().unwrap();
@@ -898,11 +900,24 @@ fn a_held_reader_is_isolated_from_a_mapped_write_through() {
         held.is_mapped(),
         "the reader kept the mapping; the writer took the heap copy"
     );
+    let age_slot = master.schema().slot(age_key).expect("age is in the schema") as usize;
     assert!(
-        !master.is_mapped(),
-        "the fork copy is heap-backed — this is the D2 fork cost, pinned here \
-         so a future change that shares the mapping across the fork has to \
-         come past this assertion"
+        !master
+            .column(age_slot)
+            .expect("age column exists")
+            .is_mapped(),
+        "the written column is the fork copy, and a clone of a mapped column \
+         is always heap-backed — a mapped reading here would mean the writer \
+         is writing through the bytes the reader is mapping"
+    );
+    assert!(
+        master
+            .columns_ref()
+            .enumerate()
+            .any(|(slot, col)| slot != age_slot && col.is_mapped()),
+        "columns the write never touched must keep their mapping: the fork \
+         cost is one column, not the type. A store whose every column landed \
+         on the heap is the whole-store copy this pins against."
     );
 }
 

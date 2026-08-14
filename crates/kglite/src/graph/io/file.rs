@@ -1402,7 +1402,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
         let mut cols = HashMap::new();
         for (slot, ik) in store.schema().iter() {
             let prop_name = graph.interner.resolve(ik);
-            if let Some(col) = store.columns_ref().get(slot as usize) {
+            if let Some(col) = store.column(slot as usize) {
                 // The *logical* column type. The per-column encoding actually
                 // used lives in the section itself (a v6 `Int64` column may be
                 // written delta-varint); the loader reads the section's tag and

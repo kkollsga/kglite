@@ -563,6 +563,39 @@ fn wide_rows_into(mut graph: DirGraph) -> DirGraph {
     graph
 }
 
+/// Property columns [`wide_schema_columnar`] gives its `Item` type, on top of
+/// the reserved `id`/`name`. Wide enough that "copied one column" and "copied
+/// the type's columns" cannot be confused for each other.
+const WIDE_SCHEMA_COLUMNS: usize = 24;
+
+/// A columnar type that is **wide**, not just tall.
+///
+/// `wide_columnar()` separates per-change cost from per-row cost; this
+/// separates per-change cost from per-*column* cost, which is the axis a
+/// copy-on-write fork of a shared store moves along. A one-cell write to a
+/// store held by two graphs has to privatise something; this fixture is what
+/// makes "it privatised the column" distinguishable from "it privatised the
+/// store".
+fn wide_schema_columnar() -> DirGraph {
+    let mut graph = DirGraph::new();
+    let rows: Vec<String> = (0..WIDE_ITEMS)
+        .map(|i| {
+            let props = (0..WIDE_SCHEMA_COLUMNS)
+                .map(|c| format!("p{c}: {}", i + c))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("(:Item {{id: {i}, name: 'n{i}', {props}}})")
+        })
+        .collect();
+    run(&mut graph, &format!("CREATE {}", rows.join(", ")));
+    graph.enable_columnar();
+    assert!(
+        graph.column_store_count() > 0,
+        "the fixture must own a master column store, or this test is vacuous"
+    );
+    graph
+}
+
 fn wide_columnar_into(graph: DirGraph) -> DirGraph {
     let mut graph = wide_rows_into(graph);
     graph.enable_columnar();
