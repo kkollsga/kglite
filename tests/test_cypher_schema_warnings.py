@@ -39,6 +39,17 @@ def test_unknown_relationship_warns_with_hint(capfd):
     assert "Did you mean 'KNOWS'?" in err
 
 
+def test_mixed_alternation_warning_does_not_claim_no_rows(capfd):
+    """An alternation matches through ANY branch, so one unknown branch is not "no rows"."""
+    g = _graph()
+    result = g.cypher("MATCH (a:Person)-[:MENTORS|KNOWS]->(b) RETURN a")
+    assert len(result.to_list()) == 1  # the KNOWS branch matches
+    err = capfd.readouterr().err
+    assert "unknown relationship type 'MENTORS'" in err
+    assert "returns no rows" not in err
+    assert "can still return rows via 'KNOWS'" in err
+
+
 def test_valid_query_emits_no_warning(capfd):
     g = _graph()
     g.cypher("MATCH (a:Person)-[:KNOWS]->(b) RETURN a")

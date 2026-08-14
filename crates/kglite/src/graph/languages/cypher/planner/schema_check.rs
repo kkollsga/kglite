@@ -50,7 +50,11 @@
 //! [`collect_unknown_pattern_warnings`] / [`warn_unknown_pattern_refs`] flag
 //! MATCH patterns that reference an unknown node label or relationship type —
 //! the most common "why is my query empty?" typo — with an edit-distance hint,
-//! *without* rejecting (the zero-row existence-check idiom stays valid). The
+//! *without* rejecting (the zero-row existence-check idiom stays valid). A
+//! warning may only claim the pattern returns no rows when that is true: an
+//! unknown branch of a relationship alternation (`-[:UNKNOWN|KNOWS]->`) is
+//! worded per-branch, because the pattern still matches through its siblings.
+//! The
 //! wrapper emits to stderr (kglite's existing `warning:` convention); routing
 //! the same messages into `QueryDiagnostics` so MCP/agent callers see them
 //! structurally is the natural next step.
@@ -928,7 +932,11 @@ pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -
     // only if there's at least one unknown.
     let mut seen: HashSet<String> = HashSet::new();
     let mut unknown_labels: Vec<String> = Vec::new();
-    let mut unknown_rels: Vec<String> = Vec::new();
+    // `(unknown type, the branches of its alternation that ARE known)`. The
+    // surviving branches decide the wording: a relationship alternation
+    // (`-[:A|B]->`) matches through *any* branch, so one unknown branch only
+    // means "returns no rows" when every branch is unknown.
+    let mut unknown_rels: Vec<(String, Vec<String>)> = Vec::new();
 
     for_each_query_pattern(query, &mut |site| {
         // Write patterns are deliberately skipped: on an open schema
@@ -955,13 +963,24 @@ pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -
                     }
                 }
                 PatternElement::Edge(ep) if have_edge_schema => {
-                    let single = ep.connection_type.iter();
-                    let multi = ep.connection_types.iter().flatten();
-                    for rel in single.chain(multi) {
-                        if !graph.connection_type_metadata.contains_key(rel)
-                            && seen.insert(format!("R:{rel}"))
-                        {
-                            unknown_rels.push(rel.clone());
+                    // Both fields, because a single type lands in
+                    // `connection_type` and an alternation in
+                    // `connection_types`.
+                    let branches = || {
+                        ep.connection_type
+                            .iter()
+                            .chain(ep.connection_types.iter().flatten())
+                    };
+                    let known = |rel: &String| graph.connection_type_metadata.contains_key(rel);
+                    // All-valid stays allocation-free: the surviving-branch
+                    // list is only built once an unknown is confirmed.
+                    if branches().all(known) {
+                        continue;
+                    }
+                    let surviving: Vec<String> = branches().filter(|r| known(r)).cloned().collect();
+                    for rel in branches().filter(|r| !known(r)) {
+                        if seen.insert(format!("R:{rel}")) {
+                            unknown_rels.push((rel.clone(), surviving.clone()));
                         }
                     }
                 }
@@ -999,12 +1018,27 @@ pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -
             .keys()
             .map(|s| s.as_str())
             .collect();
-        for rel in &unknown_rels {
-            out.push(format!(
-                "MATCH references unknown relationship type '{rel}' — the graph has no such \
-                 edge type, so this pattern returns no rows.{}",
-                did_you_mean(rel, &candidates)
-            ));
+        for (rel, surviving) in &unknown_rels {
+            let hint = did_you_mean(rel, &candidates);
+            out.push(if surviving.is_empty() {
+                format!(
+                    "MATCH references unknown relationship type '{rel}' — the graph has no such \
+                     edge type, so this pattern returns no rows.{hint}"
+                )
+            } else {
+                // The pattern is an alternation with a live branch, so the
+                // no-rows claim would be false about the query's result.
+                let named = surviving
+                    .iter()
+                    .map(|s| format!("'{s}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "MATCH references unknown relationship type '{rel}' — the graph has no such \
+                     edge type, so that branch matches no edges; the pattern can still return \
+                     rows via {named}.{hint}"
+                )
+            });
         }
     }
     out
@@ -1441,6 +1475,41 @@ mod tests {
             warnings[0].contains("Did you mean 'KNOWS'?"),
             "got: {}",
             warnings[0]
+        );
+    }
+
+    #[test]
+    fn mixed_alternation_warns_per_branch_without_the_no_rows_claim() {
+        // `-[:MENTORS|KNOWS]->` matches through KNOWS, so the pattern *does*
+        // return rows — the unqualified "returns no rows" wording was a false
+        // claim about the query's result, not just an imprecise hint.
+        let g = graph_with_schema();
+        let q = parse_cypher("MATCH (a:Person)-[:MENTORS|KNOWS]->(b:Person) RETURN a").unwrap();
+        let w = collect_unknown_pattern_warnings(&q, &g);
+        assert_eq!(w.len(), 1, "got: {w:?}");
+        assert!(w[0].contains("'MENTORS'"), "got: {}", w[0]);
+        assert!(
+            !w[0].contains("returns no rows"),
+            "false no-rows claim on a mixed alternation: {}",
+            w[0]
+        );
+        assert!(
+            w[0].contains("'KNOWS'"),
+            "the surviving branch must be named: {}",
+            w[0]
+        );
+    }
+
+    #[test]
+    fn fully_unknown_alternation_keeps_the_no_rows_claim() {
+        // Every branch unknown → the pattern really does return no rows.
+        let g = graph_with_schema();
+        let q = parse_cypher("MATCH (a:Person)-[:MENTORS|ADVISES]->(b:Person) RETURN a").unwrap();
+        let w = collect_unknown_pattern_warnings(&q, &g);
+        assert_eq!(w.len(), 2, "got: {w:?}");
+        assert!(
+            w.iter().all(|m| m.contains("returns no rows")),
+            "got: {w:?}"
         );
     }
 

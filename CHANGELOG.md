@@ -34,6 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The unknown-relationship-type warning claimed "returns no rows" about
+  patterns that return rows.** `MATCH (p)-[:MENTORS|KNOWS]->()` on a graph
+  without a `MENTORS` edge type warned *"unknown relationship type 'MENTORS' —
+  the graph has no such edge type, so this pattern returns no rows"*, while the
+  query matched through `KNOWS` and returned rows: the warning collector
+  flattened an alternation into one name per branch and lost the context needed
+  to word it. An unknown branch that has surviving siblings is now worded
+  per-branch — *"…so that branch matches no edges; the pattern can still return
+  rows via 'KNOWS'"* — and the no-rows claim is kept only when every branch of
+  the pattern is unknown. The "did you mean?" hint is unchanged in both arms.
 - **Relationship-type alternation `[:A|B]` returned answers for one branch
   only.** `MATCH (p:Person)-[:KNOWS|WORKS_AT]->(x) RETURN count(*)` counted the
   `KNOWS` edges and dropped the `WORKS_AT` ones; writing the same pattern as
