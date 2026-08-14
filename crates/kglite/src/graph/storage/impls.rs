@@ -14,6 +14,7 @@
 //! Phase 7's structural reorg.
 
 use crate::datatypes::Value;
+use crate::graph::core::filtering::str_values_equal;
 use crate::graph::core::iterators::{
     GraphEdgeIndices, GraphEdgeReferences, GraphEdges, GraphEdgesConnecting, GraphNeighbors,
     GraphNodeIndices,
@@ -1401,7 +1402,7 @@ impl GraphRead for DiskGraph {
         // Disk keeps the allocating route — the zero-alloc win is heap/mapped-specific.
         // Equality still works correctly.
         DiskGraph::get_node_property(self, idx, key)
-            .map(|v| matches!(v, Value::String(ref s) if s == target))
+            .map(|v| matches!(v, Value::String(ref s) if str_values_equal(s, target)))
     }
 
     #[inline]

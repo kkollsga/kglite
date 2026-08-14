@@ -185,6 +185,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `build_vector_index` since 0.15.11, through the C ABI's
   `kglite_session_build_vector_index`; the message named two of them and sent
   Java and C consumers looking for a route they already had.
+- **`WHERE n.prop = 'literal'` disagreed with `IN` and with `<>` when the
+  stored string was a single-element JSON list.** A row storing `'["Oslo"]'`
+  satisfied **neither** `n.tag = 'Oslo'` nor `n.tag <> 'Oslo'`, while
+  `n.tag IN ['Oslo']` matched it — three spellings of one question with two
+  different answers, and one row lost from a partition that must be complete.
+  KGLite treats a single-element JSON string list as equal to its inner string
+  (`values_equal`), and seven of the eight routes that decide string equality
+  implement that; the eighth — the byte-equality fast arm that answers a bare
+  property equality after the index-selection pushdown claims it — used a
+  plain `==`. The same predicate spelled so the planner left it in the `WHERE`
+  clause returned the other answer, so the two plans disagreed. All routes now
+  share one implementation of the rule (`str_values_equal`), which also
+  replaces the two hand-copied versions that existed before, and the storage
+  layer's `str_prop_eq` documents that its equality is the engine's rather
+  than `str`'s. Both directions match (a plain literal against a stored list
+  and a list literal against a stored plain string), on the inline pattern
+  form (`MATCH (n {tag: 'Oslo'})`) as well as `WHERE`, and in memory, mapped
+  and disk modes. Ordinary strings pay one byte test, which the JSON arm needs
+  to be entered at all. Documented in `CYPHER.md`.
 
 ## [0.16.0] - 2026-08-14
 

@@ -161,6 +161,18 @@ into `IN` for you, but only after the query parses — so it cannot rescue a
 chain that is already too long, and it does not fire for chains spanning
 different properties. Generating `IN` directly is the robust habit.
 
+### A stored `'["Oslo"]'` equals `'Oslo'`
+
+A string property whose value is a **single-element JSON string list** compares
+equal to that element's plain string, in both directions and on every route
+that decides equality: `=`, `<>`, `IN [...]`, inline pattern properties
+(`MATCH (n {tag: 'Oslo'})`), the `WHERE`-clause scan predicates, and the
+index-backed pushdown. So `n.tag = 'Oslo'`, `n.tag = '["Oslo"]'` and
+`n.tag IN ['Oslo']` all match a row storing either spelling, and `=`/`<>`
+always partition the rows between them. The rule is one-element-only —
+`'["Oslo","Bergen"]'` is an ordinary string and matches only itself — and it
+applies to strings, never to real list values.
+
 ## Relationship Properties
 
 Relationships can have properties. Access them with `r.property` syntax:

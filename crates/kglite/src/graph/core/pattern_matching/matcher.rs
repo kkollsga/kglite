@@ -5,7 +5,7 @@
 // paths, and Rayon-parallelised expansion for large match sets.
 
 use crate::datatypes::values::Value;
-use crate::graph::core::filtering::{compare_values, json_single_element_string, values_equal};
+use crate::graph::core::filtering::{compare_values, str_values_equal, values_equal};
 use crate::graph::languages::cypher::result::Bindings;
 use crate::graph::schema::{DirGraph, InternedKey, NodeData};
 use crate::graph::storage::column_store::ColumnStore;
@@ -206,11 +206,12 @@ fn str_starts_with(s: &str, prefix: &str) -> bool {
 /// agree row for row, so the borrowed read can never see a different answer
 /// than the materialising one.
 ///
-/// `Equals` reproduces `values_equal`'s string arm, JSON-single-element
-/// unwrapping included, because on the identity fields this route replaces
-/// `value_matches`, which used `values_equal`. Stored user properties keep
-/// their long-standing byte-equality fast path in
-/// [`PatternExecutor::prop_matches`] and never reach here.
+/// `Equals` is [`str_values_equal`] — `values_equal`'s string arm,
+/// JSON-single-element unwrapping included — because on the identity fields
+/// this route replaces `value_matches`, which used `values_equal`. Stored
+/// user properties are answered before this by the byte fast path in
+/// [`PatternExecutor::prop_matches`], which calls the same function through
+/// `str_prop_eq`, so the two routes cannot disagree.
 fn str_field_test(matcher: &PropertyMatcher) -> Option<impl Fn(&str) -> bool + '_> {
     if !matches!(
         matcher,
@@ -222,15 +223,7 @@ fn str_field_test(matcher: &PropertyMatcher) -> Option<impl Fn(&str) -> bool + '
         return None;
     }
     Some(move |s: &str| match matcher {
-        PropertyMatcher::Equals(Value::String(target)) => {
-            // The JSON-list arm needs a `["` on one side or the other, so one
-            // byte test rules it out for every ordinary string — this runs on
-            // every non-matching row of a scan.
-            s == target.as_str()
-                || ((s.starts_with('[') || target.starts_with('['))
-                    && (json_single_element_string(s) == Some(target.as_str())
-                        || json_single_element_string(target) == Some(s)))
-        }
+        PropertyMatcher::Equals(Value::String(target)) => str_values_equal(s, target),
         PropertyMatcher::StartsWith(prefix) => str_starts_with(s, prefix),
         PropertyMatcher::EndsWith(suffix) => str_ends_with(s, suffix),
         PropertyMatcher::Contains(needle) => s.contains(needle.as_str()),

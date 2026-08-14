@@ -235,9 +235,15 @@ pub trait GraphRead {
     /// would do on mapped graphs. Used by the Cypher executor to short-circuit
     /// `WHERE n.strProp = 'literal'` scans.
     ///
+    /// Equality is the engine's, not `str`'s: every implementation answers
+    /// [`crate::graph::core::filtering::str_values_equal`], so a stored
+    /// `'["Oslo"]'` equals `'Oslo'` here exactly as it does in `values_equal`,
+    /// `IN` and the compiled scan predicates. A plain `==` here made a bare
+    /// `n.tag = 'Oslo'` the one route that disagreed with the other seven.
+    ///
     /// Returns:
     /// - `None` — property is missing or null for this row
-    /// - `Some(true)` — stored value equals `target` byte-for-byte
+    /// - `Some(true)` — stored value equals `target`
     /// - `Some(false)` — stored value is present but differs
     fn str_prop_eq(&self, idx: NodeIndex, key: InternedKey, target: &str) -> Option<bool>;
 

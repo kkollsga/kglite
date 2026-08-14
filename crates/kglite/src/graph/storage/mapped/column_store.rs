@@ -11,6 +11,7 @@
 // Null bitmap convention: 0 = non-null, non-zero = null (same as ColumnStore).
 
 use crate::datatypes::values::Value;
+use crate::graph::core::filtering::str_values_equal;
 use crate::graph::schema::InternedKey;
 use crate::graph::storage::type_build_meta::ColType;
 use crate::graph::storage::StrField;
@@ -345,7 +346,10 @@ impl MmapColumnStore {
                     if self.read_null(&sc.nulls, row) {
                         return None;
                     }
-                    return Some(self.read_str(&sc.data, &sc.offsets, row) == target);
+                    return Some(str_values_equal(
+                        self.read_str(&sc.data, &sc.offsets, row),
+                        target,
+                    ));
                 }
                 ColRef::Fixed(_) => {
                     // Fixed-width column — definitely not a string match
@@ -355,7 +359,7 @@ impl MmapColumnStore {
         }
         // Overflow bag or unknown key: fall back to the allocating path.
         self.get_overflow_property(row_id, key)
-            .map(|v| matches!(v, Value::String(ref s) if s == target))
+            .map(|v| matches!(v, Value::String(ref s) if str_values_equal(s, target)))
     }
 
     /// Read a property value by (row_id, interned key).

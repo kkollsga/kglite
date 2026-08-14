@@ -241,10 +241,10 @@ def test_json_single_element_list_equals_its_inner_string():
     reproduces rather than replacing with a byte compare.
 
     Spelled with predicates the planner leaves in the WHERE clause. A bare
-    `n.tag = 'Oslo'` is *consumed* by the index-selection pushdown, and the
-    pattern matcher answers stored-property equality with a deliberate byte
-    compare (`prop_matches`' fast arm) — so that spelling measures the
-    matcher, not this route.
+    `n.tag = 'Oslo'` is *consumed* by the index-selection pushdown and
+    answered by the pattern matcher's byte fast arm instead — a different
+    route, pinned by
+    `test_bare_equality_on_a_stored_json_list_agrees_with_in_and_not_equals`.
     """
     graph = KnowledgeGraph()
     graph.add_nodes(
@@ -261,6 +261,47 @@ def test_json_single_element_list_equals_its_inner_string():
     ):
         assert _scalar(graph, query) == graph.cypher(query, disable_optimizer=True).scalar(), query
         assert _scalar(graph, query) == expected, query
+
+
+def test_bare_equality_on_a_stored_json_list_agrees_with_in_and_not_equals():
+    """One question, three spellings, one answer — an absolute golden.
+
+    A bare `n.tag = 'Oslo'` is consumed by the index-selection pushdown and
+    answered by `prop_matches`' byte-equality fast arm, which used to be the
+    only route that skipped `values_equal`'s single-element-JSON-list rule.
+    A row storing `'["Oslo"]'` therefore satisfied **neither** `=` nor `<>`
+    against `'Oslo'`, while `IN ['Oslo']` matched it: `=` disagreed with `IN`,
+    and the `=`/`<>` partition lost a row.
+
+    Both directions are pinned (plain literal against a stored list, list
+    literal against a stored plain string), on the optimized and the naive
+    plan, because the defect lived in a route both plans share.
+    """
+    graph = KnowledgeGraph()
+    graph.add_nodes(
+        pd.DataFrame({"id": ["a", "b"], "t": ["A", "B"], "tag": ['["Oslo"]', "Oslo"]}),
+        "T",
+        "id",
+        "t",
+    )
+    for query, expected in (
+        ("MATCH (n:T) WHERE n.tag = 'Oslo' RETURN count(*) AS c", 2),
+        ("MATCH (n:T) WHERE n.tag <> 'Oslo' RETURN count(*) AS c", 0),
+        ("MATCH (n:T) WHERE n.tag IN ['Oslo'] RETURN count(*) AS c", 2),
+        ("MATCH (n:T) WHERE n.tag = '[\"Oslo\"]' RETURN count(*) AS c", 2),
+        ("MATCH (n:T) WHERE n.tag IN ['[\"Oslo\"]'] RETURN count(*) AS c", 2),
+        # The inline-property spelling reaches the same fast arm.
+        ("MATCH (n:T {tag: 'Oslo'}) RETURN count(*) AS c", 2),
+        # A genuine non-match must stay a non-match on every route.
+        ("MATCH (n:T) WHERE n.tag = 'Bergen' RETURN count(*) AS c", 0),
+    ):
+        assert _scalar(graph, query) == expected, query
+        assert graph.cypher(query, disable_optimizer=True).scalar() == expected, query
+
+    # `=` and `<>` must partition the rows: none may satisfy neither.
+    eq = _scalar(graph, "MATCH (n:T) WHERE n.tag = 'Oslo' RETURN count(*) AS c")
+    ne = _scalar(graph, "MATCH (n:T) WHERE n.tag <> 'Oslo' RETURN count(*) AS c")
+    assert eq + ne == 2, f"= matched {eq}, <> matched {ne}, of 2 rows"
 
 
 def test_mixed_type_column_under_string_and_numeric_predicates():

@@ -2330,7 +2330,70 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WHERE p.city = $filter.city RETURN p.name AS name ORDER BY name",
         {"filter": {"city": "Oslo"}},
     ),
+    # A stored string that *is* a single-element JSON list (`'["Oslo"]'`).
+    # `values_equal` calls it equal to its inner string, so every equality
+    # route must — the index-selection pushdown's byte fast arm was the one
+    # that did not, and answered a bare `= 'Oslo'` with one row fewer than the
+    # unoptimized plan. No other fixture carries a JSON-list-valued column.
+    (
+        "json_list_property_equality",
+        "json_list_props_graph",
+        "MATCH (n:Doc) WHERE n.tag = 'Oslo' RETURN n.title AS t ORDER BY t",
+        None,
+    ),
+    (
+        "json_list_property_equality_reversed",
+        "json_list_props_graph",
+        "MATCH (n:Doc) WHERE n.tag = '[\"Oslo\"]' RETURN n.title AS t ORDER BY t",
+        None,
+    ),
+    (
+        "json_list_property_inequality",
+        "json_list_props_graph",
+        "MATCH (n:Doc) WHERE n.tag <> 'Oslo' RETURN n.title AS t ORDER BY t",
+        None,
+    ),
+    (
+        "json_list_property_membership",
+        "json_list_props_graph",
+        "MATCH (n:Doc) WHERE n.tag IN ['Oslo'] RETURN n.title AS t ORDER BY t",
+        None,
+    ),
+    (
+        "json_list_property_inline_equality",
+        "json_list_props_graph",
+        "MATCH (n:Doc {tag: 'Oslo'}) RETURN n.title AS t ORDER BY t",
+        None,
+    ),
 ]
+
+
+@pytest.fixture
+def json_list_props_graph() -> kglite.KnowledgeGraph:
+    """Nodes whose string property holds a JSON-encoded single-element list.
+
+    Kept separate from `small_graph`/`social_graph` — which are pinned by
+    absolute goldens all over the suite — so that adding the shape cannot
+    change any existing expectation. `stray` is the control: an ordinary
+    string that must keep answering by plain byte equality.
+    """
+    import pandas as pd
+
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "doc_id": [1, 2, 3, 4],
+                "title": ["listed", "plain", "other", "stray"],
+                "tag": ['["Oslo"]', "Oslo", '["Bergen"]', "Trondheim"],
+            }
+        ),
+        "Doc",
+        "doc_id",
+        "title",
+        columns=["tag"],
+    )
+    return g
 
 
 # Mutation queries: each test gets its own fresh fixture so state-bleed

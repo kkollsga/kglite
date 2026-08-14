@@ -60,6 +60,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::datatypes::values::Value;
+use crate::graph::core::filtering::str_values_equal;
 use crate::graph::storage::interner::{InternedKey, StringInterner, STRIP_PROPERTIES};
 use crate::graph::storage::StrField;
 
@@ -162,6 +163,8 @@ impl PropertyStorage {
     /// materialisation in `get()`, which dominates string-equality scans on
     /// mapped graphs. For the non-columnar variants the cost is already
     /// borrowable, so we just wrap the existing `get`.
+    ///
+    /// Equality is [`str_values_equal`] — see `GraphRead::str_prop_eq`.
     #[inline]
     pub(in crate::graph::storage) fn str_prop_eq(
         &self,
@@ -171,7 +174,7 @@ impl PropertyStorage {
         match self {
             PropertyStorage::Map(map) => map
                 .get(&key)
-                .map(|v| matches!(v, Value::String(s) if s == target)),
+                .map(|v| matches!(v, Value::String(s) if str_values_equal(s, target))),
             PropertyStorage::Columnar(_) => None,
         }
     }

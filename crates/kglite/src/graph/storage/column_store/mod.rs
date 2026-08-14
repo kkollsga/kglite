@@ -19,6 +19,7 @@ pub(crate) use typed_column::{column_clones, reset_column_clones};
 use typed_column::{MMAP_THRESHOLD, NEXT_TEMP_COLUMN_FILE};
 
 use crate::datatypes::values::Value;
+use crate::graph::core::filtering::str_values_equal;
 use crate::graph::schema::{InternedKey, StringInterner, TypeSchema};
 use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
 use crate::graph::storage::packed_codec::{
@@ -734,6 +735,8 @@ impl ColumnStore {
     /// that a full `get()` would trigger for mmap-backed string columns —
     /// significant on mapped graphs where string property scans are the
     /// main perf gap vs in-memory mode.
+    ///
+    /// Equality is [`str_values_equal`] — see `GraphRead::str_prop_eq`.
     pub fn str_prop_eq(&self, row_id: u32, key: InternedKey, target: &str) -> Option<bool> {
         if row_id >= self.row_count
             || self
@@ -748,10 +751,10 @@ impl ColumnStore {
         if let Some(slot) = self.schema.slot(key) {
             if let Some(col) = self.columns.get(slot as usize) {
                 if let Some(s) = col.get_str(row_id) {
-                    return Some(s == target);
+                    return Some(str_values_equal(s, target));
                 }
                 if let Some(v) = col.get(row_id) {
-                    return Some(matches!(v, Value::String(ref s) if s == target));
+                    return Some(matches!(v, Value::String(ref s) if str_values_equal(s, target)));
                 }
             }
         }
@@ -759,7 +762,7 @@ impl ColumnStore {
             return ms.str_prop_eq(row_id, key, target);
         }
         self.get_overflow_property(row_id, key)
-            .map(|v| matches!(v, Value::String(ref s) if s == target))
+            .map(|v| matches!(v, Value::String(ref s) if str_values_equal(s, target)))
     }
 
     /// Borrowed string read for (row_id, key) — the allocation-free form of

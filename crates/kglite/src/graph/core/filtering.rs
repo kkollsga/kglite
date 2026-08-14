@@ -126,13 +126,33 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         // UniqueId <-> Float64 (for completeness)
         (Value::UniqueId(u), Value::Float64(f)) => f.fract() == 0.0 && *u as f64 == *f,
         (Value::Float64(f), Value::UniqueId(u)) => f.fract() == 0.0 && *f == *u as f64,
-        // Single-element JSON list compared to plain string (e.g. labels(n) = 'Person')
-        (Value::String(x), Value::String(y)) => {
-            json_single_element_string(x) == Some(y.as_str())
-                || json_single_element_string(y) == Some(x.as_str())
-        }
+        // Single-element JSON list compared to plain string (`["Oslo"]` = 'Oslo').
+        // `a == b` above already answered plain byte equality.
+        (Value::String(x), Value::String(y)) => str_values_equal(x, y),
         _ => false,
     }
+}
+
+/// [`values_equal`] restricted to two strings: byte equality **plus** its
+/// single-element-JSON-list equivalence (`["Oslo"] = 'Oslo'`).
+///
+/// The single implementation of that rule, and deliberately so — it is
+/// reachable through several independent routes (`values_equal` itself, the
+/// pattern matcher's borrowed `str_field_test`, the compiled scan's `StrOp`
+/// predicates, and the storage layer's `str_prop_eq` byte fast path), and
+/// each one that spelled it out for itself was one that could drift. One did:
+/// `str_prop_eq` answered a bare `n.tag = 'Oslo'` with a plain `==`, so a row
+/// storing `'["Oslo"]'` satisfied neither `=` nor `<>` while `IN ['Oslo']`
+/// matched it.
+///
+/// The JSON arm needs a `[` on one side or the other, so one byte test rules
+/// it out for every ordinary string — this runs on every row of a scan.
+#[inline]
+pub(crate) fn str_values_equal(a: &str, b: &str) -> bool {
+    a == b
+        || ((a.starts_with('[') || b.starts_with('['))
+            && (json_single_element_string(a) == Some(b)
+                || json_single_element_string(b) == Some(a)))
 }
 
 /// The inner text of a single-element JSON string list (`["Oslo"]` → `Oslo`),

@@ -37,7 +37,7 @@ use super::super::ast::{ComparisonOp, Expression, Predicate};
 use super::helpers::evaluate_comparison;
 use super::CypherExecutor;
 use crate::datatypes::values::Value;
-use crate::graph::core::filtering::json_single_element_string;
+use crate::graph::core::filtering::str_values_equal;
 use crate::graph::core::membership::MembershipSet;
 use crate::graph::languages::cypher::result::ResultRow;
 use crate::graph::schema::{soft_alias_fallback, DirGraph, InternedKey, SoftAliasFallback};
@@ -323,18 +323,6 @@ impl StrOp {
             StrOp::Contains => value.contains(needle),
         }
     }
-}
-
-/// [`crate::graph::core::filtering::values_equal`] restricted to two strings.
-///
-/// The JSON-list arm needs a `["` on one side or the other, so one byte test
-/// rules it out for every ordinary string — this runs on every row of a scan.
-#[inline]
-fn str_values_equal(a: &str, b: &str) -> bool {
-    a == b
-        || ((a.starts_with('[') || b.starts_with('['))
-            && (json_single_element_string(a) == Some(b)
-                || json_single_element_string(b) == Some(a)))
 }
 
 // ---------------------------------------------------------------------------
