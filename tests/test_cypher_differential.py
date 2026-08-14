@@ -509,6 +509,91 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)-[:KNOWS]->(a) RETURN count(*) AS n",
         None,
     ),
+    # ── relationship-type alternation `[:A|B]` ──
+    #
+    # `EdgePattern` stores an alternation in `connection_types` and keeps only
+    # its FIRST branch in the singular `connection_type` (a documented
+    # back-compat hazard on the struct). Four optimizer consumers read the
+    # singular field and silently narrowed the pattern to one branch, each
+    # producing a wrong answer rather than a slow plan:
+    #
+    #   * the fused simple counter    (`count_simple_pattern_from_bound`)
+    #   * the fused two-hop counter   (`count_two_hop_from_anchor`)
+    #   * the anchored-count fusion   (`fuse_anchored_edge_count`)
+    #   * `skip_target_type_check`    (endpoint-type guarantee from ONE branch
+    #                                  applied to every branch — the only one
+    #                                  of the four that corrupts projections
+    #                                  rather than counts)
+    #
+    # The corpus had no alternation entry at all, which is the sole reason it
+    # missed a class it was built to catch. Both branch orders are pinned
+    # because the bug is order-sensitive: `[:B|A]` and `[:A|B]` returned
+    # different answers for the same pattern. The absent-branch entry pins the
+    # sharpest case — the singular field naming a type the graph does not have
+    # collapsed the whole alternation to zero.
+    (
+        "alternation_count_forward",
+        "social_graph",
+        "MATCH (p:Person)-[:KNOWS|WORKS_AT]->(x) RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "alternation_count_reversed",
+        "social_graph",
+        "MATCH (p:Person)-[:WORKS_AT|KNOWS]->(x) RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "alternation_count_absent_branch_first",
+        "social_graph",
+        "MATCH (p:Person)-[:MENTORS|KNOWS|WORKS_AT]->(x) RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "alternation_count_absent_branch_last",
+        "social_graph",
+        "MATCH (p:Person)-[:KNOWS|WORKS_AT|MENTORS]->(x) RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "alternation_two_hop_count",
+        "social_graph",
+        "MATCH (a:Person)-[:KNOWS|WORKS_AT]->(b)-[:KNOWS|WORKS_AT]->(c) RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "alternation_undirected_count",
+        "social_graph",
+        "MATCH (p:Person)-[:KNOWS|WORKS_AT]-(x) RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "alternation_grouped_count",
+        "social_graph",
+        "MATCH (p:Person)-[:KNOWS|WORKS_AT]->(x) RETURN p.name AS a, count(*) AS n",
+        None,
+    ),
+    (
+        "alternation_anchored_count",
+        "social_graph",
+        "MATCH ({id: 1})-[:WORKS_AT|KNOWS]->(v) RETURN count(*) AS n",
+        None,
+    ),
+    # `KNOWS` guarantees a Person target and `WORKS_AT` a Company one, so an
+    # endpoint-type guarantee read off the first branch alone is wrong for the
+    # second — projections, not just counts.
+    (
+        "alternation_typed_target_person",
+        "social_graph",
+        "MATCH (p:Person)-[:KNOWS|WORKS_AT]->(x:Person) RETURN x.name AS b",
+        None,
+    ),
+    (
+        "alternation_typed_target_company",
+        "social_graph",
+        "MATCH (p:Person)-[:KNOWS|WORKS_AT]->(x:Company) RETURN x.name AS b",
+        None,
+    ),
     # ── push_limit_into_match ──
     ("limit_simple", "social_graph", "MATCH (p:Person) RETURN p.name AS n LIMIT 5", None),
     ("limit_one", "social_graph", "MATCH (p:Person) RETURN p.name AS n LIMIT 1", None),

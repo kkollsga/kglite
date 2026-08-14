@@ -234,7 +234,7 @@ fn mark_skip_target_type_check(query: &mut CypherQuery, graph: &DirGraph) {
                     break;
                 }
                 // Extract edge and target node info without overlapping borrows
-                let (conn_type, direction, target_node_type) = {
+                let (conn_types, direction, target_node_type) = {
                     let edge = match &elements[i + 1] {
                         PatternElement::Edge(ep) => ep,
                         _ => continue,
@@ -250,29 +250,46 @@ fn mark_skip_target_type_check(query: &mut CypherQuery, graph: &DirGraph) {
                     if !target.extra_labels.is_empty() {
                         continue;
                     }
-                    match (&edge.connection_type, edge.direction, &target.node_type) {
-                        (Some(ct), dir, Some(nt)) => (ct.clone(), dir, nt.clone()),
-                        _ => continue,
+                    // An alternation's guarantee is the conjunction over its
+                    // branches. Reading only `connection_type` took the
+                    // guarantee of the FIRST branch and applied it to all of
+                    // them, so `[:KNOWS|WORKS_AT]->(x:Person)` skipped the
+                    // label check on WORKS_AT's Company targets and returned
+                    // them as Persons.
+                    let types: Vec<String> = match &edge.connection_types {
+                        Some(types) if !types.is_empty() => types.clone(),
+                        _ => match &edge.connection_type {
+                            Some(ct) => vec![ct.clone()],
+                            None => continue,
+                        },
+                    };
+                    match &target.node_type {
+                        Some(nt) => (types, edge.direction, nt.clone()),
+                        None => continue,
                     }
                 };
 
-                // Look up connection type metadata
-                if let Some(info) = graph.connection_type_metadata.get(&conn_type) {
-                    let guaranteed = match direction {
-                        EdgeDirection::Outgoing => {
-                            info.target_types.len() == 1
-                                && info.target_types.contains(&target_node_type)
-                        }
-                        EdgeDirection::Incoming => {
-                            info.source_types.len() == 1
-                                && info.source_types.contains(&target_node_type)
-                        }
-                        EdgeDirection::Both => false, // can't guarantee for bidirectional
-                    };
-                    if guaranteed {
-                        if let PatternElement::Edge(ep) = &mut elements[i + 1] {
-                            ep.skip_target_type_check = true;
-                        }
+                // Every accepted connection type must guarantee the target's
+                // primary label; one unknown or non-guaranteeing branch and
+                // the check has to stay.
+                let guaranteed = conn_types.iter().all(|conn_type| {
+                    graph.connection_type_metadata.get(conn_type).is_some_and(
+                        |info| match direction {
+                            EdgeDirection::Outgoing => {
+                                info.target_types.len() == 1
+                                    && info.target_types.contains(&target_node_type)
+                            }
+                            EdgeDirection::Incoming => {
+                                info.source_types.len() == 1
+                                    && info.source_types.contains(&target_node_type)
+                            }
+                            EdgeDirection::Both => false, // can't guarantee for bidirectional
+                        },
+                    )
+                });
+                if guaranteed {
+                    if let PatternElement::Edge(ep) = &mut elements[i + 1] {
+                        ep.skip_target_type_check = true;
                     }
                 }
             }

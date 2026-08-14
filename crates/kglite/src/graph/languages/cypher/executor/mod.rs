@@ -771,22 +771,40 @@ impl<'a> CypherExecutor<'a> {
             Clause::FusedCountAnchoredEdges {
                 anchor_idx,
                 anchor_direction,
-                edge_type,
+                edge_types,
                 alias,
             } => {
                 // O(log D) count from CSR offsets (with binary search when a
                 // connection type is specified). The anchor has already been
                 // resolved at plan time; an invalid index falls through
-                // `count_edges_filtered` to a clean `Ok(0)`.
+                // `count_edges_filtered` to a clean `Ok(0)`. An alternation
+                // sums one such read per accepted type — exact, because every
+                // edge carries exactly one type and the planner deduplicated
+                // the list.
                 let idx = petgraph::graph::NodeIndex::new(*anchor_idx as usize);
-                let conn = edge_type.as_deref().map(InternedKey::from_str);
-                let count = self.graph.graph.count_edges_filtered(
-                    idx,
-                    *anchor_direction,
-                    conn,
-                    None,
-                    self.deadline,
-                )? as i64;
+                let mut count: i64 = 0;
+                match edge_types.as_deref() {
+                    None => {
+                        count = self.graph.graph.count_edges_filtered(
+                            idx,
+                            *anchor_direction,
+                            None,
+                            None,
+                            self.deadline,
+                        )? as i64;
+                    }
+                    Some(types) => {
+                        for edge_type in types {
+                            count += self.graph.graph.count_edges_filtered(
+                                idx,
+                                *anchor_direction,
+                                Some(InternedKey::from_str(edge_type)),
+                                None,
+                                self.deadline,
+                            )? as i64;
+                        }
+                    }
+                }
                 self.budget
                     .check_work(count as usize, "fused anchored edge count")?;
                 let mut projected = Bindings::with_capacity(1);

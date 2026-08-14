@@ -84,6 +84,110 @@ pub struct EdgePattern {
     pub edge_filter: Option<RelEdgeFilter>,
 }
 
+impl EdgePattern {
+    /// The set of connection types this pattern accepts, interned once.
+    ///
+    /// Always build the filter through this constructor rather than
+    /// reading [`EdgePattern::connection_type`] directly: for `[:A|B]`
+    /// the singular field holds only `A`, so a consumer that ignores
+    /// `connection_types` silently narrows the pattern to its first
+    /// branch. That narrowing produced wrong *answers* (not just slow
+    /// plans) in the fused counters, the anchored-count fusion, the
+    /// EXISTS fast path and the `skip_target_type_check` annotation.
+    pub fn conn_filter(&self) -> ConnTypeFilter {
+        match (&self.connection_types, &self.connection_type) {
+            // `[:A|B]` — the parser does not deduplicate, and a counting
+            // consumer that sums per type would double-count `[:A|A]`,
+            // so dedup here where every consumer inherits it.
+            (Some(types), _) if !types.is_empty() => {
+                let mut keys: Vec<InternedKey> = Vec::with_capacity(types.len());
+                for ty in types {
+                    let key = InternedKey::from_str(ty);
+                    if !keys.contains(&key) {
+                        keys.push(key);
+                    }
+                }
+                match keys.len() {
+                    1 => ConnTypeFilter::One(keys[0]),
+                    _ => ConnTypeFilter::AnyOf(keys),
+                }
+            }
+            (_, Some(ty)) => ConnTypeFilter::One(InternedKey::from_str(ty)),
+            _ => ConnTypeFilter::Any,
+        }
+    }
+}
+
+/// Which connection types an [`EdgePattern`] accepts.
+///
+/// The single-type case carries no allocation, so the hot single-type
+/// path costs exactly what the old `Option<InternedKey>` did; only an
+/// alternation allocates.
+#[derive(Debug, Clone)]
+pub enum ConnTypeFilter {
+    /// Untyped edge (`-[]->`) — every connection type matches.
+    Any,
+    /// Exactly one accepted type.
+    One(InternedKey),
+    /// Alternation (`[:A|B|C]`); deduplicated, always ≥ 2 entries.
+    AnyOf(Vec<InternedKey>),
+}
+
+impl ConnTypeFilter {
+    /// Pre-filter hint for `edges_directed_filtered` / `iter_peers_filtered`.
+    ///
+    /// `Some` only when exactly one type is accepted — a backend that
+    /// pre-filters (the disk CSR) can then skip non-matching edges
+    /// entirely. For an alternation this is `None` and the caller MUST
+    /// post-filter with [`Self::accepts`]; the memory and mapped backends
+    /// treat the argument as a hint and return every edge regardless, so
+    /// the post-filter is required in all cases anyway.
+    #[inline]
+    pub fn hint(&self) -> Option<InternedKey> {
+        match self {
+            ConnTypeFilter::One(key) => Some(*key),
+            _ => None,
+        }
+    }
+
+    /// Does an edge carrying `key` match this pattern's type constraint?
+    #[inline]
+    pub fn accepts(&self, key: InternedKey) -> bool {
+        match self {
+            ConnTypeFilter::Any => true,
+            ConnTypeFilter::One(want) => key == *want,
+            ConnTypeFilter::AnyOf(keys) => keys.contains(&key),
+        }
+    }
+
+    /// True when the pattern places no connection-type constraint.
+    #[inline]
+    pub fn is_any(&self) -> bool {
+        matches!(self, ConnTypeFilter::Any)
+    }
+
+    /// Sum a per-type count over every accepted type: `f` is called once
+    /// with `None` (count all types) for an untyped edge, otherwise once
+    /// per accepted type. Summing is exact because each edge carries
+    /// exactly one connection type and the key list is deduplicated.
+    pub fn try_fold_counts<E>(
+        &self,
+        mut f: impl FnMut(Option<InternedKey>) -> Result<usize, E>,
+    ) -> Result<usize, E> {
+        match self {
+            ConnTypeFilter::Any => f(None),
+            ConnTypeFilter::One(key) => f(Some(*key)),
+            ConnTypeFilter::AnyOf(keys) => {
+                let mut total = 0usize;
+                for key in keys {
+                    total = total.saturating_add(f(Some(*key))?);
+                }
+                Ok(total)
+            }
+        }
+    }
+}
+
 /// Inline edge filter — evaluated during expansion to skip edges the
 /// downstream `WHERE` would have discarded. The single
 /// [`RelEdgePredicate`] is wrapped to carry the original anchor side

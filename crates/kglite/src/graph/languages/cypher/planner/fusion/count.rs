@@ -137,7 +137,22 @@ pub(crate) fn fuse_anchored_edge_count(query: &mut CypherQuery, graph: &DirGraph
     };
 
     let alias = return_item_column_name(&return_clause.items[0]);
-    let edge_type = edge.connection_type.clone();
+    // `[:A|B]` — the singular `connection_type` holds only the first branch,
+    // so fusing on it counted that branch alone. Carry every branch; the
+    // executor sums one CSR offset read per type. Duplicated branches
+    // (`[:A|A]`) would double-count, so they are dropped here.
+    let edge_types = match &edge.connection_types {
+        Some(types) if !types.is_empty() => {
+            let mut deduped: Vec<String> = Vec::with_capacity(types.len());
+            for ty in types {
+                if !deduped.contains(ty) {
+                    deduped.push(ty.clone());
+                }
+            }
+            Some(deduped)
+        }
+        _ => edge.connection_type.clone().map(|ty| vec![ty]),
+    };
 
     query.clauses.drain(0..2);
     query.clauses.insert(
@@ -145,7 +160,7 @@ pub(crate) fn fuse_anchored_edge_count(query: &mut CypherQuery, graph: &DirGraph
         Clause::FusedCountAnchoredEdges {
             anchor_idx,
             anchor_direction: anchor_dir,
-            edge_type,
+            edge_types,
             alias,
         },
     );

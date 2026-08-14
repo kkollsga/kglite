@@ -439,36 +439,53 @@ fn estimate_match_edge_cost(
                 PatternElement::Edge(ep) => ep,
                 _ => continue,
             };
-            let ct = ep.connection_type.as_ref()?;
-            let mut count: Option<usize> = None;
-            if let Some(triples) = triple_counts {
-                // Lookup neighbouring node-type labels. Pattern shape
-                // is always (node, edge, node, edge, ...) so the
-                // surrounding nodes are at idx-1 and idx+1. Fall back
-                // to per-edge total when either side is untyped or the
-                // (src, edge, tgt) triple isn't in the cache.
-                let src_label = idx
-                    .checked_sub(1)
-                    .and_then(|i| elems.get(i))
-                    .and_then(node_label);
-                let tgt_label = elems.get(idx + 1).and_then(node_label);
-                if let (Some(sl), Some(tl)) = (src_label, tgt_label) {
-                    let key_fwd = (sl.clone(), ct.clone(), tl.clone());
-                    let key_rev = (tl, ct.clone(), sl);
-                    // Direction-agnostic for `()-[]-()` patterns:
-                    // honour both directions, take the sum.
-                    let fwd = triples.get(&key_fwd).copied().unwrap_or(0);
-                    let rev = triples.get(&key_rev).copied().unwrap_or(0);
-                    if fwd > 0 || rev > 0 {
-                        count = Some(fwd + rev);
+            // `[:A|B]` costs the sum of its branches; charging only the first
+            // one (the singular `connection_type`) understates the pattern by
+            // up to the branch count and can pick the wrong driving side.
+            // Cost-only — this proxy never changes which rows come back.
+            let conn_types: Vec<&String> = match &ep.connection_types {
+                Some(types) if !types.is_empty() => {
+                    let mut deduped: Vec<&String> = Vec::with_capacity(types.len());
+                    for ty in types {
+                        if !deduped.contains(&ty) {
+                            deduped.push(ty);
+                        }
+                    }
+                    deduped
+                }
+                _ => vec![ep.connection_type.as_ref()?],
+            };
+            for ct in conn_types {
+                let mut count: Option<usize> = None;
+                if let Some(triples) = triple_counts {
+                    // Lookup neighbouring node-type labels. Pattern shape
+                    // is always (node, edge, node, edge, ...) so the
+                    // surrounding nodes are at idx-1 and idx+1. Fall back
+                    // to per-edge total when either side is untyped or the
+                    // (src, edge, tgt) triple isn't in the cache.
+                    let src_label = idx
+                        .checked_sub(1)
+                        .and_then(|i| elems.get(i))
+                        .and_then(node_label);
+                    let tgt_label = elems.get(idx + 1).and_then(node_label);
+                    if let (Some(sl), Some(tl)) = (src_label, tgt_label) {
+                        let key_fwd = (sl.clone(), ct.clone(), tl.clone());
+                        let key_rev = (tl, ct.clone(), sl);
+                        // Direction-agnostic for `()-[]-()` patterns:
+                        // honour both directions, take the sum.
+                        let fwd = triples.get(&key_fwd).copied().unwrap_or(0);
+                        let rev = triples.get(&key_rev).copied().unwrap_or(0);
+                        if fwd > 0 || rev > 0 {
+                            count = Some(fwd + rev);
+                        }
                     }
                 }
+                let resolved = match count {
+                    Some(c) => c,
+                    None => *edge_counts.get(ct)?,
+                };
+                total = total.saturating_add(resolved);
             }
-            let resolved = match count {
-                Some(c) => c,
-                None => *edge_counts.get(ct)?,
-            };
-            total = total.saturating_add(resolved);
         }
     }
     Some(total)

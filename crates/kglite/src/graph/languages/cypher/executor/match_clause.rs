@@ -720,7 +720,11 @@ impl<'a> CypherExecutor<'a> {
             _ => return None, // both bound or neither — fall back
         };
 
-        let interned_conn = edge.connection_type.as_deref().map(InternedKey::from_str);
+        // `[:A|B]`: the singular field holds only the first branch, so this
+        // sweep used to answer "no such edge" for a node whose only match
+        // was on a later branch.
+        let conn_filter = edge.conn_filter();
+        let interned_conn = conn_filter.hint();
 
         // Pre-allocate a mutable row for WHERE evaluation (avoids clone per edge)
         let (has_where, mut eval_row) = if where_clause.is_some() {
@@ -738,10 +742,8 @@ impl<'a> CypherExecutor<'a> {
                 .graph
                 .edges_directed_filtered(bound_idx, direction, interned_conn)
         {
-            if let Some(ik) = interned_conn {
-                if edge_ref.weight().connection_type != ik {
-                    continue;
-                }
+            if !conn_filter.accepts(edge_ref.weight().connection_type) {
+                continue;
             }
 
             let other_idx = if direction == Direction::Outgoing {
@@ -953,27 +955,34 @@ impl<'a> CypherExecutor<'a> {
                 _ => return Ok(None), // both bound or neither bound — fall back
             };
 
-        let conn_type = edge.connection_type.as_deref();
-        let interned_conn = conn_type.map(InternedKey::from_str);
+        // `[:A|B]` accepts every listed type; reading the singular
+        // `connection_type` here counted only the first branch.
+        let conn_filter = edge.conn_filter();
+        let interned_conn = conn_filter.hint();
         let interned_other_type = other_type.as_ref().map(|t| InternedKey::from_str(t));
 
         // Fast path (raw counts only): when no property filters on the
         // unbound node *and* no inline edge filter, use count_edges_filtered
         // which avoids EdgeData materialization entirely. On disk with
         // sorted CSR: binary search + sequential count (zero allocations).
+        // An alternation runs the pass once per accepted type and sums —
+        // exact, because each edge carries exactly one type and the filter
+        // deduplicates its branches.
         // Distinct-peer counting can't use it (needs peer identity, not an
         // edge count); when a filter is set we fall through — the slow loop
         // below checks each edge without ever building a row.
         if !distinct_peers && other_props.is_none() && edge.edge_filter.is_none() {
             let mut count: usize = 0;
             for &dir in traverse_dirs {
-                count = count.saturating_add(self.graph.graph.count_edges_filtered(
-                    bound_idx,
-                    dir,
-                    interned_conn,
-                    interned_other_type,
-                    self.deadline,
-                )?);
+                count = count.saturating_add(conn_filter.try_fold_counts(|conn| {
+                    self.graph.graph.count_edges_filtered(
+                        bound_idx,
+                        dir,
+                        conn,
+                        interned_other_type,
+                        self.deadline,
+                    )
+                })?);
             }
             return Ok(Some(count as i64));
         }
@@ -1024,11 +1033,11 @@ impl<'a> CypherExecutor<'a> {
                 // pre-filters by connection type, but the memory/mapped
                 // backends return every edge in the given direction (see
                 // the trait contract in storage/mod.rs), so we must
-                // post-filter on `connection_type` here.
-                if let Some(required_conn) = interned_conn {
-                    if edge_ref.weight().connection_type != required_conn {
-                        continue;
-                    }
+                // post-filter on `connection_type` here. The hint is also
+                // `None` for an alternation, which the backends cannot
+                // express, so this post-filter carries it alone.
+                if !conn_filter.accepts(edge_ref.weight().connection_type) {
+                    continue;
                 }
                 let other_idx = if dir == Direction::Outgoing {
                     edge_ref.target()
@@ -1172,14 +1181,13 @@ impl<'a> CypherExecutor<'a> {
         let Some(dir2) = map_dir(hop2_edge.direction) else {
             return Ok(0);
         };
-        let interned_conn1 = hop1_edge
-            .connection_type
-            .as_deref()
-            .map(InternedKey::from_str);
-        let interned_conn2 = hop2_edge
-            .connection_type
-            .as_deref()
-            .map(InternedKey::from_str);
+        // Both hops honour `[:A|B]`: the singular `connection_type` holds
+        // only the first branch, which counted a strict subset of the
+        // pattern's matches.
+        let conn_filter1 = hop1_edge.conn_filter();
+        let conn_filter2 = hop2_edge.conn_filter();
+        let interned_conn1 = conn_filter1.hint();
+        let interned_conn2 = conn_filter2.hint();
 
         // Node-type check without materialization (O(1) mmap read on disk).
         let node_type_matches = |idx: NodeIndex, want: &Option<String>| -> bool {
@@ -1205,11 +1213,10 @@ impl<'a> CypherExecutor<'a> {
             self.check_interrupt_periodic(work)?;
             work = work.saturating_add(1);
             // `edges_directed_filtered` is a hint (see storage/mod.rs) —
-            // post-filter connection type for memory/mapped backends.
-            if let Some(ik) = interned_conn1 {
-                if e1_ref.weight().connection_type != ik {
-                    continue;
-                }
+            // post-filter connection type for memory/mapped backends, and
+            // for the alternation case the hint cannot express at all.
+            if !conn_filter1.accepts(e1_ref.weight().connection_type) {
+                continue;
             }
             let mid_idx = if dir1 == Direction::Outgoing {
                 e1_ref.target()
@@ -1228,10 +1235,8 @@ impl<'a> CypherExecutor<'a> {
             {
                 self.check_interrupt_periodic(work)?;
                 work = work.saturating_add(1);
-                if let Some(ik) = interned_conn2 {
-                    if e2_ref.weight().connection_type != ik {
-                        continue;
-                    }
+                if !conn_filter2.accepts(e2_ref.weight().connection_type) {
+                    continue;
                 }
                 if e2_ref.id() == e1_ref.id() {
                     continue;

@@ -19,8 +19,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use super::pattern::{
-    AnchorSide, EdgeDirection, EdgePattern, MatchBinding, NodePattern, PathHop, Pattern,
-    PatternElement, PatternMatch, PropertyMatcher,
+    AnchorSide, ConnTypeFilter, EdgeDirection, EdgePattern, MatchBinding, NodePattern, PathHop,
+    Pattern, PatternElement, PatternMatch, PropertyMatcher,
 };
 
 /// Minimum match count to use parallel expansion via rayon.
@@ -428,38 +428,60 @@ impl<'a> PatternExecutor<'a> {
             && first_node.node_type.is_none()
             && first_node.properties.is_none()
         {
-            // Check if the first edge has a connection type we can look up
-            let edge_conn_type = if let Some(PatternElement::Edge(ep)) = pattern.elements.get(1) {
-                if ep.var_length.is_none() {
-                    ep.connection_type
-                        .as_ref()
-                        .map(|ct| InternedKey::from_str(ct))
+            // Check if the first edge has connection type(s) we can look up.
+            // `[:A|B]` needs the sources of EVERY branch: taking only the
+            // singular `connection_type` dropped every start node whose sole
+            // matching edge was on a later branch.
+            let edge_conn_types: Option<Vec<InternedKey>> =
+                if let Some(PatternElement::Edge(ep)) = pattern.elements.get(1) {
+                    if ep.var_length.is_none() {
+                        match ep.conn_filter() {
+                            ConnTypeFilter::Any => None,
+                            ConnTypeFilter::One(key) => Some(vec![key]),
+                            ConnTypeFilter::AnyOf(keys) => Some(keys),
+                        }
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
+                };
             // Check edge direction — inverted index only covers outgoing sources
             let is_outgoing = if let Some(PatternElement::Edge(ep)) = pattern.elements.get(1) {
                 ep.direction == EdgeDirection::Outgoing
             } else {
                 false
             };
-            if let (Some(ct), true) = (edge_conn_type, is_outgoing) {
+            if let (Some(conn_types), true) = (edge_conn_types, is_outgoing) {
                 // Pass `source_cap` through so we don't eagerly copy the
                 // whole 400 MB source list from the inverted index for
-                // a query that only needs 1 000 of them.
-                if let Some(sources) = self
-                    .graph
-                    .graph
-                    .sources_for_conn_type_bounded(ct, source_cap)
-                {
-                    // Convert u32 source IDs to NodeIndex
-                    sources
-                        .into_iter()
-                        .map(|s| NodeIndex::new(s as usize))
-                        .collect()
+                // a query that only needs 1 000 of them. An alternation
+                // unions the per-branch source lists; if the index is
+                // unavailable for ANY branch the union would be short, so
+                // the whole lookup falls back to the full node scan.
+                let mut union: Vec<NodeIndex> = Vec::new();
+                let mut complete = true;
+                for ct in conn_types {
+                    match self
+                        .graph
+                        .graph
+                        .sources_for_conn_type_bounded(ct, source_cap)
+                    {
+                        Some(sources) => {
+                            union.extend(sources.into_iter().map(|s| NodeIndex::new(s as usize)));
+                        }
+                        None => {
+                            complete = false;
+                            break;
+                        }
+                    }
+                }
+                if complete {
+                    // A node can source more than one branch; the caller
+                    // treats each start node once.
+                    union.sort_unstable();
+                    union.dedup();
+                    union
                 } else {
                     self.find_matching_nodes(first_node)?
                 }

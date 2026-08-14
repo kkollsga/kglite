@@ -2031,6 +2031,16 @@ impl<'a> CypherExecutor<'a> {
         if edge_pat.edge_filter.is_some() {
             return Ok(None);
         }
+        // The histogram is keyed by a single connection type, so an
+        // alternation would need its per-type histograms merged. Reading the
+        // singular `connection_type` instead counted only the first branch —
+        // a wrong answer. Bail to the caller's per-source counter, which
+        // honours every branch: merging k histograms is a plan-shape choice
+        // this fast path does not need to make, and the fallback is correct
+        // at the cost of the O(distinct-peers) shortcut for alternations only.
+        if edge_pat.connection_types.is_some() {
+            return Ok(None);
+        }
         // Same direction-aware "group is target" predicate as the RETURN-
         // aggregate fast paths above. Pre-fix this only matched the user-
         // written shape (group_elem_idx == 2 with Outgoing edge), so the

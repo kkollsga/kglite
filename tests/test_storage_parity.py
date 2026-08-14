@@ -302,6 +302,58 @@ def test_save_load_round_trip(graphs, tmp_path):
     assert original == after, f"save/load round-trip diverged: {original} vs {after}"
 
 
+def test_relationship_alternation_parity(tmp_path):
+    """`[:A|B]` from an untyped start node must find both branches in every mode.
+
+    An untyped, unfiltered start node with a typed outgoing edge picks its
+    start nodes from the connection-type inverted index — which `mapped` and
+    `disk` have and `memory` does not. Looked up for the *first* branch alone,
+    it dropped every start node whose only matching edge was on a later branch,
+    so the two storage modes silently returned fewer rows than memory.
+
+    The discriminator is that `WROTE`'s source set is a strict subset of
+    `LIKES`'s: node 4 only writes and node 3 only likes, so neither branch's
+    source list alone covers the pattern. The shared `ORACLE_QUERIES` fixture
+    cannot express this — both of its edge types have every Entity as a source
+    — which is why this builds its own graph. Absolute row counts are asserted
+    alongside cross-mode agreement, since a bug all three modes shared would
+    keep them in agreement.
+    """
+    nodes = pd.DataFrame({"id": [1, 2, 3, 4], "title": ["A", "B", "C", "D"]})
+    docs = pd.DataFrame({"id": [10, 11], "title": ["Doc1", "Doc2"]})
+    # LIKES sources: {1, 2, 3};  WROTE sources: {1, 2, 4}
+    likes = pd.DataFrame({"src": [1, 2, 3], "dst": [2, 3, 1]})
+    wrote = pd.DataFrame({"src": [1, 2, 4], "dst": [10, 11, 10]})
+
+    for both_orders in (("LIKES|WROTE", "WROTE|LIKES"),):
+        results: dict[str, dict[str, list[dict]]] = {}
+        for mode in STORAGE_MODES:
+            if mode == "memory":
+                graph = KnowledgeGraph()
+            elif mode == "mapped":
+                graph = KnowledgeGraph(storage="mapped")
+            else:
+                graph = KnowledgeGraph(storage="disk", path=str(tmp_path / "alt-disk"))
+            graph.add_nodes(nodes, "Person", "id", "title")
+            graph.add_nodes(docs, "Doc", "id", "title")
+            graph.add_connections(likes, "LIKES", "Person", "src", "Person", "dst")
+            graph.add_connections(wrote, "WROTE", "Person", "src", "Doc", "dst")
+            results[mode] = {
+                rel: _rows(graph.cypher(f"MATCH (x)-[:{rel}]->(y) RETURN x.title AS a, y.title AS b"))
+                for rel in both_orders
+            }
+
+        for mode in STORAGE_MODES:
+            for rel in both_orders:
+                rows = results[mode][rel]
+                assert len(rows) == 6, f"{mode} / [:{rel}]: expected 6 rows, got {len(rows)}"
+            assert results[mode][both_orders[0]] == results[mode][both_orders[1]], (
+                f"{mode}: branch order changed the answer"
+            )
+        for mode in ("mapped", "disk"):
+            assert results[mode] == results["memory"], f"{mode} diverged from memory on [:A|B]"
+
+
 def test_strongly_connected_components_parity(tmp_path):
     """Directed SCC semantics must not degrade to weak components on disk."""
     nodes = pd.DataFrame({"id": [1, 2, 3, 4, 5, 6], "title": ["A", "B", "C", "D", "E", "F"]})

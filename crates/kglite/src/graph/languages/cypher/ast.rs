@@ -224,10 +224,11 @@ pub enum Clause {
         /// Direction relative to the anchor. Outgoing = edges that leave the
         /// anchor; Incoming = edges that enter it.
         anchor_direction: petgraph::Direction,
-        /// Connection type name (None = all types). Kept as String so the
-        /// executor interns with the live interner; covers mmap-mode FNV
-        /// hashes automatically.
-        edge_type: Option<String>,
+        /// Accepted connection type names (None = all types; more than one
+        /// for an alternation `[:A|B]`, whose per-type counts the executor
+        /// sums). Kept as Strings so the executor interns with the live
+        /// interner; covers mmap-mode FNV hashes automatically.
+        edge_types: Option<Vec<String>>,
         alias: String,
     },
     /// Optimizer-generated: MATCH (n:Type) [WHERE ...] RETURN group_keys, agg_funcs(...)

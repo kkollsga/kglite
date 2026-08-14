@@ -231,14 +231,16 @@ pub fn clause_display_name(clause: &Clause) -> String {
         Clause::FusedCountAnchoredEdges {
             anchor_idx,
             anchor_direction,
-            edge_type,
+            edge_types,
             ..
         } => {
             let arrow = match anchor_direction {
                 petgraph::Direction::Outgoing => "→",
                 petgraph::Direction::Incoming => "←",
             };
-            let t = edge_type.as_deref().unwrap_or("*");
+            let t = edge_types
+                .as_ref()
+                .map_or_else(|| "*".to_string(), |types| types.join("|"));
             format!("FusedCountAnchoredEdges (anchor#{anchor_idx} {arrow} :{t})")
         }
         Clause::FusedNodeScanAggregate { .. } => "FusedNodeScanAggregate".into(),

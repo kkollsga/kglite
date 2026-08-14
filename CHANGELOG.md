@@ -34,6 +34,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Relationship-type alternation `[:A|B]` returned answers for one branch
+  only.** `MATCH (p:Person)-[:KNOWS|WORKS_AT]->(x) RETURN count(*)` counted the
+  `KNOWS` edges and dropped the `WORKS_AT` ones; writing the same pattern as
+  `[:WORKS_AT|KNOWS]` returned a *different* number, and leading with a type
+  the graph does not have returned zero. `EdgePattern` keeps the full branch
+  list in `connection_types` and, for back-compat, the first branch alone in
+  the singular `connection_type` — seven consumers read the singular field and
+  silently narrowed the pattern to that one branch. Every one produced a wrong
+  answer rather than a slow plan:
+  - the fused simple counter (`count(*)`, `count(r)`, grouped `RETURN x,
+    count(*)`, undirected `-[:A|B]-`, and `WITH … count(*)`),
+  - the fused two-hop counter (`(a)-[:A|B]->(b)-[:A|B]->(c)`),
+  - the anchored-count fusion (`MATCH ({id: V})-[:A|B]->(v) RETURN count(*)`),
+  - the `WITH tgt, count(src)` peer-count histogram path,
+  - the `skip_target_type_check` planner annotation — the one that corrupts
+    **projections** rather than counts: because `KNOWS` guarantees a `Person`
+    target, the label check was skipped for the whole alternation and
+    `-[:KNOWS|WORKS_AT]->(x:Person)` returned `WORKS_AT`'s Company nodes as
+    if they were Persons,
+  - the EXISTS/pattern-predicate fast path (`WHERE (p)-[:A|B]->()`), which
+    ran identically with the optimizer disabled and so was wrong on **both**
+    plans,
+  - the connection-type inverted index used to pick start nodes, which
+    dropped every start node whose only matching edge was on a later branch
+    (disk and mapped graphs).
+
+  All seven now honour every branch, and duplicated branches (`[:A|A]`) are
+  deduplicated so the per-branch counters cannot double-count. The join-order
+  cost proxy also charges the sum of the branches instead of the first one.
+  Single-type patterns take exactly the code path they did before. Note that
+  alternation still cannot be *parsed* inside an `EXISTS { … }` subquery or a
+  `size((n)-[…]->())` pattern expression — a pre-existing parser gap, not a
+  wrong answer.
 - **A multi-part `CREATE` fabricated anonymous nodes instead of reusing the
   variables its earlier parts had just bound.**
   `CREATE (a:T {id: 5}), (b:T {id: 7}), (b)-[:E]->(a)` produced **four** nodes

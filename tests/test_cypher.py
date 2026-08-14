@@ -1549,6 +1549,80 @@ class TestBugRelationshipTypePipe:
         assert len(rows) >= 1
 
 
+class TestAlternationAbsoluteAnswers:
+    """`[:A|B]` must match the union of its branches — absolute expectations.
+
+    `EdgePattern.connection_types` is the real branch list; the singular
+    `connection_type` keeps only the FIRST branch for back-compat. Consumers
+    that read the singular field narrow the pattern to one branch and return a
+    WRONG ANSWER. The differential corpus pins the optimizer-side consumers,
+    but two of them sit in the executor and run identically with the optimizer
+    disabled, so `optimized == naive` stays green while both are wrong. Those
+    need absolute values, which is what this class holds.
+
+    Fixture (`cypher_graph`): KNOWS 1→2, 1→3, 2→3, 3→4, 4→5 (5 edges, all
+    Person→Person); PURCHASED 1→101, 1→102, 2→103, 3→101 (4 edges, all
+    Person→Product). Diana(4) has a KNOWS out-edge but no PURCHASED one and
+    Eve(5) has neither, so a filter collapsed to a single branch changes the
+    answer in every query below.
+    """
+
+    def test_alternation_count_both_orders(self, cypher_graph):
+        for rel in ("KNOWS|PURCHASED", "PURCHASED|KNOWS"):
+            rows = cypher_graph.cypher(f"MATCH (a:Person)-[:{rel}]->(b) RETURN count(*) AS n")
+            assert rows[0]["n"] == 9, rel
+
+    def test_alternation_count_with_absent_branch(self, cypher_graph):
+        """A branch naming a type the graph lacks drops that branch, not the rest."""
+        for rel in ("SOLD|KNOWS|PURCHASED", "KNOWS|PURCHASED|SOLD"):
+            rows = cypher_graph.cypher(f"MATCH (a:Person)-[:{rel}]->(b) RETURN count(*) AS n")
+            assert rows[0]["n"] == 9, rel
+
+    def test_alternation_two_hop_count(self, cypher_graph):
+        # Second-hop out-degrees: 1→2 (2), 1→3 (2), 2→3 (2), 3→4 (1); the four
+        # Product-terminated first hops and 4→5 contribute nothing.
+        for rel in ("KNOWS|PURCHASED", "PURCHASED|KNOWS"):
+            rows = cypher_graph.cypher(f"MATCH (a:Person)-[:{rel}]->(b)-[:{rel}]->(c) RETURN count(*) AS n")
+            assert rows[0]["n"] == 7, rel
+
+    def test_alternation_anchored_count(self, cypher_graph):
+        """`{id: V}` anchored counts fuse to a CSR offset read — per branch."""
+        for rel in ("KNOWS|PURCHASED", "PURCHASED|KNOWS"):
+            rows = cypher_graph.cypher(f"MATCH ({{id: 1}})-[:{rel}]->(v) RETURN count(*) AS n")
+            assert rows[0]["n"] == 4, rel
+
+    def test_alternation_typed_endpoint_projection(self, cypher_graph):
+        """KNOWS guarantees a Person target, PURCHASED a Product one.
+
+        An endpoint-type guarantee read off the first branch and applied to
+        every branch skips the label check outright, so the rows come back
+        with the wrong node type — a corrupted projection, not a bad count.
+        """
+        for rel in ("KNOWS|PURCHASED", "PURCHASED|KNOWS"):
+            products = cypher_graph.cypher(f"MATCH (a:Person)-[:{rel}]->(b:Product) RETURN b.title AS t")
+            assert sorted(r["t"] for r in products) == ["Laptop", "Laptop", "Phone", "Tablet"], rel
+            people = cypher_graph.cypher(f"MATCH (a:Person)-[:{rel}]->(b:Person) RETURN b.title AS t")
+            assert sorted(r["t"] for r in people) == ["Bob", "Charlie", "Charlie", "Diana", "Eve"], rel
+
+    def test_alternation_pattern_predicate(self, cypher_graph):
+        """`WHERE (p)-[:A|B]->()` — executor-level, invisible to the differential
+        harness because the same fast path serves the naive plan."""
+        for rel in ("KNOWS|PURCHASED", "PURCHASED|KNOWS"):
+            rows = cypher_graph.cypher(f"MATCH (p:Person) WHERE (p)-[:{rel}]->() RETURN p.title AS t")
+            # Alice/Bob/Charlie have both; Diana only KNOWS; Eve has neither.
+            assert sorted(r["t"] for r in rows) == ["Alice", "Bob", "Charlie", "Diana"], rel
+
+    def test_alternation_negated_pattern_predicate(self, cypher_graph):
+        for rel in ("KNOWS|PURCHASED", "PURCHASED|KNOWS"):
+            rows = cypher_graph.cypher(f"MATCH (p:Person) WHERE NOT (p)-[:{rel}]->() RETURN p.title AS t")
+            assert sorted(r["t"] for r in rows) == ["Eve"], rel
+
+    def test_alternation_duplicate_branch_does_not_double_count(self, cypher_graph):
+        """`[:A|A]` is still one filter — a counter that sums per branch must dedup."""
+        rows = cypher_graph.cypher("MATCH (a:Person)-[:KNOWS|KNOWS]->(b) RETURN count(*) AS n")
+        assert rows[0]["n"] == 5
+
+
 class TestBugXorOperator:
     """BUG: XOR logical operator not implemented."""
 
