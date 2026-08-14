@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use petgraph::graph::NodeIndex;
 
+use crate::graph::dir_graph::node_remap::NodeRemap;
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::schema::EmbeddingStore;
 use crate::graph::storage::GraphRead;
@@ -83,7 +84,7 @@ impl DirGraph {
     /// buffer to the surviving slots, and resyncs the cached-norm column.
     /// Extracted from `vacuum()` to keep `dir_graph.rs` under the god-file
     /// ceiling.
-    pub(crate) fn remap_embedding_slots(&mut self, old_to_new: &HashMap<NodeIndex, NodeIndex>) {
+    pub(crate) fn remap_embedding_slots(&mut self, old_to_new: &NodeRemap) {
         for store in self.embeddings.values_mut() {
             let mut new_node_to_slot = HashMap::with_capacity(store.node_to_slot.len());
             let mut new_slot_to_node = Vec::with_capacity(store.slot_to_node.len());
@@ -91,7 +92,7 @@ impl DirGraph {
 
             for (&old_node_raw, &slot) in &store.node_to_slot {
                 let old_idx = NodeIndex::new(old_node_raw);
-                if let Some(&new_idx) = old_to_new.get(&old_idx) {
+                if let Some(new_idx) = old_to_new.get(old_idx) {
                     let new_slot = new_slot_to_node.len();
                     new_node_to_slot.insert(new_idx.index(), new_slot);
                     new_slot_to_node.push(new_idx.index());
@@ -172,5 +173,50 @@ mod tests {
             dst_store.get_embedding(dst_idx.index()),
             Some(&[2.0f32, 0.0][..])
         );
+    }
+
+    /// A `vacuum` moves every surviving node to a new index, and this is the
+    /// one consumer that has to follow it: each vector must end up on the node
+    /// that owned it, and a deleted node's vector must be dropped rather than
+    /// re-attached to whichever node inherited its slot.
+    ///
+    /// Nothing pinned this before — the suite only asserted that a vacuum
+    /// *invalidates the HNSW index*, which stays true however wrongly the
+    /// vectors are remapped.
+    #[test]
+    fn a_vacuum_moves_each_vector_to_its_own_nodes_new_index() {
+        let mut g = graph_with_docs(&[1, 2, 3, 4]);
+        let mut store = EmbeddingStore::new(2);
+        for &id in &[1i64, 2, 3, 4] {
+            let idx = g.lookup_by_id_readonly("Doc", &Value::Int64(id)).unwrap();
+            store.set_embedding(idx.index(), &[id as f32, 0.0]);
+        }
+        g.embeddings
+            .insert(("Doc".to_string(), "summary_emb".to_string()), store);
+
+        // Delete the second node, leaving a tombstone for the vacuum to close.
+        let victim = g.lookup_by_id_readonly("Doc", &Value::Int64(2)).unwrap();
+        g.graph.remove_node(victim);
+        g.type_indices
+            .entry_or_default("Doc".to_string())
+            .retain(|idx| *idx != victim);
+        g.id_indices.clear();
+
+        let remap = g.vacuum();
+        assert_eq!(remap.len(), 3, "the rebuild must actually have happened");
+
+        let store = g
+            .embeddings
+            .get(&("Doc".to_string(), "summary_emb".to_string()))
+            .unwrap();
+        assert_eq!(store.len(), 3, "the deleted node's vector must be dropped");
+        for &id in &[1i64, 3, 4] {
+            let idx = g.lookup_by_id_readonly("Doc", &Value::Int64(id)).unwrap();
+            assert_eq!(
+                store.get_embedding(idx.index()),
+                Some(&[id as f32, 0.0][..]),
+                "doc {id} kept a vector that is not its own"
+            );
+        }
     }
 }

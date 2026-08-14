@@ -272,7 +272,7 @@ fn finalize_disk_graph(
                         string_counts.len()
                     );
                 }
-                *graph.edge_type_counts_cache.write().unwrap() = Some(string_counts);
+                *graph.edge_type_counts_cache.write().unwrap() = Some(Arc::new(string_counts));
             }
         }
     }

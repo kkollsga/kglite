@@ -704,7 +704,7 @@ impl<'a> CypherExecutor<'a> {
                     .check_work(self.graph.graph.edge_count(), "fused count by edge type")?;
                 let counts = self.graph.get_edge_type_counts();
                 let mut result_rows = Vec::with_capacity(counts.len());
-                for (edge_type, count) in &counts {
+                for (edge_type, count) in counts.iter() {
                     let mut projected = Bindings::with_capacity(2);
                     projected.insert(type_alias.clone(), Value::String(edge_type.clone()));
                     projected.insert(count_alias.clone(), Value::Int64(*count as i64));

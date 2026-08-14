@@ -245,14 +245,13 @@ impl<'a> CypherExecutor<'a> {
                 // what `n.<name>` resolves at query time.
                 if let Some(arg) = args.first() {
                     if let Some(idx) = self.node_arg_index(arg, row) {
-                        if let Some(node_value) = materialize_node_value(idx, self.graph) {
-                            // BTreeMap keys are already sorted + unique.
-                            let keys: Vec<Value> = node_value
-                                .properties
-                                .into_keys()
-                                .map(Value::String)
-                                .collect();
-                            return Ok(Some(Value::List(keys)));
+                        // The same collection pass `materialize_node_value`
+                        // runs, through a names-only sink: sorted + unique,
+                        // without cloning the values it would then drop.
+                        if let Some(keys) = materialize_node_keys(idx, self.graph) {
+                            return Ok(Some(Value::List(
+                                keys.into_iter().map(Value::String).collect(),
+                            )));
                         }
                     }
                     // Materialised node value (collect()[0] etc.) → its keys.

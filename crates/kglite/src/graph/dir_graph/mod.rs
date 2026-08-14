@@ -68,11 +68,14 @@ mod independent_copy;
 pub mod index_layer;
 pub(crate) mod indexes;
 mod labels;
+pub mod node_remap;
 mod node_write;
 pub mod range_index_layer;
 pub(crate) mod rollback;
 pub(crate) mod schema_cow;
 mod schema_ops;
+
+pub use node_remap::NodeRemap;
 
 /// Version-keyed cache of per-`(type, property)` distinct-value counts (NDV)
 /// for the planner's selectivity estimator. The `u64` is the graph `version`
@@ -273,7 +276,7 @@ pub struct DirGraph {
     /// counts) and for why `wkt_cache` and `property_ndv_cache` deliberately
     /// stay shared.
     #[serde(skip)]
-    pub edge_type_counts_cache: caches::ForkPrivateCache<HashMap<String, usize>>,
+    pub edge_type_counts_cache: caches::ForkPrivateCache<Arc<HashMap<String, usize>>>,
     /// Cached type connectivity: (source_type, connection_type, target_type) → count.
     /// Computed by `rebuild_caches()`, persisted in metadata, restored on load.
     /// Invalidated on edge mutations alongside edge_type_counts_cache.
@@ -1860,9 +1863,9 @@ impl DirGraph {
     /// storage. Over time, this wastes memory and degrades iteration performance.
     /// vacuum() rebuilds the graph with contiguous indices, then rebuilds all indexes.
     ///
-    /// Returns a mapping from old NodeIndex → new NodeIndex so callers can
-    /// update any external references (e.g., selections). An empty map means
-    /// nothing was remapped.
+    /// Returns a [`NodeRemap`] from old NodeIndex → new NodeIndex so callers
+    /// can update any external references (e.g., selections). An empty mapping
+    /// means nothing was remapped.
     ///
     /// No-op if there are no tombstones (node_count == node_bound), and a
     /// no-op on the **disk** backend: its CSR arrays are frozen mmap, not a
@@ -1876,9 +1879,9 @@ impl DirGraph {
     /// wrapper. **Callers on a durable graph must flush the write-ahead log
     /// first**: buffered ops are keyed by `NodeIndex` and every index moves
     /// here.
-    pub fn vacuum(&mut self) -> HashMap<NodeIndex, NodeIndex> {
+    pub fn vacuum(&mut self) -> NodeRemap {
         if self.graph.is_disk() {
-            return HashMap::new();
+            return NodeRemap::default();
         }
         let old_node_count = self.graph.node_count();
         let old_node_bound = self.graph.node_bound();
@@ -1893,7 +1896,7 @@ impl DirGraph {
             if columnar_orphaned {
                 self.rebuild_columns_to_heap();
             }
-            return HashMap::new();
+            return NodeRemap::default();
         }
 
         // Take ownership of the old graph so the rebuild can *relocate* every
@@ -1905,24 +1908,25 @@ impl DirGraph {
         let Some(mut old) = self.graph.take_heap_graph() else {
             // Disk: nothing was taken, so nothing downstream may treat the
             // indices as remapped.
-            return HashMap::new();
+            return NodeRemap::default();
         };
 
         // Build new graph with contiguous indices
         let mut new_graph = StableDiGraph::with_capacity(old_node_count, old.edge_count());
-        let mut old_to_new: HashMap<NodeIndex, NodeIndex> = HashMap::with_capacity(old_node_count);
-        // Dense old→new lookup for the edge pass. Endpoint remapping is two
-        // probes per edge, and running them through the returned map's
-        // SipHash was the largest single cost in the rebuild (hashing was
-        // ~22% of a fired vacuum at 1M). The graph is index-addressed, so a
-        // bound-sized vector is the natural map; `u32::MAX` marks a slot that
-        // held no live node.
-        let mut dense: Vec<u32> = vec![u32::MAX; old_node_bound];
+        // Dense old→new lookup, for the edge pass *and* for the caller.
+        // Endpoint remapping is two probes per edge, and running them through a
+        // `HashMap`'s SipHash was the largest single cost in the rebuild
+        // (hashing was ~22% of a fired vacuum at 1M). The graph is
+        // index-addressed, so a bound-sized vector is the natural map — and it
+        // is the *only* one now: the second, hash-based copy this function used
+        // to build for its return value carried no information this one lacks
+        // (`NodeRemap`).
+        let mut old_to_new = NodeRemap::with_bound(old_node_bound);
 
         // Move all live nodes over, recording the index mapping. Ascending
         // raw order reproduces `node_indices()` exactly, so the compacted
         // indices are the same ones the clone loop produced.
-        for (raw, mapped) in dense.iter_mut().enumerate() {
+        for raw in 0..old_node_bound {
             let old_idx = NodeIndex::new(raw);
             let Some(slot) = old.node_weight_mut(old_idx) else {
                 continue;
@@ -1937,8 +1941,7 @@ impl DirGraph {
             };
             let node_data = std::mem::replace(slot, vacated);
             let new_idx = new_graph.add_node(node_data);
-            *mapped = new_idx.index() as u32;
-            old_to_new.insert(old_idx, new_idx);
+            old_to_new.set(raw, new_idx);
         }
 
         // Move all live edges over with remapped endpoints. The ids are
@@ -1949,9 +1952,9 @@ impl DirGraph {
             let Some((src, tgt)) = old.edge_endpoints(old_edge_idx) else {
                 continue;
             };
-            let (new_src, new_tgt) = (dense[src.index()], dense[tgt.index()]);
+            let (new_src, new_tgt) = (old_to_new.raw(src.index()), old_to_new.raw(tgt.index()));
             debug_assert!(
-                new_src != u32::MAX && new_tgt != u32::MAX,
+                !NodeRemap::is_vacant(new_src) && !NodeRemap::is_vacant(new_tgt),
                 "a live edge referenced a node that was not carried over"
             );
             let Some(slot) = old.edge_weight_mut(old_edge_idx) else {
@@ -1976,7 +1979,7 @@ impl DirGraph {
         if !self.graph.replace_heap_graph(new_graph) {
             // Unreachable: `take_heap_graph` already returned `None` for the
             // only backend `replace_heap_graph` refuses.
-            return HashMap::new();
+            return NodeRemap::default();
         }
 
         // Remap embedding stores to use new node indices (see embedding_carry.rs).

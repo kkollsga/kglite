@@ -517,6 +517,42 @@ fn row_properties_forced_second_pass(
 /// range, and with an overflow bag installed.
 #[test]
 fn row_properties_matches_forced_second_pass() {
+    let store = store_with_every_row_class();
+    for row_id in 0..=store.row_count {
+        assert_eq!(
+            store.row_properties(row_id),
+            row_properties_forced_second_pass(&store, row_id),
+            "row {row_id} diverged from the two-pass reference"
+        );
+    }
+}
+
+/// `row_property_keys` / `row_property_count` answer *without* materialising a
+/// value, so they are a second implementation of "which properties does this
+/// row have?" and free to drift from `row_properties` — which is exactly what
+/// `keys(n)` and `properties(n)` must never do. Pinned over every row class the
+/// fixture builds: dense, partially null, schema keys unset on every row, a
+/// backfilled late column, tombstoned, out of range, and an overflow bag.
+#[test]
+fn row_property_keys_matches_row_properties() {
+    let store = store_with_every_row_class();
+    for row_id in 0..=store.row_count {
+        let from_values: Vec<InternedKey> = store
+            .row_properties(row_id)
+            .into_iter()
+            .map(|(ik, _)| ik)
+            .collect();
+        assert_eq!(
+            store.row_property_keys(row_id),
+            from_values,
+            "row {row_id}: key-only enumeration diverged from the value one"
+        );
+        assert_eq!(store.row_property_count(row_id), from_values.len());
+    }
+}
+
+/// One store carrying every row class the enumeration paths have to agree on.
+fn store_with_every_row_class() -> ColumnStore {
     use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
 
     let (schema, meta, interner) = make_schema_and_meta();
@@ -576,13 +612,7 @@ fn row_properties_matches_forced_second_pass() {
         "fixture must exercise the overflow bag: {row0:?}"
     );
 
-    for row_id in 0..=store.row_count {
-        assert_eq!(
-            store.row_properties(row_id),
-            row_properties_forced_second_pass(&store, row_id),
-            "row {row_id} diverged from the two-pass reference"
-        );
-    }
+    store
 }
 
 #[test]

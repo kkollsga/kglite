@@ -804,7 +804,7 @@ pub(super) fn reorder_cyclic_pattern_edges(query: &mut CypherQuery, graph: &DirG
             if sels[root].saturating_mul(ROOT_GAIN) >= sels[0] {
                 continue;
             }
-            pattern.elements = ring.linearize(root, edge_counts.as_ref());
+            pattern.elements = ring.linearize(root, edge_counts.as_deref());
         }
     }
 }

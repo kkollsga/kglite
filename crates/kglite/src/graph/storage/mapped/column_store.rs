@@ -641,6 +641,33 @@ impl MmapColumnStore {
         result.extend(self.overflow_row_properties(row_id));
         result
     }
+
+    /// The keys [`Self::row_properties`] would yield, without reading a single
+    /// value out of the mapping. Mirrors it column for column; the overflow bag
+    /// is decoded and its values dropped (same reason as the heap store's
+    /// `row_property_keys`).
+    pub fn row_property_keys(&self, row_id: u32) -> Vec<InternedKey> {
+        if row_id >= self.row_count {
+            return Vec::new();
+        }
+        let row = row_id as usize;
+        let mut result = Vec::new();
+        for (&key, col_ref) in &self.col_map {
+            let present = match col_ref {
+                ColRef::Fixed(idx) => !self.read_null(&self.fixed_cols[*idx].nulls, row),
+                ColRef::Str(idx) => !self.read_null(&self.str_cols[*idx].nulls, row),
+            };
+            if present {
+                result.push(key);
+            }
+        }
+        result.extend(
+            self.overflow_row_properties(row_id)
+                .into_iter()
+                .map(|(k, _)| k),
+        );
+        result
+    }
 }
 
 // ─── Overflow bag ────────────────────────────────────────────────────────────

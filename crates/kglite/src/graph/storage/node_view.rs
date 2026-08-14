@@ -320,10 +320,16 @@ impl<'a> NodeView<'a> {
     }
 
     /// Number of present (non-`Null`) properties.
+    ///
+    /// Counted without materialising the row: the columnar arm used to build
+    /// the whole `Vec<(InternedKey, Value)>` to take its `len()`, and both
+    /// callers (`calculate()`/`statistics()`'s capacity hint, the GraphML
+    /// export's "has any property?" test) build the row again immediately
+    /// afterwards.
     #[inline]
     pub fn property_count(&self) -> usize {
         match self.store {
-            Some((store, row_id)) => store.row_properties(row_id).len(),
+            Some((store, row_id)) => store.row_property_count(row_id),
             None => self.data.properties.len(),
         }
     }
@@ -389,11 +395,30 @@ impl<'a> NodeView<'a> {
     pub fn property_keys(&self, interner: &'a StringInterner) -> Vec<&'a str> {
         match self.store {
             Some((store, row_id)) => store
-                .row_properties(row_id)
+                .row_property_keys(row_id)
                 .into_iter()
-                .filter_map(|(ik, _)| interner.try_resolve(ik))
+                .filter_map(|ik| interner.try_resolve(ik))
                 .collect(),
             None => self.data.properties.keys(interner).collect(),
+        }
+    }
+
+    /// Every present property key, interned — the allocation-free companion to
+    /// [`NodeView::property_pairs`] for callers that only need names.
+    ///
+    /// **Complete for columnar storage**, and key-for-key identical to what
+    /// `property_pairs` yields (pinned by
+    /// `column_store::tests::row_property_keys_matches_row_properties`). The
+    /// `Map` arm keeps `Value::Null` entries visible for the same reason
+    /// `property_pairs` does — a staged REMOVE is a key the enumeration must
+    /// still report.
+    pub fn property_key_set(&self) -> Vec<InternedKey> {
+        match self.store {
+            Some((store, row_id)) => store.row_property_keys(row_id),
+            None => match &self.data.properties {
+                PropertyStorage::Map(map) => map.keys().copied().collect(),
+                PropertyStorage::Columnar(_) => unreachable!("store resolved above"),
+            },
         }
     }
 

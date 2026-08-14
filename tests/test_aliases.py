@@ -303,7 +303,10 @@ class TestColumnarProjectionCompletion:
         node = g.cypher(f"MATCH (n:Site {{siteid: {siteid}}}) RETURN n").to_list()[0]["n"]
         star = g.cypher(f"MATCH (n:Site {{siteid: {siteid}}}) RETURN n {{.*}} AS m").to_list()[0]["m"]
         assert props == expected
-        assert sorted(keys) == sorted(expected)
+        # Sorted, and equal as a *sequence*: `keys(n)` no longer builds the
+        # property map to read its keys off, so the emitted order is a contract
+        # of its own rather than a by-product of `BTreeMap::into_keys`.
+        assert keys == sorted(expected)
         assert node["properties"] == expected
         assert star == expected
 

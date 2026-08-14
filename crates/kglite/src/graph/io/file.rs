@@ -314,7 +314,7 @@ impl FileMetadata {
             vector_index_compressed_size: 0,
             // Persist edge type counts if cache is warm (no O(E) scan if cold)
             edge_type_counts: if graph.has_edge_type_counts_cache() {
-                Some(graph.get_edge_type_counts())
+                Some((*graph.get_edge_type_counts()).clone())
             } else {
                 None
             },
@@ -368,7 +368,7 @@ impl FileMetadata {
         };
         // Restore edge type counts cache if persisted
         if let Some(counts) = self.edge_type_counts {
-            *graph.edge_type_counts_cache.write().unwrap() = Some(counts);
+            *graph.edge_type_counts_cache.write().unwrap() = Some(std::sync::Arc::new(counts));
         }
         // Restore type connectivity cache if persisted
         if let Some(triples) = self.type_connectivity {

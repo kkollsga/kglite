@@ -503,6 +503,159 @@ pub(super) fn node_to_map_value(node: NodeView<'_>) -> Value {
     node.title().into_owned()
 }
 
+/// What a node materialisation collects.
+///
+/// `keys(n)` and `properties(n)` must agree on the key set exactly — the whole
+/// contract of `keys(n)` is that it equals `keys(properties(n))` — so the two
+/// share one collection pass ([`collect_node_properties`]) and differ only in
+/// what they keep from it. A `keys(n)` that walked the node on its own would be
+/// a second copy of the null-omission, soft-alias and completion rules, free to
+/// drift from the first.
+trait PropertySink {
+    /// `false` when the sink discards values, letting the collector skip work
+    /// whose only product is a value it would drop.
+    const NEEDS_VALUES: bool;
+
+    /// Record a key whose value is unconditional (the id/title/type virtuals);
+    /// `value` is not called when the sink discards values.
+    fn insert_with(&mut self, key: &str, value: impl FnOnce() -> Value);
+
+    /// Record a key whose value is already in hand.
+    fn insert(&mut self, key: &str, value: Value);
+
+    fn contains(&self, key: &str) -> bool;
+
+    /// Absorb every stored property of the row, skipping the virtuals and the
+    /// reserved provenance keys. Returns `true` when a stored key could not be
+    /// resolved back to a name — the one case
+    /// [`complete_from_type_schema`] cannot narrow.
+    fn absorb_stored(
+        &mut self,
+        node: crate::graph::storage::NodeView<'_>,
+        graph: &DirGraph,
+    ) -> bool;
+}
+
+/// Is this a key the enumeration loop must not surface as a user property?
+#[inline]
+fn is_virtual_or_reserved(key: &str) -> bool {
+    key == "id"
+        || key == "title"
+        || key == "type"
+        || crate::graph::schema::is_reserved_provenance_key(key)
+}
+
+impl PropertySink for std::collections::BTreeMap<String, Value> {
+    const NEEDS_VALUES: bool = true;
+
+    #[inline]
+    fn insert_with(&mut self, key: &str, value: impl FnOnce() -> Value) {
+        self.insert(key.to_string(), value());
+    }
+
+    #[inline]
+    fn insert(&mut self, key: &str, value: Value) {
+        std::collections::BTreeMap::insert(self, key.to_string(), value);
+    }
+
+    #[inline]
+    fn contains(&self, key: &str) -> bool {
+        self.contains_key(key)
+    }
+
+    fn absorb_stored(
+        &mut self,
+        node: crate::graph::storage::NodeView<'_>,
+        graph: &DirGraph,
+    ) -> bool {
+        // Resolved key by key rather than through `property_pairs_named`: that
+        // allocates a `String` for every key including the four this loop
+        // drops, and it silently discards a pair whose key the interner cannot
+        // resolve — which is the one case the completion pass cannot derive
+        // from the type's schema.
+        let mut unresolved_key = false;
+        for (ik, val) in node.property_pairs() {
+            let Some(key) = graph.interner.try_resolve(ik) else {
+                unresolved_key = true;
+                continue;
+            };
+            if is_virtual_or_reserved(key) {
+                continue;
+            }
+            std::collections::BTreeMap::insert(self, key.to_string(), val);
+        }
+        unresolved_key
+    }
+}
+
+/// The names-only sink behind `keys(n)`. A `BTreeSet` so the emitted order is
+/// the sorted, de-duplicated order `BTreeMap::into_keys` produced.
+#[derive(Default)]
+struct KeySink(std::collections::BTreeSet<String>);
+
+impl PropertySink for KeySink {
+    const NEEDS_VALUES: bool = false;
+
+    #[inline]
+    fn insert_with(&mut self, key: &str, _value: impl FnOnce() -> Value) {
+        self.0.insert(key.to_string());
+    }
+
+    #[inline]
+    fn insert(&mut self, key: &str, _value: Value) {
+        self.0.insert(key.to_string());
+    }
+
+    #[inline]
+    fn contains(&self, key: &str) -> bool {
+        self.0.contains(key)
+    }
+
+    fn absorb_stored(
+        &mut self,
+        node: crate::graph::storage::NodeView<'_>,
+        graph: &DirGraph,
+    ) -> bool {
+        let mut unresolved_key = false;
+        for ik in node.property_key_set() {
+            let Some(key) = graph.interner.try_resolve(ik) else {
+                unresolved_key = true;
+                continue;
+            };
+            if is_virtual_or_reserved(key) {
+                continue;
+            }
+            self.0.insert(key.to_string());
+        }
+        unresolved_key
+    }
+}
+
+/// Insert the hoisted id/title column back under its original df-column
+/// name (e.g. `npdid`, `prospect_name`), skipping the three reserved
+/// virtuals and any key already materialised. `value` is only evaluated
+/// when an alias actually needs inserting.
+#[inline]
+fn insert_field_alias<S: PropertySink>(
+    properties: &mut S,
+    alias: Option<&String>,
+    value: impl FnOnce() -> Value,
+) {
+    let Some(alias) = alias else { return };
+    if alias == "id" || alias == "title" || alias == "type" {
+        return;
+    }
+    if properties.contains(alias) {
+        return;
+    }
+    // Match the old metadata-pass behaviour: a Null resolution is omitted,
+    // not inserted (preserves the null-omission rule in returned nodes).
+    let v = value();
+    if !matches!(v, Value::Null) {
+        properties.insert(alias, v);
+    }
+}
+
 /// Phase A.1 / C2 — materialise a graph node into an owned
 /// [`NodeValue`] suitable for `Value::Node`.
 ///
@@ -512,31 +665,6 @@ pub(super) fn node_to_map_value(node: NodeView<'_>) -> Value {
 /// The `id` field uses the petgraph NodeIndex as a stable internal
 /// identity (mirrors Neo4j's INT64 node identity in Bolt). The
 /// user-set `id` field, if any, is preserved inside `properties.id`.
-/// Insert the hoisted id/title column back under its original df-column
-/// name (e.g. `npdid`, `prospect_name`), skipping the three reserved
-/// virtuals and any key already materialised. `value` is only evaluated
-/// when an alias actually needs inserting.
-#[inline]
-fn insert_field_alias(
-    properties: &mut std::collections::BTreeMap<String, Value>,
-    alias: Option<&String>,
-    value: impl FnOnce() -> Value,
-) {
-    let Some(alias) = alias else { return };
-    if alias == "id" || alias == "title" || alias == "type" {
-        return;
-    }
-    if properties.contains_key(alias) {
-        return;
-    }
-    // Match the old metadata-pass behaviour: a Null resolution is omitted,
-    // not inserted (preserves the null-omission rule in returned nodes).
-    let v = value();
-    if !matches!(v, Value::Null) {
-        properties.insert(alias.clone(), v);
-    }
-}
-
 pub(crate) fn materialize_node_value(
     idx: petgraph::graph::NodeIndex,
     graph: &crate::graph::DirGraph,
@@ -561,30 +689,69 @@ pub(crate) fn materialize_node_value(
     Some(node_value_from_view(idx, node, graph))
 }
 
-/// Owned [`NodeValue`] from a borrowed view. Split out of
-/// [`materialize_node_value`] so the view's lifetime ends with the call.
-fn node_value_from_view(
+/// The sorted, de-duplicated key set of [`materialize_node_value`]'s property
+/// map — without building a single `Value` that only the map would have kept.
+///
+/// `keys(n)` is defined as `keys(properties(n))`, so this runs the *same*
+/// collection pass through a names-only sink rather than walking the node
+/// again: on a 30-column type the map route allocated 34 tree nodes and cloned
+/// 30 values per node to then throw all of them away.
+pub(crate) fn materialize_node_keys(
     idx: petgraph::graph::NodeIndex,
+    graph: &crate::graph::DirGraph,
+) -> Option<Vec<String>> {
+    // Same arena discipline as `materialize_node_value` (disk records must not
+    // outlive the call).
+    if graph.graph.is_disk() {
+        let data = graph.graph.owned_node_data(idx)?;
+        let store = data.properties.columnar_row_id().and_then(|row_id| {
+            graph
+                .graph
+                .column_store(data.node_type)
+                .map(|store| (&**store, row_id))
+        });
+        let node = crate::graph::storage::NodeView::new(&data, store);
+        return Some(node_keys_from_view(node, graph));
+    }
+    let node = graph.graph.node_view(idx)?;
+    Some(node_keys_from_view(node, graph))
+}
+
+fn node_keys_from_view(
     node: crate::graph::storage::NodeView<'_>,
     graph: &crate::graph::DirGraph,
-) -> crate::datatypes::values::NodeValue {
-    use crate::datatypes::values::NodeValue;
-    use std::collections::BTreeMap;
+) -> Vec<String> {
     let node_type = node.node_type_str(&graph.interner).to_string();
-    let mut properties: BTreeMap<String, Value> = BTreeMap::new();
+    let mut keys = KeySink::default();
+    collect_node_properties(&mut keys, node, &node_type, graph);
+    keys.0.into_iter().collect()
+}
+
+/// The one walk that decides which properties a materialised node carries:
+/// the three virtuals, every stored property, the id/title column aliases, and
+/// the columnar completion pass. Shared by the value and names-only sinks.
+fn collect_node_properties<S: PropertySink>(
+    sink: &mut S,
+    node: crate::graph::storage::NodeView<'_>,
+    node_type: &str,
+    graph: &crate::graph::DirGraph,
+) {
     // Include the three virtual builtins so consumers always see
     // id/title/type, matching what n.id / n.title / n.type would
     // resolve to via the alias machinery.
-    properties.insert("id".to_string(), node.id().into_owned());
-    properties.insert("title".to_string(), node.title().into_owned());
-    properties.insert("type".to_string(), Value::String(node_type.clone()));
+    sink.insert_with("id", || node.id().into_owned());
+    sink.insert_with("title", || node.title().into_owned());
+    sink.insert_with("type", || Value::String(node_type.to_string()));
     // `type` is a soft alias, not a hard virtual: a stored property named
     // "type" wins over the structural type string (KG-1), matching what
     // `n.type` resolves to via `resolve_node_property_resolved`. `id` and
     // `title` are genuine virtuals — the canonical identity always wins —
-    // so only `type` gets the stored-shadow check.
-    if let Some(stored) = node.get_property_value("type") {
-        properties.insert("type".to_string(), stored);
+    // so only `type` gets the stored-shadow check. It can only *replace* the
+    // value under a key already present, so a names-only sink skips it.
+    if S::NEEDS_VALUES {
+        if let Some(stored) = node.get_property_value("type") {
+            sink.insert("type", stored);
+        }
     }
     // Then every user-set property the node carries. Reserved provenance keys
     // (updated_at, …) are engine metadata, not user data — omit them from the
@@ -595,27 +762,7 @@ fn node_value_from_view(
     // used to yield nothing (D1 defect 1). The columnar completion pass
     // further down stays — it recovers schema-declared properties that the
     // row itself does not carry.
-    //
-    // Resolved key by key rather than through `property_pairs_named`: that
-    // allocates a `String` for every key including the four this loop drops,
-    // and it silently discards a pair whose key the interner cannot resolve —
-    // which is the one case the completion pass below cannot derive from the
-    // type's schema (see `unresolved_key`).
-    let mut unresolved_key = false;
-    for (ik, val) in node.property_pairs() {
-        let Some(key) = graph.interner.try_resolve(ik) else {
-            unresolved_key = true;
-            continue;
-        };
-        if key == "id"
-            || key == "title"
-            || key == "type"
-            || crate::graph::schema::is_reserved_provenance_key(key)
-        {
-            continue;
-        }
-        properties.insert(key.to_string(), val);
-    }
+    let unresolved_key = sink.absorb_stored(node, graph);
     // Cross-backend property completion.
     //
     // The loop above yields every stored property on every backend. The ONE
@@ -630,32 +777,35 @@ fn node_value_from_view(
     // cheaper than the former per-node walk over every metadata key with a
     // `resolve_node_property` (alias + spatial) call each, which for the
     // in-memory backend could only ever re-discover these same two columns.
-    insert_field_alias(
-        &mut properties,
-        graph.title_field_aliases.get(&node_type),
-        || node.title().into_owned(),
-    );
-    insert_field_alias(
-        &mut properties,
-        graph.id_field_aliases.get(&node_type),
-        || node.id().into_owned(),
-    );
+    insert_field_alias(sink, graph.title_field_aliases.get(node_type), || {
+        node.title().into_owned()
+    });
+    insert_field_alias(sink, graph.id_field_aliases.get(node_type), || {
+        node.id().into_owned()
+    });
     // Columnar completion: a property the *type* declares but this row does
     // not carry as a stored column (a spatial virtual, a soft structural
     // alias) is recovered through `resolve_node_property`. Keys the loop above
     // already inserted are skipped, so this only ever adds.
     if node.properties_are_columnar() {
-        if let Some(type_meta) = graph.get_node_type_metadata(&node_type) {
-            complete_from_type_schema(
-                &mut properties,
-                node,
-                &node_type,
-                type_meta,
-                graph,
-                unresolved_key,
-            );
+        if let Some(type_meta) = graph.get_node_type_metadata(node_type) {
+            complete_from_type_schema(sink, node, node_type, type_meta, graph, unresolved_key);
         }
     }
+}
+
+/// Owned [`NodeValue`] from a borrowed view. Split out of
+/// [`materialize_node_value`] so the view's lifetime ends with the call.
+fn node_value_from_view(
+    idx: petgraph::graph::NodeIndex,
+    node: crate::graph::storage::NodeView<'_>,
+    graph: &crate::graph::DirGraph,
+) -> crate::datatypes::values::NodeValue {
+    use crate::datatypes::values::NodeValue;
+    use std::collections::BTreeMap;
+    let node_type = node.node_type_str(&graph.interner).to_string();
+    let mut properties: BTreeMap<String, Value> = BTreeMap::new();
+    collect_node_properties(&mut properties, node, &node_type, graph);
     // Full label set (primary + secondaries), not just the primary type —
     // so a materialised node (RETURN n, collect(n)[0], …) carries the same
     // labels `MATCH (n:Sec)` / `labels(n)` see. `node_labels` reads the
@@ -714,29 +864,24 @@ fn node_value_from_view(
 /// graph) is dropped by the enumeration loop, so for that row a declared key
 /// *can* still be recovered from the store. The caller reports it and the walk
 /// falls back to the full declared set — correct, and off the common path.
-fn complete_from_type_schema(
-    properties: &mut std::collections::BTreeMap<String, Value>,
+fn complete_from_type_schema<S: PropertySink>(
+    properties: &mut S,
     node: crate::graph::storage::NodeView<'_>,
     node_type: &str,
     type_meta: &HashMap<String, String>,
     graph: &crate::graph::DirGraph,
     unresolved_key: bool,
 ) {
-    let complete = |properties: &mut std::collections::BTreeMap<String, Value>,
-                    prop_name: &String| {
-        if prop_name == "id"
-            || prop_name == "title"
-            || prop_name == "type"
-            || crate::graph::schema::is_reserved_provenance_key(prop_name)
-        {
+    let complete = |properties: &mut S, prop_name: &String| {
+        if is_virtual_or_reserved(prop_name) {
             return;
         }
-        if properties.contains_key(prop_name) {
+        if properties.contains(prop_name) {
             return;
         }
         let val = resolve_node_property(node, prop_name, graph);
         if !matches!(val, Value::Null) {
-            properties.insert(prop_name.clone(), val);
+            properties.insert(prop_name, val);
         }
     };
 

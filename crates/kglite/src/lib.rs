@@ -47,6 +47,8 @@ pub mod api {
     pub use crate::datatypes::Value;
     pub use crate::error::{KgError, KgErrorCode};
     pub use crate::graph::dir_graph::DirGraph;
+    /// The old→new node-index mapping `DirGraph::vacuum` returns.
+    pub use crate::graph::dir_graph::NodeRemap;
     #[cfg(feature = "fastembed")]
     pub use crate::graph::embedder::fastembed::FastEmbedAdapter;
     pub use crate::graph::embedder::Embedder;

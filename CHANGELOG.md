@@ -309,6 +309,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-folded its group keys and its `WHERE` but not its aggregate arguments.
   Measured (release, min of two runs): a folded-expression aggregate over 50k
   rows **2.50/2.50 → 0.76/0.78 ms**.
+- **`keys(n)` no longer builds the property map it only reads the names off.**
+  It was defined as `keys(properties(n))` and implemented that way too: the full
+  materialisation pass ran, cloning every value out of the column store into a
+  `BTreeMap` whose values were then dropped. Names and values now share one
+  collection pass through different sinks, so the key set is still identical to
+  `properties(n)`'s by construction — the enumeration is what changed, not the
+  answer. Measured (release, min of two runs, `count(keys(n))` over a
+  20k-node / 30-column type): **42.3/42.6 → 37.2/38.0 ms** (three
+  post-change runs spanned 37.2–38.7), with `count(properties(n))` flat as
+  the control.
+- **`property_count()` counts a row's properties without materialising them.**
+  The columnar route built the row's whole `(key, value)` vector to take its
+  `len()`, and both callers — `calculate()`/`statistics()`'s capacity hint and
+  the GraphML export's "does this node carry anything?" test — then built the
+  same row again immediately afterwards, so every such node was assembled
+  twice. Measured (release, min of two runs, `calculate()` over a 20k-node /
+  30-column type): **27.9/28.2 → 25.7/25.8 ms**.
+- **`vacuum()` and `unspill()` stopped rebuilding what they already knew.** The
+  compaction built a second, hash-keyed copy of the old→new node mapping purely
+  to hand back to the caller, next to the dense vector its own edge pass was
+  already using (an O(V) hash insert per live node and ~30 MB of transient
+  allocation at 1M nodes); the consolidation pass behind both — and behind
+  `save()` — kept a `HashMap<NodeIndex, u32>` per type recording row ids that
+  are handed out densely from zero, and allocated one throwaway property vector
+  per node of the graph. `DirGraph::vacuum` now returns a `NodeRemap` (a
+  `get`/`len`/`iter` view over that dense vector) instead of a `HashMap`.
+  Measured (release, min of two runs, 1M nodes, machine not idle): `vacuum`
+  after deleting 30% of a type **133.7/128.3 → 95.1/90.2 ms**, `unspill` of a
+  clean 1M-node graph **140.0/140.7 → 104.1/103.8 ms**.
+- **The planner reads the edge-type counts instead of copying them.**
+  `get_edge_type_counts` returns a cached map keyed by connection-type *name*,
+  and every caller — including two planner passes per replanned statement — got
+  a fresh deep copy of it, one `String` allocation per connection type. It is
+  shared by `Arc` now. Measured (release, min of two runs, a replanned
+  statement on a graph with 200 connection types): **6.5/6.4 → 4.4/4.3 µs**,
+  which is the same cost the identical graph with 2 connection types pays — the
+  planner's per-edge-type overhead is gone rather than reduced.
 
 ### Removed
 

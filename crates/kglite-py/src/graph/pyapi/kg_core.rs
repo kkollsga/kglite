@@ -197,7 +197,8 @@ impl KnowledgeGraph {
             .inner
             .edge_type_counts_cache
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(derived.counts);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(std::sync::Arc::new(derived.counts));
 
         // Backfill connection_type_metadata with discovered endpoint types
         let graph = get_graph_mut(&mut self.inner);

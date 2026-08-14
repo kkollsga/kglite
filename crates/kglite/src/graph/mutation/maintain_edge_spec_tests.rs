@@ -37,8 +37,9 @@ fn edge_specs_mutate_every_storage_mode_and_invalidate_counts() {
         let path = (mode == StorageMode::Disk).then_some(tmp.path());
         let mut graph = new_dir_graph_in_mode(mode, path).unwrap();
         add_pair(&mut graph);
-        *graph.edge_type_counts_cache.write().unwrap() =
-            Some(HashMap::from([("LINKS".to_string(), 0)]));
+        *graph.edge_type_counts_cache.write().unwrap() = Some(std::sync::Arc::new(HashMap::from(
+            [("LINKS".to_string(), 0usize)],
+        )));
 
         let report = add_edges_from_specs(&mut graph, vec![link(1, 2), link(99, 2)]).unwrap();
 

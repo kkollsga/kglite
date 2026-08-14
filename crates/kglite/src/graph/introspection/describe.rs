@@ -1835,7 +1835,8 @@ pub fn compute_description(
                 // Also derive and cache edge type counts from the same pass
                 if !graph.has_edge_type_counts_cache() {
                     let derived = derive_edge_counts_from_triples(&triples);
-                    *graph.edge_type_counts_cache.write().unwrap() = Some(derived.counts);
+                    *graph.edge_type_counts_cache.write().unwrap() =
+                        Some(std::sync::Arc::new(derived.counts));
                 }
                 graph.set_type_connectivity(triples);
             }

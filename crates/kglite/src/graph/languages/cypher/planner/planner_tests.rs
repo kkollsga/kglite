@@ -931,7 +931,7 @@ fn test_reorder_match_clauses_picks_rare_edge_first() {
         let mut counts = HashMap::new();
         counts.insert("VERY_COMMON".to_string(), 1_000_000);
         counts.insert("RARE".to_string(), 1_000);
-        *cache = Some(counts);
+        *cache = Some(std::sync::Arc::new(counts));
     }
 
     let params = HashMap::new();
@@ -1108,7 +1108,7 @@ fn test_reorder_match_clauses_requires_id_anchor() {
         let mut counts = HashMap::new();
         counts.insert("VERY_COMMON".to_string(), 1_000_000);
         counts.insert("RARE".to_string(), 1_000);
-        *cache = Some(counts);
+        *cache = Some(std::sync::Arc::new(counts));
     }
 
     let params = HashMap::new();

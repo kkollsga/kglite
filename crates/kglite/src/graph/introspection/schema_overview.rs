@@ -600,7 +600,7 @@ fn constraint_name(graph: &DirGraph, node_type: &str, properties: &[String]) -> 
 ///      for fresh types).
 pub(crate) fn collect_relationship_types(graph: &DirGraph) -> Vec<String> {
     let mut types: HashSet<String> = graph.connection_type_metadata.keys().cloned().collect();
-    types.extend(graph.get_edge_type_counts().into_keys());
+    types.extend(graph.get_edge_type_counts().keys().cloned());
     let mut out: Vec<String> = types.into_iter().collect();
     out.sort();
     out

@@ -10,6 +10,7 @@ use crate::datatypes::values::Value;
 use crate::graph::schema::InternedKey;
 use crate::graph::storage::GraphRead; // edge_endpoint_keys()
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::RwLock;
 
 /// A lazily-filled cache that a graph **clone does not share** — it is reborn
@@ -72,12 +73,17 @@ impl<T> std::ops::Deref for ForkPrivateCache<T> {
 
 impl DirGraph {
     /// Compute edge counts grouped by connection type. Lazily cached.
-    pub fn get_edge_type_counts(&self) -> HashMap<String, usize> {
+    ///
+    /// Shared by `Arc`, not copied: the map is keyed by type *name*, so a
+    /// cache hit used to allocate one `String` per connection type on every
+    /// call — including the planner's, twice per replanned statement, for a map
+    /// it only ever reads.
+    pub fn get_edge_type_counts(&self) -> Arc<HashMap<String, usize>> {
         // Fast path: return cached result
         {
             let read = self.edge_type_counts_cache.read().unwrap();
             if let Some(ref cached) = *read {
-                return cached.clone();
+                return Arc::clone(cached);
             }
         }
         // Slow path: compute O(E) and cache.
@@ -88,12 +94,14 @@ impl DirGraph {
             *counts.entry(conn_key).or_insert(0) += 1;
         }
         // Resolve to strings
-        let string_counts: HashMap<String, usize> = counts
-            .into_iter()
-            .map(|(k, v)| (self.interner.resolve(k).to_string(), v))
-            .collect();
+        let string_counts: Arc<HashMap<String, usize>> = Arc::new(
+            counts
+                .into_iter()
+                .map(|(k, v)| (self.interner.resolve(k).to_string(), v))
+                .collect(),
+        );
         let mut write = self.edge_type_counts_cache.write().unwrap();
-        *write = Some(string_counts.clone());
+        *write = Some(Arc::clone(&string_counts));
         string_counts
     }
 

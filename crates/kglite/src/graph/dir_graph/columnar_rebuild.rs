@@ -188,8 +188,14 @@ impl DirGraph {
 
         // Build a ColumnStore per node type
         let mut stores: HashMap<String, ColumnStore> = HashMap::new();
-        // Track row_id assignment per type
-        let mut row_ids: HashMap<String, HashMap<NodeIndex, u32>> = HashMap::new();
+        // Which node each row belongs to, per type — `row_owners[t][row_id]`.
+        //
+        // A `HashMap<NodeIndex, u32>` per type, which is what this was, records
+        // exactly the same thing at one SipHash insert per node of the graph on
+        // the way in and one per node on the way out. Rows are handed out
+        // densely from 0 in the order this loop walks them, so the position in
+        // a vector *is* the row id.
+        let mut row_owners: HashMap<String, Vec<NodeIndex>> = HashMap::new();
 
         // Clean type_indices: remove entries for deleted/tombstoned nodes.
         // Arena guard: node_weight materializes on the disk backend
@@ -206,6 +212,10 @@ impl DirGraph {
         // scoped so the borrow ends before the second pass's
         // node_weight_mut re-pointing below.
         let first_pass_guard = self.graph.begin_query();
+        // One buffer for every row of every type: the per-node
+        // `Vec<(InternedKey, Value)>` this loop reads out of the old store was
+        // allocated and freed once per node of the graph.
+        let mut pairs: Vec<(InternedKey, Value)> = Vec::new();
         for (node_type, indices) in self.type_indices.iter() {
             let schema = match self.type_schemas.get(node_type) {
                 Some(s) => Arc::clone(s),
@@ -218,7 +228,7 @@ impl DirGraph {
                 .unwrap_or_default();
 
             let mut store = ColumnStore::new(schema, &meta, &self.interner);
-            let mut type_row_ids = HashMap::with_capacity(indices.len());
+            let mut type_row_owners: Vec<NodeIndex> = Vec::with_capacity(indices.len());
 
             // Build column rows in ascending node-index order so the saved row
             // order matches the load-side re-point, which enumerates
@@ -272,28 +282,36 @@ impl DirGraph {
                     store.push_title(&title_val);
 
                     // Collect properties from current storage
-                    let pairs: Vec<(InternedKey, Value)> = match &node.properties {
+                    match &node.properties {
                         PropertyStorage::Map(map) => {
-                            map.iter().map(|(&k, v)| (k, v.clone())).collect()
+                            pairs.clear();
+                            pairs.extend(map.iter().map(|(&k, v)| (k, v.clone())));
                         }
-                        PropertyStorage::Columnar(row) => self
-                            .graph
-                            .column_store(node.node_type)
-                            .map(|store| store.row_properties(row.row_id()))
-                            .unwrap_or_default(),
-                    };
+                        PropertyStorage::Columnar(row) => {
+                            match self.graph.column_store(node.node_type) {
+                                Some(store) => store.row_properties_into(row.row_id(), &mut pairs),
+                                None => pairs.clear(),
+                            }
+                        }
+                    }
 
                     let row_id = store.push_row(&pairs);
-                    type_row_ids.insert(idx, row_id);
+                    debug_assert_eq!(
+                        row_id as usize,
+                        type_row_owners.len(),
+                        "rows must be handed out densely from 0 for the position \
+                         in `row_owners` to be the row id"
+                    );
+                    type_row_owners.push(idx);
                 }
             }
 
             stores.insert(node_type.to_string(), store);
-            row_ids.insert(node_type.to_string(), type_row_ids);
+            row_owners.insert(node_type.to_string(), type_row_owners);
         }
         drop(first_pass_guard);
 
-        self.install_rebuilt_column_stores(stores, &row_ids);
+        self.install_rebuilt_column_stores(stores, &row_owners);
         // Spill to disk if over the memory limit. Through the one spill
         // routine, on the installed stores — this used to be a second copy of
         // `maybe_spill_columns` operating on the local map, which meant the
@@ -307,14 +325,15 @@ impl DirGraph {
     fn install_rebuilt_column_stores(
         &mut self,
         stores: HashMap<String, ColumnStore>,
-        row_ids: &HashMap<String, HashMap<NodeIndex, u32>>,
+        row_owners: &HashMap<String, Vec<NodeIndex>>,
     ) {
         let arc_stores: HashMap<String, Arc<ColumnStore>> =
             stores.into_iter().map(|(t, s)| (t, Arc::new(s))).collect();
 
-        for (node_type, type_row_ids) in row_ids {
+        for (node_type, type_row_owners) in row_owners {
             if arc_stores.contains_key(node_type) {
-                for (&idx, &row_id) in type_row_ids {
+                for (row_id, &idx) in type_row_owners.iter().enumerate() {
+                    let row_id = row_id as u32;
                     if let Some(node) = self.graph.node_weight_mut(idx) {
                         node.properties = PropertyStorage::Columnar(ColumnarRow::new(row_id));
                         // id/title were pushed into the store's reserved

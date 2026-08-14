@@ -994,6 +994,18 @@ impl ColumnStore {
     /// Iterate over all non-null properties for a row.
     /// Returns (InternedKey, Value) pairs from both dense columns and overflow bag.
     pub fn row_properties(&self, row_id: u32) -> Vec<(InternedKey, Value)> {
+        let mut out = Vec::new();
+        self.row_properties_into(row_id, &mut out);
+        out
+    }
+
+    /// [`Self::row_properties`] into a caller-owned buffer, cleared first.
+    ///
+    /// For a pass that reads *every* row of a store and would otherwise
+    /// allocate and free one `Vec` per row — the consolidation rebuild behind
+    /// `save`/`vacuum`/`unspill`, which does exactly that once per node.
+    pub fn row_properties_into(&self, row_id: u32, result: &mut Vec<(InternedKey, Value)>) {
+        result.clear();
         if row_id >= self.row_count
             || self
                 .tombstones
@@ -1001,7 +1013,7 @@ impl ColumnStore {
                 .copied()
                 .unwrap_or(false)
         {
-            return Vec::new();
+            return;
         }
         // Build up the in-memory overlay first so `keys(node)` and
         // similar surface operators can see Cypher-SET-introduced
@@ -1009,7 +1021,6 @@ impl ColumnStore {
         // mmap-backed row, with the in-memory overlay winning on
         // collisions. Pre-0.9.4 the mmap-backed branch short-
         // circuited and SET-introduced keys never appeared.
-        let mut result = Vec::new();
         for (slot, ik) in self.schema.iter() {
             if let Some(val) = self.columns.get(slot as usize).and_then(|c| c.get(row_id)) {
                 result.push((ik, val));
@@ -1029,7 +1040,7 @@ impl ColumnStore {
                     result.push((ik, val));
                 }
             }
-            return result;
+            return;
         }
         // A second dense pass used to run here for the non-mmap path, skipping
         // keys already in `seen`. It could never emit anything: its predicate
@@ -1042,7 +1053,64 @@ impl ColumnStore {
         // Append overflow bag properties
         let overflow = self.overflow_row_properties(row_id);
         result.extend(overflow);
+    }
+
+    /// The keys [`Self::row_properties`] would yield, without building a single
+    /// `Value`.
+    ///
+    /// Same three sources in the same order — dense schema slots, then the
+    /// mmap base minus what the overlay already answered, then the overflow bag
+    /// — so the key *set* is identical to `row_properties`'s by construction.
+    /// The dense arm is the whole point: `TypedColumn::is_present` reads the
+    /// null byte where `get` clones a whole `String` out of the column only for
+    /// the caller to drop it (`keys(n)`, `property_count`).
+    ///
+    /// The overflow bag is still decoded through the value path: its entries
+    /// are decided by tag (an unknown or `List` tag is skipped, a truncated
+    /// payload ends the row), and reproducing that from a key-only walk is how
+    /// the two would silently drift. Overflow rows are the exception, not the
+    /// scan, so the values are decoded and dropped.
+    pub fn row_property_keys(&self, row_id: u32) -> Vec<InternedKey> {
+        if row_id >= self.row_count
+            || self
+                .tombstones
+                .get(row_id as usize)
+                .copied()
+                .unwrap_or(false)
+        {
+            return Vec::new();
+        }
+        let mut result = Vec::new();
+        for (slot, ik) in self.schema.iter() {
+            if self
+                .columns
+                .get(slot as usize)
+                .is_some_and(|c| c.is_present(row_id))
+            {
+                result.push(ik);
+            }
+        }
+        if let Some(ref ms) = self.mmap_store {
+            let seen: std::collections::HashSet<InternedKey> = result.iter().copied().collect();
+            for ik in ms.row_property_keys(row_id) {
+                if !seen.contains(&ik) {
+                    result.push(ik);
+                }
+            }
+            return result;
+        }
+        result.extend(
+            self.overflow_row_properties(row_id)
+                .into_iter()
+                .map(|(k, _)| k),
+        );
         result
+    }
+
+    /// How many properties [`Self::row_properties`] would yield, without
+    /// building them. See [`Self::row_property_keys`].
+    pub fn row_property_count(&self, row_id: u32) -> usize {
+        self.row_property_keys(row_id).len()
     }
 
     /// Reconstruct all properties for a row as a HashMap<String, Value>.

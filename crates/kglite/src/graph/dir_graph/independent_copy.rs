@@ -69,8 +69,9 @@ mod tests {
         graph.active_write_scope = Some(HashSet::from(["Item".to_string()]));
         graph.active_git_sha = Some("abc".to_string());
         graph.active_modified_by = Some("test".to_string());
-        *graph.edge_type_counts_cache.write().unwrap() =
-            Some(HashMap::from([("LINKS".to_string(), 3)]));
+        *graph.edge_type_counts_cache.write().unwrap() = Some(std::sync::Arc::new(HashMap::from(
+            [("LINKS".to_string(), 3usize)],
+        )));
 
         let copy = graph.independent_copy();
 
@@ -90,10 +91,16 @@ mod tests {
         );
         assert!(copy.type_connectivity_cache.read().unwrap().is_none());
         *copy.edge_type_counts_cache.write().unwrap() =
-            Some(HashMap::from([("LINKS".to_string(), 99)]));
+            Some(std::sync::Arc::new(HashMap::from([(
+                "LINKS".to_string(),
+                99usize,
+            )])));
         assert_eq!(
             graph.edge_type_counts_cache.read().unwrap().as_ref(),
-            Some(&HashMap::from([("LINKS".to_string(), 3)])),
+            Some(&std::sync::Arc::new(HashMap::from([(
+                "LINKS".to_string(),
+                3usize
+            )]))),
             "the original must keep its own entry"
         );
 
