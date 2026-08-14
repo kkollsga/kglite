@@ -101,6 +101,11 @@ macro_rules! impl_heap_graph_read {
             }
 
             #[inline]
+            fn edge_bound(&self) -> usize {
+                self.inner().edge_bound()
+            }
+
+            #[inline]
             fn is_memory(&self) -> bool {
                 $is_memory
             }
@@ -830,6 +835,10 @@ impl GraphRead for MappedGraph {
         self.inner().node_bound()
     }
     #[inline]
+    fn edge_bound(&self) -> usize {
+        self.inner().edge_bound()
+    }
+    #[inline]
     fn is_memory(&self) -> bool {
         false
     }
@@ -1355,6 +1364,16 @@ impl GraphRead for DiskGraph {
     #[inline]
     fn node_bound(&self) -> usize {
         DiskGraph::node_bound(self)
+    }
+
+    /// The disk backend's edges are a frozen CSR generation, not a
+    /// free-listed `StableDiGraph`: there is no edge slot to leave behind, so
+    /// the bound *is* the count. A disk graph therefore never reports edge
+    /// fragmentation, which is correct — it reclaims by publishing a fresh
+    /// generation (`compact_disk`), not by compacting in place.
+    #[inline]
+    fn edge_bound(&self) -> usize {
+        DiskGraph::edge_count(self)
     }
 
     #[inline]

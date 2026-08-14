@@ -1037,6 +1037,17 @@ impl GraphRead for GraphBackend {
     }
 
     #[inline]
+    fn edge_bound(&self) -> usize {
+        match self {
+            Self::Memory(g) => GraphRead::edge_bound(&**g),
+            Self::Forked(g) => GraphRead::edge_bound(g.as_ref()),
+            Self::Mapped(g) => GraphRead::edge_bound(&**g),
+            Self::Disk(g) => GraphRead::edge_bound(g.as_ref()),
+            Self::Recording(rg) => GraphRead::edge_bound(rg.as_ref()),
+        }
+    }
+
+    #[inline]
     fn is_memory(&self) -> bool {
         match self {
             Self::Memory(_) => true,

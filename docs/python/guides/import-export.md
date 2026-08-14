@@ -523,14 +523,25 @@ After heavy mutation workloads (DELETE, REMOVE), internal storage accumulates to
 ```python
 info = graph.graph_info()
 # {'node_count': 950, 'node_capacity': 1000, 'node_tombstones': 50,
-#  'edge_count': 2800, 'fragmentation_ratio': 0.05, ...}
+#  'edge_count': 2800, 'edge_capacity': 3000, 'edge_tombstones': 200,
+#  'fragmentation_ratio': 0.05, 'auto_vacuum_threshold': 0.3,
+#  'auto_vacuums_run': 2, ...}
 
-if info['fragmentation_ratio'] > 0.3:
+if info['fragmentation_ratio'] > 0.3 or info['edge_tombstones'] > 0:
     result = graph.vacuum()
-    print(f"Reclaimed {result['tombstones_removed']} slots")
+    print(f"Reclaimed {result['tombstones_removed']} node slots, "
+          f"{result['edge_tombstones_removed']} edge slots")
 ```
 
-`vacuum()` rebuilds the graph with contiguous indices and rebuilds all indexes. **Resets the current selection.**
+`vacuum()` rebuilds the graph with contiguous indices and rebuilds all indexes.
+The current selection is **carried through** it: surviving nodes keep their
+place at their new indices, deleted ones drop out, and after a traversal a
+group whose parent was deleted is dropped whole.
+
+`fragmentation_ratio` is node-shaped. A workload that deletes only
+relationships leaves it at `0.0` and shows up in `edge_tombstones` instead —
+auto-vacuum takes the worst of node slots, edge slots and dead property-column
+rows, so it fires on any of the three.
 
 ## Common Gotchas
 

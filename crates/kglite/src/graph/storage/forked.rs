@@ -451,6 +451,15 @@ impl GraphRead for ForkedGraph {
         self.append_floor() + self.appended as usize
     }
 
+    /// The base's, unmodified — for the same reason `edge_count` is. No edit
+    /// this overlay expresses reaches base adjacency (`add_edge` /
+    /// `remove_edge` materialise first), so no edge slot is created or freed
+    /// while a fork is live.
+    #[inline]
+    fn edge_bound(&self) -> usize {
+        GraphRead::edge_bound(&*self.base)
+    }
+
     #[inline]
     fn is_memory(&self) -> bool {
         true

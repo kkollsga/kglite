@@ -259,6 +259,20 @@ pub struct DirGraph {
     /// Default: Some(0.3). Set to None to disable.
     #[serde(default = "default_auto_vacuum_threshold")]
     pub auto_vacuum_threshold: Option<f64>,
+    /// How many times [`Self::check_auto_vacuum`] has fired a vacuum on this
+    /// in-memory graph.
+    ///
+    /// The observability half of auto-vacuum: without it, "did the threshold I
+    /// set actually do anything?" was only answerable by inference from
+    /// tombstone counts, and a vacuum that fired and reclaimed nothing (the
+    /// disk backend) was indistinguishable from one that never fired.
+    ///
+    /// Counts *fired* vacuums, not reclaimed slots — a fired vacuum that found
+    /// nothing still increments, because the trigger arithmetic is what this
+    /// measures. Lifetime of the graph object, not of the file: the `.kgl`
+    /// writer does not carry it, so a reopened graph starts at 0.
+    #[serde(default)]
+    pub auto_vacuums_run: u64,
     /// Spatial configuration per node type: type_name → SpatialConfig.
     /// Declares which properties hold lat/lon or WKT data for auto-resolution.
     #[serde(default)]
@@ -672,6 +686,7 @@ impl DirGraph {
             user_schema_version: 0,
             checkpoint_lsn: 0,
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
+            auto_vacuums_run: 0,
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
             edge_type_counts_cache: Default::default(),
@@ -730,6 +745,7 @@ impl DirGraph {
             user_schema_version: 0,
             checkpoint_lsn: 0,
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
+            auto_vacuums_run: 0,
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
             edge_type_counts_cache: Default::default(),
@@ -1904,10 +1920,20 @@ impl DirGraph {
         }
         let old_node_count = self.graph.node_count();
         let old_node_bound = self.graph.node_bound();
+        // Free *edge* slots are reclaimed by the same rebuild — it re-adds
+        // every live edge into a fresh graph — but only if the rebuild runs.
+        // Gating the whole pass on the node reading alone made `vacuum()` a
+        // measured no-op for a relationship-only delete workload: 500 of 1,000
+        // edges deleted, `tombstones_removed` 0, edge slots still held.
+        let edge_tombstones = self
+            .graph
+            .edge_bound()
+            .saturating_sub(self.graph.edge_count());
 
-        // No petgraph tombstones — but columnar stores may still have orphaned rows
-        // (e.g., all nodes deleted → petgraph is empty but column data remains).
-        if old_node_count == old_node_bound {
+        // No petgraph tombstones of either shape — but columnar stores may
+        // still have orphaned rows (e.g. all nodes deleted → petgraph is empty
+        // but column data remains).
+        if old_node_count == old_node_bound && edge_tombstones == 0 {
             let columnar_orphaned = self.column_stores_by_name().into_iter().any(|(t, s)| {
                 let live = self.type_indices.get(t).map(|v| v.len()).unwrap_or(0);
                 (s.row_count() as usize) > live
@@ -2052,14 +2078,6 @@ impl DirGraph {
         self.memory_limit = saved_limit;
     }
 
-    /// Check if auto-vacuum should run and trigger it if so.
-    ///
-    /// Called after DELETE operations. Only vacuums if:
-    /// - `auto_vacuum_threshold` is Some(threshold)
-    /// - Tombstones exceed 100 (avoid overhead on tiny graphs)
-    /// - `fragmentation_ratio` exceeds the threshold
-    ///
-    /// Returns true if vacuum was triggered.
     /// Rows held by every per-type `ColumnStore`, and how many of them a live
     /// node still points at: `(total, live)`.
     ///
@@ -2089,11 +2107,32 @@ impl DirGraph {
         (total, live)
     }
 
-    pub fn check_auto_vacuum(&mut self) -> bool {
-        let threshold = match self.auto_vacuum_threshold {
-            Some(t) => t,
-            None => return false,
-        };
+    /// Check whether auto-vacuum should run after a delete, and run it if so.
+    ///
+    /// Called after `DELETE` / `DETACH DELETE`. Vacuums only when
+    /// `auto_vacuum_threshold` is set, the worst of the three garbage
+    /// populations (free node slots, dead columnar rows, free edge slots)
+    /// exceeds 100 — so tiny graphs never pay for a rebuild — and its
+    /// fragmentation ratio exceeds the threshold.
+    ///
+    /// # Return value
+    ///
+    /// `None` when no vacuum ran. `Some(remap)` when one did, carrying the
+    /// `old → new` node mapping so a caller holding node indices (a fluent
+    /// selection, an external cursor) can *follow* the compaction instead of
+    /// throwing its state away.
+    ///
+    /// **This used to be a `bool`, and the `bool` was a footgun**: on the disk
+    /// backend `vacuum()` is a no-op — its CSR arrays are frozen mmap, so
+    /// there is no petgraph tombstone to compact — yet the trigger still
+    /// returned `true`, and its one caller read that as "indices moved" and
+    /// reset the caller's selection. Disk paid the whole cost of a compaction
+    /// while reclaiming nothing. A returned remap cannot lie that way: the
+    /// no-op hands back a mapping that
+    /// [`describes_rebuild`](NodeRemap::describes_rebuild) reports as no
+    /// rebuild, which is exactly the fact the caller needs.
+    pub fn check_auto_vacuum(&mut self) -> Option<NodeRemap> {
+        let threshold = self.auto_vacuum_threshold?;
 
         let node_count = self.graph.node_count();
         let node_bound = self.graph.node_bound();
@@ -2112,9 +2151,20 @@ impl DirGraph {
         let (columnar_total, columnar_live) = self.columnar_row_census();
         let columnar_dead = columnar_total.saturating_sub(columnar_live);
 
+        // Edge slots are the third, equally independent kind of garbage, and
+        // until this was added they were invisible to the trigger: a workload
+        // that deletes only *relationships* (`MATCH ()-[r]->() DELETE r`)
+        // leaves every node alive and every columnar row referenced, so both
+        // numbers above read clean. Measured before the fix: 500 of 1,000
+        // edges deleted reported `fragmentation_ratio` 0.000, could never
+        // auto-vacuum, and got a no-op from an explicit `vacuum()` as well.
+        let edge_count = self.graph.edge_count();
+        let edge_bound = self.graph.edge_bound();
+        let edge_tombstones = edge_bound.saturating_sub(edge_count);
+
         // The small-graph floor applies to whichever kind of garbage there is.
-        if tombstones.max(columnar_dead) <= 100 {
-            return false;
+        if tombstones.max(columnar_dead).max(edge_tombstones) <= 100 {
+            return None;
         }
 
         let ratio = |dead: usize, bound: usize| {
@@ -2124,12 +2174,14 @@ impl DirGraph {
                 dead as f64 / bound as f64
             }
         };
-        let worst = ratio(tombstones, node_bound).max(ratio(columnar_dead, columnar_total));
+        let worst = ratio(tombstones, node_bound)
+            .max(ratio(columnar_dead, columnar_total))
+            .max(ratio(edge_tombstones, edge_bound));
         if worst > threshold {
-            self.vacuum();
-            true
+            self.auto_vacuums_run += 1;
+            Some(self.vacuum())
         } else {
-            false
+            None
         }
     }
 
@@ -2144,6 +2196,7 @@ impl DirGraph {
         let node_count = self.graph.node_count();
         let node_bound = self.graph.node_bound();
         let edge_count = self.graph.edge_count();
+        let edge_bound = self.graph.edge_bound();
         let node_tombstones = node_bound - node_count;
 
         GraphInfo {
@@ -2151,6 +2204,8 @@ impl DirGraph {
             node_capacity: node_bound,
             node_tombstones,
             edge_count,
+            edge_capacity: edge_bound,
+            edge_tombstones: edge_bound.saturating_sub(edge_count),
             fragmentation_ratio: if node_bound == 0 {
                 0.0
             } else {
@@ -2190,7 +2245,23 @@ pub struct GraphInfo {
     pub node_tombstones: usize,
     /// Number of live edges in the graph
     pub edge_count: usize,
-    /// Ratio of wasted storage (0.0 = clean, approaching 1.0 = heavily fragmented)
+    /// Upper bound of edge indices (includes slots freed by `DELETE r`).
+    ///
+    /// Always equal to [`Self::edge_count`] on the disk backend, whose edges
+    /// are a frozen CSR generation with no free list.
+    pub edge_capacity: usize,
+    /// Number of free edge slots (`edge_capacity - edge_count`).
+    ///
+    /// The third garbage population, alongside node tombstones and dead
+    /// columnar rows, and the only one a relationship-only delete workload
+    /// produces. Reported separately rather than folded into
+    /// [`Self::fragmentation_ratio`], which stays node-shaped so its documented
+    /// meaning does not silently change; the auto-vacuum trigger takes the
+    /// worst of all three.
+    pub edge_tombstones: usize,
+    /// Ratio of wasted node storage (0.0 = clean, approaching 1.0 = heavily
+    /// fragmented). Node slots only — see [`Self::edge_tombstones`] and
+    /// [`Self::columnar_total_rows`] for the other two populations.
     pub fragmentation_ratio: f64,
     /// Number of distinct node types
     pub type_count: usize,

@@ -83,6 +83,25 @@ impl NodeRemap {
         self.live == 0
     }
 
+    /// Whether this mapping describes a rebuild at all — i.e. whether the old
+    /// indices a caller is holding have been invalidated.
+    ///
+    /// **This is the question a holder of node indices must ask, and it is not
+    /// [`Self::is_empty`].** A `NodeRemap::default()` is what every *no-op*
+    /// vacuum returns — the disk backend, which compacts by publishing a fresh
+    /// generation rather than rebuilding in place, and the columnar-only
+    /// reclaim that drops dead rows without touching a single node slot. There
+    /// the old indices are still exactly right and a holder must keep them.
+    ///
+    /// `is_empty` is also true for a rebuild whose survivors numbered *zero*
+    /// (every node deleted), and there the opposite is required: every old
+    /// index is genuinely gone. The two cases differ in whether the mapping
+    /// covers any slots, which is what this reads.
+    #[inline]
+    pub fn describes_rebuild(&self) -> bool {
+        !self.dense.is_empty()
+    }
+
     /// Every `(old, new)` pair, in ascending old-index order.
     pub fn iter(&self) -> impl Iterator<Item = (NodeIndex, NodeIndex)> + '_ {
         self.dense
@@ -124,5 +143,22 @@ mod tests {
         assert!(NodeRemap::default().is_empty());
         assert!(NodeRemap::with_bound(8).is_empty());
         assert_eq!(NodeRemap::with_bound(8).len(), 0);
+    }
+
+    #[test]
+    fn a_no_op_vacuum_is_distinguishable_from_a_rebuild_with_no_survivors() {
+        // The disk / columnar-only shape: no mapping at all, old indices stand.
+        assert!(!NodeRemap::default().describes_rebuild());
+
+        // A rebuild that carried nobody over: `is_empty` agrees with the
+        // no-op above, `describes_rebuild` does not — and a holder acting on
+        // `is_empty` would keep indices into a graph that no longer has them.
+        let wiped = NodeRemap::with_bound(8);
+        assert!(wiped.is_empty());
+        assert!(wiped.describes_rebuild());
+
+        let mut kept = NodeRemap::with_bound(2);
+        kept.set(1, NodeIndex::new(0));
+        assert!(kept.describes_rebuild());
     }
 }

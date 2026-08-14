@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Auto-vacuum's state is readable, and relationship churn is now garbage it
+  can see.** `graph_info()` gains `auto_vacuum_threshold` (the configured
+  value, or `None` when disabled — `set_auto_vacuum` was write-only),
+  `auto_vacuums_run` (how many times it has fired on this graph object; not
+  persisted), and `edge_capacity` / `edge_tombstones`. The edge numbers are a
+  third, independent garbage population: a workload deleting only
+  relationships (`MATCH ()-[r]->() DELETE r`) leaves every node alive and every
+  property-column row referenced, so both existing readings stayed clean —
+  measured at 500 of 1,000 edges deleted, `fragmentation_ratio` 0.000, no
+  auto-vacuum possible, and an explicit `vacuum()` returning a no-op with every
+  freed edge slot still held. Auto-vacuum now takes the worst of the three
+  ratios, `vacuum()` reclaims edge slots even when the node slots are clean,
+  and it reports `edge_tombstones_removed` alongside `tombstones_removed`.
+  `fragmentation_ratio` stays node-shaped so its documented meaning does not
+  change under existing callers. **A `DETACH DELETE` workload can now
+  auto-vacuum sooner and more often**, because the edge population fragments
+  faster than the node population whenever the node set carries ballast the
+  edge set does not: on the delete-lifecycle fixture (S comments + S/10 issues,
+  one edge per comment, 160 delete batches) the schedule moves from three fires
+  at batches 67/113/146 — the node ratio `b/220` — to four at 61/103/133/154,
+  the edge ratio `b/200`. Both are exactly 0.3-crossings; the earlier one was
+  simply invisible before.
 - **Dynamic labels and relationship types — a parameter can supply a *name*,
   not just a value.** `MATCH (n:$label)`, the Neo4j 5 spelling
   `MATCH (n:$(label))`, `-[:$type]->`, `CREATE (n:$label {…})`, `SET n:$label`,
@@ -30,6 +52,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (Rust API) — `DirGraph::check_auto_vacuum` returns
+  `Option<NodeRemap>` instead of `bool`.** `None` means no vacuum ran;
+  `Some(remap)` carries the `old → new` node mapping the compaction produced,
+  so a caller holding node indices can follow it. The `bool` was a footgun in
+  the exact case that mattered: on the disk backend `vacuum()` is a no-op —
+  its CSR arrays are frozen mmap, with no petgraph slot to compact — yet the
+  trigger still answered `true`, and its caller read that as "indices moved".
+  A returned mapping cannot lie that way: `NodeRemap::describes_rebuild()`
+  distinguishes a no-op from a rebuild, including a rebuild whose survivors
+  numbered zero. `NodeRemap` gains `describes_rebuild()`;
+  `kglite::api::CurrentSelection` gains `remap_indices(&NodeRemap)`; the
+  `GraphRead` trait gains `edge_bound()`, implemented by all five backends.
 - **BREAKING — a durable graph refuses a caller-supplied duplicate id.** On a
   graph opened with `durable=` (or written through a durable `Session`),
   `CREATE (:T {id: 1, …})` for an id that node type already carries now fails
@@ -89,6 +123,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A fluent selection survives a vacuum instead of silently emptying *and*
+  silently widening.** Auto-vacuum reset the held selection, and a reset
+  selection reads as "no filter has been applied" — so one held handle
+  answered `ids()` with `[]` and `len()` with the whole graph, two
+  contradictory answers about the same set, triggered by a `DELETE` the caller
+  never asked to touch its selection. Reproduced at 1,000 nodes: select 100,
+  delete 400, `len()` went 100 → 600 and `ids()` 100 → 0. Both `vacuum()` and
+  auto-vacuum now carry the selection through the compaction — survivors keep
+  their place at their new indices, deleted nodes drop out, and after a
+  traversal a group whose parent was deleted is dropped whole rather than
+  re-parented. A vacuum that moves no index (the disk backend, or a
+  columnar-only reclaim) leaves the selection completely untouched; disk used
+  to pay the reset while reclaiming nothing. `vacuum()`'s documented "resets
+  the current selection" was a limitation of not having the mapping to hand,
+  not a contract — the mapping was there all along and the binding discarded
+  it.
 - **A backtick-quoted label spelled like a parameter is a label.** ``MATCH
   (n:`$label`)`` failed to parse: the MATCH path re-serializes its token stream
   for the pattern parser, and a name beginning with `$` was written back

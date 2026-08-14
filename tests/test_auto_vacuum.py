@@ -31,11 +31,11 @@ class TestAutoVacuumDefault:
     """Auto-vacuum is enabled by default at 0.3 threshold."""
 
     def test_default_threshold_in_graph_info(self):
-        """New graphs should have auto-vacuum enabled."""
+        """New graphs should have auto-vacuum enabled, at 0.3."""
         g = kglite.KnowledgeGraph()
-        # There's no direct getter — just verify it works by deleting
-        # (tested below). Here we just ensure set_auto_vacuum doesn't error.
+        assert g.graph_info()["auto_vacuum_threshold"] == 0.3
         g.set_auto_vacuum(0.3)
+        assert g.graph_info()["auto_vacuum_threshold"] == 0.3
 
     def test_set_auto_vacuum_none_disables(self):
         """Setting None disables auto-vacuum."""

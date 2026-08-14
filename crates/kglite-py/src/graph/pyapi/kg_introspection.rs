@@ -14,7 +14,6 @@ use crate::graph::{
 use kglite_core::api::fluent::StatResult;
 use kglite_core::api::introspection;
 use kglite_core::api::mutation::{OperationReport, OperationReports};
-use kglite_core::api::GraphRead;
 use kglite_core::api::{CowSelection, PlanStep};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -125,13 +124,19 @@ impl KnowledgeGraph {
     /// Over time, this wastes memory and degrades iteration performance.
     /// vacuum() rebuilds the graph with contiguous indices, then rebuilds all indexes.
     ///
-    /// **Important**: This resets the current selection since node indices change.
-    /// Call this between query chains, not in the middle of one.
+    /// The current selection is **carried through** the compaction: nodes that
+    /// survived keep their place in it at their new indices, and nodes the
+    /// deletes took are dropped from it. A group whose parent node was deleted
+    /// is dropped whole.
     ///
     /// Returns:
     ///     dict: Statistics about the compaction:
-    ///         - 'nodes_remapped': Number of nodes that were remapped
-    ///         - 'tombstones_removed': Number of tombstone slots reclaimed
+    ///         - 'nodes_remapped': Number of nodes carried into the compacted
+    ///           graph
+    ///         - 'tombstones_removed': Number of free node slots reclaimed
+    ///         - 'edge_tombstones_removed': Number of free edge slots
+    ///           reclaimed — a relationship-only delete workload leaves these
+    ///           and no node tombstones at all
     ///         - 'columnar_rebuilt': True when the pass actually dropped
     ///           property-column rows left behind by deleted nodes (False for
     ///           a vacuum that found nothing to reclaim)
@@ -150,27 +155,35 @@ impl KnowledgeGraph {
         self.commit_wal()?;
         let graph = get_graph_mut(&mut self.inner);
 
-        let tombstones_before = graph.graph.node_bound() - graph.graph.node_count();
+        let info_before = graph.graph_info();
+        let tombstones_before = info_before.node_tombstones;
+        let edge_tombstones_before = info_before.edge_tombstones;
         // "Were the columnar stores rebuilt?" used to be answered by "is this
         // graph columnar at all?", which was a fair proxy only while a graph
         // could be non-columnar. Every graph owns stores from its first node
         // now, so the proxy would answer `true` for a vacuum that reclaimed
         // nothing. Read the row count instead: a rebuild is exactly what drops
         // the rows deleted nodes left behind.
-        let rows_before = graph.graph_info().columnar_total_rows;
+        let rows_before = info_before.columnar_total_rows;
         let old_to_new = graph.vacuum();
-        let columnar_rebuilt = graph.graph_info().columnar_total_rows != rows_before;
+        let info_after = graph.graph_info();
+        let columnar_rebuilt = info_after.columnar_total_rows != rows_before;
         let nodes_remapped = old_to_new.len();
 
-        // Reset selection — indices have changed
-        if nodes_remapped > 0 {
-            self.cursor.selection = CowSelection::new();
-        }
+        // Carry the selection through, rather than dropping it: the indices
+        // moved, but the *set of nodes the caller chose* did not, minus
+        // whatever was deleted. The documented reset was a limitation of not
+        // having the mapping to hand, never a contract.
+        self.cursor.selection.remap_indices(&old_to_new);
 
         Python::attach(|py| {
             let result = PyDict::new(py);
             result.set_item("nodes_remapped", nodes_remapped)?;
             result.set_item("tombstones_removed", tombstones_before)?;
+            result.set_item(
+                "edge_tombstones_removed",
+                edge_tombstones_before.saturating_sub(info_after.edge_tombstones),
+            )?;
             result.set_item("columnar_rebuilt", columnar_rebuilt)?;
             Ok(result.into())
         })
@@ -214,7 +227,16 @@ impl KnowledgeGraph {
     ///         - 'node_capacity': Upper bound of node indices (includes tombstones)
     ///         - 'node_tombstones': Number of wasted slots from deletions
     ///         - 'edge_count': Number of live edges
-    ///         - 'fragmentation_ratio': Ratio of wasted storage (0.0 = clean)
+    ///         - 'edge_capacity': Upper bound of edge indices (includes slots
+    ///           freed by relationship deletes)
+    ///         - 'edge_tombstones': Wasted edge slots — the only garbage a
+    ///           relationship-only delete workload produces
+    ///         - 'fragmentation_ratio': Ratio of wasted *node* storage
+    ///           (0.0 = clean)
+    ///         - 'auto_vacuum_threshold': The configured threshold, or None
+    ///           when auto-vacuum is disabled
+    ///         - 'auto_vacuums_run': How many times auto-vacuum has fired on
+    ///           this graph object
     ///         - 'type_count': Number of distinct node types
     ///         - 'property_index_count': Number of single-property indexes
     ///         - 'composite_index_count': Number of composite indexes
@@ -236,6 +258,8 @@ impl KnowledgeGraph {
             dict.set_item("node_capacity", info.node_capacity)?;
             dict.set_item("node_tombstones", info.node_tombstones)?;
             dict.set_item("edge_count", info.edge_count)?;
+            dict.set_item("edge_capacity", info.edge_capacity)?;
+            dict.set_item("edge_tombstones", info.edge_tombstones)?;
             dict.set_item("fragmentation_ratio", info.fragmentation_ratio)?;
             dict.set_item("type_count", info.type_count)?;
             dict.set_item("property_index_count", info.property_index_count)?;
@@ -258,6 +282,11 @@ impl KnowledgeGraph {
             dict.set_item("memory_limit", self.inner.memory_limit)?;
             dict.set_item("columnar_total_rows", info.columnar_total_rows)?;
             dict.set_item("columnar_live_rows", info.columnar_live_rows)?;
+            // Auto-vacuum's own state. `set_auto_vacuum` was write-only until
+            // now, so "is it on, and at what threshold?" had no answer, and
+            // "did it ever fire?" was only inferable from tombstone counts.
+            dict.set_item("auto_vacuum_threshold", self.inner.auto_vacuum_threshold)?;
+            dict.set_item("auto_vacuums_run", self.inner.auto_vacuums_run)?;
             Ok(dict.into())
         })
     }

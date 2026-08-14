@@ -14,6 +14,7 @@ pub(crate) use crate::graph::storage::property_storage::{ColumnarRow, PropertySt
 // Phase 9 split: DirGraph + GraphBackend moved to sibling modules.
 // Re-exported here to preserve `crate::graph::schema::X` import paths.
 pub use crate::graph::dir_graph::DirGraph;
+use crate::graph::dir_graph::NodeRemap;
 pub use crate::graph::storage::backend::GraphBackend;
 // MemoryGraph re-export: required by `storage/recording.rs` tests.
 // DO NOT REMOVE even if cargo fix suggests it — the test-only usage is
@@ -632,6 +633,40 @@ impl SelectionLevel {
     pub fn node_count(&self) -> usize {
         self.selections.values().map(|v| v.len()).sum()
     }
+
+    /// Rewrite this level's indices through a vacuum's `old → new` mapping.
+    ///
+    /// Semantics (see [`CurrentSelection::remap_indices`] for why remapping
+    /// happens at all):
+    ///
+    /// - A selected node that did not survive the vacuum is **dropped** from
+    ///   its group. A group that loses all of its children stays, empty — it
+    ///   still records that this parent was traversed and matched nothing,
+    ///   which is what a grouped `collect()` reports.
+    /// - A group whose **parent** did not survive is dropped whole, children
+    ///   included. The children are in this level *because of* that parent, so
+    ///   keeping them under a different key (or under `None`) would invent a
+    ///   traversal that never happened. Conservative by decision: losing rows
+    ///   is recoverable by re-querying, inventing them is not.
+    pub fn remap_indices(&mut self, remap: &NodeRemap) {
+        let mut remapped: HashMap<Option<NodeIndex>, Vec<NodeIndex>> =
+            HashMap::with_capacity(self.selections.len());
+        for (parent, children) in self.selections.drain() {
+            let new_parent = match parent {
+                None => None,
+                Some(p) => match remap.get(p) {
+                    Some(new_p) => Some(new_p),
+                    // Parent gone — the whole group goes with it.
+                    None => continue,
+                },
+            };
+            remapped.insert(
+                new_parent,
+                children.into_iter().filter_map(|c| remap.get(c)).collect(),
+            );
+        }
+        self.selections = remapped;
+    }
 }
 
 /// Represents a single step in the query execution plan
@@ -740,6 +775,35 @@ impl CurrentSelection {
             .last()
             .into_iter()
             .flat_map(|l| l.iter_node_indices())
+    }
+
+    /// Rewrite every held node index through a vacuum's `old → new` mapping,
+    /// at every level.
+    ///
+    /// **What this replaces is not a smaller behaviour, it is a wrong one.** A
+    /// selection held across a vacuum used to be *reset*, and a reset
+    /// `CurrentSelection` reads as "no filter has been applied" — so the same
+    /// held handle answered `ids()` with `[]` (silently empty) and `len()`
+    /// with the whole graph (silently widened), two contradictory answers
+    /// about the same set. Remapping keeps them describing the selection the
+    /// caller actually made, minus whatever the deletes took out of it.
+    ///
+    /// A mapping that describes no rebuild — [`NodeRemap::describes_rebuild`]
+    /// is false, which is what the disk backend and a columnar-only reclaim
+    /// return — leaves the selection untouched, because no index moved. That
+    /// is why an auto-vacuum on a disk graph, which reclaims nothing, no
+    /// longer costs the caller their selection.
+    ///
+    /// Per-level rules are in [`SelectionLevel::remap_indices`]. The execution
+    /// plan is deliberately untouched: it records what was *run*, not what is
+    /// currently selected.
+    pub fn remap_indices(&mut self, remap: &NodeRemap) {
+        if !remap.describes_rebuild() {
+            return;
+        }
+        for level in &mut self.levels {
+            level.remap_indices(remap);
+        }
     }
 
     /// Returns the node type of the first node in the current selection, if any.

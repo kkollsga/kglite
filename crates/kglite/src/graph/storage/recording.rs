@@ -374,6 +374,11 @@ impl<G: GraphRead> GraphRead for RecordingGraph<G> {
     }
 
     #[inline]
+    fn edge_bound(&self) -> usize {
+        self.inner.edge_bound()
+    }
+
+    #[inline]
     fn is_memory(&self) -> bool {
         self.inner.is_memory()
     }

@@ -31,12 +31,13 @@ otherwise be summed into one uninterpretable number:
   measured that term alone at 34,486 us vs 4.1 us at 1M. Its cost lands on
   whoever queries next, not on the deleting statement, so it is split into its
   own cell rather than left to contaminate the others.
-* **auto-vacuum.** `check_auto_vacuum` (`dir_graph/mod.rs:1914-1943`) is
-  called only from `after_mutation` (`kglite-py/src/graph/mod.rs:361-376`) and
-  only when `nodes_deleted > 0 || relationships_deleted > 0` — so it is, in
-  fact, structurally unreachable from an insert. It fires when tombstones
-  exceed a hard floor of 100 **and** the fragmentation ratio exceeds a
-  threshold, and `vacuum()` then rebuilds column stores and reindexes.
+* **auto-vacuum.** `DirGraph::check_auto_vacuum` is called only from the
+  binding's `after_mutation`, and only when
+  `nodes_deleted > 0 || relationships_deleted > 0` — so it is, in fact,
+  structurally unreachable from an insert. It fires when the worst of three
+  garbage ratios (free node slots, dead property-column rows, free edge slots)
+  exceeds the threshold and that population exceeds a hard floor of 100, and
+  `vacuum()` then rebuilds column stores and reindexes.
 
 **Every per-delete cell here pins `set_auto_vacuum(None)`.** Not to hide the
 cost, but because an auto-vacuum firing on an arbitrary round turns a
@@ -543,26 +544,41 @@ def test_bench_forced_threshold_vacuum_cost(benchmark, size, auto_vacuum):
 # asserted rather than assumed. A run whose default arm fired zero vacuums is
 # INVALID, not green, and the report aborts on it.
 #
-# How the crossing schedule is derived (`check_auto_vacuum`, tombstones must
-# exceed 100 AND `tombstones / node_bound > threshold`):
+# How the crossing schedule is derived. `check_auto_vacuum` takes the WORST of
+# three independent garbage ratios — free node slots, dead property-column
+# rows, free edge slots — and fires when it exceeds the threshold, with a floor
+# of 100 garbage entries. `DETACH DELETE` produces node *and* edge garbage, and
+# on this fixture the edge population is the one that crosses first:
 #
 #   fixture      = S Comments + S/10 Issues        -> node_bound = 1.1 * S
-#   batch        = S/200 Comments, DETACH DELETEd  -> +S/200 tombstones each
-#   ratio at b   = (S/200 * b) / (1.1 * S)         =  b / 220     <- S cancels
+#                  one :ON per Comment             -> edge_bound = S
+#   batch        = S/200 Comments, DETACH DELETEd  -> +S/200 of each, per batch
+#   node ratio   = (S/200 * b) / (1.1 * S)         =  b / 220     <- S cancels
+#   edge ratio   = (S/200 * b) / S                 =  b / 200     <- S cancels
 #
-# `b/220 > 0.3` first holds at b = 67 (0.30454...), and it does not hold at
-# b = 66 (exactly 0.3, and the comparison is strict `>`). A vacuum resets
-# node_bound to node_count, so the next crossing is recomputed against the
-# smaller graph; the same arithmetic gives b = 113 and b = 146 within 160
-# batches. **The S term cancels, so the schedule is identical at 1k, 100k and
-# 1M** — which is what makes a single literal `EXPECTED_FIRE_BATCHES` a real
-# assertion across three decades rather than three separate recordings.
+# The edge denominator is smaller — there is no Issue-shaped ballast in it — so
+# `b/200 > 0.3` holds first, at b = 61 (0.305). It does not hold at b = 60
+# (exactly 0.3, and the comparison is strict `>`). A vacuum compacts both
+# populations, so the next crossing is recomputed against the smaller graph:
+# with r batches' worth of Comments left (in S/200 units) the next fire is the
+# smallest k with k/r > 0.3, giving 61 -> 103 (r=139, k=42) -> 133 (r=97,
+# k=30) -> 154 (r=67, k=21). **Both S terms cancel, so the schedule is
+# identical at 1k, 100k and 1M** — which is what makes a single literal
+# `EXPECTED_FIRE_BATCHES` a real assertion across three decades rather than
+# three separate recordings.
+#
+# Before the edge population was counted at all, the same sequence fired on the
+# node ratio alone at (67, 113, 146) — three times instead of four. That is not
+# drift in this fixture: it is the trigger gaining sight of garbage it could not
+# previously see, and on a `DETACH DELETE` workload it fires *earlier* whenever
+# the edge set carries less ballast than the node set.
 #
 # That derivation also pins the default threshold behaviourally. No vacuum at
-# b=66 means the effective threshold is >= 0.3; a vacuum at b=67 means it is
-# < 0.30455. There is no Python getter for `auto_vacuum_threshold`
-# (`graph_info()` does not report it), so this band *is* the assertion that the
-# default is 0.3 — see `test_default_auto_vacuum_threshold_band_oracle`.
+# b=60 means the effective threshold is >= 0.3; a vacuum at b=61 means it is
+# <= 0.305. `graph_info()['auto_vacuum_threshold']` reports the *stored*
+# number now, but this band is the stronger assertion and stays: it pins the
+# threshold the trigger arithmetic actually applies, which a stored-value
+# readback cannot see — see `test_default_auto_vacuum_threshold_band_oracle`.
 #
 # The delete spelling is `UNWIND $ids AS i MATCH (c:Comment {id: i})`, i.e. a
 # primary-key point lookup per victim, not the label scan the forced cell uses.
@@ -590,12 +606,13 @@ LIFECYCLE_BATCHES = 160
 
 #: Literal, not recomputed from the model above — mutate it and the oracle must
 #: go red. 1-indexed batch numbers at which the default arm vacuums.
-EXPECTED_FIRE_BATCHES = (67, 113, 146)
+EXPECTED_FIRE_BATCHES = (61, 103, 133, 154)
 
 #: The band the observed schedule pins the engine default into. Both bounds are
-#: load-bearing: the lower comes from *no* vacuum at batch 66, the upper from a
-#: vacuum at batch 67.
-DEFAULT_THRESHOLD_BAND = (0.3, 67 / 220)
+#: load-bearing: the lower comes from *no* vacuum at batch 60, the upper from a
+#: vacuum at batch 61. Read off the EDGE ratio, which is the population that
+#: crosses first on this fixture and therefore the one the trigger acted on.
+DEFAULT_THRESHOLD_BAND = (0.3, 61 / 200)
 
 #: Literal expected end state per size, for both arms. `node_capacity` and
 #: `node_tombstones` are the two figures that legitimately differ between the
@@ -607,8 +624,8 @@ LIFECYCLE_EXPECTED = {
         "issues": 100,
         "node_count": 300,
         "edge_count": 200,
-        "on_capacity": 370,
-        "on_tombstones": 70,
+        "on_capacity": 330,
+        "on_tombstones": 30,
         "off_capacity": 1_100,
         "off_tombstones": 800,
     },
@@ -617,8 +634,8 @@ LIFECYCLE_EXPECTED = {
         "issues": 10_000,
         "node_count": 30_000,
         "edge_count": 20_000,
-        "on_capacity": 37_000,
-        "on_tombstones": 7_000,
+        "on_capacity": 33_000,
+        "on_tombstones": 3_000,
         "off_capacity": 110_000,
         "off_tombstones": 80_000,
     },
@@ -627,8 +644,8 @@ LIFECYCLE_EXPECTED = {
         "issues": 100_000,
         "node_count": 300_000,
         "edge_count": 200_000,
-        "on_capacity": 370_000,
-        "on_tombstones": 70_000,
+        "on_capacity": 330_000,
+        "on_tombstones": 30_000,
         "off_capacity": 1_100_000,
         "off_tombstones": 800_000,
     },
@@ -694,6 +711,11 @@ def _run_lifecycle(size: int, *, auto_vacuum_off: bool) -> dict:
     fires: list[int] = []
     tombstones_after: list[int] = []
     capacity_after: list[int] = []
+    # The edge population is the one that crosses first on this fixture (see
+    # the derivation above), so the threshold band has to be read off it — the
+    # node ratio at the firing batch is well under 0.3 and would pin nothing.
+    edge_tombstones_after: list[int] = []
+    edge_capacity_after: list[int] = []
     previous_tombstones = graph.graph_info()["node_tombstones"]
     total_s = 0.0
 
@@ -714,6 +736,8 @@ def _run_lifecycle(size: int, *, auto_vacuum_off: bool) -> dict:
         previous_tombstones = info["node_tombstones"]
         tombstones_after.append(info["node_tombstones"])
         capacity_after.append(info["node_capacity"])
+        edge_tombstones_after.append(info["edge_tombstones"])
+        edge_capacity_after.append(info["edge_capacity"])
 
     final = graph.graph_info()
     return {
@@ -726,6 +750,8 @@ def _run_lifecycle(size: int, *, auto_vacuum_off: bool) -> dict:
         "total_delete_s": total_s,
         "tombstones_after": tombstones_after,
         "capacity_after": capacity_after,
+        "edge_tombstones_after": edge_tombstones_after,
+        "edge_capacity_after": edge_capacity_after,
         "node_count": final["node_count"],
         "node_capacity": final["node_capacity"],
         "node_tombstones": final["node_tombstones"],
@@ -792,25 +818,45 @@ def test_default_auto_vacuum_actually_fires_oracle(size):
 
 @pytest.mark.parametrize("size", _lifecycle_sizes_for_oracle())
 def test_default_auto_vacuum_threshold_band_oracle(size):
-    """The observed schedule pins the engine default into [0.3, 0.30455).
+    """The observed schedule pins the engine default into (0.3, 0.305].
 
-    There is no way to read `auto_vacuum_threshold` back from Python, so the
-    default is asserted through the behaviour it produces. The band is narrow
-    enough that only 0.3 sits in it at any sane precision — change the engine
-    default and this goes red, which is the point.
+    `graph_info()['auto_vacuum_threshold']` reads the stored number back, but
+    the default is asserted here through the behaviour it produces, which is
+    the stronger claim: a readback cannot tell you the trigger applies the
+    value it stores. The band is narrow enough that only 0.3 sits in it at any
+    sane precision — change the engine default and this goes red, which is the
+    point.
+
+    Read off the **edge** ratio, because that is the population that crosses
+    first here. The trigger takes the worst of three, so pinning the threshold
+    means pinning the ratio that actually crossed; the node ratio at the same
+    batch is 61/220 = 0.277 and would assert nothing about 0.3. Both are
+    checked, so a change that moved the crossing back to the node population
+    goes red rather than silently re-pinning.
     """
     on = lifecycle_runs(size)["default_on"]
     first_fire = on["fires"][0]
     off = lifecycle_runs(size)["off"]
 
-    # Ratio the engine saw on the batch *before* the first fire (no vacuum) and
-    # on the firing batch itself, read off the off-control's untouched counters.
-    ratio_at_no_fire = off["tombstones_after"][first_fire - 2] / off["capacity_after"][first_fire - 2]
-    ratio_at_fire = off["tombstones_after"][first_fire - 1] / off["capacity_after"][first_fire - 1]
+    def ratios(index):
+        return (
+            off["tombstones_after"][index] / off["capacity_after"][index],
+            off["edge_tombstones_after"][index] / off["edge_capacity_after"][index],
+        )
 
-    assert ratio_at_no_fire <= DEFAULT_THRESHOLD_BAND[0]
-    assert ratio_at_fire > DEFAULT_THRESHOLD_BAND[0]
-    assert math.isclose(ratio_at_fire, DEFAULT_THRESHOLD_BAND[1], rel_tol=1e-9)
+    # The batch *before* the first fire (no vacuum) and the firing batch
+    # itself, read off the off-control's untouched counters.
+    node_at_no_fire, edge_at_no_fire = ratios(first_fire - 2)
+    node_at_fire, edge_at_fire = ratios(first_fire - 1)
+
+    assert edge_at_no_fire <= DEFAULT_THRESHOLD_BAND[0]
+    assert edge_at_fire > DEFAULT_THRESHOLD_BAND[0]
+    assert math.isclose(edge_at_fire, DEFAULT_THRESHOLD_BAND[1], rel_tol=1e-9)
+
+    # The node population is the one that did *not* cross — that asymmetry is
+    # the whole reason the edge arm changed the schedule.
+    assert node_at_fire < DEFAULT_THRESHOLD_BAND[0]
+    assert node_at_no_fire < node_at_fire
 
 
 @pytest.mark.parametrize("size", _lifecycle_sizes_for_oracle())

@@ -828,6 +828,7 @@ pub fn kglite::api::durable::RecordingGraph<G>::column_store(&self, type_key: kg
 pub fn kglite::api::durable::RecordingGraph<G>::column_stores_iter(&self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (kglite::api::InternedKey, &alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)> + '_)>
 pub fn kglite::api::durable::RecordingGraph<G>::count_edges_filtered(&self, node: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type: core::option::Option<kglite::api::InternedKey>, other_node_type: core::option::Option<kglite::api::InternedKey>, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<usize, alloc::string::String>
 pub fn kglite::api::durable::RecordingGraph<G>::count_edges_grouped_by_peer(&self, conn_type: kglite::api::InternedKey, dir: petgraph::Direction, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<std::collections::hash::map::HashMap<u32, i64>, alloc::string::String>
+pub fn kglite::api::durable::RecordingGraph<G>::edge_bound(&self) -> usize
 pub fn kglite::api::durable::RecordingGraph<G>::edge_count(&self) -> usize
 pub fn kglite::api::durable::RecordingGraph<G>::edge_endpoint_keys<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, kglite::api::InternedKey)> + 'a)>
 pub fn kglite::api::durable::RecordingGraph<G>::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
@@ -1532,6 +1533,7 @@ pub fn kglite::api::storage::GraphBackend::column_store(&self, type_key: kglite:
 pub fn kglite::api::storage::GraphBackend::column_stores_iter(&self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (kglite::api::InternedKey, &alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)> + '_)>
 pub fn kglite::api::storage::GraphBackend::count_edges_filtered(&self, node: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type: core::option::Option<kglite::api::InternedKey>, other_node_type: core::option::Option<kglite::api::InternedKey>, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<usize, alloc::string::String>
 pub fn kglite::api::storage::GraphBackend::count_edges_grouped_by_peer(&self, conn_type: kglite::api::InternedKey, dir: petgraph::Direction, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<std::collections::hash::map::HashMap<u32, i64>, alloc::string::String>
+pub fn kglite::api::storage::GraphBackend::edge_bound(&self) -> usize
 pub fn kglite::api::storage::GraphBackend::edge_count(&self) -> usize
 pub fn kglite::api::storage::GraphBackend::edge_endpoint_keys<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, kglite::api::InternedKey)> + 'a)>
 pub fn kglite::api::storage::GraphBackend::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
@@ -1694,6 +1696,7 @@ pub fn kglite::api::storage::DiskGraph::column_store(&self, type_key: kglite::ap
 pub fn kglite::api::storage::DiskGraph::column_stores_iter(&self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (kglite::api::InternedKey, &alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)> + '_)>
 pub fn kglite::api::storage::DiskGraph::count_edges_filtered(&self, node: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type: core::option::Option<kglite::api::InternedKey>, other_node_type: core::option::Option<kglite::api::InternedKey>, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<usize, alloc::string::String>
 pub fn kglite::api::storage::DiskGraph::count_edges_grouped_by_peer(&self, conn_type: kglite::api::InternedKey, dir: petgraph::Direction, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<std::collections::hash::map::HashMap<u32, i64>, alloc::string::String>
+pub fn kglite::api::storage::DiskGraph::edge_bound(&self) -> usize
 pub fn kglite::api::storage::DiskGraph::edge_count(&self) -> usize
 pub fn kglite::api::storage::DiskGraph::edge_endpoint_keys<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, kglite::api::InternedKey)> + 'a)>
 pub fn kglite::api::storage::DiskGraph::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
@@ -1803,6 +1806,7 @@ pub fn kglite::api::storage::MappedGraph::column_store(&self, type_key: kglite::
 pub fn kglite::api::storage::MappedGraph::column_stores_iter(&self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (kglite::api::InternedKey, &alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)> + '_)>
 pub fn kglite::api::storage::MappedGraph::count_edges_filtered(&self, node: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type: core::option::Option<kglite::api::InternedKey>, other_node_type: core::option::Option<kglite::api::InternedKey>, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<usize, alloc::string::String>
 pub fn kglite::api::storage::MappedGraph::count_edges_grouped_by_peer(&self, conn_type: kglite::api::InternedKey, dir: petgraph::Direction, _deadline: core::option::Option<std::time::Instant>) -> core::result::Result<std::collections::hash::map::HashMap<u32, i64>, alloc::string::String>
+pub fn kglite::api::storage::MappedGraph::edge_bound(&self) -> usize
 pub fn kglite::api::storage::MappedGraph::edge_count(&self) -> usize
 pub fn kglite::api::storage::MappedGraph::edge_endpoint_keys<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, kglite::api::InternedKey)> + 'a)>
 pub fn kglite::api::storage::MappedGraph::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
@@ -2219,12 +2223,14 @@ pub fn kglite::api::CurrentSelection::get_level_count(&self) -> usize
 pub fn kglite::api::CurrentSelection::get_level_mut(&mut self, index: usize) -> core::option::Option<&mut kglite::api::SelectionLevel>
 pub fn kglite::api::CurrentSelection::has_active_selection(&self) -> bool
 pub fn kglite::api::CurrentSelection::new() -> Self
+pub fn kglite::api::CurrentSelection::remap_indices(&mut self, remap: &kglite::api::NodeRemap)
 impl core::clone::Clone for kglite::api::CurrentSelection
 pub fn kglite::api::CurrentSelection::clone(&self) -> kglite::api::CurrentSelection
 impl core::default::Default for kglite::api::CurrentSelection
 pub fn kglite::api::CurrentSelection::default() -> kglite::api::CurrentSelection
 pub struct kglite::api::DirGraph
 pub kglite::api::DirGraph::auto_vacuum_threshold: core::option::Option<f64>
+pub kglite::api::DirGraph::auto_vacuums_run: u64
 pub kglite::api::DirGraph::checkpoint_lsn: u64
 pub kglite::api::DirGraph::composite_index_keys: alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<alloc::string::String>)>
 pub kglite::api::DirGraph::composite_indices: std::collections::hash::map::HashMap<(alloc::string::String, alloc::vec::Vec<alloc::string::String>), kglite::graph::dir_graph::index_layer::LayeredIndex<kglite::graph::schema::CompositeValue>>
@@ -2272,7 +2278,7 @@ pub fn kglite::api::DirGraph::begin_read_pass(&self) -> core::option::Option<kgl
 pub fn kglite::api::DirGraph::build_connection_types_cache(&mut self)
 pub fn kglite::api::DirGraph::build_id_index(&mut self, node_type: &str)
 pub fn kglite::api::DirGraph::bump_version(&mut self)
-pub fn kglite::api::DirGraph::check_auto_vacuum(&mut self) -> bool
+pub fn kglite::api::DirGraph::check_auto_vacuum(&mut self) -> core::option::Option<kglite::api::NodeRemap>
 pub fn kglite::api::DirGraph::clear_column_stores(&mut self)
 pub fn kglite::api::DirGraph::column_store(&self, node_type: &str) -> core::option::Option<&alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
 pub fn kglite::api::DirGraph::column_store_count(&self) -> usize
@@ -2542,6 +2548,7 @@ impl core::fmt::Debug for kglite::api::NodeInfo
 pub fn kglite::api::NodeInfo::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::NodeRemap
 impl kglite::api::NodeRemap
+pub fn kglite::api::NodeRemap::describes_rebuild(&self) -> bool
 pub fn kglite::api::NodeRemap::get(&self, old: petgraph::graph_impl::NodeIndex) -> core::option::Option<petgraph::graph_impl::NodeIndex>
 pub fn kglite::api::NodeRemap::is_empty(&self) -> bool
 pub fn kglite::api::NodeRemap::iter(&self) -> impl core::iter::traits::iterator::Iterator<Item = (petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)> + '_
@@ -2713,6 +2720,7 @@ pub fn kglite::api::SelectionLevel::iter_groups(&self) -> impl core::iter::trait
 pub fn kglite::api::SelectionLevel::iter_node_indices(&self) -> impl core::iter::traits::iterator::Iterator<Item = petgraph::graph_impl::NodeIndex> + '_
 pub fn kglite::api::SelectionLevel::new() -> Self
 pub fn kglite::api::SelectionLevel::node_count(&self) -> usize
+pub fn kglite::api::SelectionLevel::remap_indices(&mut self, remap: &kglite::api::NodeRemap)
 impl core::clone::Clone for kglite::api::SelectionLevel
 pub fn kglite::api::SelectionLevel::clone(&self) -> kglite::api::SelectionLevel
 impl core::fmt::Debug for kglite::api::SelectionLevel
@@ -2785,6 +2793,7 @@ pub fn kglite::api::GraphRead::column_store(&self, type_key: kglite::api::Intern
 pub fn kglite::api::GraphRead::column_stores_iter(&self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (kglite::api::InternedKey, &alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)> + '_)>
 pub fn kglite::api::GraphRead::count_edges_filtered(&self, node: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type: core::option::Option<kglite::api::InternedKey>, other_node_type: core::option::Option<kglite::api::InternedKey>, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<usize, alloc::string::String>
 pub fn kglite::api::GraphRead::count_edges_grouped_by_peer(&self, conn_type: kglite::api::InternedKey, dir: petgraph::Direction, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<std::collections::hash::map::HashMap<u32, i64>, alloc::string::String>
+pub fn kglite::api::GraphRead::edge_bound(&self) -> usize
 pub fn kglite::api::GraphRead::edge_count(&self) -> usize
 pub fn kglite::api::GraphRead::edge_endpoint_keys<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, kglite::api::InternedKey)> + 'a)>
 pub fn kglite::api::GraphRead::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
@@ -2837,6 +2846,7 @@ pub fn kglite::api::storage::DiskGraph::column_store(&self, type_key: kglite::ap
 pub fn kglite::api::storage::DiskGraph::column_stores_iter(&self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (kglite::api::InternedKey, &alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)> + '_)>
 pub fn kglite::api::storage::DiskGraph::count_edges_filtered(&self, node: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type: core::option::Option<kglite::api::InternedKey>, other_node_type: core::option::Option<kglite::api::InternedKey>, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<usize, alloc::string::String>
 pub fn kglite::api::storage::DiskGraph::count_edges_grouped_by_peer(&self, conn_type: kglite::api::InternedKey, dir: petgraph::Direction, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<std::collections::hash::map::HashMap<u32, i64>, alloc::string::String>
+pub fn kglite::api::storage::DiskGraph::edge_bound(&self) -> usize
 pub fn kglite::api::storage::DiskGraph::edge_count(&self) -> usize
 pub fn kglite::api::storage::DiskGraph::edge_endpoint_keys<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, kglite::api::InternedKey)> + 'a)>
 pub fn kglite::api::storage::DiskGraph::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
@@ -2882,6 +2892,7 @@ pub fn kglite::api::storage::GraphBackend::column_store(&self, type_key: kglite:
 pub fn kglite::api::storage::GraphBackend::column_stores_iter(&self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (kglite::api::InternedKey, &alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)> + '_)>
 pub fn kglite::api::storage::GraphBackend::count_edges_filtered(&self, node: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type: core::option::Option<kglite::api::InternedKey>, other_node_type: core::option::Option<kglite::api::InternedKey>, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<usize, alloc::string::String>
 pub fn kglite::api::storage::GraphBackend::count_edges_grouped_by_peer(&self, conn_type: kglite::api::InternedKey, dir: petgraph::Direction, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<std::collections::hash::map::HashMap<u32, i64>, alloc::string::String>
+pub fn kglite::api::storage::GraphBackend::edge_bound(&self) -> usize
 pub fn kglite::api::storage::GraphBackend::edge_count(&self) -> usize
 pub fn kglite::api::storage::GraphBackend::edge_endpoint_keys<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, kglite::api::InternedKey)> + 'a)>
 pub fn kglite::api::storage::GraphBackend::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
@@ -2929,6 +2940,7 @@ pub fn kglite::api::storage::MappedGraph::column_store(&self, type_key: kglite::
 pub fn kglite::api::storage::MappedGraph::column_stores_iter(&self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (kglite::api::InternedKey, &alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)> + '_)>
 pub fn kglite::api::storage::MappedGraph::count_edges_filtered(&self, node: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type: core::option::Option<kglite::api::InternedKey>, other_node_type: core::option::Option<kglite::api::InternedKey>, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<usize, alloc::string::String>
 pub fn kglite::api::storage::MappedGraph::count_edges_grouped_by_peer(&self, conn_type: kglite::api::InternedKey, dir: petgraph::Direction, _deadline: core::option::Option<std::time::Instant>) -> core::result::Result<std::collections::hash::map::HashMap<u32, i64>, alloc::string::String>
+pub fn kglite::api::storage::MappedGraph::edge_bound(&self) -> usize
 pub fn kglite::api::storage::MappedGraph::edge_count(&self) -> usize
 pub fn kglite::api::storage::MappedGraph::edge_endpoint_keys<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, kglite::api::InternedKey)> + 'a)>
 pub fn kglite::api::storage::MappedGraph::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>
@@ -2972,6 +2984,7 @@ pub fn kglite::api::durable::RecordingGraph<G>::column_store(&self, type_key: kg
 pub fn kglite::api::durable::RecordingGraph<G>::column_stores_iter(&self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (kglite::api::InternedKey, &alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)> + '_)>
 pub fn kglite::api::durable::RecordingGraph<G>::count_edges_filtered(&self, node: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type: core::option::Option<kglite::api::InternedKey>, other_node_type: core::option::Option<kglite::api::InternedKey>, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<usize, alloc::string::String>
 pub fn kglite::api::durable::RecordingGraph<G>::count_edges_grouped_by_peer(&self, conn_type: kglite::api::InternedKey, dir: petgraph::Direction, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<std::collections::hash::map::HashMap<u32, i64>, alloc::string::String>
+pub fn kglite::api::durable::RecordingGraph<G>::edge_bound(&self) -> usize
 pub fn kglite::api::durable::RecordingGraph<G>::edge_count(&self) -> usize
 pub fn kglite::api::durable::RecordingGraph<G>::edge_endpoint_keys<'a>(&'a self) -> alloc::boxed::Box<(dyn core::iter::traits::iterator::Iterator<Item = (petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, kglite::api::InternedKey)> + 'a)>
 pub fn kglite::api::durable::RecordingGraph<G>::edge_endpoints(&self, idx: petgraph::graph_impl::EdgeIndex) -> core::option::Option<(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex)>

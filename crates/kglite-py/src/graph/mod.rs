@@ -352,10 +352,18 @@ impl KnowledgeGraph {
         self.commit_wal()?;
         let graph = crate::graph::get_graph_mut(&mut self.inner);
         if let Some(stats) = stats {
-            if (stats.nodes_deleted > 0 || stats.relationships_deleted > 0)
-                && graph.check_auto_vacuum()
-            {
-                self.cursor.selection = kglite_core::api::CowSelection::new();
+            if stats.nodes_deleted > 0 || stats.relationships_deleted > 0 {
+                // Follow the compaction, do not throw the selection away. A
+                // reset `CurrentSelection` reads as "no filter applied", so the
+                // same held handle answered `ids()` with `[]` and `len()` with
+                // the whole graph — a selection that silently emptied and
+                // silently widened at the same time, from a delete the caller
+                // never asked to touch it. `remap_indices` is a no-op when the
+                // mapping describes no rebuild, which is what the disk backend
+                // returns: it used to pay the reset while reclaiming nothing.
+                if let Some(remap) = graph.check_auto_vacuum() {
+                    self.cursor.selection.remap_indices(&remap);
+                }
             }
             self.cursor.last_mutation_stats = Some(stats.clone());
         }

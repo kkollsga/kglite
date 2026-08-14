@@ -2384,13 +2384,22 @@ class KnowledgeGraph:
         all indexes, and rebuilds the property columns to drop the rows that
         deleted nodes left behind.
 
-        **Important**: This resets the current selection since node indices change.
-        Call this between query chains, not in the middle of one.
+        The current selection is **carried through** the compaction: selected
+        nodes that survived keep their place at their new indices, and nodes
+        the deletes took are dropped from it. After a traversal, a group whose
+        parent node was deleted is dropped whole — its children were selected
+        because of that parent, so re-parenting them would invent a traversal
+        that never happened.
 
         Returns:
             dict with keys:
-                - ``nodes_remapped``: Number of nodes that were remapped
-                - ``tombstones_removed``: Number of tombstone slots reclaimed
+                - ``nodes_remapped``: Number of nodes carried into the
+                  compacted graph
+                - ``tombstones_removed``: Number of free node slots reclaimed
+                - ``edge_tombstones_removed``: Number of free edge slots
+                  reclaimed. A relationship-only delete workload
+                  (``MATCH ()-[r]->() DELETE r``) produces these and no node
+                  tombstones at all
                 - ``columnar_rebuilt``: Whether the pass actually dropped
                   property-column rows left behind by deleted nodes (``False``
                   for a vacuum that found nothing to reclaim)
@@ -2435,6 +2444,19 @@ class KnowledgeGraph:
         When enabled, the graph automatically compacts itself after Cypher DELETE
         operations if the fragmentation ratio exceeds the threshold and there are
         more than 100 tombstones.
+
+        Three independent kinds of garbage feed the trigger, and the worst of
+        them decides: free node slots, property-column rows left behind by
+        deleted nodes, and free edge slots. The last is what a
+        relationship-only workload (``MATCH ()-[r]->() DELETE r``) produces —
+        it leaves every node alive, so the other two readings stay clean.
+
+        A held selection is carried through the compaction rather than reset;
+        see :meth:`vacuum`.
+
+        Read the current setting back with
+        ``graph_info()['auto_vacuum_threshold']``, and how often it has fired
+        with ``graph_info()['auto_vacuums_run']``.
 
         Args:
             threshold: A float between 0.0 and 1.0, or ``None`` to disable.
@@ -2565,7 +2587,13 @@ class KnowledgeGraph:
                 - ``node_capacity``: Upper bound of node indices (includes tombstones)
                 - ``node_tombstones``: Number of wasted slots from deletions
                 - ``edge_count``: Number of live edges
-                - ``fragmentation_ratio``: Ratio of wasted storage (0.0 = clean)
+                - ``edge_capacity``: Upper bound of edge indices (includes
+                  slots freed by relationship deletes)
+                - ``edge_tombstones``: Wasted edge slots. The only garbage a
+                  relationship-only delete workload produces, and invisible to
+                  ``fragmentation_ratio``, which is node-shaped
+                - ``fragmentation_ratio``: Ratio of wasted *node* storage
+                  (0.0 = clean)
                 - ``type_count``: Number of distinct node types
                 - ``property_index_count``: Number of single-property indexes
                 - ``composite_index_count``: Number of composite indexes
@@ -2587,6 +2615,13 @@ class KnowledgeGraph:
                 - ``columnar_total_rows``: Total property-column rows, including
                   rows orphaned by deleted nodes
                 - ``columnar_live_rows``: Rows backed by live nodes
+                - ``auto_vacuum_threshold``: The configured auto-vacuum
+                  threshold, or ``None`` when disabled (see
+                  :meth:`set_auto_vacuum`)
+                - ``auto_vacuums_run``: How many times auto-vacuum has fired on
+                  this graph object. Counts fired vacuums, not reclaimed slots
+                  — on the disk backend a vacuum reclaims nothing and still
+                  counts. Not persisted; a reopened graph starts at 0
 
         Example::
 

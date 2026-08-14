@@ -171,6 +171,17 @@ pub trait GraphRead {
     /// `StableDiGraph` without vacuuming.
     fn node_bound(&self) -> usize;
 
+    /// Upper bound on edge indices (petgraph `edge_bound`). May exceed
+    /// [`GraphRead::edge_count`] when edges have been removed from a
+    /// `StableDiGraph` without vacuuming.
+    ///
+    /// The edge-shaped half of the fragmentation picture, and the reason
+    /// `DELETE r` churn is visible at all: without it, a graph that had
+    /// deleted every one of its relationships and none of its nodes reported
+    /// `fragmentation_ratio` 0.0, could never trigger an auto-vacuum, and got
+    /// a no-op out of an explicit `vacuum()`.
+    fn edge_bound(&self) -> usize;
+
     /// `true` for heap-resident [`GraphBackend::Memory`]. Used by
     /// `recording.rs` tests to verify backend identity.
     #[allow(dead_code)]

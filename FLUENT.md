@@ -1341,9 +1341,11 @@ print(kglite.KnowledgeGraph.explain_mcp())
 # Rebuild all indexes
 graph.reindex()
 
-# Compact graph (remove tombstones from deletions)
+# Compact graph (remove slots freed by node and relationship deletions).
+# A held selection is carried through the compaction, not reset.
 result = graph.vacuum()
-# {'nodes_remapped': 50, 'tombstones_removed': 50}
+# {'nodes_remapped': 50, 'tombstones_removed': 50,
+#  'edge_tombstones_removed': 120, 'columnar_rebuilt': True}
 
 # Auto-vacuum after DELETE operations
 graph.set_auto_vacuum(0.3)     # trigger at 30% fragmentation (default)
@@ -1353,7 +1355,9 @@ graph.set_auto_vacuum(None)    # disable
 # Storage health diagnostics
 info = graph.graph_info()
 # {'node_count': 1000, 'node_capacity': 1050, 'node_tombstones': 50,
-#  'edge_count': 2000, 'fragmentation_ratio': 0.048, ...}
+#  'edge_count': 2000, 'edge_capacity': 2120, 'edge_tombstones': 120,
+#  'fragmentation_ratio': 0.048, 'auto_vacuum_threshold': 0.3,
+#  'auto_vacuums_run': 0, ...}
 
 # Read-only mode (blocks all Cypher mutations)
 graph.read_only(True)

@@ -832,11 +832,18 @@ mod auto_vacuum_trigger_tests {
              measuring the old trigger"
         );
 
-        assert!(
-            g.check_auto_vacuum(),
+        let remap = g.check_auto_vacuum().expect(
             "43% of the type's rows are garbage and auto-vacuum did not fire: \
              the trigger is reading free petgraph slots, which replacement \
-             churn returns to zero"
+             churn returns to zero",
+        );
+        // Node slots were clean, so the columnar-only arm ran: no petgraph
+        // rebuild, no index movement, and a holder of node indices must keep
+        // them.
+        assert!(
+            !remap.describes_rebuild(),
+            "a columnar-only reclaim moved no node index; reporting a rebuild \
+             would cost every index holder its state for nothing"
         );
         let (total, live) = g.columnar_row_census();
         assert_eq!(
@@ -853,17 +860,302 @@ mod auto_vacuum_trigger_tests {
         // Non-vacuity's other half: the trigger must still say no.
         let mut g = columnar_items(200);
         g.auto_vacuum_threshold = Some(0.3);
-        assert!(!g.check_auto_vacuum());
+        assert!(g.check_auto_vacuum().is_none());
 
         // ... and garbage under the small-graph floor is not worth a rebuild.
         orphan_rows(&mut g, 40);
-        assert!(!g.check_auto_vacuum());
+        assert!(g.check_auto_vacuum().is_none());
 
         // ... nor is garbage below the ratio threshold.
         let mut g = columnar_items(2000);
         g.auto_vacuum_threshold = Some(0.3);
         orphan_rows(&mut g, 300);
-        assert!(!g.check_auto_vacuum());
+        assert!(g.check_auto_vacuum().is_none());
         assert_eq!(g.columnar_row_census(), (2300, 2000));
+    }
+
+    /// The mapping a fired vacuum hands back has to name the surviving nodes,
+    /// or the caller that follows it lands on the wrong ones.
+    #[test]
+    fn a_fired_vacuum_returns_the_mapping_its_caller_needs() {
+        let mut g = columnar_items(400);
+        g.auto_vacuum_threshold = Some(0.3);
+
+        // Delete the first 200 nodes: node slots 0..200 go free, 200..400 stay.
+        let doomed: Vec<NodeIndex> = (0..200).map(NodeIndex::new).collect();
+        for idx in &doomed {
+            g.graph.remove_node(*idx);
+        }
+        assert_eq!(g.graph.node_bound() - g.graph.node_count(), 200);
+
+        let remap = g
+            .check_auto_vacuum()
+            .expect("50% of node slots are free at threshold 0.3");
+        assert!(remap.describes_rebuild());
+        assert_eq!(remap.len(), 200, "every survivor must be in the mapping");
+
+        // The survivors compact to 0..200 in ascending old-index order.
+        for (offset, old_raw) in (200..400).enumerate() {
+            assert_eq!(
+                remap.get(NodeIndex::new(old_raw)),
+                Some(NodeIndex::new(offset)),
+            );
+        }
+        // The dead are absent, not silently aliased onto a live node.
+        for idx in &doomed {
+            assert_eq!(remap.get(*idx), None);
+        }
+        assert_eq!(g.auto_vacuums_run, 1);
+    }
+
+    /// The counter only moves when a vacuum actually fires.
+    #[test]
+    fn the_run_counter_counts_fired_vacuums_only() {
+        let mut g = columnar_items(200);
+        g.auto_vacuum_threshold = Some(0.3);
+        assert_eq!(g.auto_vacuums_run, 0);
+
+        // Below the floor: no fire, no count.
+        orphan_rows(&mut g, 40);
+        assert!(g.check_auto_vacuum().is_none());
+        assert_eq!(g.auto_vacuums_run, 0);
+
+        orphan_rows(&mut g, 110);
+        assert!(g.check_auto_vacuum().is_some());
+        assert_eq!(g.auto_vacuums_run, 1);
+
+        // Disabled: never fires, whatever the garbage.
+        orphan_rows(&mut g, 500);
+        g.auto_vacuum_threshold = None;
+        assert!(g.check_auto_vacuum().is_none());
+        assert_eq!(g.auto_vacuums_run, 1);
+    }
+}
+
+/// Edge slots are the third garbage population, and the one nothing could see.
+///
+/// A relationship-only delete workload (`MATCH ()-[r]->() DELETE r`) leaves
+/// every node alive and every columnar row referenced, so both of the other
+/// two readings are clean. Measured before this: 500 of 1,000 edges deleted
+/// reported `fragmentation_ratio` 0.000, could never trigger an auto-vacuum,
+/// and got a no-op out of an explicit `vacuum()` as well.
+#[cfg(test)]
+mod edge_fragmentation_tests {
+    use super::*;
+    use crate::datatypes::{DataFrame, Value};
+    use crate::graph::schema::EdgeData;
+    use std::collections::HashMap;
+
+    /// `n` nodes in a ring of `n` `KNOWS` edges.
+    fn ring(n: usize) -> DirGraph {
+        let mut g = DirGraph::new();
+        let rows: Vec<Vec<Value>> = (0..n as i64)
+            .map(|i| vec![Value::Int64(i), Value::String(format!("t{i}"))])
+            .collect();
+        let df =
+            DataFrame::from_cypher_rows(vec!["id".to_string(), "title".to_string()], rows).unwrap();
+        crate::graph::mutation::maintain::add_nodes(
+            &mut g,
+            df,
+            "Item".to_string(),
+            "id".to_string(),
+            Some("title".to_string()),
+            None,
+        )
+        .unwrap();
+        for i in 0..n {
+            let data = EdgeData::new("KNOWS".to_string(), HashMap::new(), &mut g.interner);
+            g.graph
+                .add_edge(NodeIndex::new(i), NodeIndex::new((i + 1) % n), data);
+        }
+        g
+    }
+
+    /// Delete the first `k` edge slots, leaving the tail live so the bound
+    /// stays put — the shape a `WHERE`-filtered `DELETE r` produces.
+    fn delete_leading_edges(g: &mut DirGraph, k: usize) {
+        for i in 0..k {
+            g.graph.remove_edge(EdgeIndex::new(i));
+        }
+    }
+
+    #[test]
+    fn edge_only_garbage_is_visible_to_graph_info() {
+        let mut g = ring(1000);
+        assert_eq!(g.graph_info().edge_tombstones, 0);
+
+        delete_leading_edges(&mut g, 500);
+        let info = g.graph_info();
+        assert_eq!(info.edge_count, 500);
+        assert_eq!(info.edge_capacity, 1000);
+        assert_eq!(info.edge_tombstones, 500);
+        // The node-shaped reading is clean, which is exactly why this needed
+        // its own number rather than a wider `fragmentation_ratio`.
+        assert_eq!(info.node_tombstones, 0);
+        assert_eq!(info.fragmentation_ratio, 0.0);
+    }
+
+    #[test]
+    fn edge_only_garbage_triggers_a_vacuum_that_reclaims_it() {
+        let mut g = ring(1000);
+        g.auto_vacuum_threshold = Some(0.3);
+        delete_leading_edges(&mut g, 500);
+
+        assert!(
+            g.check_auto_vacuum().is_some(),
+            "half the edge slots are free and auto-vacuum did not fire: the \
+             trigger is blind to relationship-only deletes"
+        );
+        let info = g.graph_info();
+        assert_eq!(info.edge_count, 500);
+        assert_eq!(info.edge_tombstones, 0, "the vacuum reclaimed no edge slot");
+        assert_eq!(info.node_count, 1000, "live data must survive untouched");
+    }
+
+    #[test]
+    fn an_explicit_vacuum_reclaims_edge_slots_on_a_node_clean_graph() {
+        // The measured no-op, inverted: `vacuum()` used to return early on
+        // `node_count == node_bound` and leave every free edge slot in place.
+        let mut g = ring(1000);
+        delete_leading_edges(&mut g, 500);
+        assert_eq!(g.graph.node_bound(), g.graph.node_count(), "precondition");
+
+        let remap = g.vacuum();
+        assert_eq!(g.graph_info().edge_tombstones, 0);
+        assert_eq!(g.graph_info().edge_count, 500);
+        // Node indices did not move — the mapping is the identity — but a
+        // rebuild did happen, so the mapping covers every slot.
+        assert!(remap.describes_rebuild());
+        assert_eq!(remap.get(NodeIndex::new(7)), Some(NodeIndex::new(7)));
+    }
+
+    #[test]
+    fn a_clean_edge_set_does_not_trigger_a_vacuum() {
+        let mut g = ring(1000);
+        g.auto_vacuum_threshold = Some(0.3);
+        assert!(g.check_auto_vacuum().is_none());
+
+        // Under the small-graph floor.
+        delete_leading_edges(&mut g, 100);
+        assert!(g.check_auto_vacuum().is_none());
+        assert_eq!(g.graph_info().edge_tombstones, 100);
+
+        // Above the floor but under the ratio.
+        let mut g = ring(1000);
+        g.auto_vacuum_threshold = Some(0.5);
+        delete_leading_edges(&mut g, 400);
+        assert!(g.check_auto_vacuum().is_none());
+        assert_eq!(g.graph_info().edge_tombstones, 400);
+    }
+}
+
+/// `CurrentSelection::remap_indices` — the half of the vacuum fix that keeps a
+/// held selection describing the same set of nodes.
+#[cfg(test)]
+mod selection_remap_tests {
+    use super::*;
+    use crate::graph::schema::{CurrentSelection, SelectionLevel};
+
+    fn remap_of(pairs: &[(usize, usize)], bound: usize) -> NodeRemap {
+        let mut remap = NodeRemap::with_bound(bound);
+        for (old, new) in pairs {
+            remap.set(*old, NodeIndex::new(*new));
+        }
+        remap
+    }
+
+    fn root_selection(indices: &[usize]) -> CurrentSelection {
+        let mut sel = CurrentSelection::new();
+        let level = sel.get_level_mut(0).unwrap();
+        level.add_selection(None, indices.iter().copied().map(NodeIndex::new).collect());
+        sel
+    }
+
+    fn sorted(level: &SelectionLevel) -> Vec<usize> {
+        let mut v: Vec<usize> = level.iter_node_indices().map(|i| i.index()).collect();
+        v.sort_unstable();
+        v
+    }
+
+    #[test]
+    fn survivors_follow_the_compaction_and_the_dead_drop_out() {
+        let mut sel = root_selection(&[3, 5, 7]);
+        // 5 did not survive; 3 and 7 moved down.
+        sel.remap_indices(&remap_of(&[(3, 0), (7, 1)], 8));
+
+        assert_eq!(sorted(sel.get_level(0).unwrap()), vec![0, 1]);
+        assert_eq!(sel.current_node_count(), 2);
+    }
+
+    #[test]
+    fn a_group_whose_parent_died_is_dropped_whole() {
+        let mut sel = CurrentSelection::new();
+        let level = sel.get_level_mut(0).unwrap();
+        level.add_selection(Some(NodeIndex::new(1)), vec![NodeIndex::new(4)]);
+        level.add_selection(Some(NodeIndex::new(2)), vec![NodeIndex::new(5)]);
+
+        // Parent 2 is gone; its child 5 survived the vacuum but is no longer
+        // reachable through the traversal that put it here.
+        sel.remap_indices(&remap_of(&[(1, 0), (4, 1), (5, 2)], 8));
+
+        let level = sel.get_level(0).unwrap();
+        let groups: Vec<_> = level.iter_groups().collect();
+        assert_eq!(
+            groups.len(),
+            1,
+            "the orphaned group must not be re-parented"
+        );
+        let (parent, children) = groups[0];
+        assert_eq!(*parent, Some(NodeIndex::new(0)));
+        assert_eq!(children, &vec![NodeIndex::new(1)]);
+    }
+
+    #[test]
+    fn a_group_that_loses_every_child_stays_empty_rather_than_vanishing() {
+        let mut sel = CurrentSelection::new();
+        let level = sel.get_level_mut(0).unwrap();
+        level.add_selection(
+            Some(NodeIndex::new(1)),
+            vec![NodeIndex::new(4), NodeIndex::new(5)],
+        );
+
+        sel.remap_indices(&remap_of(&[(1, 0)], 8));
+
+        let level = sel.get_level(0).unwrap();
+        assert_eq!(level.iter_groups().count(), 1);
+        assert_eq!(level.node_count(), 0);
+    }
+
+    #[test]
+    fn every_level_is_remapped_not_just_the_last() {
+        let mut sel = root_selection(&[3]);
+        sel.add_level();
+        sel.get_level_mut(1)
+            .unwrap()
+            .add_selection(Some(NodeIndex::new(3)), vec![NodeIndex::new(7)]);
+
+        sel.remap_indices(&remap_of(&[(3, 0), (7, 1)], 8));
+
+        assert_eq!(sorted(sel.get_level(0).unwrap()), vec![0]);
+        assert_eq!(sorted(sel.get_level(1).unwrap()), vec![1]);
+    }
+
+    #[test]
+    fn a_mapping_that_describes_no_rebuild_leaves_the_selection_alone() {
+        // The disk-backend and columnar-only shape. Indices did not move, so
+        // treating "nothing in the mapping" as "everything died" would empty a
+        // perfectly valid selection.
+        let mut sel = root_selection(&[3, 5, 7]);
+        sel.remap_indices(&NodeRemap::default());
+        assert_eq!(sorted(sel.get_level(0).unwrap()), vec![3, 5, 7]);
+    }
+
+    #[test]
+    fn a_rebuild_with_no_survivors_empties_the_selection() {
+        // The other side of the same discrimination: here the mapping is also
+        // `is_empty()`, but every index the caller holds is genuinely gone.
+        let mut sel = root_selection(&[3, 5, 7]);
+        sel.remap_indices(&NodeRemap::with_bound(8));
+        assert_eq!(sel.current_node_count(), 0);
     }
 }
