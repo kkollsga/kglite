@@ -2267,22 +2267,22 @@ impl InlineAccumulators {
         // can't fire, but the .expect() makes the invariant explicit if a
         // future refactor reorders the conditions.
         if self.mins[ai].is_none()
-            || crate::graph::core::filtering::compare_values(
+            || crate::graph::core::filtering::total_order(
                 val,
                 self.mins[ai]
                     .as_ref()
                     .expect("invariant: is_none() short-circuited above"),
-            ) == Some(std::cmp::Ordering::Less)
+            ) == std::cmp::Ordering::Less
         {
             self.mins[ai] = Some(val.clone());
         }
         if self.maxs[ai].is_none()
-            || crate::graph::core::filtering::compare_values(
+            || crate::graph::core::filtering::total_order(
                 val,
                 self.maxs[ai]
                     .as_ref()
                     .expect("invariant: is_none() short-circuited above"),
-            ) == Some(std::cmp::Ordering::Greater)
+            ) == std::cmp::Ordering::Greater
         {
             self.maxs[ai] = Some(val.clone());
         }

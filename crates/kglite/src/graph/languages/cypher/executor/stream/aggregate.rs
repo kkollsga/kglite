@@ -660,18 +660,17 @@ fn value_to_f64(v: &Value) -> Option<f64> {
     }
 }
 
+/// `min`/`max` rank candidates through the same **total** order as `ORDER BY`
+/// ([`crate::graph::core::filtering::total_order`]). With the partial
+/// `compare_values` a candidate of a different type than the incumbent was
+/// neither `Less` nor `Greater`, so it was silently rejected and the answer
+/// depended on which row arrived first.
 fn cmp_lt(a: &Value, b: &Value) -> bool {
-    matches!(
-        crate::graph::core::filtering::compare_values(a, b),
-        Some(std::cmp::Ordering::Less)
-    )
+    crate::graph::core::filtering::total_order(a, b) == std::cmp::Ordering::Less
 }
 
 fn cmp_gt(a: &Value, b: &Value) -> bool {
-    matches!(
-        crate::graph::core::filtering::compare_values(a, b),
-        Some(std::cmp::Ordering::Greater)
-    )
+    crate::graph::core::filtering::total_order(a, b) == std::cmp::Ordering::Greater
 }
 
 fn combine(a: Option<Value>, b: Option<Value>, want_max: bool) -> Option<Value> {

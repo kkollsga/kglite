@@ -14,12 +14,12 @@
 //! sequence within a partition of a node type.
 
 use super::sanitize_filename;
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use indexmap::IndexMap;
 
+use super::super::expr::value_cmp;
 use super::super::schema::{Blueprint, JunctionEdge};
 use super::{csv_cell_to_value, resolve_csv_path, resolve_source_spec, resolve_source_spec_mut};
 
@@ -175,22 +175,6 @@ pub fn run_chain(
     );
 
     Ok(())
-}
-
-fn value_cmp(a: &super::super::expr::Value, b: &super::super::expr::Value) -> Ordering {
-    use super::super::expr::Value;
-    match (a, b) {
-        (Value::Null, Value::Null) => Ordering::Equal,
-        (Value::Null, _) => Ordering::Less,
-        (_, Value::Null) => Ordering::Greater,
-        (Value::Int(x), Value::Int(y)) => x.cmp(y),
-        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
-        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(Ordering::Equal),
-        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal),
-        (Value::String(x), Value::String(y)) => x.cmp(y),
-        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
-        _ => Ordering::Equal,
-    }
 }
 
 #[cfg(test)]

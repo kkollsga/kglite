@@ -38,11 +38,25 @@ impl SortSpec {
 /// `Less` means `a` sorts before `b` in the emitted result.
 ///
 /// Per key, in order: NULLs are placed by the key's `NullsPlacement`
-/// (overriding `compare_values`, which sorts NULL below everything);
-/// otherwise the values are compared and the result reversed for DESC.
-/// Keys that are incomparable (`compare_values` → `None`, e.g. a string
-/// against a list) or equal fall through to the next key; a tuple that ties on
-/// every key compares `Equal`, leaving the caller's stable order intact.
+/// (overriding the total order, which ranks NULL last ascending); otherwise
+/// the values are ranked by
+/// [`total_order`](crate::graph::core::filtering::total_order) and the result
+/// reversed for DESC. Keys that compare equal — including two values of
+/// different types that the type rank cannot separate — fall through to the
+/// next key; a tuple that ties on every key compares `Equal`, leaving the
+/// caller's stable order intact.
+///
+/// **The comparison is total.** A key column holding more than one type
+/// (a `CASE` returning a number on some rows and a string on others, a
+/// property read across two node types, `coalesce` over differently-typed
+/// fields) orders by type rank first, so no pair is ever "incomparable".
+/// Before the total order such a pair was *skipped*, which made the comparator
+/// intransitive: string-vs-number reported `Equal` while number-vs-number
+/// ordered. `slice::sort_by` detects exactly that and panics
+/// ("user-provided comparison function does not correctly implement a total
+/// order"), aborting the query — a `PanicException` through pyo3 and an
+/// unwind with no `catch_unwind` in the Bolt server. The top-K heap has no
+/// such check and silently disagreed with the full sort instead.
 pub(crate) fn compare_sort_keys(a: &[Value], b: &[Value], specs: &[SortSpec]) -> Ordering {
     for (i, spec) in specs.iter().enumerate() {
         let key_a = a.get(i).unwrap_or(&Value::Null);
@@ -67,33 +81,36 @@ pub(crate) fn compare_sort_keys(a: &[Value], b: &[Value], specs: &[SortSpec]) ->
             (false, false) => {}
         }
 
-        if let Some(ordering) = compare_one(key_a, key_b) {
-            let oriented = if spec.ascending {
-                ordering
-            } else {
-                ordering.reverse()
-            };
-            if oriented != Ordering::Equal {
-                return oriented;
-            }
+        let ordering = compare_one(key_a, key_b);
+        let oriented = if spec.ascending {
+            ordering
+        } else {
+            ordering.reverse()
+        };
+        if oriented != Ordering::Equal {
+            return oriented;
         }
     }
     Ordering::Equal
 }
 
 /// One key comparison. The three arms here are the same-type cases of
-/// [`crate::graph::core::filtering::compare_values`], repeated only so they
-/// inline: every other pair — cross-type numerics, dates, strings parsed as
-/// dates, incomparable types — falls through to that function, which remains
-/// the definition. Ordering semantics live in one place; this is a call-site
-/// shortcut, not a second rule set.
+/// [`crate::graph::core::filtering::total_order`], repeated only so they
+/// inline: every other pair — cross-type numerics, temporals, cross-*type*
+/// pairs ranked by type — falls through to that function, which remains the
+/// definition. Ordering semantics live in one place; this is a call-site
+/// shortcut, not a second rule set, and
+/// `ordering::tests::the_inline_shortcut_agrees_with_the_total_order` pins
+/// that.
 #[inline]
-fn compare_one(a: &Value, b: &Value) -> Option<Ordering> {
+fn compare_one(a: &Value, b: &Value) -> Ordering {
     match (a, b) {
-        (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y),
-        (Value::Int64(x), Value::Int64(y)) => Some(x.cmp(y)),
-        (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
-        _ => crate::graph::core::filtering::compare_values(a, b),
+        (Value::Float64(x), Value::Float64(y)) => {
+            crate::graph::core::filtering::cmp_f64_total(*x, *y)
+        }
+        (Value::Int64(x), Value::Int64(y)) => x.cmp(y),
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        _ => crate::graph::core::filtering::total_order(a, b),
     }
 }
 
@@ -459,23 +476,26 @@ mod tests {
     /// Int/Float/UniqueId keys in one column, NULLs, and heavy duplication so
     /// the `seq` tiebreak decides.
     ///
-    /// The first key stays *mutually comparable* on purpose. Mixing, say, a
-    /// string into a numeric key column makes `compare_sort_keys` intransitive
-    /// (incomparable pairs fall through to the next key), and an intransitive
-    /// comparator lets any heap disagree with any stable sort — a pre-existing
-    /// property of the mixed-type ordering rules, unrelated to the lane, which
-    /// hands every string/date/bool key straight back to the comparator.
+    /// The first key column deliberately mixes a **string** in among the
+    /// numbers. Before the total order that was impossible to test: an
+    /// incomparable pair fell through to the next key, which made
+    /// `compare_sort_keys` intransitive, and an intransitive comparator lets
+    /// any heap disagree with any stable sort. Now the string is ranked by
+    /// type (rank 9, below every number) and the lane — which hands every
+    /// string/date/bool key straight back to the comparator as NaN — must
+    /// still agree with the full sort.
     #[test]
     fn fast_lane_never_disagrees_with_the_full_sort() {
         const BIG: i64 = (1i64 << 53) + 1;
         let rows: Vec<Vec<Value>> = (0..400)
             .map(|i| {
-                let key0 = match i % 6 {
+                let key0 = match i % 7 {
                     0 => Value::Int64(BIG + (i as i64 % 3)),
                     1 => Value::Float64((i % 5) as f64),
                     2 => Value::Int64((i % 5) as i64),
                     3 => Value::UniqueId((i % 5) as u32),
                     4 => Value::Null,
+                    5 => Value::String(format!("k{}", i % 4)),
                     _ => Value::Float64(f64::from(-(i % 4))),
                 };
                 vec![key0, Value::Int64((i % 11) as i64)]
@@ -530,12 +550,309 @@ mod tests {
         assert_eq!(compare_sort_keys(&a, &b, &specs), Ordering::Greater);
     }
 
+    /// A cross-type first key is decided *by the type rank*, so the second key
+    /// never runs. (Before the total order the same assertion held for the
+    /// opposite reason: the string/boolean pair was skipped and `1 < 2`
+    /// decided it — which is precisely the intransitivity that aborted sorts.)
     #[test]
-    fn incomparable_keys_fall_through_to_the_next_key() {
+    fn a_cross_type_key_is_decided_by_the_type_rank() {
         let specs = [asc(), asc()];
-        let a = vec![Value::String("x".into()), Value::Int64(1)];
-        let b = vec![Value::Boolean(true), Value::Int64(2)];
+        // String (rank 9) before Boolean (rank 10) — the trailing key would
+        // have said the opposite.
+        let a = vec![Value::String("x".into()), Value::Int64(9)];
+        let b = vec![Value::Boolean(true), Value::Int64(1)];
         assert_eq!(compare_sort_keys(&a, &b, &specs), Ordering::Less);
+        let specs = [desc(), asc()];
+        assert_eq!(compare_sort_keys(&a, &b, &specs), Ordering::Greater);
+    }
+
+    /// Every value of every rank class, in ascending total order. Ordering one
+    /// of these against any other must reproduce this sequence exactly.
+    fn one_of_every_rank_class() -> Vec<Value> {
+        use crate::datatypes::values::{NodeValue, PathValue, RelValue};
+        use std::collections::BTreeMap;
+        let node = NodeValue {
+            id: 1,
+            labels: vec!["N".into()],
+            properties: BTreeMap::new(),
+        };
+        let rel = RelValue {
+            id: 1,
+            start_id: 1,
+            end_id: 2,
+            rel_type: "R".into(),
+            properties: BTreeMap::new(),
+        };
+        vec![
+            Value::Map(BTreeMap::from([("k".to_string(), Value::Int64(1))])),
+            Value::Node(Box::new(node.clone())),
+            Value::NodeRef(3),
+            Value::Relationship(Box::new(rel.clone())),
+            Value::List(vec![Value::Int64(1)]),
+            Value::Path(Box::new(PathValue {
+                nodes: vec![node],
+                rels: vec![rel],
+            })),
+            Value::DateTime(chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()),
+            Value::Timestamp(
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 1)
+                    .unwrap()
+                    .and_hms_opt(12, 0, 0)
+                    .unwrap(),
+            ),
+            Value::Duration {
+                months: 0,
+                days: 1,
+                seconds: 0,
+            },
+            Value::Point { lat: 1.0, lon: 2.0 },
+            Value::String("s".into()),
+            Value::Boolean(false),
+            Value::Boolean(true),
+            Value::Float64(-1.5),
+            Value::Int64(0),
+            Value::UniqueId(1),
+            Value::Float64(1.5),
+            Value::Float64(f64::NAN),
+            Value::Null,
+        ]
+    }
+
+    /// The rank table itself: sorting the one-per-class sample reproduces the
+    /// documented ascending sequence, and DESC is its exact reverse.
+    #[test]
+    fn the_type_rank_orders_every_value_class() {
+        let expected = one_of_every_rank_class();
+        let rows: Vec<Vec<Value>> = expected.iter().cloned().map(|v| vec![v]).collect();
+
+        let mut idx: Vec<usize> = (0..rows.len()).collect();
+        idx.shuffle_deterministically();
+        idx.sort_by(|&a, &b| {
+            compare_sort_keys(
+                &rows[a],
+                &rows[b],
+                &[SortSpec {
+                    ascending: true,
+                    // NULL's own rank is last ascending; assert it directly
+                    // rather than through the clause default.
+                    nulls: NullsPlacement::Last,
+                }],
+            )
+        });
+        let sorted: Vec<Value> = idx.iter().map(|&i| expected[i].clone()).collect();
+        assert_eq!(
+            format!("{sorted:?}"),
+            format!("{expected:?}"),
+            "ascending total order does not match the documented rank table"
+        );
+
+        let mut idx: Vec<usize> = (0..rows.len()).collect();
+        idx.shuffle_deterministically();
+        idx.sort_by(|&a, &b| {
+            compare_sort_keys(
+                &rows[a],
+                &rows[b],
+                &[SortSpec {
+                    ascending: false,
+                    nulls: NullsPlacement::First,
+                }],
+            )
+        });
+        let sorted: Vec<Value> = idx.iter().map(|&i| expected[i].clone()).collect();
+        let mut reversed = expected.clone();
+        reversed.reverse();
+        assert_eq!(
+            format!("{sorted:?}"),
+            format!("{reversed:?}"),
+            "descending order is not the reverse of ascending"
+        );
+    }
+
+    /// Deterministic shuffle so the sort has real work to do.
+    trait ShuffleDeterministically {
+        fn shuffle_deterministically(&mut self);
+    }
+    impl ShuffleDeterministically for Vec<usize> {
+        fn shuffle_deterministically(&mut self) {
+            let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+            for i in (1..self.len()).rev() {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                self.swap(i, (state % (i as u64 + 1)) as usize);
+            }
+        }
+    }
+
+    /// Totality, proved directly rather than through a sort's internal check:
+    /// antisymmetry and transitivity over every pair and triple of the sample.
+    #[test]
+    fn the_total_order_is_antisymmetric_and_transitive() {
+        use crate::graph::core::filtering::total_order;
+        let mut values = one_of_every_rank_class();
+        // Duplicates and near-misses: equal-ranked values that must tie, and
+        // the 2^53 neighbourhood where an `as f64` comparison stops being
+        // transitive.
+        values.extend([
+            Value::Int64(0),
+            Value::Float64(0.0),
+            Value::Float64(-0.0),
+            Value::UniqueId(0),
+            Value::Int64((1i64 << 53) + 1),
+            Value::Int64(1i64 << 53),
+            Value::Float64((1u64 << 53) as f64),
+            Value::Float64(f64::INFINITY),
+            Value::Float64(f64::NEG_INFINITY),
+            Value::String(String::new()),
+            Value::List(vec![]),
+            Value::List(vec![Value::Int64(1), Value::String("a".into())]),
+        ]);
+
+        for a in &values {
+            assert_eq!(total_order(a, a), Ordering::Equal, "not reflexive: {a:?}");
+            for b in &values {
+                assert_eq!(
+                    total_order(a, b),
+                    total_order(b, a).reverse(),
+                    "not antisymmetric: {a:?} vs {b:?}"
+                );
+            }
+        }
+        for a in &values {
+            for b in &values {
+                let ab = total_order(a, b);
+                if ab == Ordering::Greater {
+                    continue;
+                }
+                for c in &values {
+                    let bc = total_order(b, c);
+                    if bc == Ordering::Greater {
+                        continue;
+                    }
+                    // a <= b <= c  ⇒  a <= c, and a == b == c ⇒ a == c.
+                    let ac = total_order(a, c);
+                    assert_ne!(ac, Ordering::Greater, "not transitive: {a:?} {b:?} {c:?}");
+                    if ab == Ordering::Equal && bc == Ordering::Equal {
+                        assert_eq!(
+                            ac,
+                            Ordering::Equal,
+                            "equality not transitive: {a:?} {b:?} {c:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The inline shortcut in [`compare_one`] must be a shortcut, not a second
+    /// rule set.
+    #[test]
+    fn the_inline_shortcut_agrees_with_the_total_order() {
+        use crate::graph::core::filtering::total_order;
+        let mut values = one_of_every_rank_class();
+        values.extend([
+            Value::Int64(-7),
+            Value::Float64(f64::NAN),
+            Value::String("s".into()),
+            Value::String("t".into()),
+            Value::Float64(1.5),
+        ]);
+        for a in &values {
+            for b in &values {
+                assert_eq!(
+                    compare_one(a, b),
+                    total_order(a, b),
+                    "shortcut disagrees for {a:?} vs {b:?}"
+                );
+            }
+        }
+    }
+
+    /// Numbers order numerically across `Int64`/`Float64`/`UniqueId`, exactly
+    /// — including past 2^53, where an `as f64` conversion collapses two
+    /// distinct integers onto one float and makes the comparator intransitive.
+    #[test]
+    fn integers_past_2_pow_53_compare_exactly_against_floats() {
+        use crate::graph::core::filtering::total_order;
+        const BIG: i64 = (1i64 << 53) + 1;
+        let float = Value::Float64((1u64 << 53) as f64);
+        assert_eq!(total_order(&Value::Int64(BIG), &float), Ordering::Greater);
+        assert_eq!(
+            total_order(&Value::Int64(1i64 << 53), &float),
+            Ordering::Equal
+        );
+        assert_eq!(total_order(&float, &Value::Int64(BIG)), Ordering::Less);
+        // Fractions and range extremes.
+        assert_eq!(
+            total_order(&Value::Int64(2), &Value::Float64(2.5)),
+            Ordering::Less
+        );
+        assert_eq!(
+            total_order(&Value::Int64(-2), &Value::Float64(-2.5)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            total_order(&Value::Int64(i64::MAX), &Value::Float64(f64::INFINITY)),
+            Ordering::Less
+        );
+        assert_eq!(
+            total_order(&Value::Int64(i64::MIN), &Value::Float64(f64::NEG_INFINITY)),
+            Ordering::Greater
+        );
+        // NaN sorts above every number.
+        assert_eq!(
+            total_order(&Value::Int64(i64::MAX), &Value::Float64(f64::NAN)),
+            Ordering::Less
+        );
+        assert_eq!(
+            total_order(&Value::UniqueId(3), &Value::Int64(3)),
+            Ordering::Equal
+        );
+    }
+
+    /// Deterministic xorshift stream of `n` rows whose single sort key is a
+    /// string half the time and an integer the other half — the shape that
+    /// used to abort `ORDER BY` (see [`mixed_type_column_sorts_without_panicking`]).
+    fn mixed_rows(n: usize) -> Vec<Vec<Value>> {
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        (0..n)
+            .map(|_| {
+                let key = if next() % 2 == 0 {
+                    Value::Int64((next() % 7) as i64)
+                } else {
+                    Value::String(format!("s{}", next() % 7))
+                };
+                vec![key]
+            })
+            .collect()
+    }
+
+    /// A column holding both strings and integers must sort without panicking.
+    ///
+    /// `slice::sort_by` (driftsort) verifies its comparator's totality above
+    /// the insertion-sort cutoff and panics with "user-provided comparison
+    /// function does not correctly implement a total order" when it fails.
+    /// `compare_sort_keys` used to *skip* incomparable pairs, so a
+    /// string-vs-int pair reported `Equal` while int-vs-int pairs ordered —
+    /// intransitive, and `MATCH (n:S) RETURN n.nm ORDER BY n.k DESC` over such
+    /// a column aborted the query (a Python exception through pyo3; an
+    /// unwinding panic with no `catch_unwind` in the Bolt server).
+    #[test]
+    fn mixed_type_column_sorts_without_panicking() {
+        for n in [21usize, 24, 32, 64, 400] {
+            let rows = mixed_rows(n);
+            for specs in [vec![asc()], vec![desc()]] {
+                let mut idx: Vec<usize> = (0..rows.len()).collect();
+                idx.sort_by(|&a, &b| compare_sort_keys(&rows[a], &rows[b], &specs));
+                assert_eq!(idx.len(), n);
+            }
+        }
     }
 
     /// The whole point of the shared comparator: the bounded heap and a stable

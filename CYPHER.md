@@ -263,6 +263,58 @@ A `RETURN` **without** aggregates keeps every binding on its rows, so ordering
 by a non-projected expression is unrestricted there. `WITH` narrows scope to
 what it projects, so a sort key after `WITH` must be one of its columns.
 
+## Sort order
+
+`ORDER BY` accepts `ASC` (default) / `DESC` per key, plus an explicit
+`NULLS FIRST` / `NULLS LAST`. Without one, NULLs go **last ascending and first
+descending** — the Neo4j 5 default.
+
+A sort key can hold values of more than one type: a `CASE` returning a number
+on some rows and a string on others, `coalesce` over differently-typed
+properties, a property read across two node types. Those are ordered **by type
+first**, following Neo4j 5's ranking. Ascending:
+
+| | rank |
+|---|---|
+| lowest | map |
+| | node |
+| | relationship |
+| | list |
+| | path |
+| | date / datetime |
+| | duration |
+| | point |
+| | string |
+| | boolean |
+| highest | number |
+
+NULL sorts after all of them ascending, subject to the `NULLS` placement
+above. Within a rank:
+
+- **Numbers** compare numerically across integers and floats — never "all
+  integers, then all floats" — and exactly, including integers past 2⁵³ that
+  no float can represent. `NaN` sorts above every other number.
+- **Dates and datetimes** share one rank and compare chronologically, a date
+  counting as midnight on that date.
+- **Lists** compare element by element, then by length (`[1] < [1,1,9] <
+  [1,2] < [2]`).
+- **Maps** compare entry by entry in key order, then by size.
+
+```python
+graph.cypher("UNWIND [3, 'b', 1, 'a'] AS v RETURN v ORDER BY v")
+# → 'a', 'b', 1, 3      (strings rank below numbers)
+```
+
+`min()` and `max()` use this same order — `min` is the first value ascending,
+`max` the last — so they never depend on which row arrived first. NULLs are
+excluded from both. **This is one deliberate deviation from Neo4j**, which
+applies a *different*, aggregate-specific rule to `min`/`max` on mixed input
+(there, numbers rank below strings, which rank below lists). KGLite uses one
+order everywhere, so `min(x)` always equals `x ORDER BY x ASC LIMIT 1`.
+
+The same total order governs the fluent API's `sort=` fields, where a node
+missing the sort property is ordered as NULL.
+
 ## HAVING
 
 Post-aggregation filter — use after RETURN or WITH with aggregates:

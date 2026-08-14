@@ -50,6 +50,61 @@ pub enum Value {
     List(Vec<Value>),
 }
 
+/// **Total** order over blueprint values — the one comparison used by the
+/// aggregate min/max/first/last accumulators and by `chain`'s per-group sort.
+///
+/// Total matters here for the same reason it does in the Cypher executor: a
+/// comparator that reports `Equal` for two values it cannot compare, while
+/// values it *can* compare order among themselves, is intransitive, and
+/// `sort_by` aborts the process on one. The earlier form did exactly that
+/// (`_ => Ordering::Equal` for every cross-type pair), so a mixed-type
+/// `order_by` column in a blueprint chain was a crash waiting for 21 rows.
+///
+/// NULL sorts first — blueprint's own long-standing rule, unlike the Cypher
+/// clause's NULLS LAST default — then values are ranked by type
+/// (list < string < boolean < number, matching the Cypher engine's relative
+/// order) and finally within their type. Numbers compare numerically and
+/// exactly across `Int`/`Float`; NaN sorts above every other number.
+pub(crate) fn value_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use crate::graph::core::filtering::{cmp_f64_total, cmp_i64_f64};
+    use std::cmp::Ordering;
+
+    fn rank(v: &Value) -> u8 {
+        match v {
+            Value::Null => 0,
+            Value::List(_) => 1,
+            Value::String(_) => 2,
+            Value::Bool(_) => 3,
+            Value::Int(_) | Value::Float(_) => 4,
+        }
+    }
+
+    let (left, right) = (rank(a), rank(b));
+    if left != right {
+        return left.cmp(&right);
+    }
+    match (a, b) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+        (Value::Float(x), Value::Float(y)) => cmp_f64_total(*x, *y),
+        (Value::Int(x), Value::Float(y)) => cmp_i64_f64(*x, *y),
+        (Value::Float(x), Value::Int(y)) => cmp_i64_f64(*y, *x).reverse(),
+        (Value::List(x), Value::List(y)) => {
+            for (xi, yi) in x.iter().zip(y.iter()) {
+                let ordering = value_cmp(xi, yi);
+                if ordering != Ordering::Equal {
+                    return ordering;
+                }
+            }
+            x.len().cmp(&y.len())
+        }
+        // Unreachable: every rank above has an arm.
+        _ => Ordering::Equal,
+    }
+}
+
 impl Value {
     /// Truthy semantics: bool(true), non-zero Int, non-zero non-NaN
     /// Float, non-empty String, non-empty List. Null + false-ish
@@ -1441,5 +1496,63 @@ mod tests {
         } else {
             panic!("expected float");
         }
+    }
+
+    /// `value_cmp` must be a *total* order: a comparator that ties values it
+    /// cannot compare while ordering the ones it can is intransitive, and
+    /// `chain`'s per-group `sort_by` aborts the process on one.
+    #[test]
+    fn value_cmp_is_total_across_types() {
+        use std::cmp::Ordering;
+        let values = vec![
+            Value::Null,
+            Value::List(vec![Value::Int(1)]),
+            Value::List(vec![]),
+            Value::String("a".into()),
+            Value::String("b".into()),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Int(-3),
+            Value::Int(0),
+            Value::Float(0.0),
+            Value::Float(2.5),
+            Value::Int((1i64 << 53) + 1),
+            Value::Float((1u64 << 53) as f64),
+            Value::Float(f64::NAN),
+        ];
+        for a in &values {
+            for b in &values {
+                assert_eq!(
+                    value_cmp(a, b),
+                    value_cmp(b, a).reverse(),
+                    "not antisymmetric: {a:?} vs {b:?}"
+                );
+                for c in &values {
+                    if value_cmp(a, b) != Ordering::Greater && value_cmp(b, c) != Ordering::Greater
+                    {
+                        assert_ne!(
+                            value_cmp(a, c),
+                            Ordering::Greater,
+                            "not transitive: {a:?} {b:?} {c:?}"
+                        );
+                    }
+                }
+            }
+        }
+        // A mixed-type column sorts instead of aborting.
+        let mut mixed: Vec<Value> = (0..40)
+            .map(|i| {
+                if i % 2 == 0 {
+                    Value::Int(i % 7)
+                } else {
+                    Value::String(format!("s{}", i % 7))
+                }
+            })
+            .collect();
+        mixed.sort_by(value_cmp);
+        assert_eq!(mixed.len(), 40);
+        // Nulls first, then strings, then numbers.
+        assert!(matches!(mixed[0], Value::String(_)));
+        assert!(matches!(mixed[39], Value::Int(_)));
     }
 }

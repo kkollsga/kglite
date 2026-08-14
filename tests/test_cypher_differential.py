@@ -309,6 +309,27 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     ("trigger_generic_top_k", "small_graph", "UNWIND [3, 1, 2] AS x RETURN x ORDER BY x LIMIT 2", None),
+    # Mixed-type sort key. Two things here are visible to *this* harness even
+    # though it compares row sets, not row order: before the total order the
+    # unlimited form aborted the query outright (an intransitive comparator
+    # trips `sort_by`'s totality check from 21 rows up), and the LIMIT form
+    # let the bounded top-K heap *select* a different set of rows than the
+    # full sort. Row ordering itself is pinned absolutely in
+    # tests/test_cypher_mixed_type_ordering.py.
+    (
+        "trigger_mixed_type_sort_key",
+        "small_graph",
+        "UNWIND [3, 'k3', 1, 'k1', 2, 'k2', 6, 'k6', 4, 'k4', 5, 'k5', 9, 'k9', 7, 'k7', "
+        "8, 'k8', 12, 'k12', 10, 'k10', 11, 'k11'] AS x RETURN x ORDER BY x DESC",
+        None,
+    ),
+    (
+        "trigger_mixed_type_sort_key_top_k",
+        "small_graph",
+        "UNWIND [3, 'k3', 1, 'k1', 2, 'k2', 6, 'k6', 4, 'k4', 5, 'k5', 9, 'k9', 7, 'k7', "
+        "8, 'k8', 12, 'k12', 10, 'k10', 11, 'k11'] AS x RETURN x ORDER BY x ASC LIMIT 5",
+        None,
+    ),
     (
         "trigger_predicate_reorder",
         "social_graph",

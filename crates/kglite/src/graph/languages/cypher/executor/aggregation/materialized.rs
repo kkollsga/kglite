@@ -422,8 +422,8 @@ impl<'a> CypherExecutor<'a> {
                         min_val = Some(match min_val {
                             None => val,
                             Some(current) => {
-                                if crate::graph::core::filtering::compare_values(&val, &current)
-                                    == Some(std::cmp::Ordering::Less)
+                                if crate::graph::core::filtering::total_order(&val, &current)
+                                    == std::cmp::Ordering::Less
                                 {
                                     val
                                 } else {
@@ -445,8 +445,8 @@ impl<'a> CypherExecutor<'a> {
                         max_val = Some(match max_val {
                             None => val,
                             Some(current) => {
-                                if crate::graph::core::filtering::compare_values(&val, &current)
-                                    == Some(std::cmp::Ordering::Greater)
+                                if crate::graph::core::filtering::total_order(&val, &current)
+                                    == std::cmp::Ordering::Greater
                                 {
                                     val
                                 } else {
@@ -508,8 +508,10 @@ impl<'a> CypherExecutor<'a> {
                     if values.is_empty() {
                         Ok(Value::Null)
                     } else {
-                        values
-                            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        // `total_cmp`, not `partial_cmp(..).unwrap_or(Equal)`:
+                        // a NaN in the column makes the latter intransitive
+                        // (NaN ties with everything) and `sort_by` aborts.
+                        values.sort_by(|a, b| a.total_cmp(b));
                         let n = values.len();
                         let m = if n % 2 == 1 {
                             values[n / 2]
@@ -587,8 +589,10 @@ impl<'a> CypherExecutor<'a> {
                     if values.is_empty() {
                         Ok(Value::Null)
                     } else {
-                        values
-                            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        // `total_cmp`, not `partial_cmp(..).unwrap_or(Equal)`:
+                        // a NaN in the column makes the latter intransitive
+                        // (NaN ties with everything) and `sort_by` aborts.
+                        values.sort_by(|a, b| a.total_cmp(b));
                         let n = values.len();
                         if n == 1 {
                             return Ok(Value::Float64(values[0]));
@@ -621,8 +625,10 @@ impl<'a> CypherExecutor<'a> {
                     if values.is_empty() {
                         Ok(Value::Null)
                     } else {
-                        values
-                            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        // `total_cmp`, not `partial_cmp(..).unwrap_or(Equal)`:
+                        // a NaN in the column makes the latter intransitive
+                        // (NaN ties with everything) and `sort_by` aborts.
+                        values.sort_by(|a, b| a.total_cmp(b));
                         let n = values.len();
                         // Nearest-rank method: ceil(p * n), clamped to [1, n]
                         let idx = ((p * n as f64).ceil() as usize).max(1).min(n) - 1;
@@ -938,8 +944,8 @@ impl<'a> CypherExecutor<'a> {
                             mins[si] = Some(match mins[si].take() {
                                 None => val.clone(),
                                 Some(current) => {
-                                    if crate::graph::core::filtering::compare_values(val, &current)
-                                        == Some(std::cmp::Ordering::Less)
+                                    if crate::graph::core::filtering::total_order(val, &current)
+                                        == std::cmp::Ordering::Less
                                     {
                                         val.clone()
                                     } else {
@@ -955,8 +961,8 @@ impl<'a> CypherExecutor<'a> {
                             maxs[si] = Some(match maxs[si].take() {
                                 None => val.clone(),
                                 Some(current) => {
-                                    if crate::graph::core::filtering::compare_values(val, &current)
-                                        == Some(std::cmp::Ordering::Greater)
+                                    if crate::graph::core::filtering::total_order(val, &current)
+                                        == std::cmp::Ordering::Greater
                                     {
                                         val.clone()
                                     } else {

@@ -297,10 +297,11 @@ impl Ord for Value {
                     lat: b_lat,
                     lon: b_lon,
                 },
-            ) => a_lat
-                .partial_cmp(b_lat)
-                .unwrap_or(Ordering::Equal)
-                .then(a_lon.partial_cmp(b_lon).unwrap_or(Ordering::Equal)),
+                // NaN-safe: `partial_cmp(..).unwrap_or(Equal)` made a NaN
+                // coordinate tie with every other coordinate while those ordered
+                // among themselves — intransitive, and `sort_by` aborts on that.
+            ) => crate::graph::core::filtering::cmp_f64_total(*a_lat, *b_lat)
+                .then_with(|| crate::graph::core::filtering::cmp_f64_total(*a_lon, *b_lon)),
             (Value::NodeRef(a), Value::NodeRef(b)) => a.cmp(b),
             (
                 Value::Duration {

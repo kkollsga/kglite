@@ -7,7 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Cross-type ordering is now total, and follows Neo4j 5.** Sorting no longer
+  has an "incomparable" outcome: when two sort-key values are of different
+  types they are ordered by type, ascending
+  `map < node < relationship < list < path < date/datetime < duration < point
+  < string < boolean < number`, with NULL last ascending (subject to the
+  clause's `NULLS FIRST/LAST`, which still wins). Within the number rank
+  integers and floats compare numerically, never by variant; dates and
+  datetimes share a rank and compare chronologically with a date counting as
+  midnight; lists compare element-wise then by length; maps entry-wise then by
+  size. `ORDER BY`, `ORDER BY ... LIMIT` (the fused top-K), window
+  `OVER (ORDER BY ...)`, `min()`, `max()` and the fluent `sort=` all use this
+  one order, so they cannot disagree — `min(x)` is now exactly
+  `x ORDER BY x ASC LIMIT 1`. **This changes the emitted row order for queries
+  whose sort key held more than one type**; a single-typed key (the normal
+  case) is unaffected. Two deliberate deviations, both documented in
+  `CYPHER.md`: `Point` and the internal node handle have no slot in Neo4j's
+  list and take one here, and Neo4j applies a *different*, aggregate-specific
+  rule to `min`/`max` on mixed input (numbers below strings below lists) which
+  KGLite does not — one order everywhere was chosen over matching that quirk.
+  Value **comparison** is untouched: `WHERE a < b` across types still yields
+  no row, per Cypher's three-valued logic. Ordering became total; comparison
+  stayed partial.
+
 ### Fixed
+
+- **`ORDER BY` over a mixed-type sort key crashed the query engine.** A sort
+  key holding more than one type — a `CASE` returning a number on some rows
+  and a string on others, `coalesce` over differently-typed properties, a
+  property read across two node types — aborted with
+  `PanicException: user-provided comparison function does not correctly
+  implement a total order`, deterministically from 21 rows up. The comparator
+  *skipped* a pair of values it could not compare, so a string-vs-number pair
+  reported "equal" while number-vs-number pairs ordered: intransitive, which
+  is exactly what Rust's sort detects and refuses to run. Through Python it
+  surfaced as a `BaseException` that `except Exception` could not even catch;
+  the Bolt server has no `catch_unwind`, so there the same query was an
+  availability bug. The bounded top-K heap has no such check and silently
+  returned *different rows* than the same query without `LIMIT`; `min()` and
+  `max()` rejected every candidate whose type differed from the incumbent's,
+  so their answer depended on which row arrived first. The fluent API's
+  `sort=` had the same defect, plus one of its own: it stopped at the first
+  comparable field even when that field tied, so second and later sort fields
+  never broke a tie. All are fixed by one total order (see **Changed**), now
+  shared by every sorting and min/max path.
+- **Numbers past 2⁵³ sorted incorrectly and unstably against floats.** The
+  comparison converted the integer to `f64` first, so `9007199254740993` and
+  `9007199254740992` both compared *equal* to the float `9007199254740992.0`
+  while ordering against each other — wrong, and intransitive in its own
+  right. Integers now compare exactly against floats.
+- **A blueprint `chain` sorted a mixed-type `order_by` column with the same
+  intransitive comparator**, so the same 21-row crash was reachable from the
+  blueprint compute path. Its `min`/`max`/`first`/`last` accumulators shared
+  the comparator and the same first-arrival dependence. Both now use one
+  total order (NULL first, then list < string < boolean < number — blueprint's
+  own NULL placement is unchanged), defined once instead of copied into two
+  modules.
+- The same `partial_cmp(..).unwrap_or(Equal)` shape in `median()` /
+  `percentile_*()` and in `Point` ordering is replaced with a NaN-total
+  comparison. No reachable input produces one today — a NaN normalises to
+  NULL on the way into a property or out of an expression — so this closes
+  the class rather than a reproduced failure.
 
 - **Data loss: a disk-mode graph saved after a delete-then-create could never
   be loaded again.** Deleting a node frees its slot and the next create takes

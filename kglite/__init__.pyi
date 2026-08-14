@@ -1932,6 +1932,13 @@ class KnowledgeGraph:
     ) -> KnowledgeGraph:
         """Sort the current selection.
 
+        Fields are applied in order: the second field breaks ties on the
+        first, and so on. Values of different types are ordered by type rank
+        (map < node < relationship < list < path < temporal < point < string
+        < boolean < number), the same total order ``ORDER BY`` uses — see the
+        "Sort order" section of the Cypher reference. A node missing the sort
+        property is ordered as NULL: last ascending, first descending.
+
         Args:
             sort: Property name (string) or list of ``(field, ascending)`` tuples.
             ascending: Direction when *sort* is a single string. Default ``True``.

@@ -30,7 +30,7 @@ use std::path::Path;
 
 use indexmap::IndexMap;
 
-use super::super::expr::{self, Bindings, Expr, Value};
+use super::super::expr::{self, value_cmp, Bindings, Expr, Value};
 use super::super::schema::{AggregateEdge, Blueprint, JunctionEdge, NodeSpec};
 use super::{
     csv_cell_to_value, infer_value_type, resolve_csv_path, resolve_source_spec, value_to_csv_cell,
@@ -516,22 +516,6 @@ fn finalize_state(state: &AggState, kind: &AggKind) -> Value {
         AggKind::First { .. } => state.first_value.clone().unwrap_or(Value::Null),
         AggKind::Last { .. } => state.last_value.clone().unwrap_or(Value::Null),
         AggKind::RowLevel(_) => state.first_value.clone().unwrap_or(Value::Null),
-    }
-}
-
-fn value_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    match (a, b) {
-        (Value::Null, Value::Null) => Ordering::Equal,
-        (Value::Null, _) => Ordering::Less,
-        (_, Value::Null) => Ordering::Greater,
-        (Value::Int(x), Value::Int(y)) => x.cmp(y),
-        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
-        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(Ordering::Equal),
-        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal),
-        (Value::String(x), Value::String(y)) => x.cmp(y),
-        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
-        _ => Ordering::Equal,
     }
 }
 

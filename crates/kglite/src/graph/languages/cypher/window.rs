@@ -144,16 +144,18 @@ impl CypherExecutor<'_> {
             })
             .collect();
 
+        // Ranked by the same total order as `ORDER BY`
+        // (`crate::graph::core::filtering::total_order`): a partial comparison
+        // here skipped cross-type pairs, which is intransitive and aborts
+        // `sort_by` — `OVER (ORDER BY ...)` over a mixed-type key is exactly
+        // as reachable as the top-level clause.
         let sort_cmp = |a: usize, b: usize| -> std::cmp::Ordering {
             for (i, item) in order_by.iter().enumerate() {
-                if let Some(ord) = crate::graph::core::filtering::compare_values(
-                    &sort_keys[a][i],
-                    &sort_keys[b][i],
-                ) {
-                    let ord = if item.ascending { ord } else { ord.reverse() };
-                    if ord != std::cmp::Ordering::Equal {
-                        return ord;
-                    }
+                let ord =
+                    crate::graph::core::filtering::total_order(&sort_keys[a][i], &sort_keys[b][i]);
+                let ord = if item.ascending { ord } else { ord.reverse() };
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
                 }
             }
             std::cmp::Ordering::Equal

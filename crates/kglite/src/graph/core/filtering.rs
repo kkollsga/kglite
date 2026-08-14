@@ -4,7 +4,7 @@ use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, SelectionOpe
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Constant for the "type" field key used in type filtering
 const TYPE_FIELD: &str = "type";
@@ -184,6 +184,275 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         (Value::Timestamp(ts), Value::String(s)) => parse_datetime_string(s).map(|p| ts.cmp(&p)),
         (Value::String(s), Value::Timestamp(ts)) => parse_datetime_string(s).map(|p| p.cmp(ts)),
         _ => None,
+    }
+}
+
+// ── Total ordering ──────────────────────────────────────────────────────────
+//
+// `compare_values` above answers *comparison*; `total_order` below answers
+// *ordering*. They are deliberately different functions with different return
+// types, and the boundary between them is load-bearing:
+//
+// * **Comparison is partial.** `WHERE n.a < n.b` with a string on one side and
+//   a number on the other must produce **no row** — Cypher's three-valued
+//   logic, where a cross-type `<` is `null`, not `false` and not `true`.
+//   `compare_values` encodes that by returning `None`, and every filter,
+//   `WHERE` predicate, index probe and `Between` bound goes through it. That
+//   behaviour is correct and does not change.
+// * **Ordering is total.** `ORDER BY` must place *every* pair of values, and
+//   Rust's sorts (and any heap) require a total order — an intransitive
+//   comparator makes `slice::sort_by` abort the process with "user-provided
+//   comparison function does not correctly implement a total order".
+//   `total_order` therefore never says "unknown": values of different type
+//   families are ordered by their *type*, following Neo4j 5.
+//
+// Sorting calls `total_order`. Filtering calls `compare_values`. Nothing calls
+// both for the same decision.
+
+/// Ascending cross-type rank — every value of a lower rank sorts before every
+/// value of a higher rank, and values of the same rank are ordered by
+/// [`total_order`]'s per-rank rules.
+///
+/// The sequence is Neo4j 5's documented ORDER BY ordering,
+/// `Map < Node < Relationship < List < Path < temporal < String < Boolean <
+/// Number < NULL`, mapped onto KGLite's `Value` variants. Three variants have
+/// no Neo4j counterpart in that list and take a deliberate slot:
+///
+/// | rank | variants | note |
+/// |------|----------|------|
+/// | 0 | `Map` | |
+/// | 1 | `Node` | |
+/// | 2 | `NodeRef` | KGLite-only: the transient node handle used between WITH/UNWIND stages, ranked next to the `Node` it materialises into |
+/// | 3 | `Relationship` | |
+/// | 4 | `List` | |
+/// | 5 | `Path` | |
+/// | 6 | `DateTime`, `Timestamp` | one rank, not two: a date compares as midnight on that date, so a column mixing dates and timestamps still orders chronologically |
+/// | 7 | `Duration` | last of Neo4j's temporal group |
+/// | 8 | `Point` | KGLite-only slot: after the temporal group, before `String` |
+/// | 9 | `String` | |
+/// | 10 | `Boolean` | |
+/// | 11 | `UniqueId`, `Int64`, `Float64` | one numeric rank — numbers compare *numerically* across the three, never by variant |
+/// | 12 | `Null` | NULL last ascending / first descending, per Neo4j |
+///
+/// `ORDER BY` never reaches the NULL rank: [`SortSpec`](crate::graph::languages
+/// ::cypher::executor::ordering) places NULLs by the clause's explicit or
+/// default `NULLS FIRST/LAST`. The rank still defines NULL so the order is
+/// total for every other caller.
+#[inline]
+fn type_rank(v: &Value) -> u8 {
+    match v {
+        Value::Map(_) => 0,
+        Value::Node(_) => 1,
+        Value::NodeRef(_) => 2,
+        Value::Relationship(_) => 3,
+        Value::List(_) => 4,
+        Value::Path(_) => 5,
+        Value::DateTime(_) | Value::Timestamp(_) => 6,
+        Value::Duration { .. } => 7,
+        Value::Point { .. } => 8,
+        Value::String(_) => 9,
+        Value::Boolean(_) => 10,
+        Value::UniqueId(_) | Value::Int64(_) | Value::Float64(_) => 11,
+        Value::Null => 12,
+    }
+}
+
+/// The total order over `Value` — the single definition of ORDER BY's row
+/// order and of which value `min()` / `max()` keep.
+///
+/// Total means: reflexive, antisymmetric and **transitive over every pair of
+/// values**, including pairs of different types. See the module note above for
+/// why this is a separate function from [`compare_values`] and why filtering
+/// must keep using that one.
+pub fn total_order(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let rank = type_rank(a);
+    let other = type_rank(b);
+    if rank != other {
+        return rank.cmp(&other);
+    }
+    match (a, b) {
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        (Value::Boolean(x), Value::Boolean(y)) => x.cmp(y),
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::NodeRef(x), Value::NodeRef(y)) => x.cmp(y),
+        // Same rank, mixed date/timestamp: compare on the common instant.
+        (Value::DateTime(_) | Value::Timestamp(_), Value::DateTime(_) | Value::Timestamp(_)) => {
+            as_datetime(a).cmp(&as_datetime(b))
+        }
+        (
+            Value::Duration {
+                months: am,
+                days: ad,
+                seconds: asec,
+            },
+            Value::Duration {
+                months: bm,
+                days: bd,
+                seconds: bsec,
+            },
+        ) => am
+            .cmp(bm)
+            .then_with(|| ad.cmp(bd))
+            .then_with(|| asec.cmp(bsec)),
+        (
+            Value::Point {
+                lat: alat,
+                lon: alon,
+            },
+            Value::Point {
+                lat: blat,
+                lon: blon,
+            },
+        ) => cmp_f64_total(*alat, *blat).then_with(|| cmp_f64_total(*alon, *blon)),
+        (Value::List(x), Value::List(y)) => cmp_sequence(x, y),
+        (Value::Map(x), Value::Map(y)) => cmp_map(x, y),
+        // Graph entities order structurally (id first — both derive `Ord`
+        // with `id` as the leading field), which is total.
+        (Value::Node(x), Value::Node(y)) => x.cmp(y),
+        (Value::Relationship(x), Value::Relationship(y)) => x.cmp(y),
+        (Value::Path(x), Value::Path(y)) => x.cmp(y),
+        (
+            Value::UniqueId(_) | Value::Int64(_) | Value::Float64(_),
+            Value::UniqueId(_) | Value::Int64(_) | Value::Float64(_),
+        ) => cmp_numeric(a, b),
+        // Unreachable: every rank above has an arm. A new `Value` variant that
+        // lands here would silently order as "all equal" — total, but wrong —
+        // so the debug build (this project's correctness profile) fails loudly.
+        _ => {
+            debug_assert!(
+                false,
+                "total_order: same-rank pair with no arm: {a:?} vs {b:?}"
+            );
+            Ordering::Equal
+        }
+    }
+}
+
+/// The instant a temporal value sorts at: a date is midnight on that date.
+#[inline]
+fn as_datetime(v: &Value) -> chrono::NaiveDateTime {
+    match v {
+        Value::Timestamp(t) => *t,
+        Value::DateTime(d) => d.and_time(chrono::NaiveTime::MIN),
+        _ => chrono::NaiveDateTime::MIN,
+    }
+}
+
+/// `f64` order with NaN placed above every other number (and equal to itself),
+/// so floats — and the coordinates inside `Point` — are totally ordered.
+/// `-0.0` and `0.0` compare `Equal`, matching numeric equality.
+#[inline]
+pub(crate) fn cmp_f64_total(a: f64, b: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match a.partial_cmp(&b) {
+        Some(ordering) => ordering,
+        // Only reachable when at least one side is NaN.
+        None => match (a.is_nan(), b.is_nan()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            _ => Ordering::Less,
+        },
+    }
+}
+
+/// Exact `i64` vs `f64` comparison — no `as f64` on the integer.
+///
+/// The lossy form is not merely imprecise, it is **intransitive**: past 2^53
+/// two different `i64`s round to one `f64`, so each compares `Equal` to that
+/// float while comparing `Less`/`Greater` to each other, which is exactly the
+/// shape that aborts a sort.
+#[inline]
+pub(crate) fn cmp_i64_f64(i: i64, f: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if f.is_nan() {
+        // NaN sorts above every number, so every integer is below it.
+        return Ordering::Less;
+    }
+    let truncated = f.trunc();
+    // 2^63 is exactly representable; i64::MAX is not, so compare against the
+    // power of two and treat anything at or beyond it as out of `i64` range.
+    if truncated >= 9_223_372_036_854_775_808.0 {
+        return Ordering::Less;
+    }
+    if truncated < -9_223_372_036_854_775_808.0 {
+        return Ordering::Greater;
+    }
+    match i.cmp(&(truncated as i64)) {
+        Ordering::Equal => {
+            let fraction = f - truncated;
+            if fraction > 0.0 {
+                Ordering::Less
+            } else if fraction < 0.0 {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        }
+        ordering => ordering,
+    }
+}
+
+/// Numeric comparison across `UniqueId`/`Int64`/`Float64`, exact in both
+/// directions. Callers have already established that both sides are numeric.
+#[inline]
+fn cmp_numeric(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    /// `None` for the float side; `Some` for the two integral variants.
+    #[inline]
+    fn as_int(v: &Value) -> Option<i64> {
+        match v {
+            Value::Int64(i) => Some(*i),
+            Value::UniqueId(u) => Some(i64::from(*u)),
+            _ => None,
+        }
+    }
+    match (as_int(a), as_int(b)) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        (Some(x), None) => match b {
+            Value::Float64(f) => cmp_i64_f64(x, *f),
+            _ => Ordering::Equal,
+        },
+        (None, Some(y)) => match a {
+            Value::Float64(f) => cmp_i64_f64(y, *f).reverse(),
+            _ => Ordering::Equal,
+        },
+        (None, None) => match (a, b) {
+            (Value::Float64(x), Value::Float64(y)) => cmp_f64_total(*x, *y),
+            _ => Ordering::Equal,
+        },
+    }
+}
+
+/// Element-wise list order, shorter-is-less on a common prefix — Neo4j's
+/// dictionary order for lists.
+fn cmp_sequence(a: &[Value], b: &[Value]) -> std::cmp::Ordering {
+    for (x, y) in a.iter().zip(b.iter()) {
+        let ordering = total_order(x, y);
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+/// Map order: entries in key order, comparing key then value, shorter-is-less.
+fn cmp_map(a: &BTreeMap<String, Value>, b: &BTreeMap<String, Value>) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut left = a.iter();
+    let mut right = b.iter();
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some((key_a, val_a)), Some((key_b, val_b))) => {
+                let ordering = key_a.cmp(key_b).then_with(|| total_order(val_a, val_b));
+                if ordering != Ordering::Equal {
+                    return ordering;
+                }
+            }
+        }
     }
 }
 
@@ -460,6 +729,13 @@ fn filter_nodes_by_conditions(
 /// Multi-field ordering over precomputed per-node sort keys (positional,
 /// aligned with `sort_fields`). No per-comparison hashing — the keys are
 /// materialized once into a `Vec`, so the sort is plain slice comparisons.
+///
+/// Ranked by [`total_order`], with a missing field standing in as NULL, so the
+/// comparison is total: `sort_by` and `select_nth_unstable_by` both abort the
+/// process on a comparator that is not. The earlier form skipped both cases —
+/// a missing field and a cross-type pair — which was intransitive, and it
+/// `return`ed on the first *comparable* field even when that field tied, so
+/// the second and later sort fields never broke a tie.
 #[inline]
 fn cmp_sort_keys(
     a: &[Option<Value>],
@@ -467,22 +743,24 @@ fn cmp_sort_keys(
     sort_fields: &[(String, bool)],
 ) -> std::cmp::Ordering {
     for (i, (_, ascending)) in sort_fields.iter().enumerate() {
-        if let (Some(va), Some(vb)) = (&a[i], &b[i]) {
-            if let Some(ordering) = compare_values(va, vb) {
-                return if *ascending {
-                    ordering
-                } else {
-                    ordering.reverse()
-                };
-            }
+        let va = a[i].as_ref().unwrap_or(&Value::Null);
+        let vb = b[i].as_ref().unwrap_or(&Value::Null);
+        let ordering = total_order(va, vb);
+        let oriented = if *ascending {
+            ordering
+        } else {
+            ordering.reverse()
+        };
+        if oriented != std::cmp::Ordering::Equal {
+            return oriented;
         }
     }
     std::cmp::Ordering::Equal
 }
 
 /// Materialize (sort-key, node) pairs once. Each node's sort-field values are
-/// fetched in `sort_fields` order; a missing field sorts as `None` (skipped in
-/// comparison, matching the prior HashMap-miss behaviour).
+/// fetched in `sort_fields` order; a missing field is `None` and sorts as NULL
+/// (last ascending, first descending — the Cypher default placement).
 fn build_sort_keys(
     graph: &DirGraph,
     nodes: &[NodeIndex],
