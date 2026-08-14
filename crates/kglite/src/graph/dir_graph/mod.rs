@@ -1484,9 +1484,9 @@ impl DirGraph {
     /// difference between a lean, correctly-bound file and a corrupt one),
     /// `vacuum`, `unspill`, and `enable_disk_mode`.
     ///
-    /// The public `enable_columnar()` on the Python surface is a thin wrapper
-    /// over this and is scheduled for deletion — there is no longer a regime
-    /// for a caller to enable.
+    /// It is `pub(crate)`: there is no regime for a caller to enable, so the
+    /// only way in from outside the crate is the operation that needs the
+    /// pass done — [`crate::api::io::prepare_kgl_write`].
     ///
     /// Idempotent fast path: returns early when (a) every live node
     /// is already in `PropertyStorage::Columnar`, AND (b) every
@@ -1527,8 +1527,8 @@ impl DirGraph {
     /// (~257 s at wiki100m), so it is pinned by
     /// `column_ownership_tests::a_second_save_of_an_unmodified_graph_skips_the_rebuild`,
     /// which counts rebuilds rather than trusting the reasoning above.
-    pub fn enable_columnar(&mut self) {
-        if self.column_store_count() > 0 && self.is_columnar() {
+    pub(crate) fn enable_columnar(&mut self) {
+        if self.column_store_count() > 0 {
             // Arena guard: node_weight materializes on the disk backend
             // (protocol in disk/graph.rs); the whole drift check is
             // read-only and the guard drops at the end of this block.
@@ -1785,82 +1785,6 @@ impl DirGraph {
         for (node_type, store) in arc_stores {
             self.install_column_store(&node_type, store);
         }
-    }
-
-    /// Move every columnar row back onto its node as staged
-    /// [`PropertyStorage::Map`], and drop the stores.
-    ///
-    /// **Transient by construction, and scheduled for deletion.** The row
-    /// shape this used to produce (`PropertyStorage::Compact`) no longer
-    /// exists, so what a de-columnarized node holds is the same staging map
-    /// the RDF loader and the disk write path use — readable on every surface,
-    /// re-consolidated by the next `enable_columnar` (which `save()` always
-    /// runs). It is not, and cannot be, a steady state.
-    ///
-    /// Its two internal consumers are gone: `vacuum` and `unspill` now call
-    /// [`Self::rebuild_columns_to_heap`], which reaches the same end state —
-    /// dead rows reclaimed, columns heap-resident — without materialising
-    /// every row onto its node first. What is left is the public
-    /// `disable_columnar()` wrapper, which the shape-convergence programme
-    /// deletes with its partner.
-    pub fn disable_columnar(&mut self) {
-        // Per **type**, not per node. A node and its store are both owned by
-        // the backend, so a `node_weight_mut` borrow cannot also read the
-        // store — but cloning the type's store `Arc` once (O(1), a refcount
-        // bump) releases the backend borrow for the whole inner loop. That
-        // keeps this a single pass over nodes and hoists the two per-node
-        // allocations D1 Phase 3 briefly introduced: the type name `String`
-        // and the `TypeSchema` `Arc` clone are per-type facts, resolved once.
-        let type_keys: Vec<InternedKey> = self
-            .graph
-            .column_stores_iter()
-            .map(|(key, _)| key)
-            .collect();
-
-        for type_key in type_keys {
-            let Some(type_str) = self.interner.try_resolve(type_key).map(str::to_string) else {
-                continue;
-            };
-            let Some(store) = self.graph.column_store(type_key).map(Arc::clone) else {
-                continue;
-            };
-            let indices: Vec<NodeIndex> = self
-                .type_indices
-                .get(&type_str)
-                .map(|set| set.iter().collect())
-                .unwrap_or_default();
-
-            for idx in indices {
-                let Some(node) = self.graph.node_weight_mut(idx) else {
-                    continue;
-                };
-                let Some(row_id) = node.properties.columnar_row_id() else {
-                    continue;
-                };
-                // `row_properties` excludes the reserved `__id__`/`__title__`
-                // columns, so a null-sentinel node (set by `enable_columnar` or
-                // by the load path) would lose its identity when the columnar
-                // link drops. Pull both back.
-                if matches!(node.id, Value::Null) {
-                    if let Some(v) = store.get_id(row_id) {
-                        node.id = v;
-                    }
-                }
-                if matches!(node.title, Value::Null) {
-                    if let Some(v) = store.get_title(row_id) {
-                        node.title = v;
-                    }
-                }
-                node.properties =
-                    PropertyStorage::Map(store.row_properties(row_id).into_iter().collect());
-            }
-        }
-        self.clear_column_stores();
-    }
-
-    /// Returns true if any nodes are using columnar storage.
-    pub fn is_columnar(&self) -> bool {
-        self.graph.has_column_stores()
     }
 
     /// Ensure a ColumnStore exists for `node_type`, creating an empty one on
@@ -2202,7 +2126,7 @@ impl DirGraph {
         // fixtures that way), whose nodes hold their properties inline.
         // Converting one here would be a shape change, not a compaction, so
         // the gate stays.
-        if self.is_columnar() {
+        if self.column_store_count() > 0 {
             self.rebuild_columns_to_heap();
         }
 
@@ -2225,9 +2149,9 @@ impl DirGraph {
     /// documented behaviour (`test_vacuum_columnar_with_memory_limit`,
     /// `test_unspill_preserves_memory_limit`).
     ///
-    /// This replaces the `disable_columnar` + `enable_columnar` round trip the
-    /// two callers used to make, which materialised every row onto its node
-    /// only for the very next pass to read it back off again.
+    /// This replaces the de-columnarize + re-consolidate round trip the two
+    /// callers used to make, which materialised every row onto its node only
+    /// for the very next pass to read it back off again.
     pub fn rebuild_columns_to_heap(&mut self) {
         let saved_limit = self.memory_limit.take();
         self.rebuild_column_stores();

@@ -49,77 +49,41 @@ def graph_5k():
 @pytest.fixture
 def graph_5k_columnar():
     """5000-node graph (columnar, heap-backed)."""
-    g = _build_graph(5000)
-    g.enable_columnar()
-    return g
+    return _build_graph(5000)
 
 
 @pytest.fixture
-def graph_5k_spilled():
-    """5000-node graph (columnar, spilled to disk)."""
+def graph_5k_spilled(tmp_path):
+    """5000-node graph (columnar, spilled to disk).
+
+    A `save()` is the enforcement point that applies the limit; there is no
+    regime switch to call.
+    """
     g = _build_graph(5000)
     g.set_memory_limit(1024)  # force full spill
-    g.enable_columnar()
+    g.save(str(tmp_path / "spill-trigger.kgl"))
     return g
 
 
 # ---------------------------------------------------------------------------
-# Enable / Disable columnar
+# Unspill
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.benchmark
-def test_bench_enable_columnar_5k(benchmark, graph_5k):
-    """Time to convert 5000-node graph from compact to columnar."""
+def test_bench_unspill_5k(benchmark, graph_5k_spilled, tmp_path):
+    """Time to move spilled data back to heap (5000 nodes).
 
-    def run():
-        graph_5k.disable_columnar()
-        graph_5k.enable_columnar()
+    The re-spill runs in `setup`, not in the measured body: it is a `save()`
+    now, so folding it into the timed call would report file I/O as unspill
+    cost.
+    """
 
-    benchmark(run)
-
-
-@pytest.mark.benchmark
-def test_bench_disable_columnar_5k(benchmark, graph_5k_columnar):
-    """Time to convert 5000-node columnar graph back to compact."""
-
-    def run():
-        graph_5k_columnar.enable_columnar()  # ensure columnar first
-        graph_5k_columnar.disable_columnar()
-
-    benchmark(run)
-
-
-# ---------------------------------------------------------------------------
-# Spill / Unspill
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.benchmark
-def test_bench_enable_with_spill_5k(benchmark, graph_5k):
-    """Time to enable columnar + spill to disk (5000 nodes)."""
-    graph_5k.set_memory_limit(1024)
-
-    def run():
-        graph_5k.disable_columnar()
-        graph_5k.enable_columnar()
-
-    benchmark(run)
-
-
-@pytest.mark.benchmark
-def test_bench_unspill_5k(benchmark, graph_5k_spilled):
-    """Time to move spilled data back to heap (5000 nodes)."""
-
-    def run():
-        # Re-spill first to reset state
+    def setup():
         graph_5k_spilled.set_memory_limit(1024)
-        graph_5k_spilled.disable_columnar()
-        graph_5k_spilled.enable_columnar()
-        # Now unspill
-        graph_5k_spilled.unspill()
+        graph_5k_spilled.save(str(tmp_path / "respill.kgl"))
 
-    benchmark(run)
+    benchmark.pedantic(graph_5k_spilled.unspill, setup=setup, rounds=20, iterations=1)
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +156,6 @@ def test_bench_vacuum_columnar_5k(benchmark):
 
     def run():
         g = _build_graph(5000)
-        g.enable_columnar()
         g.set_auto_vacuum(None)
         g.cypher("MATCH (n:Item) WHERE n.value < 3000 DETACH DELETE n")
         g.vacuum()

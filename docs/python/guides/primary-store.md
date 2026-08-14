@@ -67,17 +67,8 @@ Two things follow, in this order:
   single-row statements cost ≈ 38 ms — about 80× at 50 k nodes, about 30× at
   5 k. This is the mitigation to reach for, and it is the same advice as
   {doc}`data-loading`'s throughput ladder.
-- **Or leave columnar mode deliberately.** `graph.disable_columnar()` moves
-  properties back to per-node storage and restores the ≈ 5 µs write; it costs
-  one O(nodes) pass (≈ 11 ms at 50 k nodes) and the next `save()` then pays a
-  full columnar rebuild (≈ 21 ms at 50 k). Worth it for a long run of small
-  writes between checkpoints, not for a handful. **Do not do it on a
-  `storage="mapped"` graph or on any graph with `set_memory_limit()`** — both
-  depend on the column store, and reverting materialises file-backed columns
-  onto the heap, silently undoing the memory limit.
-
-`graph.is_columnar` reports which regime a graph is in, and
-`graph_info()['columnar_heap_bytes']` how much data sits in the stores. The
+`graph_info()['columnar_heap_bytes']` reports how much data sits in the
+stores. The
 per-statement re-image is a known cost, not a design point: the remedy is a
 narrower write journal (per-transaction or per-column pre-images), which is a
 storage-layer change rather than something to patch at the call site, so it is

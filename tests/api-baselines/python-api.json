@@ -615,10 +615,6 @@
           "kind": "method",
           "signature": "(self, /, other)"
         },
-        "disable_columnar": {
-          "kind": "method",
-          "signature": "(self, /)"
-        },
         "drop_composite_index": {
           "kind": "method",
           "signature": "(self, /, node_type, properties)"
@@ -658,10 +654,6 @@
         "embeddings": {
           "kind": "method",
           "signature": "(self, /, node_type_or_text_column, text_column=None)"
-        },
-        "enable_columnar": {
-          "kind": "method",
-          "signature": "(self, /)"
         },
         "enable_disk_mode": {
           "kind": "method",
@@ -774,10 +766,6 @@
         "intersects_geometry": {
           "kind": "method",
           "signature": "(self, /, query_wkt, geometry_field=None)"
-        },
-        "is_columnar": {
-          "kind": "attribute",
-          "type": "getset_descriptor"
         },
         "label_pair_counts": {
           "kind": "method",

@@ -1534,29 +1534,41 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
     Ok(())
 }
 
-/// In-memory save composing `prepare_save` + `enable_columnar` +
-/// `write_kgl`. Public so non-pyo3 consumers (e.g.
-/// `kglite-mcp-server`) can save in-memory graphs without
-/// duplicating the dispatch logic from
-/// `KnowledgeGraph::save` at `src/graph/pyapi/kg_core.rs`.
+/// Everything a `.kgl` write needs done to the graph before its bytes are
+/// produced: stamp the save metadata ([`prepare_save`]), then run the
+/// consolidation pass that reclaims rows deleted nodes left behind, restores
+/// ascending row order, and re-derives each column's type from its type's
+/// metadata. Row order *is* the file's node binding, so a write that skips
+/// this can serialize every row against the wrong node.
+///
+/// This is the single pre-write step for every `.kgl` producer — the
+/// path-writing [`save_inmemory_with`] and the buffer-writing bindings
+/// (`KnowledgeGraph.to_bytes`) — so neither can drift from the other. A
+/// binding that wants the bytes rather than a file calls this, then
+/// [`write_kgl_to`] (releasing its runtime's lock around the write).
+pub fn prepare_kgl_write(graph: &mut Arc<DirGraph>) {
+    prepare_save(graph);
+    let dir = crate::graph::handle::make_dir_graph_mut_preserving_lineage(graph);
+    dir.enable_columnar();
+}
+
+/// In-memory `.kgl` save composing [`prepare_kgl_write`] + [`write_kgl_with`].
+/// Public so non-pyo3 consumers (e.g. `kglite-mcp-server`) can save in-memory
+/// graphs without duplicating the dispatch logic from `KnowledgeGraph::save`
+/// at `src/graph/pyapi/kg_core.rs`.
 ///
 /// Callers under the GIL should release it around `write_kgl`
 /// for parallelism with other Python threads — see `kg_core.rs::save`
 /// for the canonical split. Rust-only callers (no GIL) just call
 /// this directly.
-/// In-memory `.kgl` save: stamp metadata, consolidate to columnar, then
-/// write. `fsync = true` flushes the file + parent
-/// directory before returning so the bytes survive an OS/power crash;
-/// `fsync = false` keeps the atomic temp+rename (never a torn file) but
-/// skips the durability barrier for speed (the bench-only fast path). See
-/// [`write_kgl_with`]. Callers normally use the mode-aware [`save_graph`] /
-/// [`save_graph_with`] rather than this directly.
+///
+/// `fsync = true` flushes the file + parent directory before returning so the
+/// bytes survive an OS/power crash; `fsync = false` keeps the atomic
+/// temp+rename (never a torn file) but skips the durability barrier for speed
+/// (the bench-only fast path). Callers normally use the mode-aware
+/// [`save_graph`] / [`save_graph_with`] rather than this directly.
 pub fn save_inmemory_with(graph: &mut Arc<DirGraph>, path: &str, fsync: bool) -> io::Result<()> {
-    prepare_save(graph);
-    {
-        let dir = crate::graph::handle::make_dir_graph_mut_preserving_lineage(graph);
-        dir.enable_columnar();
-    }
+    prepare_kgl_write(graph);
     write_kgl_with(graph, path, fsync)
 }
 

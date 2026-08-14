@@ -26,7 +26,7 @@ impl DirGraph {
     /// Nodes stay in memory (~40 bytes each), edges are mmap'd.
     pub fn enable_disk_mode(&mut self) -> Result<(), String> {
         // Ensure columnar storage for compact node representation
-        if !self.is_columnar() {
+        if self.column_store_count() == 0 {
             self.enable_columnar();
         }
 
@@ -283,7 +283,7 @@ impl DirGraph {
         // ~150 ms for the full graph.
         let preexisting_columns_bin =
             dir.join("seg_000/columns.bin").exists() || dir.join("columns.bin").exists();
-        if !preexisting_columns_bin && self.is_columnar() {
+        if !preexisting_columns_bin && self.column_store_count() > 0 {
             let stores: HashMap<String, Arc<crate::graph::storage::column_store::ColumnStore>> =
                 self.column_stores_by_name()
                     .into_iter()

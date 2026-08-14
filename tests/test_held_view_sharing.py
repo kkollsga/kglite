@@ -257,12 +257,11 @@ def test_replace_mode_drops_omitted_properties_while_a_view_is_held(
     update. Nothing else in this file writes through ``add_nodes``, so no test
     reached that writer.
 
-    ``enable_columnar()`` is the precondition, not decoration — the defect was
-    columnar-only, and the row-storage path has always replaced correctly.
+    The defect was columnar-only; every graph is columnar from construction, so
+    the fixture reaches it with no setup.
     """
     import pandas as pd
 
-    graph.enable_columnar()
     view = graph.cypher(WIDE_QUERY)
     assert graph.cypher("MATCH (n:Item {id: 5}) RETURN n.qty AS qty").to_list()[0]["qty"] is not None
 

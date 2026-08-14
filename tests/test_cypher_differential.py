@@ -2750,13 +2750,14 @@ def _build_columnar_mutation_graph() -> kglite.KnowledgeGraph:
     """`_build_mutation_graph()` after the consolidation pass a save runs.
 
     The two are the same shape: properties are columnar from construction, and
-    `enable_columnar()` — what `save()` calls — is an idempotent consolidation
-    over a graph that is already in that shape. Kept as its own builder because
-    the corpus below exercises the *consolidated* store (one contiguous run of
-    rows, no growth history), which is what a loaded graph carries.
+    the consolidation pass — which `save()`, `vacuum()` and `unspill()` all
+    run — is idempotent over a graph already in that shape. Kept as its own
+    builder because the corpus below exercises the *consolidated* store (one
+    contiguous run of rows, no growth history), which is what a loaded graph
+    carries.
     """
     g = _build_mutation_graph()
-    g.enable_columnar()
+    g.unspill()
     return g
 
 

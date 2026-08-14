@@ -276,9 +276,11 @@ def test_bench_wide_set_fresh(benchmark):
     """Single-row `SET` on a never-saved wide graph — the control.
 
     Same statement, same shape, same size as the two cells below; the only
-    difference is that this graph has never been consolidated into column
-    stores. Without it the post-save number has nothing to be a ratio *of*, and
-    a machine-wide slowdown would be indistinguishable from a regression.
+    difference is that this graph has never been through a consolidation pass.
+    Without it the post-save number has nothing to be a ratio *of*, and a
+    machine-wide slowdown would be indistinguishable from a regression. The
+    ratio is the point: it used to separate two storage shapes and now reports
+    only what consolidation itself costs a later write.
     """
     graph = _wide_graph()
     counter = iter(range(1, 1 << 30))
@@ -287,22 +289,26 @@ def test_bench_wide_set_fresh(benchmark):
         graph.cypher("MATCH (n:Item {id: 7}) SET n.p0 = $v", params={"v": next(counter)})
 
     benchmark(write)
-    assert not graph.is_columnar, "the control must not be columnar, or it is not a control"
+    assert graph.graph_info()["columnar_total_rows"] == SHAPE_SIZE, (
+        "the control must carry its rows in the column store like the cells it anchors"
+    )
 
 
 @pytest.mark.benchmark
 def test_bench_wide_set_after_save(benchmark, tmp_path):
     """Single-row `SET` after `save()` — the cell the fresh fixtures hid.
 
-    `save()` is the shape change, not the I/O: it calls `enable_columnar`,
-    which is what puts the type behind a master `Arc<ColumnStore>`. The graph
+    `save()` runs the consolidation pass that rebuilds every column store, so
+    the type ends up behind a freshly built master `Arc<ColumnStore>`. The graph
     handle is kept and written through afterwards, so the timed statement is an
     ordinary point write on an ordinary application graph — one that has been
     checkpointed once.
     """
     graph = _wide_graph()
     graph.save(str(tmp_path / "wide.kgl"))
-    assert graph.is_columnar, "save() must have consolidated the type, or this cell is the control"
+    assert graph.graph_info()["columnar_total_rows"] == SHAPE_SIZE, (
+        "save() must have consolidated the type, or this cell measures nothing"
+    )
     counter = iter(range(1, 1 << 30))
 
     def write():

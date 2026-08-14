@@ -878,6 +878,7 @@ pub fn kglite::api::durable::RecordingGraph<G>::remove_node_property(&mut self, 
 pub fn kglite::api::durable::RecordingGraph<G>::replace_node_properties(&mut self, idx: petgraph::graph_impl::NodeIndex, pairs: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>)
 pub fn kglite::api::durable::RecordingGraph<G>::set_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
 pub fn kglite::api::durable::RecordingGraph<G>::set_node_property_if_absent(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::durable::RecordingGraph<G>::set_node_title(&mut self, idx: petgraph::graph_impl::NodeIndex, value: kglite::datatypes::values::Value)
 pub fn kglite::api::durable::RecordingGraph<G>::take_column_store(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
 pub fn kglite::api::durable::RecordingGraph<G>::update_row_id(&mut self, node_idx: petgraph::graph_impl::NodeIndex, row_id: u32)
 pub struct kglite::api::durable::Wal
@@ -1306,6 +1307,7 @@ pub fn kglite::api::io::open_or_create_graph(path: &std::path::Path, create_mode
 pub fn kglite::api::io::open_or_create_graph_in_mode(path: &std::path::Path, requested: core::option::Option<kglite::api::storage::StorageMode>, attaching_log: kglite::api::durable::DurabilityLevel) -> core::io::error::Result<kglite::api::io::OpenGraphResult>
 pub fn kglite::api::io::pass_a_scan(source: &kglite::api::storage::DiskGraph, spec: &kglite::api::io::SubsetSpec) -> kglite::graph::mutation::subgraph_streaming::PassAResult
 pub fn kglite::api::io::pass_a_scan_to_file(source: &kglite::api::storage::DiskGraph, spec: &kglite::api::io::SubsetSpec, kept_edges_path: &std::path::Path) -> core::result::Result<kglite::graph::mutation::subgraph_streaming::PassAFileResult, alloc::string::String>
+pub fn kglite::api::io::prepare_kgl_write(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>)
 pub fn kglite::api::io::prepare_save(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>)
 pub fn kglite::api::io::save_graph(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>, path: &str) -> core::result::Result<(), kglite::api::io::SaveError>
 pub fn kglite::api::io::save_graph_with(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>, path: &str, fsync: bool) -> core::result::Result<(), kglite::api::io::SaveError>
@@ -1596,6 +1598,7 @@ pub fn kglite::api::storage::GraphBackend::remove_node_property(&mut self, idx: 
 pub fn kglite::api::storage::GraphBackend::replace_node_properties(&mut self, idx: petgraph::graph_impl::NodeIndex, pairs: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>)
 pub fn kglite::api::storage::GraphBackend::set_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
 pub fn kglite::api::storage::GraphBackend::set_node_property_if_absent(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::storage::GraphBackend::set_node_title(&mut self, idx: petgraph::graph_impl::NodeIndex, value: kglite::datatypes::values::Value)
 pub fn kglite::api::storage::GraphBackend::take_column_store(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
 pub fn kglite::api::storage::GraphBackend::update_row_id(&mut self, node_idx: petgraph::graph_impl::NodeIndex, row_id: u32)
 impl serde_core::ser::Serialize for kglite::api::storage::GraphBackend
@@ -1861,6 +1864,7 @@ pub fn kglite::api::storage::MappedGraph::remove_node_property(&mut self, idx: p
 pub fn kglite::api::storage::MappedGraph::replace_node_properties(&mut self, idx: petgraph::graph_impl::NodeIndex, pairs: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>)
 pub fn kglite::api::storage::MappedGraph::set_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
 pub fn kglite::api::storage::MappedGraph::set_node_property_if_absent(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::storage::MappedGraph::set_node_title(&mut self, idx: petgraph::graph_impl::NodeIndex, value: kglite::datatypes::values::Value)
 pub fn kglite::api::storage::MappedGraph::take_column_store(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
 impl serde_core::ser::Serialize for kglite::api::storage::MappedGraph
 pub fn kglite::api::storage::MappedGraph::serialize<S: serde_core::ser::Serializer>(&self, ser: S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error>
@@ -2287,9 +2291,7 @@ pub fn kglite::api::DirGraph::column_store(&self, node_type: &str) -> core::opti
 pub fn kglite::api::DirGraph::column_store_count(&self) -> usize
 pub fn kglite::api::DirGraph::column_store_mut(&mut self, node_type: &str) -> core::option::Option<&mut alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
 pub fn kglite::api::DirGraph::column_stores_by_name(&self) -> alloc::vec::Vec<(&str, &alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)>
-pub fn kglite::api::DirGraph::disable_columnar(&mut self)
 pub fn kglite::api::DirGraph::embedding_store(&self, node_type: &str, prop_name: &str) -> core::option::Option<&kglite::api::storage::EmbeddingStore>
-pub fn kglite::api::DirGraph::enable_columnar(&mut self)
 pub fn kglite::api::DirGraph::ensure_column_store_for_push(&mut self, node_type: &str) -> &mut kglite::graph::storage::column_store::ColumnStore
 pub fn kglite::api::DirGraph::ensure_id_index(&self, node_type: &str)
 pub fn kglite::api::DirGraph::ensure_type_schema_keys(&mut self, node_type: &str, keys: &[kglite::api::InternedKey])
@@ -2308,7 +2310,6 @@ pub fn kglite::api::DirGraph::has_connection_type(&self, connection_type: &str) 
 pub fn kglite::api::DirGraph::has_node_type(&self, node_type: &str) -> bool
 pub fn kglite::api::DirGraph::has_type_shadowing_property(&self) -> bool
 pub fn kglite::api::DirGraph::install_column_store(&mut self, node_type: &str, store: alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)
-pub fn kglite::api::DirGraph::is_columnar(&self) -> bool
 pub fn kglite::api::DirGraph::lookup_by_id(&mut self, node_type: &str, id: &kglite::datatypes::values::Value) -> core::option::Option<petgraph::graph_impl::NodeIndex>
 pub fn kglite::api::DirGraph::lookup_by_id_normalized(&self, node_type: &str, id: &kglite::datatypes::values::Value) -> core::option::Option<petgraph::graph_impl::NodeIndex>
 pub fn kglite::api::DirGraph::lookup_by_id_readonly(&self, node_type: &str, id: &kglite::datatypes::values::Value) -> core::option::Option<petgraph::graph_impl::NodeIndex>
@@ -2601,7 +2602,6 @@ pub fn kglite::api::NodeView<'a>::has_property(&self, key: &str) -> bool
 pub fn kglite::api::NodeView<'a>::id(&self) -> alloc::borrow::Cow<'a, kglite::datatypes::values::Value>
 pub fn kglite::api::NodeView<'a>::node_type(&self) -> kglite::api::InternedKey
 pub fn kglite::api::NodeView<'a>::node_type_str<'i>(&self, interner: &'i kglite::api::StringInterner) -> &'i str
-pub fn kglite::api::NodeView<'a>::properties_are_columnar(&self) -> bool
 pub fn kglite::api::NodeView<'a>::properties_cloned(&self, interner: &kglite::api::StringInterner) -> std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
 pub fn kglite::api::NodeView<'a>::property_count(&self) -> usize
 pub fn kglite::api::NodeView<'a>::property_keys(&self, interner: &'a kglite::api::StringInterner) -> alloc::vec::Vec<&'a str>
@@ -3013,6 +3013,7 @@ pub fn kglite::api::GraphWrite::remove_node_property(&mut self, idx: petgraph::g
 pub fn kglite::api::GraphWrite::replace_node_properties(&mut self, idx: petgraph::graph_impl::NodeIndex, pairs: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>)
 pub fn kglite::api::GraphWrite::set_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
 pub fn kglite::api::GraphWrite::set_node_property_if_absent(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::GraphWrite::set_node_title(&mut self, idx: petgraph::graph_impl::NodeIndex, value: kglite::datatypes::values::Value)
 pub fn kglite::api::GraphWrite::take_column_store(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
 pub fn kglite::api::GraphWrite::update_row_id(&mut self, _node_idx: petgraph::graph_impl::NodeIndex, _row_id: u32)
 impl kglite::api::GraphWrite for kglite::api::storage::DiskGraph
@@ -3050,6 +3051,7 @@ pub fn kglite::api::storage::GraphBackend::remove_node_property(&mut self, idx: 
 pub fn kglite::api::storage::GraphBackend::replace_node_properties(&mut self, idx: petgraph::graph_impl::NodeIndex, pairs: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>)
 pub fn kglite::api::storage::GraphBackend::set_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
 pub fn kglite::api::storage::GraphBackend::set_node_property_if_absent(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::storage::GraphBackend::set_node_title(&mut self, idx: petgraph::graph_impl::NodeIndex, value: kglite::datatypes::values::Value)
 pub fn kglite::api::storage::GraphBackend::take_column_store(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
 pub fn kglite::api::storage::GraphBackend::update_row_id(&mut self, node_idx: petgraph::graph_impl::NodeIndex, row_id: u32)
 impl kglite::api::GraphWrite for kglite::api::storage::MappedGraph
@@ -3068,6 +3070,7 @@ pub fn kglite::api::storage::MappedGraph::remove_node_property(&mut self, idx: p
 pub fn kglite::api::storage::MappedGraph::replace_node_properties(&mut self, idx: petgraph::graph_impl::NodeIndex, pairs: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>)
 pub fn kglite::api::storage::MappedGraph::set_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
 pub fn kglite::api::storage::MappedGraph::set_node_property_if_absent(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::storage::MappedGraph::set_node_title(&mut self, idx: petgraph::graph_impl::NodeIndex, value: kglite::datatypes::values::Value)
 pub fn kglite::api::storage::MappedGraph::take_column_store(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
 impl<G: kglite::api::GraphWrite> kglite::api::GraphWrite for kglite::api::durable::RecordingGraph<G>
 pub fn kglite::api::durable::RecordingGraph<G>::add_edge(&mut self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex, data: kglite::api::EdgeData) -> petgraph::graph_impl::EdgeIndex
@@ -3086,6 +3089,7 @@ pub fn kglite::api::durable::RecordingGraph<G>::remove_node_property(&mut self, 
 pub fn kglite::api::durable::RecordingGraph<G>::replace_node_properties(&mut self, idx: petgraph::graph_impl::NodeIndex, pairs: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>)
 pub fn kglite::api::durable::RecordingGraph<G>::set_node_property(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
 pub fn kglite::api::durable::RecordingGraph<G>::set_node_property_if_absent(&mut self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, value: kglite::datatypes::values::Value)
+pub fn kglite::api::durable::RecordingGraph<G>::set_node_title(&mut self, idx: petgraph::graph_impl::NodeIndex, value: kglite::datatypes::values::Value)
 pub fn kglite::api::durable::RecordingGraph<G>::take_column_store(&mut self, type_key: kglite::api::InternedKey) -> core::option::Option<alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
 pub fn kglite::api::durable::RecordingGraph<G>::update_row_id(&mut self, node_idx: petgraph::graph_impl::NodeIndex, row_id: u32)
 pub fn kglite::api::discover_property_keys_excluding(nodes: &[(&str, kglite::api::NodeView<'_>)], interner: &kglite::api::StringInterner, excluded: &[&str]) -> alloc::vec::Vec<alloc::string::String>

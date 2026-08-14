@@ -175,7 +175,7 @@ fn report(fixture: &str, graph: &DirGraph) {
     println!(
         "\n### fixture `{fixture}` — nodes {}, columnar {}",
         graph.graph.node_count(),
-        graph.is_columnar()
+        graph.column_store_count() > 0
     );
     println!("| field | µs | % of total | extent |");
     println!("|---|---:|---:|---:|");
@@ -253,7 +253,7 @@ fn apportion_the_fork_across_the_data_scale_fields() {
         let mut saved = build_plain(NODES);
         saved.enable_columnar();
         assert!(
-            saved.is_columnar(),
+            saved.column_store_count() > 0,
             "the saved fixture must own master column stores"
         );
         report("saved (enable_columnar, as save() does)", &saved);

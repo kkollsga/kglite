@@ -197,34 +197,26 @@ def collect() -> dict:
         warmup=3,
     )
 
-    # -- Tier 3: columnar_enable ------------------------------------
+    # -- Tier 3: column consolidation -------------------------------
+    # Was an enable/disable cycle. Both halves are gone with the storage
+    # regime; `unspill()` is the surviving public route to the same full
+    # rebuild, which `save()` and `vacuum()` also run.
     g_col = _build_perf_graph(1_000)
     # Warmup
     for _ in range(5):
-        g_col.enable_columnar()
-        g_col.disable_columnar()
+        g_col.unspill()
 
-    en_samples, dis_samples = [], []
+    en_samples = []
     for _ in range(50):
-        g_col.disable_columnar()
         t0 = time.perf_counter_ns()
-        g_col.enable_columnar()
+        g_col.unspill()
         en_samples.append(time.perf_counter_ns() - t0)
-        t0 = time.perf_counter_ns()
-        g_col.disable_columnar()
-        dis_samples.append(time.perf_counter_ns() - t0)
-    out["columnar_cycle"] = {
-        "enable": {
+    out["columnar_consolidation"] = {
+        "rebuild": {
             "min_ns": min(en_samples),
             "median_ns": statistics.median(en_samples),
             "mean_ns": statistics.mean(en_samples),
             "n": len(en_samples),
-        },
-        "disable": {
-            "min_ns": min(dis_samples),
-            "median_ns": statistics.median(dis_samples),
-            "mean_ns": statistics.mean(dis_samples),
-            "n": len(dis_samples),
         },
     }
 

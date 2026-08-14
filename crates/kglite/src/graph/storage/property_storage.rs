@@ -14,9 +14,8 @@
 //!   where values must be held for a moment before they reach a store: disk
 //!   write-staging (`storage/disk/graph.rs`), `.kgl` deserialization before
 //!   the column sections are attached, the bulk funnel's pre-push scratch,
-//!   vacuum placeholders, the RDF loader's `materialize` pass (consolidated
-//!   at its first `enable_columnar`), and the row-materialising half of
-//!   `DirGraph::disable_columnar`.
+//!   vacuum placeholders, and the RDF loader's `materialize` pass
+//!   (consolidated at its first `enable_columnar`).
 //!
 //! The row-shaped steady state (`Compact`: a shared `TypeSchema` plus a dense
 //! `Vec<Value>`) is **gone**. A graph no longer changes write regime when it

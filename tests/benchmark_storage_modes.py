@@ -50,9 +50,7 @@ def build_graph(mode, node_df, edge_df):
         g = KnowledgeGraph()
     g.add_nodes(node_df, "Item", "nid", "name")
     g.add_connections(edge_df, "LINKS", "Item", "from_id", "Item", "to_id")
-    if mode == "default+col":
-        g.enable_columnar()
-    elif mode == "disk":
+    if mode == "disk":
         g.enable_disk_mode()
     return g
 

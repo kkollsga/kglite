@@ -358,11 +358,9 @@ fn seed_into(graph: &mut DirGraph) {
     );
 }
 
-/// `seeded()` after `enable_columnar()` — the shape every graph takes the
-/// moment it is saved, and keeps for the rest of its life. `save()` calls
-/// `enable_columnar` (`io/file.rs`), and only the explicit `disable_columnar`
-/// ever empties `column_stores` again, so "has been saved once" is a permanent
-/// property of a live graph and every mutation after it runs in this shape.
+/// `seeded()` after the consolidation pass `save()` runs (`io/file.rs`) — the
+/// shape every graph carries for the whole of its life. Nothing empties
+/// `column_stores` again, so every mutation after it runs in this shape.
 ///
 /// The preconditions are asserted, not assumed. If `enable_columnar` ever
 /// stopped installing master stores, or stopped re-pointing nodes at them, the
@@ -372,7 +370,7 @@ fn seeded_columnar() -> DirGraph {
     let mut graph = seeded();
     graph.enable_columnar();
     assert!(
-        graph.is_columnar(),
+        graph.column_store_count() > 0,
         "the fixture must own master column stores, or the columnar arms are vacuous"
     );
     let columnar_nodes = graph
@@ -961,7 +959,7 @@ fn wide_columnar_into(graph: DirGraph) -> DirGraph {
     let mut graph = wide_rows_into(graph);
     graph.enable_columnar();
     assert!(
-        graph.is_columnar(),
+        graph.column_store_count() > 0,
         "the fixture must own a master column store, or this test is vacuous"
     );
     graph
@@ -1096,24 +1094,25 @@ fn a_mapped_columnar_set_journals_one_pre_image_per_changed_node() {
     );
 }
 
-/// The same statement on a *plain* (never-saved) graph, as the control.
+/// The same statement on a heap-resident (unmapped) graph, as the control.
 ///
-/// Pins that the bound above is a property of the columnar path rather than of
-/// this fixture's size: if the plain path ever started capturing per type, the
-/// columnar assertion alone would not say which layer regressed.
+/// Pins that the bound above is a property of the write path rather than of
+/// the mapping or of this fixture's size: if the unmapped path ever started
+/// capturing per type, the mapped assertion alone would not say which layer
+/// regressed. This used to run against a de-columnarized graph, a shape
+/// construction no longer produces.
 #[test]
-fn a_plain_set_journals_one_pre_image_per_changed_node() {
+fn an_unmapped_set_journals_one_pre_image_per_changed_node() {
     use crate::graph::storage::undo::{journal_node_pre_images, reset_journal_node_pre_images};
 
     let mut graph = wide_columnar();
-    graph.disable_columnar();
     reset_journal_node_pre_images();
     run(&mut graph, "MATCH (i:Item {id: 7}) SET i.priority = 3");
     let captured = journal_node_pre_images();
 
     assert!(
         captured <= 2,
-        "a one-row SET on a non-columnar graph captured {captured} node \
+        "a one-row SET on an unmapped graph captured {captured} node \
          pre-images across {WIDE_ITEMS} nodes"
     );
 }
@@ -1653,7 +1652,7 @@ fn a_read_statement_clones_no_column_store() {
 
     let mut graph = wide_columnar();
     assert!(
-        graph.is_columnar(),
+        graph.column_store_count() > 0,
         "the fixture must own master column stores, or the control is vacuous"
     );
 
@@ -1907,7 +1906,7 @@ fn seeded_columnar_with_unique_qty() -> DirGraph {
         "the constraint must be declared and enforcing"
     );
     assert!(
-        graph.is_columnar(),
+        graph.column_store_count() > 0,
         "the graph must be saved, or this is the plain unique fixture again"
     );
     graph

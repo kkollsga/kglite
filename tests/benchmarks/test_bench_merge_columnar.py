@@ -78,8 +78,8 @@ them, the cost is not columnar and this file's premise is wrong — treat that a
 a finding, not as noise.
 
 `saved` (`save()` in place) and `reloaded` (`save()` then `kglite.load()`) are
-both columnar but arrive there by different routes — `enable_columnar()` versus
-`attach_portable_column_stores` on the load path. They are measured separately
+both consolidated but arrive there by different routes — an in-place rebuild
+versus `attach_portable_column_stores` on the load path. They are measured separately
 so that "after save" and "after save and reload" are answered independently
 rather than assumed identical.
 
@@ -201,22 +201,23 @@ def _variant_graph(size: int, variant: str, tmp_dir) -> KnowledgeGraph:
     graph.define_schema({"nodes": {"Item": {"primary_key": "id"}}})
     graph.add_nodes(_frame(size, 0), "Item", "id", "name")
     if variant in ("saved", "reloaded"):
-        # save() is what populates DirGraph.column_stores via enable_columnar().
-        # fsync=False: this save exists to flip the storage shape, not to
-        # benchmark a disk flush.
+        # save() runs the consolidation pass over DirGraph's column stores.
+        # fsync=False: this save exists to reach that pass, not to benchmark a
+        # disk flush.
         path = str(tmp_dir / f"merge-{variant}-{size}.kgl")
         graph.save(path, fsync=False)
         if variant == "reloaded":
-            # The other route into columnar storage: attach_portable_column_stores
-            # on the load path, rather than enable_columnar() in place.
+            # The other route to a consolidated store: attach_portable_column_stores
+            # on the load path, rather than a rebuild in place.
             graph = kglite.load(path)
 
     # Vacuity guard, in the spirit of the one in test_bench_fast_write_path.py:
-    # a `saved` cell that silently is not columnar would report a healthy number
-    # under a label promising the opposite — indistinguishable from a fix.
-    expect_columnar = variant != "fresh"
-    assert graph.is_columnar is expect_columnar, (
-        f"{variant} must{'' if expect_columnar else ' not'} own column stores; "
+    # a cell whose fixture silently carries no column rows would report a
+    # healthy number under a label promising the opposite. It no longer
+    # *discriminates* the variants — all three own stores now — so it asserts
+    # the rows are there rather than which shape they are in.
+    assert graph.graph_info()["columnar_total_rows"] == size, (
+        f"{variant} must carry its rows in the column store; "
         "without them this cell measures a code path the cost does not live on"
     )
     return graph

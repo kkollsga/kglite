@@ -39,6 +39,18 @@ def make_wide_graph(n=50_000, cols=12):
     return g
 
 
+def force_spill(g, tmp_path, name="spill-trigger.kgl"):
+    """Drive the graph past its memory limit's enforcement point.
+
+    There is no `enable_columnar()` to call: a graph is columnar from
+    construction, and the limit is applied after each mutating statement and at
+    every consolidation point. `save()` is the cheapest consolidation point a
+    test can reach, and it is what these tests used the explicit toggle to
+    stand in for.
+    """
+    g.save(str(tmp_path / name))
+
+
 def make_graph(n=1000):
     """Graph with n nodes and 2 properties (value: float64, category: string)."""
     g = kglite.KnowledgeGraph()
@@ -83,31 +95,31 @@ class TestSetMemoryLimit:
 
 
 class TestSpillToDisk:
-    def test_spill_when_over_limit(self):
+    def test_spill_when_over_limit(self, tmp_path):
         """Columnar data spills to disk when heap exceeds limit."""
         g = make_graph(1000)
         g.set_memory_limit(1024)  # tiny limit forces spill
-        g.enable_columnar()
+        force_spill(g, tmp_path)
 
         info = g.graph_info()
         assert info["columnar_is_mapped"] is True
         # Tombstones + id/title column overhead stay on heap
         assert info["columnar_heap_bytes"] < 50000
 
-    def test_no_spill_when_under_limit(self):
+    def test_no_spill_when_under_limit(self, tmp_path):
         """No spill when data fits within limit."""
         g = make_graph(10)
         g.set_memory_limit(1_000_000)  # generous limit
-        g.enable_columnar()
+        force_spill(g, tmp_path)
 
         info = g.graph_info()
         assert info["columnar_is_mapped"] is False
         assert info["columnar_heap_bytes"] > 0
 
-    def test_no_spill_without_limit(self):
+    def test_no_spill_without_limit(self, tmp_path):
         """No spill when memory limit is not set."""
         g = make_graph(1000)
-        g.enable_columnar()
+        force_spill(g, tmp_path)
 
         info = g.graph_info()
         assert info["columnar_is_mapped"] is False
@@ -118,23 +130,23 @@ class TestSpillToDisk:
         spill_dir = tmp_path / "my_spill"
         g = make_graph(1000)
         g.set_memory_limit(1024, spill_dir=str(spill_dir))
-        g.enable_columnar()
+        force_spill(g, tmp_path)
 
         assert g.graph_info()["columnar_is_mapped"] is True
         # Check spill directory was created with files
         assert spill_dir.exists()
 
-    def test_queries_work_after_spill(self):
+    def test_queries_work_after_spill(self, tmp_path):
         """Queries still return correct results on spilled data."""
         g = make_graph(1000)
         g.set_memory_limit(1024)
-        g.enable_columnar()
+        force_spill(g, tmp_path)
 
         result = g.cypher("MATCH (n:Item) WHERE n.value > 990 RETURN n.title ORDER BY n.value").to_list()
         titles = [r["n.title"] for r in result]
         assert titles == [f"Node_{i}" for i in range(991, 1000)]
 
-    def test_spill_multi_type(self):
+    def test_spill_multi_type(self, tmp_path):
         """Both types spill when both exceed limit."""
         g = kglite.KnowledgeGraph()
         items = pd.DataFrame(
@@ -154,7 +166,7 @@ class TestSpillToDisk:
         g.add_nodes(items, "Item", "nid", "name")
         g.add_nodes(people, "Person", "pid", "pname")
         g.set_memory_limit(1024)
-        g.enable_columnar()
+        force_spill(g, tmp_path)
 
         assert g.graph_info()["columnar_is_mapped"] is True
 
@@ -205,11 +217,9 @@ class TestSpillContractAcrossWrites:
         The limit is set *before* `save()` deliberately. `set_memory_limit`
         does not retroactively spill an already-columnar graph — that is
         pinned, as current behaviour, by
-        `TestEdgeCases::test_set_limit_after_columnar` — so a limit set after
-        the save would leave the graph on the heap and this test would be
-        asserting nothing. Reached the same way by `save()`-then-limit-then-
-        `disable_columnar()`/`enable_columnar()`; all three shapes were measured
-        and produce identical numbers.
+        `TestEdgeCases::test_set_limit_does_not_retroactively_spill` — so a
+        limit set after the save would leave the graph on the heap and this
+        test would be asserting nothing.
 
         The post-spill heap reading is captured as the baseline rather than
         compared against the limit itself, so that a regression which stopped
@@ -371,28 +381,26 @@ class TestSpillContractAcrossWrites:
 
 
 class TestUnspill:
-    def test_unspill_moves_to_heap(self):
+    def test_unspill_moves_to_heap(self, tmp_path):
         """Unspill converts mmap-backed data back to heap."""
         g = make_graph(1000)
         g.set_memory_limit(1024)
-        g.enable_columnar()
+        force_spill(g, tmp_path)
         assert g.graph_info()["columnar_is_mapped"] is True
 
         g.unspill()
         info = g.graph_info()
         assert info["columnar_is_mapped"] is False
         assert info["columnar_heap_bytes"] > 0
-        assert g.is_columnar  # still columnar, just heap-backed
+        assert info["columnar_live_rows"] == 1000  # columns intact, just heap-backed
 
-    def test_unspill_preserves_data(self):
+    def test_unspill_preserves_data(self, tmp_path):
         """Data is identical before spill and after unspill."""
         g = make_graph(100)
-        g.enable_columnar()
         before = g.cypher("MATCH (n:Item) RETURN n.title, n.value ORDER BY n.value").to_list()
 
         g.set_memory_limit(1024)
-        g.disable_columnar()
-        g.enable_columnar()  # spills
+        force_spill(g, tmp_path)
         g.unspill()
 
         after = g.cypher("MATCH (n:Item) RETURN n.title, n.value ORDER BY n.value").to_list()
@@ -408,23 +416,23 @@ class TestUnspill:
         g = make_graph(10)
         assert g.graph_info()["columnar_is_mapped"] is False
         g.unspill()  # should not crash
-        assert g.is_columnar
+        assert g.graph_info()["columnar_live_rows"] == 10
         assert g.graph_info()["columnar_is_mapped"] is False
         assert g.cypher("MATCH (n:Item) RETURN count(n) AS c").to_list()[0]["c"] == 10
 
-    def test_unspill_preserves_memory_limit(self):
+    def test_unspill_preserves_memory_limit(self, tmp_path):
         """Memory limit is restored after unspill."""
         g = make_graph(1000)
         g.set_memory_limit(1024)
-        g.enable_columnar()
+        force_spill(g, tmp_path)
         g.unspill()
         assert g.graph_info()["memory_limit"] == 1024
 
-    def test_unspill_after_deletes(self):
+    def test_unspill_after_deletes(self, tmp_path):
         """Unspill after deleting nodes produces smaller heap."""
         g = make_graph(500)
         g.set_memory_limit(1024)
-        g.enable_columnar()
+        force_spill(g, tmp_path)
 
         # Delete half the nodes (disable auto-vacuum to measure manually)
         g.set_auto_vacuum(None)
@@ -443,7 +451,6 @@ class TestVacuumColumnar:
     def test_vacuum_rebuilds_columnar(self):
         """Manual vacuum rebuilds columnar stores, eliminating orphaned rows."""
         g = make_graph(500)
-        g.enable_columnar()
         g.set_auto_vacuum(None)
 
         g.cypher("MATCH (n:Item) WHERE n.value < 300 DETACH DELETE n")
@@ -463,7 +470,6 @@ class TestVacuumColumnar:
     def test_auto_vacuum_rebuilds_columnar(self):
         """Auto-vacuum automatically rebuilds columnar stores."""
         g = make_graph(500)
-        g.enable_columnar()
         # Default threshold is 0.3 — deleting >150 of 500 triggers it
 
         g.cypher("MATCH (n:Item) WHERE n.value < 300 DETACH DELETE n")
@@ -491,7 +497,6 @@ class TestVacuumColumnar:
     def test_vacuum_preserves_query_results(self):
         """Queries return correct data after vacuum rebuilds columnar."""
         g = make_graph(500)
-        g.enable_columnar()
         g.set_auto_vacuum(None)
 
         g.cypher("MATCH (n:Item) WHERE n.value < 300 DETACH DELETE n")
@@ -500,11 +505,11 @@ class TestVacuumColumnar:
         result = g.cypher("MATCH (n:Item) RETURN n.value ORDER BY n.value LIMIT 3").to_list()
         assert [r["n.value"] for r in result] == [300.0, 301.0, 302.0]
 
-    def test_vacuum_columnar_with_memory_limit(self):
+    def test_vacuum_columnar_with_memory_limit(self, tmp_path):
         """Vacuum rebuild respects memory limit suspension (doesn't re-spill)."""
         g = make_graph(500)
         g.set_memory_limit(1024)
-        g.enable_columnar()
+        force_spill(g, tmp_path)
         assert g.graph_info()["columnar_is_mapped"] is True
 
         g.set_auto_vacuum(None)
@@ -538,18 +543,9 @@ class TestGraphInfoColumnar:
         assert info["columnar_heap_bytes"] > 0
         assert info["columnar_is_mapped"] is False
 
-    def test_columnar_rows_match_after_enable(self):
-        """After enable_columnar, total == live == node count."""
-        g = make_graph(100)
-        g.enable_columnar()
-        info = g.graph_info()
-        assert info["columnar_total_rows"] == 100
-        assert info["columnar_live_rows"] == 100
-
     def test_orphaned_rows_visible(self):
         """Deleting nodes without vacuum shows orphaned rows."""
         g = make_graph(100)
-        g.enable_columnar()
         g.set_auto_vacuum(None)
 
         g.cypher("MATCH (n:Item) WHERE n.value < 30 DETACH DELETE n")
@@ -561,9 +557,7 @@ class TestGraphInfoColumnar:
     def test_heap_bytes_increases_with_data(self):
         """More data = more heap bytes."""
         g1 = make_graph(100)
-        g1.enable_columnar()
         g2 = make_graph(1000)
-        g2.enable_columnar()
 
         assert g2.graph_info()["columnar_heap_bytes"] > g1.graph_info()["columnar_heap_bytes"]
 
@@ -572,34 +566,24 @@ class TestGraphInfoColumnar:
 
 
 class TestEdgeCases:
-    def test_enable_disable_enable_with_limit(self):
-        """Multiple enable/disable cycles with memory limit."""
+    def test_set_limit_does_not_retroactively_spill(self):
+        """A limit set on an already-populated graph does not spill it there and then.
+
+        Was ``test_set_limit_after_columnar``. The limit is a setting, not a
+        command: it is applied at the next enforcement point (a mutating
+        statement, or a consolidation pass such as ``save()``), which is why
+        every spill test above has to reach one.
+        """
         g = make_graph(500)
-        g.set_memory_limit(1024)
-
-        g.enable_columnar()
-        assert g.graph_info()["columnar_is_mapped"] is True
-
-        g.disable_columnar()
-        assert not g.is_columnar
-
-        g.enable_columnar()
-        assert g.graph_info()["columnar_is_mapped"] is True
-
-    def test_set_limit_after_columnar(self):
-        """Setting limit after enable_columnar doesn't retroactively spill."""
-        g = make_graph(500)
-        g.enable_columnar()
         assert g.graph_info()["columnar_is_mapped"] is False
 
         g.set_memory_limit(1024)
-        # Still on heap — limit only applies on next enable_columnar
+        # Still on heap — nothing has reached an enforcement point yet.
         assert g.graph_info()["columnar_is_mapped"] is False
 
     def test_delete_all_nodes_then_vacuum(self):
         """Vacuum after deleting all nodes produces empty columnar stores."""
         g = make_graph(200)
-        g.enable_columnar()
         g.set_auto_vacuum(None)
 
         g.cypher("MATCH (n) DETACH DELETE n")
@@ -614,13 +598,14 @@ class TestEdgeCases:
         """save/load works on a graph with spilled columns."""
         g = make_graph(500)
         g.set_memory_limit(1024)
-        g.enable_columnar()
+        force_spill(g, tmp_path)
+        assert g.graph_info()["columnar_is_mapped"] is True
 
         fp = str(tmp_path / "spilled.kgl")
         g.save(fp)
 
         g2 = kglite.load(fp)
-        assert g2.is_columnar
+        assert g2.graph_info()["columnar_live_rows"] == 500
         count = g2.cypher("MATCH (n:Item) RETURN count(n) AS c").to_list()[0]["c"]
         assert count == 500
 
@@ -628,13 +613,13 @@ class TestEdgeCases:
         """Unspill followed by save/load works correctly."""
         g = make_graph(500)
         g.set_memory_limit(1024)
-        g.enable_columnar()
+        force_spill(g, tmp_path)
         g.unspill()
 
         fp = str(tmp_path / "unspilled.kgl")
         g.save(fp)
 
         g2 = kglite.load(fp)
-        assert g2.is_columnar
+        assert g2.graph_info()["columnar_live_rows"] == 500
         count = g2.cypher("MATCH (n:Item) RETURN count(n) AS c").to_list()[0]["c"]
         assert count == 500

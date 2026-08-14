@@ -151,7 +151,7 @@ def save_and_load(kg, kgl_path):
     kg2 = kglite.load(kgl_path)
     results["load_kgl_time"] = time.perf_counter() - t0
     print(f"  load(): {fmt_time(results['load_kgl_time'])}  RSS={fmt_mb(rss_mb())}")
-    print(f"  is_columnar: {kg2.is_columnar}")
+    print(f"  columnar rows: {kg2.graph_info()['columnar_live_rows']}")
 
     return kg2, results
 

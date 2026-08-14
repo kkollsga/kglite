@@ -655,7 +655,7 @@ mod maintenance_tests {
             .collect();
 
         g.enable_columnar();
-        assert!(g.is_columnar());
+        assert!(g.column_store_count() > 0);
 
         // Verify properties match
         let after: Vec<(Value, Value, i64)> = g
@@ -677,34 +677,6 @@ mod maintenance_tests {
             .collect();
 
         assert_eq!(before, after);
-    }
-
-    #[test]
-    fn test_columnar_roundtrip_via_disable() {
-        let mut g = make_test_graph(3, false);
-        let mut meta = HashMap::new();
-        meta.insert("age".to_string(), "int64".to_string());
-        g.node_type_metadata.insert("Person".to_string(), meta);
-        g.rebuild_type_schemas();
-
-        // Enable columnar, then de-columnarize back to staged `Map`.
-        g.enable_columnar();
-        assert!(g.is_columnar());
-        g.disable_columnar();
-        assert!(!g.is_columnar());
-
-        // Verify properties still work
-        let idx = g.type_indices.get("Person").unwrap().get(0).unwrap();
-        assert!(matches!(
-            g.graph.node_weight(idx).unwrap().properties,
-            PropertyStorage::Map(_)
-        ));
-        assert!(g
-            .graph
-            .node_view(idx)
-            .unwrap()
-            .get_property("age")
-            .is_some());
     }
 
     #[test]
@@ -769,7 +741,7 @@ mod maintenance_tests {
         g.rebuild_type_schemas();
         g.enable_columnar();
         assert!(
-            g.is_columnar(),
+            g.column_store_count() > 0,
             "fixture must be columnar, or this is vacuous"
         );
 
@@ -806,8 +778,6 @@ mod maintenance_tests {
     ///   set** — silently, with no error anywhere.
     /// * the compaction reassigns node indices, so `type_indices` and the row
     ///   ids must still agree afterwards.
-    /// * `disable_columnar` now sweeps `type_indices` rather than
-    ///   `node_indices()`, so it only restores what that index still reaches.
     ///
     /// Asserted on the reserved `__id__`/`__title__` columns as well as an
     /// ordinary property, because a consolidated node stores `Null` inline and
@@ -822,7 +792,7 @@ mod maintenance_tests {
         g.rebuild_type_schemas();
         g.enable_columnar();
         assert!(
-            g.is_columnar(),
+            g.column_store_count() > 0,
             "fixture must be columnar, or this test is vacuous"
         );
 
@@ -841,8 +811,8 @@ mod maintenance_tests {
             })
             .collect();
 
-        // Reads through `type_indices`, because that is the route
-        // `disable_columnar` takes. Stale entries are tolerated (a raw
+        // Reads through `type_indices`, because that is the route every
+        // per-type sweep takes. Stale entries are tolerated (a raw
         // `remove_node` leaves them until the vacuum cleans them) but a *live*
         // node that reads wrong is not.
         let observe = |g: &DirGraph| -> Vec<(Value, Value, Value)> {
@@ -875,7 +845,7 @@ mod maintenance_tests {
         g.vacuum();
 
         assert!(
-            g.is_columnar(),
+            g.column_store_count() > 0,
             "the vacuum must carry the column stores across the heap swap; a \
              storeless columnar node reads as an empty property set, silently"
         );
@@ -885,16 +855,6 @@ mod maintenance_tests {
             expected,
             "every surviving node must keep its id, title and properties across \
              the compaction's index reassignment"
-        );
-
-        // `disable_columnar` reaches nodes through `type_indices`, so this also
-        // pins that the vacuum left the two in agreement.
-        g.disable_columnar();
-        assert!(!g.is_columnar());
-        assert_eq!(
-            observe(&g),
-            expected,
-            "unlinking the stores must restore every node the type index reaches"
         );
     }
 }

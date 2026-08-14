@@ -552,8 +552,8 @@ pub trait GraphWrite: GraphRead {
     /// Remove and return a type's store.
     fn take_column_store(&mut self, type_key: InternedKey) -> Option<Arc<ColumnStore>>;
 
-    /// Drop every store (used by `disable_columnar` and the mid-build
-    /// page-cache reclaim in the N-Triples loader).
+    /// Drop every store (used by the rebuild half of `enable_columnar` and by
+    /// the mid-build page-cache reclaim in the N-Triples loader).
     fn clear_column_stores(&mut self);
 
     // ─────────────── node property writes ───────────────

@@ -89,8 +89,8 @@
 //!   are append-only, so the truncation also restores the next row id: a node
 //!   re-created after a rollback lands on the vacated row rather than leaking a
 //!   hole, which is the columnar half of the petgraph slot identity below.
-//!   Every *other* writer of the store map (`enable_columnar`,
-//!   `disable_columnar`, `vacuum`, the spill and bulk-batch paths) still runs
+//!   Every *other* writer of the store map (`enable_columnar`, `vacuum`, the
+//!   spill and bulk-batch paths) still runs
 //!   outside the statement window, so those need no entry — and the bulk-batch
 //!   path, which swaps stores wholesale, journals its own append pre-image
 //!   before doing so should a caller ever run it under an open checkpoint.

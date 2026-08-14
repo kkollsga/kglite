@@ -191,7 +191,6 @@ def run_benchmarks(g):
     fl("select(Entity).len()", lambda: g.select("Entity").len())
     fl("graph_info()", lambda: len(str(g.graph_info())))
     fl("node_types", lambda: g.node_types)
-    fl("is_columnar", lambda: g.is_columnar)
 
     # Traversal via fluent
     fl(

@@ -226,12 +226,13 @@ impl<'a> NodeView<'a> {
 
     /// `true` when this node's properties live in a per-type column store.
     ///
-    /// Callers should not need this — every enumeration method on `NodeView`
-    /// is already complete for columnar storage. It survives for the few sites
-    /// that branch on storage shape for *schema* reasons (e.g. completing a
-    /// projection from type metadata).
+    /// Crate-internal, and not a shape a caller can act on: every enumeration
+    /// method on `NodeView` is already complete for columnar storage. It
+    /// survives for the one site that branches on storage shape for *schema*
+    /// reasons — completing a projection from type metadata, which only has a
+    /// declared-but-unstored column to recover when the row came from a store.
     #[inline]
-    pub fn properties_are_columnar(&self) -> bool {
+    pub(crate) fn properties_are_columnar(&self) -> bool {
         self.store.is_some()
     }
 

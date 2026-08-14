@@ -63,8 +63,7 @@ pub(crate)`` on a thread-local (``storage/backend.rs:42``) and is not reachable
 from Python by any route. **These benchmarks are the cost/scaling complement,
 not a replacement**: they measure that the fast path is still *cheap* and still
 *flat*, and they cover the one combination the Rust arms do not — saved **and**
-indexed at once, through a real ``save()`` rather than a bare
-``enable_columnar()``.
+indexed at once, through a real ``save()``.
 
 ────────────────────────────────────────────────────────────────────────────
 Defect B — ``Arc::make_mut`` deep clone on a merely-held reference
@@ -330,15 +329,15 @@ def _variant_graph(size: int, variant: str, tmp_dir) -> KnowledgeGraph:
     # Vacuity guards. The 2026-07-27 run's own methodology note earned this:
     # every harness defect it caught was found because a number was
     # inconsistent with the configuration it *claimed* to represent, never
-    # because a number looked implausible. A `saved` cell that silently isn't
-    # columnar, or an `indexed` cell whose index didn't take, would report a
-    # healthy fast path under a label promising otherwise — indistinguishable
-    # from the fix working. These are cheap and they fail loudly.
-    expect_columnar = variant in ("saved", "saved_indexed")
-    assert graph.is_columnar is expect_columnar, (
-        f"{variant} must{'' if expect_columnar else ' not'} own column stores; "
-        "save() populates DirGraph.column_stores via enable_columnar() "
-        "(io/file.rs:1495) and that is what the old gate vetoed on"
+    # because a number looked implausible. A cell whose fixture silently
+    # carries no column rows, or an `indexed` cell whose index didn't take,
+    # would report a healthy fast path under a label promising otherwise —
+    # indistinguishable from the fix working. These are cheap and they fail
+    # loudly. The columnar half no longer discriminates the variants (every
+    # graph owns stores from its first node), so it asserts the rows exist.
+    assert graph.graph_info()["columnar_total_rows"] == size, (
+        f"{variant} must carry its rows in the column store, or this cell "
+        "measures a code path the cost does not live on"
     )
     expect_indexed = variant in ("indexed", "saved_indexed")
     assert graph.has_index("Item", "code") is expect_indexed

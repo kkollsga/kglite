@@ -365,6 +365,12 @@ pub mod api {
         /// script (`sqlite3 out.db < dump.sql`). Node types become tables,
         /// connection types become link tables.
         pub use crate::graph::io::export_sql::to_sqlite_dump;
+        /// Everything a `.kgl` write needs done to the graph before its bytes
+        /// exist: metadata stamp plus the column-consolidation pass whose row
+        /// order *is* the file's node binding. A binding that wants the bytes
+        /// rather than a file calls this and then `write_kgl_to`; `save_graph`
+        /// runs it internally.
+        pub use crate::graph::io::file::prepare_kgl_write;
         /// Embedding-vector file export / import.
         pub use crate::graph::io::file::{
             export_embeddings_to_file, import_embeddings_from_file, EmbeddingExportFilter,

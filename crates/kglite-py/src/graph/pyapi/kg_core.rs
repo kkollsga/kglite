@@ -749,12 +749,10 @@ impl KnowledgeGraph {
                  directory, not a single byte stream). Use save('dir/') instead.",
             ));
         }
-        // Same prep as save(): stamp metadata + consolidate to columnar.
-        io::prepare_save(&mut self.inner);
-        {
-            let graph = Arc::make_mut(&mut self.inner);
-            graph.enable_columnar();
-        }
+        // Same prep as save(), through the same entry point so the two
+        // `.kgl` producers cannot drift: stamp metadata + consolidate the
+        // property columns.
+        io::prepare_kgl_write(&mut self.inner);
         // Serialize off the GIL into an owned buffer.
         let inner = self.inner.clone();
         let bytes = py

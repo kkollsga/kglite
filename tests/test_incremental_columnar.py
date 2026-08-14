@@ -74,12 +74,6 @@ class TestIncrementalColumnar:
         r = graph.cypher("MATCH (n:Item) WHERE n.val > 90 RETURN count(n) AS c").to_df()
         assert r["c"][0] == 9
 
-    def test_is_columnar_in_mapped_mode(self):
-        graph = KnowledgeGraph(storage="mapped")
-        df = pd.DataFrame({"nid": [1], "name": ["A"]})
-        graph.add_nodes(df, "Item", "nid", "name")
-        assert graph.is_columnar
-
     def test_mapped_construction_actually_maps(self):
         """An in-process mapped graph is file-backed once its ingest lands.
 
@@ -123,7 +117,7 @@ class TestIncrementalColumnar:
         graph = KnowledgeGraph()
         df = pd.DataFrame({"nid": [1], "name": ["A"]})
         graph.add_nodes(df, "Item", "nid", "name")
-        assert graph.is_columnar
+        assert graph.graph_info()["columnar_total_rows"] == 1
 
     def test_save_load_roundtrip_preserves_data(self, tmp_path):
         graph = KnowledgeGraph(storage="mapped")

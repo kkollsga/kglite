@@ -78,25 +78,9 @@ impl KnowledgeGraph {
         graph.reindex();
     }
 
-    /// Convert node properties to columnar storage.
-    ///
-    /// Properties are moved from per-node storage into per-type column stores,
-    /// reducing memory usage for homogeneous typed columns (int64, float64, etc.).
-    /// Automatically compacts properties first if not already compacted.
-    ///
-    /// Example:
-    ///     ```python
-    ///     graph.enable_columnar()
-    ///     assert graph.is_columnar
-    ///     ```
-    fn enable_columnar(&mut self) {
-        let graph = get_graph_mut(&mut self.inner);
-        graph.enable_columnar();
-    }
-
     /// Convert the graph to disk-backed storage mode.
     ///
-    /// Enables columnar storage first (if not already), then builds
+    /// Consolidates the property columns first, then builds
     /// CSR (Compressed Sparse Row) edge arrays on disk. Nodes stay
     /// in memory (~40 bytes each), edges are mmap'd from disk.
     ///
@@ -109,32 +93,13 @@ impl KnowledgeGraph {
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
     }
 
-    /// Convert columnar properties back to compact per-node storage.
+    /// Move mmap-backed property columns back to heap memory.
     ///
-    /// The inverse of enable_columnar(). It also leaves the columnar *write*
-    /// regime, which a graph enters on save() and is already in when loaded
-    /// from a file: per-node storage does not re-image a shared column store
-    /// per statement, so a long run of small writes gets much cheaper. The
-    /// revert costs one pass over the nodes, uses more memory, and the next
-    /// save() re-enables columnar and pays a full rebuild.
-    ///
-    /// Do not call it on a storage="mapped" graph or one with a memory limit
-    /// set — both depend on the column store, and this materialises
-    /// file-backed columns onto the heap.
-    fn disable_columnar(&mut self) {
-        let graph = get_graph_mut(&mut self.inner);
-        graph.disable_columnar();
-    }
-
-    /// Move mmap-backed columnar data back to heap memory.
-    ///
-    /// Useful after deleting nodes when you want data back in RAM for
-    /// faster access. Internally rebuilds every column store from the live
-    /// nodes with the memory limit temporarily suspended to prevent
-    /// re-spilling, so rows left behind by deleted nodes are reclaimed in the
-    /// same pass.
-    ///
-    /// No-op if the graph is not in columnar mode.
+    /// Useful after a spill (see `set_memory_limit()`), or after deleting
+    /// nodes when you want the data back in RAM for faster access. Rebuilds
+    /// every column from the live nodes with the memory limit temporarily
+    /// suspended to prevent re-spilling, so rows left behind by deleted nodes
+    /// are reclaimed in the same pass. The limit is restored afterwards.
     ///
     /// Example:
     ///     ```python
@@ -143,23 +108,15 @@ impl KnowledgeGraph {
     ///     assert not info['columnar_is_mapped']
     ///     ```
     fn unspill(&mut self) {
-        let graph = get_graph_mut(&mut self.inner);
-        if !graph.is_columnar() {
+        // Nothing to move, and nothing to fork the graph for: a graph with no
+        // column stores at all (one assembled through the direct `add_node`
+        // route) has no mmap-backed column to bring home, and rebuilding
+        // would be a shape change rather than an unspill.
+        if self.inner.column_store_count() == 0 {
             return;
         }
+        let graph = get_graph_mut(&mut self.inner);
         graph.rebuild_columns_to_heap();
-    }
-
-    /// Returns True if any nodes use columnar property storage.
-    ///
-    /// True after enable_columnar(), after save() — which converts the live
-    /// graph, since the .kgl format is columnar — and for any graph that came
-    /// from load() or open(). In that mode every mutating statement re-images
-    /// the column store of each type it writes, once per statement, so batch
-    /// small writes into multi-row statements.
-    #[getter]
-    fn is_columnar(&self) -> bool {
-        self.inner.is_columnar()
     }
 
     /// Compact the graph by removing tombstones left by node/edge deletions.
@@ -175,6 +132,9 @@ impl KnowledgeGraph {
     ///     dict: Statistics about the compaction:
     ///         - 'nodes_remapped': Number of nodes that were remapped
     ///         - 'tombstones_removed': Number of tombstone slots reclaimed
+    ///         - 'columnar_rebuilt': True when the pass actually dropped
+    ///           property-column rows left behind by deleted nodes (False for
+    ///           a vacuum that found nothing to reclaim)
     ///
     /// Example:
     ///     ```python
@@ -333,21 +293,23 @@ impl KnowledgeGraph {
         Ok(())
     }
 
-    /// Configure automatic memory-pressure spill for columnar storage.
+    /// Configure automatic memory-pressure spill for the property columns.
     ///
-    /// When a memory limit is set, enable_columnar() will automatically
-    /// spill the largest column stores to temporary files on disk when
-    /// the total heap usage exceeds the limit.
+    /// While a limit is set, the graph spills its largest column stores to
+    /// temporary files on disk whenever their total heap usage would exceed
+    /// it — checked after each write and at every consolidation point
+    /// (`save()`, `vacuum()`, `enable_disk_mode()`). `unspill()` brings them
+    /// back to the heap; the limit itself survives that and is re-applied by
+    /// the next write, so pass `None` first to keep them resident.
     ///
     /// Args:
-    ///     limit_bytes: Maximum heap bytes for columnar data, or None to disable.
+    ///     limit_bytes: Maximum heap bytes for column data, or None to disable.
     ///     spill_dir: Directory for spill files. Defaults to system temp dir.
     ///
     /// Example:
     ///     ```python
     ///     graph.set_memory_limit(500_000_000)  # 500 MB limit
-    ///     graph.enable_columnar()  # auto-spills if over limit
-    ///     graph.set_memory_limit(None)  # disable limit
+    ///     graph.set_memory_limit(None)         # disable limit
     ///     ```
     #[pyo3(signature = (limit_bytes, spill_dir=None))]
     fn set_memory_limit(

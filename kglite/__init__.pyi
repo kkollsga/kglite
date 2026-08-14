@@ -1411,21 +1411,6 @@ class KnowledgeGraph:
         """
         ...
 
-    @property
-    def is_columnar(self) -> bool:
-        """Whether node properties are stored in columnar format.
-
-        ``True`` after :meth:`enable_columnar`, after :meth:`save` — which
-        converts the live graph, since the ``.kgl`` format is columnar — and
-        for any graph that came from :func:`load` or :func:`open`.
-
-        Worth checking on a write-heavy graph: in columnar mode every mutating
-        statement re-images the column store of each type it writes, once per
-        statement, so single-row statements cost far more than the same updates
-        batched into one multi-row statement. See the primary-store guide.
-        """
-        ...
-
     # ====================================================================
     # Data Loading
     # ====================================================================
@@ -2389,8 +2374,8 @@ class KnowledgeGraph:
         With StableDiGraph, deletions leave holes in the internal storage.
         Over time, this wastes memory and degrades iteration performance.
         ``vacuum()`` rebuilds the graph with contiguous indices, then rebuilds
-        all indexes. If columnar storage is active, column stores are also
-        rebuilt to eliminate orphaned rows from deleted nodes.
+        all indexes, and rebuilds the property columns to drop the rows that
+        deleted nodes left behind.
 
         **Important**: This resets the current selection since node indices change.
         Call this between query chains, not in the middle of one.
@@ -2399,8 +2384,9 @@ class KnowledgeGraph:
             dict with keys:
                 - ``nodes_remapped``: Number of nodes that were remapped
                 - ``tombstones_removed``: Number of tombstone slots reclaimed
-                - ``columnar_rebuilt``: Whether the rebuild reclaimed columnar
-                  rows (rows left behind by deleted nodes)
+                - ``columnar_rebuilt``: Whether the pass actually dropped
+                  property-column rows left behind by deleted nodes (``False``
+                  for a vacuum that found nothing to reclaim)
 
         Example::
 
@@ -2585,10 +2571,14 @@ class KnowledgeGraph:
                 - ``library_version``: kglite version that last saved the graph
                 - ``user_schema_version``: your data-model revision (see
                   :attr:`schema_version`); ``0`` when unversioned
-                - ``columnar_heap_bytes``: Heap-resident bytes in columnar stores
-                - ``columnar_is_mapped``: Whether any columnar data is file-backed
+                - ``columnar_heap_bytes``: Heap-resident bytes in the property
+                  columns
+                - ``columnar_is_mapped``: Whether any property column is
+                  file-backed rather than heap-resident (after a spill, or on a
+                  graph opened from a file)
                 - ``memory_limit``: Configured memory limit (None if unset)
-                - ``columnar_total_rows``: Total rows in columnar stores (includes orphaned)
+                - ``columnar_total_rows``: Total property-column rows, including
+                  rows orphaned by deleted nodes
                 - ``columnar_live_rows``: Rows backed by live nodes
 
         Example::
@@ -3425,13 +3415,13 @@ class KnowledgeGraph:
         ...
 
     # ====================================================================
-    # Columnar Storage
+    # Storage Mode & Memory
     # ====================================================================
 
     def enable_disk_mode(self) -> None:
         """Convert the graph to disk-backed storage mode.
 
-        Enables columnar storage first (if not already), then builds
+        Consolidates the property columns first, then builds
         CSR (Compressed Sparse Row) edge arrays on disk. Nodes stay
         in memory (~40 bytes each), edges are mmap'd from disk.
 
@@ -3447,47 +3437,15 @@ class KnowledgeGraph:
         """
         ...
 
-    def enable_columnar(self) -> None:
-        """Convert node properties to columnar storage.
-
-        Properties are moved from per-node storage into per-type column
-        stores, reducing memory usage for homogeneous typed columns
-        (int64, float64, string, etc.). Automatically compacts properties
-        first if not already compacted.
-
-        Example::
-
-            graph.enable_columnar()
-            assert graph.is_columnar
-        """
-        ...
-
-    def disable_columnar(self) -> None:
-        """Move columnar properties back onto their nodes and drop the stores.
-
-        .. deprecated::
-           Properties are columnar from construction in every storage mode,
-           so this no longer exits a "write regime" — it only produces a
-           transient inline shape that the next :meth:`save` consolidates
-           straight back. It costs one pass over the nodes, uses more memory,
-           and buys nothing. Scheduled for removal.
-
-        Do not call it on a ``storage="mapped"`` graph or one with
-        :meth:`set_memory_limit` set — both depend on the column store, and
-        this materialises file-backed columns onto the heap.
-        """
-        ...
-
     def unspill(self) -> None:
-        """Move mmap-backed columnar data back to heap memory.
+        """Move mmap-backed property columns back to heap memory.
 
-        Useful after deleting nodes when you want data back in RAM for
-        faster access. Internally rebuilds every column store from the live
-        nodes with the memory limit temporarily suspended to prevent
-        re-spilling, so rows left behind by deleted nodes are reclaimed in
-        the same pass.
-
-        No-op if the graph is not in columnar mode.
+        Useful after a spill (see :meth:`set_memory_limit`), or after
+        deleting nodes when you want the data back in RAM for faster access.
+        Rebuilds every column from the live nodes with the memory limit
+        temporarily suspended to prevent re-spilling, so rows left behind by
+        deleted nodes are reclaimed in the same pass. The limit is restored
+        afterwards.
 
         Example::
 
@@ -3498,22 +3456,25 @@ class KnowledgeGraph:
         ...
 
     def set_memory_limit(self, limit_bytes: int | None, spill_dir: str | None = None) -> None:
-        """Configure automatic memory-pressure spill for columnar storage.
+        """Configure automatic memory-pressure spill for the property columns.
 
-        When a memory limit is set, :meth:`enable_columnar` will
-        automatically spill the largest column stores to temporary files
-        on disk when total heap usage exceeds the limit.
+        While a limit is set, the graph spills its largest column stores to
+        temporary files on disk whenever their total heap usage would exceed
+        it — checked after each write and at every consolidation point
+        (:meth:`save`, :meth:`vacuum`, :meth:`enable_disk_mode`).
+        :meth:`unspill` brings them back to the heap; the limit itself
+        survives that and is re-applied by the next write, so pass ``None``
+        first to keep them resident.
 
         Args:
-            limit_bytes: Maximum heap bytes for columnar data, or ``None``
+            limit_bytes: Maximum heap bytes for column data, or ``None``
                 to disable the limit.
             spill_dir: Directory for spill files. Defaults to system temp dir.
 
         Example::
 
             graph.set_memory_limit(500_000_000)  # 500 MB limit
-            graph.enable_columnar()  # auto-spills if over limit
-            graph.set_memory_limit(None)  # disable limit
+            graph.set_memory_limit(None)         # disable limit
         """
         ...
 
@@ -3621,10 +3582,9 @@ class KnowledgeGraph:
         processes saving the same path won't corrupt each other's in-flight
         write (last rename wins, cleanly — keep one writer per file).
 
-        Uses columnar storage internally for efficient compression and
-        larger-than-RAM loading. If the graph is not already in columnar
-        mode, ``save()`` enables it automatically (the graph stays columnar
-        after the call).
+        The property columns are consolidated on the way out — the same pass
+        that reclaims rows left behind by deleted nodes — which is what makes
+        the file compress well and load larger-than-RAM.
 
         Load it back with :func:`kglite.load` (accepts both files and
         directories).

@@ -128,7 +128,7 @@ fn sized_columnar(n: i64) -> DirGraph {
     let mut g = sized_rows(n);
     g.enable_columnar();
     assert!(
-        g.is_columnar(),
+        g.column_store_count() > 0,
         "fixture must own a master column store, or every arm below is vacuous"
     );
     assert!(
@@ -1048,7 +1048,7 @@ fn saving_a_freshly_built_graph_skips_the_rebuild() {
 
     let mut graph = docs_fixture();
     assert!(
-        graph.is_columnar(),
+        graph.column_store_count() > 0,
         "construction must already be columnar, or this test measures nothing"
     );
 

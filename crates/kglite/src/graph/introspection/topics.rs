@@ -888,15 +888,6 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"kglite.load(path)\">Restore from .kgl file.</method>\n");
     xml.push_str("  </group>\n");
 
-    // Columnar storage
-    xml.push_str("  <group name=\"columnar\">\n");
-    xml.push_str("    <method sig=\"enable_columnar()\">Convert properties to per-type columnar stores (lower memory).</method>\n");
-    xml.push_str("    <method sig=\"disable_columnar()\">Deprecated: moves properties back onto nodes; the next save() undoes it.</method>\n");
-    xml.push_str(
-        "    <method sig=\"is_columnar\">Property: True if columnar storage is active.</method>\n",
-    );
-    xml.push_str("  </group>\n");
-
     // Set operations
     xml.push_str("  <group name=\"set_ops\">\n");
     xml.push_str("    <method sig=\"union(other)\">Nodes in either selection.</method>\n");

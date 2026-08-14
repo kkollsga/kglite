@@ -215,8 +215,8 @@ def _reset(path: str) -> None:
 def _seeded_columnar_graph(path: str, arm: str) -> KnowledgeGraph:
     """A file-backed graph whose `Item` type already owns a column store.
 
-    `save()` is what populates `DirGraph.column_stores`, via `enable_columnar()`
-    (`io/file.rs:1495`) — and it also truncates the WAL back to its 5-byte
+    `save()` is what consolidates `DirGraph.column_stores` — and it also
+    truncates the WAL back to its 5-byte
     header (`wal.rs:557-566`), which is what makes the post-save sidecar size a
     clean zero point for the delta the cells measure.
     """

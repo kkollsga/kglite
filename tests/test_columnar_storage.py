@@ -1,8 +1,10 @@
-"""Integration tests for columnar property storage (Phase B).
+"""Integration tests for columnar property storage.
 
-Tests verify that enable_columnar() / disable_columnar() preserve
-property semantics across Cypher queries, mutations, save/load, and
-bulk operations.
+Every graph is columnar from construction, so what these pin is that the
+one shape carries property semantics correctly across Cypher queries,
+mutations, save/load, and bulk operations — and that a consolidation pass
+over the columns (``unspill()``, ``save()``) changes nothing an observer
+can see.
 """
 
 import os
@@ -58,59 +60,38 @@ def multi_type_graph():
     return kg
 
 
-# ── Basic enable/disable ─────────────────────────────────────────────────────
+# ── The one shape ────────────────────────────────────────────────────────────
 
 
 class TestColumnarBasic:
-    def test_enable_disable_flag(self, person_graph):
-        """A graph is columnar from construction; disable/enable still round-trips.
+    def test_columnar_from_construction(self, person_graph):
+        """A freshly built graph already holds its properties in columns.
 
-        The premise changed, not the mechanism: this used to open with
-        ``assert not person_graph.is_columnar``, because a freshly built graph
-        held row-shaped properties until its first save. Construction is
-        columnar in every storage mode now, so the flag starts True and what is
-        left to pin is that the explicit toggle still moves it both ways.
+        There is no flag to read and nothing to switch: ``graph_info()`` is
+        where the columns are observable, and it reports a row per live node
+        before the graph has ever been saved.
         """
-        assert person_graph.is_columnar
-        person_graph.disable_columnar()
-        assert not person_graph.is_columnar
-        person_graph.enable_columnar()
-        assert person_graph.is_columnar
-
-    def test_enable_idempotent(self, person_graph):
-        person_graph.enable_columnar()
-        person_graph.enable_columnar()  # second call should be safe
-        assert person_graph.is_columnar
-
-    def test_disable_on_non_columnar(self, person_graph):
-        person_graph.disable_columnar()
-        person_graph.disable_columnar()  # no-op, should not crash
-        assert not person_graph.is_columnar
+        info = person_graph.graph_info()
+        assert info["columnar_live_rows"] == 5
+        assert info["columnar_total_rows"] == 5
 
 
 # ── Property preservation ────────────────────────────────────────────────────
 
 
 class TestColumnarPropertyPreservation:
-    def test_all_properties_survive_enable(self, person_graph):
+    def test_all_properties_survive_consolidation(self, person_graph):
         before = person_graph.cypher(
             "MATCH (n:Person) RETURN n.full_name, n.age, n.score, n.active ORDER BY n.age"
         ).to_list()
 
-        person_graph.enable_columnar()
+        # `unspill()` is the public route to a full column rebuild — the same
+        # pass `save()` and `vacuum()` run.
+        person_graph.unspill()
 
         after = person_graph.cypher(
             "MATCH (n:Person) RETURN n.full_name, n.age, n.score, n.active ORDER BY n.age"
         ).to_list()
-        assert before == after
-
-    def test_roundtrip_enable_disable(self, person_graph):
-        before = person_graph.cypher("MATCH (n:Person) RETURN n.full_name, n.age, n.score ORDER BY n.age").to_list()
-
-        person_graph.enable_columnar()
-        person_graph.disable_columnar()
-
-        after = person_graph.cypher("MATCH (n:Person) RETURN n.full_name, n.age, n.score ORDER BY n.age").to_list()
         assert before == after
 
     def test_multi_type_properties(self, multi_type_graph):
@@ -120,7 +101,7 @@ class TestColumnarPropertyPreservation:
             "MATCH (n:Company) RETURN n.company_name, n.employees ORDER BY n.employees"
         ).to_list()
 
-        kg.enable_columnar()
+        kg.unspill()
 
         persons_after = kg.cypher("MATCH (n:Person) RETURN n.full_name, n.age ORDER BY n.age").to_list()
         companies_after = kg.cypher(
@@ -135,7 +116,6 @@ class TestColumnarPropertyPreservation:
 
 class TestColumnarCypher:
     def test_where_int_filter(self, person_graph):
-        person_graph.enable_columnar()
         result = person_graph.cypher(
             "MATCH (n:Person) WHERE n.age > 30 RETURN n.full_name ORDER BY n.full_name"
         ).to_list()
@@ -143,7 +123,6 @@ class TestColumnarCypher:
         assert names == ["Charlie", "Eve"]
 
     def test_where_float_filter(self, person_graph):
-        person_graph.enable_columnar()
         result = person_graph.cypher(
             "MATCH (n:Person) WHERE n.score >= 3.0 RETURN n.full_name ORDER BY n.full_name"
         ).to_list()
@@ -151,7 +130,6 @@ class TestColumnarCypher:
         assert names == ["Charlie", "Diana"]
 
     def test_where_bool_filter(self, person_graph):
-        person_graph.enable_columnar()
         result = person_graph.cypher(
             "MATCH (n:Person) WHERE n.active = true RETURN n.full_name ORDER BY n.full_name"
         ).to_list()
@@ -159,25 +137,21 @@ class TestColumnarCypher:
         assert names == ["Alice", "Charlie", "Diana"]
 
     def test_where_string_equals(self, person_graph):
-        person_graph.enable_columnar()
         result = person_graph.cypher("MATCH (n:Person) WHERE n.full_name = 'Bob' RETURN n.age").to_list()
         assert result == [{"n.age": 25}]
 
     def test_order_by_columnar(self, person_graph):
-        person_graph.enable_columnar()
         result = person_graph.cypher("MATCH (n:Person) RETURN n.full_name ORDER BY n.score DESC").to_list()
         names = [r["n.full_name"] for r in result]
         assert names == ["Diana", "Charlie", "Bob", "Alice", "Eve"]
 
     def test_aggregation_on_columnar(self, person_graph):
-        person_graph.enable_columnar()
         result = person_graph.cypher("MATCH (n:Person) RETURN count(n) AS cnt, avg(n.age) AS avg_age").to_list()
         assert result[0]["cnt"] == 5
         assert abs(result[0]["avg_age"] - 32.0) < 0.01
 
     def test_relationship_traversal_with_columnar(self, multi_type_graph):
         kg = multi_type_graph
-        kg.enable_columnar()
         result = kg.cypher(
             "MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN p.full_name, c.company_name ORDER BY p.full_name"
         ).to_list()
@@ -191,7 +165,6 @@ class TestColumnarCypher:
 
 class TestColumnarSaveLoad:
     def test_save_load_roundtrip(self, person_graph):
-        person_graph.enable_columnar()
         before = person_graph.cypher("MATCH (n:Person) RETURN n.full_name, n.age, n.score ORDER BY n.age").to_list()
 
         with tempfile.TemporaryDirectory() as td:
@@ -199,15 +172,13 @@ class TestColumnarSaveLoad:
             person_graph.save(fp)
             kg2 = kglite.load(fp)
 
-        # v3 files always load as columnar
-        assert kg2.is_columnar
+        assert kg2.graph_info()["columnar_live_rows"] == 5
 
         after = kg2.cypher("MATCH (n:Person) RETURN n.full_name, n.age, n.score ORDER BY n.age").to_list()
         assert before == after
 
     def test_save_load_multi_type(self, multi_type_graph):
         kg = multi_type_graph
-        kg.enable_columnar()
 
         with tempfile.TemporaryDirectory() as td:
             fp = os.path.join(td, "test.kgl")
@@ -222,7 +193,6 @@ class TestColumnarSaveLoad:
 
     def test_save_load_preserves_edges(self, multi_type_graph):
         kg = multi_type_graph
-        kg.enable_columnar()
 
         with tempfile.TemporaryDirectory() as td:
             fp = os.path.join(td, "test.kgl")
@@ -240,19 +210,16 @@ class TestColumnarSaveLoad:
 
 class TestColumnarMutations:
     def test_set_property_cypher(self, person_graph):
-        person_graph.enable_columnar()
         person_graph.cypher("MATCH (n:Person) WHERE n.full_name = 'Alice' SET n.age = 99")
         result = person_graph.cypher("MATCH (n:Person) WHERE n.full_name = 'Alice' RETURN n.age").to_list()
         assert result == [{"n.age": 99}]
 
     def test_set_new_property_cypher(self, person_graph):
-        person_graph.enable_columnar()
         person_graph.cypher("MATCH (n:Person) WHERE n.full_name = 'Bob' SET n.email = 'bob@test.com'")
         result = person_graph.cypher("MATCH (n:Person) WHERE n.full_name = 'Bob' RETURN n.email").to_list()
         assert result == [{"n.email": "bob@test.com"}]
 
     def test_remove_property_cypher(self, person_graph):
-        person_graph.enable_columnar()
         person_graph.cypher("MATCH (n:Person) WHERE n.full_name = 'Charlie' REMOVE n.score")
         result = person_graph.cypher("MATCH (n:Person) WHERE n.full_name = 'Charlie' RETURN n.score").to_list()
         assert result == [{"n.score": None}]
@@ -264,12 +231,11 @@ class TestColumnarMutations:
 class TestColumnarStats:
     def test_node_count_unchanged(self, person_graph):
         count_before = person_graph.cypher("MATCH (n:Person) RETURN count(n) AS c").to_list()[0]["c"]
-        person_graph.enable_columnar()
+        person_graph.unspill()
         count_after = person_graph.cypher("MATCH (n:Person) RETURN count(n) AS c").to_list()[0]["c"]
         assert count_before == count_after == 5
 
     def test_graph_info_with_columnar(self, person_graph):
-        person_graph.enable_columnar()
         info = person_graph.graph_info()
         assert info["node_count"] == 5
 
@@ -286,7 +252,7 @@ class TestV3Roundtrip:
         person_graph.save(fp)
 
         kg2 = kglite.load(fp)
-        assert kg2.is_columnar
+        assert kg2.graph_info()["columnar_live_rows"] == 5
         after = kg2.cypher("MATCH (n:Person) RETURN n.full_name, n.age, n.score ORDER BY n.age").to_list()
         assert before == after
 
@@ -296,7 +262,7 @@ class TestV3Roundtrip:
         multi_type_graph.save(fp)
 
         kg2 = kglite.load(fp)
-        assert kg2.is_columnar
+        assert kg2.graph_info()["columnar_live_rows"] == 5
         persons = kg2.cypher("MATCH (n:Person) RETURN n.full_name ORDER BY n.full_name").to_list()
         companies = kg2.cypher("MATCH (n:Company) RETURN n.company_name ORDER BY n.company_name").to_list()
         assert [r["n.full_name"] for r in persons] == ["Alice", "Bob", "Charlie"]
@@ -333,20 +299,21 @@ class TestV3Roundtrip:
             header = f.read(5)
         assert header == b"RGF\x06\x02"
 
-    def test_save_does_not_change_the_write_regime(self, person_graph, tmp_path):
+    def test_save_does_not_change_the_storage_shape(self, person_graph, tmp_path):
         """A graph is columnar before its first save, after it, and on reload.
 
         This used to be ``test_save_auto_columnar``: it asserted that save()
         *converted* a non-columnar graph, which is precisely the shape change
         the convergence programme removed. What survives is the round-trip —
-        the shape is the same on all three sides of a save/load.
+        the shape is the same on all three sides of a save/load, read through
+        the only place it is still observable.
         """
-        assert person_graph.is_columnar
+        assert person_graph.graph_info()["columnar_live_rows"] == 5
         fp = str(tmp_path / "auto.kgl")
         person_graph.save(fp)
-        assert person_graph.is_columnar
+        assert person_graph.graph_info()["columnar_live_rows"] == 5
         kg2 = kglite.load(fp)
-        assert kg2.is_columnar
+        assert kg2.graph_info()["columnar_live_rows"] == 5
 
 
 # ── Temp directory cleanup ────────────────────────────────────────────────────
@@ -369,7 +336,7 @@ class TestTempDirCleanup:
         baseline = set(glob.glob(pattern))
 
         kg2 = kglite.load(fp)
-        assert kg2.is_columnar
+        assert kg2.graph_info()["node_count"] == 5
         created = set(glob.glob(pattern)) - baseline
         assert created, f"Expected a new temp dir matching {pattern}"
 
@@ -394,7 +361,7 @@ class TestTempDirCleanup:
 
         for _ in range(5):
             kg = kglite.load(fp)
-            assert kg.is_columnar
+            assert kg.graph_info()["node_count"] == 5
             del kg
             gc.collect()
 
@@ -404,8 +371,8 @@ class TestTempDirCleanup:
 
 
 class TestIdTitleSentinel:
-    """enable_columnar() must null inline id/title once they live in the
-    column store, and disable_columnar() must restore them from the store.
+    """Consolidation nulls a node's inline id/title once they live in the
+    column store, and every later rebuild must read them back out of it.
 
     Regression guard for the topology-bloat bug: a default-mode build that
     saves directly used to serialize id/title twice (inline in the topology
@@ -479,17 +446,23 @@ class TestIdTitleSentinel:
                 "non-deterministic column/schema ordering regressed"
             )
 
-    def test_disable_columnar_preserves_ids_on_loaded_graph(self, tmp_path):
-        """disable_columnar() must not lose id/title for null-sentinel nodes."""
+    def test_rebuild_preserves_ids_on_loaded_graph(self, tmp_path):
+        """A column rebuild must not lose id/title for null-sentinel nodes.
+
+        A loaded node holds ``Null`` inline and gets its identity from the
+        store, so a rebuild that reads nodes rather than the store drops every
+        id silently. ``unspill()`` is the public rebuild; this used to run the
+        same assertion through ``disable_columnar()``.
+        """
         kg = kglite.KnowledgeGraph()
         kg.cypher("UNWIND range(1,500) AS i CREATE (:N {id:i, name:'n'+toString(i)})")
         fp = str(tmp_path / "g.kgl")
         kg.save(fp)
         loaded = kglite.load(fp)  # null-sentinel columnar nodes
-        loaded.disable_columnar()
+        loaded.unspill()
         res = loaded.cypher("MATCH (n:N) RETURN count(n) AS total, count(n.id) AS with_id")
         row = res.to_dicts()[0] if hasattr(res, "to_dicts") else res
         assert row["total"] == 500
-        assert row["with_id"] == 500, "disable_columnar dropped node ids"
+        assert row["with_id"] == 500, "the column rebuild dropped node ids"
         sample = loaded.cypher("MATCH (n:N) WHERE n.id = 7 RETURN n.id AS id, n.name AS nm").to_dicts()[0]
         assert sample["id"] == 7 and sample["nm"] == "n7"

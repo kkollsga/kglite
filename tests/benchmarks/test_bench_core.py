@@ -523,19 +523,20 @@ def bench_graph_columnar():
         }
     )
     graph.add_connections(edges, "LINKS", "Item", "from_id", "Item", "to_id", columns=["weight"])
-    graph.enable_columnar()
     return graph
 
 
 @pytest.mark.benchmark
 def test_bench_columnar_enable(benchmark, bench_graph):
-    """Time to convert from compact to columnar storage."""
+    """Time one full consolidation pass over the property columns.
 
-    def enable():
-        bench_graph.disable_columnar()
-        bench_graph.enable_columnar()
-
-    benchmark(enable)
+    The cell used to time a `disable_columnar()` / `enable_columnar()` round
+    trip. Both are gone with the regime; `unspill()` is the surviving public
+    route to the same rebuild, which is also what `save()` and `vacuum()` run.
+    Kept under its original name so the tracked cell set is unchanged — the
+    rename belongs with the baseline recapture.
+    """
+    benchmark(bench_graph.unspill)
 
 
 @pytest.mark.benchmark

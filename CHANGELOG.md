@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`enable_columnar()`, `disable_columnar()` and `is_columnar` are gone from
+  `KnowledgeGraph`.** They were the controls for a storage regime that no
+  longer exists: every graph is columnar from its first node, in every storage
+  mode, so there is nothing to enable, nothing to leave, and nothing to
+  interrogate. Calling any of them now raises `AttributeError`. There is no
+  replacement for `is_columnar` — the honest answer it would give is a
+  constant `True` — and none is provided; what a caller actually wanted from
+  it is in `graph_info()`, whose `columnar_total_rows`, `columnar_live_rows`,
+  `columnar_heap_bytes` and `columnar_is_mapped` keys report the columns'
+  size, occupancy and residency and are unchanged. For the two real
+  operations the pair was being used for: `unspill()` rebuilds the columns
+  heap-resident, reclaiming the rows deleted nodes left behind, and `vacuum()`
+  does the same as part of compacting the graph. `save()` still consolidates
+  on its way out, as it always did.
+
+  On the Rust side the same three go from `kglite::api`:
+  `DirGraph::disable_columnar` and `DirGraph::is_columnar` are deleted
+  outright, and `DirGraph::enable_columnar` becomes crate-internal — it is the
+  consolidation primitive `save()`, `vacuum()` and `enable_disk_mode()` run,
+  not a mode switch a caller has any reason to reach. A consumer that needs
+  the pass run reaches it through the operation that needs it: the new
+  `kglite::api::io::prepare_kgl_write(&mut Arc<DirGraph>)` does everything a
+  `.kgl` write needs done before its bytes exist (metadata stamp plus that
+  pass), and is what `save_graph` and the wheel's `to_bytes()` both now go
+  through — previously they each open-coded it, and only one of the two kept
+  the graph's copy-on-write lineage across the mutation. `NodeView::
+  properties_are_columnar` is crate-internal for the same reason. The C ABI is
+  unaffected: none of these were exported symbols.
+
 ### Fixed
 
 - **A copy of a spilled graph no longer writes into the original's columns.**
@@ -139,15 +170,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the RDF loader), and nothing persists it. No user-visible behaviour changes
   here; what changes is that the second layout can no longer be reached, so
   the defect classes that only appeared on one side of it cannot recur.
-- **`disable_columnar()` is deprecated in place and does nothing useful.**
-  Properties are columnar from construction in every storage mode, so the call
-  no longer leaves a "write regime" — it moves values back onto their nodes
-  into the transient staging form, which the next `save()` consolidates
-  straight back. It still round-trips correctly; it simply has no purpose, and
-  it is scheduled for removal. `unspill()` and `vacuum()`, which used to be
-  built on it, now rebuild their column stores directly: the same end state
-  (dead rows reclaimed, columns back on the heap) without materialising every
-  row onto its node on the way.
+- **`unspill()` and `vacuum()` rebuild their column stores directly.** Both
+  used to reach their end state by de-columnarizing the graph and immediately
+  re-consolidating it, which materialised every row onto its node only for the
+  very next pass to read it back off. They now do the rebuild in one pass, for
+  the same result: dead rows reclaimed, columns back on the heap, the memory
+  limit preserved.
 
 - **The `.kgl` container is now v6, and files this version saves cannot be read
   by kglite 0.15.14 or earlier.** This build reads both v6 and v5, so every
@@ -187,12 +215,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   columnar on every path and in every storage mode (Cypher `CREATE` and
   `MERGE`, `add_nodes` and every frame-shaped ingest built on it, WAL replay,
   the N-Triples loader), so a freshly built graph and a reloaded one are the
-  same shape and `is_columnar` reports `True` from the first node. `save()`
-  becomes a consolidation pass that a settled graph skips outright, rather than
-  a mandatory O(N) rebuild. `enable_columnar()` / `disable_columnar()` remain,
-  and remain meaningful — the pair is what reclaims the rows deleted nodes
-  leave behind and what brings a spilled store back to the heap — but neither
-  switches a mode any more.
+  same shape. `save()` becomes a consolidation pass that a settled graph skips
+  outright, rather than a mandatory O(N) rebuild, and the regime's public
+  controls are removed with the regime (see **Removed**).
 - **A node's title is written where the node's other values are.** A `SET
   n.title` / `SET n.name`, an `add_nodes` update or replace, and a connection
   title all used to write onto the node itself, leaving the column store's copy
