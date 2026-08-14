@@ -595,15 +595,26 @@ fn node_value_from_view(
     // used to yield nothing (D1 defect 1). The columnar completion pass
     // further down stays — it recovers schema-declared properties that the
     // row itself does not carry.
-    for (key, val) in node.property_pairs_named(&graph.interner) {
+    //
+    // Resolved key by key rather than through `property_pairs_named`: that
+    // allocates a `String` for every key including the four this loop drops,
+    // and it silently discards a pair whose key the interner cannot resolve —
+    // which is the one case the completion pass below cannot derive from the
+    // type's schema (see `unresolved_key`).
+    let mut unresolved_key = false;
+    for (ik, val) in node.property_pairs() {
+        let Some(key) = graph.interner.try_resolve(ik) else {
+            unresolved_key = true;
+            continue;
+        };
         if key == "id"
             || key == "title"
             || key == "type"
-            || crate::graph::schema::is_reserved_provenance_key(&key)
+            || crate::graph::schema::is_reserved_provenance_key(key)
         {
             continue;
         }
-        properties.insert(key, val);
+        properties.insert(key.to_string(), val);
     }
     // Cross-backend property completion.
     //
@@ -630,27 +641,19 @@ fn node_value_from_view(
         || node.id().into_owned(),
     );
     // Columnar completion: a property the *type* declares but this row does
-    // not carry as a stored column (a spatial virtual, an alias) is recovered
-    // from `node_type_metadata` through `resolve_node_property`. Keys the loop
-    // above already inserted are skipped, so this only ever adds.
+    // not carry as a stored column (a spatial virtual, a soft structural
+    // alias) is recovered through `resolve_node_property`. Keys the loop above
+    // already inserted are skipped, so this only ever adds.
     if node.properties_are_columnar() {
         if let Some(type_meta) = graph.get_node_type_metadata(&node_type) {
-            for prop_name in type_meta.keys() {
-                if prop_name == "id"
-                    || prop_name == "title"
-                    || prop_name == "type"
-                    || crate::graph::schema::is_reserved_provenance_key(prop_name)
-                {
-                    continue;
-                }
-                if properties.contains_key(prop_name) {
-                    continue;
-                }
-                let val = resolve_node_property(node, prop_name, graph);
-                if !matches!(val, Value::Null) {
-                    properties.insert(prop_name.clone(), val);
-                }
-            }
+            complete_from_type_schema(
+                &mut properties,
+                node,
+                &node_type,
+                type_meta,
+                graph,
+                unresolved_key,
+            );
         }
     }
     // Full label set (primary + secondaries), not just the primary type —
@@ -671,6 +674,103 @@ fn node_value_from_view(
         id: idx.index() as u32,
         labels,
         properties,
+    }
+}
+
+/// Recover the properties this row does not store but its **type** declares.
+///
+/// # Why this is not a walk over the declared keys
+///
+/// It used to be: for every key in `node_type_metadata[type]`, a full
+/// [`resolve_node_property`] (alias resolve → intern → store probe → soft-alias
+/// → spatial config) whose result was discarded whenever it came back `Null`.
+/// On a 30-declared / 5-populated type that is 25 discarded resolutions per
+/// materialised node — ~810 ns/node, and the pass runs for `RETURN n`,
+/// `properties(n)`, `keys(n)`, `n {.*}`, export and `describe`.
+///
+/// Which keys can actually produce something is a per-**type** fact. For a
+/// declared key `p` that this row does not already carry, `resolve_node_property`
+/// answers in exactly four ways:
+///
+/// 1. `p` is the type's `unique_id_field` / `node_title_field` alias → the
+///    identity value. Already inserted (with the same null-omission rule) by
+///    `insert_field_alias` above, which does not require `p` to be declared, so
+///    it is a strict superset of what this pass would add.
+/// 2. `p` is a soft structural alias (`name`, `label`, `node_type` — `type` is
+///    excluded by the filter below) → the title / type string.
+/// 3. `p` names a spatial virtual of this type → the synthesized Point / WKT.
+/// 4. Otherwise → the stored column value, or `Null`. A *stored* value is
+///    already in `properties`: `NodeView::property_pairs` enumerates every
+///    non-null column of the row, so anything `get_value` could find the loop
+///    above already inserted. A `Null` inserts nothing. Either way: no-op.
+///
+/// So only cases 2 and 3 need visiting, and both come from a fixed, tiny
+/// candidate set. Each candidate is still evaluated by `resolve_node_property`
+/// itself — the *set* narrows, the resolution does not, so precedence between
+/// stored value, soft alias and spatial virtual stays exactly where it was.
+///
+/// `unresolved_key` is case 4's one escape hatch: a column whose interned key
+/// the interner cannot resolve back to a name (a store attached from another
+/// graph) is dropped by the enumeration loop, so for that row a declared key
+/// *can* still be recovered from the store. The caller reports it and the walk
+/// falls back to the full declared set — correct, and off the common path.
+fn complete_from_type_schema(
+    properties: &mut std::collections::BTreeMap<String, Value>,
+    node: crate::graph::storage::NodeView<'_>,
+    node_type: &str,
+    type_meta: &HashMap<String, String>,
+    graph: &crate::graph::DirGraph,
+    unresolved_key: bool,
+) {
+    let complete = |properties: &mut std::collections::BTreeMap<String, Value>,
+                    prop_name: &String| {
+        if prop_name == "id"
+            || prop_name == "title"
+            || prop_name == "type"
+            || crate::graph::schema::is_reserved_provenance_key(prop_name)
+        {
+            return;
+        }
+        if properties.contains_key(prop_name) {
+            return;
+        }
+        let val = resolve_node_property(node, prop_name, graph);
+        if !matches!(val, Value::Null) {
+            properties.insert(prop_name.clone(), val);
+        }
+    };
+
+    if unresolved_key {
+        for prop_name in type_meta.keys() {
+            complete(properties, prop_name);
+        }
+        return;
+    }
+
+    // Case 2 — the soft structural aliases, if the type declares them.
+    for candidate in crate::graph::schema::SOFT_ALIAS_NAMES {
+        if let Some((declared, _)) = type_meta.get_key_value(candidate) {
+            complete(properties, declared);
+        }
+    }
+    // Case 3 — the type's spatial virtuals, if it declares a property under a
+    // virtual's name. (A type with no spatial config declares none of them, and
+    // the whole graph usually has no spatial config at all.)
+    if graph.spatial_configs.is_empty() {
+        return;
+    }
+    let Some(config) = graph.get_spatial_config(node_type) else {
+        return;
+    };
+    let named = config
+        .points
+        .keys()
+        .chain(config.shapes.keys())
+        .map(String::as_str);
+    for candidate in ["location", "geometry"].into_iter().chain(named) {
+        if let Some((declared, _)) = type_meta.get_key_value(candidate) {
+            complete(properties, declared);
+        }
     }
 }
 

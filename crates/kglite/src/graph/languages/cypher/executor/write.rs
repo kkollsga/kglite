@@ -1018,7 +1018,7 @@ fn create_node(
     graph.commit_unique_claims(&unique_claims, node_idx);
 
     // Ensure type metadata exists for this type (consistent with Python add_nodes API)
-    ensure_type_metadata(graph, &label, node_idx);
+    ensure_type_metadata(graph, &label);
 
     // Apply secondary labels from `CREATE (n:A:B:C)` patterns. The
     // first label is the primary type (set via NodeData::new_compact
@@ -1034,50 +1034,45 @@ fn create_node(
     Ok(node_idx)
 }
 
-/// Ensure type metadata exists for the given node type.
-/// Reads property types from the sample node and upserts them into graph metadata.
-/// This mirrors the behavior of the Python add_nodes() API in maintain.rs.
-fn ensure_type_metadata(
-    graph: &mut DirGraph,
-    node_type: &str,
-    sample_node_idx: petgraph::graph::NodeIndex,
-) {
-    // Read sample node properties for type inference. Arena guard: on the
-    // disk backend node_weight materializes into the query arena, which
-    // must run under a DiskQueryGuard (protocol in disk/graph.rs); no-op
-    // on memory/mapped backends. Scoped so the guard's borrow of
-    // graph.graph ends before the upsert below takes &mut.
-    let sample_props: HashMap<String, String> = {
-        let _arena_guard = graph.graph.begin_query();
-        match graph.graph.node_view(sample_node_idx) {
-            Some(node) => {
-                // Fast path: if the type's metadata already covers every property
-                // key on this node, there is nothing to add. The common case
-                // (homogeneous CREATE — enforced by the planner schema check) hits
-                // this for every node after the first, skipping the per-node
-                // HashMap build + upsert (key/type/node-type String allocations).
-                // Heterogeneous nodes (a key not yet seen) fall through to the
-                // full upsert, preserving behaviour exactly.
-                if let Some(existing) = graph.node_type_metadata.get(node_type) {
-                    if !existing.is_empty()
-                        && node
-                            .property_pairs_named(&graph.interner)
-                            .iter()
-                            .all(|(k, _)| existing.contains_key(k))
-                    {
-                        return;
-                    }
-                }
-                node.property_pairs_named(&graph.interner)
-                    .into_iter()
-                    .map(|(k, v)| (k, value_type_name(&v)))
-                    .collect()
-            }
-            None => return,
-        }
-    };
-
-    graph.upsert_node_type_metadata(node_type, sample_props);
+/// Give the created type an entry in `node_type_metadata`, so a type whose every
+/// CREATE carried no property still shows up in `describe()` / the saved schema
+/// (what the Python `add_nodes` API does in maintain.rs).
+///
+/// # This used to read the node back
+///
+/// It materialised the just-created row (`property_pairs_named` — a `Vec`, a
+/// `String` per key and a cloned `Value`, over *every column the type has*,
+/// ~12.9 ns per pre-existing column per created node) purely to ask which of its
+/// property keys the type had not registered yet.
+///
+/// `DirGraph::register_property_types` answers that question upstream, from the
+/// property map in hand, allocating nothing in the common case — and it runs
+/// inside `insert_node_routed` **after** `inject_provenance`, so it sees exactly
+/// the key set the row was written from. The read-back could therefore never
+/// find a key it had not already registered:
+///
+/// * the row's stored non-null keys are the in-hand non-null keys (a `Null`
+///   value stores no column, and `register_property_types` skips nulls for the
+///   same reason);
+/// * so the old fast path's "does the type already know every key on this node"
+///   test was, by then, always true — except when the type had *no* metadata
+///   entry at all, which is precisely the case where the node had no non-null
+///   properties for `register_property_types` to register (its early return
+///   creates no entry), and where the read-back's answer was the empty map.
+///
+/// What survived was the empty-entry creation, which is what this does. Type
+/// *inference* is `register_property_types`' job, and doing it from the in-hand
+/// values rather than a read-back is also what keeps disk correct: there the
+/// columnar store is not synced to the read side until the end of the clause, so
+/// the read-back saw no properties at all.
+fn ensure_type_metadata(graph: &mut DirGraph, node_type: &str) {
+    if graph.node_type_metadata.contains_key(node_type) {
+        return;
+    }
+    graph
+        .node_type_metadata_mut()
+        .entry(node_type.to_string())
+        .or_default();
 }
 
 /// Map a Value variant to its type name string (for SchemaNode property types).

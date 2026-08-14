@@ -144,6 +144,178 @@ class TestPropertiesKeysAliases:
         assert m == props
 
 
+@pytest.fixture
+def completion_graph():
+    """Every category the columnar projection-completion pass can recover, at once.
+
+    `Site` declares a wide column set from one seeded row; two later rows carry a
+    subset, so for them the type declares columns their row does not hold. The
+    declared set deliberately includes:
+
+    * the two **field aliases** (`siteid` -> id, `site_name` -> title), whose
+      values live in the node's identity fields rather than in `properties`;
+    * the three **soft structural aliases** (`name` -> title, `label` /
+      `node_type` -> the type string), which a row that stores them shadows
+      (KG-1) and a row that does not falls back to the structural value;
+    * four **spatial virtuals** (`location`, `geometry`, `anchor`, `outline`),
+      declared as ordinary string columns by the seed row and *also* configured
+      as spatial names, so a row without the stored value gets the synthesized
+      Point / WKT instead;
+    * a **reserved provenance key** (`updated_at`, via `auto_timestamp`), which
+      must stay out of `properties(n)` / `keys(n)` on every row;
+    * `extra`, a declared column no measured row carries and nothing recovers —
+      it must be absent, not null.
+    """
+    g = kglite.KnowledgeGraph()
+    g.define_schema({"nodes": {"Site": {"auto_timestamp": True}}})
+    seed = pd.DataFrame(
+        {
+            "siteid": [1000],
+            "site_name": ["Seed"],
+            "lat": [60.0],
+            "lon": [5.0],
+            "wkt": ["POINT(5 60)"],
+            "alat": [61.0],
+            "alon": [6.0],
+            "outline_wkt": ["POLYGON((0 0,1 0,1 1,0 0))"],
+            "name": ["seed-name"],
+            "label": ["seed-label"],
+            "node_type": ["seed-nt"],
+            "extra": [42],
+            "location": ["seed-loc"],
+            "geometry": ["seed-geom"],
+            "anchor": ["seed-anchor"],
+            "outline": ["seed-outline"],
+        }
+    )
+    g.add_nodes(seed, "Site", "siteid", "site_name")
+    sparse = pd.DataFrame(
+        {
+            "siteid": [1, 2],
+            "site_name": ["A", "B"],
+            "lat": [59.0, 58.0],
+            "lon": [10.0, 11.0],
+            "alat": [70.0, 71.0],
+            "alon": [20.0, 21.0],
+            "wkt": ["POINT(10 59)", "POINT(11 58)"],
+            "outline_wkt": ["POLYGON((1 1,2 1,2 2,1 1))", "POLYGON((3 3,4 3,4 4,3 3))"],
+        }
+    )
+    g.add_nodes(sparse, "Site", "siteid", "site_name")
+    g.set_spatial(
+        "Site",
+        location=("lat", "lon"),
+        geometry="wkt",
+        points={"anchor": ("alat", "alon")},
+        shapes={"outline": "outline_wkt"},
+    )
+    return g
+
+
+#: `properties(n)` for the sparse row `siteid = 1`, key by key. Nothing here is
+#: incidental: drop the soft-alias recovery and `label`/`name`/`node_type` go
+#: missing; drop the spatial recovery and `location`/`geometry`/`anchor`/
+#: `outline` do; stop filtering provenance and `updated_at` appears; complete
+#: from the row instead of the type and `extra` appears as null.
+SPARSE_EXPECTED = {
+    "id": 1,
+    "title": "A",
+    "type": "Site",
+    "siteid": 1,
+    "site_name": "A",
+    "lat": 59.0,
+    "lon": 10.0,
+    "alat": 70.0,
+    "alon": 20.0,
+    "wkt": "POINT(10 59)",
+    "outline_wkt": "POLYGON((1 1,2 1,2 2,1 1))",
+    "name": "A",
+    "label": "Site",
+    "node_type": "Site",
+    "location": {"latitude": 59.0, "longitude": 10.0},
+    "geometry": "POINT(10 59)",
+    "anchor": {"latitude": 70.0, "longitude": 20.0},
+    "outline": "POLYGON((1 1,2 1,2 2,1 1))",
+}
+
+#: `properties(n)` for the dense seed row — the same type, every declared column
+#: stored. Every soft alias and every spatial name is shadowed by its stored
+#: value (KG-1), so the completion pass must add *nothing* here.
+DENSE_EXPECTED = {
+    "id": 1000,
+    "title": "Seed",
+    "type": "Site",
+    "siteid": 1000,
+    "site_name": "Seed",
+    "lat": 60.0,
+    "lon": 5.0,
+    "alat": 61.0,
+    "alon": 6.0,
+    "wkt": "POINT(5 60)",
+    "outline_wkt": "POLYGON((0 0,1 0,1 1,0 0))",
+    "name": "seed-name",
+    "label": "seed-label",
+    "node_type": "seed-nt",
+    "extra": 42,
+    "location": "seed-loc",
+    "geometry": "seed-geom",
+    "anchor": "seed-anchor",
+    "outline": "seed-outline",
+}
+
+
+class TestColumnarProjectionCompletion:
+    """Exact output of the projection-completion pass, per category.
+
+    The pass recovers what a row does not store but its *type* declares. Its
+    cost used to be paid per materialized node over every declared key; the
+    recoverable set is a per-type fact, so it is now derived from the type's
+    schema instead. These cells pin the output that equivalence has to hold —
+    they are byte-exact dict comparisons on purpose: a category silently
+    dropped from the derivation is a key silently missing from `properties(n)`,
+    which no subset assertion would catch.
+    """
+
+    def test_sparse_row_properties_are_exact(self, completion_graph):
+        props = completion_graph.cypher("MATCH (n:Site {siteid: 1}) RETURN properties(n) AS p").to_list()[0]["p"]
+        assert props == SPARSE_EXPECTED
+
+    def test_dense_row_properties_are_exact(self, completion_graph):
+        props = completion_graph.cypher("MATCH (n:Site {siteid: 1000}) RETURN properties(n) AS p").to_list()[0]["p"]
+        assert props == DENSE_EXPECTED
+
+    def test_declared_but_unrecoverable_column_stays_absent(self, completion_graph):
+        """`extra` is declared by the type and carried by no sparse row.
+
+        It must be *absent*, not present-and-null: a completion pass that
+        inserted every declared key would change what `keys(n)` reports.
+        """
+        keys = completion_graph.cypher("MATCH (n:Site {siteid: 2}) RETURN keys(n) AS k").to_list()[0]["k"]
+        assert "extra" not in keys
+        assert "updated_at" not in keys, "reserved provenance keys stay out of the materialised value"
+
+    @pytest.mark.parametrize("siteid,expected", [(1, SPARSE_EXPECTED), (1000, DENSE_EXPECTED)])
+    def test_every_materialisation_route_agrees(self, completion_graph, siteid, expected):
+        """`properties(n)`, `keys(n)`, `RETURN n` and `n {.*}` share one pass."""
+        g = completion_graph
+        props = g.cypher(f"MATCH (n:Site {{siteid: {siteid}}}) RETURN properties(n) AS p").to_list()[0]["p"]
+        keys = g.cypher(f"MATCH (n:Site {{siteid: {siteid}}}) RETURN keys(n) AS k").to_list()[0]["k"]
+        node = g.cypher(f"MATCH (n:Site {{siteid: {siteid}}}) RETURN n").to_list()[0]["n"]
+        star = g.cypher(f"MATCH (n:Site {{siteid: {siteid}}}) RETURN n {{.*}} AS m").to_list()[0]["m"]
+        assert props == expected
+        assert sorted(keys) == sorted(expected)
+        assert node["properties"] == expected
+        assert star == expected
+
+    def test_completion_survives_save_load(self, completion_graph, tmp_path):
+        """The pass reads the type's declared schema, which round-trips."""
+        path = str(tmp_path / "completion.kgl")
+        completion_graph.save(path)
+        reloaded = kglite.load(path)
+        props = reloaded.cypher("MATCH (n:Site {siteid: 1}) RETURN properties(n) AS p").to_list()[0]["p"]
+        assert props == SPARSE_EXPECTED
+
+
 class TestFilterAliasResolution:
     """Fluent API where() should resolve original column names."""
 

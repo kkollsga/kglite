@@ -1354,3 +1354,40 @@ mod alias_index_maintenance_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod soft_alias_names_tests {
+    use super::*;
+
+    /// [`SOFT_ALIAS_NAMES`] and [`soft_alias_fallback`] are two views of one
+    /// fact, and a projection that completes from the *list* while resolution
+    /// reads the *match* would silently stop recovering a name that fell out of
+    /// sync. Both directions are checked: every listed name classifies, and
+    /// nothing outside the list does (over the property names an engine
+    /// actually sees — the identity fields, and the structural names' near
+    /// misses).
+    #[test]
+    fn soft_alias_names_match_the_classifier() {
+        for name in SOFT_ALIAS_NAMES {
+            assert!(
+                soft_alias_fallback(name).is_some(),
+                "{name} is listed as a soft alias but does not classify as one"
+            );
+        }
+        for name in [
+            "id",
+            "title",
+            "names",
+            "Name",
+            "labels",
+            "nodetype",
+            "node_types",
+            "",
+        ] {
+            assert!(
+                soft_alias_fallback(name).is_none(),
+                "{name} classifies as a soft alias but is not listed in SOFT_ALIAS_NAMES"
+            );
+        }
+    }
+}

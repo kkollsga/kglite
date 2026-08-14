@@ -777,6 +777,62 @@ fn test_create_creates_type_metadata() {
 }
 
 #[test]
+fn create_registers_type_metadata_without_reading_the_row_back() {
+    // What `ensure_type_metadata` still owes after it stopped materialising the
+    // created row: the *entry*, for a type no property ever registers, and the
+    // per-key type strings, which `register_property_types` now provides alone.
+    fn run(g: &mut DirGraph, q: &str) {
+        let query = parser::parse_cypher(q).unwrap();
+        execute_mutable(
+            g,
+            &query,
+            HashMap::new(),
+            crate::graph::algorithms::Interrupt::default(),
+        )
+        .unwrap_or_else(|e| panic!("query failed: {q}: {e}"));
+    }
+
+    let mut graph = DirGraph::new();
+    // A type whose only CREATE carries nothing to register. Without an explicit
+    // entry it would be absent from `describe()` and from the saved schema even
+    // though the graph holds its nodes.
+    run(&mut graph, "CREATE (:Bare)");
+    let bare = graph
+        .get_node_type_metadata("Bare")
+        .expect("a property-less CREATE must still declare its type");
+    assert!(
+        bare.is_empty(),
+        "nothing was written, so nothing should be declared: {bare:?}"
+    );
+
+    // Heterogeneous CREATEs into one type: the second node's key is not covered
+    // by the first node's registration, which is the case the read-back existed
+    // to catch.
+    run(&mut graph, "CREATE (:Mixed {a: 1})");
+    run(&mut graph, "CREATE (:Mixed {b: 'two', c: 3.5})");
+    let mixed = graph
+        .get_node_type_metadata("Mixed")
+        .expect("Mixed declared");
+    assert_eq!(mixed.get("a").map(String::as_str), Some("Int64"));
+    assert_eq!(mixed.get("b").map(String::as_str), Some("String"));
+    assert_eq!(mixed.get("c").map(String::as_str), Some("Float64"));
+
+    // A null-valued property carries no type evidence and registers nothing —
+    // the row stores no column for it either, so the read-back never saw it.
+    run(&mut graph, "CREATE (:Mixed {d: null})");
+    assert!(
+        !mixed_after(&graph).contains_key("d"),
+        "a null property must not declare a column type"
+    );
+
+    fn mixed_after(g: &DirGraph) -> std::collections::HashMap<String, String> {
+        g.get_node_type_metadata("Mixed")
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+#[test]
 fn test_merge_updates_indices() {
     let mut graph = build_test_graph();
     graph.create_index("Person", "age");

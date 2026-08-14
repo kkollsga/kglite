@@ -218,6 +218,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is the remaining term); a 30-column `CREATE` batch 3.94/3.95 → 3.82/3.85 ms.
   Nothing about stored bytes or result ordering changes — none of these maps
   reaches a file in hash order.
+- **Materialising a node no longer walks its type's whole declared schema.**
+  `RETURN n`, `properties(n)`, `keys(n)`, `n {.*}` and the exporters complete a
+  node's properties with what its *type* declares but its row does not store —
+  a spatial virtual, a structural `name`/`label`/`node_type`. That completion
+  used to be attempted for every declared property of the type, on every
+  materialised node, with a full property resolution (alias lookup, key
+  interning, store probe, spatial config) whose answer was discarded whenever
+  it came back null: on a type declaring 30 columns of which a row carries 5,
+  25 discarded resolutions per node. Which properties can be recovered is a
+  fact about the *type*, not the row, so the pass now visits only the names
+  that can produce something and resolves those exactly as before. Output is
+  unchanged, key for key, including on the sparse rows, alias columns, spatial
+  virtuals and provenance keys that a new lockstep test pins. Measured
+  (release, min of two runs, 20k nodes): `properties(n)` on a 30-declared /
+  5-populated type **34.0/33.8 ms → 9.9/9.5 ms (3.5×)**, which is 1.18–1.22×
+  the same query on 0.15.14 rather than the 3.5× it was; `keys(n)` on a
+  fully populated 30-column type **60.5/60.5 ms → 43.2/43.0 ms (−29%)**, now
+  at or just under 0.15.14. (`keys(n)` still materialises every value to
+  return names — that cost is untouched here and is the bulk of what remains.)
+- **`CREATE` no longer reads the node back to see which property types the
+  type has registered.** Each created node materialised its own freshly written
+  row — allocating a vector, a key string and a cloned value for *every column
+  the type has*, not every column the node carries — to answer a question the
+  create path already answers from the values in hand before the write. The
+  read-back is gone; property-type registration and the type's own declaration
+  are unchanged, and so is what `describe()` and the saved schema report for a
+  type created with no properties at all. Measured (release, min of two runs):
+  5,000 two-property nodes created into a 30-column type **3.80/3.83 ms →
+  3.20/3.17 ms (−16%)**.
 
 ### Removed
 

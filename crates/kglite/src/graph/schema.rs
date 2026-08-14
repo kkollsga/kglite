@@ -1195,6 +1195,13 @@ pub enum SoftAliasFallback {
     TypeString,
 }
 
+/// Every name [`soft_alias_fallback`] answers `Some` for — the enumerated form
+/// of the match below, for callers that need to go the other way and ask which
+/// property names *could* resolve structurally (projection completion asks
+/// exactly that, per type rather than per node). Kept adjacent to the match it
+/// mirrors, and pinned in lockstep by `soft_alias_names_match_the_classifier`.
+pub const SOFT_ALIAS_NAMES: [&str; 4] = ["name", "type", "node_type", "label"];
+
 /// Classify a (post-alias) property name as a soft structural alias, or
 /// `None` for a normal property / identity field. Single source of truth so
 /// every resolution path (RETURN, WHERE, inline-map, EXISTS, disk fast path)
