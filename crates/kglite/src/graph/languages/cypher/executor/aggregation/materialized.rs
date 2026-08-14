@@ -419,18 +419,7 @@ impl<'a> CypherExecutor<'a> {
                         if matches!(val, Value::Null) {
                             continue;
                         }
-                        min_val = Some(match min_val {
-                            None => val,
-                            Some(current) => {
-                                if crate::graph::core::filtering::total_order(&val, &current)
-                                    == std::cmp::Ordering::Less
-                                {
-                                    val
-                                } else {
-                                    current
-                                }
-                            }
-                        });
+                        min_val = fold_extremum(min_val, val, std::cmp::Ordering::Less);
                     }
                     Ok(min_val.unwrap_or(Value::Null))
                 }
@@ -442,18 +431,7 @@ impl<'a> CypherExecutor<'a> {
                         if matches!(val, Value::Null) {
                             continue;
                         }
-                        max_val = Some(match max_val {
-                            None => val,
-                            Some(current) => {
-                                if crate::graph::core::filtering::total_order(&val, &current)
-                                    == std::cmp::Ordering::Greater
-                                {
-                                    val
-                                } else {
-                                    current
-                                }
-                            }
-                        });
+                        max_val = fold_extremum(max_val, val, std::cmp::Ordering::Greater);
                     }
                     Ok(max_val.unwrap_or(Value::Null))
                 }
@@ -1014,4 +992,19 @@ impl<'a> CypherExecutor<'a> {
 
         Ok(Some(results))
     }
+}
+
+/// Fold `val` into the running extremum under the total cross-type order
+/// (`filtering::total_order`) — `Less` keeps minima, `Greater` maxima.
+fn fold_extremum(acc: Option<Value>, val: Value, keep: std::cmp::Ordering) -> Option<Value> {
+    Some(match acc {
+        None => val,
+        Some(current) => {
+            if crate::graph::core::filtering::total_order(&val, &current) == keep {
+                val
+            } else {
+                current
+            }
+        }
+    })
 }

@@ -217,8 +217,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/aggregation/materialized.rs",
       "qualified_name": "crate::CypherExecutor<'a>::evaluate_aggregate_with_rows",
-      "lines": 468,
-      "branches": 139,
+      "lines": 452,
+      "branches": 133,
       "nesting": 8
     },
     {
