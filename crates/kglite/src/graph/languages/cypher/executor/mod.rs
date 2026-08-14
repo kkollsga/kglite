@@ -904,6 +904,7 @@ pub mod rule_procedures;
 pub mod scalar_functions;
 pub(crate) mod schema_ddl;
 mod schema_procedures;
+mod set_row;
 pub mod shortest_path;
 pub mod spatial_join;
 pub mod stream;

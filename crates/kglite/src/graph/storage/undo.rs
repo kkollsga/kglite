@@ -104,6 +104,29 @@ thread_local! {
     /// without this counter the write path's journal cost would be
     /// unobservable in either direction.
     static JOURNAL_COLUMNAR_CELLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// Columnar **row-append** pre-images pushed into an undo journal since the
+    /// last reset.
+    ///
+    /// The sibling of `JOURNAL_COLUMNAR_CELLS` for the create path, and the
+    /// only counter that can see its cost model: an append pre-image holds a
+    /// row count and an `Arc<TypeSchema>` clone, so capturing one per created
+    /// node instead of one per `(statement, type)` is invisible to the cell
+    /// counter (a `CREATE` writes no cells), to `COLUMN_STORE_CLONES` (the
+    /// schema `Arc` is not the store) and to `JOURNAL_NODE_PRE_IMAGES`.
+    static JOURNAL_COLUMNAR_APPENDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_journal_columnar_appends() {
+    JOURNAL_COLUMNAR_APPENDS.set(0);
+}
+
+/// Columnar row-append pre-images journalled on this thread since the last
+/// reset.
+#[cfg(test)]
+pub(crate) fn journal_columnar_appends() -> usize {
+    JOURNAL_COLUMNAR_APPENDS.get()
 }
 
 #[cfg(test)]
@@ -404,6 +427,8 @@ impl ColumnarAppendPreImage {
         node_type: InternedKey,
         store_was_new: bool,
     ) {
+        #[cfg(test)]
+        JOURNAL_COLUMNAR_APPENDS.set(JOURNAL_COLUMNAR_APPENDS.get() + 1);
         journal.entries.push(UndoEntry::ColumnarRowsAppended {
             node_type,
             prior_row_count: self.row_count,
@@ -432,6 +457,11 @@ pub struct UndoJournal {
     weighed_nodes: FxHashSet<NodeIndex>,
     /// Edge counterpart of `weighed_nodes`.
     weighed_edges: FxHashSet<EdgeIndex>,
+    /// Node types whose columnar **append** pre-image this statement has
+    /// already captured — the row-append analogue of `weighed_nodes`, and for
+    /// the same reason: the first capture is the only one that carries the
+    /// pre-statement state.
+    appended_types: FxHashSet<InternedKey>,
 }
 
 impl UndoJournal {
@@ -469,6 +499,25 @@ impl UndoJournal {
                 self.entries.push(UndoEntry::NodeWeight { idx, prior });
             }
         }
+    }
+
+    /// Claim the columnar append pre-image for `node_type`: `true` on the
+    /// statement's first row append into that type's store, `false` after.
+    ///
+    /// **Why first-wins is the whole undo.** `ColumnarRowsAppended` restores
+    /// *absolutely* — truncate to `prior_row_count`, restore `prior_schema`,
+    /// drop the store when it was new — and reverse replay runs the earliest
+    /// capture last, so the end state a statement rolls back to is decided by
+    /// the first entry per type and by nothing after it. Every later entry
+    /// names an intermediate row count that the first one then overrides. One
+    /// per created node was therefore one journal entry (and one schema `Arc`
+    /// clone) per node to describe a state already described.
+    ///
+    /// The dual of `note_node_weight`'s laziness: capture the pre-image on
+    /// first touch, skip it thereafter.
+    #[inline]
+    pub fn claim_columnar_append(&mut self, node_type: InternedKey) -> bool {
+        self.appended_types.insert(node_type)
     }
 
     /// The node at `idx` was removed, carrying `prior` out with it.

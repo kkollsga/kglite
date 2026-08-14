@@ -243,6 +243,57 @@ fn indexed_graph_rolls_back_without_copying_the_graph() {
     );
 }
 
+/// The control every indexed arm in this file depends on: a **committed**
+/// multi-row `SET` really does move the nodes between index buckets.
+///
+/// Without it, the rollback arms below would keep passing if `SET` stopped
+/// maintaining indexes altogether — a no-op write is trivially restorable. The
+/// arm exists because P6 put the maintenance call behind a statement-scoped
+/// "does this type carry an index" answer, and getting that answer wrong is
+/// silent: the index keeps serving its stale buckets and `try_index_lookup`
+/// consults them with no version check, so an indexed `MATCH` returns the old
+/// rows and nothing anywhere reports an error.
+#[test]
+fn a_committed_set_moves_every_row_between_index_buckets() {
+    let mut graph = seeded_indexed();
+    assert_eq!(
+        index_bucket(&graph, "qty", Value::Int64(10)).len(),
+        1,
+        "precondition: Item 1 sits in the qty=10 bucket"
+    );
+
+    // Every row of the type, so the memo's second and later rows are covered
+    // too — a memo that answered only the first row correctly would leave the
+    // rest of the bucket stale.
+    run(&mut graph, "MATCH (n:Item) SET n.qty = 77");
+
+    assert!(
+        index_bucket(&graph, "qty", Value::Int64(10)).is_empty(),
+        "the vacated bucket must be empty"
+    );
+    assert_eq!(
+        index_bucket(&graph, "qty", Value::Int64(77)).len(),
+        3,
+        "all three Items must have joined the new bucket"
+    );
+    assert_eq!(
+        range_bucket(&graph, "qty", Value::Int64(77)).len(),
+        3,
+        "the range index is maintained by separate code and must move too"
+    );
+    assert_eq!(
+        graph
+            .lookup_by_composite_index(
+                "Item",
+                &["name".to_string(), "qty".to_string()],
+                &[Value::String("a".to_string()), Value::Int64(77)],
+            )
+            .map(|members| members.len()),
+        Some(1),
+        "and so must the composite index"
+    );
+}
+
 /// The bucket-order case the position journal exists for.
 ///
 /// `Item` 1 and 3 share a `qty` after the setup write, so that bucket holds

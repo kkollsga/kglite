@@ -21,6 +21,40 @@ use crate::graph::storage::undo::BucketId;
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 
+#[cfg(test)]
+thread_local! {
+    /// Incremental-maintenance passes that ran past the "this type carries no
+    /// user index" gate since the last reset.
+    ///
+    /// The fifth member of the oracle family (`BACKEND_CLONE_NODES`,
+    /// `JOURNAL_NODE_PRE_IMAGES`, `COLUMN_STORE_CLONES`, `SCHEMA_MAP_FORKS`),
+    /// and the only one that can see this cost: maintenance on an index-free
+    /// type clones no backend, journals nothing, forks no schema map and
+    /// allocates only transiently, so every existing counter reads the same
+    /// whether the walk runs or returns immediately. What it cost was a value
+    /// read-back, three `String` allocations and four hash misses **per written
+    /// row** — ~23% of every `SET` on a graph with no indexes at all.
+    static INDEX_MAINTENANCE_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_index_maintenance_passes() {
+    INDEX_MAINTENANCE_PASSES.set(0);
+}
+
+/// Incremental index-maintenance passes on this thread since the last reset.
+#[cfg(test)]
+pub(crate) fn index_maintenance_passes() -> usize {
+    INDEX_MAINTENANCE_PASSES.get()
+}
+
+/// Count one maintenance pass that got past the no-index gate.
+#[inline]
+fn note_maintenance_pass() {
+    #[cfg(test)]
+    INDEX_MAINTENANCE_PASSES.set(INDEX_MAINTENANCE_PASSES.get() + 1);
+}
+
 /// One property name, pre-resolved and pre-interned for a per-node read loop.
 ///
 /// Built once by [`DirGraph::property_reader`], then handed to
@@ -446,13 +480,7 @@ impl DirGraph {
         if self.unique_indices.keys().any(|(nt, _)| nt == node_type) {
             return false;
         }
-        let covered = self
-            .property_indices
-            .keys()
-            .chain(self.range_indices.keys())
-            .any(|(nt, _)| nt == node_type)
-            || self.composite_indices.keys().any(|(nt, _)| nt == node_type);
-        if !covered {
+        if !self.type_has_user_indexes(node_type) {
             // Nothing to maintain — and nothing for the rebuild to do either.
             return true;
         }
@@ -764,6 +792,10 @@ impl DirGraph {
     /// Update property, composite, and range indices after a new node is added.
     /// Only updates indices that already exist for this node_type.
     pub fn update_property_indices_for_add(&mut self, node_type: &str, node_idx: NodeIndex) {
+        if !self.type_has_user_indexes(node_type) {
+            return;
+        }
+        note_maintenance_pass();
         for property in self.single_value_indexed_properties(node_type) {
             let Some(value) = self.indexed_value(node_type, &property, node_idx) else {
                 continue;
@@ -832,6 +864,36 @@ impl DirGraph {
         }
     }
 
+    /// Whether `node_type` carries any of the three index families incremental
+    /// maintenance edits — hash equality, range, composite.
+    ///
+    /// The gate on every incremental updater. A graph with no indexes at all
+    /// answers in three `is_empty` checks; one with indexes on *other* types
+    /// pays a scan of the (small) key sets, which is still per write rather
+    /// than per index bucket.
+    ///
+    /// Unique constraints are deliberately **not** consulted: their occupancy
+    /// lives in `unique_indices`, is planned before the write and redeemed
+    /// after it (`constraints::plan_property_write` /
+    /// `apply_property_write_plan`), and is never touched by the updaters this
+    /// gates. Disk-backed persistent `PropertyIndex` stores are out of scope
+    /// for the same reason as in [`Self::refresh_indexes_for_type`] — they
+    /// never land in `property_indices`, so the updaters cannot see them
+    /// either.
+    pub(crate) fn type_has_user_indexes(&self, node_type: &str) -> bool {
+        if self.property_indices.is_empty()
+            && self.range_indices.is_empty()
+            && self.composite_indices.is_empty()
+        {
+            return false;
+        }
+        self.property_indices
+            .keys()
+            .chain(self.range_indices.keys())
+            .any(|(nt, _)| nt == node_type)
+            || self.composite_indices.keys().any(|(nt, _)| nt == node_type)
+    }
+
     /// Whether a write spelled `property` left the field every index on
     /// `node_type` is built from untouched.
     ///
@@ -865,9 +927,15 @@ impl DirGraph {
         old_value: Option<&Value>,
         new_value: &Value,
     ) {
+        // Nothing to move the node between: no bucket edit, and therefore no
+        // value read-back, no resolved-field `String`, no key set to build.
+        if !self.type_has_user_indexes(node_type) {
+            return;
+        }
         if self.write_bypasses_indexed_fields(node_type, property) {
             return;
         }
+        note_maintenance_pass();
         // The value that actually landed, read the way a rebuild reads it, so
         // storage that keeps the authoritative copy elsewhere (a columnar
         // master, the node's id/title fields) buckets the node under what a
@@ -903,9 +971,13 @@ impl DirGraph {
         property: &str,
         old_value: &Value,
     ) {
+        if !self.type_has_user_indexes(node_type) {
+            return;
+        }
         if self.write_bypasses_indexed_fields(node_type, property) {
             return;
         }
+        note_maintenance_pass();
         let field = self.resolve_alias(node_type, property).to_string();
         for indexed_as in self.index_keys_for_field(node_type, &field) {
             let key = (node_type.to_string(), indexed_as);

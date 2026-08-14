@@ -247,6 +247,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type created with no properties at all. Measured (release, min of two runs):
   5,000 two-property nodes created into a 30-column type **3.80/3.83 ms →
   3.20/3.17 ms (−16%)**.
+- **A multi-row `SET` resolves the facts about its node type once, not once per
+  row — and a type with no index no longer pays for index maintenance at all.**
+  Two costs, both per written row, both about the `(type, property)` pair rather
+  than the row: the write re-derived the type's name, its `updated_at` opt-in
+  and its schema-key registration, and handed
+  `node_type_metadata` a freshly built map naming a property type it had
+  recorded on the previous row; and incremental index maintenance ran in full on
+  types carrying no property, range or composite index — a value read-back, a
+  resolved-field string and a hash probe per index family, to edit maps holding
+  no key for the type. A statement now answers each question once and skips
+  maintenance (and the old-value read that only maintenance consumes) for a type
+  that has nothing to maintain. Index contents, bucket order, unique-constraint
+  occupancy and the property catalogue are unchanged — including the
+  last-write-wins type name a `SET` whose rows carry mixed value types leaves
+  behind. Measured (release, min of two runs) on a 100k-row `SET` over a type
+  with no index: **40.8/43.1 ms → 22.0/22.1 ms**, i.e. 408/431 → 220/221 ns per
+  row.
+- **A multi-node `CREATE` journals one row-append pre-image per node type, not
+  one per node.** The undo for appended columnar rows is absolute — truncate the
+  type's store back to the row count the statement started at — so the first
+  capture is the whole story and every later one described an intermediate state
+  the first then overrode, at a journal entry and a schema-`Arc` clone per
+  created node. Rollback is unchanged and now pinned by tests that a
+  last-capture-wins dedup fails: a failed `CREATE` of several nodes of a brand
+  new type leaves no store, no bucket and no metadata behind, and one into an
+  existing type truncates to its pre-statement row count exactly.
 
 ### Removed
 

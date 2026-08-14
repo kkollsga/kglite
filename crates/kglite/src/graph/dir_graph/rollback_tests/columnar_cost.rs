@@ -220,6 +220,122 @@ fn two_columnar_writes_in_one_statement_both_land() {
     );
 }
 
+/// A multi-node `CREATE` journals **one** append pre-image per type, not one
+/// per created node.
+///
+/// The append undo is absolute — truncate the type's store back to the row
+/// count the statement started at — so the first capture is the whole story and
+/// every later one describes an intermediate state the first then overrides.
+/// One per node meant one journal entry *and one `Arc<TypeSchema>` clone* per
+/// created node (~4% of `CREATE`), all of it redundant.
+///
+/// Two types in one statement is the second axis: the dedup is per `(statement,
+/// type)`, so a statement touching two stores must capture two pre-images — a
+/// per-*statement* dedup would read 1 here and lose the second type's undo
+/// entirely.
+#[test]
+fn a_multi_node_create_journals_one_append_pre_image_per_type() {
+    use crate::graph::storage::undo::{journal_columnar_appends, reset_journal_columnar_appends};
+
+    let mut graph = wide_columnar();
+
+    reset_journal_columnar_appends();
+    run(
+        &mut graph,
+        "CREATE (:Item {id: 900, name: 'x', qty: 1}), \
+                (:Item {id: 901, name: 'y', qty: 2}), \
+                (:Item {id: 902, name: 'z', qty: 3})",
+    );
+    assert_eq!(
+        journal_columnar_appends(),
+        1,
+        "three rows appended to one type must journal one append pre-image"
+    );
+
+    reset_journal_columnar_appends();
+    run(
+        &mut graph,
+        "CREATE (:Item {id: 910, name: 'p', qty: 1}), \
+                (:Item {id: 911, name: 'q', qty: 2}), \
+                (:Widget {id: 1, name: 'w'}), (:Widget {id: 2, name: 'v'})",
+    );
+    assert_eq!(
+        journal_columnar_appends(),
+        2,
+        "two types must journal one append pre-image each — a per-statement \
+         dedup would drop the second type's undo"
+    );
+}
+
+/// The dedup's correctness half: a failed statement that created several nodes
+/// of a **brand-new type** must leave no trace of the type at all.
+///
+/// This is the arm that fails if the dedup keeps the *last* pre-image instead
+/// of the first: the last one names `prior_row_count = N-1` and
+/// `store_was_new = false`, so the replay would truncate to N-1 rows and leave
+/// an all-but-one-row store — and the type — behind.
+#[test]
+fn a_failed_multi_node_create_of_a_new_type_rolls_back_to_nothing() {
+    let mut graph = wide_columnar();
+    assert!(
+        graph.column_store("Batch").is_none(),
+        "precondition: the type must not exist yet, or this is vacuous"
+    );
+
+    assert_rolls_back(
+        &mut graph,
+        "CREATE (:Batch {id: 1, name: 'a', qty: 1}), \
+                (:Batch {id: 2, name: 'b', qty: 2}), \
+                (:Batch {id: 3, name: 'c', qty: 3}) \
+         WITH 1 AS ignored MATCH (m:Item {id: 2}) \
+         SET m.qty = duration({months: 2147483648})",
+        None,
+    );
+
+    assert!(
+        graph.column_store("Batch").is_none(),
+        "a rolled-back CREATE of a new type left its master store behind"
+    );
+    assert_eq!(
+        graph.type_indices.get("Batch").map(|b| b.len()),
+        None,
+        "and must leave no type bucket"
+    );
+}
+
+/// The same, on a type whose store **already had rows**: the truncation has to
+/// land on the pre-statement count exactly, not on an intermediate one.
+///
+/// `assert_rolls_back` fingerprints the master's rows, so a store truncated to
+/// N-1 instead of N-3 shows up as a row-count mismatch.
+#[test]
+fn a_failed_multi_node_create_truncates_to_the_pre_statement_row_count() {
+    let mut graph = wide_columnar();
+    let before = graph
+        .column_store("Item")
+        .expect("fixture installs the master")
+        .row_count();
+
+    assert_rolls_back(
+        &mut graph,
+        "CREATE (:Item {id: 800, name: 'a', qty: 1}), \
+                (:Item {id: 801, name: 'b', qty: 2}), \
+                (:Item {id: 802, name: 'c', qty: 3}) \
+         WITH 1 AS ignored MATCH (m:Item {id: 2}) \
+         SET m.qty = duration({months: 2147483648})",
+        None,
+    );
+
+    assert_eq!(
+        graph
+            .column_store("Item")
+            .expect("master survives")
+            .row_count(),
+        before,
+        "the rolled-back appends must truncate to the pre-statement row count"
+    );
+}
+
 /// **Replaces `every_node_shares_the_master_column_store_handle`.**
 ///
 /// That test pinned the pre-D1 design: `enable_columnar` pointed every node of

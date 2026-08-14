@@ -66,7 +66,7 @@ pub mod constraints;
 mod disk_persistence;
 mod independent_copy;
 pub mod index_layer;
-mod indexes;
+pub(crate) mod indexes;
 mod labels;
 mod node_write;
 pub mod range_index_layer;

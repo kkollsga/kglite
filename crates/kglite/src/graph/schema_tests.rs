@@ -591,8 +591,27 @@ mod maintenance_tests {
         assert_eq!(comp_map.get(&new_comp).unwrap(), &vec![n0]);
     }
 
+    /// A type with no index costs **nothing** to maintain — not "no crash", no
+    /// work at all.
+    ///
+    /// The three updaters used to run in full on such a type: a value read-back
+    /// through `property_reader` (which resolves the alias and interns the
+    /// resolved name), a `String` for the resolved field, a key-set `Vec`, and
+    /// a hash probe per index family — all to edit maps that hold no key for
+    /// the type. On a 100k-row `SET` that was ~23% of the statement, 1.8× the
+    /// cell write it accompanied.
+    ///
+    /// The assertion is a call counter rather than a timing because the work is
+    /// invisible to every other oracle: it clones no backend, journals nothing
+    /// (`note_*` returns early with no index to name) and forks no schema map,
+    /// so `BACKEND_CLONE_NODES`, `JOURNAL_NODE_PRE_IMAGES` and
+    /// `SCHEMA_MAP_FORKS` all read identically whether it ran or not.
     #[test]
     fn test_no_update_when_no_index_exists() {
+        use crate::graph::dir_graph::indexes::{
+            index_maintenance_passes, reset_index_maintenance_passes,
+        };
+
         let mut g = DirGraph::new();
         let mut props = HashMap::new();
         props.insert("city".to_string(), Value::String("Oslo".to_string()));
@@ -606,7 +625,8 @@ mod maintenance_tests {
         g.type_indices
             .entry_or_default("Person".to_string())
             .push(n0);
-        // No index created — these should be no-ops without crash
+        // No index created — these must be no-ops, and must not even look.
+        reset_index_maintenance_passes();
         g.update_property_indices_for_add("Person", n0);
         g.update_property_indices_for_set(
             "Person",
@@ -621,7 +641,76 @@ mod maintenance_tests {
             "city",
             &Value::String("Oslo".to_string()),
         );
+        assert_eq!(
+            index_maintenance_passes(),
+            0,
+            "a type with no index must skip incremental maintenance outright"
+        );
         assert!(g.property_indices.is_empty());
+    }
+
+    /// The counter above is not vacuous, and the gate is keyed on the **type**,
+    /// not on the graph: a type that *does* carry an index still pays full
+    /// maintenance while an index-free type in the same graph pays none.
+    ///
+    /// Without this arm, "0 passes" would also be the reading for a gate that
+    /// disabled index maintenance altogether — which is the way this
+    /// optimisation breaks (silently, with a stale index that an indexed
+    /// `MATCH` then reads as truth).
+    #[test]
+    fn index_maintenance_gate_is_per_type() {
+        use crate::graph::dir_graph::indexes::{
+            index_maintenance_passes, reset_index_maintenance_passes,
+        };
+
+        let mut g = DirGraph::new();
+        let mut mk = |id: i64, city: &str, node_type: &str| {
+            let mut props = HashMap::new();
+            props.insert("city".to_string(), Value::String(city.to_string()));
+            let idx = g.graph.add_node(NodeData::new(
+                Value::Int64(id),
+                Value::String(format!("n{id}")),
+                node_type.to_string(),
+                props,
+                &mut g.interner,
+            ));
+            g.type_indices
+                .entry_or_default(node_type.to_string())
+                .push(idx);
+            idx
+        };
+        let person = mk(1, "Oslo", "Person");
+        let ghost = mk(2, "Oslo", "Ghost");
+        g.create_index("Person", "city");
+
+        reset_index_maintenance_passes();
+        let old = Value::String("Oslo".to_string());
+        let new = Value::String("Bergen".to_string());
+        let city = g.interner.get_or_intern("city");
+        GraphWrite::set_node_property(&mut g.graph, person, city, new.clone());
+        g.update_property_indices_for_set("Person", person, "city", Some(&old), &new);
+        assert_eq!(
+            index_maintenance_passes(),
+            1,
+            "an indexed type must still run maintenance"
+        );
+
+        // …and the index really moved, which is what the pass was for.
+        assert_eq!(
+            g.lookup_by_index("Person", "city", &new),
+            Some(vec![person])
+        );
+
+        // The same write on the index-free type in the same graph: no pass.
+        reset_index_maintenance_passes();
+        GraphWrite::set_node_property(&mut g.graph, ghost, city, new.clone());
+        g.update_property_indices_for_set("Ghost", ghost, "city", Some(&old), &new);
+        assert_eq!(
+            index_maintenance_passes(),
+            0,
+            "an index-free type must skip maintenance even when the graph has \
+             indexes on other types"
+        );
     }
 
     // ─── Columnar storage tests ──────────────────────────────────────────

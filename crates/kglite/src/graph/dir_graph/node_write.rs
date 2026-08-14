@@ -122,6 +122,14 @@ impl DirGraph {
     /// base, materialized) *before* the pre-image is taken: the materialization
     /// re-derives the store's columns, so a pre-image captured across it would
     /// restore a schema that no longer describes the columns it names.
+    ///
+    /// **One capture per (statement, type), not per created node.** The undo is
+    /// absolute — truncate to the row count the statement started at — so the
+    /// first append into a type is the only one whose pre-image says anything;
+    /// `UndoJournal::claim_columnar_append` is what decides that, and its doc
+    /// carries the replay argument. Before it, a 5k-node `CREATE` pushed 5k
+    /// entries, each cloning the type's schema `Arc`, to describe one
+    /// truncation.
     fn push_node_row(
         &mut self,
         node_type: &str,
@@ -131,11 +139,21 @@ impl DirGraph {
     ) -> u32 {
         let store_was_new = self.column_store(node_type).is_none();
         self.ensure_column_store_for_push(node_type);
+        // The type-name hash stays behind the journal check: an unjournalled
+        // create path (bulk ingest, WAL replay) must pay nothing for an undo
+        // nobody will read.
         if self.graph.undo_journal_mut().is_some() {
             let type_key = InternedKey::from_str(node_type);
-            let captured = self
-                .column_store(node_type)
-                .map(|store| ColumnarAppendPreImage::capture(store));
+            let first_append = self
+                .graph
+                .undo_journal_mut()
+                .is_some_and(|journal| journal.claim_columnar_append(type_key));
+            let captured = first_append
+                .then(|| {
+                    self.column_store(node_type)
+                        .map(|store| ColumnarAppendPreImage::capture(store))
+                })
+                .flatten();
             if let (Some(captured), Some(journal)) = (captured, self.graph.undo_journal_mut()) {
                 captured.record(journal, type_key, store_was_new);
             }

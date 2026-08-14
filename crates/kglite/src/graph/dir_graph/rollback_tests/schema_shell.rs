@@ -169,6 +169,75 @@ fn a_rolled_back_schema_growth_does_not_survive_save_and_load() {
     );
 }
 
+/// A multi-row `SET` that introduces a property records it in the catalogue
+/// **once**, and the record is right — after the statement commits, and absent
+/// after it fails.
+///
+/// P6 hoisted the `(type, property) → value type` upsert out of the per-row
+/// body and behind a statement-scoped memo, so this pins both ends of that
+/// move: the catalogue still gains the key (a memo that skipped the *first*
+/// row would silently stop declaring properties, and the columnar column set
+/// is derived from this map on save), and a failed statement still leaves none
+/// of it behind (the memo must not outlive the writes it describes).
+#[test]
+fn a_multi_row_set_records_a_new_property_once_and_correctly() {
+    let mut graph = wide_rows_into(DirGraph::new());
+    assert!(
+        !graph.node_type_metadata["Item"].contains_key("color"),
+        "precondition: the property must be new, or this is vacuous"
+    );
+
+    run(&mut graph, "MATCH (n:Item) SET n.color = 'red'");
+    assert_eq!(
+        graph.node_type_metadata["Item"]
+            .get("color")
+            .map(String::as_str),
+        Some("String"),
+        "a 200-row SET must declare the property it introduced"
+    );
+
+    // And the rollback half, on a property this statement introduces.
+    let mut graph = wide_rows_into(DirGraph::new());
+    assert_rolls_back(
+        &mut graph,
+        "MATCH (n:Item) SET n.color = 'red' \
+         WITH n LIMIT 1 MATCH (m:Item {id: 2}) \
+         SET m.qty = duration({months: 2147483648})",
+        None,
+    );
+    assert!(
+        !graph.node_type_metadata["Item"].contains_key("color"),
+        "a rolled-back multi-row SET left the property in the catalogue"
+    );
+}
+
+/// Rows whose values have **different** type names still take the catalogue
+/// with them: last write wins, exactly as it did per row.
+///
+/// The statement-scoped memo remembers the type name it recorded, not merely
+/// that it recorded something — a first-wins memo would leave the catalogue
+/// claiming `int64` for a property whose surviving rows are strings, and the
+/// column that metadata derives on save would be typed from the wrong end.
+#[test]
+fn a_set_with_mixed_value_types_records_the_last_one() {
+    let mut graph = wide_rows_into(DirGraph::new());
+
+    run(
+        &mut graph,
+        "MATCH (n:Item) WITH n ORDER BY n.qty \
+         SET n.mixed = CASE WHEN n.qty < 100 THEN 1 ELSE 'late' END",
+    );
+
+    assert_eq!(
+        graph.node_type_metadata["Item"]
+            .get("mixed")
+            .map(String::as_str),
+        Some("String"),
+        "the catalogue must carry the type name of the last row written, which \
+         is what the per-row upsert this replaced recorded"
+    );
+}
+
 /// The four O(types) maps no Cypher statement writes — aliases and parent
 /// types — restore too.
 ///

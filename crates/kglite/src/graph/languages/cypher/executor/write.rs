@@ -4,13 +4,13 @@
 use super::super::ast::*;
 use super::super::result::*;
 use super::columnar_write::{set_via_column_master, write_column_master, ColumnMasterWrite};
+use super::set_row::{apply_node_property_set, NodePropertySet, SetMemos};
 use super::{clause_display_name, schema_ddl, CypherExecutor};
 use crate::datatypes::values::Value;
 use crate::graph::algorithms::Interrupt;
 use crate::graph::schema::{DirGraph, EdgeData, InternedKey};
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::NodeIndex;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -1122,74 +1122,6 @@ fn is_null_write_target(row: &ResultRow, variable: &str) -> bool {
         && matches!(row.projected.get(variable), None | Some(Value::Null))
 }
 
-/// Execute a SET clause, modifying node properties in the graph.
-/// A single-property node `SET` that has already landed in storage, as the
-/// post-write bookkeeping needs to see it.
-struct LandedPropertyWrite<'a> {
-    node_idx: NodeIndex,
-    node_type: &'a str,
-    property: &'a str,
-    old_value: Option<&'a Value>,
-    value: &'a Value,
-    constraint_plan: &'a crate::graph::dir_graph::constraints::PropertyWritePlan,
-}
-
-/// The bookkeeping a single-property node `SET` owes once the value has landed.
-///
-/// Split out of `execute_set` because none of it is about *writing* the value:
-/// it registers the property key on the type's `TypeSchema`, moves the node
-/// between index buckets, redeems the constraint plan (handing the vacated
-/// unique tuples back and taking the new ones), keeps `node_type_metadata`
-/// accurate so `schema()` reports the property's type, and notes the node for
-/// the post-loop `updated_at` bump.
-///
-/// Order is load-bearing and matches the sequence this replaced: the index move
-/// needs the old value, so it runs before the constraint plan is redeemed. The
-/// `updated_at` bump is skipped when the write *is* to `updated_at`, which would
-/// otherwise recurse. A `title` write touches only the title field, not a
-/// property map, so it registers no schema key — but it still moves the node
-/// between index buckets: an index on `title`, or one registered under the
-/// type's title-alias spelling, is built from exactly the value it changed.
-fn finish_node_property_write(
-    graph: &mut DirGraph,
-    write: LandedPropertyWrite<'_>,
-    nodes_to_stamp: &mut std::collections::HashMap<NodeIndex, String>,
-) {
-    if write.property != "title" {
-        let ik = InternedKey::from_str(write.property);
-        // Read-check before taking `&mut`: `type_schemas` is `Arc`-shared with
-        // the rollback shell (`dir_graph::schema_cow`), so `type_schemas_mut()`
-        // copies the whole O(types) map — and this runs per written row, almost
-        // always for a key the schema already carries.
-        let needs_key = graph
-            .type_schemas
-            .get(write.node_type)
-            .is_some_and(|schema| schema.slot(ik).is_none());
-        if needs_key {
-            if let Some(schema_arc) = graph.type_schemas_mut().get_mut(write.node_type) {
-                Arc::make_mut(schema_arc).add_key(ik);
-            }
-        }
-    }
-    graph.update_property_indices_for_set(
-        write.node_type,
-        write.node_idx,
-        write.property,
-        write.old_value,
-        write.value,
-    );
-
-    graph.apply_property_write_plan(write.constraint_plan, write.node_idx);
-
-    let mut prop_type = HashMap::new();
-    prop_type.insert(write.property.to_string(), value_type_name(write.value));
-    graph.upsert_node_type_metadata(write.node_type, prop_type);
-
-    if write.property != "updated_at" && graph.auto_timestamp_for(write.node_type) {
-        nodes_to_stamp.insert(write.node_idx, write.node_type.to_string());
-    }
-}
-
 /// Every property key currently set on `variable`'s binding — the clear-list
 /// for `SET n = {…}` / `SET r = {…}`.
 ///
@@ -1255,7 +1187,7 @@ fn existing_property_keys(
 /// Extracted from `execute_set` (D1 Phase 3) so routing the write through
 /// `GraphWrite` — which a columnar node now requires — does not push that
 /// function past its size cap.
-fn set_node_property_direct(
+pub(super) fn set_node_property_direct(
     graph: &mut crate::graph::dir_graph::DirGraph,
     node_idx: NodeIndex,
     property: &str,
@@ -1310,6 +1242,9 @@ fn execute_set(
     // after the loop, same as nodes.
     let mut edges_to_stamp: std::collections::HashSet<petgraph::graph::EdgeIndex> =
         std::collections::HashSet::new();
+    // Statement-scoped memo: everything a row's bookkeeping asks that is
+    // constant across the statement's rows (see `set_row::SetMemos`).
+    let mut memos = SetMemos::default();
 
     for (row_idx, row) in result_set.rows.iter().enumerate() {
         check_interrupt_periodic(interrupt, row_idx)?;
@@ -1397,126 +1332,17 @@ fn execute_set(
                         executor.evaluate_expression(expression, row)?
                     };
 
-                    // Capture old value + node_type before mutable borrow (for
-                    // index update). Arena guard: get_node → node_weight
-                    // materializes on the disk backend (protocol in
-                    // disk/graph.rs); scoped so the borrow ends before the
-                    // &mut mutation below.
-                    let (old_value, node_type_str) = {
-                        let _arena_guard = graph.graph.begin_query();
-                        match graph.node_view(*node_idx) {
-                            Some(node) => {
-                                let nt = node.get_node_type_ref(&graph.interner).to_string();
-                                // For `name` (the canonical title-alias name in
-                                // Cypher), the value is stored on `node.title`,
-                                // not in the property map. `get_field_ref("name")`
-                                // returns None for graphs where "name" isn't
-                                // also redundantly in properties — which is the
-                                // case for `.kgl`-loaded graphs and for indexes
-                                // built from `get_node_title` (see
-                                // `dir_graph.rs::create_index`'s alias-resolution
-                                // path). Falling back to the title keeps
-                                // index auto-maintenance consistent with how
-                                // those indexes were populated.
-                                let old = match property.as_str() {
-                                    // `title()`, not the raw inline field:
-                                    // these indexes are built from
-                                    // `get_node_title`.
-                                    "name" => node
-                                        .get_field_ref("name")
-                                        .map(Cow::into_owned)
-                                        .or_else(|| Some(node.title().into_owned())),
-                                    "title" => Some(node.title().into_owned()),
-                                    _ => node.get_field_ref(property).map(Cow::into_owned),
-                                };
-                                (old, nt)
-                            }
-                            None => continue,
-                        }
-                    };
-
-                    // Role-scoped write guard: reject SET on a node type
-                    // outside the active write whitelist.
-                    enforce_write_scope(graph, &node_type_str)?;
-
-                    // Schema lock validation for SET
-                    if graph.schema_locked {
-                        crate::graph::mutation::validation::validate_property_set(
-                            &node_type_str,
-                            property,
-                            &value,
-                            &graph.node_type_metadata,
-                            graph.schema_definition.as_ref(),
-                        )?;
-                    }
-
-                    // Declared UNIQUE / NOT NULL gates. Planned before the write
-                    // so a violation returns without mutating storage; the
-                    // returned plan is redeemed after the value lands.
-                    let constraint_plan = graph
-                        .plan_property_write(&node_type_str, *node_idx, property, Some(&value))
-                        .map_err(|violation| violation.to_string())?;
-
-                    // Clone value before it may be consumed by the mutation
-                    let value_for_index = value.clone();
-
-                    // Fast path for Columnar storage when the graph's master
-                    // `Arc<ColumnStore>` for this node-type is available:
-                    // route the write through the master once per batch
-                    // instead of through each node's Arc handle. The per-
-                    // node Arcs all point at the same allocation, so
-                    // `Arc::make_mut` on a node Arc clones the entire store
-                    // on every write — O(N²) total for batch SETs. The
-                    // master Arc has refcount=1 inside this batch (after
-                    // the initial clone, if any), so subsequent writes
-                    // mutate in place. We refresh the per-node Arcs in a
-                    // single sweep at end of batch (see below).
-                    // Arena guard: node_weight materializes on the disk
-                    // backend (protocol in disk/graph.rs); scoped so the
-                    // borrow ends before the &mut writes below.
-                    let columnar_row_id = {
-                        let _arena_guard = graph.graph.begin_query();
-                        graph
-                            .graph
-                            .node_weight(*node_idx)
-                            .and_then(|n| n.properties.columnar_row_id())
-                    };
-                    let wrote_via_master = set_via_column_master(
+                    apply_node_property_set(
                         graph,
-                        ColumnMasterWrite {
+                        NodePropertySet {
                             node_idx: *node_idx,
-                            node_type: &node_type_str,
-                            property,
-                            value: &value,
-                            row_id: columnar_row_id,
+                            property: property.as_str(),
+                            value,
                         },
-                    );
-                    if wrote_via_master {
-                        stats.properties_set += 1;
-                    }
-                    if !wrote_via_master {
-                        // Row storage, or title/name, or a columnar node whose
-                        // type the backend has no store for (disk-mode graphs
-                        // with their own staged-write path): fall through to the
-                        // backend's per-node setter, which routes by storage
-                        // variant.
-                        if set_node_property_direct(graph, *node_idx, property, value) {
-                            stats.properties_set += 1;
-                        }
-                    }
-
-                    finish_node_property_write(
-                        graph,
-                        LandedPropertyWrite {
-                            node_idx: *node_idx,
-                            node_type: &node_type_str,
-                            property,
-                            old_value: old_value.as_ref(),
-                            value: &value_for_index,
-                            constraint_plan: &constraint_plan,
-                        },
+                        &mut memos,
+                        stats,
                         &mut nodes_to_stamp,
-                    );
+                    )?;
                 }
                 SetItem::Map {
                     variable,
@@ -1680,10 +1506,19 @@ fn execute_set(
                     let key = graph.interner.get_or_intern(pname);
                     GraphWrite::set_node_property(&mut graph.graph, *node_idx, key, pval.clone());
                 }
-                let mut prop_type = HashMap::new();
-                prop_type.insert(pname.to_string(), value_type_name(pval));
-                graph.upsert_node_type_metadata(node_type, prop_type);
             }
+        }
+        // The catalogue entry for each provenance key is a fact about the
+        // *type*, not about the node — so it is recorded once per stamped type
+        // rather than once per stamped node per key, which is what the loop
+        // above used to do (a fresh `HashMap` and two `String`s each time).
+        let stamped_types: std::collections::HashSet<&String> = nodes_to_stamp.values().collect();
+        let prop_types: HashMap<String, String> = prov
+            .iter()
+            .map(|(pname, pval)| (pname.to_string(), value_type_name(pval)))
+            .collect();
+        for node_type in stamped_types {
+            graph.upsert_node_type_metadata(node_type, prop_types.clone());
         }
     }
 
