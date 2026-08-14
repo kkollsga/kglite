@@ -763,3 +763,154 @@ def test_register_new_conn_type_preserves_existing_type_lookups(tmp_path):
         {"t": "FRIENDS_WITH", "n": 1},
         {"t": "WORKS_AT", "n": 5},
     ], f"per-type edge counts diverged after register: {by_type}"
+
+
+# ─── delete-then-create: the reused-slot round trip ──────────────────────────
+#
+# A delete frees a node slot and the next create takes it, so the type's index
+# bucket stops ascending (`[0, 2, 1]` for the four-statement shape below).
+# `type_indices.bin` requires every per-type payload to be strictly increasing,
+# so before the writer normalized it the *save reported success* and the graph
+# could never be loaded again — the only copy was destroyed by the operation
+# that was meant to preserve it. Delete-only saves and create-only saves both
+# round-tripped, which is why nothing here caught it.
+
+
+@pytest.mark.parametrize("mode", STORAGE_MODES)
+def test_delete_then_create_survives_save_reload(mode, tmp_path):
+    """The minimal repro: create 3, delete the middle one, create 1 more."""
+    graph_path = str(tmp_path / f"g_{mode}")
+    kg = _new_kg(mode, path=graph_path if mode == "disk" else None)
+    kg.cypher("CREATE (:Item {iid: 1}), (:Item {iid: 2}), (:Item {iid: 3})")
+    kg.cypher("MATCH (n:Item) WHERE n.iid = 2 DETACH DELETE n")
+    kg.cypher("CREATE (:Item {iid: 9})")
+
+    save_path = graph_path if mode == "disk" else str(tmp_path / f"saved_{mode}")
+    reloaded = _save_and_reload(kg, save_path, mode)
+    post = _rows(reloaded.cypher("MATCH (n:Item) RETURN n.iid ORDER BY n.iid"))
+    assert [r["n.iid"] for r in post] == [1, 3, 9], f"{mode}: reused-slot round trip lost nodes"
+
+
+@pytest.mark.parametrize("mode", STORAGE_MODES)
+def test_many_reused_slots_with_edges_survive_save_reload(mode, tmp_path):
+    """Several freed slots, several reusing creates, and edges across them.
+
+    One reused slot only proves the payload can be repaired at one position;
+    this shape interleaves deletes and creates so the bucket is scrambled at
+    many positions, and asserts the *edges* still connect the pairs they were
+    created for (a payload repaired by renumbering rather than reordering
+    would keep the node set and move the endpoints)."""
+    graph_path = str(tmp_path / f"g_{mode}")
+    kg = _new_kg(mode, path=graph_path if mode == "disk" else None)
+    kg.add_nodes(
+        pd.DataFrame([{"id": i, "title": f"item-{i}"} for i in range(12)]),
+        "Item",
+        "id",
+        "title",
+    )
+    kg.cypher("MATCH (n:Item) WHERE n.id IN [2, 5, 7, 11] DETACH DELETE n")
+    kg.cypher("CREATE (:Item {id: 100, title: 'late-a'})")
+    kg.cypher("MATCH (n:Item) WHERE n.id = 0 DETACH DELETE n")
+    kg.cypher("CREATE (:Item {id: 101, title: 'late-b'}), (:Item {id: 102, title: 'late-c'})")
+    kg.cypher("MATCH (a:Item), (b:Item) WHERE a.id = 100 AND b.id = 102 CREATE (a)-[:NEXT]->(b)")
+    kg.cypher("MATCH (a:Item), (b:Item) WHERE a.id = 1 AND b.id = 101 CREATE (a)-[:NEXT]->(b)")
+
+    expected_ids = [1, 3, 4, 6, 8, 9, 10, 100, 101, 102]
+    save_path = graph_path if mode == "disk" else str(tmp_path / f"saved_{mode}")
+    reloaded = _save_and_reload(kg, save_path, mode)
+    post = _rows(reloaded.cypher("MATCH (n:Item) RETURN n.id, n.title ORDER BY n.id"))
+    assert [r["n.id"] for r in post] == expected_ids, f"{mode}: node set diverged"
+    assert [r["n.title"] for r in post] == [
+        "item-1",
+        "item-3",
+        "item-4",
+        "item-6",
+        "item-8",
+        "item-9",
+        "item-10",
+        "late-a",
+        "late-b",
+        "late-c",
+    ], f"{mode}: titles bound to the wrong nodes after reload"
+    edges = _rows(reloaded.cypher("MATCH (a:Item)-[:NEXT]->(b:Item) RETURN a.id AS src, b.id AS tgt ORDER BY src"))
+    assert edges == [{"src": 1, "tgt": 101}, {"src": 100, "tgt": 102}], (
+        f"{mode}: edge endpoints moved across the reload"
+    )
+
+
+@pytest.mark.parametrize("mode", STORAGE_MODES)
+def test_add_nodes_into_freed_slots_survives_save_reload(mode, tmp_path):
+    """The `add_nodes` write route into slots a Cypher DELETE freed.
+
+    `add_nodes` reaches the type index through the batch path rather than the
+    Cypher create path, so it registers its members separately — the same
+    reused-slot append, from the other of the two write routes."""
+    graph_path = str(tmp_path / f"g_{mode}")
+    kg = _new_kg(mode, path=graph_path if mode == "disk" else None)
+    kg.add_nodes(
+        pd.DataFrame([{"id": f"T_{i}", "title": f"T{i}"} for i in range(6)]),
+        "Thing",
+        "id",
+        "title",
+    )
+    kg.cypher("MATCH (n:Thing) WHERE n.id IN ['T_1', 'T_3'] DETACH DELETE n")
+    kg.add_nodes(
+        pd.DataFrame([{"id": f"T_{i}", "title": f"T{i}"} for i in (10, 11)]),
+        "Thing",
+        "id",
+        "title",
+    )
+
+    save_path = graph_path if mode == "disk" else str(tmp_path / f"saved_{mode}")
+    reloaded = _save_and_reload(kg, save_path, mode)
+    post = _rows(reloaded.cypher("MATCH (n:Thing) RETURN n.id, n.title ORDER BY n.id"))
+    assert [(r["n.id"], r["n.title"]) for r in post] == [
+        ("T_0", "T0"),
+        ("T_10", "T10"),
+        ("T_11", "T11"),
+        ("T_2", "T2"),
+        ("T_4", "T4"),
+        ("T_5", "T5"),
+    ], f"{mode}: add_nodes-into-freed-slots round trip diverged"
+
+
+@pytest.mark.parametrize("mode", STORAGE_MODES)
+def test_vacuum_after_delete_then_create_still_saves_and_reloads(mode, tmp_path):
+    """`vacuum()` between the reusing create and the save.
+
+    Disk mode had no vacuum coverage at all, and vacuum is the one operation
+    that renumbers nodes — so it is the operation most able to leave the type
+    index disagreeing with the topology. Asserted on both sides of the save so
+    a vacuum that corrupted the live graph cannot hide behind a reload that
+    merely reproduces the corruption."""
+    graph_path = str(tmp_path / f"g_{mode}")
+    kg = _new_kg(mode, path=graph_path if mode == "disk" else None)
+    kg.add_nodes(
+        pd.DataFrame([{"id": i, "title": f"row-{i}"} for i in range(10)]),
+        "Row",
+        "id",
+        "title",
+    )
+    kg.cypher("MATCH (n:Row) WHERE n.id IN [1, 4, 6] DETACH DELETE n")
+    kg.cypher("CREATE (:Row {id: 50, title: 'row-50'})")
+    kg.vacuum()
+
+    expected = [
+        (0, "row-0"),
+        (2, "row-2"),
+        (3, "row-3"),
+        (5, "row-5"),
+        (7, "row-7"),
+        (8, "row-8"),
+        (9, "row-9"),
+        (50, "row-50"),
+    ]
+    live = _rows(kg.cypher("MATCH (n:Row) RETURN n.id, n.title ORDER BY n.id"))
+    assert [(r["n.id"], r["n.title"]) for r in live] == expected, f"{mode}: vacuum corrupted the live graph"
+
+    save_path = graph_path if mode == "disk" else str(tmp_path / f"saved_{mode}")
+    reloaded = _save_and_reload(kg, save_path, mode)
+    post = _rows(reloaded.cypher("MATCH (n:Row) RETURN n.id, n.title ORDER BY n.id"))
+    assert [(r["n.id"], r["n.title"]) for r in post] == expected, (
+        f"{mode}: vacuum + delete-then-create round trip diverged"
+    )

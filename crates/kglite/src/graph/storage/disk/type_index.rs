@@ -733,6 +733,22 @@ impl TypeIndexStore {
 // Writer
 // =============================================================================
 
+/// True when `members` ascends strictly. Early-exits on the first violation,
+/// so the sorted case costs one linear compare pass and the unsorted case
+/// stops as soon as it is decided.
+fn strictly_increasing<I: Iterator<Item = u32>>(mut members: I) -> bool {
+    let Some(mut previous) = members.next() else {
+        return true;
+    };
+    for member in members {
+        if member <= previous {
+            return false;
+        }
+        previous = member;
+    }
+    true
+}
+
 /// Write `type_indices.bin` (flat CSR layout).
 ///
 /// Type names are *resolved* against the interner that ships with the same
@@ -741,6 +757,26 @@ impl TypeIndexStore {
 /// unregistered name has no persisted identity: an empty entry is dropped
 /// (nothing to record), and a populated one fails the save rather than
 /// shipping a directory whose type keys the loader cannot resolve.
+///
+/// **Each per-type payload is emitted in ascending `NodeIndex` order**, which
+/// the in-memory bucket is not obliged to be in. A bucket is appended to in
+/// creation order and a create reuses a slot a delete freed, so a
+/// delete-then-create pair leaves the members out of order (`[0, 2, 1]` for the
+/// three-node case). The reader validates every payload as strictly increasing
+/// ([`TypeIndexBase::load_from`]) and `TypeNodesRef::binary_search_idx` binary-
+/// searches the mmap arm with no linear fallback, so an unsorted payload is not
+/// a file this crate can read: before this normalization the save *succeeded*
+/// and the next load refused the graph outright — silent data loss.
+///
+/// Sorting here cannot desynchronize the columns. The payload is not a
+/// coordinate system: a disk graph binds a node to its column row through
+/// `DiskNodeSlot::row_id`, persisted per slot, and the portable `.kgl` path —
+/// the one that *does* bind row k positionally
+/// (`io/file/columns.rs::attach_portable_column_stores`) — never reads this
+/// file, rebuilding `type_indices` from an ascending `node_indices()` scan
+/// instead. The overlay positions the statement journal records
+/// (`BucketRemoved`) are in-memory coordinates measured against the
+/// materialized bucket and are never persisted.
 pub fn write_type_indices_bin(
     dir: &Path,
     store: &TypeIndexStore,
@@ -751,6 +787,10 @@ pub fn write_type_indices_bin(
         Slice(&'a [u8]),
         Vec(&'a [NodeIndex]),
         Levels(&'a [Arc<Vec<NodeIndex>>]),
+        /// A payload the loop below had to reorder. Owned, because the
+        /// borrowed forms are the graph's live buckets and a save must not
+        /// mutate them.
+        Sorted(Vec<u32>),
     }
     impl Source<'_> {
         fn len(&self) -> usize {
@@ -758,6 +798,32 @@ pub fn write_type_indices_bin(
                 Source::Slice(s) => s.len() / 4,
                 Source::Vec(s) => s.len(),
                 Source::Levels(levels) => levels.iter().map(|level| level.len()).sum(),
+                Source::Sorted(members) => members.len(),
+            }
+        }
+        fn is_strictly_increasing(&self) -> bool {
+            match self {
+                Source::Slice(s) => strictly_increasing(le_u32_iter(s)),
+                Source::Vec(s) => strictly_increasing(s.iter().map(|n| n.index() as u32)),
+                Source::Levels(levels) => strictly_increasing(
+                    levels
+                        .iter()
+                        .flat_map(|level| level.iter())
+                        .map(|n| n.index() as u32),
+                ),
+                Source::Sorted(members) => strictly_increasing(members.iter().copied()),
+            }
+        }
+        fn to_members(&self) -> Vec<u32> {
+            match self {
+                Source::Slice(s) => le_u32_iter(s).collect(),
+                Source::Vec(s) => s.iter().map(|n| n.index() as u32).collect(),
+                Source::Levels(levels) => levels
+                    .iter()
+                    .flat_map(|level| level.iter())
+                    .map(|n| n.index() as u32)
+                    .collect(),
+                Source::Sorted(members) => members.clone(),
             }
         }
         fn write_into(&self, out: &mut Vec<u8>) {
@@ -775,13 +841,18 @@ pub fn write_type_indices_bin(
                         }
                     }
                 }
+                Source::Sorted(members) => {
+                    for n in members.iter() {
+                        out.extend_from_slice(&n.to_le_bytes());
+                    }
+                }
             }
         }
     }
 
     let mut entries: Vec<(u64, Source<'_>)> = Vec::new();
     for (name, view) in store.iter() {
-        let src = match view {
+        let mut src = match view {
             TypeNodesRef::Overlay(s) => Source::Vec(s),
             TypeNodesRef::Mmap(s) => Source::Slice(s),
             TypeNodesRef::Layered(levels) => Source::Levels(levels),
@@ -797,6 +868,23 @@ pub fn write_type_indices_bin(
                 src.len()
             ));
         };
+        // Ascending order is the file's contract (see the fn doc). The
+        // already-ordered case — every save that never deleted, and every
+        // untouched mmap base, i.e. the Wikidata-scale one — pays one linear
+        // compare pass over bytes the writer is about to copy anyway, and
+        // allocates nothing.
+        if !src.is_strictly_increasing() {
+            let mut members = src.to_members();
+            members.sort_unstable();
+            if let Some(pair) = members.windows(2).find(|pair| pair[0] == pair[1]) {
+                return Err(format!(
+                    "type index for type '{name}' lists node {} twice; refusing \
+                     to write a type_indices.bin that cannot be read back",
+                    pair[0]
+                ));
+            }
+            src = Source::Sorted(members);
+        }
         entries.push((key.as_u64(), src));
     }
     entries.sort_by_key(|(k, _)| *k);
@@ -1009,6 +1097,121 @@ mod validation_tests {
         let error = write_type_indices_bin(temp.path(), &store, &interner).unwrap_err();
         assert!(error.contains("Unregistered"), "{error}");
         assert!(error.contains("cannot be read back"), "{error}");
+    }
+
+    /// A bucket left out of order by a delete-then-create must still be
+    /// written as a payload the reader accepts.
+    ///
+    /// The bucket is appended to in creation order and a create takes the
+    /// slot the delete freed, so `[0, 2, 1]` is the three-node shape of
+    /// "create three, delete the middle one, create one more". The reader
+    /// requires strict ascension, so before the writer normalized the payload
+    /// this save succeeded and the graph could never be loaded again — the
+    /// save reported success while destroying the only copy.
+    #[test]
+    fn a_bucket_left_out_of_order_by_a_reused_slot_still_writes_a_loadable_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut interner = StringInterner::new();
+        interner.get_or_intern("Item");
+
+        let mut store = TypeIndexStore::new();
+        // create 0,1,2 → delete 1 → create into the freed slot 1.
+        for i in [0usize, 1, 2] {
+            store.push_to_type("Item", NodeIndex::new(i));
+        }
+        store.retain_in_type("Item", |idx| idx.index() != 1);
+        store.push_to_type("Item", NodeIndex::new(1));
+        assert_eq!(
+            store.get("Item").unwrap().to_vec(),
+            [0, 2, 1].map(NodeIndex::new).to_vec(),
+            "precondition: the bucket must actually be out of order, or this \
+             test proves nothing"
+        );
+
+        write_type_indices_bin(temp.path(), &store, &interner)
+            .expect("the save must not refuse a legitimately reordered bucket");
+        let base = TypeIndexBase::load_from(temp.path(), &interner)
+            .expect("the written file must load — this is the data-loss bug")
+            .unwrap();
+        assert_eq!(
+            base.materialize("Item").unwrap(),
+            [0, 1, 2].map(NodeIndex::new).to_vec()
+        );
+    }
+
+    /// Same shape through the layered (forked) bucket, which reaches the
+    /// writer as `TypeNodesRef::Layered` and has its own emit arm.
+    #[test]
+    fn a_layered_bucket_out_of_order_across_levels_still_writes_a_loadable_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut interner = StringInterner::new();
+        interner.get_or_intern("Item");
+
+        let mut store = TypeIndexStore::new();
+        for i in [0usize, 2, 3] {
+            store.push_to_type("Item", NodeIndex::new(i));
+        }
+        // A held reader forces the next append into a fresh level, so the
+        // out-of-order member lands in a *different* level from its peers.
+        let _reader = store.clone();
+        store.push_to_type("Item", NodeIndex::new(1));
+        assert!(
+            matches!(store.get("Item"), Some(TypeNodesRef::Layered(_))),
+            "precondition: the bucket must be layered, or this exercises the \
+             flat arm again"
+        );
+
+        write_type_indices_bin(temp.path(), &store, &interner).unwrap();
+        let base = TypeIndexBase::load_from(temp.path(), &interner)
+            .expect("the written file must load")
+            .unwrap();
+        assert_eq!(
+            base.materialize("Item").unwrap(),
+            [0, 1, 2, 3].map(NodeIndex::new).to_vec()
+        );
+    }
+
+    /// A bucket holding one node twice is not a reordering — sorting it would
+    /// still produce a payload the reader rejects. Fail the *save*, where the
+    /// message can name the type, rather than shipping a file that only fails
+    /// on the next load.
+    #[test]
+    fn a_duplicated_member_fails_the_save_instead_of_the_next_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut interner = StringInterner::new();
+        interner.get_or_intern("Item");
+
+        let mut store = TypeIndexStore::new();
+        store.replace_with(HashMap::from([(
+            "Item".to_string(),
+            vec![NodeIndex::new(2), NodeIndex::new(0), NodeIndex::new(2)],
+        )]));
+        let error = write_type_indices_bin(temp.path(), &store, &interner).unwrap_err();
+        assert!(error.contains("Item"), "{error}");
+        assert!(error.contains("twice"), "{error}");
+    }
+
+    /// An already-ascending payload must reach the file byte-for-byte, with no
+    /// reordering pass changing it — the normalization is a repair, not a
+    /// rewrite of the ordinary save.
+    #[test]
+    fn an_already_ascending_payload_is_written_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut interner = StringInterner::new();
+        interner.get_or_intern("Item");
+
+        let mut store = TypeIndexStore::new();
+        for i in [0usize, 4, 9] {
+            store.push_to_type("Item", NodeIndex::new(i));
+        }
+        write_type_indices_bin(temp.path(), &store, &interner).unwrap();
+        let base = TypeIndexBase::load_from(temp.path(), &interner)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            base.materialize("Item").unwrap(),
+            [0, 4, 9].map(NodeIndex::new).to_vec()
+        );
     }
 }
 

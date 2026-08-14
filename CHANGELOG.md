@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Data loss: a disk-mode graph saved after a delete-then-create could never
+  be loaded again.** Deleting a node frees its slot and the next create takes
+  it, so the node type's index bucket stops ascending. `type_indices.bin`
+  requires every per-type payload to be strictly increasing — the loader
+  validates it, and the mmap membership test binary-searches it with no linear
+  fallback — but the writer emitted the bucket in append order. The result was
+  the worst possible shape: `save()` reported success, and the next
+  `kglite.load()` refused the whole graph with "invalid type_indices.bin: node
+  indices are not strictly increasing". A four-node script reproduced it; a
+  delete-only save and a create-only save both round-tripped, which is why it
+  survived. The writer now emits each payload in ascending node order, and a
+  bucket that lists the same node twice — a reordering cannot repair that —
+  fails the save with a message naming the type instead of shipping a file
+  that only fails on the next load. Sorting cannot move any property value:
+  a disk graph binds a node to its column row through the row id persisted in
+  its slot, and the portable `.kgl` path that *does* bind rows positionally
+  never reads this file. Existing unloadable directories stay unloadable —
+  the ordering was lost at write time — but re-saving from a still-live graph
+  now produces a loadable one.
 - **`NodeData::id()` and `NodeData::title()` no longer claim to read from the
   `ColumnStore`.** Their rustdoc said "In mapped mode (Null sentinel), reads
   from ColumnStore" while the body is `Cow::Borrowed(&self.id)` — it consults
