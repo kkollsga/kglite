@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`NodeData::id()` and `NodeData::title()` no longer claim to read from the
+  `ColumnStore`.** Their rustdoc said "In mapped mode (Null sentinel), reads
+  from ColumnStore" while the body is `Cow::Borrowed(&self.id)` — it consults
+  no store; `NodeView` does. The only note saying so was a `//` comment,
+  invisible to rustdoc and to IDE hover, so the sole documentation a Rust
+  embedder could see promised exactly the resolution the method does not
+  perform. Both now document what they return (the raw stored field, which is
+  the `Value::Null` sentinel on the memory and mapped backends since 0.16.0
+  made every ingest path columnar) and point at `NodeView` / `GraphRead::
+  get_node_id` for a resolved read. `DirGraph::get_node`, which had no doc
+  comment at all, now states the same contract and names the backend
+  asymmetry outright: the disk backend materialises real `id`/`title` into its
+  arena copy while memory and mapped return the sentinel, so it is for
+  topology and existence, not values. Reported by codingest, who lost two
+  behaviours to the gap and caught both on their own goldens. The `[0.16.0]`
+  section is amended with the Rust-API entry it was missing, and its "no
+  user-visible behaviour changes" sentence now says which surface it means.
+- **`save_subset` no longer documents a `load(path, storage='disk')` call that
+  does not exist.** `kglite.load` takes only a path; passing `storage=` raises
+  `TypeError`. The docstrings (Python and Rust) now point at
+  `kglite.open(path, storage='disk')`, which is the real load-or-create entry
+  point that takes a mode.
+- **The Cypher `CREATE VECTOR INDEX` rejection no longer says vector indexes
+  are reachable only from Python and Rust.** Every binding has reached
+  `build_vector_index` since 0.15.11, through the C ABI's
+  `kglite_session_build_vector_index`; the message named two of them and sent
+  Java and C consumers looking for a route they already had.
+
 ## [0.16.0] - 2026-08-14
 
 ### Changed
@@ -33,9 +63,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every read, write, undo and save path has one shape to serve. Only a
   transient staging form survives (values held inline for a moment before they
   reach a store: disk write-staging, `.kgl` deserialization, the bulk funnel,
-  the RDF loader), and nothing persists it. No user-visible behaviour changes
-  here; what changes is that the second layout can no longer be reached, so
-  the defect classes that only appeared on one side of it cannot recur.
+  the RDF loader), and nothing persists it. Nothing on the Python surface
+  behaves differently; what changes is that the second layout can no longer be
+  reached, so the defect classes that only appeared on one side of it cannot
+  recur. A Rust embedder reading identity off a raw node record **does** see a
+  change — see the next entry.
+- **Rust API: `get_node(idx).id()` / `.title()` return the `Value::Null`
+  sentinel on a never-saved in-memory graph; read identity through
+  `node_view`.** (Amended 2026-08-14, after the release, on a report from
+  codingest — a correction to this section, not a new change.) Because
+  construction is now columnar on every path, the `NodeData` a
+  `DirGraph::get_node` hands back carries the sentinel in its inline `id` and
+  `title` fields on the memory and mapped backends, where 0.15.13 returned the
+  real values on a freshly built graph. The disk backend materialises real
+  values into its arena copy, so the same call still answers with values
+  there. The resolving readers — `GraphRead::node_view` (`.id()` / `.title()`)
+  and `GraphRead::get_node_id` — answer identically on all three backends and
+  are the supported route; `NodeData::id`/`title` are documented as raw
+  stored-field reads. `[0.15.9]`'s closing sentence ("`NodeData` keeps `id()`,
+  `title()` and `node_type_str()`") described the *methods* surviving that
+  release's property-reader removal, and is not a carve-out promising resolved
+  identity reads. No Python or C-ABI surface is affected.
 - **A node's title is written where the node's other values are.** A `SET
   n.title` / `SET n.name`, an `add_nodes` update or replace, and a connection
   title all used to write onto the node itself, leaving the column store's copy

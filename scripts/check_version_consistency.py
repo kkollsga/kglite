@@ -765,6 +765,15 @@ _DATED_PROSE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 #: ``0.15.5+`` is a floor written compactly — a declaration, whatever else the
 #: sentence says.
 _FLOOR_SUFFIX = re.compile(r"^\s*\+")
+#: ``kglite 0.15.13's planner fix`` — the possessive attributes a thing *to* one
+#: named release, so the sentence is about that release and stays true forever.
+#: Structural rather than lexical: no vocabulary of past-tense verbs is needed,
+#: because ``<version>'s <noun>`` cannot be a requirement on the reader — a pin
+#: names a version to use, it does not own a noun. codingest's
+#: `tests/benchmarks/README.md` line ("kglite 0.15.13's planner fix made that
+#: exact query 5.7× faster") was cited as drift by two consecutive release
+#: notes, which asked them to renumber a measurement record.
+_POSSESSIVE = re.compile(r"^['’]s\s+\w")
 
 
 def _prose_context(lines: list[str], index: int) -> tuple[str, int]:
@@ -819,6 +828,12 @@ def is_version_citation(lines: list[str], index: int, match: re.Match[str]) -> b
         return True
     if _DECLARATION_CUES.search(sentence):
         return False
+    # Checked *after* the declaration cues, deliberately: "requires kglite
+    # 0.14.3's schema loader" is still a pin, and the conservatism direction
+    # (unrecognised ⇒ finding) is unchanged by adding one more recognised
+    # record shape.
+    if _POSSESSIVE.match(lines[index][match.end() :]):
+        return True
     return bool(_CITATION_CUES.search(sentence) or _DATED_PROSE.search(context))
 
 

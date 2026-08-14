@@ -4352,9 +4352,9 @@ class KnowledgeGraph:
 
         Equivalent to ``kg.to_subgraph().save(path)`` in a single call.
         Output is a v3 binary file that reloads via ``kglite.load(path)``
-        (or ``load(path, storage='disk')`` for disk mode). All edges
-        between selected nodes are included; node and edge properties
-        round-trip byte-for-byte.
+        (or ``kglite.open(path, storage='disk')`` for disk mode — ``load``
+        takes no ``storage`` argument). All edges between selected nodes are
+        included; node and edge properties round-trip byte-for-byte.
 
         Args:
             path: Destination path for the subgraph file.

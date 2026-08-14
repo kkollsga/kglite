@@ -1270,20 +1270,31 @@ impl NodeData {
         }
     }
 
-    /// Get the node's ID. In mapped mode (Null sentinel), reads from ColumnStore.
+    /// The node's **stored** `id` field — not a resolved read.
+    ///
+    /// This returns `self.id` verbatim and consults no `ColumnStore`. Since
+    /// 0.16.0 every ingest path is columnar from the first node, so on the
+    /// memory and mapped backends the inline field is the `Value::Null`
+    /// sentinel and the node's canonical id lives in its type's store. The
+    /// disk backend materialises real values into its arena copy, so the same
+    /// call answers differently there — see [`crate::graph::dir_graph::DirGraph::get_node`].
+    ///
+    /// **Read an id through [`GraphRead::get_node_id`] or `NodeView::id`**,
+    /// which resolve the store; never off a bare `NodeData` (D1 Phase 3).
+    ///
+    /// [`GraphRead::get_node_id`]: crate::graph::storage::GraphRead::get_node_id
     #[inline]
     pub fn id(&self) -> Cow<'_, Value> {
-        // Inline field only. A columnar node's canonical id lives in its
-        // type's store, which only the backend can reach — read it through
-        // `GraphRead::get_node_id` / `NodeView::id`, never off a bare
-        // `NodeData` (D1 Phase 3).
         Cow::Borrowed(&self.id)
     }
 
-    /// Get the node's title. In mapped mode (Null sentinel), reads from ColumnStore.
+    /// The node's **stored** `title` field — not a resolved read.
+    ///
+    /// Same contract as [`NodeData::id`]: the inline field verbatim, which is
+    /// the `Value::Null` sentinel on the memory and mapped backends. Read a
+    /// title through `NodeView::title`.
     #[inline]
     pub fn title(&self) -> Cow<'_, Value> {
-        // Inline field only — see `id()`.
         Cow::Borrowed(&self.title)
     }
 

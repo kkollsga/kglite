@@ -1295,6 +1295,25 @@ impl DirGraph {
         self.graph.begin_query()
     }
 
+    /// The raw stored node record — **topology and existence only**.
+    ///
+    /// What the returned [`NodeData`]'s `id`/`title` fields hold is not the
+    /// same on every backend, and that asymmetry is deliberate:
+    ///
+    /// * **memory / mapped** — the inline fields are the `Value::Null`
+    ///   sentinel. Every ingest path has been columnar since 0.16.0, so the
+    ///   node's identity lives in its type's `ColumnStore`, not on the record.
+    /// * **disk** — the arena copy is materialised with the real `id`/`title`
+    ///   before it is handed out, so the same call answers with real values.
+    ///
+    /// So use this to ask *whether* a node exists at `index`, to reach its
+    /// `node_type`, or to walk topology. For any **value** read — id, title or
+    /// a property — go through [`GraphRead::node_view`] (or
+    /// [`GraphRead::get_node_id`]), which resolve the store and answer
+    /// identically on all three backends.
+    ///
+    /// [`GraphRead::node_view`]: crate::graph::storage::GraphRead::node_view
+    /// [`GraphRead::get_node_id`]: crate::graph::storage::GraphRead::get_node_id
     pub fn get_node(&self, index: NodeIndex) -> Option<&NodeData> {
         self.graph.node_weight(index)
     }

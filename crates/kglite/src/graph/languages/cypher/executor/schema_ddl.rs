@@ -565,8 +565,11 @@ fn unsupported_index_type_message(index_type: DdlIndexType) -> String {
         }
         DdlIndexType::Vector => {
             "Vector indexes exist in KGLite but are not created through Cypher DDL, because \
-             they need an existing embedding store and HNSW build parameters. Use the \
-             Python/Rust API: `kg.build_vector_index(node_type, text_column, ...)`."
+             they need an existing embedding store and HNSW build parameters. Use your \
+             binding's build_vector_index(node_type, text_column, ...) — every binding \
+             reaches it (Python, Rust, and the C ABI's \
+             kglite_session_build_vector_index, which Java and the other C consumers \
+             wrap)."
         }
         DdlIndexType::Lookup => {
             "KGLite has no token-lookup index to create: label and relationship-type lookup is \

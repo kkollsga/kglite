@@ -642,6 +642,17 @@ def test_breaking_symbols_are_scoped_to_the_release_that_broke_them(ecosystem: P
         # transition to the current version without rewriting which move
         # actually happened. codingest/PARITY.md:13 is exactly this shape.
         "The engine floor moved kglite 0.14.1 → 0.14.5, which the corpus verified.",
+        # The possessive: `<version>'s <noun>` attributes a thing to one named
+        # release, which is a statement about that release and true forever.
+        # codingest reported this as the third instance of the defect
+        # (2026-08-14): their `tests/benchmarks/README.md:128` reads "kglite
+        # 0.15.13's planner fix made that exact query 5.7× faster", and two
+        # consecutive release notes told them to renumber it — i.e. to falsify a
+        # measurement record. Version pinned to the fixture's stale value so the
+        # case is non-vacuous (a version *newer* than the ecosystem's is not a
+        # staleness finding at all).
+        "kglite 0.14.5's planner fix made that exact query 5.7× faster.",
+        "kglite 0.14.5's release notes name the same three files.",
     ],
 )
 def test_historical_citations_are_not_flagged_as_drift(ecosystem: Path, prose: str) -> None:
@@ -662,6 +673,10 @@ def test_historical_citations_are_not_flagged_as_drift(ecosystem: Path, prose: s
         # `X+` is a floor written compactly, so it stays a declaration even
         # inside a past-tense sentence that would otherwise read as a record.
         "It was gated on kglite 0.14.3+ here.",
+        # The possessive rule must not swallow a pin: a declaration cue in the
+        # same sentence still wins, so `<version>'s <noun>` cannot be used to
+        # smuggle a stale requirement past the scan.
+        "This requires kglite 0.14.3's schema loader.",
     ],
 )
 def test_declarations_are_still_flagged(ecosystem: Path, prose: str) -> None:

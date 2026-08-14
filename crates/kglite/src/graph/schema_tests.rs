@@ -68,23 +68,46 @@ mod maintenance_tests {
     use super::*;
     use crate::graph::storage::{GraphRead, GraphWrite};
 
-    /// Helper: create a DirGraph with N Person nodes and edges between consecutive pairs
+    /// Helper: create a DirGraph with N Person nodes and edges between consecutive pairs.
+    ///
+    /// Built through **`add_nodes`**, the real ingest funnel, rather than by
+    /// hand-assembling `NodeData` and pushing into `type_indices`. The hand-built
+    /// form bypassed every construction path a user can reach, and since 0.16.0
+    /// made construction columnar everywhere, that is the difference between a
+    /// fixture whose nodes carry inline `id`/`title` values and one whose nodes
+    /// carry the `Value::Null` sentinel with their identity in the type's
+    /// `ColumnStore` — i.e. between a fixture that hides the sentinel class and
+    /// one that exercises it. Tests here therefore read values through
+    /// `node_view`, never off `node_weight` (codingest's 0.16.0 report, ask 4b).
     fn make_test_graph(num_nodes: usize, num_edges: bool) -> DirGraph {
+        use crate::datatypes::DataFrame;
+        use crate::graph::mutation::maintain::add_nodes;
+
         let mut g = DirGraph::new();
-        for i in 0..num_nodes {
-            let mut props = HashMap::new();
-            props.insert("age".to_string(), Value::Int64(20 + i as i64));
-            let node = NodeData::new(
-                Value::UniqueId(i as u32),
-                Value::String(format!("Person_{}", i)),
+        if num_nodes > 0 {
+            let rows: Vec<Vec<Value>> = (0..num_nodes)
+                .map(|i| {
+                    vec![
+                        Value::UniqueId(i as u32),
+                        Value::String(format!("Person_{i}")),
+                        Value::Int64(20 + i as i64),
+                    ]
+                })
+                .collect();
+            let df = DataFrame::from_cypher_rows(
+                vec!["id".to_string(), "title".to_string(), "age".to_string()],
+                rows,
+            )
+            .expect("frame");
+            add_nodes(
+                &mut g,
+                df,
                 "Person".to_string(),
-                props,
-                &mut g.interner,
-            );
-            let idx = g.graph.add_node(node);
-            g.type_indices
-                .entry_or_default("Person".to_string())
-                .push(idx);
+                "id".to_string(),
+                Some("title".to_string()),
+                None,
+            )
+            .expect("add_nodes");
         }
         if num_edges {
             for i in 0..(num_nodes.saturating_sub(1)) {
@@ -335,10 +358,17 @@ mod maintenance_tests {
 
         let mapping = g.vacuum();
 
-        // Verify all surviving nodes are present with correct data
+        // Verify all surviving nodes are present with correct data.
+        //
+        // Read through `node_view`, not `node_weight`: an ingested node's
+        // inline `title` is the `Value::Null` sentinel and its real title lives
+        // in the type's `ColumnStore`. Off `node_weight` this loop matches no
+        // `Value::String` at all and collects an empty vector — the failure
+        // mode is a test that stops observing anything rather than one that
+        // observes something wrong.
         let mut titles: Vec<String> = Vec::new();
         for idx in g.graph.node_indices() {
-            if let Some(node) = g.graph.node_weight(idx) {
+            if let Some(node) = g.graph.node_view(idx) {
                 if let Value::String(s) = &*node.title() {
                     titles.push(s.clone());
                 }
@@ -376,7 +406,8 @@ mod maintenance_tests {
 
         g.vacuum();
 
-        let title = |idx: NodeIndex| match &*g.graph.node_weight(idx).unwrap().title() {
+        // `node_view`, not `node_weight` — see `test_vacuum_preserves_node_data`.
+        let title = |idx: NodeIndex| match &*g.graph.node_view(idx).unwrap().title() {
             Value::String(s) => s.clone(),
             other => panic!("unexpected title {other:?}"),
         };

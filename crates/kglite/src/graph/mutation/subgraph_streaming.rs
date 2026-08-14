@@ -413,7 +413,9 @@ pub fn pass_a_scan_to_file(
 ///
 /// Output is a v3 binary file (single `.kgl` file for in-memory/mapped
 /// sources, directory for disk sources via `save_disk`). The file can be
-/// reloaded into any storage mode via `kglite.load(path, storage=...)`.
+/// reloaded into any storage mode via `kglite.open(path, storage=...)`
+/// (`kglite.load` takes no `storage` argument — it restores the mode the
+/// checkpoint recorded).
 ///
 /// `_spec` is currently unused — the selection carries the filter. The
 /// parameter exists so v2 (Cypher integration) can lower into the same
