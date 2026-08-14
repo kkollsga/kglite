@@ -3,7 +3,7 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::core::membership::MembershipSet;
-use crate::graph::core::pattern_matching::Pattern;
+use crate::graph::core::pattern_matching::{ParamLabel, Pattern};
 
 // ============================================================================
 // Top-Level Query
@@ -413,6 +413,9 @@ pub enum Predicate {
     LabelCheck {
         variable: String,
         label: String,
+        /// Parameter name when the label was written `WHERE n:$label`,
+        /// pending [`super::dynamic_labels::resolve`].
+        label_param: Option<String>,
     },
 }
 
@@ -801,6 +804,11 @@ pub struct CreateNodePattern {
     /// via `DirGraph::add_node_label`.
     pub extra_labels: Vec<String>,
     pub properties: Vec<(String, Expression)>,
+    /// Label slots written as a parameter (`CREATE (n:$label)`), pending
+    /// [`super::dynamic_labels::resolve`]. Slot 0 is `label`, slot `n > 0` is
+    /// `extra_labels[n - 1]`. Empty for every literal pattern, and empty by
+    /// the time the planner or executor sees the clause.
+    pub label_params: Vec<ParamLabel>,
 }
 
 /// Edge pattern in CREATE: -[var:TYPE {key: expr, ...}]->
@@ -810,6 +818,9 @@ pub struct CreateEdgePattern {
     pub connection_type: String,
     pub direction: CreateEdgeDirection,
     pub properties: Vec<(String, Expression)>,
+    /// Parameter name when the type was written `-[:$type]->`, pending
+    /// [`super::dynamic_labels::resolve`]; `None` for a literal type.
+    pub type_param: Option<String>,
 }
 
 /// Edge direction in CREATE
@@ -836,6 +847,9 @@ pub enum SetItem {
     Label {
         variable: String,
         label: String,
+        /// Parameter name when the label was written `SET n:$label`, pending
+        /// [`super::dynamic_labels::resolve`]; `None` for a literal label.
+        label_param: Option<String>,
     },
     /// `SET n += map` merges keys; `SET n = map` replaces mutable keys.
     Map {
@@ -861,8 +875,17 @@ pub struct RemoveClause {
 /// Single REMOVE item
 #[derive(Debug, Clone)]
 pub enum RemoveItem {
-    Property { variable: String, property: String },
-    Label { variable: String, label: String },
+    Property {
+        variable: String,
+        property: String,
+    },
+    Label {
+        variable: String,
+        label: String,
+        /// Parameter name when the label was written `REMOVE n:$label`,
+        /// pending [`super::dynamic_labels::resolve`].
+        label_param: Option<String>,
+    },
 }
 
 /// MERGE clause — match-or-create with optional ON CREATE/ON MATCH SET

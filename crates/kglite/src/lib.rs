@@ -492,6 +492,12 @@ pub mod api {
         pub use crate::graph::languages::cypher::ast::{
             CypherQuery, Expression, OutputFormat, ReturnItem,
         };
+        /// Bind label / relationship-type positions written as parameters
+        /// (`MATCH (n:$label)`) before validation and planning. `session`
+        /// runs this for every statement it prepares; a binding that drives
+        /// the parse → optimize → execute steps itself must call it too, or
+        /// a parameterised label silently matches nothing.
+        pub use crate::graph::languages::cypher::dynamic_labels;
         pub use crate::graph::languages::cypher::executor::write::execute_mutable;
         pub use crate::graph::languages::cypher::executor::CypherExecutor;
         pub use crate::graph::languages::cypher::generate_explain_result;

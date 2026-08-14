@@ -4790,6 +4790,13 @@ class KnowledgeGraph:
             query: Cypher query string.
             to_df: If ``True``, return a pandas DataFrame.
             params: Optional parameter dict for ``$param`` substitution.
+                A parameter can supply a **value** or a **name**: labels and
+                relationship types accept ``$label`` / ``$(label)`` too
+                (``MATCH (n:$label)``, ``-[:$type]->``, ``CREATE (n:$label)``,
+                ``SET n:$label``). A parameter bound to a name position is a
+                name by construction, so a caller never has to escape
+                untrusted input into the query text. Name parameters must be
+                strings, and a missing one is an error.
             timeout_ms: Deadline in milliseconds. If omitted, uses
                 ``set_default_timeout()`` when set, otherwise the
                 built-in default of 180_000 ms (3 min). Pass ``0`` to

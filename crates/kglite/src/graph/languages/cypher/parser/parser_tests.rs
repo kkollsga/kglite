@@ -620,7 +620,7 @@ mod tests {
         let query = parse_cypher("MATCH (n:Person) REMOVE n:Temporary").unwrap();
         if let Clause::Remove(r) = &query.clauses[1] {
             assert!(
-                matches!(&r.items[0], RemoveItem::Label { variable, label } if variable == "n" && label == "Temporary")
+                matches!(&r.items[0], RemoveItem::Label { variable, label, .. } if variable == "n" && label == "Temporary")
             );
         }
     }

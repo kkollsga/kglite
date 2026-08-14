@@ -1125,6 +1125,20 @@ fn resolve_create_node_idx(
     }
 }
 
+/// The node's type name when that type opted into `updated_at` stamping, else
+/// `None`. Arena guard: `node_view` materializes on the disk backend, so the
+/// read is scoped and the borrow ends before the caller's `&mut` writes.
+fn auto_timestamp_type_of(graph: &DirGraph, node_idx: NodeIndex) -> Option<String> {
+    let node_type = {
+        let _arena_guard = graph.graph.begin_query();
+        graph
+            .graph
+            .node_view(node_idx)
+            .map(|n| n.node_type_str(&graph.interner).to_string())
+    };
+    node_type.filter(|nt| graph.auto_timestamp_for(nt))
+}
+
 /// True when `variable` is a bound-but-null write target on this row —
 /// e.g. an unmatched OPTIONAL MATCH variable (no binding at all) or an
 /// explicit NULL projection. openCypher: SET / REMOVE on a NULL target is
@@ -1443,7 +1457,9 @@ fn execute_set(
                         )?;
                     }
                 }
-                SetItem::Label { variable, label } => {
+                SetItem::Label {
+                    variable, label, ..
+                } => {
                     let Some(&node_idx) = row.node_bindings.get(variable) else {
                         // Null target (OPTIONAL MATCH miss): no-op for this row.
                         if is_null_write_target(row, variable) {
@@ -1459,19 +1475,9 @@ fn execute_set(
                         stats.properties_set += 1;
                         // A label add is a modification — bump `updated_at` if
                         // the node's type opted in (same post-loop stamp as a
-                        // property SET). Arena guard: node_weight materializes
-                        // on the disk backend; scoped read.
-                        let nt = {
-                            let _arena_guard = graph.graph.begin_query();
-                            graph
-                                .graph
-                                .node_view(node_idx)
-                                .map(|n| n.node_type_str(&graph.interner).to_string())
-                        };
-                        if let Some(nt) = nt {
-                            if graph.auto_timestamp_for(&nt) {
-                                nodes_to_stamp.insert(node_idx, nt);
-                            }
+                        // property SET).
+                        if let Some(nt) = auto_timestamp_type_of(graph, node_idx) {
+                            nodes_to_stamp.insert(node_idx, nt);
                         }
                     }
                 }
@@ -1868,7 +1874,9 @@ fn execute_remove(
                     }
                     graph.apply_property_write_plan(&constraint_plan, *node_idx);
                 }
-                RemoveItem::Label { variable, label } => {
+                RemoveItem::Label {
+                    variable, label, ..
+                } => {
                     let Some(&node_idx) = row.node_bindings.get(variable) else {
                         // Null target (OPTIONAL MATCH miss): no-op for this row.
                         if is_null_write_target(row, variable) {

@@ -32,6 +32,7 @@ surface at a glance — most of what you'd reach for is here, in-process:
 | **Path finding** | variable-length `-[*1..n]->`, `shortestPath(…)`, `allShortestPaths(…)`, weighted shortest path (`CALL`) |
 | **Predicates** | `=, <>, <, >, <=, >=`, `AND` / `OR` / `NOT`, `IS [NOT] NULL`, `IN`, `CONTAINS` / `STARTS WITH` / `ENDS WITH`, regex `=~` |
 | **Expressions** | list comprehension `[x IN xs WHERE … \| …]`, `reduce(…)`, `CASE`, list/map literals, parameters `$p` |
+| **Parameters** | values `$p`, and **names**: dynamic labels / relationship types `(n:$label)`, `(n:$(label))`, `-[:$type]->` — see [Parameters](#parameters) |
 | **Aggregation** | `count` / `sum` / `avg` / `min` / `max` / `collect` / `percentile_cont` / `mode` / `stdev` …, `DISTINCT`, `HAVING`, window functions (`OVER`, `PARTITION BY`, ranking) |
 | **Procedures** (`CALL`) | centralities (pagerank, betweenness, closeness, degree), community (louvain, leiden, label propagation), components, k-core, clustering, `triangle_count` / `transitivity`, `eccentricity` / `diameter`, `ready_set` (dependency frontier), `shortest_path_length`, `kg_knn`, structural validators (`duplicate_title`, `cycle_2step`, `parallel_edges`, …) |
 | **Vector + text** | `vector_score(…)` (HNSW index, exact fallback), `text_score(…)` (query vector, or query text via a pluggable embedder) — hybrid semantic + structural in one query |
@@ -1161,6 +1162,55 @@ df = graph.cypher(
     params={'min_age': 20}, to_df=True
 )
 ```
+
+### Dynamic labels and relationship types
+
+A parameter can also supply a **label or relationship type**, in both the bare
+and the Neo4j 5 parenthesised spelling — `$label` and `$(label)` are the same
+reference:
+
+```python
+graph.cypher("MATCH (n:$label) RETURN n.name", params={'label': 'Person'})
+graph.cypher("MATCH (n:$(label)) RETURN n.name", params={'label': 'Person'})
+graph.cypher("MATCH (a)-[:$type]->(b) RETURN b.name", params={'type': 'KNOWS'})
+
+graph.cypher("CREATE (n:$label {id: 1})", params={'label': 'Person'})
+graph.cypher("MATCH (n:Person {id: 1}) SET n:$label", params={'label': 'Employee'})
+graph.cypher("MATCH (n:Person {id: 1}) REMOVE n:$label", params={'label': 'Employee'})
+graph.cypher("MATCH (n) WHERE n:$label RETURN n.name", params={'label': 'Robot'})
+```
+
+It works anywhere a name is written: `MATCH`, `MERGE`, `CREATE`, `SET`,
+`REMOVE`, the `WHERE n:Label` predicate, secondary labels (`(n:Person:$label)`),
+type alternations (`-[:KNOWS|$type]->`), and inside `EXISTS { … }` /
+`COUNT { … }` / `CALL { … }`.
+
+**Why it matters: there is now no position left that a caller has to escape.**
+Building a query from user input used to mean splicing the label into the query
+*text*, and every such caller owned an injection surface. As a parameter the
+value is a **name by construction** — it is bound into an already-parsed query,
+so no spelling of it (backticks, braces, a closing parenthesis, another label)
+can change the query's shape. A value that does not name an existing label
+simply matches nothing, exactly as the literal spelling would:
+
+```python
+# Matches nothing. Not a syntax error, and not a different query.
+graph.cypher("MATCH (n:$label) RETURN n",
+             params={'label': "Person) RETURN n MATCH (m:Person"})
+```
+
+The parameter is bound before the query is planned, so a dynamic label plans
+and performs exactly like the literal one — `EXPLAIN` of both is identical, and
+index selection is unaffected.
+
+Two limits, both deliberate:
+
+- `$(...)` takes a **parameter name**, not a general expression; `$(row.label)`
+  is a syntax error.
+- The value must be a **string**. Neo4j's list forms (one parameter expanding
+  into several labels, or into a type alternation) are rejected with an error
+  rather than expanded. A missing parameter is an error too — a label has no
+  sensible default, and matching nothing would hide the caller's bug.
 
 ## UNWIND
 

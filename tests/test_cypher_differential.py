@@ -50,6 +50,29 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     # ── basic shapes ──
     ("simple_match", "small_graph", "MATCH (p:Person) RETURN p.name AS n", None),
     ("simple_match_param", "small_graph", "MATCH (p:Person) WHERE p.age > $min RETURN p.name AS n", {"min": 30}),
+    # Dynamic label / relationship type: the parameter is bound before the
+    # optimizer runs, so both paths must plan and answer exactly as the
+    # literal spelling does — that equivalence is what makes it safe for
+    # every pass to keep reading a plain label.
+    ("dynamic_label", "small_graph", "MATCH (p:$label) RETURN p.name AS n", {"label": "Person"}),
+    (
+        "dynamic_label_with_pushdown",
+        "small_graph",
+        "MATCH (p:$label) WHERE p.age > $min RETURN p.name AS n ORDER BY n",
+        {"label": "Person", "min": 30},
+    ),
+    (
+        "dynamic_relationship_type",
+        "social_graph",
+        "MATCH (a:Person)-[:$type]->(b:Person) RETURN a.name AS a, b.name AS b",
+        {"type": "KNOWS"},
+    ),
+    (
+        "dynamic_label_count_fusion",
+        "social_graph",
+        "MATCH (p:$label) RETURN count(p) AS n",
+        {"label": "Person"},
+    ),
     ("count_all_typed", "social_graph", "MATCH (p:Person) RETURN count(p) AS n", None),
     ("count_all_untyped", "social_graph", "MATCH (n) RETURN count(n) AS n", None),
     (

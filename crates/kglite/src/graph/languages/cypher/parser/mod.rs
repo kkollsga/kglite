@@ -20,6 +20,7 @@ use super::tokenizer::{
 #[cfg(test)]
 use crate::datatypes::values::Value;
 use crate::error::KgError;
+use crate::graph::core::pattern_matching::ParamLabel;
 
 pub mod clauses;
 pub mod expression;
@@ -333,6 +334,29 @@ impl CypherParser {
                 .ok_or_else(|| format!("Expected {}, got {:?}", context, token)),
             None => Err(format!("Expected {}", context)),
         }
+    }
+
+    /// [`Self::expect_name`] for a **label / relationship-type** position,
+    /// which additionally accepts a parameter reference (`$label`, `$(label)`).
+    ///
+    /// Returns the text to park in the string slot — the name itself, or the
+    /// `$name` placeholder — plus the parameter name when it *was* a
+    /// reference. Callers record that reference alongside the slot, and
+    /// [`super::dynamic_labels::resolve`] substitutes it before validation.
+    /// See [`ParamLabel`] for why the marker is out of band.
+    ///
+    /// Name positions reached through the MATCH pattern re-serializer do not
+    /// come here: that path hands `$name` to the secondary pattern lexer,
+    /// which has the mirror of this function.
+    pub(super) fn expect_label_name(
+        &mut self,
+        context: &str,
+    ) -> Result<(String, Option<String>), String> {
+        if let Some(CypherToken::Parameter(param)) = self.peek().cloned() {
+            self.advance();
+            return Ok((ParamLabel::placeholder(&param), Some(param)));
+        }
+        Ok((self.expect_name(context)?, None))
     }
 
     /// Check if we're at a clause boundary (start of a new clause)

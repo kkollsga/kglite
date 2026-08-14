@@ -70,8 +70,8 @@
     {
       "path": "crates/kglite-py/src/graph/pyapi/kg_mutation.rs",
       "qualified_name": "crate::write_connections",
-      "lines": 226,
-      "branches": 18,
+      "lines": 212,
+      "branches": 17,
       "nesting": 4
     },
     {
@@ -336,8 +336,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/where_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::evaluate_predicate_tristate",
-      "lines": 319,
-      "branches": 86,
+      "lines": 310,
+      "branches": 84,
       "nesting": 6
     },
     {
@@ -350,8 +350,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
       "qualified_name": "crate::execute_set",
-      "lines": 331,
-      "branches": 43,
+      "lines": 323,
+      "branches": 42,
       "nesting": 8
     },
     {
@@ -434,8 +434,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/tokenizer.rs",
       "qualified_name": "crate::tokenize_cypher_with_positions",
-      "lines": 360,
-      "branches": 71,
+      "lines": 350,
+      "branches": 70,
       "nesting": 6
     },
     {

@@ -202,6 +202,31 @@ fn validate_connection_input_mode(
     Ok(())
 }
 
+/// Parse the `query=` form of `add_connections` / `replace_connections`,
+/// enforcing the two things this entry point requires of it: the query must be
+/// read-only, and it must not reference parameters — this route accepts none.
+///
+/// Resolving dynamic labels against an empty parameter map is what turns
+/// `MATCH (n:$label)` here into an actionable "Missing parameter" error rather
+/// than a pattern that silently matches nothing.
+fn parse_read_only_connection_query(query: &str) -> PyResult<cypher::CypherQuery> {
+    let mut parsed = cypher::parse_cypher(query).map_err(|e| -> PyErr {
+        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
+            "Cypher syntax error in query: {}",
+            e
+        )))
+    })?;
+    if cypher::is_mutation_query(&parsed) {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "The 'query' parameter must be a read-only query (MATCH...RETURN). \
+             CREATE/SET/DELETE/MERGE are not allowed here.",
+        ));
+    }
+    cypher::dynamic_labels::resolve(&mut parsed, &HashMap::new())
+        .map_err(crate::error_py::kg_to_pyerr)?;
+    Ok(parsed)
+}
+
 /// Shared body of `add_connections` (replace=false) and
 /// `replace_connections` (replace=true). The two methods are identical
 /// except for the core call: `replace` first prunes the existing edges
@@ -245,21 +270,7 @@ fn write_connections(
 
     // ── Query path: run Cypher, convert to internal DataFrame ──
     if let Some(query_str) = query {
-        // Parse the cypher query
-        let mut parsed = cypher::parse_cypher(&query_str).map_err(|e| -> PyErr {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
-                "Cypher syntax error in query: {}",
-                e
-            )))
-        })?;
-
-        // Reject mutation queries — the query must be read-only
-        if cypher::is_mutation_query(&parsed) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "The 'query' parameter must be a read-only query (MATCH...RETURN). \
-                 CREATE/SET/DELETE/MERGE are not allowed here.",
-            ));
-        }
+        let mut parsed = parse_read_only_connection_query(&query_str)?;
 
         // Execute read-only: clone Arc, execute without holding mutable borrow
         let inner_clone = kg.inner.clone();

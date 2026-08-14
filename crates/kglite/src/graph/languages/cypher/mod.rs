@@ -13,6 +13,7 @@
 // the kglite-py wrapper crate — they're not part of the engine.
 
 pub mod ast;
+pub mod dynamic_labels;
 pub mod executor;
 pub mod parse_cache;
 pub mod parser;

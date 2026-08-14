@@ -6,6 +6,7 @@
 use super::super::ast::*;
 use super::super::tokenizer::CypherToken;
 use super::CypherParser;
+use crate::graph::core::pattern_matching::ParamLabel;
 
 impl CypherParser {
     pub(super) fn parse_return_clause(&mut self) -> Result<Clause, String> {
@@ -284,6 +285,7 @@ impl CypherParser {
         let mut label = None;
         let mut extra_labels: Vec<String> = Vec::new();
         let mut properties = Vec::new();
+        let mut label_params: Vec<ParamLabel> = Vec::new();
 
         // Parse optional variable name
         if let Some(CypherToken::Identifier(_)) = self.peek() {
@@ -298,10 +300,21 @@ impl CypherParser {
         // Parse :Primary[:Extra1:Extra2:…]
         if self.check(&CypherToken::Colon) {
             self.advance();
-            label = Some(self.expect_name("label name after ':'")?);
+            let (name, param) = self.expect_label_name("label name after ':'")?;
+            label = Some(name);
+            if let Some(param) = param {
+                label_params.push(ParamLabel { slot: 0, param });
+            }
             while self.check(&CypherToken::Colon) {
                 self.advance();
-                extra_labels.push(self.expect_name("label name after ':'")?);
+                let (name, param) = self.expect_label_name("label name after ':'")?;
+                extra_labels.push(name);
+                if let Some(param) = param {
+                    label_params.push(ParamLabel {
+                        slot: extra_labels.len(),
+                        param,
+                    });
+                }
             }
         }
 
@@ -316,6 +329,7 @@ impl CypherParser {
             label,
             extra_labels,
             properties,
+            label_params,
         })
     }
 
@@ -388,9 +402,12 @@ impl CypherParser {
         }
 
         // Parse :TYPE (required for CREATE)
+        let mut type_param = None;
         if self.check(&CypherToken::Colon) {
             self.advance();
-            connection_type = Some(self.expect_name("relationship type after ':'")?);
+            let (name, param) = self.expect_label_name("relationship type after ':'")?;
+            connection_type = Some(name);
+            type_param = param;
         }
 
         let conn_type = connection_type
@@ -422,6 +439,7 @@ impl CypherParser {
             connection_type: conn_type,
             direction,
             properties,
+            type_param,
         })
     }
 
@@ -484,10 +502,11 @@ impl CypherParser {
                 // per label, mirroring Neo4j semantics.
                 loop {
                     self.advance(); // consume :
-                    let label = self.expect_name("label name after ':'")?;
+                    let (label, label_param) = self.expect_label_name("label name after ':'")?;
                     items.push(SetItem::Label {
                         variable: var_name.clone(),
                         label,
+                        label_param,
                     });
                     if !self.check(&CypherToken::Colon) {
                         break;
@@ -579,10 +598,12 @@ impl CypherParser {
                 // Label removal: var:Label[:More:...]
                 loop {
                     self.advance(); // consume :
-                    let label = self.expect_name("label name after ':' in REMOVE")?;
+                    let (label, label_param) =
+                        self.expect_label_name("label name after ':' in REMOVE")?;
                     items.push(RemoveItem::Label {
                         variable: var_name.clone(),
                         label,
+                        label_param,
                     });
                     if !self.check(&CypherToken::Colon) {
                         break;

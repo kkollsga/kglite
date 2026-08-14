@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Dynamic labels and relationship types — a parameter can supply a *name*,
+  not just a value.** `MATCH (n:$label)`, the Neo4j 5 spelling
+  `MATCH (n:$(label))`, `-[:$type]->`, `CREATE (n:$label {…})`, `SET n:$label`,
+  `REMOVE n:$label`, `WHERE n:$label`, secondary labels (`(n:A:$label)`), type
+  alternations (`-[:A|$type]->`), and the same inside `EXISTS { }`,
+  `COUNT { }`, `MERGE`, `FOREACH` and `CALL { }`. **This removes the last
+  position in a query that a caller had to escape by hand:** a label could
+  previously only be spliced into the query *text*, so every caller building a
+  query from user input owned an injection surface. Bound as a parameter, the
+  value is a name by construction — it is written into an already-parsed query,
+  so no spelling of it can change the query's shape, and a value naming no
+  existing label matches nothing exactly as the literal spelling would. The
+  parameter is bound *before* planning, so a dynamic label plans, uses indexes
+  and performs identically to the literal form (its `EXPLAIN` is byte-identical).
+  Deliberate limits, both erroring rather than guessing: `$(...)` takes a
+  parameter name and not a general expression, and the value must be a string —
+  Neo4j's list forms that expand into several labels or an alternation are
+  rejected. A missing parameter is an error, not an empty result.
+
 ### Changed
 
 - **BREAKING — a durable graph refuses a caller-supplied duplicate id.** On a
@@ -68,6 +89,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A backtick-quoted label spelled like a parameter is a label.** ``MATCH
+  (n:`$label`)`` failed to parse: the MATCH path re-serializes its token stream
+  for the pattern parser, and a name beginning with `$` was written back
+  *unquoted*, so the pattern lexer re-read it as a parameter reference. Same
+  class as the `TRUE`-as-a-label trap below — the emitter's quoting rule now
+  covers every word that lexer would read back as something other than a name,
+  and both directions are pinned against the lexer itself. (Without the fix the
+  new dynamic-label syntax would have made it worse than a parse error: a
+  literal label would have silently become a parameter reference.)
 - **`TRUE`, `FALSE` and `NULL` work as names everywhere, or nowhere — the
   mint-but-never-query trap is closed.** ``CREATE (:`TRUE` {x: 1})`` succeeded
   while ``MATCH (n:`TRUE`)`` failed with a syntax error, so a caller could mint

@@ -40,6 +40,11 @@ pub struct NodePattern {
     /// first label lives in `node_type`; these are the rest.
     pub extra_labels: Vec<String>,
     pub properties: Option<HashMap<String, PropertyMatcher>>,
+    /// Label slots written as a parameter (`(n:$label)`), pending
+    /// [`crate::graph::languages::cypher::dynamic_labels::resolve`]. See
+    /// [`ParamLabel`] — empty for every literal pattern, and empty for every
+    /// pattern that reaches the planner.
+    pub label_params: Vec<ParamLabel>,
 }
 
 /// Pattern for matching edges: -[:TYPE {prop: value}]->
@@ -82,6 +87,48 @@ pub struct EdgePattern {
     /// pass populates this field; it stays `None` for callers that
     /// build patterns by hand.
     pub edge_filter: Option<RelEdgeFilter>,
+    /// Relationship-type slots written as a parameter (`-[:$type]->`),
+    /// pending resolution. See [`ParamLabel`]; slot `i` indexes
+    /// `connection_types[i]`, and slot 0 additionally covers
+    /// `connection_type`.
+    pub type_params: Vec<ParamLabel>,
+}
+
+/// A label or relationship-type slot whose text comes from a query parameter
+/// (`(n:$label)`, `(n:$(label))`, `-[:$type]->`).
+///
+/// **This exists only between the parser and the resolver.** The parser cannot
+/// know the parameter's value — parsed ASTs are cached by query *text*, and
+/// the same text is re-run with different parameters — so it records the
+/// reference here and leaves the string slot holding the source spelling
+/// (`"$label"`). `cypher::dynamic_labels::resolve` runs before validation,
+/// planning and execution, writes the bound name into the string slot, and
+/// clears this list. Every consumer downstream of it therefore sees the
+/// literal form and needs no knowledge of the feature at all.
+///
+/// The marker is deliberately **out of band** rather than a sentinel spelling
+/// inside the string: no literal label, however written (`` `$label` ``
+/// included), can then be mistaken for a parameter reference, and no
+/// parameter *value* can ever be re-read as a reference.
+///
+/// If a slot were ever to reach the planner unresolved, the string slot names
+/// a type spelled `$label`, which matches nothing — an unresolved pattern
+/// under-returns rather than over-returning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamLabel {
+    /// Which slot the parameter fills. For [`NodePattern`], 0 is `node_type`
+    /// and `n > 0` is `extra_labels[n - 1]`; for [`EdgePattern`], `n` is
+    /// `connection_types[n]`.
+    pub slot: usize,
+    /// Parameter name, without the `$`.
+    pub param: String,
+}
+
+impl ParamLabel {
+    /// The source spelling parked in the string slot until resolution.
+    pub fn placeholder(param: &str) -> String {
+        format!("${param}")
+    }
 }
 
 impl EdgePattern {

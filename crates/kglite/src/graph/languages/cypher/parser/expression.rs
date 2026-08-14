@@ -90,12 +90,13 @@ impl CypherParser {
         while self.check(&CypherToken::Colon) {
             self.advance();
             self.deepen()?;
-            let next_label = self.expect_name("label name after ':'")?;
+            let (next_label, label_param) = self.expect_label_name("label name after ':'")?;
             pred = Predicate::And(
                 Box::new(pred),
                 Box::new(Predicate::LabelCheck {
                     variable: var.clone(),
                     label: next_label,
+                    label_param,
                 }),
             );
         }
@@ -127,10 +128,11 @@ impl CypherParser {
             if let Expression::Variable(var) = &expr {
                 let var = var.clone();
                 self.advance(); // consume :
-                let first_label = self.expect_name("label name after ':'")?;
+                let (first_label, label_param) = self.expect_label_name("label name after ':'")?;
                 let first = Predicate::LabelCheck {
                     variable: var.clone(),
                     label: first_label,
+                    label_param,
                 };
                 let pred = self.chain(|p| p.parse_label_chain(var, first))?;
                 return Ok(Expression::PredicateExpr(Box::new(pred)));

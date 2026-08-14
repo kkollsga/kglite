@@ -489,6 +489,21 @@ impl<'a> CypherExecutor<'a> {
         Ok(self.evaluate_predicate_tristate(pred, row)? == Some(true))
     }
 
+    /// `WHERE n:Label` — true iff `variable` is bound to a node carrying
+    /// `label` as its primary type OR a secondary label. An unbound binding
+    /// (`OPTIONAL MATCH` that did not match) or a non-node binding is false,
+    /// never an error.
+    fn row_binding_has_label(&self, row: &ResultRow, variable: &str, label: &str) -> bool {
+        let Some(&idx) = row.node_bindings.get(variable) else {
+            return false;
+        };
+        if self.graph.graph.node_view(idx).is_none() {
+            return false;
+        }
+        self.graph
+            .node_has_label(idx, crate::graph::schema::InternedKey::from_str(label))
+    }
+
     /// Three-valued predicate evaluator implementing openCypher NULL
     /// semantics:
     ///
@@ -563,18 +578,9 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             Predicate::Not(inner) => Ok(self.evaluate_predicate_tristate(inner, row)?.map(|b| !b)),
-            Predicate::LabelCheck { variable, label } => {
-                // True iff the variable is bound to a node carrying `label` as
-                // its primary type OR a secondary label. Unbound (OPTIONAL
-                // MATCH) or non-node bindings are false.
-                if let Some(&idx) = row.node_bindings.get(variable) {
-                    if self.graph.graph.node_view(idx).is_some() {
-                        let key = crate::graph::schema::InternedKey::from_str(label);
-                        return Ok(Some(self.graph.node_has_label(idx, key)));
-                    }
-                }
-                Ok(Some(false))
-            }
+            Predicate::LabelCheck {
+                variable, label, ..
+            } => Ok(Some(self.row_binding_has_label(row, variable, label))),
             Predicate::IsNull(expr) => {
                 let val = self.evaluate_expression(expr, row)?;
                 Ok(Some(matches!(val, Value::Null)))

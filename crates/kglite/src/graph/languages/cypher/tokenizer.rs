@@ -64,7 +64,14 @@ pub enum CypherToken {
     Xor,
 
     // Parameters
-    Parameter(String), // $param_name
+    //
+    // Both spellings produce this one token: `$name` and the Neo4j 5
+    // parenthesised form `$(name)`. They are the same reference to the same
+    // parameter, so collapsing them here means every consumer — the value
+    // path, the pattern re-serializer, `parameter_names` — handles the new
+    // spelling without a second arm. `$(...)` accepts a parameter *name*
+    // only; the general `$(<expression>)` form is not implemented.
+    Parameter(String), // $param_name / $(param_name)
 
     // Symbols
     LParen,      // (
@@ -138,6 +145,43 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
         .into_iter()
         .map(|(tok, _pos)| tok)
         .collect())
+}
+
+/// Lex one parameter reference starting at the `$` in `chars[at]`.
+///
+/// Accepts both spellings — `$name` and the Neo4j 5 parenthesised `$(name)` —
+/// and returns `(name, name_start, index_after)`. The two forms are the same
+/// reference, so they produce the same token; `$(...)` takes a parameter
+/// *name*, not a general expression, and says so when handed one.
+fn lex_parameter(chars: &[char], at: usize) -> Result<(String, usize, usize), String> {
+    let len = chars.len();
+    let mut i = at + 1; // consume $
+    let parenthesised = i < len && chars[i] == '(';
+    if parenthesised {
+        i += 1; // consume (
+    }
+    let start = i;
+    while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+        i += 1;
+    }
+    if i == start {
+        return Err(format!(
+            "Expected parameter name after '$' at position {}",
+            start
+        ));
+    }
+    let name: String = chars[start..i].iter().collect();
+    if parenthesised {
+        if i >= len || chars[i] != ')' {
+            return Err(format!(
+                "Expected ')' closing '$({}' at position {}. \
+                 $(...) takes a parameter name only.",
+                name, i
+            ));
+        }
+        i += 1; // consume )
+    }
+    Ok((name, start, i))
 }
 
 /// Same as [`tokenize_cypher`] but returns the **char-position** at
@@ -452,20 +496,10 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, St
                 }
             }
 
-            // Parameter: $name
+            // Parameter: $name, or the Neo4j 5 parenthesised form $(name)
             '$' => {
-                i += 1; // consume $
-                let start = i;
-                while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
-                    i += 1;
-                }
-                if i == start {
-                    return Err(format!(
-                        "Expected parameter name after '$' at position {}",
-                        start
-                    ));
-                }
-                let name: String = chars[start..i].iter().collect();
+                let (name, start, next) = lex_parameter(&chars, i)?;
+                i = next;
                 tokens.push((CypherToken::Parameter(name), start));
             }
 
@@ -979,6 +1013,28 @@ mod tests {
         let tokens = tokenize_cypher("WHERE n.age > $age AND n.city = $city").unwrap();
         assert!(tokens.contains(&CypherToken::Parameter("age".to_string())));
         assert!(tokens.contains(&CypherToken::Parameter("city".to_string())));
+    }
+
+    /// The Neo4j 5 `$(name)` spelling is the same reference as `$name`, so it
+    /// produces the same token — every downstream consumer inherits it.
+    #[test]
+    fn parenthesised_parameter_is_the_same_token_as_the_bare_form() {
+        assert_eq!(
+            tokenize_cypher("MATCH (n:$(label))").unwrap(),
+            tokenize_cypher("MATCH (n:$label)").unwrap()
+        );
+        assert_eq!(
+            tokenize_cypher("$(min_age)").unwrap(),
+            vec![CypherToken::Parameter("min_age".to_string())]
+        );
+    }
+
+    #[test]
+    fn unclosed_or_empty_parenthesised_parameter_is_a_syntax_error() {
+        assert!(tokenize_cypher("MATCH (n:$(label").is_err());
+        assert!(tokenize_cypher("MATCH (n:$())").is_err());
+        // `$(...)` takes a name, not an expression.
+        assert!(tokenize_cypher("MATCH (n:$(row.label))").is_err());
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::iter::Peekable;
 use std::str::Chars;
 
 use super::pattern::{
-    EdgeDirection, EdgePattern, NodePattern, Pattern, PatternElement, PropertyMatcher,
+    EdgeDirection, EdgePattern, NodePattern, ParamLabel, Pattern, PatternElement, PropertyMatcher,
 };
 
 // ============================================================================
@@ -125,7 +125,13 @@ fn opens_signed_number(chars: &Peekable<Chars<'_>>) -> bool {
 /// Keep this in step with the identifier arm of [`tokenize`]; the agreement is
 /// pinned by `quoting_predicate_agrees_with_the_tokenizer`.
 pub fn bare_word_needs_quoting(word: &str) -> bool {
-    word.eq_ignore_ascii_case("true") || word.eq_ignore_ascii_case("false")
+    // A leading `$` lexes as a parameter reference here, which is how a
+    // *dynamic* label is written (`(n:$label)`). A name that happens to start
+    // with `$` — only reachable as `` `$label` `` in the source, since the
+    // primary tokenizer would otherwise have made it a parameter — must
+    // therefore be re-emitted quoted, or the re-serializer turns a literal
+    // label into a parameter reference and the query silently changes meaning.
+    word.starts_with('$') || word.eq_ignore_ascii_case("true") || word.eq_ignore_ascii_case("false")
 }
 
 pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
@@ -406,6 +412,23 @@ impl Parser {
         Ok(Pattern { elements })
     }
 
+    /// Consume a name in a label / relationship-type position, which may be
+    /// written literally or as a parameter reference (`$label`).
+    ///
+    /// Returns the text to park in the string slot — the name itself, or the
+    /// `$name` placeholder — plus the parameter name when it *was* a
+    /// reference. The caller records that reference in the pattern's
+    /// `label_params` / `type_params`, which is what the resolver reads; see
+    /// [`ParamLabel`] for why the marker is out of band rather than a
+    /// spelling inside the string.
+    fn expect_label_name(&mut self, context: &str) -> Result<(String, Option<String>), String> {
+        match self.advance().cloned() {
+            Some(Token::Identifier(name)) => Ok((name, None)),
+            Some(Token::Parameter(param)) => Ok((ParamLabel::placeholder(&param), Some(param))),
+            _ => Err(context.to_string()),
+        }
+    }
+
     /// Parse node pattern: (var:Type {props})
     fn parse_node_pattern(&mut self) -> Result<NodePattern, String> {
         self.expect(&Token::LParen)?;
@@ -414,6 +437,10 @@ impl Parser {
         let mut node_type = None;
         let mut extra_labels: Vec<String> = Vec::new();
         let mut properties = None;
+        let mut label_params: Vec<ParamLabel> = Vec::new();
+
+        const TYPE_ERR: &str =
+            "Expected node type name after ':'. Example: (:Person), (n:Person) or (n:$label)";
 
         // Check what comes next
         match self.peek() {
@@ -423,13 +450,10 @@ impl Parser {
             Some(Token::Colon) => {
                 // No variable, just type: (:Type) or (:A:B:...)
                 self.advance(); // consume :
-                if let Some(Token::Identifier(name)) = self.advance().cloned() {
-                    node_type = Some(name);
-                } else {
-                    return Err(
-                        "Expected node type name after ':'. Example: (:Person) or (n:Person)"
-                            .to_string(),
-                    );
+                let (name, param) = self.expect_label_name(TYPE_ERR)?;
+                node_type = Some(name);
+                if let Some(param) = param {
+                    label_params.push(ParamLabel { slot: 0, param });
                 }
             }
             Some(Token::Identifier(_)) => {
@@ -440,13 +464,10 @@ impl Parser {
                 // Check for type
                 if let Some(Token::Colon) = self.peek() {
                     self.advance(); // consume :
-                    if let Some(Token::Identifier(name)) = self.advance().cloned() {
-                        node_type = Some(name);
-                    } else {
-                        return Err(
-                            "Expected node type name after ':'. Example: (:Person) or (n:Person)"
-                                .to_string(),
-                        );
+                    let (name, param) = self.expect_label_name(TYPE_ERR)?;
+                    node_type = Some(name);
+                    if let Some(param) = param {
+                        label_params.push(ParamLabel { slot: 0, param });
                     }
                 }
             }
@@ -460,12 +481,15 @@ impl Parser {
         // first label. The executor AND-intersects across all labels.
         while let Some(Token::Colon) = self.peek() {
             self.advance(); // consume :
-            if let Some(Token::Identifier(name)) = self.advance().cloned() {
-                extra_labels.push(name);
-            } else {
-                return Err(
-                    "Expected node label name after ':'. Example: (n:Person:Manager)".to_string(),
-                );
+            let (name, param) = self.expect_label_name(
+                "Expected node label name after ':'. Example: (n:Person:Manager)",
+            )?;
+            extra_labels.push(name);
+            if let Some(param) = param {
+                label_params.push(ParamLabel {
+                    slot: extra_labels.len(),
+                    param,
+                });
             }
         }
 
@@ -481,6 +505,7 @@ impl Parser {
             node_type,
             extra_labels,
             properties,
+            label_params,
         })
     }
 
@@ -524,6 +549,7 @@ impl Parser {
                 needs_path_info: true,
                 skip_target_type_check: false,
                 edge_filter: None,
+                type_params: Vec::new(),
             });
         }
 
@@ -535,6 +561,10 @@ impl Parser {
         let mut connection_types: Option<Vec<String>> = None;
         let mut properties = None;
         let mut var_length = None;
+        let mut type_params: Vec<ParamLabel> = Vec::new();
+
+        const TYPE_ERR: &str = "Expected connection/edge type after ':'. \
+             Example: -[:KNOWS]->, -[e:WORKS_AT]-> or -[:$type]->";
 
         // Check what comes next
         match self.peek() {
@@ -544,10 +574,10 @@ impl Parser {
             Some(Token::Colon) => {
                 // No variable, just type: [:TYPE] or [:TYPE1|TYPE2]
                 self.advance(); // consume :
-                if let Some(Token::Identifier(name)) = self.advance().cloned() {
-                    connection_type = Some(name);
-                } else {
-                    return Err("Expected connection/edge type after ':'. Example: -[:KNOWS]-> or -[e:WORKS_AT]->".to_string());
+                let (name, param) = self.expect_label_name(TYPE_ERR)?;
+                connection_type = Some(name);
+                if let Some(param) = param {
+                    type_params.push(ParamLabel { slot: 0, param });
                 }
             }
             Some(Token::Identifier(_)) => {
@@ -558,10 +588,10 @@ impl Parser {
                 // Check for type
                 if let Some(Token::Colon) = self.peek() {
                     self.advance(); // consume :
-                    if let Some(Token::Identifier(name)) = self.advance().cloned() {
-                        connection_type = Some(name);
-                    } else {
-                        return Err("Expected connection/edge type after ':'. Example: -[:KNOWS]-> or -[e:WORKS_AT]->".to_string());
+                    let (name, param) = self.expect_label_name(TYPE_ERR)?;
+                    connection_type = Some(name);
+                    if let Some(param) = param {
+                        type_params.push(ParamLabel { slot: 0, param });
                     }
                 }
             }
@@ -581,13 +611,15 @@ impl Parser {
                 let mut types = vec![connection_type.clone().unwrap()];
                 while let Some(Token::Pipe) = self.peek() {
                     self.advance(); // consume |
-                    if let Some(Token::Identifier(name)) = self.advance().cloned() {
-                        types.push(name);
-                    } else {
-                        return Err(
-                            "Expected connection/edge type after '|'. Example: -[:KNOWS|LIKES]->"
-                                .to_string(),
-                        );
+                    let (name, param) = self.expect_label_name(
+                        "Expected connection/edge type after '|'. Example: -[:KNOWS|LIKES]->",
+                    )?;
+                    types.push(name);
+                    if let Some(param) = param {
+                        type_params.push(ParamLabel {
+                            slot: types.len() - 1,
+                            param,
+                        });
                     }
                 }
                 connection_types = Some(types);
@@ -630,6 +662,7 @@ impl Parser {
             needs_path_info: true,
             skip_target_type_check: false,
             edge_filter: None,
+            type_params,
         })
     }
 
@@ -856,11 +889,13 @@ mod tests {
         // are checked, so the predicate can neither under- nor over-claim.
         for word in [
             "true", "TRUE", "True", "false", "FALSE", "fAlSe", "null", "NULL", "Person", "order",
-            "contains", "x", "_x", "t1",
+            "contains", "x", "_x", "t1", "$label", "$", "$1",
         ] {
+            // A word the tokenizer *rejects* outright (a bare `$`) also fails
+            // to lex as itself, so the predicate must demand quoting for it.
             let lexes_as_itself = matches!(
-                tokenize(word).unwrap().as_slice(),
-                [Token::Identifier(s)] if s == word
+                tokenize(word).as_deref(),
+                Ok([Token::Identifier(s)]) if s == word
             );
             assert_eq!(
                 bare_word_needs_quoting(word),

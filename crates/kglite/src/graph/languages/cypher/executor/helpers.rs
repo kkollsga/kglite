@@ -324,7 +324,9 @@ pub(super) fn predicate_to_string(pred: &Predicate) -> String {
                 expression_to_string(pattern)
             )
         }
-        Predicate::LabelCheck { variable, label } => format!("{}:{}", variable, label),
+        Predicate::LabelCheck {
+            variable, label, ..
+        } => format!("{}:{}", variable, label),
         _ => "predicate(...)".to_string(),
     }
 }

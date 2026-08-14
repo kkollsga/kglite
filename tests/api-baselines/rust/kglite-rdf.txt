@@ -443,6 +443,8 @@ pub fn kglite::api::code_entities::find_code_entities(dir: &alloc::sync::Arc<kgl
 pub fn kglite::api::code_entities::resolve_code_entity(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>) -> (core::option::Option<petgraph::graph_impl::NodeIndex>, alloc::vec::Vec<(petgraph::graph_impl::NodeIndex, kglite::api::NodeInfo)>)
 pub fn kglite::api::code_entities::source_location(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>) -> kglite::api::code_entities::SourceLookup
 pub mod kglite::api::cypher
+pub mod kglite::api::cypher::dynamic_labels
+pub fn kglite::api::cypher::dynamic_labels::resolve(query: &mut kglite::api::cypher::CypherQuery, params: &std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> core::result::Result<(), kglite::error::KgError>
 pub mod kglite::api::cypher::planner
 pub mod kglite::api::cypher::planner::cost_model
 pub mod kglite::api::cypher::planner::fusion

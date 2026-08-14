@@ -598,6 +598,13 @@ fn prepare(
 
     let mut parsed = cypher::parse_cypher(query)?;
 
+    // Dynamic labels / relationship types (`MATCH (n:$label)`): bind them from
+    // the caller's parameters FIRST, so validation, optimization and execution
+    // all see an ordinary literal label. The parser cannot do this — parsed
+    // ASTs are cached by query text and re-run with different parameters — so
+    // it leaves a marker for this pass. See `cypher::dynamic_labels`.
+    cypher::dynamic_labels::resolve(&mut parsed, opts.params)?;
+
     // value_codecs: decode operator-declared literals bound to a codec'd
     // property (`{id:'Q42'}` / `WHERE n.id = 'Q42'` → `42`) BEFORE anything
     // else, so validation, optimization, and execution all treat the decoded
