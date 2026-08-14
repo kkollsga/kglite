@@ -594,6 +594,87 @@ impl TypeIndexStore {
         self.overlay.entry(name).or_default().to_mut()
     }
 
+    /// Locate `members` in `name`'s bucket, ascending by position.
+    ///
+    /// **The delete path's fast lane.** A `DETACH DELETE` used to reach this
+    /// store only through [`retain_in_type`](Self::retain_in_type), which walks
+    /// every member of the type and probes a `HashSet` for each one — 4.0 ms to
+    /// remove a single node from a 1M-row bucket, and quadratic in a delete
+    /// loop. Membership is resolvable in O(k log N) instead, via the
+    /// sortedness invariant [`TypeNodesRef::binary_search_idx`] documents:
+    /// members are appended in `node_indices()` order, so a type's bucket is a
+    /// sorted subsequence.
+    ///
+    /// Returns `None` — meaning "use the retain" — whenever that invariant does
+    /// not hold for one of the members. A freed `NodeIndex` slot reused by a
+    /// later create is appended out of order, so the invariant is a fast path,
+    /// never a guarantee. A position that *is* found is always right: the
+    /// search only reports `Ok` for an element that compares equal.
+    ///
+    /// Promotes the bucket into a flat, owned overlay entry (as the retain
+    /// does), which is what makes the returned positions valid coordinates for
+    /// [`remove_positions`](Self::remove_positions) and for the statement
+    /// journal's `BucketRemoved` entries.
+    pub fn positions_of(
+        &mut self,
+        name: &str,
+        members: &[NodeIndex],
+    ) -> Option<Vec<(usize, NodeIndex)>> {
+        if members.is_empty() {
+            return Some(Vec::new());
+        }
+        if !self.contains_key(name) {
+            return None;
+        }
+        let bucket = self.entry_or_default(name.to_string());
+        let mut hits: Vec<(usize, NodeIndex)> = Vec::with_capacity(members.len());
+        for member in members {
+            hits.push((bucket.binary_search(member).ok()?, *member));
+        }
+        hits.sort_unstable();
+        // Two doomed members resolving to one position means the bucket holds a
+        // duplicate the search collapsed; the retain removes every occurrence,
+        // so hand it back rather than removing one of them.
+        let unique = hits.windows(2).all(|pair| pair[0].0 != pair[1].0);
+        unique.then_some(hits)
+    }
+
+    /// Drop the members at `hits` (ascending positions, as returned by
+    /// [`positions_of`](Self::positions_of)) from `name`'s bucket, **preserving
+    /// the order of every survivor**.
+    ///
+    /// Order is not an aesthetic here: the bucket is the scan order of an
+    /// un-`ORDER BY`'d `MATCH`, the save writer's row order, and the coordinate
+    /// system the statement journal records its `BucketRemoved` positions in.
+    /// So this closes the gaps with one `copy_within` per surviving run rather
+    /// than swap-removing.
+    pub fn remove_positions(&mut self, name: &str, hits: &[(usize, NodeIndex)]) {
+        if hits.is_empty() {
+            return;
+        }
+        let Some(bucket) = self.overlay.get_mut(name) else {
+            return;
+        };
+        let bucket = bucket.to_mut();
+        if hits.last().is_some_and(|(pos, _)| *pos >= bucket.len()) {
+            debug_assert!(false, "stale bucket position handed to remove_positions");
+            return;
+        }
+        let mut write = hits[0].0;
+        for (i, (pos, _)) in hits.iter().enumerate() {
+            let start = pos + 1;
+            let end = hits
+                .get(i + 1)
+                .map(|(next, _)| *next)
+                .unwrap_or(bucket.len());
+            if end > start {
+                bucket.copy_within(start..end, write);
+                write += end - start;
+            }
+        }
+        bucket.truncate(write);
+    }
+
     /// Promote a single type into the overlay if needed, then run `predicate`
     /// on its Vec via `Vec::retain`. No-op if the type is absent.
     pub fn retain_in_type<F: FnMut(&NodeIndex) -> bool>(&mut self, name: &str, predicate: F) {
@@ -762,6 +843,10 @@ pub fn write_type_indices_bin(
         .map_err(|e| format!("Failed to write type_indices.bin: {}", e))?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "type_index_positional_tests.rs"]
+mod positional_tests;
 
 #[cfg(test)]
 mod validation_tests {

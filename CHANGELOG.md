@@ -147,6 +147,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   18.6/18.3 µs → 5.67/5.83 µs, and a 100k-row `SET` 46.1/45.8 ms → 41.5/42.7 ms.
   Rollback semantics are unchanged: a failed statement still restores the
   pre-statement catalogue exactly, live and through a subsequent `save()`.
+- **Appending rows to a large node type costs the rows, not the type.**
+  `add_nodes` derived its per-row "does this id already exist?" answer by
+  materialising the whole type's id index into a throwaway map, and then threw
+  the real index away and rebuilt it from every node of the type — two O(type)
+  passes per call, however few rows the call carried. Appending ten rows to a
+  200k-row type spent 84% of its time in index maintenance and 1.4% on the
+  rows. The index is now built once (the first call to a type, as before) and
+  afterwards only the call's own creations are folded in. Measured (release,
+  min of two runs): a 10-row append into a 200k-row type **9.67/9.65 ms →
+  83.8/84.4 µs (115×)**, and one-shot bulk ingest holds at 255.3 → 246.7 µs
+  (−3%). Streaming ingest — repeated small appends into a growing type — was
+  quadratic in the type's size and is now linear in the rows appended.
+- **…and the same for a type's own indexes.** `add_nodes` also rebuilt every
+  property, range and composite index covering the type, from every member,
+  once per call — so a single index put the cost back that the id-index fix had
+  just removed. A creation-only batch now gives each appended row the same
+  per-node index maintenance a Cypher `CREATE` gives it. Measured (release,
+  min, 10 rows appended to a 200k-row type): with one property index
+  **6.09 ms → 91.0 µs**, with two **29.9 ms → 89.5 µs** — the append is now
+  flat in the number of indexes. Batches that also *update* existing rows, and
+  types carrying a `UNIQUE` or non-`id` `PRIMARY KEY` tuple, keep the rebuild:
+  an update can move a row between index buckets, and unique occupancy is
+  re-derived from live data by design. Index contents and bucket order are
+  identical either way.
+- **Deleting one node no longer costs the size of its node type.** A
+  `DETACH DELETE` swept the whole type's member list with a hashed probe per
+  member, twice when a statement checkpoint was open (once to journal the
+  removal's position, once to perform it), so removing a single node from a
+  1M-row type cost 3.9 ms while the same statement against a 1k-row type in the
+  same graph cost 7 µs — and a delete loop was quadratic. The doomed members
+  are now located directly and their gaps closed with a memmove, with the sweep
+  kept as the fallback for the cases that cannot be located (a member list that
+  lost its ordering when a freed node slot was reused) and for deletes large
+  enough that the sweep is the cheaper answer. Bucket order — the row order an
+  un-`ORDER BY`'d `MATCH` returns, and what statement rollback restores — is
+  preserved exactly. Measured (release, min of two runs): a single
+  `DETACH DELETE` from a 1M-row type **3.91/3.91 ms → 3.67/3.62 µs**, from a
+  1k-row type in the same graph 6.88/6.79 → 3.21/3.13 µs, and the tracked
+  `single_delete` scaling cells go 14.7 µs / 764 µs / 7.94 ms at 1k / 100k / 1M
+  to a flat 8.0–8.8 µs at every size. The cost that remains tracks the deleted
+  node's position rather than the type's size: at 1M rows, 3.3 µs deleting the
+  newest node, 35 µs mid-list, 66 µs deleting the oldest.
 
 ### Removed
 

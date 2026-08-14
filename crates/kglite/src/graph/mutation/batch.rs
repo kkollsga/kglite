@@ -294,9 +294,13 @@ impl BatchProcessor {
             // Writing into entry_or_default before any prior `build_id_index`
             // call would create a partial entry that subsequent lookups
             // would trust as complete (build_id_index short-circuits when
-            // an entry exists). Leave id_indices alone; `maintain::add_nodes`
-            // invalidates the type's entry at return time so the next
-            // lookup rebuilds from `type_indices` (the source of truth).
+            // an entry exists). Leave id_indices alone: `maintain::add_nodes`
+            // settles the type's entry at return time, folding in exactly the
+            // members appended here (`fold_appended_ids_into_index`, which
+            // reads this bucket's tail) or invalidating for a rebuild when it
+            // cannot. A future creating caller that does neither would leave a
+            // stale entry, which is why the fold is on the *caller's* side of
+            // this boundary and not here.
             stats.creates += 1;
         }
         if let Some((held, store)) = current.take() {

@@ -407,6 +407,64 @@ impl DirGraph {
     // Bulk-path Index Refresh
     // ========================================================================
 
+    /// Maintain `node_type`'s secondary indexes for a bulk append that only
+    /// *created* rows, by giving each appended node the same per-node
+    /// treatment a Cypher `CREATE` gives it — instead of rebuilding every
+    /// covering index from every member of the type.
+    ///
+    /// **Why the rebuild is not good enough.** It is O(nodes-of-type) per
+    /// index, per call: measured 2026-08-14 (release), appending ten rows to a
+    /// 200k-row type costs 88 µs with no index, 6.1 ms with one property index
+    /// and 29.9 ms with two. That is the same shape the id index carried until
+    /// [`fold_appended_ids_into_index`](DirGraph::fold_appended_ids_into_index)
+    /// removed it, and it would otherwise re-impose it on exactly the types a
+    /// query-heavy application indexes.
+    ///
+    /// Returns `false` — meaning "rebuild instead" — for the cases the
+    /// per-node path does not cover:
+    ///
+    /// - **Updated rows.** An upsert can move an already-indexed node between
+    ///   value buckets, which needs the old bucket vacated; the append path
+    ///   only ever joins one.
+    /// - **A `UNIQUE` / non-`id` `PRIMARY KEY` tuple on the type.** Occupancy
+    ///   is deliberately re-derived from live data by the rebuild (see
+    ///   [`Self::refresh_indexes_for_type`]) rather than claimed per row, and
+    ///   this path has no claims to commit.
+    ///
+    /// Bucket order is preserved either way: the rebuild walks the type's
+    /// members in order, so the appended nodes land at the end of their value
+    /// buckets — which is where appending puts them.
+    pub(crate) fn fold_appended_into_user_indexes(
+        &mut self,
+        node_type: &str,
+        created: usize,
+        updated: usize,
+    ) -> bool {
+        if updated > 0 {
+            return false;
+        }
+        if self.unique_indices.keys().any(|(nt, _)| nt == node_type) {
+            return false;
+        }
+        let covered = self
+            .property_indices
+            .keys()
+            .chain(self.range_indices.keys())
+            .any(|(nt, _)| nt == node_type)
+            || self.composite_indices.keys().any(|(nt, _)| nt == node_type);
+        if !covered {
+            // Nothing to maintain — and nothing for the rebuild to do either.
+            return true;
+        }
+        let Some(tail) = self.appended_tail(node_type, created) else {
+            return false;
+        };
+        for node_idx in tail {
+            self.update_property_indices_for_add(node_type, node_idx);
+        }
+        true
+    }
+
     /// Rebuild every in-memory secondary index that covers `node_type` from
     /// live graph state. Returns the number of indexes rebuilt.
     ///

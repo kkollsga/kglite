@@ -12,7 +12,7 @@ use crate::graph::schema::{
     CompositeValue, CurrentSelection, DirGraph, InternedKey, TypeSchema, PROVISIONAL_KEY,
     RESERVED_PROVENANCE_KEYS,
 };
-use crate::graph::storage::lookups::{CombinedTypeLookup, TypeLookup};
+use crate::graph::storage::lookups::CombinedTypeLookup;
 use crate::graph::storage::undo::BucketId;
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::{EdgeIndex, NodeIndex};
@@ -367,8 +367,15 @@ pub fn add_nodes(
             .insert(node_type.clone(), title_field.clone());
     }
 
-    let type_lookup =
-        TypeLookup::from_id_indices(&graph.id_indices, &graph.graph, node_type.clone())?;
+    // The per-row conflict check reads the type's live id index. Building it
+    // here (a no-op once it exists) replaces the `TypeLookup` snapshot, which
+    // materialized every id of the type into an owned map on *every* call —
+    // half of the O(N_type) cost of appending ten rows to a large type (perf
+    // scan 2026-08-14 #2). The index is not written again until after the
+    // batch, so the rows still see exactly the pre-call state a snapshot gave
+    // them: a duplicate *within* this input is caught by the primary-key and
+    // claim checks below, never by reading back a row this call created.
+    graph.build_id_index(&node_type);
     let id_idx = df_data
         .get_column_index(&unique_id_field)
         .ok_or_else(|| format!("Column '{}' not found", unique_id_field))?;
@@ -511,7 +518,7 @@ pub fn add_nodes(
         // Constraint gates. Run here, before the row is queued onto the batch,
         // so a violation aborts the whole call with the graph untouched — no
         // rollback needed and no half-applied load.
-        let existing_idx = type_lookup.check_uid(&id);
+        let existing_idx = graph.id_indices.lookup(&node_type, &id);
         if let Some(columns) = &constraint_columns {
             columns.gate_row_parked(
                 graph,
@@ -545,25 +552,32 @@ pub fn add_nodes(
     // Execute the batch and get the statistics
     let (stats, metrics) = batch.execute(graph)?;
 
-    // Rebuild the type's id_index. The batch added rows to type_indices but
-    // doesn't touch id_indices, so any pre-existing entry is now stale.
-    // Rebuild it eagerly (rather than only invalidating) so the read path is
-    // O(1): `lookup_by_id_readonly` — used by `MATCH (n {id:X})` and the
-    // `MERGE` match — does NOT build the index, it falls back to an O(n)
-    // linear scan when the index is absent. Pre-fix the index stayed absent
-    // after add_nodes, so every id-equality read scanned (issue #20: lookups
-    // were O(node position), e.g. 26µs for a high-id node on 30k rows). The
-    // build is O(nodes-of-type), matching the cost the load path already pays
-    // via build_id_index.
-    graph.id_indices.remove(&node_type);
-    graph.build_id_index(&node_type);
+    // Fold this call's creations into the type's id_index. The batch adds rows
+    // to type_indices but deliberately does not touch id_indices, so the entry
+    // is stale until one of these two runs.
+    //
+    // The index must end up *present*, not merely valid: `lookup_by_id_readonly`
+    // — `MATCH (n {id:X})` and the `MERGE` match — does not build it, and an
+    // absent entry sent every id-equality read down an O(node-position) scan
+    // (issue #20). Folding keeps it present at O(created); the rebuild is the
+    // fallback for the cases the fold declines (see
+    // `fold_appended_ids_into_index`), and is what the whole call used to pay
+    // unconditionally.
+    if !graph.fold_appended_ids_into_index(&node_type, stats.creates) {
+        graph.id_indices.remove(&node_type);
+        graph.build_id_index(&node_type);
+    }
 
     // Same staleness hazard for the *secondary* indexes: the batch path skips
     // the per-write incremental maintenance the Cypher executor runs, and
     // `try_index_lookup` trusts `property_indices` unconditionally — so an
     // index built before this call would silently hide every row we just
-    // loaded. Rebuild the covering indexes once (no-op when the type has none).
-    graph.refresh_indexes_for_type(&node_type);
+    // loaded. A creation-only batch gives each appended node that per-node
+    // maintenance directly; anything else rebuilds the covering indexes (a
+    // no-op when the type has none).
+    if !graph.fold_appended_into_user_indexes(&node_type, stats.creates, stats.updates) {
+        graph.refresh_indexes_for_type(&node_type);
+    }
 
     // Calculate elapsed time
     let elapsed_ms = metrics.processing_time * 1000.0; // Convert to milliseconds
@@ -1044,6 +1058,60 @@ fn vivify_stubs(graph: &mut DirGraph, node_type: &str, ids: &[Value]) -> Result<
     Ok(report.nodes_created)
 }
 
+/// Above this share of a type's members, locating the doomed rows costs more
+/// than the walk it replaces, so the delete keeps the walk.
+///
+/// Locating is `k log N` probes into a `Vec` far larger than cache, plus a
+/// `k`-entry position list; the retain is one linear `N` pass. The crossover
+/// is `k = N / log2(N)` — 1/20th of the bucket at a million rows — and this is
+/// that, rounded to a power of two with margin. It only applies to buckets big
+/// enough for the difference to exist: below [`POSITIONAL_MIN_BUCKET`] both
+/// paths are microseconds and the positional one keeps its (tested) coverage.
+const POSITIONAL_MAX_SHARE: usize = 32;
+
+/// Buckets at or below this size always take the positional path.
+const POSITIONAL_MIN_BUCKET: usize = 1024;
+
+/// Where each doomed member sits in its type's bucket, for the types whose
+/// bucket can answer that in O(k log N).
+///
+/// Resolving this once serves both halves of the delete: the journal records
+/// `BucketRemoved` positions, and the bucket edit closes exactly those gaps.
+/// A type missing from the returned map takes the full-bucket retain — see
+/// [`TypeIndexStore::positions_of`](crate::graph::storage::disk::type_index::TypeIndexStore::positions_of).
+///
+/// Declines wholesale when some doomed node's type could not be read, because
+/// the retain removes every doomed index from every affected bucket while this
+/// removes only the ones it located.
+fn doomed_bucket_positions(
+    graph: &mut DirGraph,
+    doomed_ids: &HashMap<String, Vec<(Value, NodeIndex)>>,
+    nodes_to_delete: &HashSet<NodeIndex>,
+) -> HashMap<String, Vec<(usize, NodeIndex)>> {
+    let typed: usize = doomed_ids.values().map(Vec::len).sum();
+    if typed != nodes_to_delete.len() {
+        return HashMap::new();
+    }
+    let mut resolved = HashMap::with_capacity(doomed_ids.len());
+    for (node_type, entries) in doomed_ids {
+        let bucket_len = graph
+            .type_indices
+            .get(node_type)
+            .map(|members| members.len())
+            .unwrap_or(0);
+        if bucket_len > POSITIONAL_MIN_BUCKET
+            && entries.len().saturating_mul(POSITIONAL_MAX_SHARE) > bucket_len
+        {
+            continue;
+        }
+        let members: Vec<NodeIndex> = entries.iter().map(|(_, idx)| *idx).collect();
+        if let Some(hits) = graph.type_indices.positions_of(node_type, &members) {
+            resolved.insert(node_type.clone(), hits);
+        }
+    }
+    resolved
+}
+
 /// Journal every inverted-index eviction this delete is about to perform,
 /// with the *position* each doomed member occupies.
 ///
@@ -1056,13 +1124,26 @@ fn journal_bucket_evictions(
     graph: &mut DirGraph,
     affected_types: &HashSet<String>,
     nodes_to_delete: &HashSet<NodeIndex>,
+    bucket_positions: &HashMap<String, Vec<(usize, NodeIndex)>>,
 ) {
     if graph.graph.undo_journal_mut().is_none() {
         return;
     }
+    // Types whose positions are already known: recorded directly, descending,
+    // which is the order `note_bucket_retain` produces by scanning the bucket.
+    // Copying the whole bucket to re-derive them would reintroduce the O(N_type)
+    // term on the journalled path that the positional edit removes on the
+    // unjournalled one.
+    let mut positional: Vec<(BucketId, usize, NodeIndex)> = Vec::new();
     let mut evictions: Vec<(BucketId, Vec<NodeIndex>)> = Vec::new();
     for node_type in affected_types {
-        if let Some(members) = graph.type_indices.get(node_type) {
+        if let Some(hits) = bucket_positions.get(node_type) {
+            positional.extend(
+                hits.iter()
+                    .rev()
+                    .map(|(pos, idx)| (BucketId::NodeType(node_type.clone()), *pos, *idx)),
+            );
+        } else if let Some(members) = graph.type_indices.get(node_type) {
             evictions.push((BucketId::NodeType(node_type.clone()), members.to_vec()));
         }
         // User-created indexes, same treatment. Only buckets that actually
@@ -1123,6 +1204,9 @@ fn journal_bucket_evictions(
         }
     }
     if let Some(journal) = graph.graph.undo_journal_mut() {
+        for (bucket, pos, idx) in positional {
+            journal.note_bucket_removed(bucket, idx, pos);
+        }
         for (bucket, members) in &evictions {
             journal.note_bucket_retain(bucket, members.iter().copied(), nodes_to_delete);
         }
@@ -1238,15 +1322,25 @@ pub(crate) fn detach_delete_nodes(
         }
     }
 
-    // Statement-rollback capture, before the `retain` sweeps below strip the
-    // doomed members out of the buckets.
-    journal_bucket_evictions(graph, &affected_types, nodes_to_delete);
+    // Where each doomed member sits in its type bucket, resolved once for both
+    // the journal and the edit. `remove_node` above does not touch
+    // `type_indices`, so these positions are still the pre-delete ones.
+    let bucket_positions = doomed_bucket_positions(graph, &doomed_ids, nodes_to_delete);
+
+    // Statement-rollback capture, before the sweeps below strip the doomed
+    // members out of the buckets.
+    journal_bucket_evictions(graph, &affected_types, nodes_to_delete, &bucket_positions);
 
     // Index cleanup — StableDiGraph keeps surviving indices stable.
     for node_type in &affected_types {
-        graph
-            .type_indices
-            .retain_in_type(node_type, |idx| !nodes_to_delete.contains(idx));
+        match bucket_positions.get(node_type) {
+            // O(k log N) + one memmove per surviving run, instead of a walk of
+            // the whole type with a hashed probe per member.
+            Some(hits) => graph.type_indices.remove_positions(node_type, hits),
+            None => graph
+                .type_indices
+                .retain_in_type(node_type, |idx| !nodes_to_delete.contains(idx)),
+        }
         match doomed_ids.get(node_type) {
             Some(entries) if evictable.contains(node_type) => {
                 graph.id_indices.evict_entries(node_type, entries);
@@ -2452,3 +2546,11 @@ mod replace_connections_tests {
 #[cfg(test)]
 #[path = "maintain_delete_id_index_tests.rs"]
 mod delete_id_index_tests;
+
+#[cfg(test)]
+#[path = "maintain_incremental_index_tests.rs"]
+mod incremental_index_tests;
+
+#[cfg(test)]
+#[path = "maintain_positional_delete_tests.rs"]
+mod positional_delete_tests;
