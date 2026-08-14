@@ -53,7 +53,7 @@ static NEXT_GRAPH_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 
 /// Mint a fresh, process-unique graph id (also the serde default for the
 /// skipped `graph_id` field, so a loaded graph gets a new identity).
-fn next_graph_id() -> u64 {
+pub(crate) fn next_graph_id() -> u64 {
     NEXT_GRAPH_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -379,11 +379,19 @@ pub struct DirGraph {
     /// Used for optimistic concurrency control in transactions.
     #[serde(skip, default)]
     pub version: u64,
-    /// Process-unique graph identity, assigned at construction and preserved
-    /// across clones (a CoW working copy shares its parent's id; `version`
-    /// distinguishes states). Never persisted — a loaded `.kgl` is a fresh
-    /// runtime instance and gets a new id. Used with `version` as the Cypher
-    /// plan-cache key so a cached plan can never leak across graphs.
+    /// Process-unique graph identity, assigned at construction. Never persisted
+    /// — a loaded `.kgl` is a fresh runtime instance and gets a new id. Used
+    /// with `version` as the Cypher plan-cache key so a cached plan can never
+    /// leak across graphs.
+    ///
+    /// **Preserved by `Clone`, re-minted whenever a clone becomes an
+    /// independently mutable lineage** — `independent_copy` and
+    /// `fork_transaction`. Plain `Clone` keeps the id because it backs
+    /// snapshots and CoW views, which are the *same* state until something
+    /// diverges; a transaction working copy is precisely that divergence, and
+    /// leaving it on the parent's id made two sibling forks indistinguishable
+    /// to the plan cache (see `session::transaction::fork_transaction`).
+    /// `version` alone does not distinguish them: siblings bump in lockstep.
     #[serde(skip, default = "next_graph_id")]
     pub graph_id: u64,
     /// High-water mark for engine-minted node ids — see
@@ -1153,7 +1161,14 @@ impl DirGraph {
     /// group by the wrong key). `node_type_metadata` is the complete property
     /// catalogue — add_nodes and cypher CREATE both register into it and it
     /// round-trips through save/load — so this O(#types) plan-time scan is an
-    /// exact gate. Cheap: only consulted for count-by-type-shaped queries.
+    /// exact gate.
+    ///
+    /// **O(#types), so call it only where it is used.** Until 0.15.15 this was
+    /// evaluated as a call argument to `fuse_count_short_circuits`, i.e. on
+    /// every statement the planner touched rather than on the count-by-type
+    /// shape that reads it — ~23 ns per declared node type, 4.6 µs per
+    /// statement on a 200-type schema. A new caller belongs behind its own
+    /// shape gate for the same reason.
     pub fn has_type_shadowing_property(&self) -> bool {
         self.node_type_metadata.values().any(|props| {
             props.contains_key("type")

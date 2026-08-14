@@ -343,6 +343,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Two concurrent transactions could be served each other's query plans, and
+  one plan shape turned that into a wrong answer.** The Cypher plan cache
+  decides "same graph, same state" from `(graph_id, version)`, and a
+  transaction working copy used to inherit its parent's `graph_id`. Two
+  transactions opened against the same graph then bumped `version` in lockstep,
+  so they arrived at an identical cache key holding *different* graphs. For
+  nearly every plan that is invisible — the optimizer's choices are cost and
+  ordering estimates, so a sibling's plan is at worst mis-ordered. The
+  exception is the anchored-edge-count fusion, which resolves a literal
+  `{id: …}` anchor to a physical node index at plan time: reused across
+  lineages it counted a *different node's* edges and returned a plausible wrong
+  number with no error. A transaction working copy now takes a fresh graph
+  identity, which is what its own soundness argument always assumed. No
+  configuration or API change, and no cache reuse worth having is lost — a
+  working copy's first write already moved it past every plan its parent's key
+  could match.
+
+- **Statement planning no longer scales with the number of declared node types
+  on graphs where it is never consulted.** A gate used by one count-fusion
+  shape (`RETURN n.type, count(*)` — does any type declare a property that
+  shadows the primary type?) walks the whole schema catalogue, and it was being
+  evaluated as a call argument, so every statement the planner touched paid it
+  whether or not the query had that shape. Measured at ~23 ns per declared node
+  type: on a 200-type schema this alone was 4.6 µs per planned statement. It is
+  now computed where it is read, behind the shape gates that already stood in
+  front of it. On a 200-type × 50-column schema, a single-statement write drops
+  from 8.4 to 3.4 µs and a read following a write from 7.6 to 2.9 µs; the cost
+  no longer varies with schema width at all. Cached-plan reads, which never
+  paid it, are unchanged.
+
 - **A mutating statement against a saved (columnar) graph no longer copies the
   touched node type's whole column store.** Statement rollback works from an
   undo journal, and the journal's pre-image for a columnar property write used

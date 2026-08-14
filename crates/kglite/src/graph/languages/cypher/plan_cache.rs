@@ -20,6 +20,16 @@
 //!   that happen to share a `version` (e.g. both freshly loaded at version 0)
 //!   can never collide on each other's plans.
 //!
+//! **`version` alone is not enough, and that is what `graph_id` is really
+//! for.** Two transactions forked from one base bump in lockstep, so they hold
+//! *different* graphs at the same version — the key is only unambiguous
+//! because `fork_transaction` mints a fresh `graph_id` for a working copy.
+//! Before it did, a sibling could be served a plan carrying the other fork's
+//! resolved anchor `NodeIndex` and return a wrong count; the case is pinned in
+//! `session::plan_cache_cost_tests::a_sibling_fork_is_never_served_another_forks_plan`.
+//! Any future clone that becomes an independently mutable lineage owes itself
+//! a new id for the same reason.
+//!
 //! ## Reads only
 //!
 //! `session::execute::prepare` inserts a plan only for a **non-mutating**

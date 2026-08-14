@@ -11,9 +11,13 @@
 //! **What the bypass gives up, deliberately.** Two shapes did hit and no longer
 //! can, and both are pinned below rather than left to be rediscovered:
 //!
-//! - two transactions forked from the same base version share `(graph_id,
-//!   version)` (`session/transaction.rs`, `fork_transaction` clones both), so
-//!   the second one's identical write used to hit the first one's entry;
+//! - two transactions forked from the same base version used to share
+//!   `(graph_id, version)`, so the second one's identical write hit the first
+//!   one's entry. That sharing has since been removed outright as a
+//!   *correctness* fix — `fork_transaction` now mints a fresh `graph_id`
+//!   (`session/transaction.rs`), because a shared key also served sibling
+//!   forks each other's **read** plans, and one plan shape bakes a physical
+//!   `NodeIndex` (see `a_sibling_fork_is_never_served_another_forks_plan`);
 //! - a mutation that fails *after* `prepare()` (name collision, constraint,
 //!   write scope) never reaches `bump_version`, so a retry used to hit.
 //!
@@ -165,10 +169,15 @@ fn transactions_forked_from_one_base_version_no_longer_reuse_a_mutation_plan() {
     let params = empty_params();
     let opts = ExecuteOptions::eager(&params);
 
-    // Both transactions snapshot the same version, and `fork_transaction`
-    // clones `graph_id` and `version` — so their working copies share one cache
-    // key. Before the mutation bypass, the second write hit the first's entry:
-    // (2 lookups, 1 hit, 1 insertion), measured 2026-08-09.
+    // Both transactions snapshot the same version, and `fork_transaction` used
+    // to clone `graph_id` alongside it — so their working copies shared one
+    // cache key. Before the mutation bypass, the second write hit the first's
+    // entry: (2 lookups, 1 hit, 1 insertion), measured 2026-08-09.
+    //
+    // Two independent reasons now keep that from happening, and this case
+    // survives as the pin on the first: the mutation bypass (nothing is
+    // inserted) and, since the sibling-fork correctness fix, distinct
+    // `graph_id`s (nothing would match even if it were).
     //
     // ⚠ THE TRADE, STATED SO IT IS NOT RE-LITIGATED AS A REGRESSION. This is
     // the *only* shape in which a cached mutation plan was ever reused — a
@@ -191,7 +200,8 @@ fn transactions_forked_from_one_base_version_no_longer_reuse_a_mutation_plan() {
     assert_eq!(
         events(stats.mutation),
         (2, 0, 0),
-        "same-base-version forks share a key, but nothing is cached to share"
+        "a fork's write must insert nothing, independently of the fact that \
+         sibling forks no longer share a key at all"
     );
 }
 
@@ -295,5 +305,78 @@ fn a_write_burst_evicts_no_other_graphs_read_plan() {
         (1, 1, 0),
         "{BURST} writes on an unrelated graph must not cost this reader its \
          cached plan"
+    );
+}
+
+/// Two sibling working copies must never be served each other's plans.
+///
+/// The plan cache's soundness argument is that a hit means the graph is the
+/// same state the plan was computed against, and `(graph_id, version)` is how
+/// it decides that. `fork_transaction` used to clone **both**, so two
+/// transactions forked from one base and each writing once arrived at an
+/// identical key holding *different* graphs — and the second one's read was
+/// served the first one's plan.
+///
+/// For almost every plan that is invisible: the passes make cost and ordering
+/// decisions, so a plan computed against a sibling's data is at worst
+/// mis-ordered. `fuse_anchored_edge_count` is the exception, and it is why this
+/// test asserts a **row value** rather than a cache counter: it resolves the
+/// literal `{id: VAL}` anchor to a physical `NodeIndex` and bakes that u32 into
+/// `Clause::FusedCountAnchoredEdges` (`ast.rs`), which is an identity, not an
+/// estimate. Reused across lineages it counts a *different node's* edges.
+///
+/// The case below is the minimal reproduction, measured before the fix:
+/// `tx2` holds no node with `id: 5` at all, so the only correct answer is 0 —
+/// and it returned **1**, the outgoing `:E` degree of whatever sat at the index
+/// `tx1` had baked.
+#[test]
+fn a_sibling_fork_is_never_served_another_forks_plan() {
+    let _guard = plan_cache::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    plan_cache::clear_for_tests();
+    let params = empty_params();
+    let opts = ExecuteOptions::eager(&params);
+
+    let session = Session::new(DirGraph::new());
+    let mut first = session.begin();
+    let mut second = session.begin();
+
+    // One write each, so both working copies sit one bump above the same base.
+    execute_mut(
+        first.working_mut().expect("tx1 working"),
+        "CREATE (:T {id: 5})",
+        &opts,
+    )
+    .expect("tx1 write");
+    // `tx2` has no `id: 5`, and the node at tx1's anchor index here *does* have
+    // an outgoing `:E` — which is what turns a shared key into a wrong number.
+    execute_mut(
+        second.working_mut().expect("tx2 working"),
+        "CREATE (b:T {id: 77})-[:E]->(a:T {id: 88})",
+        &opts,
+    )
+    .expect("tx2 write");
+
+    const ANCHORED_COUNT: &str = "MATCH ({id: 5})-[:E]->(x) RETURN count(x) AS c";
+    let tx1 = execute_read(first.current().expect("tx1 current"), ANCHORED_COUNT, &opts)
+        .expect("tx1 read");
+    let tx2 = execute_read(
+        second.current().expect("tx2 current"),
+        ANCHORED_COUNT,
+        &opts,
+    )
+    .expect("tx2 read");
+
+    assert_eq!(
+        tx1.result.rows,
+        vec![vec![crate::datatypes::Value::Int64(0)]],
+        "tx1's own answer: it has an id-5 node, with no outgoing :E edges"
+    );
+    assert_eq!(
+        tx2.result.rows,
+        vec![vec![crate::datatypes::Value::Int64(0)]],
+        "tx2 holds no node with id 5, so its only correct answer is 0; a 1 here \
+         means it was served tx1's plan with tx1's anchor NodeIndex baked in"
     );
 }

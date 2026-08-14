@@ -30,8 +30,29 @@ impl DirGraph {
     /// Create a transaction working copy. Disk backends remap immutable base
     /// arrays and inherit the serialized writer lineage; memory/mapped modes
     /// retain their ordinary snapshot clone semantics.
+    ///
+    /// ## Why the fork takes a fresh `graph_id`
+    ///
+    /// A fork is the one clone that becomes an **independently mutable
+    /// lineage**: the base keeps running and the working copy diverges from it.
+    /// `graph_id` used to be cloned along with everything else, which made the
+    /// Cypher plan cache's key — `(graph_id, version, …)` — ambiguous the
+    /// moment two forks of one base each took a bump: identical key, different
+    /// graphs. That is not merely a stale-statistics risk, because
+    /// `fuse_anchored_edge_count` bakes a resolved physical `NodeIndex` into
+    /// `Clause::FusedCountAnchoredEdges`; a sibling served that plan counts a
+    /// different node's edges and returns a **wrong number** with no error (see
+    /// `plan_cache_cost_tests::a_sibling_fork_is_never_served_another_forks_plan`).
+    ///
+    /// Minting here costs no cache reuse worth having. `working_mut` only
+    /// reaches this path when the base Arc is still owned elsewhere — the
+    /// genuinely-divergent case — and takes the `Arc::try_unwrap` *move* when it
+    /// is not, which stays one lineage and rightly keeps its id. A fork's very
+    /// first mutation bumps `version` anyway, so every plan the old id could
+    /// still have matched was already unreachable by version alone.
     pub(crate) fn fork_transaction(&self) -> Self {
         let mut child = self.clone();
+        child.graph_id = crate::graph::dir_graph::next_graph_id();
         child.graph.adopt_shared_writer_lineage(&self.graph);
         child
     }
