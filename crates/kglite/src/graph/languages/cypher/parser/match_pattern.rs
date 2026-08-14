@@ -16,7 +16,7 @@ impl CypherParser {
 
         // Check for path assignment: p = shortestPath(...)
         // Pattern: Identifier Equals [Identifier("shortestPath") LParen] pattern [RParen]
-        if self.is_path_assignment() {
+        let patterns = if self.is_path_assignment() {
             let path_var = self.consume_identifier()?;
             self.expect(&CypherToken::Equals)?;
 
@@ -40,28 +40,33 @@ impl CypherParser {
                 is_shortest_path: is_shortest,
                 all_shortest: is_all_shortest,
             });
+            patterns
+        } else {
+            self.parse_match_patterns()?
+        };
 
-            let clause = MatchClause {
-                patterns,
-                path_assignments,
-                limit_hint: None,
-                distinct_node_hint: None,
-            };
-            return if optional {
-                Ok(Clause::OptionalMatch(clause))
-            } else {
-                Ok(Clause::Match(clause))
-            };
-        }
-
-        // Normal MATCH clause
-        let patterns = self.parse_match_patterns()?;
+        // `Match = ['OPTIONAL'] 'MATCH' Pattern [Where]` — a WHERE directly
+        // after OPTIONAL MATCH is part of *this* clause, so it filters
+        // candidates during matching and a row whose candidates all fail is
+        // null-extended rather than deleted. A plain MATCH's WHERE keeps its
+        // own `Clause::Where` (identical semantics there, and every
+        // MATCH+WHERE planner pass matches on that adjacency) — see
+        // `MatchClause::where_clause`.
+        let where_clause = if optional && self.check(&CypherToken::Where) {
+            self.advance(); // consume WHERE
+            Some(WhereClause {
+                predicate: self.parse_predicate()?,
+            })
+        } else {
+            None
+        };
 
         let clause = MatchClause {
             patterns,
             path_assignments,
             limit_hint: None,
             distinct_node_hint: None,
+            where_clause,
         };
         if optional {
             Ok(Clause::OptionalMatch(clause))

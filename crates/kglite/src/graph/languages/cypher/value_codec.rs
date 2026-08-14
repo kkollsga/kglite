@@ -165,6 +165,13 @@ fn decode_clauses(clauses: &mut [Clause], lookup: &HashMap<&str, &ValueCodec>) {
                 for pattern in &mut m.patterns {
                     decode_pattern_elements(&mut pattern.elements, lookup);
                 }
+                // `OPTIONAL MATCH … WHERE n.id = 'Q42'` holds its predicate
+                // inside the clause; without this arm its literals would
+                // reach the executor un-decoded while the identical
+                // `MATCH … WHERE` form was decoded.
+                if let Some(wc) = &mut m.where_clause {
+                    decode_predicate(&mut wc.predicate, lookup);
+                }
             }
             Clause::Where(w) => decode_predicate(&mut w.predicate, lookup),
             Clause::With(w) => {

@@ -11,7 +11,15 @@ use crate::datatypes::values::Value;
 /// are evaluated first (enabling short-circuit evaluation).
 pub(super) fn reorder_predicates_by_cost(query: &mut CypherQuery) {
     for clause in &mut query.clauses {
-        if let Clause::Where(ref mut w) = clause {
+        // The clause-owned form (`OPTIONAL MATCH … WHERE`) is the same
+        // predicate in a different home — reordered on the same rule, so the
+        // two spellings short-circuit alike.
+        let where_clause = match clause {
+            Clause::Where(ref mut w) => Some(w),
+            Clause::Match(ref mut m) | Clause::OptionalMatch(ref mut m) => m.where_clause.as_mut(),
+            _ => None,
+        };
+        if let Some(w) = where_clause {
             w.predicate = reorder_predicate(std::mem::replace(
                 &mut w.predicate,
                 Predicate::IsNull(Expression::Literal(Value::Null)),

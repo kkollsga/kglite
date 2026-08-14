@@ -94,6 +94,81 @@ fn test_predicate_pushdown_keeps_inline_property_collision_in_where() {
 }
 
 #[test]
+fn test_predicate_pushdown_into_a_scoped_optional_match_where() {
+    // The predicate lives inside the OPTIONAL MATCH, so it pushes into that
+    // clause's own pattern — and stays in the clause as the safety net every
+    // non-pattern-matcher path relies on. It must never reappear as a
+    // pipeline-level `Clause::Where`, which is what deleted null-extended
+    // rows before scoping.
+    let mut query = parse_cypher(
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) WHERE f.age > 35 RETURN p, f",
+    )
+    .unwrap();
+
+    push_where_into_match(&mut query, &HashMap::new());
+
+    assert!(
+        !query.clauses.iter().any(|c| matches!(c, Clause::Where(_))),
+        "the scoped predicate must not be lifted into a standalone WHERE"
+    );
+    let Clause::OptionalMatch(m) = &query.clauses[1] else {
+        panic!("expected OPTIONAL MATCH clause");
+    };
+    let PatternElement::Node(node) = &m.patterns[0].elements[2] else {
+        panic!("expected the optional target node");
+    };
+    assert!(matches!(
+        node.properties.as_ref().and_then(|props| props.get("age")),
+        Some(PropertyMatcher::GreaterThan(Value::Int64(35)))
+    ));
+    assert!(
+        m.where_clause.is_some(),
+        "fully-pushed predicate stays as the safety net"
+    );
+}
+
+#[test]
+fn test_scoped_optional_where_narrows_to_the_unpushable_remainder() {
+    let mut query = parse_cypher(
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) \
+         WHERE f.age > 35 AND size(f.name) > 0 RETURN p, f",
+    )
+    .unwrap();
+
+    push_where_into_match(&mut query, &HashMap::new());
+
+    let Clause::OptionalMatch(m) = &query.clauses[1] else {
+        panic!("expected OPTIONAL MATCH clause");
+    };
+    let where_clause = m.where_clause.as_ref().expect("remainder survives");
+    assert!(
+        !matches!(where_clause.predicate, Predicate::And(_, _)),
+        "the pushed comparison should be gone from the remainder"
+    );
+}
+
+#[test]
+fn test_scoped_optional_where_blocks_the_aggregate_fusion() {
+    // The fused counter cannot evaluate a per-candidate predicate, so the
+    // shape must stay on the materialized executor.
+    let mut query = parse_cypher(
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) WHERE f.age > 35 \
+         RETURN p.name AS n, count(f) AS k",
+    )
+    .unwrap();
+
+    fuse_optional_match_aggregate(&mut query);
+
+    assert!(
+        !query
+            .clauses
+            .iter()
+            .any(|c| matches!(c, Clause::FusedOptionalMatchAggregate { .. })),
+        "a clause-owned WHERE must block the fused counter"
+    );
+}
+
+#[test]
 fn test_predicate_pushdown_keeps_second_same_direction_bound_in_where() {
     let mut query = parse_cypher(
         "MATCH (n:Person) \

@@ -22,9 +22,19 @@ pub(crate) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
         // (`count(a)` vs `count(b)` over different patterns) — summing
         // silently returns wrong counts. Multi-pattern shapes take the
         // materialized executor.
+        //
+        // WHY-BAIL on a clause-owned WHERE: the fused counter counts a
+        // pattern's matches per source row through `try_count_simple_pattern`,
+        // which has no hook to evaluate a predicate per candidate — it would
+        // count candidates the scoped WHERE excludes. (Before the WHERE moved
+        // into the clause it sat between the two as a `Clause::Where` and
+        // broke this adjacency anyway, so this bail is the shape's existing
+        // plan, now stated rather than accidental. The pushdown pass has
+        // usually moved the cheap terms into the pattern by this point, so
+        // the materialized path is not starting from a full scan.)
         let can_fuse = match (&query.clauses[i], &query.clauses[i + 1]) {
             (Clause::OptionalMatch(m), Clause::With(_) | Clause::Return(_)) => {
-                m.patterns.len() == 1
+                m.patterns.len() == 1 && m.where_clause.is_none()
             }
             _ => false,
         };
@@ -1765,10 +1775,19 @@ pub(crate) fn mark_return_lazy_eligible(query: &mut CypherQuery) {
     // folding a fully-pushed WHERE out of the clause list in `optimize`, or by
     // auditing the resolver and admitting predicate-only WHERE — and either is a
     // deliberate change with its own tests, not a one-line arm added here.
+    //
+    // An `OPTIONAL MATCH … WHERE` disqualifies for exactly the reason a
+    // standalone WHERE does — the predicate is still there, it just lives in
+    // the clause now. Admitting it here would silently widen the gate the
+    // note above declines to widen.
     let mut return_idx: Option<usize> = None;
     for (i, c) in query.clauses.iter().enumerate() {
         match c {
-            Clause::Match(_) | Clause::OptionalMatch(_) => {}
+            Clause::Match(m) | Clause::OptionalMatch(m) => {
+                if m.where_clause.is_some() {
+                    return;
+                }
+            }
             Clause::Return(_) => {
                 if return_idx.is_some() {
                     return; // Multiple RETURNs.

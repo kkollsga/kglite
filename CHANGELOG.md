@@ -68,6 +68,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`OPTIONAL MATCH ... WHERE` no longer deletes the rows it was supposed to
+  null-extend.** The predicate now belongs to the `OPTIONAL MATCH`, as
+  openCypher's grammar and Neo4j both define it: it is applied while looking
+  for matches, so a row whose candidates all fail it comes back with the
+  optional variables set to NULL. KGLite parsed the `WHERE` as an independent
+  pipeline filter and ran it over the *already null-extended* rows, which
+  deleted them —
+  `MATCH (p:P) OPTIONAL MATCH (p)-[:KNOWS]->(x:Q) WHERE x.w > 5 RETURN p.name,
+  x.name` returned one row where Neo4j returns two, so an `OPTIONAL MATCH`
+  carrying a `WHERE` silently behaved like a plain `MATCH`. The inline spelling
+  of the same filter (`OPTIONAL MATCH (p)-[:KNOWS]->(x:Q {w: 9})`) was always
+  correct, so the two spellings of one filter disagreed. This holds whichever
+  variables the predicate mentions: `WHERE p.age > 35` on an outer variable now
+  decides whether the optional part *matches*, and no longer drops the person.
+  `count()` over such a clause consequently keeps its zero groups. **What
+  changes for you:** queries of this shape return *more* rows than before — the
+  null-extended ones — and any code that used a trailing `WHERE` to filter rows
+  should move it to a following `WITH ... WHERE` (which filters, unchanged) or
+  onto a plain `MATCH`. `MATCH ... WHERE`, `WITH ... WHERE` and every other
+  `WHERE` position are unaffected.
 - **The unknown-relationship-type warning claimed "returns no rows" about
   patterns that return rows.** `MATCH (p)-[:MENTORS|KNOWS]->()` on a graph
   without a `MENTORS` edge type warned *"unknown relationship type 'MENTORS' —

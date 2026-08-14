@@ -395,6 +395,38 @@ graph.cypher("""
 """)
 ```
 
+### `WHERE` belongs to the `OPTIONAL MATCH` it follows
+
+A `WHERE` written directly after an `OPTIONAL MATCH` is part of that clause's
+pattern — its predicate is applied **while looking for matches, not after**.
+A row whose candidates all fail the predicate is therefore null-extended, not
+deleted:
+
+```python
+graph.cypher("""
+    MATCH (p:Person)
+    OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) WHERE f.age > 35
+    RETURN p.name, f.name
+""")
+# every Person appears; f.name is NULL for those with no friend over 35
+```
+
+This holds whichever variables the predicate mentions — including one bound
+before the `OPTIONAL MATCH` (`WHERE p.age > 35` decides whether the optional
+part *matches*, it does not drop the person). To filter rows instead, put the
+predicate where it filters: after a plain `MATCH`, or in a following
+`WITH ... WHERE`, which deletes the null-extended rows:
+
+```python
+graph.cypher("""
+    MATCH (p:Person)
+    OPTIONAL MATCH (p)-[:KNOWS]->(f:Person)
+    WITH p, f WHERE f.age > 35
+    RETURN p.name, f.name
+""")
+# only Persons with a friend over 35
+```
+
 ## Built-in Functions
 
 | Function | Description |

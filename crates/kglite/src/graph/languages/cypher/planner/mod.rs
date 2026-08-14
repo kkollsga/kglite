@@ -75,8 +75,8 @@ type PassFn = fn(&mut CypherQuery, &PassCtx);
 /// |---|---|---|
 /// | `optimize_nested_queries` | **recurses (by design)** | Owns body optimization; import-aware (disables seed-ignoring fusion for anchored correlated bodies). |
 /// | `rewrite_count_bound_var_to_star` | safe-by-shape | Rewrites a `count(v)` expression in place; never spans clauses. |
-/// | `push_where_into_match` (×2) | safe-by-shape | Matches adjacent `(Match\|OptionalMatch, Where)`; a CallSubquery is neither, so it breaks the window. Prior-scope helpers under-report CALL outputs → under-push (conservative). |
-/// | `fold_or_to_in` | safe-by-shape | Rewrites a WHERE predicate in place. |
+/// | `push_where_into_match` (×2) | safe-by-shape | Matches adjacent `(Match\|OptionalMatch, Where)`, plus an `OptionalMatch` whose WHERE is the clause's own (`MatchClause::where_clause`) — that form pushes into its *own* patterns, so no window is spanned at all. A CallSubquery is neither, so it breaks the adjacency window. Prior-scope helpers under-report CALL outputs → under-push (conservative). |
+/// | `fold_or_to_in` | safe-by-shape | Rewrites a WHERE predicate in place — the standalone clause or a MATCH's own. |
 /// | `extract_pushable_rel_predicates` | safe-by-shape | Matches `(Match, Where)` adjacency only. |
 /// | `fold_pass_through_with` | **guarded** | Folds only `WITH`. Its downstream-ref check now records a CallSubquery's import names + body refs (see `collect_clause_variables`) so a `WITH` a correlated CALL depends on is never folded away. |
 /// | `desugar_multi_match_return_aggregate` | safe-by-shape | Requires `Match, Match, Return` ADJACENT; a CallSubquery between two MATCHes breaks adjacency. |
@@ -88,12 +88,12 @@ type PassFn = fn(&mut CypherQuery, &PassCtx);
 /// | `push_limit_into_aggregate` | safe-by-shape | Matches `(Return\|With) → Limit` adjacency. |
 /// | `push_distinct_into_match` | safe-by-shape | Matches `Match → [Where] → Return` adjacency. |
 /// | `fuse_anchored_edge_count` / `fuse_count_short_circuits` | safe-by-shape | Fire only when the WHOLE query is exactly `[Match, Return]` (len 2); a CallSubquery makes len ≠ 2. |
-/// | `fuse_optional_match_aggregate` | safe-by-shape | Matches `(OptionalMatch, With\|Return)` adjacency. |
+/// | `fuse_optional_match_aggregate` | safe-by-shape | Matches `(OptionalMatch, With\|Return)` adjacency, and bails when the OptionalMatch owns a WHERE (the fused counter has no per-candidate predicate hook). |
 /// | `fuse_match_return_aggregate` / `fuse_match_with_aggregate` | safe-by-shape | Match `(Match, Return\|With)` adjacency. |
 /// | `fuse_match_with_aggregate_top_k` | safe-by-shape | Absorbs into a preceding `FusedMatchWithAggregate`; a CallSubquery is never that. |
 /// | `fuse_node_scan_aggregate` / `fuse_node_scan_top_k` | safe-by-shape | Match `Match → [Where] → Return [→ OrderBy → Limit]` adjacency. |
 /// | `fuse_vector_score_order_limit` / `fuse_order_by_top_k` | safe-by-shape | Match `(Return, OrderBy, Limit)` adjacency; a CallSubquery breaks it. |
-/// | `reorder_predicates_by_cost` | safe-by-shape | Reorders predicates WITHIN one WHERE. |
+/// | `reorder_predicates_by_cost` | safe-by-shape | Reorders predicates WITHIN one WHERE (standalone or clause-owned). |
 /// | `mark_disjoint_fixed_trails` / `mark_fast_var_length_paths` / `mark_skip_target_type_check` | safe-by-shape | Mark flags on edge elements WITHIN MATCH clauses; CallSubquery hits `_ => continue`. The downstream-dedup-safety scan stops at the first Return/With, which a CallSubquery is not. |
 ///
 /// When in doubt the rule is: correctness beats optimization — a pass
@@ -513,6 +513,19 @@ pub(crate) fn seed_ignoring_fusion_passes() -> &'static HashSet<String> {
 /// instead of evaluating them per row, pruning the search early. Runs
 /// twice in the pipeline (before and after `fold_or_to_in`) so IN
 /// predicates synthesized by the OR fold also get pushed.
+///
+/// Two sources of predicate, one rewrite: a trailing `Clause::Where` after
+/// a `MATCH`/`OPTIONAL MATCH`, and an `OPTIONAL MATCH`'s own
+/// `MatchClause::where_clause`. The second is the *easier* case, not a
+/// riskier one: under clause scoping a candidate the predicate rejects and a
+/// candidate the pattern never produced are the same outcome — the row is
+/// null-extended either way — so moving the test from the predicate into the
+/// pattern cannot change which rows survive. (While the predicate was read
+/// as an independent post-filter those two outcomes differed, and pushing it
+/// down was silently choosing between them.) The safety-net rule is
+/// unchanged in both homes: a partial push leaves the whole predicate
+/// standing, and a full push keeps it as the filter every non-pattern-matcher
+/// path still relies on.
 fn pass_push_where_into_match(query: &mut CypherQuery, ctx: &PassCtx) {
     push_where_into_match(query, ctx.params)
 }
@@ -652,7 +665,10 @@ fn pass_fuse_count_short_circuits(query: &mut CypherQuery, ctx: &PassCtx) {
 /// `FusedOptionalMatchAggregate` clause that counts matches per input
 /// row without materializing intermediate per-row expansions. WHY-BAIL:
 /// gate growing — most recently extended in 0.8.31 to recognize edge
-/// vars (`count(r)`) as local-to-OPT.
+/// vars (`count(r)`) as local-to-OPT; multi-pattern clauses and a
+/// clause-owned `WHERE` (`OPTIONAL MATCH … WHERE …`) also bail, the latter
+/// because the fused counter counts a pattern's matches with no hook to
+/// test a predicate per candidate.
 fn pass_fuse_optional_match_aggregate(query: &mut CypherQuery, _ctx: &PassCtx) {
     fuse_optional_match_aggregate(query)
 }

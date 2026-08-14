@@ -401,11 +401,19 @@ impl<'a> CypherExecutor<'a> {
     ///
     /// `budget_rows_base` is the caller's already-materialized row count,
     /// so the budget reservation reflects the true total.
+    ///
+    /// `scoped_where` is the clause's own WHERE (already constant-folded). It
+    /// is applied to the fully-expanded candidate rows *here*, so a candidate
+    /// that fails it is simply not a match — and an empty result means the
+    /// caller null-extends, which is the whole point: running the same
+    /// predicate over the caller's null-padded output instead would delete
+    /// the row the miss was supposed to produce.
     fn expand_optional_match_row(
         &self,
         clause: &MatchClause,
         row: &ResultRow,
         budget_rows_base: usize,
+        scoped_where: Option<&Predicate>,
     ) -> Result<Vec<ResultRow>, String> {
         let enforce_rel_uniqueness = clause_needs_rel_uniqueness(clause);
         let mut row_set: Vec<ResultRow> = vec![row.clone()];
@@ -475,6 +483,15 @@ impl<'a> CypherExecutor<'a> {
             if enforce_rel_uniqueness {
                 edge_sets = expanded_sets;
             }
+        }
+        if let Some(predicate) = scoped_where {
+            let mut kept = Vec::with_capacity(row_set.len());
+            for candidate in row_set {
+                if self.evaluate_predicate(predicate, &candidate)? {
+                    kept.push(candidate);
+                }
+            }
+            row_set = kept;
         }
         Ok(row_set)
     }
@@ -592,11 +609,28 @@ impl<'a> CypherExecutor<'a> {
         clause: &MatchClause,
         existing: ResultSet,
     ) -> Result<ResultSet, String> {
+        // The clause's own WHERE (`OPTIONAL MATCH ... WHERE ...`). Folded once
+        // per clause, exactly as `execute_where` and the fused paths do it.
+        let scoped_where = clause
+            .where_clause
+            .as_ref()
+            .map(|w| self.fold_constants_pred(&w.predicate));
+        let scoped_where = scoped_where.as_ref();
+
         if existing.rows.is_empty() {
             // OPTIONAL MATCH as first clause: try regular match, but if
             // nothing matches, return one row with all variables set to NULL
             let columns = existing.columns.clone();
-            let result = self.execute_match(clause, existing, None)?;
+            let mut result = self.execute_match(clause, existing, None)?;
+            if let Some(predicate) = scoped_where {
+                let mut kept = Vec::with_capacity(result.rows.len());
+                for candidate in std::mem::take(&mut result.rows) {
+                    if self.evaluate_predicate(predicate, &candidate)? {
+                        kept.push(candidate);
+                    }
+                }
+                result.rows = kept;
+            }
             if !result.rows.is_empty() {
                 return Ok(result);
             }
@@ -627,7 +661,8 @@ impl<'a> CypherExecutor<'a> {
         let mut new_rows = Vec::with_capacity(existing.rows.len());
 
         for row in &existing.rows {
-            let expanded = self.expand_optional_match_row(clause, row, new_rows.len())?;
+            let expanded =
+                self.expand_optional_match_row(clause, row, new_rows.len(), scoped_where)?;
             if expanded.is_empty() {
                 // The joined pattern set produced no match: keep the row,
                 // recording an explicit NULL for every pattern variable so

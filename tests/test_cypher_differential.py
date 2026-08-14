@@ -1278,6 +1278,88 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (a:Person {person_id: 1})-[:KNOWS*0..2]->(b:Person) RETURN b.person_id AS r ORDER BY r",
         None,
     ),
+    # ── OPTIONAL MATCH … WHERE (predicate scoped to the clause) ──
+    #
+    # The predicate lives inside the OPTIONAL MATCH, so the pushdown pass
+    # rewrites it into the optional pattern (`push_where_into_match` on the
+    # scoped form) while the unoptimised path evaluates it per candidate in
+    # the executor. Both must null-extend the same rows: a pushdown that
+    # dropped instead of null-extending, or a fusion that counted the
+    # excluded candidates, diverges here. Row ORDER BY includes the optional
+    # column so NULL placement is pinned.
+    (
+        "optional_scoped_where_cmp",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) WHERE f.age > 35 "
+        "RETURN p.name AS n, f.name AS fn ORDER BY n, fn",
+        None,
+    ),
+    (
+        "optional_scoped_where_equality",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) WHERE f.city = 'Oslo' "
+        "RETURN p.name AS n, f.name AS fn ORDER BY n, fn",
+        None,
+    ),
+    (
+        "optional_scoped_where_param",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) WHERE f.age >= $floor "
+        "RETURN p.name AS n, f.name AS fn ORDER BY n, fn",
+        {"floor": 38},
+    ),
+    (
+        "optional_scoped_where_correlated",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) WHERE f.city = p.city "
+        "RETURN p.name AS n, f.name AS fn ORDER BY n, fn",
+        None,
+    ),
+    (
+        "optional_scoped_where_outer_only",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) WHERE p.age > 35 "
+        "RETURN p.name AS n, f.name AS fn ORDER BY n, fn",
+        None,
+    ),
+    (
+        "optional_scoped_where_or_chain",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) "
+        "WHERE f.age = 38 OR f.age = 39 OR f.age = 40 "
+        "RETURN p.name AS n, f.name AS fn ORDER BY n, fn",
+        None,
+    ),
+    (
+        "optional_scoped_where_count",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) WHERE f.age > 35 "
+        "RETURN p.name AS n, count(f) AS k ORDER BY n",
+        None,
+    ),
+    (
+        "optional_scoped_where_edge_var_count",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[r:KNOWS]->(f:Person) WHERE f.age > 35 "
+        "WITH p, count(r) AS k RETURN p.name AS n, k ORDER BY n",
+        None,
+    ),
+    (
+        "two_optional_scoped_wheres",
+        "social_graph",
+        "MATCH (p:Person) "
+        "OPTIONAL MATCH (p)-[:WORKS_AT]->(c:Company) WHERE c.name = 'TechCorp' "
+        "OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) WHERE f.age > 38 "
+        "RETURN p.name AS n, c.name AS cn, f.name AS fn ORDER BY n, cn, fn",
+        None,
+    ),
+    (
+        "optional_scoped_where_then_with_where",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) WHERE f.age > 35 "
+        "WITH p, f WHERE p.age < 25 RETURN p.name AS n, f.name AS fn ORDER BY n, fn",
+        None,
+    ),
     # ── multiple OPTIONAL MATCH ──
     (
         "two_optional_match",

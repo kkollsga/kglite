@@ -218,6 +218,55 @@ mod tests {
     }
 
     #[test]
+    fn test_optional_match_owns_the_where_that_follows_it() {
+        // `Match = ['OPTIONAL'] 'MATCH' Pattern [Where]`: the predicate is
+        // part of the clause, so it never becomes a pipeline-level filter
+        // over already-null-padded rows.
+        let query = parse_cypher(
+            "MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(f:Person) WHERE f.age > 5 RETURN n, f",
+        )
+        .unwrap();
+
+        assert_eq!(query.clauses.len(), 3, "no standalone WHERE clause");
+        let Clause::OptionalMatch(m) = &query.clauses[1] else {
+            panic!("expected OPTIONAL MATCH");
+        };
+        assert!(m.where_clause.is_some());
+        assert!(matches!(&query.clauses[2], Clause::Return(_)));
+    }
+
+    #[test]
+    fn test_plain_match_keeps_its_where_as_a_separate_clause() {
+        let query = parse_cypher("MATCH (n:Person) WHERE n.age > 5 RETURN n").unwrap();
+
+        let Clause::Match(m) = &query.clauses[0] else {
+            panic!("expected MATCH");
+        };
+        assert!(m.where_clause.is_none());
+        assert!(matches!(&query.clauses[1], Clause::Where(_)));
+    }
+
+    #[test]
+    fn test_each_optional_match_takes_only_its_own_where() {
+        let query = parse_cypher(
+            "MATCH (n:Person) \
+             OPTIONAL MATCH (n)-[:KNOWS]->(f:Person) WHERE f.age > 5 \
+             OPTIONAL MATCH (n)-[:WORKS_AT]->(c:Company) \
+             RETURN n, f, c",
+        )
+        .unwrap();
+
+        assert_eq!(query.clauses.len(), 4);
+        let (Clause::OptionalMatch(first), Clause::OptionalMatch(second)) =
+            (&query.clauses[1], &query.clauses[2])
+        else {
+            panic!("expected two OPTIONAL MATCH clauses");
+        };
+        assert!(first.where_clause.is_some());
+        assert!(second.where_clause.is_none());
+    }
+
+    #[test]
     fn test_match_with_edge_pattern() {
         let query =
             parse_cypher("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name").unwrap();

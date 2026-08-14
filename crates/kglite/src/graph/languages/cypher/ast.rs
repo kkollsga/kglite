@@ -308,6 +308,22 @@ pub struct MatchClause {
     /// pre-deduplicate pattern matches by that variable's NodeIndex to avoid creating
     /// duplicate ResultRows that would be removed later.
     pub distinct_node_hint: Option<String>,
+    /// The clause's own `WHERE`, in the openCypher grammar's sense:
+    /// `Match = ['OPTIONAL'] 'MATCH' Pattern [Where]` — the predicate belongs
+    /// to the match, not to the pipeline. Populated by the parser **only for
+    /// `OPTIONAL MATCH`**, where the distinction is observable: a candidate
+    /// failing the predicate is *no match for that row*, so the row is
+    /// null-extended, whereas an independent post-filter would delete it.
+    ///
+    /// A plain `MATCH`'s trailing WHERE stays a separate [`Clause::Where`]:
+    /// for a mandatory match the two readings coincide (no rows are
+    /// null-extended, so filtering during or after the match is the same
+    /// answer), and keeping it out of the clause leaves every MATCH+WHERE
+    /// planner pass — pushdown, top-K fusion, spatial fusion, relationship
+    /// pushdown — matching on the adjacency it already understands. This
+    /// asymmetry is deliberate; see [`WithClause::where_clause`] for the same
+    /// in-clause shape on the projection side.
+    pub where_clause: Option<WhereClause>,
 }
 
 /// Path variable assignment: `p = shortestPath(pattern)`

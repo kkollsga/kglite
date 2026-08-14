@@ -394,7 +394,7 @@ def test_checkpoint_skips_when_the_graph_has_not_changed(tmp_path):
         )
 
         # Mutation check: a further write makes the next checkpoint save again.
-        _write_marker(url, "Later")
+        _write_marker(url, "Later", node_id=100)
         third = _checkpoint(url)
         assert third["message"].startswith("checkpoint written: version "), third["message"]
     finally:
@@ -545,7 +545,7 @@ def test_checkpoint_interval_skips_ticks_while_the_graph_is_idle(tmp_path):
         assert _digest(fixture) == settled, "ticks over an unchanged graph must not rewrite the served file"
         # Mutation check on the skip itself: a further write makes the next
         # tick save again, so the stability above is a skip, not a dead task.
-        _write_marker(url, "Later")
+        _write_marker(url, "Later", node_id=100)
         _wait_until(
             lambda: _digest(fixture) != settled,
             timeout=25.0,
@@ -734,7 +734,7 @@ def test_checkpoint_interval_and_the_verb_share_one_skip_state(tmp_path):
 
         # Now the other direction: a tick writes the next version, and the verb
         # that follows reports the skip instead of re-saving.
-        _write_marker(url, "Later")
+        _write_marker(url, "Later", node_id=100)
         _wait_until(
             lambda: _digest(fixture) != after_verb,
             timeout=25.0,

@@ -29,8 +29,19 @@ use std::collections::{HashMap, HashSet};
 /// error names the `IN [...]` rewrite for exactly that reason.
 pub(super) fn fold_or_to_in(query: &mut CypherQuery) {
     for clause in &mut query.clauses {
-        if let Clause::Where(ref mut w) = clause {
-            w.predicate = fold_or_to_in_pred(&w.predicate);
+        match clause {
+            Clause::Where(ref mut w) => {
+                w.predicate = fold_or_to_in_pred(&w.predicate);
+            }
+            // An `OPTIONAL MATCH … WHERE x.p = 1 OR x.p = 2` carries its
+            // predicate in-clause; folding it here keeps the two spellings of
+            // one filter on the same plan.
+            Clause::Match(ref mut m) | Clause::OptionalMatch(ref mut m) => {
+                if let Some(ref mut w) = m.where_clause {
+                    w.predicate = fold_or_to_in_pred(&w.predicate);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -594,113 +605,7 @@ pub fn rewrite_text_score(
     };
 
     for clause in &mut query.clauses {
-        match clause {
-            Clause::Return(r) => {
-                for item in &mut r.items {
-                    collector.rewrite_expr(&mut item.expression, params)?;
-                }
-            }
-            Clause::Where(w) => {
-                collector.rewrite_pred(&mut w.predicate, params)?;
-            }
-            Clause::With(w) => {
-                for item in &mut w.items {
-                    collector.rewrite_expr(&mut item.expression, params)?;
-                }
-                if let Some(ref mut wh) = w.where_clause {
-                    collector.rewrite_pred(&mut wh.predicate, params)?;
-                }
-            }
-            Clause::OrderBy(o) => {
-                for item in &mut o.items {
-                    collector.rewrite_expr(&mut item.expression, params)?;
-                }
-            }
-            Clause::Unwind(u) => {
-                collector.rewrite_expr(&mut u.expression, params)?;
-            }
-            Clause::Delete(d) => {
-                for expr in &mut d.expressions {
-                    collector.rewrite_expr(expr, params)?;
-                }
-            }
-            Clause::Set(s) => {
-                for item in &mut s.items {
-                    match item {
-                        SetItem::Property { expression, .. } | SetItem::Map { expression, .. } => {
-                            collector.rewrite_expr(expression, params)?;
-                        }
-                        SetItem::Label { .. } => {}
-                    }
-                }
-            }
-            Clause::Create(c) => {
-                for pattern in &mut c.patterns {
-                    for element in &mut pattern.elements {
-                        match element {
-                            CreateElement::Node(n) => {
-                                for (_, expr) in &mut n.properties {
-                                    collector.rewrite_expr(expr, params)?;
-                                }
-                            }
-                            CreateElement::Edge(e) => {
-                                for (_, expr) in &mut e.properties {
-                                    collector.rewrite_expr(expr, params)?;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Clause::Merge(m) => {
-                for element in &mut m.pattern.elements {
-                    match element {
-                        CreateElement::Node(n) => {
-                            for (_, expr) in &mut n.properties {
-                                collector.rewrite_expr(expr, params)?;
-                            }
-                        }
-                        CreateElement::Edge(e) => {
-                            for (_, expr) in &mut e.properties {
-                                collector.rewrite_expr(expr, params)?;
-                            }
-                        }
-                    }
-                }
-                if let Some(ref mut items) = m.on_create {
-                    for item in items {
-                        match item {
-                            SetItem::Property { expression, .. }
-                            | SetItem::Map { expression, .. } => {
-                                collector.rewrite_expr(expression, params)?;
-                            }
-                            SetItem::Label { .. } => {}
-                        }
-                    }
-                }
-                if let Some(ref mut items) = m.on_match {
-                    for item in items {
-                        match item {
-                            SetItem::Property { expression, .. }
-                            | SetItem::Map { expression, .. } => {
-                                collector.rewrite_expr(expression, params)?;
-                            }
-                            SetItem::Label { .. } => {}
-                        }
-                    }
-                }
-            }
-            Clause::Skip(s) => {
-                collector.rewrite_expr(&mut s.count, params)?;
-            }
-            Clause::Limit(l) => {
-                collector.rewrite_expr(&mut l.count, params)?;
-            }
-            // Match/OptionalMatch: patterns only, no function call expressions
-            // Remove: no expressions
-            // Fused clauses: don't exist yet (created by optimize, which runs after rewrite)
-            _ => {}
-        }
+        collector.rewrite_clause(clause, params)?;
     }
 
     Ok(TextScoreRewrite {
@@ -744,6 +649,111 @@ fn text_score_query_arg(
 }
 
 impl TextScoreCollector {
+    /// Rewrite every expression a clause can carry. One arm per clause kind;
+    /// the write-side property maps and SET-item lists are shared helpers
+    /// because CREATE and MERGE spell them identically.
+    fn rewrite_clause(
+        &mut self,
+        clause: &mut Clause,
+        params: &HashMap<String, Value>,
+    ) -> Result<(), String> {
+        match clause {
+            Clause::Return(r) => {
+                for item in &mut r.items {
+                    self.rewrite_expr(&mut item.expression, params)?;
+                }
+            }
+            Clause::Where(w) => {
+                self.rewrite_pred(&mut w.predicate, params)?;
+            }
+            Clause::Match(m) | Clause::OptionalMatch(m) => {
+                if let Some(ref mut wh) = m.where_clause {
+                    self.rewrite_pred(&mut wh.predicate, params)?;
+                }
+            }
+            Clause::With(w) => {
+                for item in &mut w.items {
+                    self.rewrite_expr(&mut item.expression, params)?;
+                }
+                if let Some(ref mut wh) = w.where_clause {
+                    self.rewrite_pred(&mut wh.predicate, params)?;
+                }
+            }
+            Clause::OrderBy(o) => {
+                for item in &mut o.items {
+                    self.rewrite_expr(&mut item.expression, params)?;
+                }
+            }
+            Clause::Unwind(u) => {
+                self.rewrite_expr(&mut u.expression, params)?;
+            }
+            Clause::Delete(d) => {
+                for expr in &mut d.expressions {
+                    self.rewrite_expr(expr, params)?;
+                }
+            }
+            Clause::Set(s) => self.rewrite_set_items(&mut s.items, params)?,
+            Clause::Create(c) => {
+                for pattern in &mut c.patterns {
+                    self.rewrite_write_pattern(pattern, params)?;
+                }
+            }
+            Clause::Merge(m) => {
+                self.rewrite_write_pattern(&mut m.pattern, params)?;
+                for items in [m.on_create.as_mut(), m.on_match.as_mut()]
+                    .into_iter()
+                    .flatten()
+                {
+                    self.rewrite_set_items(items, params)?;
+                }
+            }
+            Clause::Skip(s) => {
+                self.rewrite_expr(&mut s.count, params)?;
+            }
+            Clause::Limit(l) => {
+                self.rewrite_expr(&mut l.count, params)?;
+            }
+            // Remove: no expressions
+            // Fused clauses: don't exist yet (created by optimize, which runs after rewrite)
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Property expressions on a CREATE / MERGE pattern's elements.
+    fn rewrite_write_pattern(
+        &mut self,
+        pattern: &mut CreatePattern,
+        params: &HashMap<String, Value>,
+    ) -> Result<(), String> {
+        for element in &mut pattern.elements {
+            let properties = match element {
+                CreateElement::Node(n) => &mut n.properties,
+                CreateElement::Edge(e) => &mut e.properties,
+            };
+            for (_, expr) in properties {
+                self.rewrite_expr(expr, params)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// SET items — a `SET` clause's own, or a MERGE's `ON CREATE`/`ON MATCH`.
+    fn rewrite_set_items(
+        &mut self,
+        items: &mut [SetItem],
+        params: &HashMap<String, Value>,
+    ) -> Result<(), String> {
+        for item in items {
+            match item {
+                SetItem::Property { expression, .. } | SetItem::Map { expression, .. } => {
+                    self.rewrite_expr(expression, params)?;
+                }
+                SetItem::Label { .. } => {}
+            }
+        }
+        Ok(())
+    }
     /// Rewrite one `text_score(node, col, query [, metric])` call in place into
     /// `vector_score(node, '{col}_emb', query [, metric])`.
     ///
@@ -1401,6 +1411,12 @@ fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String>) {
             collect_pattern_refs(&m.patterns, out);
             for pa in &m.path_assignments {
                 out.insert(pa.variable.clone());
+            }
+            // A variable referenced only by the clause's own WHERE is still
+            // referenced: without this the pass-through-WITH fold would drop
+            // the projection an `OPTIONAL MATCH … WHERE w.x = 1` depends on.
+            if let Some(wc) = &m.where_clause {
+                collect_predicate_refs(&wc.predicate, out);
             }
         }
         Clause::Where(w) => collect_predicate_refs(&w.predicate, out),

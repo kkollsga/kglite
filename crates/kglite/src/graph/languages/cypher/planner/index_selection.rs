@@ -7,7 +7,24 @@ use std::collections::{HashMap, HashSet};
 
 pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<String, Value>) {
     let mut i = 0;
-    while i + 1 < query.clauses.len() {
+    while i < query.clauses.len() {
+        // Scoped form first: `OPTIONAL MATCH … WHERE` carries its predicate
+        // inside the clause. Pushing it into the optional pattern is not just
+        // still-legal, it is now *unconditionally* legal — the pushed matcher
+        // and the surviving predicate mean the same thing, because under
+        // clause scoping "filtered out" and "never matched" are the same
+        // outcome (both leave the row null-extended). Under the old
+        // post-filter reading they were different outcomes and the pushdown
+        // was quietly changing which rows survived.
+        if matches!(&query.clauses[i], Clause::OptionalMatch(m) if m.where_clause.is_some()) {
+            push_scoped_where(query, i, params);
+            i += 1;
+            continue;
+        }
+
+        if i + 1 >= query.clauses.len() {
+            break;
+        }
         let can_push = matches!(
             (&query.clauses[i], &query.clauses[i + 1]),
             (Clause::Match(_), Clause::Where(_)) | (Clause::OptionalMatch(_), Clause::Where(_))
@@ -67,13 +84,14 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
         );
 
         // Apply pushable conditions to MATCH/OPTIONAL MATCH patterns
-        if !pushable.is_empty()
-            || !pushable_in.is_empty()
-            || !pushable_cmp.is_empty()
-            || !pushable_var.is_empty()
-            || !pushable_nodeprop.is_empty()
-            || !pushable_text.is_empty()
-        {
+        if has_pushable(
+            &pushable,
+            &pushable_in,
+            &pushable_cmp,
+            &pushable_var,
+            &pushable_nodeprop,
+            &pushable_text,
+        ) {
             let patterns = match &mut query.clauses[i] {
                 Clause::Match(ref mut m) => &mut m.patterns,
                 Clause::OptionalMatch(ref mut m) => &mut m.patterns,
@@ -82,30 +100,15 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
                     continue;
                 }
             };
-            let mut all_applied = true;
-            for (var_name, property, value) in pushable {
-                all_applied &= apply_property_to_patterns(patterns, &var_name, &property, value);
-            }
-            for (var_name, property, values) in pushable_in {
-                all_applied &=
-                    apply_in_property_to_patterns(patterns, &var_name, &property, values);
-            }
-            for (var_name, property, op, value) in pushable_cmp {
-                all_applied &=
-                    apply_comparison_to_patterns(patterns, &var_name, &property, op, value);
-            }
-            for (var_name, property, ref_name) in pushable_var {
-                all_applied &=
-                    apply_var_property_to_patterns(patterns, &var_name, &property, ref_name);
-            }
-            for (var_name, property, ref_var, ref_prop) in pushable_nodeprop {
-                all_applied &=
-                    apply_nodeprop_to_patterns(patterns, &var_name, &property, ref_var, ref_prop);
-            }
-            for (var_name, property, matcher) in pushable_text {
-                all_applied &=
-                    apply_text_matcher_to_patterns(patterns, &var_name, &property, matcher);
-            }
+            let all_applied = apply_pushables(
+                patterns,
+                pushable,
+                pushable_in,
+                pushable_cmp,
+                pushable_var,
+                pushable_nodeprop,
+                pushable_text,
+            );
 
             // Update WHERE clause with remaining predicates.
             // When all predicates are pushed into the pattern, keep the WHERE
@@ -124,6 +127,125 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
 
         i += 1;
     }
+}
+
+/// Push an `OPTIONAL MATCH … WHERE`'s clause-owned predicate into its own
+/// patterns. Same extraction and same safety-net rule as the adjacent-WHERE
+/// form above — only the predicate's home differs.
+fn push_scoped_where(query: &mut CypherQuery, i: usize, params: &HashMap<String, Value>) {
+    let (where_pred, match_vars, occupied_properties) = match &query.clauses[i] {
+        Clause::OptionalMatch(m) => match &m.where_clause {
+            Some(wc) => (
+                wc.predicate.clone(),
+                collect_pattern_variables(&m.patterns),
+                collect_pattern_property_keys(&m.patterns),
+            ),
+            None => return,
+        },
+        _ => return,
+    };
+    let prior_node_vars = collect_prior_node_vars(&query.clauses[..i], &match_vars);
+    let prior_scalar_vars = collect_prior_scalar_vars(&query.clauses[..i]);
+
+    let PushableResult {
+        pushable,
+        pushable_in,
+        pushable_cmp,
+        pushable_var,
+        pushable_nodeprop,
+        pushable_text,
+        remaining,
+    } = extract_pushable_equalities(
+        &where_pred,
+        &match_vars,
+        &prior_node_vars,
+        &prior_scalar_vars,
+        params,
+        occupied_properties,
+    );
+
+    if !has_pushable(
+        &pushable,
+        &pushable_in,
+        &pushable_cmp,
+        &pushable_var,
+        &pushable_nodeprop,
+        &pushable_text,
+    ) {
+        return;
+    }
+
+    let Clause::OptionalMatch(ref mut m) = query.clauses[i] else {
+        return;
+    };
+    let all_applied = apply_pushables(
+        &mut m.patterns,
+        pushable,
+        pushable_in,
+        pushable_cmp,
+        pushable_var,
+        pushable_nodeprop,
+        pushable_text,
+    );
+    // Identical rule to the adjacent form: a partially-applied push leaves the
+    // original predicate untouched, a fully-applied one narrows it to the
+    // remainder, and a fully-consumed one keeps the predicate as the
+    // safety net every non-pattern-matcher path relies on.
+    if all_applied {
+        if let Some(pred) = remaining {
+            m.where_clause = Some(WhereClause { predicate: pred });
+        }
+    }
+}
+
+fn has_pushable(
+    pushable: &[(String, String, Value)],
+    pushable_in: &[(String, String, Vec<Value>)],
+    pushable_cmp: &[(String, String, ComparisonOp, Value)],
+    pushable_var: &[(String, String, String)],
+    pushable_nodeprop: &[(String, String, String, String)],
+    pushable_text: &[(String, String, PropertyMatcher)],
+) -> bool {
+    !pushable.is_empty()
+        || !pushable_in.is_empty()
+        || !pushable_cmp.is_empty()
+        || !pushable_var.is_empty()
+        || !pushable_nodeprop.is_empty()
+        || !pushable_text.is_empty()
+}
+
+/// Apply every extracted term to `patterns`; `false` when any term found no
+/// home (the caller then keeps the whole original predicate).
+fn apply_pushables(
+    patterns: &mut [crate::graph::core::pattern_matching::Pattern],
+    pushable: Vec<(String, String, Value)>,
+    pushable_in: Vec<(String, String, Vec<Value>)>,
+    pushable_cmp: Vec<(String, String, ComparisonOp, Value)>,
+    pushable_var: Vec<(String, String, String)>,
+    pushable_nodeprop: Vec<(String, String, String, String)>,
+    pushable_text: Vec<(String, String, PropertyMatcher)>,
+) -> bool {
+    let mut all_applied = true;
+    for (var_name, property, value) in pushable {
+        all_applied &= apply_property_to_patterns(patterns, &var_name, &property, value);
+    }
+    for (var_name, property, values) in pushable_in {
+        all_applied &= apply_in_property_to_patterns(patterns, &var_name, &property, values);
+    }
+    for (var_name, property, op, value) in pushable_cmp {
+        all_applied &= apply_comparison_to_patterns(patterns, &var_name, &property, op, value);
+    }
+    for (var_name, property, ref_name) in pushable_var {
+        all_applied &= apply_var_property_to_patterns(patterns, &var_name, &property, ref_name);
+    }
+    for (var_name, property, ref_var, ref_prop) in pushable_nodeprop {
+        all_applied &=
+            apply_nodeprop_to_patterns(patterns, &var_name, &property, ref_var, ref_prop);
+    }
+    for (var_name, property, matcher) in pushable_text {
+        all_applied &= apply_text_matcher_to_patterns(patterns, &var_name, &property, matcher);
+    }
+    all_applied
 }
 
 /// Collect node variable names bound by earlier MATCH/OPTIONAL MATCH clauses,

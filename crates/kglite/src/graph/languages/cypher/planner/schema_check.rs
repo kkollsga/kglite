@@ -372,6 +372,49 @@ fn scope_after_with(
     Ok(projected)
 }
 
+/// Every property expression written by a CREATE / MERGE pattern must resolve
+/// in `scope`. Shared by both clauses, which write the same element shape.
+fn validate_write_pattern_properties(
+    pattern: &CreatePattern,
+    scope: &HashSet<String>,
+) -> Result<(), SchemaError> {
+    for element in &pattern.elements {
+        let properties = match element {
+            CreateElement::Node(node) => &node.properties,
+            CreateElement::Edge(edge) => &edge.properties,
+        };
+        for (_, expression) in properties {
+            validate_expression_scope(expression, scope)?;
+        }
+    }
+    Ok(())
+}
+
+/// SET items — the clause's own, or a MERGE's `ON CREATE` / `ON MATCH` list.
+/// Each names a variable that must already be bound, plus (for the value
+/// forms) an expression that must resolve in the same scope.
+fn validate_set_items(items: &[SetItem], scope: &HashSet<String>) -> Result<(), SchemaError> {
+    for item in items {
+        match item {
+            SetItem::Property {
+                variable,
+                expression,
+                ..
+            }
+            | SetItem::Map {
+                variable,
+                expression,
+                ..
+            } => {
+                require_variable(variable, scope)?;
+                validate_expression_scope(expression, scope)?;
+            }
+            SetItem::Label { variable, .. } => require_variable(variable, scope)?,
+        }
+    }
+    Ok(())
+}
+
 fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), SchemaError> {
     let mut scope = initial.clone();
     // Set by an aggregating RETURN, consumed by the ORDER BY that follows it.
@@ -390,6 +433,12 @@ fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), 
                     bind_pattern(pattern, &mut scope);
                 }
                 scope.extend(m.path_assignments.iter().map(|path| path.variable.clone()));
+                // The clause's own WHERE sees this clause's pattern variables
+                // — validated after binding them, exactly as the separate
+                // `Clause::Where` arm below is reached after its MATCH.
+                if let Some(wc) = &m.where_clause {
+                    validate_predicate_scope(&wc.predicate, &scope)?;
+                }
             }
             Clause::Where(where_clause) => {
                 validate_predicate_scope(&where_clause.predicate, &scope)?
@@ -418,37 +467,10 @@ fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), 
             Clause::Create(create) => {
                 for pattern in &create.patterns {
                     bind_create_pattern(pattern, &mut scope);
-                    for element in &pattern.elements {
-                        let properties = match element {
-                            CreateElement::Node(node) => &node.properties,
-                            CreateElement::Edge(edge) => &edge.properties,
-                        };
-                        for (_, expression) in properties {
-                            validate_expression_scope(expression, &scope)?;
-                        }
-                    }
+                    validate_write_pattern_properties(pattern, &scope)?;
                 }
             }
-            Clause::Set(set) => {
-                for item in &set.items {
-                    match item {
-                        SetItem::Property {
-                            variable,
-                            expression,
-                            ..
-                        }
-                        | SetItem::Map {
-                            variable,
-                            expression,
-                            ..
-                        } => {
-                            require_variable(variable, &scope)?;
-                            validate_expression_scope(expression, &scope)?;
-                        }
-                        SetItem::Label { variable, .. } => require_variable(variable, &scope)?,
-                    }
-                }
-            }
+            Clause::Set(set) => validate_set_items(&set.items, &scope)?,
             Clause::Delete(delete) => {
                 for expression in &delete.expressions {
                     validate_expression_scope(expression, &scope)?;
@@ -465,34 +487,9 @@ fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), 
             }
             Clause::Merge(merge) => {
                 bind_create_pattern(&merge.pattern, &mut scope);
-                for element in &merge.pattern.elements {
-                    let properties = match element {
-                        CreateElement::Node(node) => &node.properties,
-                        CreateElement::Edge(edge) => &edge.properties,
-                    };
-                    for (_, expression) in properties {
-                        validate_expression_scope(expression, &scope)?;
-                    }
-                }
+                validate_write_pattern_properties(&merge.pattern, &scope)?;
                 for items in [&merge.on_create, &merge.on_match].into_iter().flatten() {
-                    for item in items {
-                        match item {
-                            SetItem::Property {
-                                variable,
-                                expression,
-                                ..
-                            }
-                            | SetItem::Map {
-                                variable,
-                                expression,
-                                ..
-                            } => {
-                                require_variable(variable, &scope)?;
-                                validate_expression_scope(expression, &scope)?;
-                            }
-                            SetItem::Label { variable, .. } => require_variable(variable, &scope)?,
-                        }
-                    }
+                    validate_set_items(items, &scope)?;
                 }
             }
             Clause::Foreach {
@@ -806,6 +803,9 @@ fn absent_property_warnings(query: &CypherQuery, graph: &DirGraph) -> Vec<String
         let pred = match clause {
             Clause::Where(w) => Some(&w.predicate),
             Clause::With(w) => w.where_clause.as_ref().map(|wc| &wc.predicate),
+            Clause::Match(m) | Clause::OptionalMatch(m) => {
+                m.where_clause.as_ref().map(|wc| &wc.predicate)
+            }
             _ => None,
         };
         if let Some(p) = pred {
@@ -1111,6 +1111,10 @@ fn walk_clause_patterns<E>(
         Clause::Match(m) | Clause::OptionalMatch(m) => {
             for pattern in &m.patterns {
                 visit(PatternSite::Read(pattern))?;
+            }
+            // Patterns nested in the clause's own WHERE (`… WHERE EXISTS { … }`).
+            if let Some(wc) = &m.where_clause {
+                walk_predicate_patterns(&wc.predicate, visit)?;
             }
         }
         Clause::Where(w) => walk_predicate_patterns(&w.predicate, visit)?,
