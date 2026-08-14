@@ -95,6 +95,35 @@ def test_create_with_edge_rolls_back(g):
     )
 
 
+def test_create_across_pattern_parts_rolls_back(g):
+    """Parts 1-2 create nodes and part 3 links them; part 4 is rejected.
+
+    The whole statement — both nodes and the edge wired between them by a
+    *later* part than the one that introduced their variables — must reverse.
+    """
+    assert_rolls_back(
+        g,
+        "CREATE (x:Item {id: 210, name: 'x'}), (y:Item {id: 211, name: 'y'}), "
+        "(x)-[:LINKS {weight: 3}]->(y), (z:Blocked {id: 212})",
+        write_scope=["Item"],
+    )
+
+
+def test_create_with_anonymous_endpoints_rolls_back(g):
+    assert_rolls_back(
+        g,
+        "CREATE (:Item {id: 220})-[:LINKS]->(:Item {id: 221}), (:Blocked {id: 222})",
+        write_scope=["Item"],
+    )
+
+
+def test_match_plus_anonymous_endpoint_create_rolls_back(g):
+    assert_rolls_back(
+        g,
+        f"MATCH (a:Item {{id: 1}}) CREATE (a)-[:LINKS]->(:Item {{id: 230, name: 'anon', bad: {BOOM}}})",
+    )
+
+
 def test_create_with_secondary_labels_rolls_back(g):
     assert_rolls_back(
         g,

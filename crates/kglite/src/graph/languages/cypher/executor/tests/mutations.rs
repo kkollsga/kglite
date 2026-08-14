@@ -945,3 +945,269 @@ fn test_path_variable_count() {
         other => panic!("Expected Int64, got {:?}", other),
     }
 }
+
+// ── CREATE element bookkeeping: cross-part bindings + anonymous endpoints ────
+//
+// Two halves of one defect in `execute_create`'s element -> NodeIndex record:
+//
+//   * the variable map was rebuilt per comma-separated pattern part and seeded
+//     only from the incoming row, so a later part could not see a variable an
+//     earlier part introduced — it created a *second*, untyped node and wired
+//     the edge between those instead;
+//   * the map was keyed by variable name only, so an anonymous endpoint had
+//     nowhere to be recorded and the edge pass rejected the pattern outright
+//     ("CREATE edge requires named source and target nodes"), including the
+//     fully-inline `CREATE (:A)-[:R]->(:B)` form.
+//
+// Both are wrong-answer/rejection bugs that the optimiser differential cannot
+// see (the unoptimised path agrees), so these are absolute goldens: node count
+// AND edge endpoints, never "a typed node exists".
+
+/// Run a mutation, panicking on error.
+fn run_mut(graph: &mut DirGraph, q: &str) {
+    let query = parser::parse_cypher(q).unwrap();
+    execute_mutable(
+        graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
+}
+
+/// Plain text of a title value, whatever variant it is stored as.
+fn value_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => format!("{:?}", other),
+    }
+}
+
+/// `(title, node_type)` for every live node, sorted.
+fn node_census(graph: &DirGraph) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = graph
+        .graph
+        .node_indices()
+        .filter_map(|i| graph.graph.node_view(i))
+        .map(|n| {
+            (
+                value_text(&n.title()),
+                n.get_node_type_ref(&graph.interner).to_string(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// `(source title, connection type, target title)` for every live edge, sorted.
+fn edge_census(graph: &DirGraph) -> Vec<(String, String, String)> {
+    let title = |i| {
+        graph
+            .graph
+            .node_view(i)
+            .map(|n| value_text(&n.title()))
+            .unwrap_or_default()
+    };
+    let mut out: Vec<(String, String, String)> = graph
+        .graph
+        .edge_indices()
+        .filter_map(|e| {
+            let (s, t) = graph.graph.edge_endpoints(e)?;
+            let w = graph.graph.edge_weight(e)?;
+            Some((
+                title(s),
+                w.connection_type_str(&graph.interner).to_string(),
+                title(t),
+            ))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn create_reuses_a_variable_bound_by_an_earlier_pattern_part() {
+    // The reported repro. Before the fix: 4 nodes (two junk, untyped `Node`)
+    // and the `:E` wired between the two junk ones, leaving a and b unlinked.
+    let mut graph = DirGraph::new();
+    run_mut(
+        &mut graph,
+        "CREATE (a:T {id: 5, name: 'a'}), (b:T {id: 7, name: 'b'}), (b)-[:E]->(a)",
+    );
+
+    assert_eq!(
+        node_census(&graph),
+        vec![
+            ("a".to_string(), "T".to_string()),
+            ("b".to_string(), "T".to_string()),
+        ]
+    );
+    assert_eq!(
+        edge_census(&graph),
+        vec![("b".to_string(), "E".to_string(), "a".to_string())]
+    );
+}
+
+#[test]
+fn create_chains_bindings_across_four_pattern_parts() {
+    let mut graph = DirGraph::new();
+    run_mut(
+        &mut graph,
+        "CREATE (a:T {id: 1, name: 'a'}), (b:T {id: 2, name: 'b'}), \
+         (c:T {id: 3, name: 'c'}), (a)-[:E]->(b), (b)-[:E]->(c)",
+    );
+
+    assert_eq!(node_census(&graph).len(), 3);
+    assert_eq!(
+        edge_census(&graph),
+        vec![
+            ("a".to_string(), "E".to_string(), "b".to_string()),
+            ("b".to_string(), "E".to_string(), "c".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn create_wires_fully_anonymous_inline_endpoints() {
+    // The single most idiomatic Neo4j CREATE form. Before the fix it was
+    // rejected outright.
+    let mut graph = DirGraph::new();
+    run_mut(
+        &mut graph,
+        "CREATE (:A1 {name: 'x'})-[:R]->(:A2 {name: 'y'})",
+    );
+
+    assert_eq!(
+        node_census(&graph),
+        vec![
+            ("x".to_string(), "A1".to_string()),
+            ("y".to_string(), "A2".to_string()),
+        ]
+    );
+    assert_eq!(
+        edge_census(&graph),
+        vec![("x".to_string(), "R".to_string(), "y".to_string())]
+    );
+}
+
+#[test]
+fn create_wires_an_anonymous_endpoint_onto_a_matched_node() {
+    let mut graph = DirGraph::new();
+    run_mut(&mut graph, "CREATE (h:H {id: 1, name: 'h'})");
+    run_mut(
+        &mut graph,
+        "MATCH (h:H) CREATE (h)-[:R]->(:Anon {name: 'anon'})",
+    );
+
+    assert_eq!(
+        node_census(&graph),
+        vec![
+            ("anon".to_string(), "Anon".to_string()),
+            ("h".to_string(), "H".to_string()),
+        ]
+    );
+    assert_eq!(
+        edge_census(&graph),
+        vec![("h".to_string(), "R".to_string(), "anon".to_string())]
+    );
+}
+
+#[test]
+fn create_wires_a_bare_parenthesis_endpoint() {
+    let mut graph = DirGraph::new();
+    run_mut(&mut graph, "CREATE (h:H {id: 1, name: 'h'})");
+    run_mut(&mut graph, "MATCH (h:H) CREATE (h)-[:R]->()");
+
+    let nodes = node_census(&graph);
+    assert_eq!(nodes.len(), 2);
+    // The untyped endpoint keeps the default `Node` label and an engine-minted
+    // title; only its identity relative to the edge is contractual here.
+    let edges = edge_census(&graph);
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].0, "h");
+    assert_eq!(edges[0].1, "R");
+    assert_ne!(edges[0].2, "h");
+}
+
+#[test]
+fn create_references_a_match_bound_variable_from_a_later_pattern_part() {
+    // Control: a MATCH-bound variable used bare in a CREATE part is a
+    // reference, and the part that introduces `b` is visible to the part that
+    // links it.
+    let mut graph = DirGraph::new();
+    run_mut(&mut graph, "CREATE (a:T {id: 1, name: 'a'})");
+    run_mut(
+        &mut graph,
+        "MATCH (a:T) CREATE (b:T {id: 2, name: 'b'}), (a)-[:E]->(b)",
+    );
+
+    assert_eq!(node_census(&graph).len(), 2);
+    assert_eq!(
+        edge_census(&graph),
+        vec![("a".to_string(), "E".to_string(), "b".to_string())]
+    );
+}
+
+#[test]
+fn create_of_an_already_bound_variable_is_a_reference_not_a_second_node() {
+    // Documented behaviour, unchanged by the bookkeeping rework and asserted
+    // here so a future change to it is deliberate: an occurrence of a variable
+    // that is *already* bound references that node even when it carries a
+    // label and properties. Neo4j raises "variable already bound"; this engine
+    // silently references, and both pattern parts of one CREATE and a
+    // preceding MATCH resolve the same way.
+    let mut graph = DirGraph::new();
+    run_mut(&mut graph, "CREATE (a:T {id: 1, name: 'a'})");
+    run_mut(&mut graph, "MATCH (a:T) CREATE (a:T {id: 99, name: 'z'})");
+    assert_eq!(
+        node_census(&graph),
+        vec![("a".to_string(), "T".to_string())]
+    );
+
+    // Same rule inside one CREATE, across parts.
+    let mut graph = DirGraph::new();
+    run_mut(
+        &mut graph,
+        "CREATE (a:T {id: 1, name: 'a'}), (a:T {id: 2, name: 'b'})",
+    );
+    assert_eq!(
+        node_census(&graph),
+        vec![("a".to_string(), "T".to_string())]
+    );
+
+    // A *separate statement* rebinds from scratch — two nodes, not one.
+    run_mut(&mut graph, "CREATE (a:T {id: 3, name: 'c'})");
+    assert_eq!(node_census(&graph).len(), 2);
+}
+
+#[test]
+fn merge_create_arm_inherits_anonymous_endpoint_resolution() {
+    // MERGE's create arm routes through `execute_create`, so a node-only MERGE
+    // that must create still lands exactly one node. (MERGE's *match* arm
+    // requires both endpoints of a relationship pattern to be bound by a prior
+    // MATCH, so a MERGE relationship pattern with an anonymous endpoint is
+    // rejected before it can reach the create arm — a separate, pre-existing
+    // MERGE limitation, pinned here so the asymmetry is deliberate.)
+    let mut graph = DirGraph::new();
+    run_mut(&mut graph, "MERGE (a:T {id: 1, name: 'a'})");
+    run_mut(&mut graph, "MERGE (a:T {id: 1, name: 'a'})");
+    assert_eq!(
+        node_census(&graph),
+        vec![("a".to_string(), "T".to_string())]
+    );
+
+    run_mut(&mut graph, "CREATE (b:T {id: 2, name: 'b'})");
+    let query = parser::parse_cypher("MATCH (a:T {id: 1}) MERGE (a)-[:R]->(:Anon)").unwrap();
+    let err = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("bound by prior MATCH"),
+        "expected the MERGE endpoint-binding error, got: {err}"
+    );
+}

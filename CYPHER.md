@@ -1770,6 +1770,15 @@ graph.cypher("""
     CREATE (a)-[:KNOWS]->(b)
 """)
 
+# Nodes and relationships in one statement. Endpoints need no variable name,
+# and a variable introduced in one comma-separated part is a *reference* in
+# every later part of the same CREATE (variable scope ends with the statement).
+graph.cypher("CREATE (:Person {name: 'Carol'})-[:KNOWS]->(:Person {name: 'Dan'})")
+graph.cypher("""
+    CREATE (a:Person {name: 'Eve'}), (b:Person {name: 'Frank'}),
+           (a)-[:KNOWS]->(b), (b)-[:KNOWS]->(a)
+""")
+
 # SET — update properties
 result = graph.cypher("MATCH (n:Person {name: 'Bob'}) SET n.age = 26, n.city = 'Stavanger'")
 print(result.stats['properties_set'])  # 2

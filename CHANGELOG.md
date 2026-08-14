@@ -34,6 +34,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A multi-part `CREATE` fabricated anonymous nodes instead of reusing the
+  variables its earlier parts had just bound.**
+  `CREATE (a:T {id: 5}), (b:T {id: 7}), (b)-[:E]->(a)` produced **four** nodes
+  — the two you asked for, plus two untyped `Node`-labelled ones — and wired
+  the `:E` between the two junk nodes, leaving `a` and `b` unconnected. The
+  variable map was rebuilt for every comma-separated pattern part and seeded
+  only from the incoming row, so each part was blind to the ones before it. A
+  variable introduced anywhere in a `CREATE` is now a reference in every later
+  part of the same `CREATE`, matching Neo4j. Statements that already worked —
+  a single inline pattern, endpoints bound by a preceding `MATCH`, and a
+  variable name reused in a *later statement* (which still creates a new node,
+  since variable scope ends with the statement) — are unaffected. Note that an
+  occurrence of an already-bound variable that carries a label or properties
+  references the bound node and drops them, rather than raising Neo4j's
+  "variable already declared" error; that is now consistent whether the
+  binding came from `MATCH` or from an earlier part of the same `CREATE`.
+- **`CREATE` rejected anonymous relationship endpoints**, including
+  `CREATE (:A)-[:R]->(:B)` — the most common CREATE form there is. Any pattern
+  whose edge endpoint had no variable name failed with *"CREATE edge requires
+  named source and target nodes"*, so `MATCH (h:H) CREATE (h)-[:R]->(:Q {…})`
+  and `CREATE (h)-[:R]->()` were both unwritable and the node had to be given
+  a throwaway variable. The endpoint node was in fact being created; the edge
+  pass simply had no way to find it, because the record it resolved through
+  was keyed by variable name. Endpoints now resolve by position, so anonymous
+  and named ones behave identically.
 - **`ORDER BY` over a mixed-type sort key crashed the query engine.** A sort
   key holding more than one type — a `CASE` returning a number on some rows
   and a string on others, `coalesce` over differently-typed properties, a

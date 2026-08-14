@@ -687,145 +687,53 @@ fn execute_create(
         check_interrupt_periodic(interrupt, row_idx)?;
         let mut new_row = row.clone();
 
+        // Positional element -> NodeIndex record for the pattern part being
+        // walked. Reused (cleared) per part; see `create_pattern_edges`.
+        let mut element_nodes: Vec<Option<NodeIndex>> = Vec::new();
+
         for pattern in &create.patterns {
-            // Collect variable -> NodeIndex mappings for this pattern
-            let mut pattern_vars: HashMap<String, petgraph::graph::NodeIndex> = HashMap::new();
+            // First pass: create all new nodes.
+            //
+            // The variable map is `new_row.node_bindings` itself, NOT a map
+            // rebuilt per comma-separated part. It starts as a clone of the
+            // incoming row's bindings (so MATCH-bound variables are visible)
+            // and every node created here is written straight back into it, so
+            // a variable introduced in one part is a *reference* in every later
+            // part of the same CREATE. Rebuilding a per-part map from `row`
+            // made each part blind to its predecessors, and
+            // `CREATE (a:T {id:5}), (b:T {id:7}), (b)-[:E]->(a)` silently
+            // fabricated two anonymous nodes and wired the edge between those.
+            element_nodes.clear();
+            element_nodes.resize(pattern.elements.len(), None);
 
-            // Seed with existing bindings from MATCH
-            for (var, idx) in row.node_bindings.iter() {
-                pattern_vars.insert(var.clone(), *idx);
-            }
-
-            // First pass: create all new nodes
-            for element in &pattern.elements {
+            for (pos, element) in pattern.elements.iter().enumerate() {
                 if let CreateElement::Node(node_pat) = element {
-                    // If variable already bound (from MATCH), skip creation
-                    if let Some(ref var) = node_pat.variable {
-                        if pattern_vars.contains_key(var) {
+                    // If the variable is already bound — by a prior MATCH or by
+                    // an earlier part of this same CREATE — this occurrence
+                    // references that node instead of creating a second one.
+                    if let Some(var) = node_pat.variable.as_deref() {
+                        if let Some(&bound) = new_row.node_bindings.get(var) {
+                            element_nodes[pos] = Some(bound);
                             continue;
                         }
                     }
 
                     let node_idx = create_node(graph, node_pat, &new_row, params, stats)?;
 
-                    if let Some(ref var) = node_pat.variable {
-                        pattern_vars.insert(var.clone(), node_idx);
-                        new_row.node_bindings.insert(var.clone(), node_idx);
+                    // Record by position as well as by name: an *anonymous*
+                    // endpoint has no name to record under, and the edge pass
+                    // walks endpoints by index, so position is what makes
+                    // `CREATE (:A)-[:R]->(:B)` and `CREATE (h)-[:R]->()`
+                    // resolvable at all.
+                    element_nodes[pos] = Some(node_idx);
+                    if let Some(var) = node_pat.variable.as_deref() {
+                        new_row.node_bindings.insert(var.to_string(), node_idx);
                     }
                 }
             }
 
-            // Second pass: create edges
-            // Elements are [Node, Edge, Node, Edge, Node, ...]
-            let mut i = 1;
-            while i < pattern.elements.len() {
-                if let CreateElement::Edge(edge_pat) = &pattern.elements[i] {
-                    let source_var = get_create_node_variable(&pattern.elements[i - 1]);
-                    let target_var = get_create_node_variable(&pattern.elements[i + 1]);
-
-                    let source_idx = resolve_create_node_idx(source_var, &pattern_vars)?;
-                    let target_idx = resolve_create_node_idx(target_var, &pattern_vars)?;
-
-                    // Determine actual source/target based on direction
-                    let (actual_source, actual_target) = match edge_pat.direction {
-                        CreateEdgeDirection::Outgoing => (source_idx, target_idx),
-                        CreateEdgeDirection::Incoming => (target_idx, source_idx),
-                    };
-
-                    // NOTE: edge creation is deliberately NOT write-scoped by
-                    // its endpoint node types. Creating an edge between two
-                    // *existing* (MATCH-bound) nodes does not mutate either
-                    // node — it's a read of both endpoints — so the central
-                    // agent-contract pattern (link a runtime `Task` to a
-                    // managed `AlgorithmSpec`) must be allowed under a scope
-                    // that excludes the managed type. A *newly created*
-                    // endpoint is still caught: its node CREATE goes through
-                    // `create_node`, which enforces the scope. (Whitelisting
-                    // relationship types is a possible future refinement.)
-
-                    // Endpoint types — needed for both the schema-lock check
-                    // and the connection-type metadata upsert below.
-                    let src_type = graph
-                        .node_view(actual_source)
-                        .map(|n| n.get_node_type_ref(&graph.interner).to_string())
-                        .unwrap_or_default();
-                    let tgt_type = graph
-                        .node_view(actual_target)
-                        .map(|n| n.get_node_type_ref(&graph.interner).to_string())
-                        .unwrap_or_default();
-
-                    // Schema lock validation for edge
-                    if graph.schema_locked {
-                        crate::graph::mutation::validation::validate_edge_creation(
-                            &edge_pat.connection_type,
-                            &src_type,
-                            &tgt_type,
-                            &graph.connection_type_metadata,
-                            &graph.node_type_metadata,
-                        )?;
-                    }
-
-                    // Evaluate edge properties
-                    let mut edge_props = HashMap::new();
-                    {
-                        let executor = CypherExecutor::with_params(graph, params, None);
-                        for (key, expr) in &edge_pat.properties {
-                            let val = executor.evaluate_expression(expr, &new_row)?;
-                            edge_props.insert(key.clone(), val);
-                        }
-                    }
-                    // Freshness provenance: stamp `updated_at` if this edge type
-                    // opted in (before metadata/EdgeData pick up the props).
-                    graph.inject_edge_provenance(&edge_pat.connection_type, &mut edge_props);
-
-                    // Register the connection type fully — both the lightweight
-                    // cache (for `has_connection_type`) AND the metadata map.
-                    // The metadata is what `connection_types()`, the planner's
-                    // schema check, and the columnar edge-store save all read;
-                    // without it a brand-new relationship type created via
-                    // Cypher was treated as "unknown" (spurious warnings) and
-                    // — on a columnar graph — its edges were silently dropped
-                    // on `save()`, since the columnar edge store serializes by
-                    // registered connection type. (SimulatoRS, 0.12.1.)
-                    graph.register_connection_type(edge_pat.connection_type.clone());
-                    let prop_types: HashMap<String, String> = edge_props
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.type_name().to_string()))
-                        .collect();
-                    graph.upsert_connection_type_metadata(
-                        &edge_pat.connection_type,
-                        &src_type,
-                        &tgt_type,
-                        prop_types,
-                    );
-                    stats.relationships_created += 1;
-
-                    let edge_data = EdgeData::new(
-                        edge_pat.connection_type.clone(),
-                        edge_props,
-                        &mut graph.interner,
-                    );
-                    let edge_index = GraphWrite::add_edge(
-                        &mut graph.graph,
-                        actual_source,
-                        actual_target,
-                        edge_data,
-                    );
-
-                    // Bind edge variable if named
-                    if let Some(ref var) = edge_pat.variable {
-                        new_row.edge_bindings.insert(
-                            var.clone(),
-                            EdgeBinding {
-                                source: actual_source,
-                                target: actual_target,
-                                edge_index,
-                            },
-                        );
-                    }
-                }
-                i += 2; // Skip to next edge position
-            }
+            // Second pass: create edges.
+            create_pattern_edges(graph, pattern, &element_nodes, &mut new_row, params, stats)?;
         }
 
         new_rows.push(new_row);
@@ -846,6 +754,127 @@ fn execute_create(
         columns: existing.columns,
         lazy_return_items: None,
     })
+}
+
+/// Create every edge of one CREATE pattern part, wiring endpoints from the
+/// positional record the node pass produced.
+///
+/// Elements alternate `[Node, Edge, Node, Edge, Node, …]` (the parser enforces
+/// both the alternation and the node-terminated shape), so the endpoints of the
+/// edge at index `i` are the elements at `i - 1` and `i + 1`. Endpoints are
+/// resolved from `element_nodes` — by *position*, not by name — because an
+/// anonymous endpoint has no name to resolve by.
+fn create_pattern_edges(
+    graph: &mut DirGraph,
+    pattern: &CreatePattern,
+    element_nodes: &[Option<NodeIndex>],
+    new_row: &mut ResultRow,
+    params: &HashMap<String, Value>,
+    stats: &mut MutationStats,
+) -> Result<(), String> {
+    let mut i = 1;
+    while i < pattern.elements.len() {
+        if let CreateElement::Edge(edge_pat) = &pattern.elements[i] {
+            let source_idx = resolve_create_node_idx(pattern, element_nodes, i - 1)?;
+            let target_idx = resolve_create_node_idx(pattern, element_nodes, i + 1)?;
+
+            // Determine actual source/target based on direction
+            let (actual_source, actual_target) = match edge_pat.direction {
+                CreateEdgeDirection::Outgoing => (source_idx, target_idx),
+                CreateEdgeDirection::Incoming => (target_idx, source_idx),
+            };
+
+            // NOTE: edge creation is deliberately NOT write-scoped by
+            // its endpoint node types. Creating an edge between two
+            // *existing* (MATCH-bound) nodes does not mutate either
+            // node — it's a read of both endpoints — so the central
+            // agent-contract pattern (link a runtime `Task` to a
+            // managed `AlgorithmSpec`) must be allowed under a scope
+            // that excludes the managed type. A *newly created*
+            // endpoint is still caught: its node CREATE goes through
+            // `create_node`, which enforces the scope. (Whitelisting
+            // relationship types is a possible future refinement.)
+
+            // Endpoint types — needed for both the schema-lock check
+            // and the connection-type metadata upsert below.
+            let src_type = graph
+                .node_view(actual_source)
+                .map(|n| n.get_node_type_ref(&graph.interner).to_string())
+                .unwrap_or_default();
+            let tgt_type = graph
+                .node_view(actual_target)
+                .map(|n| n.get_node_type_ref(&graph.interner).to_string())
+                .unwrap_or_default();
+
+            // Schema lock validation for edge
+            if graph.schema_locked {
+                crate::graph::mutation::validation::validate_edge_creation(
+                    &edge_pat.connection_type,
+                    &src_type,
+                    &tgt_type,
+                    &graph.connection_type_metadata,
+                    &graph.node_type_metadata,
+                )?;
+            }
+
+            // Evaluate edge properties
+            let mut edge_props = HashMap::new();
+            {
+                let executor = CypherExecutor::with_params(graph, params, None);
+                for (key, expr) in &edge_pat.properties {
+                    let val = executor.evaluate_expression(expr, new_row)?;
+                    edge_props.insert(key.clone(), val);
+                }
+            }
+            // Freshness provenance: stamp `updated_at` if this edge type
+            // opted in (before metadata/EdgeData pick up the props).
+            graph.inject_edge_provenance(&edge_pat.connection_type, &mut edge_props);
+
+            // Register the connection type fully — both the lightweight
+            // cache (for `has_connection_type`) AND the metadata map.
+            // The metadata is what `connection_types()`, the planner's
+            // schema check, and the columnar edge-store save all read;
+            // without it a brand-new relationship type created via
+            // Cypher was treated as "unknown" (spurious warnings) and
+            // — on a columnar graph — its edges were silently dropped
+            // on `save()`, since the columnar edge store serializes by
+            // registered connection type. (SimulatoRS, 0.12.1.)
+            graph.register_connection_type(edge_pat.connection_type.clone());
+            let prop_types: HashMap<String, String> = edge_props
+                .iter()
+                .map(|(k, v)| (k.clone(), v.type_name().to_string()))
+                .collect();
+            graph.upsert_connection_type_metadata(
+                &edge_pat.connection_type,
+                &src_type,
+                &tgt_type,
+                prop_types,
+            );
+            stats.relationships_created += 1;
+
+            let edge_data = EdgeData::new(
+                edge_pat.connection_type.clone(),
+                edge_props,
+                &mut graph.interner,
+            );
+            let edge_index =
+                GraphWrite::add_edge(&mut graph.graph, actual_source, actual_target, edge_data);
+
+            // Bind edge variable if named
+            if let Some(ref var) = edge_pat.variable {
+                new_row.edge_bindings.insert(
+                    var.clone(),
+                    EdgeBinding {
+                        source: actual_source,
+                        target: actual_target,
+                        edge_index,
+                    },
+                );
+            }
+        }
+        i += 2; // Skip to next edge position
+    }
+    Ok(())
 }
 
 /// Create a single node from a CreateNodePattern
@@ -1093,17 +1122,30 @@ fn get_create_node_variable(element: &CreateElement) -> Option<&str> {
     }
 }
 
-/// Resolve a variable name to a NodeIndex from the pattern vars map
+/// Resolve a CREATE edge endpoint at `pos` to its NodeIndex.
+///
+/// The node pass records *every* node element of the part at its own index —
+/// bound-from-elsewhere or freshly created, named or anonymous — so an
+/// endpoint is resolved positionally and never needs a variable name. Both
+/// error arms are structural (a non-node element at an endpoint position, or a
+/// position the node pass never visited); the parser's alternation check makes
+/// them unreachable from user input, and they stay as defensive diagnostics
+/// rather than an index panic.
 fn resolve_create_node_idx(
-    var: Option<&str>,
-    pattern_vars: &HashMap<String, petgraph::graph::NodeIndex>,
-) -> Result<petgraph::graph::NodeIndex, String> {
-    match var {
-        Some(name) => pattern_vars
-            .get(name)
-            .copied()
-            .ok_or_else(|| format!("Unbound variable '{}' in CREATE edge", name)),
-        None => Err("CREATE edge requires named source and target nodes".to_string()),
+    pattern: &CreatePattern,
+    element_nodes: &[Option<NodeIndex>],
+    pos: usize,
+) -> Result<NodeIndex, String> {
+    match pattern.elements.get(pos) {
+        Some(CreateElement::Node(node_pat)) => {
+            element_nodes.get(pos).copied().flatten().ok_or_else(|| {
+                match node_pat.variable.as_deref() {
+                    Some(name) => format!("Unbound variable '{}' in CREATE edge", name),
+                    None => "Unresolved anonymous node in CREATE edge".to_string(),
+                }
+            })
+        }
+        _ => Err("CREATE edge endpoints must be node patterns".to_string()),
     }
 }
 

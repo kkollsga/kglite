@@ -72,6 +72,23 @@ rollback_shapes! {
         "CREATE (:Tag:Hot:Fresh {id: 300}), (:Blocked {id: 301})",
         Some(&["Tag"]);
 
+    /// Two parts create nodes and a *third* part links them by variable — the
+    /// cross-part binding shape. Until 2026-08-14 the third part could not see
+    /// the first two and fabricated its own anonymous endpoints, so what the
+    /// journal had to reverse was a different (and larger) set of writes than
+    /// the statement names.
+    create_linking_earlier_pattern_parts:
+        "CREATE (x:Item {id: 210, name: 'x'}), (y:Item {id: 211, name: 'y'}), \
+                (x)-[:LINKS {weight: 3}]->(y), (z:Blocked {id: 212})",
+        Some(&["Item"]);
+
+    /// Anonymous endpoints: nodes the journal must reverse under no variable
+    /// name at all. This shape was un-executable before the same change.
+    create_anonymous_endpoints:
+        "CREATE (:Item {id: 220})-[:LINKS]->(:Item {id: 221}), \
+                (:Blocked {id: 222})",
+        Some(&["Item"]);
+
     /// Every Item is updated, then the expression on the last SET item blows
     /// up — a multi-property SET across multiple rows.
     set_properties:
