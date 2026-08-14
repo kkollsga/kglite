@@ -1278,7 +1278,7 @@ mod tests {
     #[test]
     fn schema_lock_rejects_indexing_an_undeclared_property() {
         let mut graph = person_graph();
-        graph.node_type_metadata.insert(
+        graph.node_type_metadata_mut().insert(
             "Person".to_string(),
             HashMap::from([("age".to_string(), "int".to_string())]),
         );
@@ -1496,7 +1496,7 @@ mod tests {
     #[test]
     fn schema_lock_rejects_constraining_an_undeclared_property() {
         let mut graph = person_graph();
-        graph.node_type_metadata.insert(
+        graph.node_type_metadata_mut().insert(
             "Person".to_string(),
             HashMap::from([("age".to_string(), "int".to_string())]),
         );

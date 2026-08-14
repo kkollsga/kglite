@@ -63,7 +63,16 @@ struct Fingerprint {
     has_secondary_labels: bool,
     /// Schema growth a failed statement must not leave behind.
     node_type_metadata: Vec<(String, PropPairs)>,
-    connection_type_metadata: Vec<String>,
+    /// `(conn type, sorted source types, sorted target types, sorted property
+    /// name→type pairs)`. Keys alone were not enough: a failed edge write can
+    /// grow an *existing* connection type's `property_types` or endpoint sets
+    /// without introducing a key, and that growth is exactly what the shell
+    /// restore has to reverse.
+    connection_type_metadata: Vec<(String, Vec<String>, Vec<String>, PropPairs)>,
+    /// Per node type, the shared `TypeSchema`'s key names in slot order. Slot
+    /// order is load-bearing (it is the column order a columnar store is
+    /// written in), so this pins order, not just membership.
+    type_schemas: Vec<(String, Vec<String>)>,
     /// `(node_type, id)` → slot, read through the id index so a stale or
     /// unrebuilt index shows up as a mismatch.
     id_lookup: Vec<(String, String, usize)>,
@@ -172,9 +181,37 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
         .collect();
     node_type_metadata.sort();
 
-    let mut connection_type_metadata: Vec<String> =
-        graph.connection_type_metadata.keys().cloned().collect();
+    let mut connection_type_metadata: Vec<(String, Vec<String>, Vec<String>, PropPairs)> = graph
+        .connection_type_metadata
+        .iter()
+        .map(|(conn, info)| {
+            let mut sources: Vec<String> = info.source_types.iter().cloned().collect();
+            sources.sort();
+            let mut targets: Vec<String> = info.target_types.iter().cloned().collect();
+            targets.sort();
+            let mut props: PropPairs = info
+                .property_types
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            props.sort();
+            (conn.clone(), sources, targets, props)
+        })
+        .collect();
     connection_type_metadata.sort();
+
+    let mut type_schemas: Vec<(String, Vec<String>)> = graph
+        .type_schemas
+        .iter()
+        .map(|(node_type, schema)| {
+            let keys: Vec<String> = schema
+                .iter()
+                .map(|(_, key)| graph.interner.resolve(key).to_string())
+                .collect();
+            (node_type.clone(), keys)
+        })
+        .collect();
+    type_schemas.sort();
 
     // Probe the id index for every live node, which forces a lazy rebuild if
     // the rollback invalidated it — a stale index answers with a dead slot.
@@ -280,6 +317,7 @@ fn fingerprint(graph: &mut DirGraph) -> Fingerprint {
         has_secondary_labels: graph.has_secondary_labels,
         node_type_metadata,
         connection_type_metadata,
+        type_schemas,
         id_lookup,
         column_masters,
         columnar_rows,
@@ -532,5 +570,6 @@ mod fidelity;
 mod held_reader;
 mod journal_invariants;
 mod row_undo;
+mod schema_shell;
 mod store_clone;
 mod unique_claims;

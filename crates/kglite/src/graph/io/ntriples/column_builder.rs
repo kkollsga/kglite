@@ -1382,7 +1382,7 @@ fn assemble_column_stores(
         if !graph.type_schemas.contains_key(type_name) {
             let schema = TypeSchema::from_keys(writer.col_map.keys().copied());
             graph
-                .type_schemas
+                .type_schemas_mut()
                 .insert(type_name.clone(), Arc::new(schema));
         }
         graph.install_column_store(type_name, Arc::new(store));

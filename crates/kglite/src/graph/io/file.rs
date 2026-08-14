@@ -290,13 +290,13 @@ impl FileMetadata {
             range_index_keys: graph.range_index_keys.clone(),
             unique_constraint_keys: graph.unique_constraint_keys.clone(),
             constraint_names: graph.constraint_names.clone(),
-            node_type_metadata: graph.node_type_metadata.clone(),
-            connection_type_metadata: graph.connection_type_metadata.clone(),
-            id_field_aliases: graph.id_field_aliases.clone(),
-            title_field_aliases: graph.title_field_aliases.clone(),
+            node_type_metadata: (*graph.node_type_metadata).clone(),
+            connection_type_metadata: (*graph.connection_type_metadata).clone(),
+            id_field_aliases: (*graph.id_field_aliases).clone(),
+            title_field_aliases: (*graph.title_field_aliases).clone(),
             auto_vacuum_threshold: graph.auto_vacuum_threshold,
             storage_mode: recorded_storage_mode_tag(graph),
-            parent_types: graph.parent_types.clone(),
+            parent_types: (*graph.parent_types).clone(),
             graph_instructions: graph.graph_instructions.clone(),
             user_schema_version: graph.user_schema_version,
             checkpoint_lsn: graph.checkpoint_lsn,
@@ -349,12 +349,12 @@ impl FileMetadata {
         graph.range_index_keys = self.range_index_keys;
         graph.unique_constraint_keys = self.unique_constraint_keys;
         graph.constraint_names = self.constraint_names;
-        graph.node_type_metadata = self.node_type_metadata;
-        graph.connection_type_metadata = self.connection_type_metadata;
-        graph.id_field_aliases = self.id_field_aliases;
-        graph.title_field_aliases = self.title_field_aliases;
+        graph.node_type_metadata = Arc::new(self.node_type_metadata);
+        graph.connection_type_metadata = Arc::new(self.connection_type_metadata);
+        graph.id_field_aliases = Arc::new(self.id_field_aliases);
+        graph.title_field_aliases = Arc::new(self.title_field_aliases);
         graph.auto_vacuum_threshold = self.auto_vacuum_threshold;
-        graph.parent_types = self.parent_types;
+        graph.parent_types = Arc::new(self.parent_types);
         graph.graph_instructions = self.graph_instructions;
         graph.user_schema_version = self.user_schema_version;
         graph.checkpoint_lsn = self.checkpoint_lsn;
@@ -378,7 +378,7 @@ impl FileMetadata {
             // This covers older graphs that don't have persisted type_connectivity.
             let edge_counts = graph.edge_type_counts_cache.read().unwrap();
             let mut triples = Vec::new();
-            for (conn_type, info) in &graph.connection_type_metadata {
+            for (conn_type, info) in graph.connection_type_metadata.iter() {
                 let count = edge_counts
                     .as_ref()
                     .and_then(|c| c.get(conn_type).copied())
@@ -1943,8 +1943,13 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     }
     log_stage("type_indices_load", t);
 
-    // Build type_schemas from node_type_metadata (needed for column loading)
-    for (node_type, props) in &graph.node_type_metadata {
+    // Build type_schemas from node_type_metadata (needed for column loading).
+    // The catalogue is `Arc`-shared (`dir_graph::schema_cow`), so holding a
+    // second handle for the walk costs a refcount and frees `graph` for the
+    // `type_schemas_mut()` writes inside it. Nothing in the loop writes the
+    // catalogue, so the handle and the field stay the same map throughout.
+    let metadata = std::sync::Arc::clone(&graph.node_type_metadata);
+    for (node_type, props) in metadata.iter() {
         let mut schema = crate::graph::schema::TypeSchema::new();
         for prop_name in props.keys() {
             let key = graph
@@ -1954,7 +1959,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
             schema.add_key(key);
         }
         graph
-            .type_schemas
+            .type_schemas_mut()
             .insert(node_type.clone(), std::sync::Arc::new(schema));
     }
 

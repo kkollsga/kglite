@@ -96,7 +96,10 @@ pub(super) fn create_edges_with_qnum_map(
     // Register connection type names (no O(types²) metadata loop).
     for conn_key in &conn_types_seen {
         let conn_name = graph.interner.resolve(*conn_key).to_string();
-        graph.connection_type_metadata.entry(conn_name).or_default();
+        graph
+            .connection_type_metadata_mut()
+            .entry(conn_name)
+            .or_default();
     }
     graph.invalidate_edge_type_counts_cache();
     Ok(())
@@ -257,7 +260,10 @@ pub(super) fn create_edges_compact(
     // Register connection type names (no O(types²) metadata loop).
     for conn_key in &conn_types_seen {
         let conn_name = graph.interner.resolve(*conn_key).to_string();
-        graph.connection_type_metadata.entry(conn_name).or_default();
+        graph
+            .connection_type_metadata_mut()
+            .entry(conn_name)
+            .or_default();
     }
 
     graph.invalidate_edge_type_counts_cache();

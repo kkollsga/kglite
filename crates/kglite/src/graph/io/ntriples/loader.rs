@@ -415,7 +415,7 @@ fn finalize_disk_graph(
             // This makes describe(types=['human']) instant instead of scanning 10K nodes.
             {
                 let mut triples = Vec::new();
-                for (conn_type, info) in &graph.connection_type_metadata {
+                for (conn_type, info) in graph.connection_type_metadata.iter() {
                     let edge_count = graph
                         .edge_type_counts_cache
                         .read()
@@ -865,9 +865,9 @@ fn resolve_type_labels(
                         .extend(indices);
                 }
                 // Merge node_type_metadata: keep the richer entry (more property keys)
-                if let Some(old_meta) = graph.node_type_metadata.remove(old_name) {
+                if let Some(old_meta) = graph.node_type_metadata_mut().remove(old_name) {
                     let entry = graph
-                        .node_type_metadata
+                        .node_type_metadata_mut()
                         .entry(new_name.clone())
                         .or_default();
                     for (k, v) in old_meta {
@@ -875,14 +875,16 @@ fn resolve_type_labels(
                     }
                 }
                 // Merge type_schemas: union property keys
-                if let Some(old_schema) = graph.type_schemas.remove(old_name) {
+                if let Some(old_schema) = graph.type_schemas_mut().remove(old_name) {
                     if let Some(existing) = graph.type_schemas.get(new_name) {
                         let merged = existing.merge(&old_schema);
                         graph
-                            .type_schemas
+                            .type_schemas_mut()
                             .insert(new_name.clone(), Arc::new(merged));
                     } else {
-                        graph.type_schemas.insert(new_name.clone(), old_schema);
+                        graph
+                            .type_schemas_mut()
+                            .insert(new_name.clone(), old_schema);
                     }
                 }
                 // Merge type_build_meta: combine row counts and column info

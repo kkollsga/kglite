@@ -17,7 +17,7 @@
 //! | | cost to open | cost to roll back |
 //! |---|---|---|
 //! | [`StatementCheckpoint::None`] | nothing | n/a — the shape cannot fail after its first write |
-//! | [`StatementCheckpoint::Journal`] | O(schema) + O(changes) | O(changes) + reindex of affected types |
+//! | [`StatementCheckpoint::Journal`] | O(1) + O(changes) | O(changes) + reindex of affected types |
 //! | [`StatementCheckpoint::Clone`] | O(V+E) | O(1) swap |
 //!
 //! ## How the journal path splits `DirGraph`'s state
@@ -32,6 +32,16 @@
 //!   *key* lists, aliases, configs, and `version`. It is also every field
 //!   nobody has thought about yet, which is the point: **a field that is not
 //!   explicitly parked is automatically restored**.
+//!
+//!   "Cloned" is now literal only for the small ones. The six that scale with
+//!   schema width — `node_type_metadata`, `connection_type_metadata`,
+//!   `type_schemas`, the two alias maps and `parent_types` — are `Arc`-shared
+//!   and copy-on-write, so the shell takes a pointer and the statement's first
+//!   write to each forks it once. The restore semantics are unchanged (the
+//!   shell still hands back exactly the pre-statement value); what changed is
+//!   that a 200-type × 50-column schema costs a refcount instead of 337 µs of
+//!   memcpy per statement. Contract, writer rules and measurement:
+//!   [`super::schema_cow`].
 //! - **O(V+E)-sized fields are parked** (moved aside so `clone()` sees them
 //!   empty) and reconstructed from the journal. This list is short, closed,
 //!   and each member has a documented undo story in [`apply`]:
@@ -322,7 +332,13 @@ impl DirGraph {
     /// Implemented by parking the O(V+E) fields in a throwaway husk, cloning
     /// what is left, and handing them straight back — so the returned shell
     /// has empty data-scale fields and a faithful copy of everything else.
-    fn schema_shell(&mut self) -> DirGraph {
+    ///
+    /// The six schema-scale maps in "everything else" are `Arc`-shared, so
+    /// this is a refcount bump per map rather than a copy of the property
+    /// catalogue; the copy, if any, happens at the first writer of the
+    /// statement. See [`super::schema_cow`] — and do not reach for
+    /// `Arc::make_mut` on those fields anywhere else.
+    pub(super) fn schema_shell(&mut self) -> DirGraph {
         let mut husk = DirGraph::new();
         swap_data_scale(self, &mut husk);
         let shell = self.clone();
@@ -331,7 +347,7 @@ impl DirGraph {
     }
 
     /// Adopt `shell`'s O(schema) state while keeping the live O(V+E) state.
-    fn restore_schema_shell(&mut self, mut shell: DirGraph) {
+    pub(super) fn restore_schema_shell(&mut self, mut shell: DirGraph) {
         // `shell`'s data-scale fields are empty; hand it the live ones, then
         // become it.
         swap_data_scale(&mut shell, self);

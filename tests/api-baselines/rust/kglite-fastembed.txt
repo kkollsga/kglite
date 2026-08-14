@@ -2226,7 +2226,7 @@ pub kglite::api::DirGraph::auto_vacuum_threshold: core::option::Option<f64>
 pub kglite::api::DirGraph::checkpoint_lsn: u64
 pub kglite::api::DirGraph::composite_index_keys: alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<alloc::string::String>)>
 pub kglite::api::DirGraph::composite_indices: std::collections::hash::map::HashMap<(alloc::string::String, alloc::vec::Vec<alloc::string::String>), kglite::graph::dir_graph::index_layer::LayeredIndex<kglite::graph::schema::CompositeValue>>
-pub kglite::api::DirGraph::connection_type_metadata: std::collections::hash::map::HashMap<alloc::string::String, kglite::graph::schema::ConnectionTypeInfo>
+pub kglite::api::DirGraph::connection_type_metadata: alloc::sync::Arc<std::collections::hash::map::HashMap<alloc::string::String, kglite::graph::schema::ConnectionTypeInfo>>
 pub kglite::api::DirGraph::connection_types: std::collections::hash::set::HashSet<kglite::api::InternedKey>
 pub kglite::api::DirGraph::edge_type_counts_cache: kglite::graph::dir_graph::caches::ForkPrivateCache<std::collections::hash::map::HashMap<alloc::string::String, usize>>
 pub kglite::api::DirGraph::embeddings: std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), kglite::api::storage::EmbeddingStore>
@@ -2234,12 +2234,12 @@ pub kglite::api::DirGraph::graph: kglite::api::storage::GraphBackend
 pub kglite::api::DirGraph::graph_id: u64
 pub kglite::api::DirGraph::graph_instructions: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
 pub kglite::api::DirGraph::has_secondary_labels: bool
-pub kglite::api::DirGraph::id_field_aliases: rustc_hash::FxHashMap<alloc::string::String, alloc::string::String>
+pub kglite::api::DirGraph::id_field_aliases: alloc::sync::Arc<rustc_hash::FxHashMap<alloc::string::String, alloc::string::String>>
 pub kglite::api::DirGraph::id_indices: kglite::graph::storage::disk::id_index::IdIndexStore
 pub kglite::api::DirGraph::interner: kglite::api::StringInterner
 pub kglite::api::DirGraph::memory_limit: core::option::Option<usize>
-pub kglite::api::DirGraph::node_type_metadata: std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
-pub kglite::api::DirGraph::parent_types: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
+pub kglite::api::DirGraph::node_type_metadata: alloc::sync::Arc<std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>>
+pub kglite::api::DirGraph::parent_types: alloc::sync::Arc<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
 pub kglite::api::DirGraph::property_index_keys: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
 pub kglite::api::DirGraph::property_indices: std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), kglite::graph::dir_graph::index_layer::LayeredIndex<kglite::datatypes::values::Value>>
 pub kglite::api::DirGraph::property_ndv_cache: alloc::sync::Arc<std::sync::poison::rwlock::RwLock<(u64, std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), usize>)>>
@@ -2256,10 +2256,10 @@ pub kglite::api::DirGraph::temporal_edge_configs: std::collections::hash::map::H
 pub kglite::api::DirGraph::temporal_node_configs: std::collections::hash::map::HashMap<alloc::string::String, kglite::api::TemporalConfig>
 pub kglite::api::DirGraph::timeseries_configs: std::collections::hash::map::HashMap<alloc::string::String, kglite::api::timeseries::TimeseriesConfig>
 pub kglite::api::DirGraph::timeseries_store: std::collections::hash::map::HashMap<usize, kglite::api::timeseries::NodeTimeseries>
-pub kglite::api::DirGraph::title_field_aliases: rustc_hash::FxHashMap<alloc::string::String, alloc::string::String>
+pub kglite::api::DirGraph::title_field_aliases: alloc::sync::Arc<rustc_hash::FxHashMap<alloc::string::String, alloc::string::String>>
 pub kglite::api::DirGraph::type_connectivity_cache: kglite::graph::dir_graph::caches::ForkPrivateCache<alloc::vec::Vec<kglite::graph::schema::ConnectivityTriple>>
 pub kglite::api::DirGraph::type_indices: kglite::graph::storage::disk::type_index::TypeIndexStore
-pub kglite::api::DirGraph::type_schemas: std::collections::hash::map::HashMap<alloc::string::String, alloc::sync::Arc<kglite::graph::schema::TypeSchema>>
+pub kglite::api::DirGraph::type_schemas: alloc::sync::Arc<std::collections::hash::map::HashMap<alloc::string::String, alloc::sync::Arc<kglite::graph::schema::TypeSchema>>>
 pub kglite::api::DirGraph::user_schema_version: u32
 pub kglite::api::DirGraph::version: u64
 pub kglite::api::DirGraph::wkt_cache: alloc::sync::Arc<std::sync::poison::rwlock::RwLock<std::collections::hash::map::HashMap<alloc::string::String, alloc::sync::Arc<geo_types::geometry::Geometry<f64>>>>>
@@ -2345,6 +2345,13 @@ pub fn kglite::api::DirGraph::compact_disk(&mut self) -> core::result::Result<us
 pub fn kglite::api::DirGraph::enable_disk_mode(&mut self) -> core::result::Result<(), alloc::string::String>
 pub fn kglite::api::DirGraph::ensure_disk_edges_built(&mut self) -> core::result::Result<(), alloc::string::String>
 pub fn kglite::api::DirGraph::save_disk(&mut self, path: &str) -> core::result::Result<(), alloc::string::String>
+impl kglite::api::DirGraph
+pub fn kglite::api::DirGraph::connection_type_metadata_mut(&mut self) -> &mut std::collections::hash::map::HashMap<alloc::string::String, kglite::graph::schema::ConnectionTypeInfo>
+pub fn kglite::api::DirGraph::id_field_aliases_mut(&mut self) -> &mut rustc_hash::FxHashMap<alloc::string::String, alloc::string::String>
+pub fn kglite::api::DirGraph::node_type_metadata_mut(&mut self) -> &mut std::collections::hash::map::HashMap<alloc::string::String, std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
+pub fn kglite::api::DirGraph::parent_types_mut(&mut self) -> &mut std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
+pub fn kglite::api::DirGraph::title_field_aliases_mut(&mut self) -> &mut rustc_hash::FxHashMap<alloc::string::String, alloc::string::String>
+pub fn kglite::api::DirGraph::type_schemas_mut(&mut self) -> &mut std::collections::hash::map::HashMap<alloc::string::String, alloc::sync::Arc<kglite::graph::schema::TypeSchema>>
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::copy_embeddings_from(&mut self, src: &kglite::api::DirGraph) -> (usize, usize, usize)
 impl kglite::api::DirGraph

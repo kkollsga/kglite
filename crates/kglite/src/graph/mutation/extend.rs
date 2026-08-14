@@ -252,12 +252,12 @@ pub fn extend_graph(
         if !target_has_type {
             if let Some(alias) = source.id_field_aliases.get(&node_type) {
                 target
-                    .id_field_aliases
+                    .id_field_aliases_mut()
                     .insert(node_type.clone(), alias.clone());
             }
             if let Some(alias) = source.title_field_aliases.get(&node_type) {
                 target
-                    .title_field_aliases
+                    .title_field_aliases_mut()
                     .insert(node_type.clone(), alias.clone());
             }
         }

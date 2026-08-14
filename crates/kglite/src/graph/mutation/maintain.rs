@@ -354,7 +354,7 @@ pub fn add_nodes(
     // Record original field name aliases so users can query by original column name
     if unique_id_field != "id" {
         graph
-            .id_field_aliases
+            .id_field_aliases_mut()
             .insert(node_type.clone(), unique_id_field.clone());
     }
     // Only register the title alias when the caller explicitly named one.
@@ -363,7 +363,7 @@ pub fn add_nodes(
     // to the stored title.
     if should_update_title && title_field != "title" {
         graph
-            .title_field_aliases
+            .title_field_aliases_mut()
             .insert(node_type.clone(), title_field.clone());
     }
 
@@ -420,9 +420,13 @@ pub fn add_nodes(
             merged.add_key(key);
         }
         let merged_arc = Arc::new(merged);
-        graph.type_schemas.insert(node_type.clone(), merged_arc);
+        graph
+            .type_schemas_mut()
+            .insert(node_type.clone(), merged_arc);
     } else {
-        graph.type_schemas.insert(node_type.clone(), type_schema);
+        graph
+            .type_schemas_mut()
+            .insert(node_type.clone(), type_schema);
     }
 
     // Pre-intern property column keys once (avoids re-interning per row)

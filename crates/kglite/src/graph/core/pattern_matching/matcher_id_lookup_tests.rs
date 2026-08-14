@@ -90,7 +90,7 @@ fn absent_alias_key_with_index_answers_empty() {
     // `add_nodes(df, "Star", "starId", ...)` records this: the alias column
     // *is* the node's id, so `{starId: X}` routes to the id index.
     graph
-        .id_field_aliases
+        .id_field_aliases_mut()
         .insert("Star".to_string(), "starId".to_string());
     graph.build_id_index("Star");
 

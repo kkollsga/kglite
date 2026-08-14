@@ -1496,7 +1496,7 @@ impl KnowledgeGraph {
             ));
         }
         let graph = get_graph_mut(&mut self.inner);
-        graph.parent_types.insert(node_type, parent_type);
+        graph.parent_types_mut().insert(node_type, parent_type);
         Ok(())
     }
 

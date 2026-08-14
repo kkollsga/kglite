@@ -1162,8 +1162,16 @@ fn finish_node_property_write(
 ) {
     if write.property != "title" {
         let ik = InternedKey::from_str(write.property);
-        if let Some(schema_arc) = graph.type_schemas.get_mut(write.node_type) {
-            if schema_arc.slot(ik).is_none() {
+        // Read-check before taking `&mut`: `type_schemas` is `Arc`-shared with
+        // the rollback shell (`dir_graph::schema_cow`), so `type_schemas_mut()`
+        // copies the whole O(types) map — and this runs per written row, almost
+        // always for a key the schema already carries.
+        let needs_key = graph
+            .type_schemas
+            .get(write.node_type)
+            .is_some_and(|schema| schema.slot(ik).is_none());
+        if needs_key {
+            if let Some(schema_arc) = graph.type_schemas_mut().get_mut(write.node_type) {
                 Arc::make_mut(schema_arc).add_key(ik);
             }
         }
@@ -1653,8 +1661,13 @@ fn execute_set(
             };
             for &(pname, ref pval) in &prov {
                 let key = graph.interner.get_or_intern(pname);
-                if let Some(schema_arc) = graph.type_schemas.get_mut(node_type) {
-                    if schema_arc.slot(key).is_none() {
+                // Read-check first — see the note in `apply_landed_property_write`.
+                let needs_key = graph
+                    .type_schemas
+                    .get(node_type)
+                    .is_some_and(|schema| schema.slot(key).is_none());
+                if needs_key {
+                    if let Some(schema_arc) = graph.type_schemas_mut().get_mut(node_type) {
                         Arc::make_mut(schema_arc).add_key(key);
                     }
                 }

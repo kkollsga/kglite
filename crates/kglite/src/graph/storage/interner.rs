@@ -15,6 +15,9 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::Cell;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
+use crate::graph::cow::cow_mut;
 
 /// Two distinct strings attempted to claim the same persisted u64 identity.
 /// The first mapping remains unchanged when this error is returned.
@@ -155,7 +158,14 @@ pub struct StringInterner {
     /// cryptographic hasher is pure overhead. `try_resolve`/`resolve` run per
     /// row (e.g. `node_type_str` in `resolve_node_property`) — see the
     /// 2026-05-29 samply profile (SipHash ~23% of in-memory query CPU).
-    strings: FxHashMap<InternedKey, String>,
+    /// `Arc`-shared and copy-on-write. `StringInterner` is one of the fields
+    /// the rollback shell clones before every mutating statement
+    /// (`dir_graph::rollback`), and this table is O(distinct names) — measured
+    /// at ~41 ns per entry to copy, which on any real schema is the whole
+    /// remaining per-statement shell cost once the six `DirGraph` maps are
+    /// shared. `try_register` below reads before it forks, so a statement that
+    /// interns no *new* name copies nothing.
+    strings: Arc<FxHashMap<InternedKey, String>>,
 }
 
 impl StringInterner {
@@ -177,7 +187,7 @@ impl StringInterner {
             }
             return Ok(());
         }
-        self.strings.insert(key, s.to_string());
+        cow_mut(&mut self.strings).insert(key, s.to_string());
         Ok(())
     }
 

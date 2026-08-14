@@ -632,7 +632,8 @@ mod maintenance_tests {
         // Add metadata so columnar knows types
         let mut meta = HashMap::new();
         meta.insert("age".to_string(), "int64".to_string());
-        g.node_type_metadata.insert("Person".to_string(), meta);
+        g.node_type_metadata_mut()
+            .insert("Person".to_string(), meta);
         g.rebuild_type_schemas();
 
         // Snapshot properties before
@@ -684,7 +685,8 @@ mod maintenance_tests {
         let mut g = make_test_graph(2, false);
         let mut meta = HashMap::new();
         meta.insert("age".to_string(), "int64".to_string());
-        g.node_type_metadata.insert("Person".to_string(), meta);
+        g.node_type_metadata_mut()
+            .insert("Person".to_string(), meta);
         g.rebuild_type_schemas();
         g.enable_columnar();
 
@@ -708,7 +710,8 @@ mod maintenance_tests {
         let mut g = make_test_graph(2, false);
         let mut meta = HashMap::new();
         meta.insert("age".to_string(), "int64".to_string());
-        g.node_type_metadata.insert("Person".to_string(), meta);
+        g.node_type_metadata_mut()
+            .insert("Person".to_string(), meta);
         g.rebuild_type_schemas();
         g.enable_columnar();
 
@@ -737,7 +740,8 @@ mod maintenance_tests {
         let mut g = make_test_graph(3, false);
         let mut meta = HashMap::new();
         meta.insert("age".to_string(), "int64".to_string());
-        g.node_type_metadata.insert("Person".to_string(), meta);
+        g.node_type_metadata_mut()
+            .insert("Person".to_string(), meta);
         g.rebuild_type_schemas();
         g.enable_columnar();
         assert!(
@@ -788,7 +792,8 @@ mod maintenance_tests {
         let mut g = make_test_graph(6, false);
         let mut meta = HashMap::new();
         meta.insert("age".to_string(), "int64".to_string());
-        g.node_type_metadata.insert("Person".to_string(), meta);
+        g.node_type_metadata_mut()
+            .insert("Person".to_string(), meta);
         g.rebuild_type_schemas();
         g.enable_columnar();
         assert!(

@@ -202,7 +202,10 @@ impl KnowledgeGraph {
         // Backfill connection_type_metadata with discovered endpoint types
         let graph = get_graph_mut(&mut self.inner);
         for (conn_type, (src_types, tgt_types)) in derived.endpoints {
-            let info = graph.connection_type_metadata.entry(conn_type).or_default();
+            let info = graph
+                .connection_type_metadata_mut()
+                .entry(conn_type)
+                .or_default();
             if info.source_types.is_empty() {
                 info.source_types = src_types;
             }

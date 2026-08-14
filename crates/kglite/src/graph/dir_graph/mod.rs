@@ -71,6 +71,7 @@ mod labels;
 mod node_write;
 pub mod range_index_layer;
 pub(crate) mod rollback;
+pub(crate) mod schema_cow;
 mod schema_ops;
 
 /// Version-keyed cache of per-`(type, property)` distinct-value counts (NDV)
@@ -174,12 +175,20 @@ pub struct DirGraph {
     pub connection_types: std::collections::HashSet<InternedKey>,
     /// Node type metadata: node_type → { property_name → type_string }
     /// Replaces SchemaNode graph nodes — persisted via versioned binary Serde.
+    ///
+    /// `Arc`-shared: the rollback shell copies the pointer, not the
+    /// catalogue — see `schema_cow` for the copy-on-write contract and the
+    /// measurement that earned it. Read through the field (it derefs); write
+    /// only through [`DirGraph::node_type_metadata_mut`].
     #[serde(default)]
-    pub node_type_metadata: HashMap<String, HashMap<String, String>>,
+    pub node_type_metadata: Arc<HashMap<String, HashMap<String, String>>>,
     /// Connection type metadata: connection_type → ConnectionTypeInfo
     /// Replaces SchemaNode graph nodes for connections — persisted via versioned binary Serde.
+    ///
+    /// `Arc`-shared for the rollback shell — see `schema_cow`; write only
+    /// through [`DirGraph::connection_type_metadata_mut`].
     #[serde(default)]
-    pub connection_type_metadata: HashMap<String, ConnectionTypeInfo>,
+    pub connection_type_metadata: Arc<HashMap<String, ConnectionTypeInfo>>,
     /// Version and library info stamped at save time.
     /// Old files without this field deserialize to SaveMetadata::default() (format_version=0).
     #[serde(default)]
@@ -187,18 +196,27 @@ pub struct DirGraph {
     /// Original ID field name per node type (e.g. "Person" → "npdid").
     /// Stored when the user-supplied unique_id_field differs from "id".
     /// Used for alias resolution: querying by original column name maps to the `id` field.
+    ///
+    /// `Arc`-shared for the rollback shell — see `schema_cow`; write only
+    /// through [`DirGraph::id_field_aliases_mut`].
     #[serde(default)]
-    pub id_field_aliases: FxHashMap<String, String>,
+    pub id_field_aliases: Arc<FxHashMap<String, String>>,
     /// Original title field name per node type (e.g. "Person" → "prospect_name").
     /// Stored when the user-supplied node_title_field differs from "title".
     /// Used for alias resolution: querying by original column name maps to the `title` field.
+    ///
+    /// `Arc`-shared for the rollback shell — see `schema_cow`; write only
+    /// through [`DirGraph::title_field_aliases_mut`].
     #[serde(default)]
-    pub title_field_aliases: FxHashMap<String, String>,
+    pub title_field_aliases: Arc<FxHashMap<String, String>>,
     /// Parent type for supporting node types: child_type → parent_type.
     /// If a type has an entry here, it is a "supporting" type that belongs to the parent.
     /// Types without an entry are "core" types (shown in describe() inventory).
+    ///
+    /// `Arc`-shared for the rollback shell — see `schema_cow`; write only
+    /// through [`DirGraph::parent_types_mut`].
     #[serde(default)]
-    pub parent_types: HashMap<String, String>,
+    pub parent_types: Arc<HashMap<String, String>>,
     /// Free-text instructions/briefing rendered verbatim at the top of
     /// `describe()` so an agent opening the graph cold sees how to use it.
     /// Keyed by channel; the empty string `""` is the default channel (the
@@ -381,8 +399,11 @@ pub struct DirGraph {
     pub interner: StringInterner,
     /// Shared property schemas per node type: type_name → Arc<TypeSchema>.
     /// Populated during ingestion (add_nodes, CREATE) and compaction (load).
+    ///
+    /// `Arc`-shared for the rollback shell — see `schema_cow`; write only
+    /// through [`DirGraph::type_schemas_mut`].
     #[serde(skip)]
-    pub type_schemas: HashMap<String, Arc<TypeSchema>>,
+    pub type_schemas: Arc<HashMap<String, Arc<TypeSchema>>>,
     /// Fast-skip flag: true if any node has secondary labels.
     /// Read paths short-circuit the secondary_label_index scan entirely
     /// when this is false, so single-label graphs pay no perf tax.
@@ -630,12 +651,12 @@ impl DirGraph {
             ddl_not_null_constraints: std::collections::BTreeSet::new(),
             id_indices: IdIndexStore::new(),
             connection_types: std::collections::HashSet::new(),
-            node_type_metadata: HashMap::new(),
-            connection_type_metadata: HashMap::new(),
+            node_type_metadata: Arc::new(HashMap::new()),
+            connection_type_metadata: Arc::new(HashMap::new()),
             save_metadata: SaveMetadata::current(),
-            id_field_aliases: FxHashMap::default(),
-            title_field_aliases: FxHashMap::default(),
-            parent_types: HashMap::new(),
+            id_field_aliases: Arc::default(),
+            title_field_aliases: Arc::default(),
+            parent_types: Arc::new(HashMap::new()),
             graph_instructions: HashMap::new(),
             user_schema_version: 0,
             checkpoint_lsn: 0,
@@ -661,7 +682,7 @@ impl DirGraph {
             pending_constraint_violation: None,
             version: 0,
             interner: StringInterner::new(),
-            type_schemas: HashMap::new(),
+            type_schemas: Arc::new(HashMap::new()),
             has_secondary_labels: false,
             secondary_label_index: HashMap::new(),
         }
@@ -688,12 +709,12 @@ impl DirGraph {
             ddl_not_null_constraints: std::collections::BTreeSet::new(),
             id_indices: IdIndexStore::new(),
             connection_types: std::collections::HashSet::new(),
-            node_type_metadata: HashMap::new(),
-            connection_type_metadata: HashMap::new(),
+            node_type_metadata: Arc::new(HashMap::new()),
+            connection_type_metadata: Arc::new(HashMap::new()),
             save_metadata: SaveMetadata::default(),
-            id_field_aliases: FxHashMap::default(),
-            title_field_aliases: FxHashMap::default(),
-            parent_types: HashMap::new(),
+            id_field_aliases: Arc::default(),
+            title_field_aliases: Arc::default(),
+            parent_types: Arc::new(HashMap::new()),
             graph_instructions: HashMap::new(),
             user_schema_version: 0,
             checkpoint_lsn: 0,
@@ -719,7 +740,7 @@ impl DirGraph {
             pending_constraint_violation: None,
             version: 0,
             interner: StringInterner::new(),
-            type_schemas: HashMap::new(),
+            type_schemas: Arc::new(HashMap::new()),
             has_secondary_labels: false,
             secondary_label_index: HashMap::new(),
         }
@@ -1057,9 +1078,25 @@ impl DirGraph {
     }
 
     /// Upsert node type metadata — merges new property types into existing.
+    ///
+    /// **Checks before it writes**, and that check is load-bearing rather than
+    /// a micro-optimisation: `node_type_metadata` is `Arc`-shared with the
+    /// rollback shell (see `schema_cow`), so taking `&mut` forks the whole
+    /// catalogue whether or not anything changes. The Cypher `SET` path calls
+    /// this once per written row with a property the type almost always
+    /// already declares, so an unconditional `&mut` would put the
+    /// O(types x properties) copy back on every mutating statement.
+    ///
+    /// A type that is absent still falls through, so declaring a type with no
+    /// properties creates its (empty) entry exactly as before.
     pub fn upsert_node_type_metadata(&mut self, node_type: &str, props: HashMap<String, String>) {
+        if let Some(existing) = self.node_type_metadata.get(node_type) {
+            if props.iter().all(|(k, v)| existing.get(k) == Some(v)) {
+                return;
+            }
+        }
         let entry = self
-            .node_type_metadata
+            .node_type_metadata_mut()
             .entry(node_type.to_string())
             .or_default();
         for (k, v) in props {
@@ -1075,8 +1112,21 @@ impl DirGraph {
         target_type: &str,
         prop_types: HashMap<String, String>,
     ) {
+        // Same read-first discipline as `upsert_node_type_metadata`, and for
+        // the same reason: this map is `Arc`-shared with the rollback shell,
+        // and the edge write path calls this per written edge.
+        if let Some(existing) = self.connection_type_metadata.get(conn_type) {
+            if existing.source_types.contains(source_type)
+                && existing.target_types.contains(target_type)
+                && prop_types
+                    .iter()
+                    .all(|(k, v)| existing.property_types.get(k) == Some(v))
+            {
+                return;
+            }
+        }
         let entry = self
-            .connection_type_metadata
+            .connection_type_metadata_mut()
             .entry(conn_type.to_string())
             .or_insert_with(|| ConnectionTypeInfo {
                 source_types: HashSet::new(),
@@ -1388,7 +1438,7 @@ impl DirGraph {
     pub fn rebuild_type_schemas(&mut self) {
         // Phase 1: Build TypeSchemas from node_type_metadata (O(types), not O(N×P))
         let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
-        for (node_type, props) in &self.node_type_metadata {
+        for (node_type, props) in self.node_type_metadata.iter() {
             let keys = props.keys().map(|name| self.interner.get_or_intern(name));
             schemas.insert(node_type.clone(), TypeSchema::from_keys(keys));
         }
@@ -1413,7 +1463,7 @@ impl DirGraph {
         }
 
         // Phase 2: Wrap in Arc and store
-        self.type_schemas = schemas.into_iter().map(|(t, s)| (t, Arc::new(s))).collect();
+        self.type_schemas = Arc::new(schemas.into_iter().map(|(t, s)| (t, Arc::new(s))).collect());
     }
 
     /// Combined [`Self::rebuild_type_indices`] + [`Self::rebuild_type_schemas`]
@@ -1422,7 +1472,7 @@ impl DirGraph {
     pub fn rebuild_type_indices_and_schemas(&mut self) {
         // Build TypeSchemas from metadata (O(types))
         let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
-        for (node_type, props) in &self.node_type_metadata {
+        for (node_type, props) in self.node_type_metadata.iter() {
             let keys = props.keys().map(|name| self.interner.get_or_intern(name));
             schemas.insert(node_type.clone(), TypeSchema::from_keys(keys));
         }
@@ -1465,7 +1515,7 @@ impl DirGraph {
         }
 
         self.type_indices.replace_with(new_type_indices);
-        self.type_schemas = arc_schemas;
+        self.type_schemas = Arc::new(arc_schemas);
         // `secondary_label_index` is *not* rebuilt here — it's the
         // canonical store, populated by the load path (the disk
         // sidecar or the in-memory `.kgl` section).
@@ -1856,9 +1906,18 @@ impl DirGraph {
 
     /// Ensure the TypeSchema for `node_type` contains all the given keys.
     /// Creates the schema if it doesn't exist, extends it if it does.
+    ///
+    /// Read-first, like the two metadata upserts above: `type_schemas` is
+    /// `Arc`-shared with the rollback shell, and the create path calls this
+    /// once per created node with a key set the type already carries.
     pub fn ensure_type_schema_keys(&mut self, node_type: &str, keys: &[InternedKey]) {
+        if let Some(schema) = self.type_schemas.get(node_type) {
+            if keys.iter().all(|key| schema.slot(*key).is_some()) {
+                return;
+            }
+        }
         let schema = self
-            .type_schemas
+            .type_schemas_mut()
             .entry(node_type.to_string())
             .or_insert_with(|| Arc::new(TypeSchema::new()));
         let s = Arc::make_mut(schema);

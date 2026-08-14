@@ -170,7 +170,7 @@ pub fn build(
                 && graph.type_indices.contains_key(parent)
             {
                 graph
-                    .parent_types
+                    .parent_types_mut()
                     .insert(sub.node_type.clone(), parent.clone());
             }
         }
