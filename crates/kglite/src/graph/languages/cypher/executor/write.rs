@@ -967,10 +967,9 @@ fn create_node(
         )?;
     }
 
-    // Insert the node, routing storage by backend. On disk this writes
-    // id/title/properties through the per-type ColumnStore (memory/mapped
-    // build a Compact NodeData) — see DirGraph::insert_node_routed. The
-    // per-clause disk read-side sync happens once in execute_create, not here.
+    // Insert the node: every backend writes id/title/properties through the
+    // per-type ColumnStore — see DirGraph::insert_node_routed. The per-clause
+    // disk read-side sync happens once in execute_create, not here.
     let node_idx = graph.insert_node_routed(id, title, &label, properties);
 
     // Update type_indices. `bucket_was_new` feeds statement rollback: undoing
@@ -1474,12 +1473,10 @@ fn execute_set(
                     // borrow ends before the &mut writes below.
                     let columnar_row_id = {
                         let _arena_guard = graph.graph.begin_query();
-                        match graph.graph.node_weight(*node_idx).map(|n| &n.properties) {
-                            Some(crate::graph::schema::PropertyStorage::Columnar(row)) => {
-                                Some(row.row_id())
-                            }
-                            _ => None,
-                        }
+                        graph
+                            .graph
+                            .node_weight(*node_idx)
+                            .and_then(|n| n.properties.columnar_row_id())
                     };
                     let wrote_via_master = set_via_column_master(
                         graph,
@@ -1649,12 +1646,10 @@ fn execute_set(
             // the &mut writes below.
             let columnar_row_id = {
                 let _arena_guard = graph.graph.begin_query();
-                match graph.graph.node_weight(*node_idx).map(|n| &n.properties) {
-                    Some(crate::graph::schema::PropertyStorage::Columnar(row)) => {
-                        Some(row.row_id())
-                    }
-                    _ => None,
-                }
+                graph
+                    .graph
+                    .node_weight(*node_idx)
+                    .and_then(|n| n.properties.columnar_row_id())
             };
             for &(pname, ref pval) in &prov {
                 let key = graph.interner.get_or_intern(pname);
@@ -1945,12 +1940,10 @@ fn execute_remove(
                     if !is_disk && property != "name" && property != "title" {
                         let columnar_row_id = {
                             let _arena_guard = graph.graph.begin_query();
-                            match graph.graph.node_weight(*node_idx).map(|n| &n.properties) {
-                                Some(crate::graph::schema::PropertyStorage::Columnar(row)) => {
-                                    Some(row.row_id())
-                                }
-                                _ => None,
-                            }
+                            graph
+                                .graph
+                                .node_weight(*node_idx)
+                                .and_then(|n| n.properties.columnar_row_id())
                         };
                         if let Some(row_id) = columnar_row_id {
                             let key = graph.interner.get_or_intern(property);

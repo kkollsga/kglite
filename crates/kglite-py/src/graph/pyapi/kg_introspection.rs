@@ -129,9 +129,10 @@ impl KnowledgeGraph {
     /// Move mmap-backed columnar data back to heap memory.
     ///
     /// Useful after deleting nodes when you want data back in RAM for
-    /// faster access. Internally rebuilds columnar stores from scratch
-    /// (disable_columnar + enable_columnar) with the memory limit
-    /// temporarily suspended to prevent re-spilling.
+    /// faster access. Internally rebuilds every column store from the live
+    /// nodes with the memory limit temporarily suspended to prevent
+    /// re-spilling, so rows left behind by deleted nodes are reclaimed in the
+    /// same pass.
     ///
     /// No-op if the graph is not in columnar mode.
     ///
@@ -146,10 +147,7 @@ impl KnowledgeGraph {
         if !graph.is_columnar() {
             return;
         }
-        let saved_limit = graph.memory_limit.take();
-        graph.disable_columnar();
-        graph.enable_columnar();
-        graph.memory_limit = saved_limit;
+        graph.rebuild_columns_to_heap();
     }
 
     /// Returns True if any nodes use columnar property storage.

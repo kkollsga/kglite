@@ -128,6 +128,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One property shape, not two.** A node's properties used to take one of two
+  durable layouts — a row-shaped block on the node, or a row in the type's
+  column store — with the shape decided by how the graph had been built and
+  changed under it by `save()`. Construction became columnar in every storage
+  mode earlier in this release; the row layout is now deleted outright, so
+  every read, write, undo and save path has one shape to serve. Only a
+  transient staging form survives (values held inline for a moment before they
+  reach a store: disk write-staging, `.kgl` deserialization, the bulk funnel,
+  the RDF loader), and nothing persists it. No user-visible behaviour changes
+  here; what changes is that the second layout can no longer be reached, so
+  the defect classes that only appeared on one side of it cannot recur.
+- **`disable_columnar()` is deprecated in place and does nothing useful.**
+  Properties are columnar from construction in every storage mode, so the call
+  no longer leaves a "write regime" — it moves values back onto their nodes
+  into the transient staging form, which the next `save()` consolidates
+  straight back. It still round-trips correctly; it simply has no purpose, and
+  it is scheduled for removal. `unspill()` and `vacuum()`, which used to be
+  built on it, now rebuild their column stores directly: the same end state
+  (dead rows reclaimed, columns back on the heap) without materialising every
+  row onto its node on the way.
+
 - **The `.kgl` container is now v6, and files this version saves cannot be read
   by kglite 0.15.14 or earlier.** This build reads both v6 and v5, so every
   existing file keeps loading and a `save()` migrates it forward; the break is

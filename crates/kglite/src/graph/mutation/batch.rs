@@ -192,7 +192,7 @@ impl BatchProcessor {
         //
         // This avoids Arc::make_mut cloning the entire store per row. The pair
         // used to run for mapped/disk only, with memory building row-shaped
-        // `Compact` nodes instead; construction is columnar in every mode now
+        // nodes instead; construction is columnar in every mode now
         // (see `dir_graph::node_write`), so there is one path.
         let mut deferred_columnar: DeferredColumnarRows = Vec::new();
         let mut owned_stores: OwnedColumnStores =

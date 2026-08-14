@@ -1453,7 +1453,7 @@ impl<'a> PatternExecutor<'a> {
     ) -> bool {
         // Zero-alloc fast path for `Equals(String)` on a user property.
         // For columnar storage this bypasses cloning bytes out of the mmap
-        // into an owned String; for Map/Compact it avoids an unnecessary
+        // into an owned String; for the staging `Map` it avoids an unnecessary
         // Value comparison.
         if !matches!(
             field,

@@ -28,8 +28,8 @@
 //!
 //! This function used to fork: disk pushed the node's id/title/properties
 //! through the type's `ColumnStore`, memory and mapped built a row-shaped
-//! `PropertyStorage::Compact` node instead and only became columnar when
-//! `save()` rebuilt them. A graph therefore *changed write regime* the first
+//! node instead (the since-deleted `PropertyStorage::Compact`) and only became
+//! columnar when `save()` rebuilt them. A graph therefore *changed write regime* the first
 //! time it was saved, and every columnar defect was reachable only on a graph
 //! that had been through that door.
 //!

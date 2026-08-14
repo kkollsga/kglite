@@ -433,7 +433,7 @@
       "classification": "api-shape"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store_tests.rs::module::clippy::approx_constant",
+      "identity": "crates/kglite/src/graph/storage/column_store/tests.rs::module::clippy::approx_constant",
       "classification": "test"
     },
     {
@@ -507,59 +507,59 @@
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:column_type_str:pub fn column_type_str(&self, slot: usize) -> Option<&'static str>::dead_code",
+      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:column_type_str:pub fn column_type_str(&self, slot: usize) -> Option<&'static str>::dead_code",
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:column_values_mixed:pub fn column_values_mixed(&self, slot: usize) -> Option<&Vec<Value>>::dead_code",
+      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:column_values_mixed:pub fn column_values_mixed(&self, slot: usize) -> Option<&Vec<Value>>::dead_code",
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:compare_str_by_slot:pub fn compare_str_by_slot(&self, row_id: u32, slot: u16, target: &str) -> bool::dead_code",
+      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:compare_str_by_slot:pub fn compare_str_by_slot(&self, row_id: u32, slot: u16, target: &str) -> bool::dead_code",
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:contains:pub fn contains(&self, row_id: u32, key: InternedKey) -> bool::dead_code",
+      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:contains:pub fn contains(&self, row_id: u32, key: InternedKey) -> bool::dead_code",
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:flush_and_release_pages:pub fn flush_and_release_pages(&self) -> io::Result<()>@occurrence:1::dead_code",
+      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:flush_and_release_pages:pub fn flush_and_release_pages(&self) -> io::Result<()>::dead_code",
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:flush_and_release_pages:pub fn flush_and_release_pages(&self) -> io::Result<()>@occurrence:2::dead_code",
+      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:get_by_slot:pub fn get_by_slot(&self, row_id: u32, slot: u16) -> Option<Value>::dead_code",
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:get_by_slot:pub fn get_by_slot(&self, row_id: u32, slot: u16) -> Option<Value>::dead_code",
+      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:live_count:pub fn live_count(&self) -> u32::dead_code",
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:live_count:pub fn live_count(&self) -> u32::dead_code",
+      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:new_mixed:pub fn new_mixed(schema: Arc<TypeSchema>) -> Self::dead_code",
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:new_mixed:pub fn new_mixed(schema: Arc<TypeSchema>) -> Self::dead_code",
+      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:replace_columns:pub fn replace_columns(&mut self, columns: Vec<TypedColumn>)::dead_code",
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:replace_columns:pub fn replace_columns(&mut self, columns: Vec<TypedColumn>)::dead_code",
+      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:replace_id_column:pub fn replace_id_column(&mut self, col: TypedColumn)::dead_code",
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:replace_id_column:pub fn replace_id_column(&mut self, col: TypedColumn)::dead_code",
+      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:replace_title_column:pub fn replace_title_column(&mut self, col: TypedColumn)::dead_code",
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:replace_title_column:pub fn replace_title_column(&mut self, col: TypedColumn)::dead_code",
+      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:row_properties_map:pub fn row_properties_map( &self, row_id: u32, interner: &StringInterner, ) -> HashMap<String, Value>::dead_code",
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:row_properties_map:pub fn row_properties_map( &self, row_id: u32, interner: &StringInterner, ) -> HashMap<String, Value>::dead_code",
+      "identity": "crates/kglite/src/graph/storage/column_store/mod.rs::fn:set_row_count:pub fn set_row_count(&mut self, n: u32)::dead_code",
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:set_row_count:pub fn set_row_count(&mut self, n: u32)::dead_code",
+      "identity": "crates/kglite/src/graph/storage/column_store/typed_column.rs::fn:flush_and_release_pages:pub fn flush_and_release_pages(&self) -> io::Result<()>::dead_code",
       "classification": "dead-code"
     },
     {

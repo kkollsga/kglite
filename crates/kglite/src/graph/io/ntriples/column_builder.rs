@@ -566,7 +566,7 @@ fn link_column_rows(graph: &mut DirGraph, row_ids: &[(NodeIndex, u32)], verbose:
     //
     // Memory backend: `update_row_id` is a default no-op and mapped
     // linkage is skipped — memory-mode N-Triples builds don't go through
-    // this path (they keep `PropertyStorage::Map/Compact` unchanged).
+    // this path (they keep their staged `PropertyStorage::Map` unchanged).
     if GraphRead::is_disk(&graph.graph) {
         for &(node_idx, row_id) in row_ids {
             GraphWrite::update_row_id(&mut graph.graph, node_idx, row_id);

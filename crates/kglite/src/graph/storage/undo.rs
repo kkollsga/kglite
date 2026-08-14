@@ -7,7 +7,7 @@
 //! a deep clone of the whole graph taken *before* every mutating Cypher
 //! statement, discarded on success and swapped back on failure. Correct, but
 //! it makes the cost of writing one property proportional to the size of the
-//! whole graph — a `Compact` `NodeData` clone deep-copies every
+//! whole graph — a row-shaped `NodeData` clone deep-copies every
 //! `Value::String` it holds — which is disqualifying for a primary store.
 //!
 //! A journal inverts the trade: capture what changed, on the way through.

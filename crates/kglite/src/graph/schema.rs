@@ -49,7 +49,7 @@ use std::sync::Arc;
 /// property of this name is rejected at blueprint validation.
 pub const PROVISIONAL_KEY: &str = "_provisional";
 
-// ─── Type Schema & Compact Property Storage ──────────────────────────────────
+// ─── Type Schema ─────────────────────────────────────────────────────────────
 
 /// Shared schema for all nodes of one type — maps property keys to dense slot indices.
 /// All nodes of the same type share an `Arc<TypeSchema>`, keeping per-node overhead to 8 bytes.
@@ -60,7 +60,7 @@ pub struct TypeSchema {
     /// interned key → slot_index (for O(1) lookup). FxHash, not the std
     /// SipHasher: `InternedKey` is already a well-distributed FNV `u64`, so a
     /// cryptographic hash is pure overhead. `slot()` is the per-property,
-    /// per-row, per-column lookup on the Compact (production) read path —
+    /// per-row, per-column lookup on the columnar read path —
     /// samply (2026-05-29) showed SipHash here at ~23% of in-memory query CPU.
     key_to_slot: FxHashMap<InternedKey, u16>,
 }
@@ -1218,7 +1218,12 @@ pub struct NodeData {
 
 impl NodeData {
     /// Create a new NodeData, interning all property keys and the node type.
-    /// Builds PropertyStorage::Map — call compact_properties() later to convert to Compact.
+    ///
+    /// Builds the **staging** `PropertyStorage::Map`: the node's properties
+    /// are held inline until a consolidation pass (`DirGraph::enable_columnar`,
+    /// or the loader's own) pushes them into the type's `ColumnStore`. The
+    /// converged construction funnels build `PropertyStorage::Columnar`
+    /// directly and never call this; see `dir_graph/node_write.rs`.
     pub fn new(
         id: Value,
         title: Value,
@@ -1239,44 +1244,6 @@ impl NodeData {
             title,
             node_type: type_key,
             properties: PropertyStorage::Map(interned_props),
-        }
-    }
-
-    /// Create a new NodeData with Compact storage using a pre-built schema.
-    pub fn new_compact(
-        id: Value,
-        title: Value,
-        node_type: String,
-        properties: HashMap<String, Value>,
-        interner: &mut StringInterner,
-        schema: &Arc<TypeSchema>,
-    ) -> Self {
-        let type_key = interner.get_or_intern(&node_type);
-        let pairs = properties.into_iter().map(|(k, v)| {
-            let key = interner.get_or_intern(&k);
-            (key, v)
-        });
-        NodeData {
-            id,
-            title,
-            node_type: type_key,
-            properties: PropertyStorage::from_compact(pairs, schema),
-        }
-    }
-
-    /// Create a new NodeData with Compact storage from pre-interned keys (avoids re-interning).
-    pub fn new_compact_preinterned(
-        id: Value,
-        title: Value,
-        node_type: InternedKey,
-        properties: Vec<(InternedKey, Value)>,
-        schema: &Arc<TypeSchema>,
-    ) -> Self {
-        NodeData {
-            id,
-            title,
-            node_type,
-            properties: PropertyStorage::from_compact(properties, schema),
         }
     }
 

@@ -633,7 +633,7 @@ mod maintenance_tests {
         let mut meta = HashMap::new();
         meta.insert("age".to_string(), "int64".to_string());
         g.node_type_metadata.insert("Person".to_string(), meta);
-        g.compact_properties();
+        g.rebuild_type_schemas();
 
         // Snapshot properties before
         let before: Vec<(Value, Value, i64)> = g
@@ -685,9 +685,9 @@ mod maintenance_tests {
         let mut meta = HashMap::new();
         meta.insert("age".to_string(), "int64".to_string());
         g.node_type_metadata.insert("Person".to_string(), meta);
-        g.compact_properties();
+        g.rebuild_type_schemas();
 
-        // Enable columnar, then disable back to Compact
+        // Enable columnar, then de-columnarize back to staged `Map`.
         g.enable_columnar();
         assert!(g.is_columnar());
         g.disable_columnar();
@@ -697,7 +697,7 @@ mod maintenance_tests {
         let idx = g.type_indices.get("Person").unwrap().get(0).unwrap();
         assert!(matches!(
             g.graph.node_weight(idx).unwrap().properties,
-            PropertyStorage::Compact { .. }
+            PropertyStorage::Map(_)
         ));
         assert!(g
             .graph
@@ -713,7 +713,7 @@ mod maintenance_tests {
         let mut meta = HashMap::new();
         meta.insert("age".to_string(), "int64".to_string());
         g.node_type_metadata.insert("Person".to_string(), meta);
-        g.compact_properties();
+        g.rebuild_type_schemas();
         g.enable_columnar();
 
         let idx = g.type_indices.get("Person").unwrap().get(0).unwrap();
@@ -737,7 +737,7 @@ mod maintenance_tests {
         let mut meta = HashMap::new();
         meta.insert("age".to_string(), "int64".to_string());
         g.node_type_metadata.insert("Person".to_string(), meta);
-        g.compact_properties();
+        g.rebuild_type_schemas();
         g.enable_columnar();
 
         let idx = g.type_indices.get("Person").unwrap().get(0).unwrap();
@@ -766,7 +766,7 @@ mod maintenance_tests {
         let mut meta = HashMap::new();
         meta.insert("age".to_string(), "int64".to_string());
         g.node_type_metadata.insert("Person".to_string(), meta);
-        g.compact_properties();
+        g.rebuild_type_schemas();
         g.enable_columnar();
         assert!(
             g.is_columnar(),
@@ -819,7 +819,7 @@ mod maintenance_tests {
         let mut meta = HashMap::new();
         meta.insert("age".to_string(), "int64".to_string());
         g.node_type_metadata.insert("Person".to_string(), meta);
-        g.compact_properties();
+        g.rebuild_type_schemas();
         g.enable_columnar();
         assert!(
             g.is_columnar(),

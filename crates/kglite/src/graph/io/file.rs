@@ -2263,7 +2263,7 @@ fn decode_portable_topology(
     let mut dir_graph = DirGraph::from_graph(graph);
     dir_graph.interner = interner;
     metadata.apply_to(&mut dir_graph);
-    dir_graph.rebuild_type_indices_and_compact();
+    dir_graph.rebuild_type_indices_and_schemas();
     dir_graph.build_connection_types_cache();
     Ok((dir_graph, plan))
 }

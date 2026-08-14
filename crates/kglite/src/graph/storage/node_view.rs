@@ -293,20 +293,6 @@ impl<'a> NodeView<'a> {
                 // disk flush. Filtering them here would change what every
                 // existing enumeration caller sees.
                 PropertyStorage::Map(map) => map.iter().map(|(k, v)| (*k, v.clone())).collect(),
-                PropertyStorage::Compact { schema, values } => schema
-                    .slots
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, ik)| {
-                        values.get(i).and_then(|v| {
-                            if matches!(v, Value::Null) {
-                                None
-                            } else {
-                                Some((*ik, v.clone()))
-                            }
-                        })
-                    })
-                    .collect(),
                 PropertyStorage::Columnar(_) => unreachable!("store resolved above"),
             },
         }

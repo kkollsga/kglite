@@ -2287,7 +2287,6 @@ pub fn kglite::api::DirGraph::column_store(&self, node_type: &str) -> core::opti
 pub fn kglite::api::DirGraph::column_store_count(&self) -> usize
 pub fn kglite::api::DirGraph::column_store_mut(&mut self, node_type: &str) -> core::option::Option<&mut alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>
 pub fn kglite::api::DirGraph::column_stores_by_name(&self) -> alloc::vec::Vec<(&str, &alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)>
-pub fn kglite::api::DirGraph::compact_properties(&mut self)
 pub fn kglite::api::DirGraph::disable_columnar(&mut self)
 pub fn kglite::api::DirGraph::embedding_store(&self, node_type: &str, prop_name: &str) -> core::option::Option<&kglite::api::storage::EmbeddingStore>
 pub fn kglite::api::DirGraph::enable_columnar(&mut self)
@@ -2317,9 +2316,11 @@ pub fn kglite::api::DirGraph::maybe_spill_columns(&mut self)
 pub fn kglite::api::DirGraph::new() -> Self
 pub fn kglite::api::DirGraph::node_view(&self, index: petgraph::graph_impl::NodeIndex) -> core::option::Option<kglite::api::NodeView<'_>>
 pub fn kglite::api::DirGraph::populate_index_keys(&mut self)
+pub fn kglite::api::DirGraph::rebuild_columns_to_heap(&mut self)
 pub fn kglite::api::DirGraph::rebuild_indices_from_keys(&mut self)
 pub fn kglite::api::DirGraph::rebuild_type_indices(&mut self)
-pub fn kglite::api::DirGraph::rebuild_type_indices_and_compact(&mut self)
+pub fn kglite::api::DirGraph::rebuild_type_indices_and_schemas(&mut self)
+pub fn kglite::api::DirGraph::rebuild_type_schemas(&mut self)
 pub fn kglite::api::DirGraph::register_connection_type(&mut self, connection_type: alloc::string::String)
 pub fn kglite::api::DirGraph::reindex(&mut self)
 pub fn kglite::api::DirGraph::remove_node_property(&mut self, index: petgraph::graph_impl::NodeIndex, key: &str) -> core::option::Option<kglite::datatypes::values::Value>
@@ -2521,8 +2522,6 @@ pub kglite::api::NodeData::title: kglite::datatypes::values::Value
 impl kglite::api::NodeData
 pub fn kglite::api::NodeData::id(&self) -> alloc::borrow::Cow<'_, kglite::datatypes::values::Value>
 pub fn kglite::api::NodeData::new(id: kglite::datatypes::values::Value, title: kglite::datatypes::values::Value, node_type: alloc::string::String, properties: std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>, interner: &mut kglite::api::StringInterner) -> Self
-pub fn kglite::api::NodeData::new_compact(id: kglite::datatypes::values::Value, title: kglite::datatypes::values::Value, node_type: alloc::string::String, properties: std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>, interner: &mut kglite::api::StringInterner, schema: &alloc::sync::Arc<kglite::graph::schema::TypeSchema>) -> Self
-pub fn kglite::api::NodeData::new_compact_preinterned(id: kglite::datatypes::values::Value, title: kglite::datatypes::values::Value, node_type: kglite::api::InternedKey, properties: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>, schema: &alloc::sync::Arc<kglite::graph::schema::TypeSchema>) -> Self
 pub fn kglite::api::NodeData::new_preinterned(id: kglite::datatypes::values::Value, title: kglite::datatypes::values::Value, node_type: kglite::api::InternedKey, properties: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>) -> Self
 pub fn kglite::api::NodeData::node_type_str<'a>(&self, interner: &'a kglite::api::StringInterner) -> &'a str
 pub fn kglite::api::NodeData::title(&self) -> alloc::borrow::Cow<'_, kglite::datatypes::values::Value>

@@ -891,7 +891,7 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     // Columnar storage
     xml.push_str("  <group name=\"columnar\">\n");
     xml.push_str("    <method sig=\"enable_columnar()\">Convert properties to per-type columnar stores (lower memory).</method>\n");
-    xml.push_str("    <method sig=\"disable_columnar()\">Convert back to compact per-node storage.</method>\n");
+    xml.push_str("    <method sig=\"disable_columnar()\">Deprecated: moves properties back onto nodes; the next save() undoes it.</method>\n");
     xml.push_str(
         "    <method sig=\"is_columnar\">Property: True if columnar storage is active.</method>\n",
     );

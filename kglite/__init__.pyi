@@ -3463,14 +3463,14 @@ class KnowledgeGraph:
         ...
 
     def disable_columnar(self) -> None:
-        """Convert columnar properties back to compact per-node storage.
+        """Move columnar properties back onto their nodes and drop the stores.
 
-        The inverse of :meth:`enable_columnar`. It also leaves the columnar
-        *write* regime, which a graph enters on :meth:`save` and is already in
-        when loaded from a file: per-node storage does not re-image a shared
-        column store per statement, so a long run of small writes gets much
-        cheaper. The revert costs one pass over the nodes, uses more memory,
-        and the next :meth:`save` re-enables columnar and pays a full rebuild.
+        .. deprecated::
+           Properties are columnar from construction in every storage mode,
+           so this no longer exits a "write regime" — it only produces a
+           transient inline shape that the next :meth:`save` consolidates
+           straight back. It costs one pass over the nodes, uses more memory,
+           and buys nothing. Scheduled for removal.
 
         Do not call it on a ``storage="mapped"`` graph or one with
         :meth:`set_memory_limit` set — both depend on the column store, and
@@ -3482,8 +3482,10 @@ class KnowledgeGraph:
         """Move mmap-backed columnar data back to heap memory.
 
         Useful after deleting nodes when you want data back in RAM for
-        faster access. Internally rebuilds columnar stores from scratch
-        with the memory limit temporarily suspended to prevent re-spilling.
+        faster access. Internally rebuilds every column store from the live
+        nodes with the memory limit temporarily suspended to prevent
+        re-spilling, so rows left behind by deleted nodes are reclaimed in
+        the same pass.
 
         No-op if the graph is not in columnar mode.
 

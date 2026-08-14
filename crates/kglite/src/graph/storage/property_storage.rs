@@ -1,4 +1,26 @@
-//! `PropertyStorage` — the three physical shapes a node's properties take.
+//! `PropertyStorage` — the two physical shapes a node's properties take.
+//!
+//! # Transient vs real
+//!
+//! Since the shape-convergence programme there are exactly two variants, and
+//! the match arms across the engine read as that distinction:
+//!
+//! - **`Columnar`** — the real, durable shape. Every construction funnel
+//!   (Cypher `CREATE`, the bulk `add_nodes`/blueprint/WAL-replay batch path,
+//!   the `.kgl` load path, disk) produces it, and it is the only shape a
+//!   `.kgl` file or a disk graph persists. A node carries a row id; the values
+//!   live in the type's `ColumnStore`, which the backend owns.
+//! - **`Map`** — *transient staging only*, never an end state. It exists
+//!   where values must be held for a moment before they reach a store: disk
+//!   write-staging (`storage/disk/graph.rs`), `.kgl` deserialization before
+//!   the column sections are attached, the bulk funnel's pre-push scratch,
+//!   vacuum placeholders, the RDF loader's `materialize` pass (consolidated
+//!   at its first `enable_columnar`), and the row-materialising half of
+//!   `DirGraph::disable_columnar`.
+//!
+//! The row-shaped steady state (`Compact`: a shared `TypeSchema` plus a dense
+//! `Vec<Value>`) is **gone**. A graph no longer changes write regime when it
+//! is saved, so there is no second durable layout to keep in step.
 //!
 //! # Ownership
 //!
@@ -35,12 +57,10 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::datatypes::values::Value;
-use crate::graph::schema::TypeSchema;
 use crate::graph::storage::interner::{InternedKey, StringInterner, STRIP_PROPERTIES};
 
 /// A node's columnar row — **identity only**.
@@ -69,22 +89,16 @@ impl ColumnarRow {
     }
 }
 
-/// Compact property storage for nodes.
-/// - `Map`: transient during deserialization (before compaction).
-/// - `Compact`: steady state with a shared `TypeSchema` and dense `Vec<Value>`.
-/// - `Columnar`: column-oriented storage via a shared `ColumnStore`.
+/// The physical shape of one node's properties — **transient or real**; see
+/// the module docs for the distinction the two variants encode.
 pub(crate) enum PropertyStorage {
-    /// HashMap storage (used during deserialization, before `compact_properties()`).
+    /// Transient staging: values held inline before they reach a store.
+    /// Never a durable end state.
     Map(HashMap<InternedKey, Value>),
-    /// Slot-vec storage indexed by shared TypeSchema.
-    /// `Value::Null` in a slot means "property absent".
-    Compact {
-        schema: Arc<TypeSchema>,
-        values: Vec<Value>,
-    },
     /// Column-oriented storage — properties live in a per-type `ColumnStore`
     /// the backend owns. See [`ColumnarRow`] for why the handle is not a bare
-    /// field here.
+    /// field here. This is the shape every construction funnel produces and
+    /// the only one that is persisted.
     Columnar(ColumnarRow),
 }
 
@@ -97,12 +111,6 @@ pub(crate) enum PropertyKeyIter<'a> {
         inner: std::collections::hash_map::Keys<'a, InternedKey, Value>,
         interner: &'a StringInterner,
     },
-    Compact {
-        slots: &'a [InternedKey],
-        values: &'a [Value],
-        slot_idx: usize,
-        interner: &'a StringInterner,
-    },
     Columnar(std::vec::IntoIter<&'a str>),
 }
 
@@ -113,21 +121,6 @@ impl<'a> Iterator for PropertyKeyIter<'a> {
     fn next(&mut self) -> Option<&'a str> {
         match self {
             PropertyKeyIter::Map { inner, interner } => inner.next().map(|k| interner.resolve(*k)),
-            PropertyKeyIter::Compact {
-                slots,
-                values,
-                slot_idx,
-                interner,
-            } => loop {
-                let i = *slot_idx;
-                if i >= slots.len() {
-                    return None;
-                }
-                *slot_idx = i + 1;
-                if values.get(i).is_some_and(|v| !matches!(v, Value::Null)) {
-                    return Some(interner.resolve(slots[i]));
-                }
-            },
             PropertyKeyIter::Columnar(iter) => iter.next(),
         }
     }
@@ -136,17 +129,12 @@ impl<'a> Iterator for PropertyKeyIter<'a> {
 impl PropertyStorage {
     /// Look up a property value by interned key. Returns None if absent or Value::Null.
     ///
-    /// Returns `Cow::Borrowed` for Map/Compact variants (zero-copy).
-    /// Future Columnar variant will return `Cow::Owned`.
+    /// Returns `Cow::Borrowed` for the staging `Map` (zero-copy); `None` for
+    /// `Columnar`, whose values this type cannot reach (see the module docs).
     #[inline]
     pub(in crate::graph::storage) fn get(&self, key: InternedKey) -> Option<Cow<'_, Value>> {
         match self {
             PropertyStorage::Map(map) => map.get(&key).map(Cow::Borrowed),
-            PropertyStorage::Compact { schema, values } => schema
-                .slot(key)
-                .and_then(|slot| values.get(slot as usize))
-                .filter(|v| !matches!(v, Value::Null))
-                .map(Cow::Borrowed),
             PropertyStorage::Columnar(_) => None,
         }
     }
@@ -158,11 +146,6 @@ impl PropertyStorage {
     pub(in crate::graph::storage) fn get_value(&self, key: InternedKey) -> Option<Value> {
         match self {
             PropertyStorage::Map(map) => map.get(&key).cloned(),
-            PropertyStorage::Compact { schema, values } => schema
-                .slot(key)
-                .and_then(|slot| values.get(slot as usize))
-                .filter(|v| !matches!(v, Value::Null))
-                .cloned(),
             PropertyStorage::Columnar(_) => None,
         }
     }
@@ -189,33 +172,15 @@ impl PropertyStorage {
             PropertyStorage::Map(map) => map
                 .get(&key)
                 .map(|v| matches!(v, Value::String(s) if s == target)),
-            PropertyStorage::Compact { schema, values } => schema
-                .slot(key)
-                .and_then(|slot| values.get(slot as usize))
-                .filter(|v| !matches!(v, Value::Null))
-                .map(|v| matches!(v, Value::String(s) if s == target)),
             PropertyStorage::Columnar(_) => None,
         }
     }
 
-    /// Insert or update a property. For Compact, extends schema via Arc::make_mut if key is new.
+    /// Insert or update a property in the staging map.
     pub(in crate::graph::storage) fn insert(&mut self, key: InternedKey, value: Value) {
         match self {
             PropertyStorage::Map(map) => {
                 map.insert(key, value);
-            }
-            PropertyStorage::Compact { schema, values } => {
-                let slot = if let Some(s) = schema.slot(key) {
-                    s as usize
-                } else {
-                    // New key: extend schema
-                    let s = Arc::make_mut(schema).add_key(key) as usize;
-                    s
-                };
-                if slot >= values.len() {
-                    values.resize(slot + 1, Value::Null);
-                }
-                values[slot] = value;
             }
             // A columnar node's properties live in the backend's store, which
             // this type cannot reach. Route through
@@ -234,28 +199,6 @@ impl PropertyStorage {
             PropertyStorage::Map(map) => {
                 map.entry(key).or_insert(value);
             }
-            PropertyStorage::Compact { schema, values } => {
-                if let Some(slot) = schema.slot(key) {
-                    let slot = slot as usize;
-                    if slot < values.len() {
-                        if matches!(values[slot], Value::Null) {
-                            values[slot] = value;
-                        }
-                        // else: existing non-Null value, preserve it
-                    } else {
-                        // Slot beyond current Vec: insert
-                        values.resize(slot + 1, Value::Null);
-                        values[slot] = value;
-                    }
-                } else {
-                    // Key not in schema: extend and insert
-                    let slot = Arc::make_mut(schema).add_key(key) as usize;
-                    if slot >= values.len() {
-                        values.resize(slot + 1, Value::Null);
-                    }
-                    values[slot] = value;
-                }
-            }
             PropertyStorage::Columnar(_) => debug_assert!(
                 false,
                 "columnar property write must go through GraphWrite::set_node_property_if_absent"
@@ -267,19 +210,6 @@ impl PropertyStorage {
     pub(in crate::graph::storage) fn remove(&mut self, key: InternedKey) -> Option<Value> {
         match self {
             PropertyStorage::Map(map) => map.remove(&key),
-            PropertyStorage::Compact { schema, values } => schema.slot(key).and_then(|slot| {
-                let slot = slot as usize;
-                if slot < values.len() {
-                    let old = std::mem::replace(&mut values[slot], Value::Null);
-                    if matches!(old, Value::Null) {
-                        None
-                    } else {
-                        Some(old)
-                    }
-                } else {
-                    None
-                }
-            }),
             PropertyStorage::Columnar(_) => {
                 debug_assert!(
                     false,
@@ -301,23 +231,6 @@ impl PropertyStorage {
                 map.clear();
                 map.extend(pairs);
             }
-            PropertyStorage::Compact { schema, values } => {
-                // Reset all slots to Null
-                for v in values.iter_mut() {
-                    *v = Value::Null;
-                }
-                for (key, value) in pairs {
-                    let slot = if let Some(s) = schema.slot(key) {
-                        s as usize
-                    } else {
-                        Arc::make_mut(schema).add_key(key) as usize
-                    };
-                    if slot >= values.len() {
-                        values.resize(slot + 1, Value::Null);
-                    }
-                    values[slot] = value;
-                }
-            }
             PropertyStorage::Columnar(_) => debug_assert!(
                 false,
                 "columnar property replace must go through GraphWrite::replace_node_properties"
@@ -329,9 +242,6 @@ impl PropertyStorage {
     pub(in crate::graph::storage) fn len(&self) -> usize {
         match self {
             PropertyStorage::Map(map) => map.len(),
-            PropertyStorage::Compact { values, .. } => {
-                values.iter().filter(|v| !matches!(v, Value::Null)).count()
-            }
             PropertyStorage::Columnar(_) => 0,
         }
     }
@@ -346,13 +256,6 @@ impl PropertyStorage {
     ) -> Vec<(InternedKey, Value)> {
         match std::mem::replace(self, PropertyStorage::Map(HashMap::new())) {
             PropertyStorage::Map(map) => map.into_iter().collect(),
-            PropertyStorage::Compact { schema, values } => schema
-                .slots
-                .iter()
-                .zip(values)
-                .filter(|(_, v)| !matches!(v, Value::Null))
-                .map(|(ik, v)| (*ik, v))
-                .collect(),
             PropertyStorage::Columnar { .. } => {
                 // Already columnar — nothing to drain
                 Vec::new()
@@ -369,30 +272,7 @@ impl PropertyStorage {
                 inner: map.keys(),
                 interner,
             },
-            PropertyStorage::Compact { schema, values } => PropertyKeyIter::Compact {
-                slots: &schema.slots,
-                values,
-                slot_idx: 0,
-                interner,
-            },
             PropertyStorage::Columnar(_) => PropertyKeyIter::Columnar(Vec::new().into_iter()),
-        }
-    }
-
-    /// Build Compact storage from pre-interned key-value pairs and a shared schema.
-    pub fn from_compact(
-        pairs: impl IntoIterator<Item = (InternedKey, Value)>,
-        schema: &Arc<TypeSchema>,
-    ) -> Self {
-        let mut values = vec![Value::Null; schema.len()];
-        for (key, value) in pairs {
-            if let Some(slot) = schema.slot(key) {
-                values[slot as usize] = value;
-            }
-        }
-        PropertyStorage::Compact {
-            schema: Arc::clone(schema),
-            values,
         }
     }
 }
@@ -401,10 +281,6 @@ impl Clone for PropertyStorage {
     fn clone(&self) -> Self {
         match self {
             PropertyStorage::Map(map) => PropertyStorage::Map(map.clone()),
-            PropertyStorage::Compact { schema, values } => PropertyStorage::Compact {
-                schema: Arc::clone(schema),
-                values: values.clone(),
-            },
             PropertyStorage::Columnar(row) => PropertyStorage::Columnar(*row),
         }
     }
@@ -414,9 +290,6 @@ impl std::fmt::Debug for PropertyStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PropertyStorage::Map(map) => f.debug_tuple("Map").field(map).finish(),
-            PropertyStorage::Compact { values, .. } => {
-                f.debug_tuple("Compact").field(values).finish()
-            }
             PropertyStorage::Columnar(row) => f
                 .debug_struct("Columnar")
                 .field("row_id", &row.row_id())
@@ -433,24 +306,6 @@ impl PartialEq for PropertyStorage {
             match ps {
                 PropertyStorage::Map(map) => {
                     let mut entries: Vec<_> = map.iter().map(|(&k, v)| (k, v.clone())).collect();
-                    entries.sort_by_key(|(k, _)| k.as_u64());
-                    entries
-                }
-                PropertyStorage::Compact { schema, values } => {
-                    let mut entries: Vec<_> = schema
-                        .slots
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, &ik)| {
-                            values.get(i).and_then(|v| {
-                                if matches!(v, Value::Null) {
-                                    None
-                                } else {
-                                    Some((ik, v.clone()))
-                                }
-                            })
-                        })
-                        .collect();
                     entries.sort_by_key(|(k, _)| k.as_u64());
                     entries
                 }
@@ -473,19 +328,6 @@ impl Serialize for PropertyStorage {
         }
         match self {
             PropertyStorage::Map(map) => map.serialize(serializer),
-            PropertyStorage::Compact { schema, values } => {
-                // Count non-Null entries for accurate map length
-                let count = values.iter().filter(|v| !matches!(v, Value::Null)).count();
-                let mut map_ser = serializer.serialize_map(Some(count))?;
-                for (i, ik) in schema.slots.iter().enumerate() {
-                    if let Some(v) = values.get(i) {
-                        if !matches!(v, Value::Null) {
-                            map_ser.serialize_entry(ik, v)?;
-                        }
-                    }
-                }
-                map_ser.end()
-            }
             PropertyStorage::Columnar(_) => {
                 // The store is the backend's; this type cannot reach it. Every
                 // save path that can meet a columnar node writes its properties

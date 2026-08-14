@@ -61,7 +61,7 @@ impl DirGraph {
     ///    matcher reads them via `get_node_id` / `get_node_title`; so do we.
     /// 3. **Column-aware reads.** For mapped/disk graphs loaded from `.kgl` the
     ///    values live in a `ColumnStore`, not in the node's
-    ///    `PropertyStorage::Map`/`Compact` snapshot. The backend's
+    ///    staged `PropertyStorage::Map` snapshot. The backend's
     ///    `get_node_property` knows how to read each storage type;
     ///    `NodeData::get_property` reads only the in-memory snapshot and
     ///    silently returns `None` for column-stored values.

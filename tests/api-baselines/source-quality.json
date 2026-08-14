@@ -378,8 +378,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
       "qualified_name": "crate::execute_set",
-      "lines": 426,
-      "branches": 57,
+      "lines": 423,
+      "branches": 53,
       "nesting": 8
     },
     {
@@ -523,7 +523,7 @@
       "nesting": 5
     },
     {
-      "path": "crates/kglite/src/graph/storage/column_store.rs",
+      "path": "crates/kglite/src/graph/storage/column_store/mod.rs",
       "qualified_name": "crate::ColumnStore::unpack_column",
       "lines": 204,
       "branches": 33,

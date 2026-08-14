@@ -1375,10 +1375,17 @@ impl DirGraph {
         // the in-memory .kgl section).
     }
 
-    /// Convert all node properties from PropertyStorage::Map to PropertyStorage::Compact.
-    /// Called after deserialization to convert the transient Map storage to dense slot-vec.
-    /// Builds TypeSchemas per node type and stores them in `self.type_schemas`.
-    pub fn compact_properties(&mut self) {
+    /// Rebuild `self.type_schemas` — one shared [`TypeSchema`] per node type,
+    /// derived from `node_type_metadata` (O(types)) or, for a graph that
+    /// carries none, by scanning the staged property maps.
+    ///
+    /// This used to also rewrite every node's properties into the deleted
+    /// `PropertyStorage::Compact` row shape. Nothing does that any more: the
+    /// staging `Map` either reaches a `ColumnStore` (the load path's column
+    /// sections, `enable_columnar`) or stays inline until it does. What
+    /// survives is the schema derivation, which the store constructors and the
+    /// planner's type metadata both read.
+    pub fn rebuild_type_schemas(&mut self) {
         // Phase 1: Build TypeSchemas from node_type_metadata (O(types), not O(N×P))
         let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
         for (node_type, props) in &self.node_type_metadata {
@@ -1406,37 +1413,13 @@ impl DirGraph {
         }
 
         // Phase 2: Wrap in Arc and store
-        let arc_schemas: HashMap<String, Arc<TypeSchema>> =
-            schemas.into_iter().map(|(t, s)| (t, Arc::new(s))).collect();
-
-        // Phase 3: Convert each node's Map → Compact
-        // Collect indices first to avoid borrowing conflict.
-        let node_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
-        for node_idx in node_indices {
-            let node = self.graph.node_weight_mut(node_idx).unwrap();
-            if let PropertyStorage::Map(_) = &node.properties {
-                let type_str = node.node_type_str(&self.interner);
-                if let Some(schema) = arc_schemas.get(type_str) {
-                    let old = std::mem::replace(
-                        &mut node.properties,
-                        PropertyStorage::Compact {
-                            schema: Arc::clone(schema),
-                            values: Vec::new(),
-                        },
-                    );
-                    if let PropertyStorage::Map(map) = old {
-                        node.properties = PropertyStorage::from_compact(map, schema);
-                    }
-                }
-            }
-        }
-
-        self.type_schemas = arc_schemas;
+        self.type_schemas = schemas.into_iter().map(|(t, s)| (t, Arc::new(s))).collect();
     }
 
-    /// Combined rebuild_type_indices + compact_properties in a single pass.
-    /// Used after deserialization when both need to run.
-    pub fn rebuild_type_indices_and_compact(&mut self) {
+    /// Combined [`Self::rebuild_type_indices`] + [`Self::rebuild_type_schemas`]
+    /// in a single pass over the nodes. Used after deserialization, where both
+    /// need to run.
+    pub fn rebuild_type_indices_and_schemas(&mut self) {
         // Build TypeSchemas from metadata (O(types))
         let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
         for (node_type, props) in &self.node_type_metadata {
@@ -1466,7 +1449,6 @@ impl DirGraph {
         let arc_schemas: HashMap<String, Arc<TypeSchema>> =
             schemas.into_iter().map(|(t, s)| (t, Arc::new(s))).collect();
 
-        // Single pass: build type_indices AND convert Map → Compact
         let type_count = arc_schemas.len().max(4);
         let avg_per_type = self.graph.node_count() / type_count.max(1);
         let mut new_type_indices: HashMap<String, Vec<NodeIndex>> =
@@ -1475,30 +1457,11 @@ impl DirGraph {
         let node_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
         for node_idx in node_indices {
             let node = self.graph.node_weight_mut(node_idx).unwrap();
-
-            // Rebuild type_indices
             let type_str = node.node_type_str(&self.interner).to_string();
             new_type_indices
                 .entry(type_str)
                 .or_insert_with(|| Vec::with_capacity(avg_per_type))
                 .push(node_idx);
-
-            // Convert Map → Compact
-            if let PropertyStorage::Map(_) = &node.properties {
-                let type_str = node.node_type_str(&self.interner);
-                if let Some(schema) = arc_schemas.get(type_str) {
-                    let old = std::mem::replace(
-                        &mut node.properties,
-                        PropertyStorage::Compact {
-                            schema: Arc::clone(schema),
-                            values: Vec::new(),
-                        },
-                    );
-                    if let PropertyStorage::Map(map) = old {
-                        node.properties = PropertyStorage::from_compact(map, schema);
-                    }
-                }
-            }
         }
 
         self.type_indices.replace_with(new_type_indices);
@@ -1663,9 +1626,11 @@ impl DirGraph {
         {}
         use crate::graph::storage::column_store::ColumnStore;
 
-        // Ensure properties are compacted first
+        // The store constructors read the type's shared schema, so derive it
+        // first for a graph that has none (a fixture built straight through
+        // `GraphWrite::add_node`, or a pre-metadata file).
         if self.type_schemas.is_empty() {
-            self.compact_properties();
+            self.rebuild_type_schemas();
         }
 
         // Build a ColumnStore per node type
@@ -1706,7 +1671,7 @@ impl DirGraph {
             // order matches the load-side re-point, which enumerates
             // `type_indices` rebuilt in ascending node-index order (see
             // io/file.rs "Re-point nodes to columnar storage" +
-            // rebuild_type_indices_and_compact scanning node_indices()). This
+            // rebuild_type_indices_and_schemas scanning node_indices()). This
             // `type_indices` may be in insertion order, which diverges from
             // index order once a node has been deleted (the free slot is reused
             // or a hole remains). Left unsorted, save wrote row k from the k-th
@@ -1718,10 +1683,9 @@ impl DirGraph {
             sorted_indices.sort_unstable_by_key(|i| i.index());
             for idx in sorted_indices {
                 if let Some(node) = self.graph.node_weight(idx) {
-                    // Push id/title for every node. For Columnar nodes, read from
-                    // the old column store. For Compact/Map nodes, use node.id/title.
-                    // Always push id and title. For Columnar nodes, try old store first,
-                    // fall back to node fields. For Compact/Map, use node fields directly.
+                    // Push id/title for every node. For Columnar nodes, try the
+                    // old column store first and fall back to the inline fields;
+                    // for a staged `Map` node the inline fields are all there is.
                     let old_row = node.properties.columnar_row_id();
                     let old_store = old_row.and(self.graph.column_store(node.node_type));
                     let id_val = if let (Some(old_store), Some(old_row)) = (old_store, old_row) {
@@ -1756,20 +1720,6 @@ impl DirGraph {
 
                     // Collect properties from current storage
                     let pairs: Vec<(InternedKey, Value)> = match &node.properties {
-                        PropertyStorage::Compact { schema, values } => schema
-                            .slots
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, &ik)| {
-                                values.get(i).and_then(|v| {
-                                    if matches!(v, Value::Null) {
-                                        None
-                                    } else {
-                                        Some((ik, v.clone()))
-                                    }
-                                })
-                            })
-                            .collect(),
                         PropertyStorage::Map(map) => {
                             map.iter().map(|(&k, v)| (k, v.clone())).collect()
                         }
@@ -1837,15 +1787,22 @@ impl DirGraph {
         }
     }
 
-    /// Move every columnar row back onto its node, and drop the stores.
+    /// Move every columnar row back onto its node as staged
+    /// [`PropertyStorage::Map`], and drop the stores.
     ///
-    /// **Internal, and half of a pair.** No caller wants a row-shaped graph as
-    /// an end state any more; what the two live callers want is the *round
-    /// trip* — `vacuum` and `unspill` use `disable_columnar` +
-    /// `enable_columnar` to rebuild every store from live nodes, which is how
-    /// dead rows are reclaimed and how a spilled store comes back to the heap.
-    /// The public `disable_columnar()` is a thin wrapper scheduled for
-    /// deletion with its partner.
+    /// **Transient by construction, and scheduled for deletion.** The row
+    /// shape this used to produce (`PropertyStorage::Compact`) no longer
+    /// exists, so what a de-columnarized node holds is the same staging map
+    /// the RDF loader and the disk write path use — readable on every surface,
+    /// re-consolidated by the next `enable_columnar` (which `save()` always
+    /// runs). It is not, and cannot be, a steady state.
+    ///
+    /// Its two internal consumers are gone: `vacuum` and `unspill` now call
+    /// [`Self::rebuild_columns_to_heap`], which reaches the same end state —
+    /// dead rows reclaimed, columns heap-resident — without materialising
+    /// every row onto its node first. What is left is the public
+    /// `disable_columnar()` wrapper, which the shape-convergence programme
+    /// deletes with its partner.
     pub fn disable_columnar(&mut self) {
         // Per **type**, not per node. A node and its store are both owned by
         // the backend, so a `node_weight_mut` borrow cannot also read the
@@ -1867,7 +1824,6 @@ impl DirGraph {
             let Some(store) = self.graph.column_store(type_key).map(Arc::clone) else {
                 continue;
             };
-            let schema = self.type_schemas.get(&type_str).cloned();
             let indices: Vec<NodeIndex> = self
                 .type_indices
                 .get(&type_str)
@@ -1895,11 +1851,8 @@ impl DirGraph {
                         node.title = v;
                     }
                 }
-                let pairs = store.row_properties(row_id);
-                node.properties = match &schema {
-                    Some(schema) => PropertyStorage::from_compact(pairs, schema),
-                    None => PropertyStorage::Map(pairs.into_iter().collect()),
-                };
+                node.properties =
+                    PropertyStorage::Map(store.row_properties(row_id).into_iter().collect());
             }
         }
         self.clear_column_stores();
@@ -1992,14 +1945,12 @@ impl DirGraph {
 
     /// Insert one node, routing storage by backend; returns the new index.
     ///
-    /// - **Memory / mapped**: build a Compact `NodeData` on the shared
-    ///   `TypeSchema` and `add_node` — the heap `StableDiGraph` keeps the
-    ///   properties (today's path; unchanged behaviour).
-    /// - **Disk**: the disk `add_node` stores only a slot and drops the
-    ///   `NodeData` payload, so route id/title/properties through the per-type
-    ///   `ColumnStore` first (the same mechanism `batch.rs::flush_chunk` uses
-    ///   for bulk `add_nodes`): register schema keys, push id/title/row, then
-    ///   `add_node` a `Columnar` slot and `update_row_id`.
+    /// Every backend routes id/title/properties through the type's
+    /// `ColumnStore` first (the same mechanism `batch.rs::flush_chunk` uses for
+    /// bulk `add_nodes`): register schema keys, push id/title/row, then
+    /// `add_node` a `Columnar` slot and `update_row_id`. On disk the last step
+    /// also stamps the `DiskNodeSlot`, which is where disk reads resolve the
+    /// row from; on the heap backends it is a no-op.
     ///
     /// Used by Cypher `CREATE` (`executor::write::create_node`) so a single
     /// choke point gives uniform create semantics across modes. The caller
@@ -2144,7 +2095,7 @@ impl DirGraph {
                 (s.row_count() as usize) > live
             });
             if columnar_orphaned {
-                self.rebuild_columns_under_suspended_limit();
+                self.rebuild_columns_to_heap();
             }
             return HashMap::new();
         }
@@ -2252,26 +2203,34 @@ impl DirGraph {
         // Converting one here would be a shape change, not a compaction, so
         // the gate stays.
         if self.is_columnar() {
-            self.rebuild_columns_under_suspended_limit();
+            self.rebuild_columns_to_heap();
         }
 
         old_to_new
     }
 
-    /// Rebuild every column store from live nodes, with the memory limit taken
-    /// out of the way for the duration.
+    /// Rebuild every column store from live nodes, heap-resident, with the
+    /// memory limit taken out of the way for the duration.
     ///
-    /// `vacuum`'s columnar half, shared by its two exits. The limit is
-    /// suspended because the round trip goes through the heap by construction —
-    /// `disable_columnar` reads every row back onto its node — so leaving the
-    /// limit installed would re-spill each store as the rebuild passed it, only
-    /// for the next statement's write to pull it back. Restoring the limit
-    /// afterwards leaves the graph heap-resident, which is the documented
-    /// behaviour (`test_vacuum_columnar_with_memory_limit`).
-    fn rebuild_columns_under_suspended_limit(&mut self) {
+    /// The primitive behind `vacuum`'s columnar half and the public
+    /// `unspill()`. Both want the same two effects and neither wants a row
+    /// shape on the way: rows that no live node points at are dropped (the
+    /// rebuild reads live nodes only), and every column comes back as a fresh
+    /// heap column, which is what un-spills an mmap-backed store.
+    ///
+    /// The limit is suspended because the rebuild goes through the heap by
+    /// construction — leaving it installed would re-spill each store as the
+    /// rebuild passed it, only for the next statement's write to pull it back.
+    /// Restoring it afterwards leaves the graph heap-resident, which is the
+    /// documented behaviour (`test_vacuum_columnar_with_memory_limit`,
+    /// `test_unspill_preserves_memory_limit`).
+    ///
+    /// This replaces the `disable_columnar` + `enable_columnar` round trip the
+    /// two callers used to make, which materialised every row onto its node
+    /// only for the very next pass to read it back off again.
+    pub fn rebuild_columns_to_heap(&mut self) {
         let saved_limit = self.memory_limit.take();
-        self.disable_columnar();
-        self.enable_columnar();
+        self.rebuild_column_stores();
         self.memory_limit = saved_limit;
     }
 

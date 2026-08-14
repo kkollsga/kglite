@@ -1,10 +1,13 @@
-//! Unit tests for `column_store.rs`. Split out as a sibling file via
-//! `#[path]` so the production file stays under the centralized 2500-line
+//! Unit tests for the `column_store` module. Split out as a sibling file so
+//! the production sources stay under the centralized 2500-line
 //! source-quality cap.
 
 #![allow(clippy::approx_constant)]
 
+use super::typed_column::MMAP_THRESHOLD;
 use super::*;
+use crate::graph::storage::packed_codec::write_packed_values;
+use chrono::NaiveDate;
 
 fn make_schema_and_meta() -> (Arc<TypeSchema>, HashMap<String, String>, StringInterner) {
     let mut interner = StringInterner::new();
