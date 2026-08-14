@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-14
+
 ### Changed
 
 - **Every graph is columnar from its first node; `save()` no longer changes the
