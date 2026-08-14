@@ -74,6 +74,11 @@ pub struct ColumnStore {
     /// Re-spilling the *same* store reuses its own token, which is what keeps
     /// a repeatedly-enforced memory limit from growing the spill directory.
     spill_token: u64,
+    /// Whether spillable heap may have grown since this store last spilled.
+    /// See [`ColumnStore::may_have_grown_spillable_heap`] for the contract;
+    /// `true` is the safe value and therefore the default everywhere a store
+    /// is constructed or cloned.
+    spillable_growth: bool,
 }
 
 /// Source of [`ColumnStore::spill_token`] values.
@@ -154,6 +159,10 @@ impl Clone for ColumnStore {
             slot_scratch: Vec::new(),
             // Re-drawn, never copied — see the field's documentation.
             spill_token: next_spill_token(),
+            // `MmapOrVec::clone` always yields a `Heap` variant, so a clone of
+            // a spilled store is fully back on the heap: the clone has grown
+            // spillable bytes by construction and owes a spill check.
+            spillable_growth: true,
         }
     }
 }
@@ -187,6 +196,7 @@ impl ColumnStore {
             mmap_store: None,
             slot_scratch: Vec::new(),
             spill_token: next_spill_token(),
+            spillable_growth: true,
         }
     }
 
@@ -208,6 +218,7 @@ impl ColumnStore {
             mmap_store: None,
             slot_scratch: Vec::new(),
             spill_token: next_spill_token(),
+            spillable_growth: true,
         }
     }
 
@@ -229,6 +240,7 @@ impl ColumnStore {
             mmap_store: Some(mmap_store),
             slot_scratch: Vec::new(),
             spill_token: next_spill_token(),
+            spillable_growth: true,
         }
     }
 
@@ -287,6 +299,7 @@ impl ColumnStore {
     /// A heterogeneous id set still demotes to `Mixed` through the fallback
     /// below, which is where it belongs.
     pub fn push_id(&mut self, value: &Value) {
+        self.spillable_growth = true;
         let col = self
             .id_column
             .get_or_insert_with(|| TypedColumn::for_value(value));
@@ -304,11 +317,12 @@ impl ColumnStore {
 
     /// Push a node title value into the title column. Creates a Str column if None.
     pub fn push_title(&mut self, value: &Value) {
+        self.spillable_growth = true;
         let col = self.title_column.get_or_insert_with(|| TypedColumn::Str {
             offsets: MmapOrVec::from_vec(vec![0u64]),
             data: MmapBytes::new(),
             nulls: MmapOrVec::new(),
-            relocated: HashMap::new(),
+            relocated: rustc_hash::FxHashMap::default(),
         });
         if col.push(value).is_err() {
             // Type mismatch or storage growth failure: explicit heap fallback.
@@ -338,6 +352,7 @@ impl ColumnStore {
         // owned Values, paying a one-time RAM cost on first SET-title.
         if self.title_column.is_none() {
             if let Some(ref ms) = self.mmap_store {
+                self.spillable_growth = true;
                 let row_count = ms.row_count();
                 let mut mixed: Vec<Value> = Vec::with_capacity(row_count as usize);
                 for i in 0..row_count {
@@ -553,6 +568,7 @@ impl ColumnStore {
 
     /// [`Self::append_column`] with the column type named outright.
     fn append_column_typed(&mut self, key: InternedKey, type_str: &str) -> u16 {
+        self.spillable_growth = true;
         debug_assert_eq!(
             self.columns.len(),
             self.schema.len(),
@@ -577,6 +593,7 @@ impl ColumnStore {
     /// papered over it by rebuilding the entire store whenever the type schema
     /// had grown, paying O(rows x cols) per new key to avoid a silent drop.
     pub fn push_row(&mut self, values: &[(InternedKey, Value)]) -> u32 {
+        self.spillable_growth = true;
         #[cfg(test)]
         COLUMN_STORE_ROW_PUSHES.set(COLUMN_STORE_ROW_PUSHES.get() + 1);
         let row_id = self.row_count;
@@ -1043,6 +1060,7 @@ impl ColumnStore {
 
     /// Demote a column from typed to Mixed, preserving all existing data.
     fn demote_to_mixed(&mut self, slot: usize) {
+        self.spillable_growth = true;
         let old_col = &self.columns[slot];
         let mut mixed_data = Vec::with_capacity(old_col.len());
         for i in 0..old_col.len() {
@@ -1075,6 +1093,10 @@ impl ColumnStore {
         if let Some(ref mut col) = self.title_column {
             col.materialize_to_file(dir, "__title__")?;
         }
+        // Every spillable byte this store had is now file-backed. Until one of
+        // the growth paths above runs again, re-walking it can only rediscover
+        // the unspillable floor.
+        self.spillable_growth = false;
         Ok(())
     }
 
@@ -1124,6 +1146,7 @@ impl ColumnStore {
     /// Convert all columns back to heap-backed storage.
     #[cfg(test)]
     pub fn materialize_to_heap(&mut self) {
+        self.spillable_growth = true;
         for col in &mut self.columns {
             col.materialize_to_heap();
         }
@@ -1148,6 +1171,52 @@ impl ColumnStore {
         let overflow_bytes = self.overflow_offsets.as_ref().map_or(0, |o| o.heap_bytes())
             + self.overflow_data.as_ref().map_or(0, |d| d.heap_bytes());
         col_bytes + id_bytes + title_bytes + overflow_bytes + self.tombstones.len()
+    }
+
+    /// The subset of [`Self::heap_bytes`] that [`Self::materialize_to_files`]
+    /// can actually reclaim — the number the spill *trigger* compares against
+    /// `memory_limit`.
+    ///
+    /// Excluded, in addition to the per-column unspillables documented on
+    /// [`TypedColumn::spillable_heap_bytes`]:
+    ///
+    /// * the tombstone `Vec<bool>` — one byte per row, heap by construction and
+    ///   never written to a file;
+    /// * the overflow bag — `materialize_to_files` writes columns and the
+    ///   id/title sidecars only, so its offsets/data stay resident.
+    ///
+    /// `heap_bytes` keeps reporting all of it: it is the observability reading
+    /// (`graph_info()['columnar_heap_bytes']`) and the thing
+    /// `test_new_column_from_set_stays_inside_the_limit` holds under the limit.
+    /// This is the *decision* number, and the difference between the two is the
+    /// floor the trigger must not chase — see that method for what chasing it
+    /// cost.
+    pub fn spillable_heap_bytes(&self) -> usize {
+        let col_bytes: usize = self.columns.iter().map(|c| c.spillable_heap_bytes()).sum();
+        let id_bytes = self
+            .id_column
+            .as_ref()
+            .map_or(0, |c| c.spillable_heap_bytes());
+        let title_bytes = self
+            .title_column
+            .as_ref()
+            .map_or(0, |c| c.spillable_heap_bytes());
+        col_bytes + id_bytes + title_bytes
+    }
+
+    /// Whether this store may have grown spillable heap since the last
+    /// successful spill — the guard that lets a statement which grew nothing
+    /// skip the spill pass entirely.
+    ///
+    /// `true` is the conservative answer and the constructed/cloned default: a
+    /// missed `true` skips a spill that was due, so every path that can add
+    /// spillable bytes sets it and only [`Self::materialize_to_files`] clears
+    /// it. An ordinary `SET` of an existing property is exactly the case this
+    /// exists for — a mapped column is written *through* its mapping, so it
+    /// adds no heap and needs no pass.
+    #[inline]
+    pub fn may_have_grown_spillable_heap(&self) -> bool {
+        self.spillable_growth
     }
 
     /// Access columns for introspection (e.g., getting type tags).
@@ -1200,18 +1269,21 @@ impl ColumnStore {
     /// in slot order; the caller is responsible for the correspondence.
     #[allow(dead_code)]
     pub fn replace_columns(&mut self, columns: Vec<TypedColumn>) {
+        self.spillable_growth = true;
         self.columns = columns;
     }
 
     /// Replace the id sidecar column.
     #[allow(dead_code)]
     pub fn replace_id_column(&mut self, col: TypedColumn) {
+        self.spillable_growth = true;
         self.id_column = Some(col);
     }
 
     /// Replace the title sidecar column.
     #[allow(dead_code)]
     pub fn replace_title_column(&mut self, col: TypedColumn) {
+        self.spillable_growth = true;
         self.title_column = Some(col);
     }
 
@@ -1857,7 +1929,7 @@ impl ColumnStore {
             offsets,
             data,
             nulls,
-            relocated: HashMap::new(),
+            relocated: rustc_hash::FxHashMap::default(),
         })
     }
 

@@ -366,9 +366,9 @@ pub fn parse_temporal_column_types_from_pairs(
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum TypeIdIndex {
     /// All IDs are UniqueId(u32) — compact, ~8 bytes per entry.
-    Integer(HashMap<u32, NodeIndex>),
+    Integer(FxHashMap<u32, NodeIndex>),
     /// Mixed ID types — general, ~60 bytes per entry.
-    General(HashMap<Value, NodeIndex>),
+    General(FxHashMap<Value, NodeIndex>),
 }
 
 impl TypeIdIndex {
@@ -458,7 +458,7 @@ impl TypeIdIndex {
                     map.insert(u, idx);
                 } else {
                     // Demote to General
-                    let mut general: HashMap<Value, NodeIndex> =
+                    let mut general: FxHashMap<Value, NodeIndex> =
                         map.drain().map(|(k, v)| (Value::UniqueId(k), v)).collect();
                     general.insert(id, idx);
                     *self = TypeIdIndex::General(general);
@@ -554,7 +554,7 @@ impl TypeIdIndex {
 
 impl Default for TypeIdIndex {
     fn default() -> Self {
-        TypeIdIndex::General(HashMap::new())
+        TypeIdIndex::General(FxHashMap::default())
     }
 }
 

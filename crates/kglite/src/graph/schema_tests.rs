@@ -8,7 +8,7 @@ mod type_id_index_tests {
     use petgraph::graph::NodeIndex;
 
     fn integer_index() -> TypeIdIndex {
-        let mut m = HashMap::new();
+        let mut m = rustc_hash::FxHashMap::default();
         m.insert(1u32, NodeIndex::new(10));
         m.insert(42u32, NodeIndex::new(20));
         TypeIdIndex::Integer(m)

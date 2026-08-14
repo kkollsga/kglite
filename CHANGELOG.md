@@ -189,6 +189,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to a flat 8.0–8.8 µs at every size. The cost that remains tracks the deleted
   node's position rather than the type's size: at 1M rows, 3.3 µs deleting the
   newest node, 35 µs mid-list, 66 µs deleting the oldest.
+- **A `storage="mapped"` graph no longer re-runs its whole spill pass after
+  every statement.** `set_memory_limit` is enforced by a pass that compares the
+  column stores' heap footprint against the limit; that footprint included
+  bytes no spill can move — the tombstone bitmap, `Mixed` columns, the string
+  write overlay, the overflow bag — so on a mapped graph (a zero limit) the
+  total was permanently over and the pass never converged. Every mutating
+  statement therefore walked every node type, sorted them by size and made a
+  directory-creation syscall per type, to spill nothing. The comparison is now
+  against the bytes a spill can actually reclaim, and a statement that grew no
+  spillable bytes — an ordinary `SET` of an existing property, which writes
+  through the mapping — skips the walk outright. `graph_info()`'s
+  `columnar_heap_bytes` is unchanged: the floor is excluded from the decision,
+  not from the reading, and the limit still bounds the reported total. Measured
+  (release, min of two runs) on a 100-type mapped graph, single-row `SET`:
+  **248.3/244.4 µs → 5.0/5.5 µs**, i.e. from 47× the same statement on an
+  in-memory graph to parity with it (0.97×).
+- **Faster hashing on five hot maps.** `FxHash` replaces the default
+  cryptographic `SipHash` where the key is already a well-distributed integer
+  or an id value and the map is probed per row or per node: the string column's
+  relocation overlay, `save()`'s row-order drift check, the mapped column
+  lookup, the statement journal's touched-node/edge sets, and the id indices
+  (`TypeIdIndex`, and the `add_nodes` conflict-check maps). Measured (release,
+  min of two runs): a 1M-node unchanged `save()` **46.6/46.3 ms →
+  37.1/37.8 ms (−20%)**; the scan penalty a single differing-length string
+  write leaves on its column **+34.6%/+39.5% → +2.5%/+3.1%** (median, against
+  the same column unwritten — the overlay itself is still not compacted, which
+  is the remaining term); a 30-column `CREATE` batch 3.94/3.95 → 3.82/3.85 ms.
+  Nothing about stored bytes or result ordering changes — none of these maps
+  reaches a file in hash order.
 
 ### Removed
 

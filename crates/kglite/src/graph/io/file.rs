@@ -747,8 +747,9 @@ pub(crate) fn read_id_indices_bin(
                 let idxs_bytes = &payload[cursor + keys_size..block_end];
                 cursor = block_end;
                 let mut map =
-                    std::collections::HashMap::<u32, petgraph::graph::NodeIndex>::with_capacity(
+                    FxHashMap::<u32, petgraph::graph::NodeIndex>::with_capacity_and_hasher(
                         num_entries,
+                        Default::default(),
                     );
                 let mut previous = None;
                 for i in 0..num_entries {

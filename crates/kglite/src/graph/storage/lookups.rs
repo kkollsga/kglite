@@ -3,13 +3,18 @@ use crate::datatypes::Value;
 use crate::graph::schema::{GraphBackend, InternedKey};
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeLookup {
-    uid_to_index: HashMap<Value, NodeIndex>,
-    title_to_index: HashMap<Value, NodeIndex>,
+    /// FxHash, not the std SipHasher, for every id map in this module. These
+    /// are the `add_nodes` conflict-check maps: one probe per incoming row
+    /// against a map sized to the whole type, on the bulk-ingest hot path.
+    /// `Value::hash` writes a discriminant then the payload, both of which Fx
+    /// mixes as cheaply as any integer key.
+    uid_to_index: FxHashMap<Value, NodeIndex>,
+    title_to_index: FxHashMap<Value, NodeIndex>,
     node_type: String,
 }
 
@@ -19,8 +24,8 @@ impl TypeLookup {
             return Err("Node type cannot be empty".to_string());
         }
 
-        let mut uid_to_index = HashMap::new();
-        let mut title_to_index = HashMap::new();
+        let mut uid_to_index = FxHashMap::default();
+        let mut title_to_index = FxHashMap::default();
 
         // Arena guard: node_weight materializes on the disk backend and
         // must run under a DiskQueryGuard (protocol in disk/graph.rs).
@@ -56,7 +61,7 @@ impl TypeLookup {
         if let Some(uid_map) = id_indices.materialize_type(&node_type) {
             Ok(TypeLookup {
                 uid_to_index: uid_map,
-                title_to_index: HashMap::new(),
+                title_to_index: FxHashMap::default(),
                 node_type,
             })
         } else {
@@ -76,9 +81,9 @@ impl TypeLookup {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CombinedTypeLookup {
-    source_uid_to_index: HashMap<Value, NodeIndex>,
+    source_uid_to_index: FxHashMap<Value, NodeIndex>,
     /// Only populated when source and target types differ (None when same_type is true)
-    target_uid_to_index: Option<HashMap<Value, NodeIndex>>,
+    target_uid_to_index: Option<FxHashMap<Value, NodeIndex>>,
     source_type: String,
     target_type: String,
     same_type: bool,
@@ -95,11 +100,11 @@ impl CombinedTypeLookup {
         }
 
         let same_type = source_type == target_type;
-        let mut source_uid_to_index = HashMap::new();
-        let mut target_uid_to_index_map: Option<HashMap<Value, NodeIndex>> = if same_type {
+        let mut source_uid_to_index = FxHashMap::default();
+        let mut target_uid_to_index_map: Option<FxHashMap<Value, NodeIndex>> = if same_type {
             None // Don't allocate separate map when types are the same
         } else {
-            Some(HashMap::new())
+            Some(FxHashMap::default())
         };
 
         // Arena guard: node_weight materializes on the disk backend and
@@ -189,7 +194,7 @@ impl CombinedTypeLookup {
     /// due to pandas nullable-int promotion.  This method tries all plausible
     /// numeric representations so that a Float64(260.0) matches an Int64(260) node.
     fn lookup_with_type_fallback(
-        map: &HashMap<Value, NodeIndex>,
+        map: &FxHashMap<Value, NodeIndex>,
         uid: &Value,
     ) -> Option<NodeIndex> {
         // First try direct lookup

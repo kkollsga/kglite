@@ -16,8 +16,8 @@ use crate::graph::storage::type_build_meta::ColType;
 use crate::graph::storage::StrField;
 use chrono::NaiveDate;
 use memmap2::MmapMut;
+use rustc_hash::FxHashMap;
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 const UNIX_EPOCH_DATE: NaiveDate = match NaiveDate::from_ymd_opt(1970, 1, 1) {
@@ -85,7 +85,10 @@ pub struct MmapColumnStore {
     /// Title column (always string).
     pub(crate) title: StrColumnMeta,
     /// Property key → column reference (fixed or string).
-    pub(crate) col_map: HashMap<InternedKey, ColRef>,
+    /// FxHash, not the std SipHasher: `InternedKey` is already a
+    /// well-distributed FNV `u64`, and this is the per-row property probe on
+    /// every mapped/disk read.
+    pub(crate) col_map: FxHashMap<InternedKey, ColRef>,
     /// Dense fixed-width columns.
     pub(crate) fixed_cols: Vec<FixedColumnMeta>,
     /// Dense string columns.
@@ -729,7 +732,7 @@ mod tests {
                     len: titles.len(),
                 },
             },
-            col_map: HashMap::new(),
+            col_map: FxHashMap::default(),
             fixed_cols: Vec::new(),
             str_cols: Vec::new(),
             overflow_offsets: Region::EMPTY,

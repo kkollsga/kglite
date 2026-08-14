@@ -65,6 +65,7 @@
 //!   entries stand between. `replay_order_is_reverse_of_capture` pins the
 //!   ordering that argument rests on.
 
+use rustc_hash::FxHashSet;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -424,9 +425,13 @@ pub struct UndoJournal {
     entries: Vec<UndoEntry>,
     /// Nodes whose pre-statement weight is already captured (or that were
     /// created by this statement, whose pre-state is "absent").
-    weighed_nodes: HashSet<NodeIndex>,
+    /// FxHash, not the std SipHasher, for both: the keys are bare `u32`
+    /// indices and these are probed once per touched node/edge per write on
+    /// the statement hot path. Membership only — never iterated — so the
+    /// hasher cannot reach an ordering anything observes.
+    weighed_nodes: FxHashSet<NodeIndex>,
     /// Edge counterpart of `weighed_nodes`.
-    weighed_edges: HashSet<EdgeIndex>,
+    weighed_edges: FxHashSet<EdgeIndex>,
 }
 
 impl UndoJournal {

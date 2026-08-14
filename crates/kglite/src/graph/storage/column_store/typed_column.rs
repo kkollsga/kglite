@@ -12,8 +12,8 @@ use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec, MmapPod};
 use crate::graph::storage::packed_codec::write_packed_values;
 use crate::graph::storage::StrField;
 use chrono::NaiveDate;
+use rustc_hash::FxHashMap;
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::AtomicU64;
@@ -58,7 +58,13 @@ pub enum TypedColumn {
         offsets: MmapOrVec<u64>,
         data: MmapBytes,
         nulls: MmapOrVec<u8>,
-        relocated: HashMap<u32, String>,
+        /// FxHash, not the std SipHasher: the key is a bare `u32` row id and
+        /// this map is probed on *every* row of every scan of the column once
+        /// it is non-empty (`str_at`). One differing-length `SET` was measured
+        /// at +35% on every later scan of that column; the hash was the part
+        /// of that a swap can remove (compacting the overlay away is the
+        /// filed follow-on).
+        relocated: FxHashMap<u32, String>,
     },
     /// Fallback for heterogeneous columns — stores boxed Values directly.
     /// Cannot be mmap'd, but preserves correctness.
@@ -148,7 +154,7 @@ fn str_at<'c>(
     offsets: &'c MmapOrVec<u64>,
     data: &'c MmapBytes,
     nulls: &'c MmapOrVec<u8>,
-    relocated: &'c HashMap<u32, String>,
+    relocated: &'c FxHashMap<u32, String>,
     row: u32,
 ) -> Option<&'c str> {
     let idx = row as usize;
@@ -234,7 +240,7 @@ impl TypedColumn {
                 offsets: MmapOrVec::from_vec(vec![0u64]),
                 data: MmapBytes::new(),
                 nulls: MmapOrVec::new(),
-                relocated: HashMap::new(),
+                relocated: FxHashMap::default(),
             },
             _ => TypedColumn::Mixed { data: Vec::new() },
         }
@@ -747,6 +753,41 @@ impl TypedColumn {
                 offsets.heap_bytes() + data.heap_bytes() + nulls.heap_bytes() + relocated_bytes
             }
             TypedColumn::Mixed { data } => data.len() * std::mem::size_of::<Value>(),
+        }
+    }
+
+    /// The subset of [`Self::heap_bytes`] that [`Self::materialize_to_file`]
+    /// can actually move off the heap.
+    ///
+    /// Two parts of `heap_bytes` are structurally unspillable and must not
+    /// enter the spill *trigger*'s arithmetic (they stay in `heap_bytes`,
+    /// which is what `graph_info()['columnar_heap_bytes']` reports):
+    ///
+    /// * `Mixed` has no file representation at all — `materialize_to_file` is
+    ///   a documented no-op for it.
+    /// * the `Str` `relocated` overlay is deliberately left behind: it is the
+    ///   write overlay a mapping cannot hold, and folding it away is a
+    ///   compaction, not a spill.
+    ///
+    /// Counting them made the trigger unable to converge. `StorageMode::Mapped`
+    /// pins `memory_limit = Some(0)`, so any unspillable byte left the total
+    /// permanently over the limit and `maybe_spill_columns` re-ran its entire
+    /// per-type loop — Vec + sort + a `create_dir_all` syscall per type — after
+    /// every mutating statement, spilling nothing each time.
+    pub fn spillable_heap_bytes(&self) -> usize {
+        match self {
+            TypedColumn::Int64 { .. }
+            | TypedColumn::Float64 { .. }
+            | TypedColumn::UniqueId { .. }
+            | TypedColumn::Bool { .. }
+            | TypedColumn::Date { .. } => self.heap_bytes(),
+            TypedColumn::Str {
+                offsets,
+                data,
+                nulls,
+                ..
+            } => offsets.heap_bytes() + data.heap_bytes() + nulls.heap_bytes(),
+            TypedColumn::Mixed { .. } => 0,
         }
     }
 

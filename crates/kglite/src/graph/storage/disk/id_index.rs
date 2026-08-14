@@ -42,6 +42,7 @@ use crate::graph::storage::disk::id_index_layer::TypeEntry;
 use crate::serde_codec;
 use memmap2::Mmap;
 use petgraph::graph::NodeIndex;
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -88,7 +89,7 @@ pub struct IdIndexBase {
     dir: HashMap<String, BaseEntry>,
     /// Lazy materialization cache for codec-selected General payloads.
     /// Integer variant never enters here — it's read directly from mmap.
-    general_cache: RwLock<HashMap<String, Arc<HashMap<Value, NodeIndex>>>>,
+    general_cache: RwLock<HashMap<String, Arc<FxHashMap<Value, NodeIndex>>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -213,7 +214,7 @@ impl IdIndexBase {
             };
             if variant == 1 {
                 let blob = &mmap[payload_off_usize..payload_end];
-                let map: HashMap<Value, NodeIndex> = serde_codec::decode_exact_with(
+                let map: FxHashMap<Value, NodeIndex> = serde_codec::decode_exact_with(
                     serde_codec::CURRENT_CODEC,
                     blob,
                     blob.len() as u64,
@@ -278,8 +279,10 @@ impl IdIndexBase {
         match entry.variant {
             0 => {
                 let (keys, idxs) = self.integer_bytes(entry)?;
-                let mut map: HashMap<u32, NodeIndex> =
-                    HashMap::with_capacity(entry.num_entries as usize);
+                let mut map: FxHashMap<u32, NodeIndex> = FxHashMap::with_capacity_and_hasher(
+                    entry.num_entries as usize,
+                    Default::default(),
+                );
                 for index in 0..entry.num_entries as usize {
                     map.insert(
                         read_le_u32(keys, index)?,
@@ -346,14 +349,18 @@ impl IdIndexBase {
         }
     }
 
-    fn general_map(&self, name: &str, entry: &BaseEntry) -> Option<Arc<HashMap<Value, NodeIndex>>> {
+    fn general_map(
+        &self,
+        name: &str,
+        entry: &BaseEntry,
+    ) -> Option<Arc<FxHashMap<Value, NodeIndex>>> {
         if let Some(arc) = self.general_cache.read().unwrap().get(name).cloned() {
             return Some(arc);
         }
         let off = entry.payload_off as usize;
         let len = entry.payload_len as usize;
         let blob = self.mmap.get(off..off + len)?;
-        let map: HashMap<Value, NodeIndex> = serde_codec::decode_exact_with(
+        let map: FxHashMap<Value, NodeIndex> = serde_codec::decode_exact_with(
             serde_codec::CURRENT_CODEC,
             blob,
             blob.len() as u64,
@@ -525,7 +532,7 @@ impl IdIndexStore {
 
     /// Materialize the full `id → NodeIndex` map for a type, or None when the
     /// type isn't indexed. Used by the add_nodes conflict-check fast path.
-    pub fn materialize_type(&self, name: &str) -> Option<HashMap<Value, NodeIndex>> {
+    pub fn materialize_type(&self, name: &str) -> Option<FxHashMap<Value, NodeIndex>> {
         {
             let ov = self.overlay.read().unwrap();
             if let Some(entry) = ov.get(name) {
@@ -1036,11 +1043,11 @@ mod validation_tests {
         ordered.sort_by_key(|name| InternedKey::from_str(name).as_u64());
         let general_name = ordered[0];
         let integer_name = ordered[1];
-        let general = TypeIdIndex::General(HashMap::from([(
+        let general = TypeIdIndex::General(FxHashMap::from_iter([(
             Value::String("x".into()),
             NodeIndex::new(3),
         )]));
-        let integer = TypeIdIndex::Integer(HashMap::from([(7, NodeIndex::new(4))]));
+        let integer = TypeIdIndex::Integer(FxHashMap::from_iter([(7, NodeIndex::new(4))]));
         let mut store = IdIndexStore::default();
         store.replace_with(HashMap::from([
             (general_name.to_string(), general),
@@ -1121,7 +1128,7 @@ mod validation_tests {
         store.replace_with(HashMap::from([
             (
                 "Known".to_string(),
-                TypeIdIndex::Integer(HashMap::from([(7, NodeIndex::new(1))])),
+                TypeIdIndex::Integer(FxHashMap::from_iter([(7, NodeIndex::new(1))])),
             ),
             // Never interned: an id index cached for a type with no rows.
             ("Unregistered".to_string(), TypeIdIndex::default()),
@@ -1149,7 +1156,7 @@ mod validation_tests {
 
         store.insert(
             "Unregistered".to_string(),
-            TypeIdIndex::Integer(HashMap::from([(1, NodeIndex::new(0))])),
+            TypeIdIndex::Integer(FxHashMap::from_iter([(1, NodeIndex::new(0))])),
         );
         let error = write_id_indices_bin(temp.path(), &store, &interner).unwrap_err();
         assert!(error.contains("Unregistered"), "{error}");

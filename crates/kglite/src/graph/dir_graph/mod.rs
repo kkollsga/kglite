@@ -887,7 +887,7 @@ impl DirGraph {
     fn compute_id_index(&self, node_type: &str) -> TypeIdIndex {
         let node_indices = match self.type_indices.get(node_type) {
             Some(indices) => indices,
-            None => return TypeIdIndex::General(HashMap::new()),
+            None => return TypeIdIndex::General(FxHashMap::default()),
         };
 
         let mut all_unique_id = true;
@@ -938,7 +938,7 @@ impl DirGraph {
         let entry_count = entries.len();
         if all_unique_id && !entries.is_empty() {
             // Compact: u32 keys only (~8 bytes per entry vs ~60).
-            let map: HashMap<u32, NodeIndex> = entries
+            let map: FxHashMap<u32, NodeIndex> = entries
                 .into_iter()
                 .filter_map(|(id, idx)| {
                     if let Value::UniqueId(u) = id {
@@ -952,7 +952,7 @@ impl DirGraph {
             TypeIdIndex::Integer(map)
         } else {
             // General: mixed ID types.
-            let map: HashMap<Value, NodeIndex> = entries.into_iter().collect();
+            let map: FxHashMap<Value, NodeIndex> = entries.into_iter().collect();
             warn_on_duplicate_ids(node_type, entry_count, map.len());
             TypeIdIndex::General(map)
         }
@@ -1671,7 +1671,11 @@ impl DirGraph {
             let backend = &self.graph;
             // Rows a type has handed out so far, walking nodes in ascending
             // index order — the order the file is written and read back in.
-            let mut next_row: HashMap<InternedKey, u32> = HashMap::new();
+            // FxHash, not the std SipHasher: `InternedKey` is already a
+            // well-distributed FNV `u64` and this probes once per node of the
+            // graph. `RandomState` was the top self symbol (14.9%) of a
+            // 1M-node save profile.
+            let mut next_row: FxHashMap<InternedKey, u32> = FxHashMap::default();
             let any_drift = self
                 .graph
                 .node_indices()
@@ -2029,15 +2033,44 @@ impl DirGraph {
     /// map on `DirGraph` and needed an explicit sync per batch.
     /// Check heap usage of column stores and spill largest to disk if over limit.
     /// No-op if memory_limit is None or the backend is memory-mode.
+    ///
+    /// Two guards decide, in order, that there is nothing to do — and both are
+    /// load-bearing, because this runs after *every* mutating statement
+    /// (`session::execute`):
+    ///
+    /// 1. **No store grew spillable heap since its last spill.** A `SET` of an
+    ///    existing property on a mapped column is written through the mapping
+    ///    and adds nothing; walking every type to rediscover that is pure
+    ///    per-statement tax, O(types) wide.
+    /// 2. **The spillable total is under the limit.** The comparison is against
+    ///    [`ColumnStore::spillable_heap_bytes`], not `heap_bytes`: the latter
+    ///    includes the tombstone bitmap, the `Str` `relocated` overlay, `Mixed`
+    ///    columns and the overflow bag, none of which `materialize_to_files`
+    ///    can move. `StorageMode::Mapped` pins `memory_limit = Some(0)`, so
+    ///    that floor kept the total permanently over the limit: the pass could
+    ///    never converge and re-ran its whole per-type loop — Vec + sort + a
+    ///    `create_dir_all` syscall per type — on every statement, spilling
+    ///    nothing. Measured at 100 types: 245 µs per single-row `SET`.
+    ///
+    /// `graph_info()['columnar_heap_bytes']` keeps reporting the full
+    /// `heap_bytes` — the floor is excluded from the *decision*, not from the
+    /// observability reading.
     pub fn maybe_spill_columns(&mut self) {
         let limit = match self.memory_limit {
             Some(l) => l,
             None => return,
         };
+        if !self
+            .graph
+            .column_stores_iter()
+            .any(|(_, s)| s.may_have_grown_spillable_heap())
+        {
+            return;
+        }
         let total: usize = self
             .graph
             .column_stores_iter()
-            .map(|(_, s)| s.heap_bytes())
+            .map(|(_, s)| s.spillable_heap_bytes())
             .sum();
         if total <= limit {
             return;
@@ -2068,7 +2101,7 @@ impl DirGraph {
         let mut by_size: Vec<(String, usize)> = self
             .column_stores_by_name()
             .into_iter()
-            .map(|(t, s)| (t.to_string(), s.heap_bytes()))
+            .map(|(t, s)| (t.to_string(), s.spillable_heap_bytes()))
             .collect();
         by_size.sort_by_key(|s| std::cmp::Reverse(s.1));
         let mut remaining = total;

@@ -1483,3 +1483,88 @@ fn the_backend_store_is_the_only_read_route_on_disk() {
         "and the Cypher read route must resolve the same store"
     );
 }
+
+// ── 4b. P4 — the spill pass converges, and still fires when it must ────────
+
+/// The spill trigger must reach a fixed point.
+///
+/// `heap_bytes` counts what a spill cannot move — the tombstone `Vec<bool>`,
+/// the `Str` `relocated` overlay, `Mixed` columns, the overflow bag — so
+/// comparing *it* against the limit left `StorageMode::Mapped`
+/// (`memory_limit = Some(0)`) permanently over: the pass re-ran its whole
+/// per-type loop (Vec + sort + a `create_dir_all` syscall per type) after every
+/// mutating statement and spilled nothing each time. 245 us per single-row
+/// `SET` at 100 types.
+///
+/// The convergence property is the pair of readings below: after one spill the
+/// *spillable* total is zero while the total is not.
+#[test]
+fn the_spill_trigger_converges_on_the_unspillable_floor() {
+    let mut graph = seeded_columnar();
+    let dir = tempfile::tempdir().unwrap();
+    graph.spill_dir = Some(dir.path().to_path_buf());
+    graph.memory_limit = Some(0);
+
+    graph.maybe_spill_columns();
+
+    let master = graph.column_store("Item").expect("master store");
+    assert!(
+        master.is_mapped(),
+        "precondition: the store must actually have spilled"
+    );
+    assert_eq!(
+        master.spillable_heap_bytes(),
+        0,
+        "everything a spill can move is file-backed, so the trigger must now \
+         read zero against its zero limit"
+    );
+    assert!(
+        master.heap_bytes() > 0,
+        "precondition: the unspillable floor is still there — without it this \
+         test cannot distinguish convergence from an empty store"
+    );
+    assert!(
+        !master.may_have_grown_spillable_heap(),
+        "and a completed spill must clear the growth flag, or every later \
+         statement re-walks every type to rediscover the floor"
+    );
+}
+
+/// ...and the flag that buys that skip must not swallow a real spill.
+///
+/// A `SET` of a property the type has never carried appends a whole column of
+/// heap behind the limit. That is the one write shape the growth flag has to
+/// catch: break `append_column_typed`'s flag and this goes red (the fresh
+/// column stays on the heap because nothing re-runs the pass), while
+/// `the_spill_trigger_converges_on_the_unspillable_floor` above stays green.
+#[test]
+fn a_statement_that_grows_spillable_heap_still_triggers_the_spill() {
+    let mut graph = seeded_columnar();
+    let dir = tempfile::tempdir().unwrap();
+    graph.spill_dir = Some(dir.path().to_path_buf());
+    graph.memory_limit = Some(0);
+    graph.maybe_spill_columns();
+    assert_eq!(
+        graph
+            .column_store("Item")
+            .expect("master store")
+            .spillable_heap_bytes(),
+        0,
+        "precondition: the fixture starts converged"
+    );
+
+    run(&mut graph, "MATCH (n:Item) SET n.fresh = 7");
+
+    let master = graph.column_store("Item").expect("master store");
+    assert_eq!(
+        master.spillable_heap_bytes(),
+        0,
+        "the appended `fresh` column is spillable heap over a zero limit; the \
+         statement that created it must have re-run the spill pass"
+    );
+    assert_eq!(
+        read_one(&graph, "MATCH (n:Item) WHERE n.id = 1 RETURN n.fresh"),
+        Value::Int64(7),
+        "and the value must survive the spill it triggered"
+    );
+}

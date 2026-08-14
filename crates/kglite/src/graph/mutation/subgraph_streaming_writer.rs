@@ -880,7 +880,7 @@ impl ColumnWriter {
                     offsets,
                     data,
                     nulls,
-                    relocated: std::collections::HashMap::new(),
+                    relocated: rustc_hash::FxHashMap::default(),
                 })
             }
             ColumnWriter::Mixed { values } => {
