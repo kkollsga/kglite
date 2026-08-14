@@ -17,8 +17,8 @@ atomically renames it over the target, so a crash mid-save can't leave a torn
 {doc}`durable apps guide </python/guides/durable-apps>`).
 
 Save files (`.kgl`) use an explicitly versioned binary container. Current
-files use RGF v5, an explicit Postcard codec tag, and core-data version 3.
-Current readers accept RGF v5/Postcard. RGF v4/bincode and older containers
+files use RGF v6, an explicit Postcard codec tag, and core-data version 3.
+Current readers accept RGF v6 and RGF v5. RGF v4/bincode and older containers
 are rejected with an explicit migration/rebuild instruction; use kglite 0.13.4
 as the conversion bridge described in the
 [0.13 → 0.14 migration guide](../migrations/0.13-to-0.14.md#convert-persisted-data-before-upgrading).

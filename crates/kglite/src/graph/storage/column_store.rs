@@ -10,7 +10,10 @@
 use crate::datatypes::values::Value;
 use crate::graph::schema::{InternedKey, StringInterner, TypeSchema};
 use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec, MmapPod};
-use crate::graph::storage::packed_codec::{write_packed_values, PackedElement};
+use crate::graph::storage::packed_codec::{
+    decode_int64_delta, encode_int64_delta_if_smaller, write_packed_values, IntColumnEncoding,
+    PackedElement, INT64_DELTA_TAG,
+};
 use chrono::NaiveDate;
 use std::collections::HashMap;
 use std::io;
@@ -2039,14 +2042,26 @@ impl ColumnStore {
     ///   [8B] data_len      [NB] data_bytes (+ null_bytes for typed columns)
     ///   For "string": data_bytes = offsets + str_data + null_bitmap
     ///   For "mixed": data_bytes = the selected codec's Vec<Value>
+    ///   For "int64d" (`.kgl` v6 only): data_bytes = zigzag-varint deltas +
+    ///   null_bytes — see [`encode_int64_delta_if_smaller`].
+    ///
+    /// Emits fixed-width integer columns only. The `.kgl` v6 writer calls
+    /// [`Self::write_packed_with_codec`] with [`IntColumnEncoding::Auto`]
+    /// instead; every other consumer of this layout (the disk-graph column
+    /// sidecars) must keep the bytes a 0.15.14 reader understands.
     pub fn write_packed(&self, interner: &StringInterner) -> io::Result<Vec<u8>> {
-        self.write_packed_with_codec(interner, crate::serde_codec::CURRENT_CODEC)
+        self.write_packed_with_codec(
+            interner,
+            crate::serde_codec::CURRENT_CODEC,
+            IntColumnEncoding::Raw,
+        )
     }
 
     pub(crate) fn write_packed_with_codec(
         &self,
         interner: &StringInterner,
         codec: crate::serde_codec::CodecVersion,
+        int_encoding: IntColumnEncoding,
     ) -> io::Result<Vec<u8>> {
         // If this ColumnStore is mmap-backed (from_mmap_store), materialize
         // rows from the mmap store so they can be serialized.
@@ -2080,9 +2095,9 @@ impl ColumnStore {
                 while padded.len() < self.row_count as usize {
                     padded.push_null();
                 }
-                Self::write_packed_column(&mut buf, col_name, &padded, codec)?;
+                Self::write_packed_column(&mut buf, col_name, &padded, codec, int_encoding)?;
             } else {
-                Self::write_packed_column(&mut buf, col_name, col, codec)?;
+                Self::write_packed_column(&mut buf, col_name, col, codec, int_encoding)?;
             }
         }
 
@@ -2092,14 +2107,14 @@ impl ColumnStore {
             while padded.len() < self.row_count as usize {
                 padded.push_null();
             }
-            Self::write_packed_column(&mut buf, "__id__", &padded, codec)?;
+            Self::write_packed_column(&mut buf, "__id__", &padded, codec, int_encoding)?;
         }
         if let Some(ref col) = self.title_column {
             let mut padded = col.clone();
             while padded.len() < self.row_count as usize {
                 padded.push_null();
             }
-            Self::write_packed_column(&mut buf, "__title__", &padded, codec)?;
+            Self::write_packed_column(&mut buf, "__title__", &padded, codec, int_encoding)?;
         }
 
         // Write overflow bag as two pseudo-columns
@@ -2186,14 +2201,22 @@ impl ColumnStore {
         }
         buf.extend_from_slice(&num_cols.to_le_bytes());
 
-        // Write property columns
+        // Write property columns. Everything materialized out of an mmap-backed
+        // store above is `Mixed`, so the integer-encoding choice cannot apply
+        // here; pass the fixed-width policy rather than implying otherwise.
         for (name, col) in &prop_columns {
-            Self::write_packed_column(&mut buf, name, col, codec)?;
+            Self::write_packed_column(&mut buf, name, col, codec, IntColumnEncoding::Raw)?;
         }
 
         // Write id/title
-        Self::write_packed_column(&mut buf, "__id__", &id_col, codec)?;
-        Self::write_packed_column(&mut buf, "__title__", &title_col, codec)?;
+        Self::write_packed_column(&mut buf, "__id__", &id_col, codec, IntColumnEncoding::Raw)?;
+        Self::write_packed_column(
+            &mut buf,
+            "__title__",
+            &title_col,
+            codec,
+            IntColumnEncoding::Raw,
+        )?;
 
         // Write overflow if present
         if has_overflow {
@@ -2234,8 +2257,22 @@ impl ColumnStore {
         col_name: &str,
         col: &TypedColumn,
         codec: crate::serde_codec::CodecVersion,
+        int_encoding: IntColumnEncoding,
     ) -> io::Result<()> {
-        let type_tag = col.type_tag();
+        // A v6 writer may swap an `Int64` column's fixed-width array for the
+        // delta-varint form when that is smaller. The choice is recorded in the
+        // per-column type tag, so the reader needs no side channel and a column
+        // that declines the swap is byte-identical to what v5 wrote.
+        let delta_blob = match (int_encoding, col) {
+            (IntColumnEncoding::Auto, TypedColumn::Int64 { data, nulls }) => {
+                encode_int64_delta_if_smaller(data, nulls)
+            }
+            _ => None,
+        };
+        let type_tag = match delta_blob {
+            Some(_) => INT64_DELTA_TAG,
+            None => col.type_tag(),
+        };
 
         // Column name
         let name_bytes = col_name.as_bytes();
@@ -2250,7 +2287,10 @@ impl ColumnStore {
         // Column data — write length placeholder, then data directly, then patch length
         let len_offset = buf.len();
         buf.extend_from_slice(&0u64.to_le_bytes()); // placeholder
-        col.write_to_with_codec(buf, codec)?;
+        match delta_blob {
+            Some(blob) => buf.extend_from_slice(&blob),
+            None => col.write_to_with_codec(buf, codec)?,
+        }
         let data_len = (buf.len() - len_offset - 8) as u64;
         buf[len_offset..len_offset + 8].copy_from_slice(&data_len.to_le_bytes());
         Ok(())
@@ -2463,6 +2503,16 @@ impl ColumnStore {
                     col_name,
                     "null",
                 )?;
+                Ok(TypedColumn::Int64 { data, nulls })
+            }
+            // `.kgl` v6's delta-varint form of the same column. Decoded back to
+            // the fixed-width in-memory representation here, so nothing above
+            // the loader can tell which form the file used.
+            INT64_DELTA_TAG => {
+                let (value_bytes, null_bytes) = decode_int64_delta(data_blob, rc)?;
+                let data =
+                    Self::load_typed_vec::<i64>(&value_bytes, rc, temp_dir, col_name, "i64")?;
+                let nulls = Self::load_typed_vec::<u8>(null_bytes, rc, temp_dir, col_name, "null")?;
                 Ok(TypedColumn::Int64 { data, nulls })
             }
             "float64" => {

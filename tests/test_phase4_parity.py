@@ -129,7 +129,7 @@ def _parity_query(kg: KnowledgeGraph) -> list[tuple]:
 # Changing this digest without a format bump is a refactor bug — the
 # whole point of this test is to trip loudly when the `.kgl` byte layout
 # silently drifts.
-GOLDEN_V3_DIGEST = "459eeecdb65eb641cc3e1cba62ec1ef6c50583d426b6184e4cb781e15204649e"
+GOLDEN_V3_DIGEST = "c40fc56a3f90a1f13b9fb6284234292cf9044f16e690d1ded788c2af4deae561"
 
 # Phase A.1 / C5 cleared this set on the v3 → v4 format break. The
 # new v4 loader rejects v3 files (per the user-decided hard break
@@ -144,6 +144,15 @@ GOLDEN_V3_DIGEST = "459eeecdb65eb641cc3e1cba62ec1ef6c50583d426b6184e4cb781e15204
 # back to a working v4 era.
 ACCEPTABLE_DIGESTS: frozenset[str] = frozenset(
     {
+        # Demoted from GOLDEN_V3_DIGEST by the shape-convergence program's
+        # Phase 6b, which bumps the container to `.kgl` **v6**. Two things move
+        # the bytes: the magic (`RGF\x05` -> `RGF\x06`) and the per-column
+        # integer encoding choice v6 introduces — an `Int64` column may now be
+        # written as zigzag-varint deltas under the `"int64d"` tag when that is
+        # smaller than the fixed-width array. This IS a format change: 0.15.14
+        # refuses a v6 file by version number. This build still reads v5, which
+        # `tests/test_kgl_format_compat.py` pins against wheel-written files.
+        "459eeecdb65eb641cc3e1cba62ec1ef6c50583d426b6184e4cb781e15204649e",
         # Demoted from GOLDEN_V3_DIGEST by the shape-convergence program's
         # Phase 5(ii): `ColumnStore::push_id` now types the `__id__` column
         # from the first id pushed instead of always building a

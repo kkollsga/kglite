@@ -29,7 +29,7 @@ mod memory_graph_impl;
 pub mod mode;
 pub mod node_view;
 pub mod overflow;
-mod packed_codec;
+pub(crate) mod packed_codec;
 pub mod property_storage;
 pub(crate) mod slot_mirror;
 pub mod type_build_meta;

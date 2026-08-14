@@ -31,8 +31,8 @@ Defined at `crates/kglite/src/datatypes/values.rs`. Sixteen variants today:
 | **`List(Vec<Value>)`** | ordered heterogeneous list | LIST (sized) |
 | **`Map(BTreeMap<String, Value>)`** | string-keyed map (deterministic order) | MAP (sized) |
 
-Persistence uses the explicitly versioned RGF v5/Postcard container. The
-current reader accepts v5/Postcard and rejects v4/bincode and older containers
+Persistence uses the explicitly versioned RGF v6/Postcard container. The
+current reader accepts v6 and v5; it rejects v4/bincode and older containers
 with a clear migration/rebuild error.
 
 ## `NodeRef` vs `Node` — transient vs materialised
@@ -145,10 +145,10 @@ performance baselines cover this path.
 
 ## In `.kgl` files
 
-The current `.kgl` format is an RGF v5 binary container:
+The current `.kgl` format is an RGF v6 binary container:
 
 ```
-[0..4]    Magic: b"RGF\x05"
+[0..4]    Magic: b"RGF\x06"
 [4]       codec tag: Postcard
 [...]     core_data_version (currently 3)
 [8..12]   metadata_length: u32 LE

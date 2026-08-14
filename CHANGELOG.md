@@ -128,6 +128,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The `.kgl` container is now v6, and files this version saves cannot be read
+  by kglite 0.15.14 or earlier.** This build reads both v6 and v5, so every
+  existing file keeps loading and a `save()` migrates it forward; the break is
+  one-way and deliberate. An older binary handed a v6 file refuses it by
+  version number rather than misreading it — 0.15.14 raises
+  `kglite.FileFormatError: File uses .kgl container version 6, but this library
+  only supports up to version 5. Please upgrade kglite.` for `load()`,
+  `open()` and `from_bytes()` alike. Bundled MCP and Bolt binaries link the
+  engine, so a prebuilt one from an earlier release cannot read files this one
+  writes and must be rebuilt.
+
+  What v6 buys: an integer column is written as zigzag-varint *deltas* whenever
+  that is smaller than the fixed-width array, chosen per column and recorded in
+  the column's own type tag, then re-typed to the same in-memory column on
+  load. Nothing above the loader can tell which form a file used. This closes
+  the size regression the identity-column typing opened — the `__id__` column
+  became a raw 8-byte-per-row array, which is smaller than the previous
+  postcard encoding at 50k rows but larger at 6k — and goes well past merely
+  closing it. Measured on the three fixtures the program's file-size goalpost
+  is stated against, against what 0.15.14 writes for identical content: a clean
+  50k-node build 396,369 → 370,171 bytes (0.934×), a schema-growth ingest
+  stream 52,899 → 41,720 (0.789×), and a 50k-node graph with 40% deleted
+  312,020 → 133,231 (0.427×). The delete-heavy shape moves furthest because a
+  strided survivor set is what most disturbs the byte-level regularity the
+  fixed-width form was relying on compression to exploit, and least disturbs a
+  delta. Disk-mode graph directories are a separate format and are unchanged.
+
 - **Every graph is columnar from its first node; `save()` no longer changes the
   write regime.** A graph used to be built one way and saved another: node
   properties were laid out per node, in a row, and only the first `save()` (or

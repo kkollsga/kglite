@@ -1,0 +1,64 @@
+{
+  "counts": [
+    {
+      "events": 11
+    }
+  ],
+  "events": [
+    {
+      "id": 0,
+      "kind": "checkpointed",
+      "weight": 0.0
+    },
+    {
+      "id": 1,
+      "kind": "checkpointed",
+      "weight": 1.5
+    },
+    {
+      "id": 2,
+      "kind": "checkpointed",
+      "weight": 3.0
+    },
+    {
+      "id": 3,
+      "kind": "checkpointed",
+      "weight": 4.5
+    },
+    {
+      "id": 4,
+      "kind": "checkpointed",
+      "weight": 6.0
+    },
+    {
+      "id": 5,
+      "kind": "checkpointed",
+      "weight": 7.5
+    },
+    {
+      "id": 6,
+      "kind": "logged",
+      "weight": 9.0
+    },
+    {
+      "id": 7,
+      "kind": "logged",
+      "weight": 10.5
+    },
+    {
+      "id": 8,
+      "kind": "logged",
+      "weight": 12.0
+    },
+    {
+      "id": 9,
+      "kind": "logged",
+      "weight": 13.5
+    },
+    {
+      "id": 10,
+      "kind": "logged",
+      "weight": 15.0
+    }
+  ]
+}

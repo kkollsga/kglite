@@ -1,0 +1,97 @@
+{
+  "cities": [
+    {
+      "id": 100,
+      "name": "Oslo",
+      "population": 709037
+    },
+    {
+      "id": 101,
+      "name": "Bergen",
+      "population": 289330
+    }
+  ],
+  "companies": [
+    {
+      "founded": 1998,
+      "id": 10,
+      "name": "Acme"
+    },
+    {
+      "founded": 2004,
+      "id": 11,
+      "name": "Globex"
+    }
+  ],
+  "counts": [
+    {
+      "nodes": 8
+    }
+  ],
+  "lives_in": [
+    {
+      "city": 100,
+      "person": 1
+    },
+    {
+      "city": 101,
+      "person": 2
+    },
+    {
+      "city": 100,
+      "person": 3
+    },
+    {
+      "city": 101,
+      "person": 4
+    }
+  ],
+  "people": [
+    {
+      "active": true,
+      "age": 34,
+      "id": 1,
+      "name": "Alice",
+      "score": 1.5
+    },
+    {
+      "active": false,
+      "age": 41,
+      "id": 2,
+      "name": "Bob",
+      "score": 2.25
+    },
+    {
+      "active": true,
+      "age": 29,
+      "id": 3,
+      "name": "Carla",
+      "score": -0.75
+    },
+    {
+      "active": true,
+      "age": 57,
+      "id": 4,
+      "name": "Dan",
+      "score": 0.0
+    }
+  ],
+  "works_at": [
+    {
+      "company": 10,
+      "person": 1
+    },
+    {
+      "company": 10,
+      "person": 2
+    },
+    {
+      "company": 11,
+      "person": 3
+    },
+    {
+      "company": 11,
+      "person": 4
+    }
+  ]
+}

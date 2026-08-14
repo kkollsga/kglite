@@ -6,8 +6,10 @@ on 2026-05-12).
 
 Each `.kgl` is built synthetically by `build_fixtures.py` (see cover
 message) — deterministic, < 3 KB each, no dependency on real-world
-data. The committed binaries use the current RGF5/Postcard format and
-must be regenerated after a persistence-format change. Each is paired
+data. The committed binaries are RGF5/Postcard files, deliberately kept
+at v5: the current reader still accepts v5 (v6 is what it writes), so
+these double as read-compat coverage. They only need regenerating if v5
+support is ever dropped. Each is paired
 with a tiny `_mcp.yaml` declaring `name`,
 `instructions`, and the target category in `overview_prefix`.
 

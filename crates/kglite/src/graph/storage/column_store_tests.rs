@@ -397,7 +397,13 @@ fn packed_mixed_columns_round_trip_with_current_codec() {
     store.push_row(&[(key, Value::String("legacy-or-current".into()))]);
 
     let codec = crate::serde_codec::CURRENT_CODEC;
-    let packed = store.write_packed_with_codec(&interner, codec).unwrap();
+    let packed = store
+        .write_packed_with_codec(
+            &interner,
+            codec,
+            crate::graph::storage::packed_codec::IntColumnEncoding::Raw,
+        )
+        .unwrap();
     let loaded = ColumnStore::load_packed_with_codec(
         schema,
         &HashMap::new(),

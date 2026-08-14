@@ -69,12 +69,26 @@ mod atomic_save_tests {
         let g = tiny_graph(4);
         let mut buf: Vec<u8> = Vec::new();
         write_kgl_to(&g, &mut buf).unwrap();
-        assert_eq!(&buf[..4], &V5_MAGIC, "buffer must carry the v5 magic");
+        assert_eq!(&buf[..4], &V6_MAGIC, "buffer must carry the v6 magic");
         assert_eq!(
             buf[4],
             serde_codec::CodecVersion::PostcardV1.tag(),
-            "v5 header must select Postcard explicitly"
+            "v6 header must select Postcard explicitly"
         );
+        let loaded = load_kgl_bytes(&buf).unwrap();
+        assert_eq!(loaded.graph.node_count(), g.graph.node_count());
+    }
+
+    /// The v5 container is still decoded. This checks the *dispatch* only —
+    /// that a v5 magic reaches the shared reader rather than the
+    /// unrecognised-format arm; `tests/test_kgl_v5_compat.py` pins the real
+    /// thing against files a published 0.15.14 wheel wrote.
+    #[test]
+    fn v5_magic_still_reaches_the_shared_reader() {
+        let g = tiny_graph(4);
+        let mut buf: Vec<u8> = Vec::new();
+        write_kgl_to(&g, &mut buf).unwrap();
+        buf[3] = V5_MAGIC[3];
         let loaded = load_kgl_bytes(&buf).unwrap();
         assert_eq!(loaded.graph.node_count(), g.graph.node_count());
     }
@@ -88,16 +102,22 @@ mod atomic_save_tests {
     }
 
     #[test]
-    fn newer_container_and_invalid_v5_codec_are_rejected_clearly() {
-        let newer = [b'R', b'G', b'F', 6];
+    fn newer_container_and_invalid_codec_are_rejected_clearly() {
+        let newer = [b'R', b'G', b'F', 7];
         let error = load_kgl_bytes(&newer).err().unwrap().to_string();
-        assert!(error.contains("version 6") && error.contains("upgrade kglite"));
+        assert!(error.contains("version 7") && error.contains("upgrade kglite"));
 
-        let mut invalid = vec![b'R', b'G', b'F', 5, 99];
-        invalid.extend_from_slice(&CURRENT_CORE_DATA_VERSION.to_le_bytes());
-        invalid.extend_from_slice(&0u32.to_le_bytes());
-        let error = load_kgl_bytes(&invalid).err().unwrap().to_string();
-        assert!(error.contains("invalid codec tag"));
+        // Both readable containers validate the codec byte the same way.
+        for version in [5u8, 6u8] {
+            let mut invalid = vec![b'R', b'G', b'F', version, 99];
+            invalid.extend_from_slice(&CURRENT_CORE_DATA_VERSION.to_le_bytes());
+            invalid.extend_from_slice(&0u32.to_le_bytes());
+            let error = load_kgl_bytes(&invalid).err().unwrap().to_string();
+            assert!(
+                error.contains("invalid codec tag"),
+                "v{version} must report a bad codec byte, got: {error}"
+            );
+        }
     }
 
     /// A v3 (or otherwise unreadable) file is a hard break, but the error must
@@ -459,7 +479,7 @@ mod atomic_save_tests {
     }
 
     fn rewrite_metadata(buf: &[u8], mutate: impl FnOnce(&mut FileMetadata)) -> Vec<u8> {
-        assert_eq!(&buf[..4], &V5_MAGIC);
+        assert_eq!(&buf[..4], &V6_MAGIC);
         let old_len = u32::from_le_bytes(buf[9..13].try_into().unwrap()) as usize;
         let mut metadata: FileMetadata = serde_json::from_slice(&buf[13..13 + old_len]).unwrap();
         mutate(&mut metadata);
@@ -626,7 +646,7 @@ mod atomic_save_tests {
     /// and would re-add any key it knows about; this simulates a file written
     /// by a build whose `FileMetadata` never had the field at all.
     fn rewrite_metadata_json(buf: &[u8], mutate: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
-        assert_eq!(&buf[..4], &V5_MAGIC);
+        assert_eq!(&buf[..4], &V6_MAGIC);
         let old_len = u32::from_le_bytes(buf[9..13].try_into().unwrap()) as usize;
         let mut raw: serde_json::Value =
             serde_json::from_slice(&buf[13..13 + old_len]).expect("metadata is JSON");
@@ -715,7 +735,7 @@ mod atomic_save_tests {
     /// Parse the metadata JSON out of a v5 buffer, so a test can assert on the
     /// bytes actually written rather than on a round-tripped struct.
     fn metadata_json_of(buf: &[u8]) -> serde_json::Value {
-        assert_eq!(&buf[..4], &V5_MAGIC);
+        assert_eq!(&buf[..4], &V6_MAGIC);
         let len = u32::from_le_bytes(buf[9..13].try_into().unwrap()) as usize;
         serde_json::from_slice(&buf[13..13 + len]).expect("metadata is JSON")
     }

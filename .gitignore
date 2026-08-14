@@ -79,6 +79,13 @@ rust-core-coverage.lcov
 # from tests/fixtures/build_fixtures.py with a seeded RNG). These are tracked
 # in-repo so CI sees them; reproducible by re-running that script.
 !tests/fixtures/*.kgl
+# …and the v5 read-compat fixtures, which are the whole point of
+# tests/test_kgl_format_compat.py: `.kgl` files a published 0.15.14 wheel wrote,
+# in a container this build no longer emits. They cannot be regenerated from
+# this tree at all (tests/fixtures/build_v5_compat_fixtures.py needs the wheel),
+# so an ignore rule that swallowed them would delete the evidence.
+!tests/fixtures/kgl_v5/**/*.kgl
+!tests/fixtures/kgl_v5/**/*.kgl-wal
 
 # Sphinx docs build output
 docs/_build/

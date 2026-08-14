@@ -19,20 +19,31 @@ doubled its on-disk footprint, and nothing else here would notice.
 
 ## What the pinned numbers are
 
-Byte-exact sizes measured on this tree at **0.15.14** (`ddcd8bf6`), the release
-the goalpost is stated against, with a **+/-5%** band around each. The band is
-not a noise allowance — the writer is deterministic and every one of these was
-measured identical across repeated saves, which the `deterministic` arm below
-pins. It is the amount of layout change the program is allowed to spend before
-the user's goalpost is a live question rather than an accounting detail.
+Each shape carries two numbers. `*_BYTES_0_15_14` is what the released 0.15.14
+wheel writes for that shape — the goalpost's reference, and a hard ceiling: no
+cell may ever exceed it. `*_BYTES` is what *this* tree writes, pinned with a
+**+/-5%** band. The band is not a noise allowance — the writer is deterministic
+and every one of these was measured identical across repeated saves, which the
+`deterministic` arm below pins. It is the amount of layout change the program is
+allowed to spend before the user's goalpost is a live question rather than an
+accounting detail.
 
 The band is two-sided on purpose. A file that got *smaller* is good news and
 still has to be looked at: it means the content changed, and the cell was
-supposed to be holding content constant.
+supposed to be holding content constant. That is why a shrink lowers the pin
+rather than widening the band — the cell keeps gating drift in both directions
+around wherever the writer actually landed.
+
+Phase 6b (the `.kgl` v6 bump) is where the two numbers came apart. v6 lets an
+integer column pick a delta-varint encoding when that is smaller than the
+fixed-width array, and these three fixtures are exactly the shape that
+benefits: ids that count up, properties that cycle, and a delete pattern that
+leaves a regular stride. So every cell shrank well past the band, and every pin
+moved down to the measured v6 size with the 0.15.14 reference kept beside it.
 
 Gated at Phase 6 (the always-columnar flip) and Phase 10 (verification sweep).
-When these go red, the answer is a serializer that skips tombstones and does not
-materialise nulls — never a wider band.
+When these go red *upward*, the answer is a serializer that skips tombstones and
+does not materialise nulls — never a wider band.
 """
 
 from __future__ import annotations
@@ -66,14 +77,27 @@ GROWTH_PER_BATCH = 500
 #: Tolerance around each pinned size. See the module docstring.
 TOLERANCE = 0.05
 
-# ── Pinned sizes, measured 2026-08-13 on 0.15.14 (`ddcd8bf6`) ────────────────
+# ── The 0.15.14 reference, measured 2026-08-13 on `ddcd8bf6` ─────────────────
 #
-# Reproduce with: build the fixture below, `save()`, `os.path.getsize`. Every
-# shape was measured twice and returned identical bytes.
+# Reproduce with: install the published 0.15.14 wheel into an isolated venv,
+# build the fixture below, `save()`, `os.path.getsize`. Every shape was measured
+# twice and returned identical bytes. These are ceilings, never targets.
 
-CLEAN_BYTES = 396_369
-DELETE_HEAVY_BYTES = 312_020
-SCHEMA_GROWTH_BYTES = 52_899
+CLEAN_BYTES_0_15_14 = 396_369
+DELETE_HEAVY_BYTES_0_15_14 = 312_020
+SCHEMA_GROWTH_BYTES_0_15_14 = 52_899
+
+# ── Pinned sizes for this tree, measured 2026-08-14 (`.kgl` v6, Phase 6b) ────
+#
+# Ratios against the 0.15.14 reference above: 0.934x, 0.427x, 0.789x. The
+# delete-heavy cell moves the most because deleting every id where `id % 5 < 2`
+# leaves a *strided* survivor set: the fixed-width form of those columns lost
+# the byte-level regularity zstd had been exploiting (0.84 B/value, against
+# 0.30 in the clean cell), while their deltas stayed a short repeating pattern.
+
+CLEAN_BYTES = 370_171
+DELETE_HEAVY_BYTES = 133_231
+SCHEMA_GROWTH_BYTES = 41_720
 
 
 # ── Builders ─────────────────────────────────────────────────────────────────
@@ -144,17 +168,23 @@ def _saved_size(graph: kglite.KnowledgeGraph, path) -> int:
     return path.stat().st_size
 
 
-def _assert_within_band(actual: int, pinned: int, shape: str) -> None:
+def _assert_within_band(actual: int, pinned: int, reference: int, shape: str) -> None:
+    assert actual <= reference, (
+        f"{shape} .kgl is {actual:,} bytes; 0.15.14 wrote {reference:,} "
+        f"({actual / reference:.3f}x). The user goalpost for the "
+        "shape-convergence program is that the file never gets fatter for the "
+        "same logical content, so this is the ceiling that cannot move. Look "
+        "for tombstoned rows or null-backfilled columns reaching the "
+        "serializer."
+    )
     low = pinned * (1 - TOLERANCE)
     high = pinned * (1 + TOLERANCE)
     assert low <= actual <= high, (
-        f"{shape} .kgl is {actual:,} bytes; the 0.15.14 baseline is "
-        f"{pinned:,} ({actual / pinned:.3f}x, band {low:,.0f}-{high:,.0f}). "
-        "The user goalpost for the shape-convergence program is +/-5% on "
-        "identical logical content. If the file grew, look for tombstoned rows "
-        "or null-backfilled columns reaching the serializer; if it shrank, "
-        "check that the fixture still builds the same content. Widening this "
-        "band is not the fix."
+        f"{shape} .kgl is {actual:,} bytes; this tree's pin is {pinned:,} "
+        f"({actual / pinned:.3f}x, band {low:,.0f}-{high:,.0f}). If it shrank, "
+        "check that the fixture still builds the same content, then lower the "
+        "pin to the measured size and say in the comment what made it "
+        "smaller. Widening this band is not the fix."
     )
 
 
@@ -168,7 +198,12 @@ def test_clean_build_file_size(tmp_path):
     assert info["node_count"] == SIZE, "fixture drift: node count"
     assert info["edge_count"] == SIZE, "fixture drift: edge count"
 
-    _assert_within_band(_saved_size(graph, tmp_path / "clean.kgl"), CLEAN_BYTES, "clean")
+    _assert_within_band(
+        _saved_size(graph, tmp_path / "clean.kgl"),
+        CLEAN_BYTES,
+        CLEAN_BYTES_0_15_14,
+        "clean",
+    )
 
 
 def test_delete_heavy_file_size(tmp_path):
@@ -182,34 +217,14 @@ def test_delete_heavy_file_size(tmp_path):
     survivors = SIZE - sum(1 for i in range(SIZE) if i % DELETE_MODULUS < DELETE_KEEP_UNDER)
     assert graph.graph_info()["node_count"] == survivors, "fixture drift: survivor count"
 
-    _assert_within_band(_saved_size(graph, tmp_path / "deleted.kgl"), DELETE_HEAVY_BYTES, "delete-heavy")
+    _assert_within_band(
+        _saved_size(graph, tmp_path / "deleted.kgl"),
+        DELETE_HEAVY_BYTES,
+        DELETE_HEAVY_BYTES_0_15_14,
+        "delete-heavy",
+    )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "MEASURED, NOT WAIVED. Phase 5(ii) types the `__id__` column from the "
-        "first id pushed instead of leaving it `TypedColumn::Mixed`, which is "
-        "what makes it spillable (Mixed has no file representation, so it was "
-        "1.6 MB of unspillable heap at 50k rows). That changes the column's "
-        "on-the-wire encoding from postcard-tagged `Vec<Value>` to a raw LE i64 "
-        "array + null byte array, and the two encodings cross over with row "
-        "count: id-only graphs measured 6,601 -> 6,691 B at n=1k, 39,695 -> "
-        "43,674 B at n=6k, and 310,452 -> 297,993 B at n=50k. Small dense ids "
-        "fit a 2-byte varint; 8 raw bytes plus a null byte do not, until n is "
-        "large enough for the array's regularity to compress better. So this "
-        "6,000-row cell is +6.8% (52,899 -> 56,475) while the two 50k/30k cells "
-        "SHRANK to 0.958x and 0.970x. Attribution is exact: reverting only "
-        "`push_id`'s typing reproduces all three pinned sizes byte-for-byte. "
-        "The remedy is a serializer decision, not a test change - either write "
-        "`__id__` through whichever encoding is smaller and re-type it on load, "
-        "or accept the id column staying Mixed and lose the spill win. That is "
-        "a coordinator call for the Phase 6 gate, where these cells are gated; "
-        "the band stays +/-5% and the pin stays 52,899. strict=True: this goes "
-        "RED the moment the cell comes back into band, so the decision cannot "
-        "be lost."
-    ),
-)
 def test_schema_growth_file_size(tmp_path):
     """(c) Schema-growth stream: later batches introduce new properties.
 
@@ -217,11 +232,26 @@ def test_schema_growth_file_size(tmp_path):
     twelve, so `p11` is null for 11/12 of the rows. Materialising those nulls
     into the file rather than encoding their absence is the regression this
     cell is watching for.
+
+    This cell carried a strict xfail from Phase 5 to Phase 6b. Phase 5(ii)
+    typed the `__id__` column so it could be spilled (`Mixed` has no file
+    representation, so it had been 1.6 MB of unspillable heap at 50k rows),
+    which swapped its wire form from postcard-tagged `Vec<Value>` to a raw LE
+    i64 array — smaller at 50k rows, *larger* at 6k, and this cell is a 6k-row
+    cell: 52,899 -> 56,475 (+6.8%), out of band. The xfail said the remedy was
+    a serializer decision rather than a test change, and Phase 6b took it: v6
+    writes whichever of {fixed-width, delta-varint} is smaller per column, so
+    the same fixture is now 41,720 bytes. The pin moved down with it.
     """
     graph = _schema_growth_graph()
     assert graph.graph_info()["node_count"] == GROWTH_BATCHES * GROWTH_PER_BATCH, "fixture drift: node count"
 
-    _assert_within_band(_saved_size(graph, tmp_path / "growth.kgl"), SCHEMA_GROWTH_BYTES, "schema-growth")
+    _assert_within_band(
+        _saved_size(graph, tmp_path / "growth.kgl"),
+        SCHEMA_GROWTH_BYTES,
+        SCHEMA_GROWTH_BYTES_0_15_14,
+        "schema-growth",
+    )
 
 
 @pytest.mark.parametrize(

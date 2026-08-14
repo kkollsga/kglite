@@ -1,6 +1,7 @@
 //! Disk-mode lifecycle and persistence orchestration.
 
 use super::*;
+use crate::graph::storage::packed_codec::IntColumnEncoding;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static DISK_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -348,6 +349,8 @@ impl DirGraph {
                 .write_packed_with_codec(
                     &self.interner,
                     crate::serde_codec::CodecVersion::PostcardV1,
+                    // `KGLCOLv2` is its own container; `.kgl` v6 encodings do not apply.
+                    IntColumnEncoding::Raw,
                 )
                 .map_err(|e| format!("Column pack failed: {}", e))?;
             // Prefix with a magic tag + the ColumnStore's row_count so

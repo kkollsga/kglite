@@ -884,7 +884,7 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("  <group name=\"export\">\n");
     xml.push_str("    <method sig=\"export(path, format='graphml')\">Export as GraphML, GEXF, JSON (D3), or CSV.</method>\n");
     xml.push_str("    <method sig=\"export_csv(directory)\">CSV tree + blueprint.json (round-trips with from_blueprint).</method>\n");
-    xml.push_str("    <method sig=\"save(path)\">Binary .kgl v3 file (auto-columnar, supports larger-than-RAM loading).</method>\n");
+    xml.push_str("    <method sig=\"save(path)\">Binary .kgl v6 file (columnar, supports larger-than-RAM loading).</method>\n");
     xml.push_str("    <method sig=\"kglite.load(path)\">Restore from .kgl file.</method>\n");
     xml.push_str("  </group>\n");
 
@@ -1252,7 +1252,7 @@ pub(super) fn write_fluent_topic_export(xml: &mut String) {
         "      <m sig=\"export_string(format='graphml')\">Export to string (no file).</m>\n",
     );
     xml.push_str("      <m sig=\"export_csv(directory)\">CSV directory tree + blueprint.json (round-trips with from_blueprint).</m>\n");
-    xml.push_str("      <m sig=\"save(path)\">Binary .kgl v3 file (auto-columnar, supports larger-than-RAM loading).</m>\n");
+    xml.push_str("      <m sig=\"save(path)\">Binary .kgl v6 file (columnar, supports larger-than-RAM loading).</m>\n");
     xml.push_str("      <m sig=\"kglite.load(path)\">Restore from .kgl file.</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");

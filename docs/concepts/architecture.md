@@ -143,10 +143,10 @@ parsing.
 
 ## Persistence
 
-`.kgl` snapshots use the current RGF v5 container:
+`.kgl` snapshots use the current RGF v6 container:
 
 ```text
-magic RGF\x05
+magic RGF\x06
 codec tag (Postcard)
 core-data version (u32 LE)
 JSON metadata length + metadata
@@ -156,7 +156,7 @@ optional embeddings, timeseries, and secondary-label sections
 ```
 
 Container, codec, and core-data versions are separate. The current reader
-accepts RGF v5/Postcard only. RGF v4/bincode and older containers are detected
+accepts RGF v6 and RGF v5. RGF v4/bincode and older containers are detected
 and refused with a 0.13.4 conversion or rebuild message. Within v5, metadata
 additions use serde defaults where compatible, while incompatible embedded
 cache layouts are detected explicitly. Index definitions are stored so

@@ -2,8 +2,9 @@
 //
 // Versioned binary format for KnowledgeGraph persistence.
 //
-// File format v5 layout:
-//   [0..4]     Magic: b"RGF\x05" (Rusty Graph Format, version 5)
+// File format v6 layout (v5 is identical apart from the magic and the
+// per-column encodings noted below, and is still read):
+//   [0..4]     Magic: b"RGF\x06" (Rusty Graph Format, version 6)
 //   [4]        Codec tag: 2 (Postcard v1)
 //   [5..9]     core_data_version: u32 LE
 //   [9..13]    metadata_length: u32 LE
@@ -14,6 +15,14 @@
 //   [section]  timeseries.zst (optional)
 //   [section]  secondary_labels.zst (optional)
 //   [section]  vector_index.zst (optional, rebuildable)
+//
+// v6 vs v5: the section layout, metadata schema and codec are unchanged. What
+// v6 adds is a per-column encoding choice inside the packed column sections —
+// an `Int64` column may be written as `"int64d"` (zigzag-varint deltas) when
+// that is smaller than the fixed-width `"int64"` array, and is re-typed to the
+// same in-memory column on load. A v5 reader would take the unknown tag for a
+// `Mixed` column and fail decoding it, so the container version is what stops
+// it: this writer emits v6 only, and 0.15.14 refuses it by version number.
 //
 // Pre-v5 magic values are retained only for explicit rejection and migration
 // guidance; their payloads are never decoded by the current reader.
@@ -30,7 +39,7 @@ use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::property_storage::ColumnarRow;
 use crate::graph::storage::{GraphRead, GraphWrite};
 // This module no longer constructs `KnowledgeGraph` directly.
-// `load_file` / `load_disk_dir` / `load_v5` return
+// `load_file` / `load_disk_dir` / `load_portable_container` return
 // `Arc<DirGraph>`; the binding callsites wrap that in their own
 // ergonomic type (pyapi → `KnowledgeGraph`, mcp-server → its
 // own `ActiveGraph`, future Go/TS → their binding's struct).
@@ -63,7 +72,14 @@ const V4_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x04];
 
 /// Magic bytes for the v5 columnar format. v5 retains the v4 section layout
 /// but adds an explicit codec tag and writes Serde payloads with Postcard.
+/// Still read (v5 files outlive the binary that wrote them); no longer
+/// written.
 const V5_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x05];
+
+/// Magic bytes for the v6 columnar format — what this binary writes. v6 is v5
+/// plus per-column integer encodings inside the packed column sections (see
+/// the module header). Both are decoded by the same reader.
+const V6_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x06];
 
 /// Current core data version. Bump ONLY when NodeData, EdgeData, or Value enum changes.
 /// This is independent of metadata — metadata uses JSON and handles changes via serde defaults.
@@ -1331,7 +1347,7 @@ pub fn write_kgl_with(graph: &DirGraph, path: &str, fsync: bool) -> io::Result<(
 /// and durably (temp + fsync + rename — see [`write_kgl_with`]). Heavy
 /// I/O, safe to run without the GIL.
 ///
-/// The bytes are the v5 container: `V5_MAGIC`, an explicit Postcard codec
+/// The bytes are the v6 container: `V6_MAGIC`, an explicit Postcard codec
 /// tag, and `CURRENT_CORE_DATA_VERSION`.
 ///
 /// The graph MUST have columnar storage enabled before calling this function.
@@ -1372,7 +1388,12 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
     let mut column_stores_sorted: Vec<(&str, &Arc<ColumnStore>)> = graph.column_stores_by_name();
     column_stores_sorted.sort_by(|a, b| a.0.cmp(b.0));
     for (type_name, store) in column_stores_sorted {
-        let packed = store.write_packed_with_codec(&graph.interner, codec)?;
+        let packed = store.write_packed_with_codec(
+            &graph.interner,
+            codec,
+            // v6: integer columns pick their smaller encoding per column.
+            crate::graph::storage::packed_codec::IntColumnEncoding::Auto,
+        )?;
         let compressed = zstd_compress(&packed)?;
         drop(packed); // free uncompressed before next type
 
@@ -1381,6 +1402,10 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
         for (slot, ik) in store.schema().iter() {
             let prop_name = graph.interner.resolve(ik);
             if let Some(col) = store.columns_ref().get(slot as usize) {
+                // The *logical* column type. The per-column encoding actually
+                // used lives in the section itself (a v6 `Int64` column may be
+                // written delta-varint); the loader reads the section's tag and
+                // uses these entries only for their key set.
                 cols.insert(prop_name.to_string(), col.type_tag().to_string());
             }
         }
@@ -1467,7 +1492,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
 
     // Header: magic (4B) + codec (1B) + core_data_version (4B) +
     // metadata_length (4B). The codec byte prevents implicit byte sniffing.
-    writer.write_all(&V5_MAGIC)?;
+    writer.write_all(&V6_MAGIC)?;
     writer.write_all(&[codec.tag()])?;
     writer.write_all(&CURRENT_CORE_DATA_VERSION.to_le_bytes())?;
     writer.write_all(&(metadata_json.len() as u32).to_le_bytes())?;
@@ -1666,8 +1691,11 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
                 "File is too small to be a valid kglite file.",
             ));
         }
+        if mmap[..4] == V6_MAGIC {
+            return load_portable_container(&mmap, "v6");
+        }
         if mmap[..4] == V5_MAGIC {
-            return load_v5(&mmap);
+            return load_portable_container(&mmap, "v5");
         }
         if mmap[..4] == V4_MAGIC {
             return Err(pre_014_bincode_error(".kgl container v4"));
@@ -1675,7 +1703,7 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
         if mmap[..4] == V3_MAGIC {
             return Err(io::Error::other(V3_HARD_BREAK_MSG));
         }
-        if mmap[..3] == V5_MAGIC[..3] && mmap[3] > V5_MAGIC[3] {
+        if mmap[..3] == V6_MAGIC[..3] && mmap[3] > V6_MAGIC[3] {
             return Err(newer_portable_format_error(mmap[3]));
         }
         return Err(io::Error::other(
@@ -1694,13 +1722,15 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
             "File is too small to be a valid kglite file.",
         ));
     }
-    if buf[..4] == V5_MAGIC {
-        load_v5(&buf)
+    if buf[..4] == V6_MAGIC {
+        load_portable_container(&buf, "v6")
+    } else if buf[..4] == V5_MAGIC {
+        load_portable_container(&buf, "v5")
     } else if buf[..4] == V4_MAGIC {
         Err(pre_014_bincode_error(".kgl container v4"))
     } else if buf[..4] == V3_MAGIC {
         Err(io::Error::other(V3_HARD_BREAK_MSG))
-    } else if buf[..3] == V5_MAGIC[..3] && buf[3] > V5_MAGIC[3] {
+    } else if buf[..3] == V6_MAGIC[..3] && buf[3] > V6_MAGIC[3] {
         Err(newer_portable_format_error(buf[3]))
     } else {
         Err(io::Error::other(
@@ -1725,13 +1755,15 @@ pub fn load_kgl_bytes(data: &[u8]) -> io::Result<Arc<DirGraph>> {
             "Byte buffer is too small to be a valid kglite graph.",
         ));
     }
-    if data[..4] == V5_MAGIC {
-        load_v5(data)
+    if data[..4] == V6_MAGIC {
+        load_portable_container(data, "v6")
+    } else if data[..4] == V5_MAGIC {
+        load_portable_container(data, "v5")
     } else if data[..4] == V4_MAGIC {
         Err(pre_014_bincode_error(".kgl container v4"))
     } else if data[..4] == V3_MAGIC {
         Err(io::Error::other(V3_HARD_BREAK_MSG))
-    } else if data[..3] == V5_MAGIC[..3] && data[3] > V5_MAGIC[3] {
+    } else if data[..3] == V6_MAGIC[..3] && data[3] > V6_MAGIC[3] {
         Err(newer_portable_format_error(data[3]))
     } else {
         Err(io::Error::other(
@@ -1746,7 +1778,7 @@ pub fn load_kgl_bytes(data: &[u8]) -> io::Result<Arc<DirGraph>> {
 fn newer_portable_format_error(version: u8) -> io::Error {
     io::Error::other(format!(
         "File uses .kgl container version {version}, but this library only supports up to version {}. Please upgrade kglite.",
-        V5_MAGIC[3]
+        V6_MAGIC[3]
     ))
 }
 
@@ -2150,22 +2182,31 @@ fn apply_disk_metadata(dir: &std::path::Path, graph: &mut DirGraph) -> io::Resul
     Ok(())
 }
 
-fn load_v5(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
+/// Decode a v5 or v6 container. The two share a header, a codec and a section
+/// layout; they differ only in which per-column encodings the column sections
+/// may use, and the column reader dispatches on the section's own type tags.
+/// `format_name` is the version the caller matched, and appears in errors.
+fn load_portable_container(buf: &[u8], format_name: &str) -> io::Result<Arc<DirGraph>> {
     if buf.len() < 13 {
-        return Err(invalid_data("v5 file is truncated — header incomplete"));
+        return Err(invalid_data(format!(
+            "{format_name} file is truncated — header incomplete"
+        )));
     }
-    let codec = serde_codec::CodecVersion::from_tag(buf[4])
-        .map_err(|e| invalid_data(format!("v5 header has an invalid codec tag: {e}")))?;
+    let codec = serde_codec::CodecVersion::from_tag(buf[4]).map_err(|e| {
+        invalid_data(format!(
+            "{format_name} header has an invalid codec tag: {e}"
+        ))
+    })?;
     if codec != serde_codec::CodecVersion::PostcardV1 {
         return Err(invalid_data(format!(
-            "v5 header selects codec {}, but v5 requires Postcard codec {}",
+            "{format_name} header selects codec {}, but {format_name} requires Postcard codec {}",
             codec.tag(),
             serde_codec::CodecVersion::PostcardV1.tag()
         )));
     }
     let core_version = u32::from_le_bytes([buf[5], buf[6], buf[7], buf[8]]);
     let metadata_len = u32::from_le_bytes([buf[9], buf[10], buf[11], buf[12]]) as usize;
-    load_portable_columnar(buf, "v5", codec, core_version, metadata_len, 13)
+    load_portable_columnar(buf, format_name, codec, core_version, metadata_len, 13)
 }
 
 struct PortableSectionPlan {
@@ -2347,7 +2388,7 @@ fn load_portable_optional_sections(
     Ok(())
 }
 
-/// Load the shared v4/v5 columnar section layout through the codec selected by
+/// Load the shared v5/v6 columnar section layout through the codec selected by
 /// the already-validated container header.
 fn load_portable_columnar(
     buf: &[u8],

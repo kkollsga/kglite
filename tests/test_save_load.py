@@ -113,7 +113,7 @@ class TestV3Format:
     """
 
     def test_v3_magic_bytes(self):
-        """Saved files should start with v5 magic and Postcard codec tag 2."""
+        """Saved files should start with v6 magic and Postcard codec tag 2."""
         graph = KnowledgeGraph()
         df = pd.DataFrame({"id": [1], "name": ["A"]})
         graph.add_nodes(df, "Node", "id", "name")
@@ -124,7 +124,7 @@ class TestV3Format:
             graph.save(path)
             with open(path, "rb") as f:
                 header = f.read(5)
-            assert header == b"RGF\x05\x02", f"Expected v5/Postcard header, got {header!r}"
+            assert header == b"RGF\x06\x02", f"Expected v6/Postcard header, got {header!r}"
         finally:
             os.unlink(path)
 
@@ -146,7 +146,7 @@ class TestV3Format:
                 core_version = struct.unpack("<I", f.read(4))[0]
                 metadata_len = struct.unpack("<I", f.read(4))[0]
 
-            assert magic == b"RGF\x05"
+            assert magic == b"RGF\x06"
             assert codec == b"\x02"
             # 2 — Phase A.1 (Value enum); 3 — 0.10.29 (embedding model_id + text_hashes)
             assert core_version == 3
