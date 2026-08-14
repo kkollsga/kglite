@@ -1,7 +1,7 @@
 //! Cypher parser: MATCH / OPTIONAL MATCH clause + pattern extraction.
 
 use super::super::ast::*;
-use super::super::tokenizer::{keyword_name_token, CypherToken};
+use super::super::tokenizer::{keyword_name_token, reserved_literal_name_token, CypherToken};
 use super::CypherParser;
 
 impl CypherParser {
@@ -210,11 +210,20 @@ impl CypherParser {
     }
 
     /// Extract tokens forming a pattern inside EXISTS { ... }, stopping at RBrace or comma.
-    /// Re-serialize an identifier, adding backticks if it contains spaces or special chars.
+    /// Re-serialize an identifier, adding backticks if it contains spaces or
+    /// special chars, or if the secondary pattern lexer would read the bare
+    /// word back as something other than an identifier.
     ///
     /// Quoting always routes through [`backtick_quote`], so an identifier that
     /// itself contains a backtick survives the round trip through the secondary
     /// pattern lexer instead of terminating the quote early.
+    ///
+    /// The second condition is the one that closes the mint-but-never-query
+    /// trap: a token that reached the parser as `` `TRUE` `` is a plain
+    /// `Identifier` by then, and emitting it bare handed the secondary lexer a
+    /// boolean. The word list lives with that lexer
+    /// ([`crate::graph::core::pattern_matching::parser::bare_word_needs_quoting`])
+    /// because it is a property of *its* grammar, not of this emitter.
     pub(super) fn quote_identifier(s: &str) -> String {
         if s.contains(' ')
             || s.contains('-')
@@ -223,6 +232,7 @@ impl CypherParser {
             || s.contains('(')
             || s.contains(')')
             || s.contains('`')
+            || crate::graph::core::pattern_matching::parser::bare_word_needs_quoting(s)
         {
             backtick_quote(s)
         } else {
@@ -244,6 +254,8 @@ impl CypherParser {
         let mut parts = Vec::new();
         let mut paren_depth = 0i32;
         let mut bracket_depth = 0i32;
+        let mut brace_depth = 0i32;
+        let mut prev: Option<CypherToken> = None;
 
         while self.has_tokens() {
             // Stop at the caller-supplied end-token (RBrace for EXISTS,
@@ -288,8 +300,14 @@ impl CypherParser {
                     bracket_depth -= 1;
                     parts.push("]".to_string());
                 }
-                CypherToken::LBrace => parts.push("{".to_string()),
-                CypherToken::RBrace => parts.push("}".to_string()),
+                CypherToken::LBrace => {
+                    brace_depth += 1;
+                    parts.push("{".to_string());
+                }
+                CypherToken::RBrace => {
+                    brace_depth -= 1;
+                    parts.push("}".to_string());
+                }
                 CypherToken::Colon => parts.push(":".to_string()),
                 CypherToken::Comma => parts.push(",".to_string()),
                 CypherToken::Dash => parts.push("-".to_string()),
@@ -306,6 +324,17 @@ impl CypherParser {
                 }
                 CypherToken::IntLit(n) => parts.push(n.to_string()),
                 CypherToken::FloatLit(f) => parts.push(f.to_string()),
+                // A value-literal word in a NAME position — see
+                // `at_name_position`. Backtick its verbatim lexeme so the
+                // secondary lexer reads a name, not a boolean.
+                tok @ (CypherToken::True | CypherToken::False | CypherToken::Null)
+                    if at_name_position(prev.as_ref(), self.peek(), brace_depth) =>
+                {
+                    let name = self
+                        .keyword_lexeme_at(self.pos - 1)
+                        .unwrap_or_else(|| reserved_literal_name_token(tok).unwrap());
+                    parts.push(backtick_quote(name));
+                }
                 CypherToken::True => parts.push("true".to_string()),
                 CypherToken::False => parts.push("false".to_string()),
                 // Re-serialize `$param` so the inner pattern parser sees it
@@ -329,6 +358,7 @@ impl CypherParser {
                     return Err(format!("Unexpected token in EXISTS pattern: {:?}", token));
                 }
             }
+            prev = Some(token);
         }
 
         Ok(parts.join(" "))
@@ -341,6 +371,8 @@ impl CypherParser {
         let mut parts = Vec::new();
         let mut paren_depth = 0i32;
         let mut bracket_depth = 0i32;
+        let mut brace_depth = 0i32;
+        let mut prev: Option<CypherToken> = None;
 
         while self.has_tokens() {
             // Stop at clause boundaries (only at top level)
@@ -410,8 +442,14 @@ impl CypherParser {
                     bracket_depth -= 1;
                     parts.push("]".to_string());
                 }
-                CypherToken::LBrace => parts.push("{".to_string()),
-                CypherToken::RBrace => parts.push("}".to_string()),
+                CypherToken::LBrace => {
+                    brace_depth += 1;
+                    parts.push("{".to_string());
+                }
+                CypherToken::RBrace => {
+                    brace_depth -= 1;
+                    parts.push("}".to_string());
+                }
                 CypherToken::Colon => parts.push(":".to_string()),
                 CypherToken::Comma => parts.push(",".to_string()),
                 CypherToken::Dash => parts.push("-".to_string()),
@@ -428,6 +466,17 @@ impl CypherParser {
                 }
                 CypherToken::IntLit(n) => parts.push(n.to_string()),
                 CypherToken::FloatLit(f) => parts.push(f.to_string()),
+                // A value-literal word in a NAME position — see
+                // `at_name_position`. Backtick its verbatim lexeme so the
+                // secondary lexer reads a name, not a boolean.
+                tok @ (CypherToken::True | CypherToken::False | CypherToken::Null)
+                    if at_name_position(prev.as_ref(), self.peek(), brace_depth) =>
+                {
+                    let name = self
+                        .keyword_lexeme_at(self.pos - 1)
+                        .unwrap_or_else(|| reserved_literal_name_token(tok).unwrap());
+                    parts.push(backtick_quote(name));
+                }
                 CypherToken::True => parts.push("true".to_string()),
                 CypherToken::False => parts.push("false".to_string()),
                 CypherToken::Parameter(name) => {
@@ -449,6 +498,7 @@ impl CypherParser {
                     return Err(format!("Unexpected token in MATCH pattern: {:?}", token));
                 }
             }
+            prev = Some(token);
         }
 
         Ok(parts.join(""))
@@ -457,6 +507,40 @@ impl CypherParser {
     // ========================================================================
     // WHERE Clause
     // ========================================================================
+}
+
+/// Does the token just consumed by a pattern re-serializer occupy a **name**
+/// position — a label, a relationship type, or a property key — rather than a
+/// value position?
+///
+/// The re-serializer walks a flat token stream, so this is the whole of its
+/// grammar knowledge, and it is deliberately small because a pattern's
+/// structure is: names follow `:` (label / relationship type) or `|` (type
+/// alternation) outside any property map, and a property map's keys are the
+/// tokens immediately before their `:`. Everything else at map depth 0 is a
+/// variable position, where openCypher's `Variable = SymbolicName` excludes
+/// the reserved words — refusing them there is what keeps MATCH symmetric with
+/// CREATE, whose variable slot takes an `Identifier` only.
+///
+/// `brace_depth` counts open `{` of inline property maps; `prev` and `next`
+/// are the surrounding tokens (`None` at the ends of the pattern).
+///
+/// **Extension point (T10, dynamic labels).** This is the single place that
+/// answers "is this token a name here?", so a second token class joins by
+/// adding one guarded arm at each of the two call sites below and reusing this
+/// predicate — `$(...)` parameter labels are name-position tokens by exactly
+/// this rule, and must not disturb the `$param` *value* arm that already
+/// exists a few lines above them.
+fn at_name_position(
+    prev: Option<&CypherToken>,
+    next: Option<&CypherToken>,
+    brace_depth: i32,
+) -> bool {
+    if brace_depth > 0 {
+        matches!(next, Some(CypherToken::Colon))
+    } else {
+        matches!(prev, Some(CypherToken::Colon) | Some(CypherToken::Pipe))
+    }
 }
 
 /// Wrap `name` in backticks, doubling any backtick it contains.

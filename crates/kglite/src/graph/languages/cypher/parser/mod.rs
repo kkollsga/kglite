@@ -14,7 +14,9 @@
 //! Rust merges them at codegen.
 
 use super::ast::*;
-use super::tokenizer::{keyword_name_token, token_to_keyword_name, CypherToken};
+use super::tokenizer::{
+    keyword_name_token, reserved_literal_name_token, token_to_keyword_name, CypherToken,
+};
 #[cfg(test)]
 use crate::datatypes::values::Value;
 use crate::error::KgError;
@@ -302,17 +304,27 @@ impl CypherParser {
     }
 
     /// Consume the next token as a NAME — a node label, relationship type, or
-    /// property key. Accepts an identifier verbatim, or a soft-reservable
+    /// property key. Accepts an identifier verbatim, a soft-reservable
     /// keyword via `keyword_name_token` (KG-2: `[:CONTAINS]`, `(:CONTAINS)`,
-    /// `{contains: 1}`). `context` names the position for the error message,
-    /// preserving the original "Expected <X>" wording. Case-preserving: a
-    /// keyword name keeps its verbatim source spelling (`{order: 1}` stores
-    /// key `order`), falling back to the canonical uppercase word when no
-    /// lexeme table is present (unit tests).
+    /// `{contains: 1}`), or one of the value-literal words via
+    /// `reserved_literal_name_token` (`(:TRUE)`, `{null: 1}` — legal schema
+    /// names in openCypher 9, where `SchemaName = SymbolicName | ReservedWord`).
+    /// `context` names the position for the error message, preserving the
+    /// original "Expected <X>" wording. Case-preserving: a keyword name keeps
+    /// its verbatim source spelling (`{order: 1}` stores key `order`), falling
+    /// back to the canonical uppercase word when no lexeme table is present
+    /// (unit tests).
+    ///
+    /// This is a **name position by construction** — every caller has already
+    /// consumed the `:`, `.` or `{` that makes the next token a name — so
+    /// accepting TRUE / FALSE / NULL here cannot reach a value position. The
+    /// value positions are parsed by `parse_expression` / `parse_value`, which
+    /// never route through this function; `{x: true}` stays a boolean.
     pub(super) fn expect_name(&mut self, context: &str) -> Result<String, String> {
         match self.advance().cloned() {
             Some(CypherToken::Identifier(name)) => Ok(name),
             Some(ref token) => keyword_name_token(token)
+                .or_else(|| reserved_literal_name_token(token))
                 .map(|canonical| {
                     self.keyword_lexeme_at(self.pos - 1)
                         .map(str::to_string)

@@ -10,8 +10,14 @@ sort / set / mutation words like CONTAINS / IN / STARTS / ORDER / MERGE) is
 accepted as a NAME in every name-position — relationship types, node labels,
 property keys, and property access — across MATCH / CREATE / MERGE / SET /
 REMOVE / WHERE and EXISTS subqueries. Structurally load-bearing words
-(AND / OR / WHERE / clause keywords) and value keywords (NULL / TRUE / CASE …)
-stay reserved and error clearly; the backtick escape hatch still works.
+(AND / OR / WHERE / clause keywords) and the value-expression keywords
+(CASE / WHEN / END / EXISTS) stay reserved and error clearly; the backtick
+escape hatch still works.
+
+The three value literals — NULL / TRUE / FALSE — joined the name-position set
+later, per openCypher's ``SchemaName = SymbolicName | ReservedWord``: they are
+names after a ``:`` or ``|`` and on the key side of a property map, and stay
+literals everywhere else. They are still *not* variable names.
 
 Run: pytest tests/test_cypher_keyword_names.py
 """
@@ -177,3 +183,38 @@ def test_reserved_words_still_error_with_backtick_escape():
     # Backtick escape works for the reserved word.
     g.cypher("CREATE (q:Q {`where`: 7})")
     assert g.cypher("MATCH (n:Q) RETURN n.`where` AS v").to_list() == [{"v": 7}]
+
+
+def test_value_literal_words_are_names_in_name_positions_only():
+    """TRUE / FALSE / NULL as label, rel type and property key — and still
+    literals in every value position.
+
+    The reported trap was an asymmetry, not a missing feature: ``CREATE
+    (:`TRUE` {x: 1})`` succeeded while ``MATCH (n:`TRUE`)`` failed, so the
+    label could be minted and never queried. Both spellings, bare and
+    backticked, now work in both parsers.
+    """
+    g = KnowledgeGraph()
+    g.cypher("CREATE (:TRUE {id: 1, null: 7, on: true})-[:FALSE]->(:Thing {id: 2})")
+
+    assert g.cypher("MATCH (n:TRUE) RETURN count(n) AS n").scalar() == 1
+    assert g.cypher("MATCH (n:`TRUE`) RETURN count(n) AS n").scalar() == 1
+    assert g.cypher("MATCH ()-[:FALSE]->(t:Thing) RETURN t.id AS id").scalar() == 2
+    assert g.cypher("MATCH (n:TRUE {null: 7}) RETURN n.null AS v").scalar() == 7
+
+    # Value positions are untouched: `on: true` is a boolean, not a name.
+    assert g.cypher("MATCH (n:TRUE {on: true}) RETURN n.id AS id").scalar() == 1
+    assert g.cypher("MATCH (n:TRUE) WHERE n.on = true RETURN n.id AS id").scalar() == 1
+    assert g.cypher("RETURN true AS t").scalar() is True
+
+
+def test_value_literal_words_are_not_bare_variables_in_either_parser():
+    """The symmetry that keeps the trap closed: refused by CREATE *and* MATCH."""
+    g = KnowledgeGraph()
+    with pytest.raises(Exception):
+        g.cypher("CREATE (true:Thing {id: 1})")
+    with pytest.raises(Exception):
+        g.cypher("MATCH (true:Thing) RETURN 1")
+    # Backticked, it is an ordinary variable in both.
+    g.cypher("CREATE (`true`:Thing {id: 1})")
+    assert g.cypher("MATCH (`true`:Thing) RETURN `true`.id AS id").scalar() == 1

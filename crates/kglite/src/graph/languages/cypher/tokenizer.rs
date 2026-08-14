@@ -698,6 +698,10 @@ pub fn token_to_keyword_name(token: &CypherToken) -> Option<String> {
 /// THEN / ELSE / END, EXISTS) — because those can legitimately appear as a
 /// property *value* in an inline map (`{x: null}`) and must not be mis-read as
 /// a name. The backtick escape hatch still works for any excluded word.
+///
+/// The three *value-literal* words it excludes — TRUE / FALSE / NULL — are
+/// handled by [`reserved_literal_name_token`] instead, because for them the
+/// grammar position, not a table, decides.
 pub fn keyword_name_token(token: &CypherToken) -> Option<&'static str> {
     let name = match token {
         CypherToken::Contains => "CONTAINS",
@@ -735,6 +739,38 @@ pub fn keyword_name_token(token: &CypherToken) -> Option<&'static str> {
         _ => return None,
     };
     Some(name)
+}
+
+/// Canonical UPPERCASE word for one of the three **value-literal** keywords —
+/// TRUE, FALSE, NULL — when it is used as a NAME. Returns `None` for every
+/// other token.
+///
+/// These are deliberately NOT in [`keyword_name_token`]. That table answers
+/// "may this word be a name *anywhere* a name is expected", and its members are
+/// safe there because they cannot also be a value. TRUE / FALSE / NULL can be
+/// both, so only the grammar position separates them: openCypher 9 spells a
+/// label, relationship type or property key as
+/// `SchemaName = SymbolicName | ReservedWord`, and lists all three under
+/// `ReservedWord` — while a variable is `SymbolicName` alone, which excludes
+/// them. Neo4j 25 matches that for the schema half
+/// (`labelType : COLON symbolicNameString`, whose unescaped alternatives
+/// include TRUE / FALSE / NULL).
+///
+/// So the consumers are the *name* positions only:
+/// [`super::parser::CypherParser::expect_name`] (label, relationship type,
+/// property key, map key) and the MATCH-pattern re-serializer's name arm. A
+/// value position never consults this and keeps reading the literal
+/// (`{x: true}`, `WHERE n.x = true`, `RETURN null`). As with the soft
+/// keywords, the NAME actually stored is the verbatim source lexeme; the
+/// uppercase word here is only the fallback for parsers built without a lexeme
+/// table (unit tests).
+pub fn reserved_literal_name_token(token: &CypherToken) -> Option<&'static str> {
+    match token {
+        CypherToken::True => Some("TRUE"),
+        CypherToken::False => Some("FALSE"),
+        CypherToken::Null => Some("NULL"),
+        _ => None,
+    }
 }
 
 // ============================================================================

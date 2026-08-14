@@ -109,6 +109,25 @@ fn opens_signed_number(chars: &Peekable<Chars<'_>>) -> bool {
     }
 }
 
+/// Would `word`, written bare into a pattern string, lex as something other
+/// than an [`Token::Identifier`]?
+///
+/// **This is the emitter's obligation, and it belongs here** — next to the
+/// lexer that creates the hazard. Pattern strings are not written by users;
+/// they are *re-serialized* from an already-tokenized Cypher query by
+/// `languages::cypher::parser::match_pattern`, which has to reproduce every
+/// name it received. An identifier that this tokenizer would read back as a
+/// literal has to be emitted backtick-quoted, or the name silently changes
+/// meaning in transit — which is exactly how a backticked `` `TRUE` `` label
+/// could be created and never matched: the escape was dropped and the
+/// secondary lexer re-read a boolean.
+///
+/// Keep this in step with the identifier arm of [`tokenize`]; the agreement is
+/// pinned by `quoting_predicate_agrees_with_the_tokenizer`.
+pub fn bare_word_needs_quoting(word: &str) -> bool {
+    word.eq_ignore_ascii_case("true") || word.eq_ignore_ascii_case("false")
+}
+
 pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
@@ -826,6 +845,34 @@ mod tests {
                 Token::RParen,
             ]
         );
+    }
+
+    #[test]
+    fn quoting_predicate_agrees_with_the_tokenizer() {
+        // `bare_word_needs_quoting` tells the pattern re-serializer which
+        // names it may write bare. If it ever disagrees with this tokenizer,
+        // a name changes meaning in transit — the create-then-match asymmetry
+        // that made a backticked `TRUE` label unmatchable. Both directions
+        // are checked, so the predicate can neither under- nor over-claim.
+        for word in [
+            "true", "TRUE", "True", "false", "FALSE", "fAlSe", "null", "NULL", "Person", "order",
+            "contains", "x", "_x", "t1",
+        ] {
+            let lexes_as_itself = matches!(
+                tokenize(word).unwrap().as_slice(),
+                [Token::Identifier(s)] if s == word
+            );
+            assert_eq!(
+                bare_word_needs_quoting(word),
+                !lexes_as_itself,
+                "{word:?}: the quoting predicate and the tokenizer disagree"
+            );
+            // And the escape always works, whatever the verdict.
+            assert_eq!(
+                tokenize(&format!("`{word}`")).unwrap(),
+                vec![Token::Identifier(word.to_string())]
+            );
+        }
     }
 
     #[test]

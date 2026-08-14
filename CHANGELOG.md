@@ -68,6 +68,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`TRUE`, `FALSE` and `NULL` work as names everywhere, or nowhere — the
+  mint-but-never-query trap is closed.** ``CREATE (:`TRUE` {x: 1})`` succeeded
+  while ``MATCH (n:`TRUE`)`` failed with a syntax error, so a caller could mint
+  a label it could never query back. The MATCH path re-serializes its token
+  stream for the pattern parser, and the backtick escape was dropped in
+  transit: the bare word was re-read as a boolean. Escaping now survives the
+  round trip, and the three words are additionally accepted **bare** in the
+  name positions — label, relationship type, property key, and the type after a
+  `|` alternation — matching openCypher, which spells a schema name as
+  `SchemaName = SymbolicName | ReservedWord` and lists all three under
+  `ReservedWord`, and Neo4j 5/25, whose `labelType : COLON symbolicNameString`
+  does the same. So `CREATE (:TRUE {null: 1})-[:FALSE]->(:Thing)` and the
+  matching `MATCH` both parse, in both parsers, with the verbatim source
+  spelling preserved as for every other keyword name. **Position still
+  decides**, and value positions are unchanged: `{x: true}` is a boolean
+  property, `WHERE n.x = true` a boolean comparison, `RETURN null` null.
+  Variable positions are the one place the words stay reserved — `MATCH
+  (true:Thing)` is still an error, in *both* parsers, because openCypher's
+  `Variable = SymbolicName` excludes them and a bare `true` in an expression is
+  the literal, so such a variable could never be read back; backticks make it
+  an ordinary variable.
 - **`OPTIONAL MATCH ... WHERE` no longer deletes the rows it was supposed to
   null-extend.** The predicate now belongs to the `OPTIONAL MATCH`, as
   openCypher's grammar and Neo4j both define it: it is applied while looking

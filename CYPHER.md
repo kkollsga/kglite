@@ -2375,14 +2375,41 @@ where a lowercase source now reads `order`; backticks reach the old spelling.)
 The soft set covers the operator / comparison / sort / set / mutation
 keywords (`CONTAINS`, `IN`, `IS`, `NOT`, `STARTS`, `ENDS`, `ORDER`, `BY`,
 `ASC`, `DESC`, `DISTINCT`, `ALL`, `MERGE`, `CREATE`, `DELETE`, `SET`,
-`REMOVE`, `UNION`, …). A few keywords stay **reserved** to avoid ambiguity:
-the clause-flow words (`MATCH`, `WHERE`, `RETURN`, `WITH`, `AND`, `OR`, …)
-and the value keywords (`NULL`, `TRUE`, `FALSE`, `CASE`/`WHEN`/`END`,
-`EXISTS`). For any reserved word, quote it with **backticks**:
+`REMOVE`, `UNION`, …), **and the value literals `TRUE`, `FALSE` and `NULL`**
+— openCypher spells a schema name as `SchemaName = SymbolicName |
+ReservedWord`, so those three are legal labels, relationship types and
+property keys:
 
 ```cypher
-CREATE (n:Doc {`where`: 1, `null`: 'x'})
+CREATE (:TRUE {null: 1})-[:FALSE]->(:Thing)
+MATCH  (n:TRUE {null: 1})-[:FALSE]->() RETURN n.null
+```
+
+**Position decides.** The same word in a *value* position is still the
+literal, and nothing about that changed: `{x: true}` is a boolean property,
+`WHERE n.x = true` is a boolean comparison, `RETURN null` is null. Only the
+name positions — after the `:` of a label or relationship type, after the `|`
+of a type alternation, and the key side of a property map — read them as
+names.
+
+The remaining reserved words are the clause-flow keywords (`MATCH`, `WHERE`,
+`RETURN`, `WITH`, `AND`, `OR`, …) and the value-expression keywords
+(`CASE`/`WHEN`/`END`, `EXISTS`). For any of those, quote it with
+**backticks**:
+
+```cypher
+CREATE (n:Doc {`where`: 1})
 RETURN n.`where`
+```
+
+**Variables are the exception, in both directions.** `TRUE`, `FALSE` and
+`NULL` are *not* accepted as bare variable names (`MATCH (true:Thing)` is a
+syntax error) — openCypher's `Variable = SymbolicName` excludes them, and a
+bare `true` in an expression is the literal, so such a variable could never be
+read back. Backticks make it an ordinary variable:
+
+```cypher
+MATCH (`true`:Thing) RETURN `true`.id
 ```
 
 ### Identifier charset & special characters (hyphens, dots, spaces)
