@@ -273,6 +273,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   last-capture-wins dedup fails: a failed `CREATE` of several nodes of a brand
   new type leaves no store, no bucket and no metadata behind, and one into an
   existing type truncates to its pre-statement row count exactly.
+- **A filtered scan resolves what `n.prop` means once, not once per row.** The
+  fused single-node scans — the operators behind `MATCH (n:T) … RETURN <keys>,
+  <aggregates>` and `MATCH (n:T) … RETURN … ORDER BY … LIMIT k` — evaluated
+  every group key, sort key, aggregate argument and surviving `WHERE` through
+  the general interpreter, which re-derives per access what is fixed for the
+  whole scan: the row's variable lookup, the node type's column store, the
+  id/title alias resolution, and two hashes of the property *name*. Each scan
+  now compiles its expressions once, against property routes resolved per node
+  type, and reads through a single view per row. Anything the compiler does not
+  model — subqueries, functions, list operations, the disk backend, any graph
+  with a spatial configuration — falls through to the interpreter unchanged, so
+  a shape that is not accelerated is only not faster. Measured (release, min of
+  two runs, 50k-row type): marginal cost per property read in a scanned
+  aggregate **23.0/23.6 → 17.5/17.3 ns**, in a top-K sort key **16.1/16.0 →
+  12.4/12.4 ns**; `sum(n.a + n.b + n.c + n.d)` over 50k rows **5.05/4.78 →
+  3.88/3.89 ms**, `sum(n.a)` **1.59/1.58 → 1.22/1.23 ms**.
+- **A `WHERE` comparison against a text literal no longer copies the value out
+  of the column to compare it.** A predicate the planner cannot push into the
+  pattern — `<>`, an `OR`-combined comparison, or the safety net retained behind
+  a text-index probe — allocated an owned string per row purely to compare and
+  drop it, which made a string filter measurably more expensive than the same
+  filter on a number. Those comparisons now read the string in place. Equality
+  keeps its full semantics, single-element-JSON-list equivalence included, and a
+  column holding non-strings still falls back to the values the interpreter
+  would have compared (so a date column filtered against a date literal still
+  parses the literal). Measured (release, min of two runs, 50k rows): the gap
+  between `WHERE n.city <> …` and `WHERE n.age <> …` **+24.6/+25.3 → −3.3/−4.0
+  ns per row** — the string filter is now the faster of the two; a retained
+  `STARTS WITH` net **3.67/3.55 → 1.75/1.73 ms**, `CONTAINS` **3.57/3.42 →
+  1.63/1.60 ms**.
+- **A scanned aggregate folds its argument's constants before the row loop.**
+  `sum(1 + 2 + 3)` re-evaluated the addition tree for every scanned row where
+  the materialized aggregation path folds it once, because the fused operator
+  pre-folded its group keys and its `WHERE` but not its aggregate arguments.
+  Measured (release, min of two runs): a folded-expression aggregate over 50k
+  rows **2.50/2.50 → 0.76/0.78 ms**.
 
 ### Removed
 

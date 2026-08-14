@@ -902,6 +902,7 @@ pub mod return_clause;
 pub mod rev_procedures;
 pub mod rule_procedures;
 pub mod scalar_functions;
+mod scan_eval;
 pub(crate) mod schema_ddl;
 mod schema_procedures;
 mod set_row;

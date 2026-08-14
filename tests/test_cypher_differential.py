@@ -235,6 +235,79 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person {city: 'Oslo'}) RETURN p.name AS name, p.age AS age ORDER BY age DESC LIMIT 2",
         None,
     ),
+    # ── fused node-scan compiled property routes (executor/scan_eval.rs) ──
+    # The fused scans evaluate group keys, sort keys, aggregate arguments and
+    # the surviving WHERE through a plan compiled once per scan. Each shape
+    # below is one of the branches that plan has to reproduce: a soft alias, an
+    # identity alias, an unpushable string comparison over a nullable column,
+    # the three-valued NOT, a text predicate behind its retained safety net, a
+    # cross-type scan, and compiled arithmetic.
+    (
+        "scan_route_soft_alias_group_key",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS name, count(*) AS n ORDER BY name LIMIT 5",
+        None,
+    ),
+    (
+        "scan_route_identity_alias_group_key",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.id AS i, count(*) AS n ORDER BY i LIMIT 5",
+        None,
+    ),
+    (
+        "scan_route_label_soft_alias",
+        "multi_label_graph",
+        "MATCH (n) RETURN n.label AS l, count(*) AS n ORDER BY l",
+        None,
+    ),
+    (
+        "scan_route_not_equals_nullable_string",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.email <> 'nobody@example.com' RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "scan_route_negated_text_over_nullable",
+        "social_graph",
+        "MATCH (p:Person) WHERE NOT (p.email CONTAINS '@') RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "scan_route_text_predicate_safety_net",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.name STARTS WITH 'Person_1' RETURN p.name AS name ORDER BY name",
+        None,
+    ),
+    (
+        "scan_route_or_combined_string_and_numeric",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.city < 'P' OR p.age > 38 RETURN count(*) AS n",
+        None,
+    ),
+    (
+        "scan_route_cross_type_untyped_scan",
+        "social_graph",
+        "MATCH (n) RETURN n.name AS name, count(*) AS c ORDER BY name LIMIT 5",
+        None,
+    ),
+    (
+        "scan_route_compiled_arithmetic_aggregate",
+        "social_graph",
+        "MATCH (p:Person) RETURN sum(p.age * 2 - 1) AS total, avg(p.age / 2) AS half",
+        None,
+    ),
+    (
+        "scan_route_compiled_arithmetic_sort_key",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS name ORDER BY p.age * -1, p.name LIMIT 4",
+        None,
+    ),
+    (
+        "scan_route_folded_constant_aggregate",
+        "social_graph",
+        "MATCH (p:Person) RETURN sum(1 + 2 + 3) AS total",
+        None,
+    ),
     ("trigger_generic_top_k", "small_graph", "UNWIND [3, 1, 2] AS x RETURN x ORDER BY x LIMIT 2", None),
     (
         "trigger_predicate_reorder",

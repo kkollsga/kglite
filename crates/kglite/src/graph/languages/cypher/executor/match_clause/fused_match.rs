@@ -1278,15 +1278,52 @@ impl<'a> CypherExecutor<'a> {
             .node_bindings
             .insert(node_var.to_string(), petgraph::graph::NodeIndex::new(0));
 
-        // Inline accumulators for aggregation during scan
-        struct InlineAccumulators {
-            counts: Vec<i64>,
-            sums: Vec<f64>,
-            mins: Vec<Option<Value>>,
-            maxs: Vec<Option<Value>>,
-            // Per-agg value set for count(DISTINCT …); None for non-distinct aggs.
-            distinct_sets: Vec<Option<FxHashSet<Value>>>,
-        }
+        // `None` marks an aggregate whose input is the constant "row present"
+        // marker: `count(*)`, and `count(<bound var>)`, which cannot be null and
+        // so must not materialise the node value per row. The test reads the
+        // scan's bindings, which are fixed for the whole scan.
+        let folded_agg_args: Vec<Option<Expression>> = agg_indices
+            .iter()
+            .map(|&ai| match &return_clause.items[ai].expression {
+                Expression::FunctionCall {
+                    name,
+                    args,
+                    distinct,
+                } => {
+                    // `count(*)`, and `count(<bound var>)` — whose binding is
+                    // always present, so materialising the node value only to
+                    // test it for null is pure waste.
+                    let is_row_marker = args.is_empty()
+                        || matches!(args[0], Expression::Star)
+                        || (!*distinct
+                            && name.eq_ignore_ascii_case("count")
+                            && matches!(&args[0], Expression::Variable(v)
+                                if eval_row.node_bindings.get(v).is_some()
+                                    || eval_row.edge_bindings.get(v).is_some()));
+                    // Fold the argument, as the materialized aggregation path
+                    // does — this operator evaluated it unfolded.
+                    (!is_row_marker).then(|| self.fold_constants_expr(&args[0]))
+                }
+                other => Some(self.fold_constants_expr(other)),
+            })
+            .collect();
+
+        // Compile the per-row expressions against the scan's single node
+        // variable: property routes and borrowed string comparisons resolved
+        // once per node type, not once per row. Anything not modelled stays on
+        // the interpreter (see `scan_eval`).
+        let mut compiler = ScanCompiler::new(self, node_var);
+        let compiled_group: Vec<ScanExpr<'_>> = folded_group_exprs
+            .iter()
+            .map(|expr| compiler.expr(expr))
+            .collect();
+        let compiled_agg: Vec<Option<ScanExpr<'_>>> = folded_agg_args
+            .iter()
+            .map(|arg| arg.as_ref().map(|expr| compiler.expr(expr)))
+            .collect();
+        let compiled_where = folded_where_ref.map(|pred| compiler.pred(pred));
+        let mut runtime = compiler.finish();
+        let needs_node = !runtime.is_empty();
 
         // Groups: (group_key_values, first_node_idx_for_binding)
         let mut groups: Vec<(Vec<Value>, petgraph::graph::NodeIndex)> = Vec::new();
@@ -1311,11 +1348,19 @@ impl<'a> CypherExecutor<'a> {
                 .expect("invariant: node_var binding inserted upstream by pattern match") =
                 node_idx;
 
-            // Check WHERE predicate. Use the compiled fast path when available
-            // (pre-resolved accessors, no per-row interpreter overhead);
-            // otherwise fall back to the generic evaluator.
-            if let Some(pred) = folded_where_ref {
-                if !self.evaluate_predicate(pred, &eval_row).unwrap_or(false) {
+            // One view per node — the store handle and the property routes are
+            // memoised by node type.
+            let node = if needs_node {
+                runtime.bind(self.graph, node_idx)
+            } else {
+                None
+            };
+
+            // Check WHERE predicate. Errors are swallowed here (a row whose
+            // predicate cannot be evaluated does not match), matching
+            // `evaluate_predicate(..).unwrap_or(false)`.
+            if let Some(pred) = &compiled_where {
+                if !matches!(pred.eval(self, &runtime, node, &eval_row), Ok(Some(true))) {
                     continue;
                 }
             }
@@ -1325,132 +1370,37 @@ impl<'a> CypherExecutor<'a> {
             // aggregation path: null groups arrive as Ok(Null); an Err is a
             // genuine error (missing parameter, overflow, …), never a group.
             key_values.clear();
-            for expr in &folded_group_exprs {
-                key_values.push(self.evaluate_expression(expr, &eval_row)?);
+            for expr in &compiled_group {
+                key_values.push(expr.eval(self, &runtime, node, &eval_row)?);
             }
 
-            // Evaluate all aggregate expressions for this node (reuse buffer)
+            // Evaluate all aggregate inputs for this node (reuse buffer).
+            // Errors propagate — same contract as the group keys above and the
+            // materialized aggregation path: a null argument arrives as
+            // Ok(Null) and is skipped by the accumulators; an Err is a genuine
+            // error (missing parameter, overflow, …).
             agg_vals.clear();
-            for &ai in &agg_indices {
-                let item = &return_clause.items[ai];
-                let v = match &item.expression {
-                    Expression::FunctionCall {
-                        name,
-                        args,
-                        distinct,
-                    } => {
-                        if args.is_empty() || matches!(args[0], Expression::Star) {
-                            Value::Boolean(true) // count(*) marker — always counted
-                        } else if !*distinct
-                            && name.eq_ignore_ascii_case("count")
-                            && matches!(&args[0], Expression::Variable(v)
-                                if eval_row.node_bindings.get(v).is_some()
-                                    || eval_row.edge_bindings.get(v).is_some())
-                        {
-                            // count(n) over a bound node/edge variable: the binding
-                            // is always present, so this is equivalent to count(*).
-                            // Avoid materializing the full node Value (every property
-                            // cloned into a BTreeMap) per row just to test non-null.
-                            Value::Boolean(true)
-                        } else {
-                            // Errors propagate — same contract as the group
-                            // keys above and the materialized aggregation
-                            // path: a null argument arrives as Ok(Null) and
-                            // is skipped by the accumulators; an Err is a
-                            // genuine error (missing parameter, overflow, …).
-                            self.evaluate_expression(&args[0], &eval_row)?
-                        }
-                    }
-                    _ => self.evaluate_expression(&item.expression, &eval_row)?,
-                };
-                agg_vals.push(v);
+            for compiled in &compiled_agg {
+                agg_vals.push(match compiled {
+                    // count(*) / count(<bound var>) marker — always counted.
+                    None => Value::Boolean(true),
+                    Some(expr) => expr.eval(self, &runtime, node, &eval_row)?,
+                });
             }
 
-            if let Some(&group_idx) = group_index_map.get(&key_values) {
-                // Update accumulators
-                let acc = &mut group_accumulators[group_idx];
-                for (ai, _) in agg_indices.iter().enumerate() {
-                    let val = &agg_vals[ai];
-                    // count(DISTINCT …): dedup non-null values in the per-agg set.
-                    if agg_is_distinct[ai] {
-                        if !matches!(val, Value::Null) {
-                            acc.distinct_sets[ai]
-                                .get_or_insert_with(FxHashSet::default)
-                                .insert(val.clone());
-                        }
-                        continue;
-                    }
-                    // Only count non-null values (count(*) uses Boolean marker)
-                    if !matches!(val, Value::Null) {
-                        acc.counts[ai] += 1;
-                    }
-                    if let Some(f) = value_to_f64(val) {
-                        acc.sums[ai] += f;
-                    }
-                    if !matches!(val, Value::Null) {
-                        // Phase A.2 / C4 — short-circuit on is_none()
-                        // guarantees the unwrap can't fire, but the
-                        // .expect() makes the invariant explicit if a
-                        // future refactor reorders the conditions.
-                        if acc.mins[ai].is_none()
-                            || crate::graph::core::filtering::compare_values(
-                                val,
-                                acc.mins[ai]
-                                    .as_ref()
-                                    .expect("invariant: is_none() short-circuited above"),
-                            ) == Some(std::cmp::Ordering::Less)
-                        {
-                            acc.mins[ai] = Some(val.clone());
-                        }
-                        if acc.maxs[ai].is_none()
-                            || crate::graph::core::filtering::compare_values(
-                                val,
-                                acc.maxs[ai]
-                                    .as_ref()
-                                    .expect("invariant: is_none() short-circuited above"),
-                            ) == Some(std::cmp::Ordering::Greater)
-                        {
-                            acc.maxs[ai] = Some(val.clone());
-                        }
-                    }
+            let group_idx = match group_index_map.get(&key_values) {
+                Some(&group_idx) => group_idx,
+                None => {
+                    let group_idx = groups.len();
+                    group_index_map.insert(key_values.clone(), group_idx);
+                    groups.push((key_values.clone(), node_idx));
+                    group_accumulators.push(InlineAccumulators::new(&agg_is_distinct));
+                    group_idx
                 }
-            } else {
-                let group_idx = groups.len();
-                group_index_map.insert(key_values.clone(), group_idx);
-                groups.push((key_values.clone(), node_idx));
-
-                // Initialize accumulators
-                let na = agg_indices.len();
-                let mut acc = InlineAccumulators {
-                    counts: vec![0i64; na],
-                    sums: vec![0.0f64; na],
-                    mins: vec![None; na],
-                    maxs: vec![None; na],
-                    distinct_sets: agg_is_distinct
-                        .iter()
-                        .map(|&d| if d { Some(FxHashSet::default()) } else { None })
-                        .collect(),
-                };
-                for (ai, _) in agg_indices.iter().enumerate() {
-                    let val = &agg_vals[ai];
-                    if agg_is_distinct[ai] {
-                        if !matches!(val, Value::Null) {
-                            acc.distinct_sets[ai]
-                                .get_or_insert_with(FxHashSet::default)
-                                .insert(val.clone());
-                        }
-                        continue;
-                    }
-                    if !matches!(val, Value::Null) {
-                        acc.counts[ai] = 1;
-                        if let Some(f) = value_to_f64(val) {
-                            acc.sums[ai] = f;
-                        }
-                        acc.mins[ai] = Some(val.clone());
-                        acc.maxs[ai] = Some(val.clone());
-                    }
-                }
-                group_accumulators.push(acc);
+            };
+            let acc = &mut group_accumulators[group_idx];
+            for (ai, val) in agg_vals.iter().enumerate() {
+                acc.absorb(ai, val, agg_is_distinct[ai]);
             }
         }
 
@@ -1637,6 +1587,16 @@ impl<'a> CypherExecutor<'a> {
             TopKCollector::new(specs, limit);
         let mut key_buf: Vec<Value> = Vec::with_capacity(folded_keys.len());
 
+        // Both the sort keys and the filter run on every candidate, so both are
+        // compiled against the scan's node variable (see `scan_eval`); the
+        // RETURN expressions run only for the K winners and stay interpreted.
+        let mut compiler = ScanCompiler::new(self, node_var);
+        let compiled_keys: Vec<ScanExpr<'_>> =
+            folded_keys.iter().map(|expr| compiler.expr(expr)).collect();
+        let compiled_where = folded_where_ref.map(|pred| compiler.pred(pred));
+        let mut runtime = compiler.finish();
+        let needs_node = !runtime.is_empty();
+
         for (scan_count, &node_idx) in node_indices.iter().enumerate() {
             // Periodic deadline check
             if scan_count.is_multiple_of(10000) {
@@ -1650,9 +1610,19 @@ impl<'a> CypherExecutor<'a> {
                 .expect("invariant: node_var binding inserted upstream by pattern match") =
                 node_idx;
 
-            // WHERE filter
-            if let Some(pred) = folded_where_ref {
-                if !self.evaluate_predicate(pred, &eval_row).unwrap_or(false) {
+            // One view per node — the store handle and the property routes are
+            // memoised by node type.
+            let node = if needs_node {
+                runtime.bind(self.graph, node_idx)
+            } else {
+                None
+            };
+
+            // WHERE filter. Errors are swallowed (a row whose predicate cannot
+            // be evaluated does not match), as `evaluate_predicate(..)
+            // .unwrap_or(false)` did.
+            if let Some(pred) = &compiled_where {
+                if !matches!(pred.eval(self, &runtime, node, &eval_row), Ok(Some(true))) {
                     continue;
                 }
             }
@@ -1660,8 +1630,8 @@ impl<'a> CypherExecutor<'a> {
             // Evaluate the sort-key tuple; only a candidate that would enter
             // the top-K pays for an owned key tuple.
             key_buf.clear();
-            for expr in &folded_keys {
-                key_buf.push(self.evaluate_expression(expr, &eval_row)?);
+            for expr in &compiled_keys {
+                key_buf.push(expr.eval(self, &runtime, node, &eval_row)?);
             }
             if collector.accepts(&key_buf, scan_count) {
                 collector.push(&key_buf, scan_count, node_idx);
@@ -2237,6 +2207,85 @@ impl<'a> CypherExecutor<'a> {
         }
 
         Ok(Some(rows))
+    }
+}
+
+/// Running aggregate state for one group of a fused node scan.
+///
+/// Every supported aggregate is folded into the same four running values plus,
+/// for `count(DISTINCT …)`, a per-aggregate value set — so one pass over the
+/// scan answers `count` / `sum` / `avg` / `min` / `max` together, without
+/// materialising the group's rows.
+struct InlineAccumulators {
+    counts: Vec<i64>,
+    sums: Vec<f64>,
+    mins: Vec<Option<Value>>,
+    maxs: Vec<Option<Value>>,
+    /// Per-aggregate value set for `count(DISTINCT …)`; `None` for the rest.
+    distinct_sets: Vec<Option<FxHashSet<Value>>>,
+}
+
+impl InlineAccumulators {
+    fn new(agg_is_distinct: &[bool]) -> Self {
+        let width = agg_is_distinct.len();
+        InlineAccumulators {
+            counts: vec![0i64; width],
+            sums: vec![0.0f64; width],
+            mins: vec![None; width],
+            maxs: vec![None; width],
+            distinct_sets: agg_is_distinct
+                .iter()
+                .map(|&distinct| distinct.then(FxHashSet::default))
+                .collect(),
+        }
+    }
+
+    /// Fold one row's value for aggregate `ai` into the running state.
+    ///
+    /// `Null` contributes to nothing: it is not counted, not summed, and never
+    /// becomes a `min`/`max` — the same rule the materialized aggregation path
+    /// applies. `count(*)` and `count(<bound var>)` arrive as a non-null
+    /// `Boolean` marker, so they count without materialising a node value.
+    fn absorb(&mut self, ai: usize, val: &Value, distinct: bool) {
+        if distinct {
+            // count(DISTINCT …): dedup non-null values in the per-agg set.
+            if !matches!(val, Value::Null) {
+                self.distinct_sets[ai]
+                    .get_or_insert_with(FxHashSet::default)
+                    .insert(val.clone());
+            }
+            return;
+        }
+        if matches!(val, Value::Null) {
+            return;
+        }
+        self.counts[ai] += 1;
+        if let Some(f) = value_to_f64(val) {
+            self.sums[ai] += f;
+        }
+        // Phase A.2 / C4 — short-circuit on is_none() guarantees the unwrap
+        // can't fire, but the .expect() makes the invariant explicit if a
+        // future refactor reorders the conditions.
+        if self.mins[ai].is_none()
+            || crate::graph::core::filtering::compare_values(
+                val,
+                self.mins[ai]
+                    .as_ref()
+                    .expect("invariant: is_none() short-circuited above"),
+            ) == Some(std::cmp::Ordering::Less)
+        {
+            self.mins[ai] = Some(val.clone());
+        }
+        if self.maxs[ai].is_none()
+            || crate::graph::core::filtering::compare_values(
+                val,
+                self.maxs[ai]
+                    .as_ref()
+                    .expect("invariant: is_none() short-circuited above"),
+            ) == Some(std::cmp::Ordering::Greater)
+        {
+            self.maxs[ai] = Some(val.clone());
+        }
     }
 }
 
