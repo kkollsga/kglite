@@ -894,29 +894,6 @@ impl DirGraph {
             || self.composite_indices.keys().any(|(nt, _)| nt == node_type)
     }
 
-    /// Whether a write spelled `property` left the field every index on
-    /// `node_type` is built from untouched.
-    ///
-    /// True when `property` is one of the type's id/title **alias** spellings:
-    /// Cypher stores such a write verbatim in the property map (see the
-    /// CREATE/SET write path), while every index — under either spelling —
-    /// holds the node's id/title, read through [`Self::read_indexed`]. A
-    /// rebuild would therefore reproduce the buckets already present, so the
-    /// correct incremental action is none. Filing the written value here is
-    /// what produced buckets an equivalent scan can never match.
-    ///
-    /// `title` and `name` are the exception: they are the Cypher-level
-    /// spellings of the title itself, and the SET/REMOVE executor writes the
-    /// node's title through both (`write.rs::set_node_property_direct`), so a
-    /// write spelled either one *does* move the indexed field — even for a type
-    /// that also declares `name` as its title alias.
-    fn write_bypasses_indexed_fields(&self, node_type: &str, property: &str) -> bool {
-        if property == "title" || property == "name" {
-            return false;
-        }
-        self.resolve_alias(node_type, property) != property
-    }
-
     /// Update property, range, and composite indices after a property value is changed.
     /// Removes node from the old value bucket and adds to the new value bucket.
     pub fn update_property_indices_for_set(
@@ -930,9 +907,6 @@ impl DirGraph {
         // Nothing to move the node between: no bucket edit, and therefore no
         // value read-back, no resolved-field `String`, no key set to build.
         if !self.type_has_user_indexes(node_type) {
-            return;
-        }
-        if self.write_bypasses_indexed_fields(node_type, property) {
             return;
         }
         note_maintenance_pass();
@@ -972,9 +946,6 @@ impl DirGraph {
         old_value: &Value,
     ) {
         if !self.type_has_user_indexes(node_type) {
-            return;
-        }
-        if self.write_bypasses_indexed_fields(node_type, property) {
             return;
         }
         note_maintenance_pass();

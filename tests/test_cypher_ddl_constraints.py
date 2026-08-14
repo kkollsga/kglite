@@ -189,30 +189,40 @@ def test_the_primary_key_route_actually_enforces_identity_uniqueness(graph) -> N
         graph.cypher("CREATE (p:Person {id: 1})")
 
 
-def test_the_id_alias_spelling_does_not_reach_the_identity_field_on_create(graph) -> None:
-    """**Known gap, pinned deliberately** — the aliased spelling is not enforced,
-    because on `CREATE` it never becomes the identity in the first place.
+def test_the_id_alias_spelling_reaches_the_identity_field_on_create(graph) -> None:
+    """The aliased spelling *is* the identity on `CREATE`, so the primary key
+    enforces it.
 
     `add_nodes(unique_id_field="person_id")` makes `person_id` the identity, and
-    reads honour that: `MATCH (p:Person {person_id: 1})` finds Alice and
-    `p.person_id` returns the identity. `CREATE` does not close the loop — it
-    only ever promotes a literal `id` property, so `{person_id: 99}` leaves the
-    node with an engine-minted id and the supplied key is silently dropped.
+    every read honours that: `MATCH (p:Person {person_id: 1})` finds Alice and
+    `p.person_id` resolves through the alias to the identity. Until 0.16.1 the
+    write path did not agree — `CREATE (:Person {person_id: 99})` stored 99 as an
+    ordinary property beside an engine-minted id, and because the dot read
+    resolves the alias to the identity, `p.person_id` then answered with the
+    minted id while `properties(p)` still showed 99.
 
-    This assertion previously read as "both spellings are rejected" and passed
-    for an accidental reason: the fixture's ids are the dense `1, 2, 3`, and the
-    engine's auto-id was `node_bound()` — which for a 3-node graph is `3`, an id
-    that already existed. So the rejection came from the *auto* id colliding,
-    not from the alias resolving. Re-seat the fixture on non-dense ids (or fix
-    the allocator, as `next_auto_node_id` now does) and the old assertion fails.
-    Pinned in its true shape so the gap cannot close or widen unnoticed.
+    Now the alias is promoted to the identity, so the id `99` is really the
+    node's, and a repeat of it collides with the declared primary key.
     """
     graph.define_schema({"nodes": {"Person": {"primary_key": "id"}}})
     graph.cypher("CREATE (p:Person {person_id: 99})")
 
     ids = sorted(d["id"] for d in graph.cypher("MATCH (p:Person) RETURN p.id AS id").to_dicts())
     assert len(set(ids)) == len(ids), "the engine must not mint a duplicate identity"
-    assert 99 not in ids, "known gap changed — CREATE now honours the id alias; re-read the docstring"
+    assert ids == [1, 2, 3, 99], "the aliased spelling must land in the identity field"
+    # …and the primary key now covers the spelling the type actually uses.
+    with pytest.raises(Exception, match="duplicate primary key"):
+        graph.cypher("CREATE (p:Person {person_id: 99})")
+
+
+def test_the_id_alias_and_the_literal_id_spelling_cannot_disagree(graph) -> None:
+    """Both spellings name one field, so two different values is a request the
+    node cannot satisfy — refused rather than silently resolved one way."""
+    with pytest.raises(Exception, match="two different identities"):
+        graph.cypher("CREATE (p:Person {person_id: 7, id: 8})")
+    # Agreeing values are fine, and store one identity.
+    graph.cypher("CREATE (p:Person {person_id: 7, id: 7})")
+    assert graph.cypher("MATCH (p:Person {person_id: 7}) RETURN p.id AS id").to_list() == [{"id": 7}]
 
 
 def test_relationship_constraint_is_rejected_by_name(graph) -> None:

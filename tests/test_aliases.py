@@ -502,3 +502,147 @@ class TestRepeatedAddNodesPreservesAlias:
         rows = list(g.cypher("MATCH (n:Prospect) RETURN n.npdid AS id, n.prospect_name AS name"))
         assert rows[0]["id"] == 1
         assert rows[0]["name"] == "Alpha"
+
+
+class TestWritePathHonoursAliases:
+    """The Cypher write path resolves a type's declared identity-field
+    spellings exactly as the read path does.
+
+    Until 0.16.1 it did not. `CREATE (:Prospect {npdid: 99})` stored 99 as an
+    ordinary property and minted a *separate* identity — and because `n.npdid`
+    resolves the alias to the identity, the dot read then answered with the
+    minted id while `properties(n)` still showed 99. Two routes, one node, two
+    answers. The title half was worse: `CREATE (:Prospect {prospect_name: 'C'})`
+    fabricated `Prospect_3` and served that engine-minted string back for
+    `n.prospect_name`, over the caller's own value.
+
+    Every assertion below is therefore a *two-route* one: `properties(n)` (the
+    materialised map) and `n.<alias>` (the dot route) must agree, and agree with
+    the value the write supplied.
+    """
+
+    @staticmethod
+    def _both_routes(g, npdid):
+        """`(properties(n), {alias: dot-read})` for one node."""
+        row = g.cypher(
+            "MATCH (n:Prospect) WHERE n.npdid = $i "
+            "RETURN properties(n) AS p, n.npdid AS pid, n.prospect_name AS pname, "
+            "n.id AS id, n.title AS title",
+            params={"i": npdid},
+        ).to_list()
+        assert len(row) == 1, f"expected exactly one node with npdid={npdid}, got {len(row)}"
+        return row[0]
+
+    def test_create_promotes_both_declared_spellings(self, graph_with_aliases):
+        graph_with_aliases.cypher("CREATE (:Prospect {npdid: 99, prospect_name: 'Delta', status: 'new'})")
+        row = self._both_routes(graph_with_aliases, 99)
+
+        # The dot route and the canonical field agree…
+        assert row["pid"] == 99 and row["id"] == 99
+        assert row["pname"] == "Delta" and row["title"] == "Delta"
+        # …and so does the materialised map.
+        assert row["p"]["npdid"] == 99
+        assert row["p"]["prospect_name"] == "Delta"
+        assert row["p"]["id"] == 99
+        assert row["p"]["title"] == "Delta"
+        assert row["p"]["status"] == "new"
+
+    def test_create_does_not_fabricate_a_title_over_the_supplied_one(self, graph_with_aliases):
+        """The `<Label>_<n>` fabrication is the last resort it always was — it
+        must not override a value the caller supplied under the type's own
+        title column."""
+        graph_with_aliases.cypher("CREATE (:Prospect {npdid: 50, prospect_name: 'Epsilon'})")
+        titles = graph_with_aliases.cypher("MATCH (n:Prospect {npdid: 50}) RETURN n.title AS t").to_list()
+        assert titles == [{"t": "Epsilon"}]
+        # A CREATE that supplies neither spelling still gets a fabricated title
+        # rather than a null one.
+        graph_with_aliases.cypher("CREATE (:Prospect {npdid: 51})")
+        fabricated = graph_with_aliases.cypher("MATCH (n:Prospect {npdid: 51}) RETURN n.title AS t").scalar()
+        assert isinstance(fabricated, str) and fabricated.startswith("Prospect_")
+
+    def test_the_promoted_value_is_not_also_stored_as_a_property(self, graph_with_aliases):
+        """Promoted, not duplicated — `add_nodes` keeps its id/title columns out
+        of the property columns, and CREATE now agrees. A stored copy would
+        shadow the identity in `properties(n)` (the materialiser prefers a key
+        the map already carries) while the dot route kept resolving to the
+        identity, which is the disagreement this whole path closes."""
+        graph_with_aliases.cypher("CREATE (:Prospect {npdid: 60, prospect_name: 'Zeta'})")
+        # One authority for each field: rewriting the identity moves BOTH routes.
+        graph_with_aliases.cypher("MATCH (n:Prospect {npdid: 60}) SET n.prospect_name = 'Zeta-2'")
+        row = self._both_routes(graph_with_aliases, 60)
+        assert row["pname"] == "Zeta-2"
+        assert row["title"] == "Zeta-2"
+        assert row["p"]["prospect_name"] == "Zeta-2"
+
+    def test_merge_creates_through_the_same_promotion(self, graph_with_aliases):
+        graph_with_aliases.cypher("MERGE (n:Prospect {npdid: 101}) ON CREATE SET n.status = 'fresh'")
+        row = self._both_routes(graph_with_aliases, 101)
+        assert row["pid"] == 101 and row["id"] == 101
+        assert row["p"]["npdid"] == 101
+        assert row["p"]["status"] == "fresh"
+
+    def test_merge_matches_the_node_its_own_create_arm_made(self, graph_with_aliases):
+        """The proof that the promotion is real: a second MERGE on the same
+        aliased key must find the node rather than create a twin."""
+        graph_with_aliases.cypher("MERGE (n:Prospect {npdid: 102}) ON CREATE SET n.status = 'first'")
+        graph_with_aliases.cypher("MERGE (n:Prospect {npdid: 102}) ON CREATE SET n.status = 'second'")
+        rows = graph_with_aliases.cypher("MATCH (n:Prospect) WHERE n.npdid = 102 RETURN n.status AS s").to_list()
+        assert rows == [{"s": "first"}], "the second MERGE must match, not create"
+
+    def test_set_on_the_title_alias_is_visible_on_both_routes(self, graph_with_aliases):
+        """It used to store an ordinary property that `n.prospect_name` — which
+        resolves the alias to the title — could never return: the write was
+        invisible on the route that asked for it."""
+        graph_with_aliases.cypher("MATCH (n:Prospect {npdid: 1}) SET n.prospect_name = 'Alpha-2'")
+        row = self._both_routes(graph_with_aliases, 1)
+        assert row["pname"] == "Alpha-2"
+        assert row["title"] == "Alpha-2"
+        assert row["p"]["prospect_name"] == "Alpha-2"
+        assert row["p"]["title"] == "Alpha-2"
+
+    def test_set_on_the_id_alias_is_refused_as_immutable(self, graph_with_aliases):
+        """Same answer as the literal `SET n.id`, for the same reason: the
+        identity is the row's key, not a value `add_nodes` updates."""
+        with pytest.raises(Exception, match="immutable"):
+            graph_with_aliases.cypher("MATCH (n:Prospect {npdid: 1}) SET n.npdid = 77")
+        assert graph_with_aliases.cypher("MATCH (n:Prospect {npdid: 1}) RETURN n.npdid AS i").to_list() == [{"i": 1}]
+
+    def test_remove_on_the_id_alias_is_refused_as_immutable(self, graph_with_aliases):
+        with pytest.raises(Exception, match="immutable"):
+            graph_with_aliases.cypher("MATCH (n:Prospect {npdid: 1}) REMOVE n.npdid")
+        assert graph_with_aliases.cypher("MATCH (n:Prospect {npdid: 1}) RETURN n.npdid AS i").to_list() == [{"i": 1}]
+
+    def test_remove_on_the_title_alias_clears_the_title(self, graph_with_aliases):
+        graph_with_aliases.cypher("MATCH (n:Prospect {npdid: 2}) REMOVE n.prospect_name")
+        row = graph_with_aliases.cypher(
+            "MATCH (n:Prospect) WHERE n.npdid = 2 RETURN n.prospect_name AS pname, n.title AS title"
+        ).to_list()[0]
+        assert row["title"] is None
+        assert row["pname"] is None
+
+    def test_a_type_without_aliases_is_untouched(self, graph_default_fields):
+        """`Item` declares `id`/`title` literally, so nothing resolves and the
+        `name`-writes-the-title behaviour every type has is unchanged."""
+        graph_default_fields.cypher("CREATE (:Item {id: 40, name: 'W', category: 'C'})")
+        row = graph_default_fields.cypher(
+            "MATCH (n:Item {id: 40}) RETURN properties(n) AS p, n.name AS name, n.title AS title"
+        ).to_list()[0]
+        assert row["name"] == "W" and row["title"] == "W"
+        assert row["p"]["name"] == "W"
+        assert row["p"]["category"] == "C"
+
+
+def test_a_declared_id_column_agrees_on_both_read_routes_after_create():
+    """The accuracy-sweep case, in its own fixture: a type whose id column is
+    `pid`. `properties(n)['pid']` said 101 and `n.pid` said the auto-minted id —
+    the same node, two answers, one of them invented."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(pd.DataFrame({"pid": [1, 2], "label_text": ["a", "b"]}), "T", "pid")
+    g.cypher("CREATE (:T {pid: 101, label_text: 'c'})")
+
+    row = g.cypher("MATCH (n:T) WHERE n.pid = 101 RETURN properties(n) AS p, n.pid AS pid, n.id AS id").to_list()
+    assert len(row) == 1
+    assert row[0]["pid"] == 101
+    assert row[0]["id"] == 101
+    assert row[0]["p"]["pid"] == 101
+    assert row[0]["p"]["id"] == 101

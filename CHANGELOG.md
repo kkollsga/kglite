@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING — a durable graph refuses a caller-supplied duplicate id.** On a
+  graph opened with `durable=` (or written through a durable `Session`),
+  `CREATE (:T {id: 1, …})` for an id that node type already carries now fails
+  with an actionable error instead of being accepted. It was never really
+  accepted: the write-ahead log names every entity — nodes, and both endpoints
+  of every edge — by its logical `(node_type, id)`, so a log in which one id
+  denotes two nodes is *unwritable*, and reopening the graph folded the two
+  into one. A node disappeared across recovery, with nothing at write time to
+  say so. The error names the two routes that work — `MERGE` to upsert, or a
+  declared `primary_key` (`define_schema`) to enforce identity in every storage
+  mode. **Migration:** an application that supplies its own ids and relied on
+  duplicates should switch the duplicating statement to `MERGE`, or give the
+  second node a distinct id. Non-durable graphs are unaffected: `id` uniqueness
+  stays opt-in there, and two `CREATE (:T {id: 'k'})` still make two nodes.
+  `add_nodes` is unaffected in every mode — it upserts by id by construction.
+- **The Cypher write path honours a type's declared id/title field names.**
+  After `add_nodes(df, 'Person', 'person_id', 'person_name')`, every *read*
+  route resolves those spellings onto the node's identity fields — but the
+  write path did not, so `CREATE (:Person {person_id: 99, person_name: 'C'})`
+  stored both as ordinary properties beside an engine-minted id and a
+  fabricated `Person_3` title. Because the dot read resolves the alias to the
+  identity, `p.person_id` then answered with the minted id while
+  `properties(p)` showed 99 — one node, two answers — and `p.person_name`
+  returned the engine's fabricated string over the caller's own value. `CREATE`
+  and `MERGE`'s create arm now *promote* those values into the identity fields
+  (the key leaves the property map, exactly as `add_nodes` keeps its
+  `unique_id_field` / `node_title_field` columns out of the property columns),
+  `MERGE`'s match arm resolves them, and `SET` / `REMOVE` route a write spelled
+  with the title field to the title. A `SET` or `REMOVE` on the *id* field is
+  refused as immutable, the same answer `SET n.id` has always given. Supplying
+  both `id` and the type's own id spelling with different values is refused
+  rather than silently resolved one way. Declared constraints and indexes keep
+  the spelling their declaration used.
+
 - **Cross-type ordering is now total, and follows Neo4j 5.** Sorting no longer
   has an "incomparable" outcome: when two sort-key values are of different
   types they are ordered by type, ascending

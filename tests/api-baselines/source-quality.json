@@ -376,13 +376,6 @@
       "nesting": 8
     },
     {
-      "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
-      "qualified_name": "crate::try_match_merge_pattern",
-      "lines": 203,
-      "branches": 31,
-      "nesting": 8
-    },
-    {
       "path": "crates/kglite/src/graph/languages/cypher/parser/expression.rs",
       "qualified_name": "crate::CypherParser::parse_primary_expression_inner",
       "lines": 226,

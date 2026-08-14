@@ -2428,6 +2428,26 @@ after the fact, `CALL duplicate_id({type: 'Artifact'}) YIELD node` yields every
 node of that type whose id is shared (the identity-column sibling of
 `duplicate_title`).
 
+A node type loaded with its own column names — `add_nodes(df, 'Person',
+'person_id', 'person_name')` — accepts **either spelling** on the write path,
+not just on reads. `CREATE (:Person {person_id: 99, person_name: 'Cleo'})`
+makes 99 the identity and `'Cleo'` the title; the values are *promoted* into
+those fields rather than also stored as properties, so `p.person_id` and
+`properties(p)['person_id']` cannot disagree. `MERGE` matches and creates
+through the same resolution. `SET` / `REMOVE` on the title spelling write the
+title; on the id spelling they are refused — the identity is immutable under
+every spelling, exactly as `SET n.id` is. Giving one `CREATE` both `id` and the
+type's own id column with *different* values is refused rather than resolved
+one way.
+
+**Durable graphs refuse a duplicate id.** With `durable=` (or a durable
+`Session`), a `CREATE` whose `(type, id)` already exists fails: the
+write-ahead log names every entity by that pair, so a second node under a live
+id cannot be recovered — replay would merge the two and lose one. Use `MERGE`
+to upsert, pick a distinct id, or declare a `primary_key` to get the same
+enforcement in every mode. Without a log the documented opt-in behaviour above
+is unchanged.
+
 For datasets whose ids are a prefix + number (Wikidata `Q42`, `P31`, …), the
 loader stores the **integer** as `id` (compact, identical across modes — disk
 needs it at 100M-node scale) and the **string form** as the `nid` property.

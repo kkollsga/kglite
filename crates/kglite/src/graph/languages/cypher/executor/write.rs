@@ -4,6 +4,10 @@
 use super::super::ast::*;
 use super::super::result::*;
 use super::columnar_write::{set_via_column_master, write_column_master, ColumnMasterWrite};
+use super::identity_fields::{
+    check_identity_uniqueness, create_identity, merge_expected_props, remove_write_field,
+    CreatedIdentity, IdentityAliases,
+};
 use super::set_row::{apply_node_property_set, NodePropertySet, SetMemos};
 use super::{clause_display_name, schema_ddl, CypherExecutor};
 use crate::datatypes::values::Value;
@@ -895,63 +899,35 @@ fn create_node(
         }
     }
 
-    // Identity: honor a user-provided `id` property as the node's unique id
-    // (consistent with `add_nodes(unique_id_field='id')`), so
-    // `CREATE (n {id: 's1'})` round-trips and `MATCH (n {id: 's1'})` finds it.
-    // The `id` is the identity, not a duplicate property, so it is removed
-    // from the property map (mirroring add_nodes, which does not store the
-    // unique-id column as a property). Absent → auto-assign a fresh UniqueId.
-    // A caller-supplied id is taken as given (uniqueness is opt-in — see the
-    // PRIMARY KEY gate below); an absent one is *allocated*, and an allocator
-    // must never hand out a live id. See `DirGraph::next_auto_node_id` for the
-    // node_bound() reuse bug this replaced.
-    let id = match properties.remove("id") {
-        Some(explicit) => {
-            graph.observe_explicit_id(&explicit);
-            explicit
-        }
-        None => graph.next_auto_node_id(),
-    };
-
-    // Determine title: use 'name' or 'title' property if present
-    let title = properties
-        .get("name")
-        .or_else(|| properties.get("title"))
-        .cloned()
-        .unwrap_or_else(|| {
-            let label = node_pat.label.as_deref().unwrap_or("Node");
-            Value::String(format!("{}_{}", label, graph.graph.node_bound()))
-        });
-
     let label = node_pat.label.clone().unwrap_or_else(|| "Node".to_string());
 
-    // PRIMARY KEY enforcement (opt-in). When this node type declares a primary
-    // key via `define_schema`, reject a CREATE that would duplicate it — MERGE
-    // is the explicit upsert path. `lookup_by_id_readonly` self-heals (builds +
-    // caches the id-index on a miss) and is cross-mode, so the probe is O(1)
-    // amortised and behaves identically across memory/mapped/disk. Undeclared
-    // types skip the probe entirely, leaving the permissive default (and the
-    // dense-int hot path) untouched.
-    // The `id` case keeps its dedicated path: `id` is the node's identity, not
-    // an entry in the property map, and the per-type id-index answers the probe
-    // in O(1) amortised across every backend. A primary key on any *other*
-    // property is enforced by the unique-constraint index instead, installed
-    // when the schema declares it (`DirGraph::set_schema`).
-    if graph.primary_key_for(&label) == Some("id")
-        && graph.lookup_by_id_readonly(&label, &id).is_some()
-    {
-        return Err(format!(
-            "duplicate primary key: node type '{label}' declares a primary key and a \
-             node with id {id} already exists. Use MERGE to upsert instead of CREATE, \
-             or remove the duplicate."
-        ));
-    }
+    // Identity fields, under whichever spelling this node type declares — see
+    // [`IdentityAliases`] and [`create_identity`].
+    let aliases = IdentityAliases::for_type(graph, &label);
+    let CreatedIdentity {
+        id,
+        title,
+        title_supplied,
+    } = create_identity(graph, node_pat, &label, &aliases, &mut properties)?;
 
-    // Declared UNIQUE / NOT NULL constraints. Both gates read through one
-    // closure over the values this CREATE is about to write: `id` and `title`
-    // are the identity fields, everything else comes from the evaluated property
-    // map. Skipped entirely for a type that declares nothing.
+    check_identity_uniqueness(graph, &label, &id)?;
+
+    // A constraint declared on the type's *own* id/title spelling (`REQUIRE
+    // p.name IS UNIQUE` on a type loaded with `node_title_field='name'`) reads
+    // the value this CREATE is putting in the identity field — that spelling no
+    // longer has a property key of its own, the value having been promoted.
+    // The title alias answers only when the caller *supplied* the title: the
+    // `<Label>_<n>` fallback is engine-minted, and a `REQUIRE … IS NOT NULL` on
+    // the type's title column is asking the caller for a value. That keeps the
+    // gate exactly as strict as it was when the alias never reached the title
+    // at all.
     let constraint_read = |property: &str| -> Option<Value> {
+        if aliases.id_field() == Some(property) {
+            return (!matches!(id, Value::Null)).then(|| id.clone());
+        }
+        if aliases.title_field() == Some(property) {
+            return (title_supplied && !matches!(title, Value::Null)).then(|| title.clone());
+        }
         match property {
             "id" => (!matches!(id, Value::Null)).then(|| id.clone()),
             "title" => (!matches!(title, Value::Null)).then(|| title.clone()),
@@ -1786,6 +1762,8 @@ fn execute_remove(
                         .map(|n| n.get_node_type_ref(&graph.interner).to_string())
                         .unwrap_or_default();
 
+                    let write_field = remove_write_field(graph, &node_type_str, property.as_str())?;
+
                     // Declared NOT NULL / UNIQUE gates. Removing a required
                     // property is a violation; removing part of a unique tuple
                     // just vacates it. Planned before the write so a rejection
@@ -1822,7 +1800,7 @@ fn execute_remove(
                     // `execute_set`: they live inline on the node and are
                     // consolidated by `enable_columnar` at save time.
                     let mut cleared_via_master = None;
-                    if !is_disk && property != "name" && property != "title" {
+                    if !is_disk && write_field != "name" && write_field != "title" {
                         let columnar_row_id = {
                             let _arena_guard = graph.graph.begin_query();
                             graph
@@ -1831,7 +1809,7 @@ fn execute_remove(
                                 .and_then(|n| n.properties.columnar_row_id())
                         };
                         if let Some(row_id) = columnar_row_id {
-                            let key = graph.interner.get_or_intern(property);
+                            let key = graph.interner.get_or_intern(write_field);
                             // Same primitive `SET` uses, for the same reason:
                             // it captures the pre-statement store into the undo
                             // journal *before* mutating. This path used to write
@@ -1855,7 +1833,7 @@ fn execute_remove(
                     let removed_value = if let Some(prior) = cleared_via_master {
                         prior
                     } else if graph.graph.node_weight(*node_idx).is_some() {
-                        if property == "name" || property == "title" {
+                        if write_field == "name" || write_field == "title" {
                             // Read the *resolved* title (a columnar node keeps
                             // it in its store's reserved column, with the
                             // inline field on the `Null` sentinel) and clear it
@@ -1871,7 +1849,7 @@ fn execute_remove(
                             // The backend picks the right removal semantics per
                             // storage: disk stages a `Null` write so its flush
                             // propagates the removal; row storage drops the key.
-                            let key = InternedKey::from_str(property);
+                            let key = InternedKey::from_str(write_field);
                             GraphWrite::remove_node_property(&mut graph.graph, *node_idx, key)
                         }
                     } else {
@@ -2066,16 +2044,7 @@ fn try_match_merge_pattern(
                         .secondary_label_index
                         .contains_key(&crate::graph::schema::InternedKey::from_str(label));
 
-                // Evaluate expected properties
-                let expected_props: Vec<(&str, Value)> = node_pat
-                    .properties
-                    .iter()
-                    .map(|(key, expr)| {
-                        executor
-                            .evaluate_expression(expr, row)
-                            .map(|val| (key.as_str(), val))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                let expected_props = merge_expected_props(&executor, node_pat, row, graph)?;
 
                 // Helper: verify a candidate node matches all expected properties
                 let node_matches_all = |idx: NodeIndex, props: &[(&str, Value)]| -> bool {

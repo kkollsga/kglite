@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::columnar_write::{set_via_column_master, ColumnMasterWrite};
+use super::identity_fields::IdentityAliases;
 use super::write::{enforce_write_scope, set_node_property_direct};
 use crate::datatypes::values::Value;
 use crate::graph::languages::cypher::result::MutationStats;
@@ -56,6 +57,10 @@ pub(super) struct SetMemos<'a> {
 struct TypeFacts {
     /// The type's name — resolved once instead of `to_string()`-ed per row.
     name: String,
+    /// The type's declared identity-field spellings, so a write to one of them
+    /// reaches the field the *reads* of that name resolve to. Statement-scoped
+    /// like the rest of the memo: `SET` never registers an alias.
+    aliases: IdentityAliases,
     maintains_indexes: bool,
     auto_timestamp: bool,
 }
@@ -92,7 +97,12 @@ struct RowBookkeeping {
 struct LandedPropertyWrite<'a> {
     node_idx: NodeIndex,
     node_type: &'a str,
+    /// The name the statement used — what a constraint, an index and the type
+    /// catalogue are keyed by.
     property: &'a str,
+    /// The field the value landed in, once the type's identity-field spellings
+    /// were resolved. Differs from `property` only for a title alias.
+    write_field: &'a str,
     old_value: Option<&'a Value>,
     value: &'a Value,
     constraint_plan: &'a crate::graph::dir_graph::constraints::PropertyWritePlan,
@@ -131,6 +141,33 @@ pub(super) fn apply_node_property_set<'a>(
     let facts = type_facts_for(&mut memos.types, graph, type_key);
     let node_type_str = facts.name.as_str();
 
+    // The field this write actually lands in. A type's declared identity
+    // spellings name the identity columns — the resolution every *read* of that
+    // name applies — so `SET n.term_name = 'x'` on a type loaded with
+    // `node_title_field='term_name'` has to write the title. It used to store an
+    // ordinary property instead, which `n.term_name` could never return: the
+    // write was invisible on the route that asked for it.
+    //
+    // The id half is refused rather than rewritten, for the reason the literal
+    // `SET n.id` already is: the identity is immutable, and `add_nodes` treats
+    // its `unique_id_field` column as the row's key rather than a value it
+    // updates.
+    //
+    // Only the *storage* write is redirected. Constraints, index maintenance
+    // and the type catalogue keep the name the statement (and the declaration)
+    // used — `update_property_indices_for_set` resolves the alias itself, and a
+    // constraint is declared and reported under the spelling its author wrote.
+    let write_field = match facts.aliases.canonical(property) {
+        "id" => {
+            return Err(format!(
+                "Cannot SET node id — it is immutable ('{property}' is the id field of \
+                 node type '{node_type_str}', so it names the identity)"
+            ))
+        }
+        "title" => "title",
+        _ => property,
+    };
+
     // The old value, read **only when an index will consume it**: its one
     // consumer is the bucket move in `update_property_indices_for_set`, and on
     // a type carrying no index that move is a provable no-op — so there the
@@ -148,7 +185,7 @@ pub(super) fn apply_node_property_set<'a>(
         // `dir_graph.rs::create_index`'s alias-resolution path). Falling back
         // to the title keeps index auto-maintenance consistent with how those
         // indexes were populated.
-        match property {
+        match write_field {
             // `title()`, not the raw inline field: these indexes are built
             // from `get_node_title`.
             "name" => node
@@ -156,7 +193,7 @@ pub(super) fn apply_node_property_set<'a>(
                 .map(Cow::into_owned)
                 .or_else(|| Some(node.title().into_owned())),
             "title" => Some(node.title().into_owned()),
-            _ => node.get_field_ref(property).map(Cow::into_owned),
+            _ => node.get_field_ref(write_field).map(Cow::into_owned),
         }
     } else {
         None
@@ -216,7 +253,7 @@ pub(super) fn apply_node_property_set<'a>(
         ColumnMasterWrite {
             node_idx,
             node_type: node_type_str,
-            property,
+            property: write_field,
             value: &value,
             row_id: columnar_row_id,
         },
@@ -231,7 +268,7 @@ pub(super) fn apply_node_property_set<'a>(
         // storage variant. The clone lives here rather than before the write:
         // the master path borrows the value, so only the setter that *consumes*
         // one pays for it.
-        if set_node_property_direct(graph, node_idx, property, value.clone()) {
+        if set_node_property_direct(graph, node_idx, write_field, value.clone()) {
             stats.properties_set += 1;
         }
     }
@@ -242,6 +279,7 @@ pub(super) fn apply_node_property_set<'a>(
             node_idx,
             node_type: node_type_str,
             property,
+            write_field,
             old_value: old_value.as_ref(),
             value: &value,
             constraint_plan: &constraint_plan,
@@ -272,7 +310,9 @@ fn finish_node_property_write(
     write: LandedPropertyWrite<'_>,
     nodes_to_stamp: &mut HashMap<NodeIndex, String>,
 ) {
-    if write.owed.register_schema_key && write.property != "title" {
+    // A `title` write touches the node's title field, not the property map, so
+    // it registers no schema key — under either spelling of that field.
+    if write.owed.register_schema_key && write.write_field != "title" {
         let ik = InternedKey::from_str(write.property);
         // Read-check before taking `&mut`: `type_schemas` is `Arc`-shared with
         // the rollback shell (`dir_graph::schema_cow`), so `type_schemas_mut()`
@@ -322,6 +362,7 @@ fn type_facts_for<'m>(
         TypeFacts {
             maintains_indexes: graph.type_has_user_indexes(&name),
             auto_timestamp: graph.auto_timestamp_for(&name),
+            aliases: IdentityAliases::for_type(graph, &name),
             name,
         }
     })

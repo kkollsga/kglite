@@ -250,6 +250,13 @@ impl RowBuilder<'_> {
     /// The batch action for one row: an update when the id already resolves to a
     /// node, a create otherwise. Both arms keep the interned keys all the way
     /// down.
+    ///
+    /// The create arm therefore *cannot* produce a second node under a live
+    /// `(type, id)`: `existing_idx` is a lookup in the type's freshly built id
+    /// index, so an id that exists takes the update arm. That is why the durable
+    /// duplicate-id refusal (`write.rs::create_node`) has no counterpart here —
+    /// a gate on this path could never fire. It is also why WAL replay, which
+    /// folds its net state through `add_nodes`, cannot refuse its own history.
     fn action(
         &self,
         df_data: &DataFrame,

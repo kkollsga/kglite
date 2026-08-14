@@ -910,6 +910,7 @@ pub mod dead_code;
 mod execution_support;
 pub mod expression;
 pub mod helpers;
+mod identity_fields;
 pub mod load_csv;
 pub mod match_clause;
 pub mod match_execution;

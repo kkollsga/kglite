@@ -1397,31 +1397,85 @@ def test_recovery_matches_live_across_checkpoint_then_create(tmp_path, storage):
     assert recovered == live
 
 
-def test_caller_supplied_duplicate_ids_are_merged_by_recovery(tmp_path):
-    """**Known limitation, pinned deliberately** — not an endorsement.
+@pytest.mark.parametrize("storage", DURABLE_STORAGE_MODES)
+def test_a_durable_graph_refuses_a_caller_supplied_duplicate_id(tmp_path, storage):
+    """A durable graph refuses the write it cannot log, rather than logging one
+    recovery would silently merge.
 
-    ``id`` uniqueness is opt-in (CYPHER.md: "two ``CREATE (:T {id: 'k'})``
-    make two nodes"), but the WAL names every entity — nodes, and both
-    endpoints of every edge — by its logical ``(node_type, id)``. A log in
-    which one id denotes two nodes is therefore not merely folded wrongly,
-    it is *unwritable*: there is no discriminator to carry. So a history
-    that duplicates a caller-supplied id recovers as one node.
+    ``id`` uniqueness is opt-in on a plain graph (CYPHER.md: "two ``CREATE (:T
+    {id: 'k'})`` make two nodes"), but the WAL names every entity — nodes, and
+    both endpoints of every edge — by its logical ``(node_type, id)``. A log in
+    which one id denotes two nodes is not merely folded wrongly, it is
+    *unwritable*: there is no discriminator to carry. Until 0.16.1 the second
+    ``CREATE`` was accepted and the two nodes came back as one — a node lost
+    across a reopen, with nothing at write time to warn anyone.
 
-    This is asserted rather than left silent so the behaviour cannot change
-    unnoticed in either direction. The fix is a decision, not a patch —
-    either durable mode refuses the write it cannot log, or the WAL gains a
-    node identity independent of ``id`` — and until one is made, a durable
-    application that supplies its own ids should declare a primary key
-    (``define_schema``) or use ``MERGE``, both of which make the shape
-    unreachable.
+    So durable mode now refuses it, and the error names the two routes that do
+    work. The refusal is scoped to a recording backend: a non-durable graph
+    keeps the documented permissive behaviour, pinned below.
     """
-    live, recovered = _live_and_recovered(
+    script = _child_script(
         tmp_path,
         """
         g = open_durable()
         g.cypher("CREATE (:T {id: 1, tag: 'first'})")
-        g.cypher("CREATE (:T {id: 1, tag: 'second'})")
+        try:
+            g.cypher("CREATE (:T {id: 1, tag: 'second'})")
+        except Exception as exc:
+            print("REFUSED", exc, flush=True)
+        else:
+            print("ACCEPTED", flush=True)
         """,
+        storage,
+        "os._exit(0)",
     )
-    assert live == "[(1, 'first'), (1, 'second')]"
-    assert recovered == "[(1, 'second')]", "known limitation changed — re-read the docstring"
+    done = subprocess.run([PYBIN, "-c", script], check=True, capture_output=True, env=dict(os.environ))
+    out = done.stdout.decode()
+    assert "REFUSED" in out, out
+    # The message has to be actionable — both working routes by name.
+    assert "MERGE" in out, out
+    assert "primary key" in out and "define_schema" in out, out
+
+    # And the refusal left the graph recoverable: the first node, intact.
+    # Reaching this state at all is the proof that *replay* does not refuse its
+    # own history — the child died without a checkpoint, so this open folds the
+    # log back in, and it does so through the bulk upsert path (which keys by
+    # ``(type, id)`` and therefore cannot produce a duplicate) before the graph
+    # is wrapped for capture.
+    g = _open(tmp_path / "app.kgl", storage)
+    assert sorted((d["id"], d["tag"]) for d in g.cypher("MATCH (n:T) RETURN n.id AS id, n.tag AS tag").to_dicts()) == [
+        (1, "first")
+    ]
+    # …and the gate covers a node that only exists because it was replayed.
+    with pytest.raises(Exception, match="durable graph"):
+        g.cypher("CREATE (:T {id: 1, tag: 'third'})")
+
+
+def test_a_non_durable_graph_still_allows_duplicate_ids(tmp_path):
+    """The counter-pin: the refusal is a property of *durable capture*, not of
+    ``CREATE``. Without a log there is nothing that cannot be represented, and
+    the documented opt-in-uniqueness behaviour is unchanged."""
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:T {id: 1, tag: 'first'})")
+    g.cypher("CREATE (:T {id: 1, tag: 'second'})")
+    assert g.cypher("MATCH (n:T) RETURN count(n) AS c").scalar() == 2
+
+
+def test_a_durable_graph_takes_merge_as_the_route_the_refusal_names(tmp_path):
+    """The guidance in the error must actually work: MERGE upserts the node
+    rather than tripping the refusal."""
+    script = _child_script(
+        tmp_path,
+        """
+        g = open_durable()
+        g.cypher("CREATE (:T {id: 1, tag: 'first'})")
+        g.cypher("MERGE (n:T {id: 1}) ON MATCH SET n.tag = 'second'")
+        """,
+        "memory",
+        "os._exit(0)",
+    )
+    subprocess.run([PYBIN, "-c", script], check=True, capture_output=True, env=dict(os.environ))
+    g = _open(tmp_path / "app.kgl", "memory")
+    assert sorted((d["id"], d["tag"]) for d in g.cypher("MATCH (n:T) RETURN n.id AS id, n.tag AS tag").to_dicts()) == [
+        (1, "second")
+    ]
