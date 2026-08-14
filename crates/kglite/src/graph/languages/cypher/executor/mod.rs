@@ -581,6 +581,122 @@ impl<'a> CypherExecutor<'a> {
         })
     }
 
+    /// `Clause::FusedCountEdgesByType` — one row per edge type, from the
+    /// cached per-type counts.
+    fn execute_fused_count_edges_by_type(
+        &self,
+        type_alias: &str,
+        count_alias: &str,
+    ) -> Result<ResultSet, String> {
+        self.budget
+            .check_work(self.graph.graph.edge_count(), "fused count by edge type")?;
+        let counts = self.graph.get_edge_type_counts();
+        let mut result_rows = Vec::with_capacity(counts.len());
+        for (edge_type, count) in counts.iter() {
+            let mut projected = Bindings::with_capacity(2);
+            projected.insert(type_alias.to_string(), Value::String(edge_type.clone()));
+            projected.insert(count_alias.to_string(), Value::Int64(*count as i64));
+            result_rows.push(ResultRow::from_projected(projected));
+        }
+        Ok(ResultSet {
+            rows: result_rows,
+            columns: vec![type_alias.to_string(), count_alias.to_string()],
+            lazy_return_items: None,
+        })
+    }
+
+    /// `Clause::FusedCountTypedNode` — count nodes carrying `node_type` as
+    /// EITHER their primary type or a secondary label. The choke-point API
+    /// (`DirGraph::add_node_label`) forbids a node holding the same key as
+    /// both primary and secondary, so the two buckets are disjoint and sum
+    /// without double-counting. Multi-label patterns (`:A:B`) never reach
+    /// here — the fusion pass bails on extra labels, leaving the
+    /// intersection to the matcher.
+    fn execute_fused_count_typed_node(
+        &self,
+        node_type: &str,
+        alias: &str,
+    ) -> Result<ResultSet, String> {
+        let primary = self
+            .graph
+            .type_indices
+            .get(node_type)
+            .map(|v| v.len())
+            .unwrap_or(0);
+        let secondary = if self.graph.has_secondary_labels {
+            self.graph
+                .secondary_label_index
+                .get(&InternedKey::from_str(node_type))
+                .map(|v| v.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let count = (primary + secondary) as i64;
+        self.budget
+            .check_work(count as usize, "fused typed node count")?;
+        Ok(single_count_result(alias, count))
+    }
+
+    /// `Clause::FusedCountTypedEdge` — use the cached edge-type count.
+    /// Populated by the N-Triples builder and persisted in metadata; for
+    /// in-memory graphs the first call walks edges once and caches. Either
+    /// way this turns an O(E) scan into an O(1) HashMap lookup (on Wikidata,
+    /// 64 s → sub-millisecond).
+    fn execute_fused_count_typed_edge(
+        &self,
+        edge_type: &str,
+        alias: &str,
+    ) -> Result<ResultSet, String> {
+        let counts = self.graph.get_edge_type_counts();
+        let count = counts.get(edge_type).copied().unwrap_or(0) as i64;
+        self.budget
+            .check_work(count as usize, "fused typed edge count")?;
+        Ok(single_count_result(alias, count))
+    }
+
+    /// `Clause::FusedCountAnchoredEdges` — O(log D) count from CSR offsets
+    /// (with binary search when a connection type is specified). The anchor
+    /// has already been resolved at plan time; an invalid index falls
+    /// through `count_edges_filtered` to a clean `Ok(0)`. An alternation
+    /// sums one such read per accepted type — exact, because every edge
+    /// carries exactly one type and the planner deduplicated the list.
+    fn execute_fused_count_anchored_edges(
+        &self,
+        anchor_idx: u32,
+        anchor_direction: petgraph::Direction,
+        edge_types: Option<&[String]>,
+        alias: &str,
+    ) -> Result<ResultSet, String> {
+        let idx = petgraph::graph::NodeIndex::new(anchor_idx as usize);
+        let mut count: i64 = 0;
+        match edge_types {
+            None => {
+                count = self.graph.graph.count_edges_filtered(
+                    idx,
+                    anchor_direction,
+                    None,
+                    None,
+                    self.deadline,
+                )? as i64;
+            }
+            Some(types) => {
+                for edge_type in types {
+                    count += self.graph.graph.count_edges_filtered(
+                        idx,
+                        anchor_direction,
+                        Some(InternedKey::from_str(edge_type)),
+                        None,
+                        self.deadline,
+                    )? as i64;
+                }
+            }
+        }
+        self.budget
+            .check_work(count as usize, "fused anchored edge count")?;
+        Ok(single_count_result(alias, count))
+    }
+
     /// Public so execute_mutable can call it for read clauses.
     pub fn execute_single_clause(
         &self,
@@ -670,26 +786,14 @@ impl<'a> CypherExecutor<'a> {
                 self.budget
                     .check_work(self.graph.graph.node_count(), "fused node count")?;
                 let count = self.graph.graph.node_count() as i64;
-                let mut projected = Bindings::with_capacity(1);
-                projected.insert(alias.clone(), Value::Int64(count));
-                Ok(ResultSet {
-                    rows: vec![ResultRow::from_projected(projected)],
-                    columns: vec![alias.clone()],
-                    lazy_return_items: None,
-                })
+                Ok(single_count_result(alias, count))
             }
             Clause::FusedCountAllEdges { alias } => {
                 let edge_count = self.graph.graph.edge_count();
                 self.budget.check_work(edge_count, "fused all-edge count")?;
                 let count = i64::try_from(edge_count)
                     .map_err(|_| "edge count exceeds Cypher integer range".to_string())?;
-                let mut projected = Bindings::with_capacity(1);
-                projected.insert(alias.clone(), Value::Int64(count));
-                Ok(ResultSet {
-                    rows: vec![ResultRow::from_projected(projected)],
-                    columns: vec![alias.clone()],
-                    lazy_return_items: None,
-                })
+                Ok(single_count_result(alias, count))
             }
             Clause::FusedCountByType {
                 type_alias,
@@ -699,122 +803,24 @@ impl<'a> CypherExecutor<'a> {
             Clause::FusedCountEdgesByType {
                 type_alias,
                 count_alias,
-            } => {
-                self.budget
-                    .check_work(self.graph.graph.edge_count(), "fused count by edge type")?;
-                let counts = self.graph.get_edge_type_counts();
-                let mut result_rows = Vec::with_capacity(counts.len());
-                for (edge_type, count) in counts.iter() {
-                    let mut projected = Bindings::with_capacity(2);
-                    projected.insert(type_alias.clone(), Value::String(edge_type.clone()));
-                    projected.insert(count_alias.clone(), Value::Int64(*count as i64));
-                    result_rows.push(ResultRow::from_projected(projected));
-                }
-                Ok(ResultSet {
-                    rows: result_rows,
-                    columns: vec![type_alias.clone(), count_alias.clone()],
-                    lazy_return_items: None,
-                })
-            }
+            } => self.execute_fused_count_edges_by_type(type_alias, count_alias),
             Clause::FusedCountTypedNode { node_type, alias } => {
-                // Count nodes carrying `node_type` as EITHER their primary
-                // type or a secondary label. The choke-point API
-                // (`DirGraph::add_node_label`) forbids a node holding the
-                // same key as both primary and secondary, so the two buckets
-                // are disjoint and sum without double-counting. Multi-label
-                // patterns (`:A:B`) never reach here — the fusion pass bails
-                // on extra labels, leaving the intersection to the matcher.
-                let primary = self
-                    .graph
-                    .type_indices
-                    .get(node_type.as_str())
-                    .map(|v| v.len())
-                    .unwrap_or(0);
-                let secondary = if self.graph.has_secondary_labels {
-                    self.graph
-                        .secondary_label_index
-                        .get(&InternedKey::from_str(node_type))
-                        .map(|v| v.len())
-                        .unwrap_or(0)
-                } else {
-                    0
-                };
-                let count = (primary + secondary) as i64;
-                self.budget
-                    .check_work(count as usize, "fused typed node count")?;
-                let mut projected = Bindings::with_capacity(1);
-                projected.insert(alias.clone(), Value::Int64(count));
-                Ok(ResultSet {
-                    rows: vec![ResultRow::from_projected(projected)],
-                    columns: vec![alias.clone()],
-                    lazy_return_items: None,
-                })
+                self.execute_fused_count_typed_node(node_type, alias)
             }
             Clause::FusedCountTypedEdge { edge_type, alias } => {
-                // Use the cached edge-type count. Populated by the N-Triples
-                // builder and persisted in metadata; for in-memory graphs the
-                // first call walks edges once and caches. Either way this
-                // turns an O(E) scan into an O(1) HashMap lookup (on Wikidata,
-                // 64 s → sub-millisecond).
-                let counts = self.graph.get_edge_type_counts();
-                let count = counts.get(edge_type).copied().unwrap_or(0) as i64;
-                self.budget
-                    .check_work(count as usize, "fused typed edge count")?;
-                let mut projected = Bindings::with_capacity(1);
-                projected.insert(alias.clone(), Value::Int64(count));
-                Ok(ResultSet {
-                    rows: vec![ResultRow::from_projected(projected)],
-                    columns: vec![alias.clone()],
-                    lazy_return_items: None,
-                })
+                self.execute_fused_count_typed_edge(edge_type, alias)
             }
             Clause::FusedCountAnchoredEdges {
                 anchor_idx,
                 anchor_direction,
                 edge_types,
                 alias,
-            } => {
-                // O(log D) count from CSR offsets (with binary search when a
-                // connection type is specified). The anchor has already been
-                // resolved at plan time; an invalid index falls through
-                // `count_edges_filtered` to a clean `Ok(0)`. An alternation
-                // sums one such read per accepted type — exact, because every
-                // edge carries exactly one type and the planner deduplicated
-                // the list.
-                let idx = petgraph::graph::NodeIndex::new(*anchor_idx as usize);
-                let mut count: i64 = 0;
-                match edge_types.as_deref() {
-                    None => {
-                        count = self.graph.graph.count_edges_filtered(
-                            idx,
-                            *anchor_direction,
-                            None,
-                            None,
-                            self.deadline,
-                        )? as i64;
-                    }
-                    Some(types) => {
-                        for edge_type in types {
-                            count += self.graph.graph.count_edges_filtered(
-                                idx,
-                                *anchor_direction,
-                                Some(InternedKey::from_str(edge_type)),
-                                None,
-                                self.deadline,
-                            )? as i64;
-                        }
-                    }
-                }
-                self.budget
-                    .check_work(count as usize, "fused anchored edge count")?;
-                let mut projected = Bindings::with_capacity(1);
-                projected.insert(alias.clone(), Value::Int64(count));
-                Ok(ResultSet {
-                    rows: vec![ResultRow::from_projected(projected)],
-                    columns: vec![alias.clone()],
-                    lazy_return_items: None,
-                })
-            }
+            } => self.execute_fused_count_anchored_edges(
+                *anchor_idx,
+                *anchor_direction,
+                edge_types.as_deref(),
+                alias,
+            ),
             Clause::FusedNodeScanAggregate {
                 match_clause,
                 where_predicate,
@@ -941,6 +947,17 @@ pub use helpers::return_item_column_name;
 // uses `write::execute_mutable_with_csv`, which carries the LOAD CSV
 // filesystem capability.
 pub use write::is_mutation_query;
+
+/// The single-row, single-column result every fused scalar count returns.
+fn single_count_result(alias: &str, count: i64) -> ResultSet {
+    let mut projected = Bindings::with_capacity(1);
+    projected.insert(alias.to_string(), Value::Int64(count));
+    ResultSet {
+        rows: vec![ResultRow::from_projected(projected)],
+        columns: vec![alias.to_string()],
+        lazy_return_items: None,
+    }
+}
 
 /// Best-effort declared-variable set derived from the bindings present on
 /// a result set's rows. Used only by the index-less `execute_single_clause`

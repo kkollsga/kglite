@@ -2172,8 +2172,28 @@ impl<'a> CypherExecutor<'a> {
         };
 
         let _ = columns; // column names are the caller's ResultSet wrap
+        Ok(Some(self.histogram_counts_to_rows(
+            &counts,
+            with_clause,
+            group_var,
+            group_key_indices,
+            count_indices,
+        )?))
+    }
+
+    /// Result assembly for [`Self::try_fast_with_aggregate_via_histogram`]:
+    /// turn per-peer counts into projected rows and apply the `WITH … WHERE`
+    /// filter. Runs once, after the counting sweep.
+    fn histogram_counts_to_rows(
+        &self,
+        counts: &std::collections::HashMap<u32, i64>,
+        with_clause: &WithClause,
+        group_var: &str,
+        group_key_indices: &[usize],
+        count_indices: &[usize],
+    ) -> Result<Vec<ResultRow>, String> {
         let mut rows: Vec<ResultRow> = Vec::with_capacity(counts.len());
-        for (&peer, &count) in &counts {
+        for (&peer, &count) in counts {
             let node_idx = NodeIndex::new(peer as usize);
 
             // Build temporary row so group-key expressions (e.g.
@@ -2216,7 +2236,7 @@ impl<'a> CypherExecutor<'a> {
             rows.retain(|row| self.evaluate_predicate(&folded, row).unwrap_or(false));
         }
 
-        Ok(Some(rows))
+        Ok(rows)
     }
 }
 

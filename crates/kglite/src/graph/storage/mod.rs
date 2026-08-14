@@ -47,7 +47,6 @@ use petgraph::stable_graph::StableDiGraph;
 use petgraph::Direction;
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
-use std::ops::Deref;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -728,59 +727,6 @@ pub struct MemoryGraph {
 pub(crate) struct MemoryPeerCounts {
     pub(crate) by_target: Arc<HashMap<u32, i64>>,
     pub(crate) by_source: Arc<HashMap<u32, i64>>,
-}
-
-pub(super) fn flatten_to_csr(
-    mut map: HashMap<NodeIndex, Vec<EdgeIndex>>,
-) -> (Vec<NodeIndex>, Vec<u32>, Vec<EdgeIndex>) {
-    let mut sources: Vec<NodeIndex> = map.keys().copied().collect();
-    sources.sort_by_key(|n| n.index());
-    let mut offsets: Vec<u32> = Vec::with_capacity(sources.len() + 1);
-    let total: usize = map.values().map(|v| v.len()).sum();
-    let mut flat: Vec<EdgeIndex> = Vec::with_capacity(total);
-    offsets.push(0);
-    for src in &sources {
-        if let Some(edges) = map.remove(src) {
-            flat.extend(edges);
-        }
-        offsets.push(flat.len() as u32);
-    }
-    (sources, offsets, flat)
-}
-
-// Read-only Deref for MemoryGraph / MappedGraph stays — petgraph's
-// inherent read methods (`node_weight`, `edge_references`, etc.) are
-// the same shape as the GraphRead trait methods, and trait dispatch
-// is enforced explicitly elsewhere via UFCS or `use Trait`.
-//
-// DerefMut is REMOVED (0.9.0 Cluster 6 / D2 hygiene). Without it,
-// callers that need a mutable petgraph view must go through
-// `inner_mut()`, and any mutation that requires lazy-index
-// invalidation must route through the GraphWrite trait. This kills
-// the silent footgun: pre-fix, `g.add_node(data)` on `&mut MappedGraph`
-// auto-deref'd to petgraph, bypassing
-// `MappedGraph::invalidate_property_index()`. Post-fix, the same call
-// site fails to compile and forces the author to choose explicitly.
-impl Deref for MemoryGraph {
-    type Target = StableDiGraph<NodeData, EdgeData>;
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-// Serialize as the inner StableDiGraph so the on-disk binary format
-// is unchanged between this refactor and pre-refactor code.
-impl serde::Serialize for MemoryGraph {
-    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        self.inner.serialize(ser)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for MemoryGraph {
-    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        StableDiGraph::deserialize(de).map(MemoryGraph::from_graph)
-    }
 }
 
 pub mod impls;

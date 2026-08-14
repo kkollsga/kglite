@@ -166,3 +166,38 @@ impl MemoryGraph {
         &mut self.inner
     }
 }
+
+// Read-only Deref for MemoryGraph / MappedGraph stays — petgraph's
+// inherent read methods (`node_weight`, `edge_references`, etc.) are
+// the same shape as the GraphRead trait methods, and trait dispatch
+// is enforced explicitly elsewhere via UFCS or `use Trait`.
+//
+// DerefMut is REMOVED (0.9.0 Cluster 6 / D2 hygiene). Without it,
+// callers that need a mutable petgraph view must go through
+// `inner_mut()`, and any mutation that requires lazy-index
+// invalidation must route through the GraphWrite trait. This kills
+// the silent footgun: pre-fix, `g.add_node(data)` on `&mut MappedGraph`
+// auto-deref'd to petgraph, bypassing
+// `MappedGraph::invalidate_property_index()`. Post-fix, the same call
+// site fails to compile and forces the author to choose explicitly.
+impl std::ops::Deref for MemoryGraph {
+    type Target = StableDiGraph<NodeData, EdgeData>;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+// Serialize as the inner StableDiGraph so the on-disk binary format
+// is unchanged between this refactor and pre-refactor code.
+impl serde::Serialize for MemoryGraph {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        self.inner.serialize(ser)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MemoryGraph {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        StableDiGraph::deserialize(de).map(MemoryGraph::from_graph)
+    }
+}

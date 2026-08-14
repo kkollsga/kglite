@@ -16,7 +16,28 @@ use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use super::{flatten_to_csr, MappedGraph, MappedPropertyIndex, MappedTypeIndex};
+use super::{MappedGraph, MappedPropertyIndex, MappedTypeIndex};
+
+/// Flatten an adjacency map into CSR form: sorted source list, per-source
+/// offsets, and the flat edge array. Both columnar index builds below feed
+/// through it.
+fn flatten_to_csr(
+    mut map: HashMap<NodeIndex, Vec<EdgeIndex>>,
+) -> (Vec<NodeIndex>, Vec<u32>, Vec<EdgeIndex>) {
+    let mut sources: Vec<NodeIndex> = map.keys().copied().collect();
+    sources.sort_by_key(|n| n.index());
+    let mut offsets: Vec<u32> = Vec::with_capacity(sources.len() + 1);
+    let total: usize = map.values().map(|v| v.len()).sum();
+    let mut flat: Vec<EdgeIndex> = Vec::with_capacity(total);
+    offsets.push(0);
+    for src in &sources {
+        if let Some(edges) = map.remove(src) {
+            flat.extend(edges);
+        }
+        offsets.push(flat.len() as u32);
+    }
+    (sources, offsets, flat)
+}
 
 impl Clone for MappedGraph {
     fn clone(&self) -> Self {

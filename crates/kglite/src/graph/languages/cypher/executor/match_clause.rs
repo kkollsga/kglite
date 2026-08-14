@@ -7,8 +7,8 @@ use super::scan_eval::{ScanCompiler, ScanExpr};
 use super::*;
 use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::{
-    EdgeDirection, MatchBinding, NodePattern, Pattern, PatternElement, PatternExecutor,
-    PatternMatch, PropertyMatcher,
+    EdgeDirection, EdgePattern, MatchBinding, NodePattern, Pattern, PatternElement,
+    PatternExecutor, PatternMatch, PropertyMatcher,
 };
 use crate::graph::schema::InternedKey;
 use crate::graph::storage::{ColumnStore, GraphRead, NodeView};
@@ -17,6 +17,31 @@ use petgraph::Direction;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// Decode the one pattern shape every endpoint-anchored fast path below
+/// accepts: exactly `Node-Edge-Node`, with a fixed-length edge carrying no
+/// inline property map. Returns `None` for every other shape, which the
+/// callers turn into their own "fall back to the full executor" answer.
+///
+/// Variable-length edges and edge property filters are excluded here rather
+/// than at each call site: neither the direct `edges_directed_filtered`
+/// sweep nor the CSR counter can honour them.
+fn simple_node_edge_node(pattern: &Pattern) -> Option<(&NodePattern, &EdgePattern, &NodePattern)> {
+    if pattern.elements.len() != 3 {
+        return None;
+    }
+    let (PatternElement::Node(node_a), PatternElement::Edge(edge), PatternElement::Node(node_b)) = (
+        &pattern.elements[0],
+        &pattern.elements[1],
+        &pattern.elements[2],
+    ) else {
+        return None;
+    };
+    if edge.var_length.is_some() || edge.properties.is_some() {
+        return None;
+    }
+    Some((node_a, edge, node_b))
+}
 
 /// Collect the edge indices a [`PatternMatch`] consumed, deduplicated into
 /// `out`. Fixed-length hops live on the compact `exact_path` trail (named
@@ -644,28 +669,8 @@ impl<'a> CypherExecutor<'a> {
         if patterns.len() != 1 {
             return None;
         }
-        let pattern = &patterns[0];
-        if pattern.elements.len() != 3 {
-            return None;
-        }
-
-        let node_a = match &pattern.elements[0] {
-            PatternElement::Node(np) => np,
-            _ => return None,
-        };
-        let edge = match &pattern.elements[1] {
-            PatternElement::Edge(ep) => ep,
-            _ => return None,
-        };
-        let node_b = match &pattern.elements[2] {
-            PatternElement::Node(np) => np,
-            _ => return None,
-        };
-
-        // Skip variable-length edges and edge property filters
-        if edge.var_length.is_some() || edge.properties.is_some() {
-            return None;
-        }
+        // Shape gate (3 elements, fixed-length edge, no edge property map).
+        let (node_a, edge, node_b) = simple_node_edge_node(&patterns[0])?;
 
         // A pre-bound relationship variable pins the pattern to exactly
         // that edge; the direct edges_directed sweep below never checks
@@ -884,28 +889,10 @@ impl<'a> CypherExecutor<'a> {
         bindings: &Bindings<NodeIndex>,
         distinct_peers: bool,
     ) -> Result<Option<i64>, String> {
-        // Only handle simple 3-element patterns: Node-Edge-Node
-        if pattern.elements.len() != 3 {
+        // Shape gate (3 elements, fixed-length edge, no edge property map).
+        let Some((node_a, edge, node_b)) = simple_node_edge_node(pattern) else {
             return Ok(None);
-        }
-
-        let node_a = match &pattern.elements[0] {
-            PatternElement::Node(np) => np,
-            _ => return Ok(None),
         };
-        let edge = match &pattern.elements[1] {
-            PatternElement::Edge(ep) => ep,
-            _ => return Ok(None),
-        };
-        let node_b = match &pattern.elements[2] {
-            PatternElement::Node(np) => np,
-            _ => return Ok(None),
-        };
-
-        // Don't use fast-path for variable-length edges or edge property filters
-        if edge.var_length.is_some() || edge.properties.is_some() {
-            return Ok(None);
-        }
 
         // Determine which end is bound
         let a_bound = node_a

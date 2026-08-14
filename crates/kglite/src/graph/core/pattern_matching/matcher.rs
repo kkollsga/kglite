@@ -371,38 +371,16 @@ impl<'a> PatternExecutor<'a> {
         self
     }
 
-    /// Execute the pattern and return all matches
-    pub fn execute(&self, pattern: &Pattern) -> Result<Vec<PatternMatch>, String> {
-        if pattern.elements.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Start with the first node pattern
-        let first_node = match &pattern.elements[0] {
-            PatternElement::Node(np) => np,
-            _ => {
-                return Err(
-                    "Pattern must start with a node in parentheses. Example: (n:Person) or ()"
-                        .to_string(),
-                )
-            }
-        };
-
-        // Find all nodes matching the first pattern.
-        // For multi-hop patterns with max_matches, cap the source candidates to avoid
-        // O(N) allocation when only a small number of results are needed (e.g. LIMIT 10
-        // on an 11M-node type). The expansion loop enforces the exact max_matches.
-        let has_edges = pattern.elements.len() > 1;
-        let source_cap = if has_edges {
-            // Multi-hop with LIMIT: cap sources to avoid O(N) allocation + PatternMatch
-            // construction for millions of nodes. The expansion loop enforces exact
-            // max_matches via early-exit. 100x headroom handles sparse match patterns
-            // (each source needs only a 1% chance of producing a match to hit the limit).
-            self.max_matches.map(|m| m.saturating_mul(100).max(1000))
-        } else {
-            // Single-node pattern: exact truncation
-            self.max_matches
-        };
+    /// Choose and materialise the start-node set for `pattern`, capped at
+    /// `source_cap`. Runs once per [`Self::execute`] call, before the
+    /// expansion loop — never per row.
+    fn seed_start_nodes(
+        &self,
+        pattern: &Pattern,
+        first_node: &NodePattern,
+        has_edges: bool,
+        source_cap: Option<usize>,
+    ) -> Result<Vec<NodeIndex>, String> {
         // Pre-bound first nodes (e.g. `MATCH (f {id: X}) MATCH (f)-[:R]->(c)`)
         // must skip the inverted-index fast path — that path returns every source
         // for the edge type, ignoring the binding. find_matching_nodes resolves
@@ -489,6 +467,42 @@ impl<'a> PatternExecutor<'a> {
                 initial_nodes.truncate(cap);
             }
         }
+        Ok(initial_nodes)
+    }
+
+    /// Execute the pattern and return all matches
+    pub fn execute(&self, pattern: &Pattern) -> Result<Vec<PatternMatch>, String> {
+        if pattern.elements.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Start with the first node pattern
+        let first_node = match &pattern.elements[0] {
+            PatternElement::Node(np) => np,
+            _ => {
+                return Err(
+                    "Pattern must start with a node in parentheses. Example: (n:Person) or ()"
+                        .to_string(),
+                )
+            }
+        };
+
+        // Find all nodes matching the first pattern.
+        // For multi-hop patterns with max_matches, cap the source candidates to avoid
+        // O(N) allocation when only a small number of results are needed (e.g. LIMIT 10
+        // on an 11M-node type). The expansion loop enforces the exact max_matches.
+        let has_edges = pattern.elements.len() > 1;
+        let source_cap = if has_edges {
+            // Multi-hop with LIMIT: cap sources to avoid O(N) allocation + PatternMatch
+            // construction for millions of nodes. The expansion loop enforces exact
+            // max_matches via early-exit. 100x headroom handles sparse match patterns
+            // (each source needs only a 1% chance of producing a match to hit the limit).
+            self.max_matches.map(|m| m.saturating_mul(100).max(1000))
+        } else {
+            // Single-node pattern: exact truncation
+            self.max_matches
+        };
+        let initial_nodes = self.seed_start_nodes(pattern, first_node, has_edges, source_cap)?;
 
         // Initialize matches with first node bindings
         let mut matches: Vec<PatternMatch> = initial_nodes
