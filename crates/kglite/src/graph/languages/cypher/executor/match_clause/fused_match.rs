@@ -261,53 +261,13 @@ impl<'a> CypherExecutor<'a> {
             return self.execute_fused_global_pattern_count(pattern, return_clause);
         }
 
-        // Extract node variables from pattern
-        let first_var = match &pattern.elements[0] {
-            PatternElement::Node(np) => np.variable.as_ref(),
-            _ => return Err("FusedMatchReturnAggregate: expected node pattern".into()),
-        };
+        let FusedAggregateShape {
+            group_var,
+            group_elem_idx,
+            group_key_indices,
+            count_indices,
+        } = fused_aggregate_shape(pattern, return_clause)?;
         let last_elem_idx = pattern.elements.len() - 1;
-        let second_var = match &pattern.elements[last_elem_idx] {
-            PatternElement::Node(np) => np.variable.as_ref(),
-            _ => return Err("FusedMatchReturnAggregate: expected node pattern".into()),
-        };
-
-        // Determine which variable is the group key by checking RETURN items.
-        // The planner guarantees all non-aggregate items reference the same variable.
-        let group_var: &str = {
-            let mut gv = None;
-            for item in &return_clause.items {
-                if !is_aggregate_expression(&item.expression) {
-                    gv = match &item.expression {
-                        Expression::PropertyAccess { variable, .. } => Some(variable.as_str()),
-                        Expression::Variable(v) => Some(v.as_str()),
-                        _ => None,
-                    };
-                    break;
-                }
-            }
-            gv.ok_or("FusedMatchReturnAggregate: no group-by variable found")?
-        };
-
-        // Determine which pattern element index is the group key
-        let group_elem_idx = if first_var.is_some_and(|v| v == group_var) {
-            0
-        } else if second_var.is_some_and(|v| v == group_var) {
-            last_elem_idx
-        } else {
-            return Err("FusedMatchReturnAggregate: group variable not in pattern".into());
-        };
-
-        // Identify which RETURN items are group keys vs aggregates
-        let mut group_key_indices = Vec::new();
-        let mut count_indices = Vec::new();
-        for (i, item) in return_clause.items.iter().enumerate() {
-            if is_aggregate_expression(&item.expression) {
-                count_indices.push(i);
-            } else {
-                group_key_indices.push(i);
-            }
-        }
 
         // Helper: extract node index from a match binding
         let extract_node_idx = |m: &crate::graph::core::pattern_matching::PatternMatch| -> Option<petgraph::graph::NodeIndex> {
@@ -2278,4 +2238,69 @@ impl<'a> CypherExecutor<'a> {
 
         Ok(Some(rows))
     }
+}
+
+/// The query-shape half of `execute_fused_match_return_aggregate`, resolved
+/// once per query before the row loop: which variable groups, which pattern
+/// end it binds to, and which RETURN items are keys vs aggregates.
+struct FusedAggregateShape<'q> {
+    group_var: &'q str,
+    group_elem_idx: usize,
+    group_key_indices: Vec<usize>,
+    count_indices: Vec<usize>,
+}
+
+fn fused_aggregate_shape<'q>(
+    pattern: &'q Pattern,
+    return_clause: &'q ReturnClause,
+) -> Result<FusedAggregateShape<'q>, String> {
+    let first_var = match &pattern.elements[0] {
+        PatternElement::Node(np) => np.variable.as_ref(),
+        _ => return Err("FusedMatchReturnAggregate: expected node pattern".into()),
+    };
+    let last_elem_idx = pattern.elements.len() - 1;
+    let second_var = match &pattern.elements[last_elem_idx] {
+        PatternElement::Node(np) => np.variable.as_ref(),
+        _ => return Err("FusedMatchReturnAggregate: expected node pattern".into()),
+    };
+
+    // The planner guarantees all non-aggregate items reference the same variable.
+    let group_var: &str = {
+        let mut gv = None;
+        for item in &return_clause.items {
+            if !is_aggregate_expression(&item.expression) {
+                gv = match &item.expression {
+                    Expression::PropertyAccess { variable, .. } => Some(variable.as_str()),
+                    Expression::Variable(v) => Some(v.as_str()),
+                    _ => None,
+                };
+                break;
+            }
+        }
+        gv.ok_or("FusedMatchReturnAggregate: no group-by variable found")?
+    };
+
+    let group_elem_idx = if first_var.is_some_and(|v| v == group_var) {
+        0
+    } else if second_var.is_some_and(|v| v == group_var) {
+        last_elem_idx
+    } else {
+        return Err("FusedMatchReturnAggregate: group variable not in pattern".into());
+    };
+
+    let mut group_key_indices = Vec::new();
+    let mut count_indices = Vec::new();
+    for (i, item) in return_clause.items.iter().enumerate() {
+        if is_aggregate_expression(&item.expression) {
+            count_indices.push(i);
+        } else {
+            group_key_indices.push(i);
+        }
+    }
+    Ok(FusedAggregateShape {
+        group_var,
+        group_elem_idx,
+        group_key_indices,
+        count_indices,
+    })
 }

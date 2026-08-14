@@ -259,8 +259,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause/fused_match.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_fused_match_return_aggregate",
-      "lines": 984,
-      "branches": 162,
+      "lines": 964,
+      "branches": 149,
       "nesting": 7
     },
     {
