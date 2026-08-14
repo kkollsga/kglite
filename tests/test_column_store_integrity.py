@@ -1,10 +1,11 @@
-"""Integration tests for columnar property storage.
+"""Integration tests for the per-type property column store.
 
-Every graph is columnar from construction, so what these pin is that the
-one shape carries property semantics correctly across Cypher queries,
-mutations, save/load, and bulk operations — and that a consolidation pass
-over the columns (``unspill()``, ``save()``) changes nothing an observer
-can see.
+Properties live in columns from the first node in every mode, so what these
+pin is that the one shape carries property semantics correctly across Cypher
+queries, mutations, save/load, and bulk operations — and that a consolidation
+pass over the columns (``unspill()``, ``save()``) changes nothing an observer
+can see. The file was ``test_columnar_storage.py``, named for a storage mode
+that no longer exists as a distinct thing to be in.
 """
 
 import os
@@ -63,7 +64,7 @@ def multi_type_graph():
 # ── The one shape ────────────────────────────────────────────────────────────
 
 
-class TestColumnarBasic:
+class TestConstruction:
     def test_columnar_from_construction(self, person_graph):
         """A freshly built graph already holds its properties in columns.
 
@@ -79,7 +80,7 @@ class TestColumnarBasic:
 # ── Property preservation ────────────────────────────────────────────────────
 
 
-class TestColumnarPropertyPreservation:
+class TestPropertyPreservation:
     def test_all_properties_survive_consolidation(self, person_graph):
         before = person_graph.cypher(
             "MATCH (n:Person) RETURN n.full_name, n.age, n.score, n.active ORDER BY n.age"
@@ -114,7 +115,7 @@ class TestColumnarPropertyPreservation:
 # ── Cypher queries on columnar storage ───────────────────────────────────────
 
 
-class TestColumnarCypher:
+class TestCypherOverColumns:
     def test_where_int_filter(self, person_graph):
         result = person_graph.cypher(
             "MATCH (n:Person) WHERE n.age > 30 RETURN n.full_name ORDER BY n.full_name"
@@ -163,7 +164,7 @@ class TestColumnarCypher:
 # ── Save/Load ────────────────────────────────────────────────────────────────
 
 
-class TestColumnarSaveLoad:
+class TestSaveLoad:
     def test_save_load_roundtrip(self, person_graph):
         before = person_graph.cypher("MATCH (n:Person) RETURN n.full_name, n.age, n.score ORDER BY n.age").to_list()
 
@@ -208,7 +209,7 @@ class TestColumnarSaveLoad:
 # ── Mutations on columnar storage ────────────────────────────────────────────
 
 
-class TestColumnarMutations:
+class TestMutations:
     def test_set_property_cypher(self, person_graph):
         person_graph.cypher("MATCH (n:Person) WHERE n.full_name = 'Alice' SET n.age = 99")
         result = person_graph.cypher("MATCH (n:Person) WHERE n.full_name = 'Alice' RETURN n.age").to_list()
@@ -228,7 +229,7 @@ class TestColumnarMutations:
 # ── Node count and graph stats ───────────────────────────────────────────────
 
 
-class TestColumnarStats:
+class TestStats:
     def test_node_count_unchanged(self, person_graph):
         count_before = person_graph.cypher("MATCH (n:Person) RETURN count(n) AS c").to_list()[0]["c"]
         person_graph.unspill()
@@ -243,7 +244,7 @@ class TestColumnarStats:
 # ── V3 save/load roundtrip ──────────────────────────────────────────────────
 
 
-class TestV3Roundtrip:
+class TestKglRoundtrip:
     def test_save_load_v3_basic(self, person_graph, tmp_path):
         """v3 save/load roundtrip preserves all data and loads as columnar."""
         before = person_graph.cypher("MATCH (n:Person) RETURN n.full_name, n.age, n.score ORDER BY n.age").to_list()

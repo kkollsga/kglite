@@ -356,38 +356,37 @@ print(f"Updated {result['nodes_updated']} nodes")
 ## Write throughput — pick the coarsest path that fits
 
 Every rung below writes the same data. They differ in how much
-per-statement machinery each row pays for. Measured on 0.15.13,
-release build, an in-memory graph of 50 k nodes with 12 declared
-properties:
+per-statement machinery each row pays for. Measured release-build on
+an in-memory graph of 50 k nodes with 12 declared properties:
 
 | How you write | Cost per row |
 |---|---|
 | `add_nodes` / `add_connections` (bulk) | ≈ 1 µs |
 | One statement, many rows (`UNWIND $rows AS r CREATE …`) | ≈ 1–2 µs |
-| One statement per row, on a graph built in this process | ≈ 3 µs (`CREATE`), ≈ 5 µs (`MATCH … SET`) |
-| One statement per row, on a graph that came from a `.kgl` file | ≈ 40 µs at 5 k nodes, ≈ 380 µs at 50 k — and it keeps growing |
+| One statement per row | ≈ 3 µs (`CREATE`), ≈ 4–5 µs (`MATCH … SET`) |
 
-The first three rungs are flat in graph size; the last one is not,
-and it is the one long-running applications land in. A graph that
-came from a file — `kglite.load()`, `kglite.open()`, or your own
-earlier `save()` in the same process — holds its properties in
-per-type column stores, and **every mutating statement re-images the
-store of each type it writes, once per statement**, however few rows
-it touched. Wrapping the loop in `begin()` / `commit()` does not
-amortize that (measured: the same per-statement cost inside a
-transaction); batching into fewer statements does.
+**All three rungs are flat in graph size**, and the third does not
+depend on where the graph came from: a graph loaded with
+`kglite.load()`, opened with `kglite.open()`, or saved earlier in the
+same process measures the same as one built in this process — 4.3–5.0 µs
+per single-row `SET` at 50 k nodes, 4.3 µs at 100 k. Earlier releases
+charged a per-statement column-store re-image on any graph that had
+touched a file (≈ 380 µs at 50 k, growing with node count); that cost is
+gone, and with it the reason to treat a reloaded graph as a different
+kind of thing to write to.
 
-So write per statement, not per row:
+Batching is still the lever, because it is the per-*statement* work —
+parse, plan, checkpoint — that the rungs differ in:
 
 ```python
 rows = [{"id": 1, "lc": 10}, {"id": 2, "lc": 20}]  # ... 100 of them
 
-# 100 single-row statements on a 50 k-node graph loaded from disk:
-# ≈ 380 µs each, ≈ 38 ms for the loop.
+# 100 single-row statements: ≈ 4–5 µs each.
 for row in rows:
     graph.cypher("MATCH (n:Item {id: $id}) SET n.line_count = $lc", params=row)
 
-# The same 100 updates as one statement: ≈ 0.5 ms — about 80× less.
+# The same 100 updates as one statement: ≈ 1–2 µs per row, so roughly
+# a third of the work, and one plan lookup instead of a hundred.
 graph.cypher(
     "UNWIND $rows AS r MATCH (n:Item {id: r.id}) SET n.line_count = r.lc",
     params={"rows": rows},
@@ -396,10 +395,9 @@ graph.cypher(
 
 One statement per batch is the right shape for any mutation —
 `UNWIND $rows AS r CREATE (:Item {id: r.id, …})` reads the same way.
-Reads are unaffected by the regime, and so is `CREATE`, which appends
-rows rather than re-imaging a store. The
-[primary store guide](primary-store.md) covers the regime itself —
-how to see which one a graph is in, and the escape hatch.
+The [primary store guide](primary-store.md) covers what a write costs
+in memory, and the one backend (`disk`) whose statement cost still
+scales with graph size.
 
 ## Operation Reports
 

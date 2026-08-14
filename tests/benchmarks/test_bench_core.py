@@ -497,80 +497,43 @@ def test_bench_shortest_path(benchmark, bench_graph):
 
 
 # ---------------------------------------------------------------------------
-# Columnar storage benchmarks
+# Save throughput
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def bench_graph_columnar():
-    """Graph with 1000 nodes using columnar storage."""
-    graph = KnowledgeGraph()
-    nodes = pd.DataFrame(
-        {
-            "nid": list(range(1000)),
-            "name": [f"Node_{i}" for i in range(1000)],
-            "value": [float(i) for i in range(1000)],
-            "category": [f"cat_{i % 10}" for i in range(1000)],
-        }
-    )
-    graph.add_nodes(nodes, "Item", "nid", "name")
-
-    edges = pd.DataFrame(
-        {
-            "from_id": [i % 1000 for i in range(2000)],
-            "to_id": [(i * 7 + 13) % 1000 for i in range(2000)],
-            "weight": [float(i % 100) for i in range(2000)],
-        }
-    )
-    graph.add_connections(edges, "LINKS", "Item", "from_id", "Item", "to_id", columns=["weight"])
-    return graph
+#
+# `bench_graph_columnar` used to stand beside `bench_graph` as the "columnar"
+# fixture. The two built byte-identical graphs, because nothing in either body
+# ever changed a storage shape, and construction is columnar from the first
+# node now — so the pair, and the two query cells that only differed by which
+# of them they took, were measuring one thing twice. Merged into `bench_graph`
+# and `test_bench_cypher_{where,match}`.
 
 
 @pytest.mark.benchmark
-def test_bench_columnar_enable(benchmark, bench_graph):
-    """Time one full consolidation pass over the property columns.
+def test_bench_save_kgl(benchmark, bench_graph, tmp_path):
+    """Save to one `.kgl` path, overwriting it every round.
 
-    The cell used to time a `disable_columnar()` / `enable_columnar()` round
-    trip. Both are gone with the regime; `unspill()` is the surviving public
-    route to the same rebuild, which is also what `save()` and `vacuum()` run.
-    Kept under its original name so the tracked cell set is unchanged — the
-    rename belongs with the baseline recapture.
-    """
-    benchmark(bench_graph.unspill)
-
-
-@pytest.mark.benchmark
-def test_bench_columnar_cypher_where(benchmark, bench_graph_columnar):
-    """Filtered MATCH...WHERE with columnar storage."""
-    benchmark(bench_graph_columnar.cypher, "MATCH (n:Item) WHERE n.value > 500 RETURN n.title, n.value")
-
-
-@pytest.mark.benchmark
-def test_bench_columnar_cypher_match(benchmark, bench_graph_columnar):
-    """Simple MATCH...RETURN with columnar storage."""
-    benchmark(bench_graph_columnar.cypher, "MATCH (n:Item) RETURN n.title, n.value LIMIT 100")
-
-
-@pytest.mark.benchmark
-def test_bench_columnar_save_kgl(benchmark, bench_graph_columnar, tmp_path):
-    """Save columnar graph as standard .kgl file.
-
-    fsync=False: this tracks columnar *serialization + write* throughput, the
-    thing kglite controls. The fsync durability barrier (default in save()) is a
+    fsync=False: this tracks *serialization + write* throughput, the thing
+    kglite controls. The fsync durability barrier (default in save()) is a
     fixed OS-level cost orthogonal to serialization — including it would make a
     µs-scale bench dominated by ms-scale disk-flush latency.
     """
     path = str(tmp_path / "bench.kgl")
-    benchmark(lambda: bench_graph_columnar.save(path, fsync=False))
+    benchmark(lambda: bench_graph.save(path, fsync=False))
 
 
 @pytest.mark.benchmark
-def test_bench_save_v3(benchmark, bench_graph_columnar, tmp_path):
-    """Save columnar graph as a .kgl file (fsync=False — see save_kgl bench)."""
+def test_bench_save_kgl_new_file(benchmark, bench_graph, tmp_path):
+    """Save to a fresh `.kgl` path every round (fsync=False — see above).
+
+    The pair with `test_bench_save_kgl` separates writing over an existing file
+    from creating one, which are different syscall paths on every platform this
+    ships to. Formerly `test_bench_save_v3`, named for a container version two
+    bumps out of date; the operation and the fixture are unchanged.
+    """
     counter = [0]
 
     def save():
-        bench_graph_columnar.save(str(tmp_path / f"v3_{counter[0]}.kgl"), fsync=False)
+        bench_graph.save(str(tmp_path / f"fresh_{counter[0]}.kgl"), fsync=False)
         counter[0] += 1
 
     benchmark(save)

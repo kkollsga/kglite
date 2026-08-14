@@ -267,7 +267,7 @@ pub enum UndoEntry {
         /// rather than leaving an empty one behind — the same distinction
         /// [`BucketAppended`](Self::BucketAppended) draws with
         /// `bucket_was_new`, and for the same reason: an empty-but-present
-        /// store is observable (`is_columnar`, `graph_info`, the rollback
+        /// store is observable (`graph_info`'s `columnar_*` keys, the rollback
         /// fingerprint's master rows).
         store_was_new: bool,
     },

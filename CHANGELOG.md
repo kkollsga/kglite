@@ -7,6 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Every graph is columnar from its first node; `save()` no longer changes the
+  write regime.** A graph used to be built one way and saved another: node
+  properties were laid out per node, in a row, and only the first `save()` (or
+  an explicit `enable_columnar()`) rebuilt them into the per-type column stores
+  the file format, the memory limit and the mapped/disk modes all require. That
+  made "has been saved once" a permanent, invisible property of a live graph —
+  writes cost differently on either side of it, and a defect reachable only on
+  one side was a defect most testing never reached. Node creation is now
+  columnar on every path and in every storage mode (Cypher `CREATE` and
+  `MERGE`, `add_nodes` and every frame-shaped ingest built on it, WAL replay,
+  the N-Triples loader), so a freshly built graph and a reloaded one are the
+  same shape. `save()` becomes a consolidation pass that a settled graph skips
+  outright, rather than a mandatory O(N) rebuild, and the regime's public
+  controls are removed with the regime (see **Removed**).
+- **One property shape, not two.** A node's properties used to take one of two
+  durable layouts — a row-shaped block on the node, or a row in the type's
+  column store — with the shape decided by how the graph had been built and
+  changed under it by `save()`. Construction became columnar in every storage
+  mode earlier in this release; the row layout is now deleted outright, so
+  every read, write, undo and save path has one shape to serve. Only a
+  transient staging form survives (values held inline for a moment before they
+  reach a store: disk write-staging, `.kgl` deserialization, the bulk funnel,
+  the RDF loader), and nothing persists it. No user-visible behaviour changes
+  here; what changes is that the second layout can no longer be reached, so
+  the defect classes that only appeared on one side of it cannot recur.
+- **A node's title is written where the node's other values are.** A `SET
+  n.title` / `SET n.name`, an `add_nodes` update or replace, and a connection
+  title all used to write onto the node itself, leaving the column store's copy
+  stale until the next `save()` noticed the divergence and rebuilt every store
+  to reconcile it. Title writes now go through the store like any other value,
+  so a title write no longer costs the next save a full rebuild. One
+  user-visible consequence: `SET n = {…}` clears a node's title when the map
+  omits it, on every graph. It always did so on a graph that had not been
+  saved, and never did on one that had; the two now agree, on the
+  never-saved behaviour.
+- **Adding a property that a node type has never carried no longer rebuilds the
+  type's column store.** Every newly seen property key used to re-push every row
+  already stored into a fresh store, so an ingest stream whose columns widen
+  over time paid for all the rows already loaded, again, per new column; the
+  rebuild also dropped deleted rows' tombstones, resurrecting them. A new
+  property now appends a single column. Measured on a 500-row batch introducing
+  one new property: 44.6 µs/row with 5k rows already present, 147.1 at 20k and
+  558.4 at 80k, against 18.3 / 41.6 / 131.3 after the change — the remaining
+  growth is the batch loader's existing per-row cost and tracks the row-shaped
+  path within 8% at 80k.
+- **A graph built in-process with `storage="mapped"` is actually mapped.**
+  `storage="mapped"` is a zero memory limit, but nothing enforced it on the
+  ingest path, so an in-process mapped graph stayed wholly heap-resident until
+  its first write — only a `load()` ever produced mapped columns. Measured on a
+  20,000-row three-column build: 589 kB heap-resident before, 20 kB after (the
+  tombstone bitmap, which has no file form).
+- **`unspill()` and `vacuum()` rebuild their column stores directly.** Both
+  used to reach their end state by de-columnarizing the graph and immediately
+  re-consolidating it, which materialised every row onto its node only for the
+  very next pass to read it back off. They now do the rebuild in one pass, for
+  the same result: dead rows reclaimed, columns back on the heap, the memory
+  limit preserved.
+- **`vacuum()`'s `columnar_rebuilt` reports whether rows were actually
+  reclaimed.** It used to report whether the graph was columnar at all, which
+  was a fair proxy only while a graph could be non-columnar. A vacuum with no
+  dead rows to reclaim now reports `False`.
+- **The `.kgl` container is now v6, and files this version saves cannot be read
+  by kglite 0.15.14 or earlier.** This build reads both v6 and v5, so every
+  existing file keeps loading and a `save()` migrates it forward; the break is
+  one-way and deliberate. An older binary handed a v6 file refuses it by
+  version number rather than misreading it — 0.15.14 raises
+  `kglite.FileFormatError: File uses .kgl container version 6, but this library
+  only supports up to version 5. Please upgrade kglite.` for `load()`,
+  `open()` and `from_bytes()` alike. Bundled MCP and Bolt binaries link the
+  engine, so a prebuilt one from an earlier release cannot read files this one
+  writes and must be rebuilt.
+
+  What v6 buys: an integer column is written as zigzag-varint *deltas* whenever
+  that is smaller than the fixed-width array, chosen per column and recorded in
+  the column's own type tag, then re-typed to the same in-memory column on
+  load. Nothing above the loader can tell which form a file used. This closes
+  the size regression the identity-column typing opened — the `__id__` column
+  became a raw 8-byte-per-row array, which is smaller than the previous
+  postcard encoding at 50k rows but larger at 6k — and goes well past merely
+  closing it. Measured on the three fixtures the program's file-size goalpost
+  is stated against, against what 0.15.14 writes for identical content: a clean
+  50k-node build 396,369 → 370,171 bytes (0.934×), a schema-growth ingest
+  stream 52,899 → 41,720 (0.789×), and a 50k-node graph with 40% deleted
+  312,020 → 133,231 (0.427×). The delete-heavy shape moves furthest because a
+  strided survivor set is what most disturbs the byte-level regularity the
+  fixed-width form was relying on compression to exploit, and least disturbs a
+  delta. Disk-mode graph directories are a separate format and are unchanged.
+- **The tracked benchmark cell set is 24 cells, was 27.** `bench-check`'s
+  baselines lose `test_bench_columnar_enable` (the operation it named — a
+  storage-regime conversion — no longer exists, so its fixed 0.13.2 anchor
+  value is not comparable to anything the cell could measure now) and
+  `test_bench_columnar_cypher_{where,match}` (their fixture was
+  character-identical to the plain one, so they duplicated
+  `test_bench_cypher_{where,match}`). `test_bench_columnar_save_kgl` and
+  `test_bench_save_v3` are renamed to `test_bench_save_kgl` and
+  `test_bench_save_kgl_new_file`, values carried across — same operation, same
+  fixture. Nothing user-facing; recorded because the committed baseline files
+  changed shape.
+
 ### Removed
 
 - **`enable_columnar()`, `disable_columnar()` and `is_columnar` are gone from
@@ -40,47 +141,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A copy of a spilled graph no longer writes into the original's columns.**
-  A graph that has spilled its columns to disk keeps reading them through their
-  file mappings, and a copy of that graph — `.copy()`, a transaction fork, a
-  held query result — inherited the same spill directory *and the same file
-  names*. The moment the copy spilled anything of its own it overwrote the
-  original's column files, and the original then read the copy's values back
-  through its mapping: a write on one graph appearing on another, which is the
-  one thing copy-on-write must never do. Each column store now spills under its
-  own name, re-drawn whenever the store is copied.
-- **A node created after a deletion is saved against itself.** The `.kgl`
-  column section is positional: row *k* of a node type belongs to that type's
-  *k*-th node. A creation reuses a deleted node's slot but appends its row at
-  the end, so a delete-then-create pair left the two orders disagreeing, and
-  every row after the divergence was saved against the wrong node — ids,
-  titles and properties all shifted by one, and the edges consequently appeared
-  to connect different nodes after a reload. The consolidation pass has always
-  sorted rows to match; what was missing was noticing that it needed to run.
-
-- **Crash recovery keeps every property value's type.** A property carrying
-  different types on different nodes — legal in a live graph, where a value is
-  a sum type and a columnar column simply demotes to mixed — came back from
-  WAL replay with all of its values rewritten into one type: an int alongside
-  a string on another node recovered as `'1'`, an int alongside a float as
-  `1.0`, and a `point()` as its WKT text. Replay folds a whole node type's
-  logged upserts into one bulk load whose columns are singly typed, and the
-  bulk loader's type promotion — correct for the data loads it was written
-  for — was silently converting cells on the recovery path. Replay now routes
-  only the columns that survive a load unchanged through it and writes the
-  rest one value at a time afterwards, for node and edge properties alike, so
-  a recovered graph is value-faithful. This was data loss no re-query could
-  undo: the coerced value was all that remained after the crash.
-- **Crash recovery keeps node ids and titles as themselves, and no longer
-  invents nodes.** The same coercion reached the identity columns: a node type
-  holding an integer id on one node and a string id on another recovered with
-  the integer id rewritten as text — and because an edge addresses its
-  endpoints by those ids, a stringified endpoint id matched nothing and the
-  loader vivified a stub node under it, so recovery *added* a node that never
-  existed. Mixed-type titles were rewritten the same way. Identity columns
-  cannot be held back from the bulk load, so replay now splits such a type's
-  rows by shape and loads each shape on its own; a type with uniform ids and
-  titles — the ordinary case — still replays in a single bulk call.
 - **A mutating statement against a saved (columnar) graph no longer copies the
   touched node type's whole column store.** Statement rollback works from an
   undo journal, and the journal's pre-image for a columnar property write used
@@ -105,12 +165,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never-saved graph at every size and column count measured; the same
   statements inside one transaction 355 → 14–45 µs; a spilled graph's
   single-row `SET` 4,961 → 4.4 µs with its mapping intact.
-- **`add_nodes(conflict_handling="replace")` drops the properties the batch
-  omits even while a query result or a `.copy()` is holding the graph.** On a
-  saved (columnar) graph in that state the write went through a separate code
-  path that merged the incoming columns over the existing row instead of
-  rewriting it, so a property left out of the batch survived — a replace
-  silently behaving as an update, and only when a view happened to be held.
 - **A write to an mmap-backed (spilled or mapped-mode) column no longer brings
   it back to the heap at all, so `set_memory_limit` survives ordinary writes.**
   The whole-store copy above brought every column of the type onto the heap on
@@ -141,6 +195,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-enforces the limit — so twenty new properties on that fixture now peak at
   0.95 MB against the same 1 MB limit, and the at-rest floor is the tombstone
   bitmap alone (50 kB).
+- **A copy of a spilled graph no longer writes into the original's columns.**
+  A graph that has spilled its columns to disk keeps reading them through their
+  file mappings, and a copy of that graph — `.copy()`, a transaction fork, a
+  held query result — inherited the same spill directory *and the same file
+  names*. The moment the copy spilled anything of its own it overwrote the
+  original's column files, and the original then read the copy's values back
+  through its mapping: a write on one graph appearing on another, which is the
+  one thing copy-on-write must never do. Each column store now spills under its
+  own name, re-drawn whenever the store is copied.
+- **`add_nodes(conflict_handling="replace")` drops the properties the batch
+  omits even while a query result or a `.copy()` is holding the graph.** On a
+  saved (columnar) graph in that state the write went through a separate code
+  path that merged the incoming columns over the existing row instead of
+  rewriting it, so a property left out of the batch survived — a replace
+  silently behaving as an update, and only when a view happened to be held.
+- **A node created after a deletion is saved against itself.** The `.kgl`
+  column section is positional: row *k* of a node type belongs to that type's
+  *k*-th node. A creation reuses a deleted node's slot but appends its row at
+  the end, so a delete-then-create pair left the two orders disagreeing, and
+  every row after the divergence was saved against the wrong node — ids,
+  titles and properties all shifted by one, and the edges consequently appeared
+  to connect different nodes after a reload. The consolidation pass has always
+  sorted rows to match; what was missing was noticing that it needed to run.
+- **Crash recovery keeps every property value's type.** A property carrying
+  different types on different nodes — legal in a live graph, where a value is
+  a sum type and a columnar column simply demotes to mixed — came back from
+  WAL replay with all of its values rewritten into one type: an int alongside
+  a string on another node recovered as `'1'`, an int alongside a float as
+  `1.0`, and a `point()` as its WKT text. Replay folds a whole node type's
+  logged upserts into one bulk load whose columns are singly typed, and the
+  bulk loader's type promotion — correct for the data loads it was written
+  for — was silently converting cells on the recovery path. Replay now routes
+  only the columns that survive a load unchanged through it and writes the
+  rest one value at a time afterwards, for node and edge properties alike, so
+  a recovered graph is value-faithful. This was data loss no re-query could
+  undo: the coerced value was all that remained after the crash.
+- **Crash recovery keeps node ids and titles as themselves, and no longer
+  invents nodes.** The same coercion reached the identity columns: a node type
+  holding an integer id on one node and a string id on another recovered with
+  the integer id rewritten as text — and because an edge addresses its
+  endpoints by those ids, a stringified endpoint id matched nothing and the
+  loader vivified a stub node under it, so recovery *added* a node that never
+  existed. Mixed-type titles were rewritten the same way. Identity columns
+  cannot be held back from the bulk load, so replay now splits such a type's
+  rows by shape and loads each shape on its own; a type with uniform ids and
+  titles — the ordinary case — still replays in a single bulk call.
 - **A `CREATE` naming a property the schema declares is no longer rejected as a
   typo.** The unknown-property guard read only the property metadata built up
   from values already written, so a property declared through `define_schema`
@@ -156,98 +256,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reported fragmentation of zero — measured at 43% dead rows on a 2,000-node
   type after 1,500 delete/create pairs. It now also measures the rows no live
   node points at, and vacuums on whichever kind of fragmentation is worse.
-
-### Changed
-
-- **One property shape, not two.** A node's properties used to take one of two
-  durable layouts — a row-shaped block on the node, or a row in the type's
-  column store — with the shape decided by how the graph had been built and
-  changed under it by `save()`. Construction became columnar in every storage
-  mode earlier in this release; the row layout is now deleted outright, so
-  every read, write, undo and save path has one shape to serve. Only a
-  transient staging form survives (values held inline for a moment before they
-  reach a store: disk write-staging, `.kgl` deserialization, the bulk funnel,
-  the RDF loader), and nothing persists it. No user-visible behaviour changes
-  here; what changes is that the second layout can no longer be reached, so
-  the defect classes that only appeared on one side of it cannot recur.
-- **`unspill()` and `vacuum()` rebuild their column stores directly.** Both
-  used to reach their end state by de-columnarizing the graph and immediately
-  re-consolidating it, which materialised every row onto its node only for the
-  very next pass to read it back off. They now do the rebuild in one pass, for
-  the same result: dead rows reclaimed, columns back on the heap, the memory
-  limit preserved.
-
-- **The `.kgl` container is now v6, and files this version saves cannot be read
-  by kglite 0.15.14 or earlier.** This build reads both v6 and v5, so every
-  existing file keeps loading and a `save()` migrates it forward; the break is
-  one-way and deliberate. An older binary handed a v6 file refuses it by
-  version number rather than misreading it — 0.15.14 raises
-  `kglite.FileFormatError: File uses .kgl container version 6, but this library
-  only supports up to version 5. Please upgrade kglite.` for `load()`,
-  `open()` and `from_bytes()` alike. Bundled MCP and Bolt binaries link the
-  engine, so a prebuilt one from an earlier release cannot read files this one
-  writes and must be rebuilt.
-
-  What v6 buys: an integer column is written as zigzag-varint *deltas* whenever
-  that is smaller than the fixed-width array, chosen per column and recorded in
-  the column's own type tag, then re-typed to the same in-memory column on
-  load. Nothing above the loader can tell which form a file used. This closes
-  the size regression the identity-column typing opened — the `__id__` column
-  became a raw 8-byte-per-row array, which is smaller than the previous
-  postcard encoding at 50k rows but larger at 6k — and goes well past merely
-  closing it. Measured on the three fixtures the program's file-size goalpost
-  is stated against, against what 0.15.14 writes for identical content: a clean
-  50k-node build 396,369 → 370,171 bytes (0.934×), a schema-growth ingest
-  stream 52,899 → 41,720 (0.789×), and a 50k-node graph with 40% deleted
-  312,020 → 133,231 (0.427×). The delete-heavy shape moves furthest because a
-  strided survivor set is what most disturbs the byte-level regularity the
-  fixed-width form was relying on compression to exploit, and least disturbs a
-  delta. Disk-mode graph directories are a separate format and are unchanged.
-
-- **Every graph is columnar from its first node; `save()` no longer changes the
-  write regime.** A graph used to be built one way and saved another: node
-  properties were laid out per node, in a row, and only the first `save()` (or
-  an explicit `enable_columnar()`) rebuilt them into the per-type column stores
-  the file format, the memory limit and the mapped/disk modes all require. That
-  made "has been saved once" a permanent, invisible property of a live graph —
-  writes cost differently on either side of it, and a defect reachable only on
-  one side was a defect most testing never reached. Node creation is now
-  columnar on every path and in every storage mode (Cypher `CREATE` and
-  `MERGE`, `add_nodes` and every frame-shaped ingest built on it, WAL replay,
-  the N-Triples loader), so a freshly built graph and a reloaded one are the
-  same shape. `save()` becomes a consolidation pass that a settled graph skips
-  outright, rather than a mandatory O(N) rebuild, and the regime's public
-  controls are removed with the regime (see **Removed**).
-- **A node's title is written where the node's other values are.** A `SET
-  n.title` / `SET n.name`, an `add_nodes` update or replace, and a connection
-  title all used to write onto the node itself, leaving the column store's copy
-  stale until the next `save()` noticed the divergence and rebuilt every store
-  to reconcile it. Title writes now go through the store like any other value,
-  so a title write no longer costs the next save a full rebuild. One
-  user-visible consequence: `SET n = {…}` clears a node's title when the map
-  omits it, on every graph. It always did so on a graph that had not been
-  saved, and never did on one that had; the two now agree, on the
-  never-saved behaviour.
-- **`vacuum()`'s `columnar_rebuilt` reports whether rows were actually
-  reclaimed.** It used to report whether the graph was columnar at all, which
-  was a fair proxy only while a graph could be non-columnar. A vacuum with no
-  dead rows to reclaim now reports `False`.
-- **A graph built in-process with `storage="mapped"` is actually mapped.**
-  `storage="mapped"` is a zero memory limit, but nothing enforced it on the
-  ingest path, so an in-process mapped graph stayed wholly heap-resident until
-  its first write — only a `load()` ever produced mapped columns. Measured on a
-  20,000-row three-column build: 589 kB heap-resident before, 20 kB after (the
-  tombstone bitmap, which has no file form).
-- **Adding a property that a node type has never carried no longer rebuilds the
-  type's column store.** Every newly seen property key used to re-push every row
-  already stored into a fresh store, so an ingest stream whose columns widen
-  over time paid for all the rows already loaded, again, per new column; the
-  rebuild also dropped deleted rows' tombstones, resurrecting them. A new
-  property now appends a single column. Measured on a 500-row batch introducing
-  one new property: 44.6 µs/row with 5k rows already present, 147.1 at 20k and
-  558.4 at 80k, against 18.3 / 41.6 / 131.3 after the change — the remaining
-  growth is the batch loader's existing per-row cost and tracks the row-shaped
-  path within 8% at 80k.
 
 ## [0.15.14] - 2026-08-13
 

@@ -1,12 +1,20 @@
-"""Tests for incremental columnar insertion in mapped mode (Phase 2A-2B)."""
+"""Incremental inserts land in property columns, in every storage mode.
+
+Nodes added one batch at a time — by ``add_nodes``, by the N-Triples loader,
+or by Cypher ``CREATE`` against a loaded disk graph — must reach the same
+per-type column store a bulk build produces, with their properties readable
+and the type's schema able to grow in place. Formerly
+``test_incremental_columnar.py``, when reaching columns incrementally was a
+mapped-mode-only concern.
+"""
 
 import pandas as pd
 
 from kglite import KnowledgeGraph
 
 
-class TestIncrementalColumnar:
-    """Nodes added in mapped mode should use columnar storage from the start."""
+class TestIncrementalMapped:
+    """Nodes added in mapped mode reach their column store from the start."""
 
     def test_properties_accessible_after_add_nodes(self):
         graph = KnowledgeGraph(storage="mapped")
@@ -141,7 +149,7 @@ class TestIncrementalColumnar:
         assert r["n.score"][0] == 50.0
 
 
-class TestNTriplesColumnar:
+class TestNTriplesMapped:
     """N-Triples loader in mapped mode should produce columnar nodes."""
 
     def test_ntriples_properties_in_mapped_mode(self):

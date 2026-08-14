@@ -319,15 +319,22 @@ def test_bench_wide_set_after_save(benchmark, tmp_path):
 
 @pytest.mark.benchmark
 def test_bench_wide_set_mapped(benchmark, tmp_path):
-    """Single-row `SET` on a mapped-mode graph — the worst arm, and a contract
-    defect as well as a cost.
+    """Single-row `SET` on a mapped-mode graph — the arm that used to be worst.
 
-    Mapped mode holds columns in mmap-backed storage, so the per-statement
-    store clone copies them onto the *heap* (`MmapOrVec::clone` always yields
-    the `Heap` variant). The write is therefore both the slowest of the three
-    and the one that silently defeats `set_memory_limit`; the contract half is
-    pinned separately by
+    Mapped mode holds columns in mmap-backed storage. The per-statement store
+    clone used to copy them onto the *heap* (`MmapOrVec::clone` always yields
+    the `Heap` variant), which made this both the slowest of the three cells
+    and the one that silently defeated `set_memory_limit`. Writes now go
+    *through* the mapping, so this arm belongs beside its two controls rather
+    than in a class of its own; the contract half stays pinned by
     `tests/test_memory_management.py::TestSpillContractAcrossWrites`.
+
+    `durable="off"` is load-bearing: `kglite.open()` resolves an unspecified
+    `durable=` to full fsync, which would make this cell a measurement of the
+    WAL barrier rather than of the write. Its two controls are plain
+    `KnowledgeGraph()` handles with no log at all, so anything else here makes
+    the three numbers incomparable — the mistake that once attributed ~3 ms of
+    fsync to a mapped-mode store clone.
 
     The fixture is built and saved through a plain handle first, then reopened
     with `storage="mapped"`, so the bulk load never lands in the measurement.
@@ -337,7 +344,7 @@ def test_bench_wide_set_mapped(benchmark, tmp_path):
     seed.save(str(path))
     seed.close()
 
-    graph = kglite.open(str(path), storage="mapped")
+    graph = kglite.open(str(path), storage="mapped", durable="off")
     assert graph.graph_info()["storage_mode"] == "mapped"
     # Warm the id index so the measurement is the write, not a first touch.
     graph.cypher("MATCH (n:Item {id: 0}) RETURN n.id")
@@ -628,3 +635,248 @@ def test_bench_explicit_sync(benchmark, tmp_path, level):
 #
 # Left here as a signpost because a null result that was believed for a while
 # is worth being able to trace.
+
+
+# ---------------------------------------------------------------------------
+# Multi-row write statements: does R rows into an N-node type care about N?
+# ---------------------------------------------------------------------------
+#
+# Moved here from `test_bench_merge_columnar.py`, which is retired. That file's
+# subject was the difference between **two arrival routes** — a "fresh" graph
+# whose properties lived in node weights against a "saved"/"reloaded" graph
+# whose properties lived in column stores — and that difference no longer
+# exists: construction is columnar from the first node, so all three arms build
+# the same object. Its header also documented the whole-store pre-image clone
+# as the mechanism under test, and that clone is gone (the journal records one
+# entry per changed cell).
+#
+# What survived the retirement is the shape nothing else here measures: **one
+# statement writing R rows into a type that already has N nodes**.
+# `test_bench_fast_write_path.py` measures a one-row `MERGE` across the
+# `journal_covers` corners; the cells above measure inserts as the graph grows.
+# Neither varies R and N independently, and that grid is what catches a per-row
+# term coming back.
+#
+# The `fresh` / `saved` pair is kept, demoted from *subject* to **control**: it
+# is the standing guard that a `save()` has not reintroduced a cost the write
+# path pays afterwards. The ratio must stay ~1.0 (measured 0.8-1.0x across
+# every N and column count). The third arm, `reloaded`, is dropped — it
+# differed only in how the store was *built* on load, never in what a
+# subsequent write did, and with the parity guard in place it triples the cell
+# count for a ratio that is a foregone conclusion.
+
+#: Existing nodes in the written type. The diagnostic axis: the cost of writing
+#: R rows must not depend on N, and two decades of N make a dependency obvious.
+GRID_SIZES = [1_000, 100_000]
+
+#: Rows covered by the single measured `MERGE` statement.
+MERGE_ROWS = [1, 50, 500]
+
+#: Rows covered by the single measured `SET` / `REMOVE` statement. R = 1 is the
+#: load-bearing cell — one statement, one row of real work — and R = 500 shows
+#: what does and does not amortise over rows.
+GRID_WRITE_ROWS = [1, 500]
+
+#: `fresh` never went through `save()`; `saved` did. Same shape, kept as the
+#: parity control described above.
+GRID_VARIANTS = ["fresh", "saved"]
+
+#: Wide enough that the type's column count is a visible term rather than a
+#: rounding error.
+GRID_EXTRA_COLUMNS = 12
+
+GRID_MERGE_ROUNDS = 5
+GRID_MERGE_WARMUP = 1
+
+#: The `SET` / `REMOVE` cells are cheaper per round than a 500-row `MERGE`, so
+#: they can afford more rounds; `min` over 20 is a far steadier reading than
+#: `min` over 5 for a shape that lands in the tens of microseconds.
+GRID_WRITE_ROUNDS = 20
+GRID_WRITE_WARMUP = 3
+
+#: The property the REMOVE cells clear and the setup step restores. One of the
+#: `GRID_EXTRA_COLUMNS`, i.e. a genuine column rather than the promoted title.
+GRID_REMOVE_PROP = "c0"
+
+#: Where a `SET` lands, and why the SET cell has this extra axis:
+#: `add_nodes(..., "id", "name")` promotes `name` to the node **title**, so
+#: `SET n.name` takes the `GraphWrite::set_node_property` route (which writes
+#: the title through to the master), while `SET n.c1` takes
+#: `write_column_master`. Two routes, two pre-image capture sites — measured
+#: separately so a regression in one is not hidden by the other.
+GRID_SET_TARGETS = {"column": "c1", "title": "name"}
+
+
+def _grid_frame(rows: int, offset: int) -> pd.DataFrame:
+    data: dict = {
+        "id": range(offset, offset + rows),
+        "name": [f"item-{i}" for i in range(rows)],
+    }
+    for c in range(GRID_EXTRA_COLUMNS):
+        data[f"c{c}"] = [f"v{c}-{i}" for i in range(rows)]
+    return pd.DataFrame(data)
+
+
+def _grid_graph(size: int, variant: str, tmp_dir) -> KnowledgeGraph:
+    graph = KnowledgeGraph()
+    graph.define_schema({"nodes": {"Item": {"primary_key": "id"}}})
+    graph.add_nodes(_grid_frame(size, 0), "Item", "id", "name")
+    if variant == "saved":
+        # fsync=False: this save exists to reach the consolidation pass, not to
+        # benchmark a disk flush.
+        graph.save(str(tmp_dir / f"grid-{variant}-{size}.kgl"), fsync=False)
+
+    # Vacuity guard: a fixture silently carrying no column rows would report a
+    # healthy number under a label promising the opposite.
+    assert graph.graph_info()["columnar_total_rows"] == size, (
+        f"{variant} must carry its rows in the column store; "
+        "without them this cell measures a code path the cost does not live on"
+    )
+    return graph
+
+
+@pytest.fixture(scope="module")
+def grid_graphs(tmp_path_factory) -> dict:
+    """One graph per (size, variant). Module-scoped — the 100k builds are
+    seconds each and must not be repeated per cell."""
+    tmp_dir = tmp_path_factory.mktemp("write-grid")
+    return {(size, variant): _grid_graph(size, variant, tmp_dir) for size in GRID_SIZES for variant in GRID_VARIANTS}
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("variant", GRID_VARIANTS)
+@pytest.mark.parametrize("rows", MERGE_ROWS)
+@pytest.mark.parametrize("size", GRID_SIZES)
+def test_bench_merge_rows_into_type(benchmark, grid_graphs, size, rows, variant):
+    """One `MERGE` statement covering `rows` rows, against a type with `size`
+    existing nodes.
+
+    Read it two ways — across `rows` at fixed `size` (sub-linear is correct:
+    per-statement work amortises, and growth faster than linear means a per-row
+    term is back), and across `size` at fixed `rows` (flat is the pass
+    condition; growth means a term proportional to the type has returned).
+
+    Every merged row is a genuine ON MATCH: the ids are drawn from the rows the
+    fixture already created, so the statement never inserts and the number is
+    the update path rather than a mix of insert and update.
+    """
+    graph = grid_graphs[(size, variant)]
+
+    # ON MATCH, not ON CREATE — ids in [0, rows) already exist in every fixture
+    # (all GRID_SIZES are >= max(MERGE_ROWS)). Merging new ids would measure
+    # inserts and grow the fixture between rounds, making later rounds a
+    # different experiment from earlier ones.
+    ids = list(range(rows))
+    statement = "UNWIND $ids AS i MERGE (n:Item {id: i}) ON MATCH SET n.name = 'merged'"
+
+    def merge():
+        return graph.cypher(statement, params={"ids": ids})
+
+    benchmark.pedantic(merge, rounds=GRID_MERGE_ROUNDS, iterations=1, warmup_rounds=GRID_MERGE_WARMUP)
+
+    benchmark.extra_info["variant"] = variant
+    benchmark.extra_info["existing_nodes"] = size
+    benchmark.extra_info["merged_rows"] = rows
+    benchmark.extra_info["columns"] = GRID_EXTRA_COLUMNS + 2
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("variant", GRID_VARIANTS)
+@pytest.mark.parametrize("target", sorted(GRID_SET_TARGETS))
+@pytest.mark.parametrize("rows", GRID_WRITE_ROWS)
+@pytest.mark.parametrize("size", GRID_SIZES)
+def test_bench_set_rows_on_type(benchmark, grid_graphs, size, rows, target, variant):
+    """One `SET` clause covering `rows` rows, against a type with `size` nodes.
+
+    The `target` axis is why this is two cells rather than one — the two write
+    destinations take different routes through the same node:
+
+    * `column` writes `c1`, a genuine store column, so it takes the
+      master-write path (`set_via_column_master` -> `write_column_master`),
+      which journals its cell pre-images itself.
+    * `title` writes `name`, which `add_nodes` promoted to the node title, so it
+      goes through `GraphWrite::set_node_property` and the title write-through,
+      whose pre-image is journalled by `capture_property_pre_image`.
+
+    Measuring only one of them would let a regression in the other hide; the
+    two once differed by 30x.
+    """
+    graph = grid_graphs[(size, variant)]
+
+    ids = list(range(rows))
+    prop = GRID_SET_TARGETS[target]
+    statement = f"UNWIND $ids AS i MATCH (n:Item {{id: i}}) SET n.{prop} = 'set'"
+
+    def run_set():
+        return graph.cypher(statement, params={"ids": ids})
+
+    # Non-vacuity: a statement that matched nothing would report a beautifully
+    # flat number for a code path never entered.
+    run_set()
+    written = graph.cypher(f"MATCH (n:Item {{id: 0}}) RETURN n.{prop} AS p").to_list()
+    assert written and written[0]["p"] == "set", f"SET did not land on {variant}/{size}/{target}: {written!r}"
+
+    benchmark.pedantic(run_set, rounds=GRID_WRITE_ROUNDS, iterations=1, warmup_rounds=GRID_WRITE_WARMUP)
+
+    benchmark.extra_info["variant"] = variant
+    benchmark.extra_info["existing_nodes"] = size
+    benchmark.extra_info["written_rows"] = rows
+    benchmark.extra_info["columns"] = GRID_EXTRA_COLUMNS + 2
+    benchmark.extra_info["clause"] = "SET"
+    benchmark.extra_info["target"] = target
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("variant", GRID_VARIANTS)
+@pytest.mark.parametrize("rows", GRID_WRITE_ROWS)
+@pytest.mark.parametrize("size", GRID_SIZES)
+def test_bench_remove_rows_on_type(benchmark, grid_graphs, size, rows, variant):
+    """One `REMOVE` clause covering `rows` rows, against a type with `size` nodes.
+
+    `execute_remove` is the second columnar write path, and its master-side
+    write is a different one — a `Null` into the store rather than a value —
+    so it is measured rather than inferred from `SET`.
+
+    Each round is preceded by an **untimed** `setup` that puts the property
+    back. Without it every round after the first would be removing an absent
+    property, which is a different and much cheaper statement: the cell would
+    look healthy for the wrong reason.
+    """
+    graph = grid_graphs[(size, variant)]
+    ids = list(range(rows))
+    restore = f"UNWIND $ids AS i MATCH (n:Item {{id: i}}) SET n.{GRID_REMOVE_PROP} = 'restored'"
+    statement = f"UNWIND $ids AS i MATCH (n:Item {{id: i}}) REMOVE n.{GRID_REMOVE_PROP}"
+
+    def setup():
+        graph.cypher(restore, params={"ids": ids})
+
+    def run_remove():
+        return graph.cypher(statement, params={"ids": ids})
+
+    probe = f"MATCH (n:Item {{id: 0}}) RETURN n.{GRID_REMOVE_PROP} AS p"
+
+    # Non-vacuity: prove the property is there before, and gone after.
+    setup()
+    before = graph.cypher(probe).to_list()
+    assert before and before[0]["p"] == "restored", (
+        f"setup did not restore {GRID_REMOVE_PROP} on {variant}/{size}: {before!r}"
+    )
+    run_remove()
+    after = graph.cypher(probe).to_list()
+    assert not after or after[0].get("p") is None, (
+        f"REMOVE left {GRID_REMOVE_PROP}={after!r} on {variant}/{size}; the cell would time a no-op"
+    )
+
+    benchmark.pedantic(
+        run_remove,
+        setup=setup,
+        rounds=GRID_WRITE_ROUNDS,
+        iterations=1,
+        warmup_rounds=GRID_WRITE_WARMUP,
+    )
+
+    benchmark.extra_info["variant"] = variant
+    benchmark.extra_info["existing_nodes"] = size
+    benchmark.extra_info["written_rows"] = rows
+    benchmark.extra_info["columns"] = GRID_EXTRA_COLUMNS + 2
+    benchmark.extra_info["clause"] = "REMOVE"

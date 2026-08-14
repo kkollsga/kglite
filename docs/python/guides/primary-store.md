@@ -25,54 +25,64 @@ you rebuild. It is measured, not assumed:
 `tests/benchmarks/test_bench_write_scaling.py` runs the same statements at 1 k,
 100 k, and 1 M nodes, and a reading that grows with size is a regression.
 
-Three cases keep the older whole-graph checkpoint, and there the write cost is
-still proportional to graph size:
+**One** case keeps the older whole-graph checkpoint, and there the write cost is
+still proportional to graph size: the **`disk`** backend. A disk graph has no
+petgraph slot identity for an inverse edit to name, so every mutating statement
+on it opens an O(V+E) checkpoint instead. `memory` and `mapped` both take the
+journal, and a durable graph over either of them does too — durability and
+rollback strategy are independent concerns.
 
-- the `mapped` and `disk` backends,
-- columnar mode, whose `SET` writes a shared column store the journal cannot
-  observe,
-- graphs carrying user-created property, range, or composite indexes, whose
-  delete path needs per-bucket position undo the journal does not record yet.
+Two cases that used to be on that list are not any more, because the journal
+grew to cover them:
 
-That third case is easy to walk into now that indexes are a Cypher surface:
-`CREATE INDEX`, like the `create_index` API, builds exactly those structures, so
-indexing a graph moves its writes back onto the whole-graph checkpoint.
-Uniqueness constraints are backed by a different structure whose cost interaction
-is not yet characterised. If your workload writes continuously *and* indexes or
-constrains, measure it rather than assuming flat cost.
+- **A graph that has been saved, loaded, or opened from a file.** It carries the
+  same property shape a freshly built graph does, and a `SET` journals the
+  individual cells it overwrote rather than a copy of the type's whole column
+  store. A single-row `SET` measures 4.3–5.0 µs at 50 k nodes × 12 declared
+  properties and 4.3 µs at 100 k — parity with a graph that has never touched a
+  file, and flat in node count. Inside an explicit transaction the same
+  statements cost 14–45 µs each. A graph whose columns have spilled to disk
+  under `set_memory_limit` measures 4.4 µs and keeps its spill; `mapped`
+  measures 5.0 µs unlogged and 7.5 µs at `durable="normal"`.
+- **A graph carrying user-created property, range, or composite indexes.** Their
+  bucket edits are journalled with the position they occupied, so `CREATE INDEX`
+  and the `create_index` API no longer move a graph's writes back onto the
+  whole-graph checkpoint.
 
-### Columnar mode is where every graph that has touched a file lives
+Uniqueness constraints are the one structure still rebuilt wholesale, and only
+on the *failure* path: a statement that rolls back recomputes the occupancy map
+of each type it touched, which scales with that type's node count. Successful
+writes never pay it. If your workload both writes continuously and fails
+statements often, measure it rather than assuming flat cost.
 
-The second case deserves its own warning, because a primary store walks into it
-by construction rather than by choice. `save()` converts the live graph to
-columnar storage — the `.kgl` format is columnar — and it stays that way
-afterwards; a graph obtained from `kglite.load()` or `kglite.open()` starts
-there. So the open-write-checkpoint-keep-writing loop this page is about runs in
-the columnar write regime from its first statement onward.
+### What a write costs in memory
 
-In that regime a mutating statement re-images the column store of each type it
-writes, once per statement, however few rows it touched. Measured on 0.15.13
-with 12 declared properties: ≈ 40 µs per single-row `SET` at 5 k nodes and
-≈ 380 µs at 50 k, against ≈ 5 µs on a graph that has never been saved, growing
-with node count and with the type's column count. `kglite.load()` and
-`kglite.open()` measure the same as a post-`save()` graph, and an explicit
-transaction does not amortize it — the term is per statement, not per commit.
-`CREATE` is unaffected (it appends a row rather than re-imaging), and so are
-reads.
+Properties live in per-type columns, from the first node onward — building,
+saving, loading and reopening all produce the same shape, so there is no
+conversion step to plan around and no second cost profile to discover after the
+first `save()`. Two consequences are worth knowing before you rely on this as a
+primary store:
 
-Two things follow, in this order:
+- **A column is allocated per declared property, per row, whether or not the row
+  has a value.** Memory is therefore proportional to schema width rather than to
+  the properties actually set, so a type with many optional properties costs
+  more at rest than the same data in a narrow type.
+  `graph_info()['columnar_heap_bytes']` reports how much the stores hold, and
+  `set_memory_limit()` spills columns to disk when they exceed a budget — the
+  limit is re-enforced after every statement, not only at load time.
+- **`DELETE` tombstones rows; `vacuum()` reclaims them.** Deleted rows keep
+  their space until you compact, so a write-heavy primary store should call
+  `vacuum()` periodically (it also fires automatically once fragmentation
+  crosses `auto_vacuum_threshold`). Scans are unaffected — measured at
+  0.975–1.043× with 40% of rows tombstoned — so the cost of putting this off is
+  memory, not time. **`vacuum()` is a no-op on `storage="disk"`**: a disk
+  graph's deleted rows are not reclaimed at all today. Rebuild the directory if
+  that matters to you.
 
-- **Batch mutations into multi-row statements.** One
-  `UNWIND $rows AS r MATCH … SET …` over 100 rows costs ≈ 0.5 ms where 100
-  single-row statements cost ≈ 38 ms — about 80× at 50 k nodes, about 30× at
-  5 k. This is the mitigation to reach for, and it is the same advice as
-  {doc}`data-loading`'s throughput ladder.
-`graph_info()['columnar_heap_bytes']` reports how much data sits in the
-stores. The
-per-statement re-image is a known cost, not a design point: the remedy is a
-narrower write journal (per-transaction or per-column pre-images), which is a
-storage-layer change rather than something to patch at the call site, so it is
-documented here until that lands.
+Batching mutations into multi-row statements is still worth doing — it
+amortises per-statement parsing, planning and checkpoint overhead — but it is
+now a throughput optimisation rather than a workaround. See
+{doc}`data-loading`'s throughput ladder.
 
 **Crash safety is the default.** `kglite.open(path)` opens in write-ahead-log
 mode wherever the storage mode supports it — the default in-memory backend and
@@ -398,7 +408,9 @@ an absence of one, and it is kill-9 tested in its own right
 mutations made since the last `save()`, and the last published generation always
 reopens complete — never half-written, and never with a partially-applied commit.
 What `disk` does not give you is a *smaller* unit of durability than a whole
-`save()`. Both keep the whole-graph write checkpoint described above.
+`save()`. `disk` also keeps the whole-graph write checkpoint described above;
+`mapped` does not — its statements take the same O(changes) journal in-memory
+graphs take.
 In-memory is the product; the disk modes are for exploring graphs too big for it,
 and that is the trade-off you are accepting.
 

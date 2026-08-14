@@ -21,6 +21,14 @@ timed write with the reference re-acquired untimed every round:
 | 2 property + 1 composite + 1 range index | ~180,000 µs | **~97 µs** (all of it the range index — see [Limits](#limits)) |
 | resident growth, 20 writes under a held view, 1M | +668.8 MB | **+0.0 MB** |
 
+The first two rows are a snapshot of a distinction that no longer exists. When
+this was measured, a graph held its properties in node weights until `save()`
+converted it to per-type column stores, so "plain" and "saved / columnar" were
+two different objects with two different fork costs. Construction is columnar
+from the first node now, and every graph is the second row's shape; the
+measurements are kept as the record of what the overlay replaced, not as a menu
+of shapes to expect. See [The rollback pre-image, since](#the-rollback-pre-image-since).
+
 ---
 
 ## Why writer-side, and not the obvious alternative
@@ -208,6 +216,63 @@ never-saved graph the term is exactly zero. The overlay neither improves nor
 worsens it: it is the statement checkpoint capturing a pre-image, not the fork
 copying a graph, and the two are independent. Anyone reading a slow write on a
 saved graph should check this term before suspecting the fork.
+
+---
+
+## The rollback pre-image, since
+
+The paragraph above is D2's record, and its conclusion — *the fork and the
+statement checkpoint are independent costs* — still holds. Its **numbers do
+not**: the pre-image it describes was a second `Arc` handle on the type's whole
+master `ColumnStore`, so the `Arc::make_mut` at the write site deep-copied every
+column of the type to change one cell. The shape-convergence work replaced it
+with **cell-grained pre-images**, and the section is left standing because
+"unchanged by this work" was true of D2 and the two mechanisms are easiest to
+tell apart side by side.
+
+**The journal now records one entry per changed cell.** `UndoEntry::ColumnarCell`
+carries `{node_type, row_id, key, prior: Option<Value>}` — the value the cell
+held before the statement overwrote it — and rollback writes it straight back
+into the live store. The prior value was already being read on the hot path, so
+capture costs a move rather than a copy. Companion entries cover the non-cell
+edits a statement can make to a store: `ColumnarSchemaGrown` (a `SET` that
+introduced a property the type lacked, which appends a null-backfilled column),
+`ColumnarRowsAppended` and `ColumnarTombstone` (the `CREATE` and `DELETE` halves,
+which reach a master store now that construction is columnar), and
+`ColumnarTitle`.
+
+**The mechanism is the inversion, not the size.** Because the journal holds no
+handle on the store, the master stays *uniquely owned* for the whole statement,
+so `Arc::make_mut` at the write site mutates one cell in place. That direction is
+asserted at the write site (`columnar_write::write_column_master`) rather than
+left to a benchmark to notice — the old code asserted the opposite, that the
+clone *had* happened, which is how a documented invariant hid a 76–162× tax. Two
+things fall out of the same change: an mmap-backed column is no longer
+materialised into the heap by the journal, so `set_memory_limit` survives writes;
+and the "on a never-saved graph the term is exactly zero" escape hatch stops
+mattering, because there is nothing left to escape.
+
+Cost, release build, A/B against the published 0.15.14 wheel: a single-row `SET`
+on a saved graph went **327.9 → 4.3–5.0 µs at 50 k × 12 columns and 683.5 → 4.3 µs
+at 100 k** — parity with a never-saved graph (ratio 0.8–1.0× at every N and
+column count), and flat in N rather than linear. Inside a transaction, 355 →
+14–45 µs per statement. On a spilled graph, 4,961 → 4.4 µs with the spill intact.
+
+**What the fork still copies.** One store copy per *fork*, not per statement:
+the first write under a held view is 587.6 µs at 100 k × 12 (mean of first
+writes; the second write is 8.2 µs, and flattening after the reader drops is
+137.7 µs). That is `ForkedGraph` sharing its stores with the base a reader holds,
+so its first write per type must copy — the one legitimate exception to the
+uniquely-owned invariant, and the reason the write-site assertion names it.
+Per-column `Arc` would narrow it to the touched column; it is a filed follow-on
+with those numbers attached, not a gap.
+
+Two residues, both observational no-ops. A cell that was *absent* before the
+statement is restored by writing `Value::Null`, which `ColumnStore::get` and
+`row_properties` cannot distinguish from absent. And a rolled-back write whose
+value did not fit the column's type leaves the column demoted to `Mixed`; values
+and reads are identical, only the storage tag differs, until the next
+consolidation re-derives it.
 
 ---
 

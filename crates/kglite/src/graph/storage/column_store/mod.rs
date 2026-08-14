@@ -1610,6 +1610,11 @@ impl ColumnStore {
     }
 
     /// Unpack a single column from its raw data blob.
+    ///
+    /// A tag dispatcher: the five fixed-width tags differ only in their element
+    /// type and the variant they build, so they share
+    /// [`Self::unpack_fixed_width`]; the two variable-width forms (`string` and
+    /// the `Mixed` fallback) own a function each.
     fn unpack_column(
         type_tag: &str,
         data_blob: &[u8],
@@ -1621,22 +1626,8 @@ impl ColumnStore {
         let rc = row_count as usize;
         match type_tag {
             "int64" => {
-                let data_size = rc * std::mem::size_of::<i64>();
-                let null_size = rc;
-                Self::check_blob_size(data_blob, data_size + null_size, type_tag, col_name)?;
-                let data = Self::load_typed_vec::<i64>(
-                    &data_blob[..data_size],
-                    rc,
-                    temp_dir,
-                    col_name,
-                    "i64",
-                )?;
-                let nulls = Self::load_typed_vec::<u8>(
-                    &data_blob[data_size..],
-                    rc,
-                    temp_dir,
-                    col_name,
-                    "null",
+                let (data, nulls) = Self::unpack_fixed_width::<i64>(
+                    data_blob, rc, temp_dir, col_name, type_tag, "i64",
                 )?;
                 Ok(TypedColumn::Int64 { data, nulls })
             }
@@ -1651,178 +1642,166 @@ impl ColumnStore {
                 Ok(TypedColumn::Int64 { data, nulls })
             }
             "float64" => {
-                let data_size = rc * std::mem::size_of::<f64>();
-                let null_size = rc;
-                Self::check_blob_size(data_blob, data_size + null_size, type_tag, col_name)?;
-                let data = Self::load_typed_vec::<f64>(
-                    &data_blob[..data_size],
-                    rc,
-                    temp_dir,
-                    col_name,
-                    "f64",
-                )?;
-                let nulls = Self::load_typed_vec::<u8>(
-                    &data_blob[data_size..],
-                    rc,
-                    temp_dir,
-                    col_name,
-                    "null",
+                let (data, nulls) = Self::unpack_fixed_width::<f64>(
+                    data_blob, rc, temp_dir, col_name, type_tag, "f64",
                 )?;
                 Ok(TypedColumn::Float64 { data, nulls })
             }
             "uniqueid" => {
-                let data_size = rc * std::mem::size_of::<u32>();
-                let null_size = rc;
-                Self::check_blob_size(data_blob, data_size + null_size, type_tag, col_name)?;
-                let data = Self::load_typed_vec::<u32>(
-                    &data_blob[..data_size],
-                    rc,
-                    temp_dir,
-                    col_name,
-                    "u32",
-                )?;
-                let nulls = Self::load_typed_vec::<u8>(
-                    &data_blob[data_size..],
-                    rc,
-                    temp_dir,
-                    col_name,
-                    "null",
+                let (data, nulls) = Self::unpack_fixed_width::<u32>(
+                    data_blob, rc, temp_dir, col_name, type_tag, "u32",
                 )?;
                 Ok(TypedColumn::UniqueId { data, nulls })
             }
             "bool" | "boolean" => {
-                let data_size = rc; // u8 per row
-                let null_size = rc;
-                Self::check_blob_size(data_blob, data_size + null_size, type_tag, col_name)?;
-                let data = Self::load_typed_vec::<u8>(
-                    &data_blob[..data_size],
-                    rc,
-                    temp_dir,
-                    col_name,
-                    "bool",
-                )?;
-                let nulls = Self::load_typed_vec::<u8>(
-                    &data_blob[data_size..],
-                    rc,
-                    temp_dir,
-                    col_name,
-                    "null",
+                let (data, nulls) = Self::unpack_fixed_width::<u8>(
+                    data_blob, rc, temp_dir, col_name, type_tag, "bool",
                 )?;
                 Ok(TypedColumn::Bool { data, nulls })
             }
             "date" | "datetime" => {
-                let data_size = rc * std::mem::size_of::<i32>();
-                let null_size = rc;
-                Self::check_blob_size(data_blob, data_size + null_size, type_tag, col_name)?;
-                let data = Self::load_typed_vec::<i32>(
-                    &data_blob[..data_size],
-                    rc,
-                    temp_dir,
-                    col_name,
-                    "i32",
-                )?;
-                let nulls = Self::load_typed_vec::<u8>(
-                    &data_blob[data_size..],
-                    rc,
-                    temp_dir,
-                    col_name,
-                    "null",
+                let (data, nulls) = Self::unpack_fixed_width::<i32>(
+                    data_blob, rc, temp_dir, col_name, type_tag, "i32",
                 )?;
                 Ok(TypedColumn::Date { data, nulls })
             }
-            "string" => {
-                // offsets: (rc+1) * u64, then str_data, then nulls: rc * u8
-                let offsets_size = rc
-                    .checked_add(1)
-                    .and_then(|count| count.checked_mul(std::mem::size_of::<u64>()))
-                    .ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::InvalidData, "string offset size overflow")
-                    })?;
-                if data_blob.len() < offsets_size {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "column '{}' (string): blob too small for offsets ({} < {})",
-                            col_name,
-                            data_blob.len(),
-                            offsets_size
-                        ),
-                    ));
-                }
-                let offsets_bytes = &data_blob[..offsets_size];
-                let rest = &data_blob[offsets_size..];
-
-                // Determine string data length from last offset
-                let last_offset_u64 = u64::from_le_bytes(
-                    offsets_bytes[offsets_size - 8..offsets_size]
-                        .try_into()
-                        .unwrap(),
-                );
-                let last_offset = usize::try_from(last_offset_u64).map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("column '{col_name}' string data length exceeds usize"),
-                    )
-                })?;
-                let null_size = rc;
-
-                let expected_rest = last_offset.checked_add(null_size).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "string data size overflow")
-                })?;
-                if rest.len() != expected_rest {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "column '{col_name}' (string): data+nulls has {} bytes; expected {expected_rest}",
-                            rest.len()
-                        ),
-                    ));
-                }
-                let str_bytes = &rest[..last_offset];
-                let null_bytes = &rest[last_offset..last_offset + null_size];
-
-                let validated = std::str::from_utf8(str_bytes).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("column '{col_name}' contains invalid UTF-8: {e}"),
-                    )
-                })?;
-                let mut previous = 0u64;
-                for (index, chunk) in offsets_bytes.chunks_exact(8).enumerate() {
-                    let offset = u64::from_le_bytes(chunk.try_into().unwrap());
-                    // Each offset must also land on a char boundary of the
-                    // (already whole-blob-validated) string data: a corrupt
-                    // offset that splits a multi-byte code point would make
-                    // the per-row *slice* invalid UTF-8, breaking the
-                    // `from_utf8_unchecked` readers' invariant.
-                    if (index == 0 && offset != 0)
-                        || offset < previous
-                        || offset > last_offset_u64
-                        || !validated.is_char_boundary(offset as usize)
-                    {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "column '{col_name}' has invalid string offset at index {index}"
-                            ),
-                        ));
-                    }
-                    previous = offset;
-                }
-
-                let offsets =
-                    Self::load_typed_vec::<u64>(offsets_bytes, rc + 1, temp_dir, col_name, "off")?;
-                let data = Self::load_bytes(str_bytes, temp_dir, col_name, "str")?;
-                let nulls = Self::load_typed_vec::<u8>(null_bytes, rc, temp_dir, col_name, "null")?;
-                Ok(TypedColumn::Str {
-                    offsets,
-                    data,
-                    nulls,
-                    relocated: HashMap::new(),
-                })
-            }
+            "string" => Self::unpack_string_column(data_blob, rc, temp_dir, col_name),
             _ => Self::unpack_mixed_column(codec, data_blob, col_name),
         }
+    }
+
+    /// Split a fixed-width blob into its `len` values and its `len` null flags.
+    ///
+    /// The layout every fixed-width tag shares: `len * size_of::<T>()` value
+    /// bytes followed by one null byte per row. `ext` is the value half's
+    /// spill-file extension; the null half is always `"null"`.
+    fn unpack_fixed_width<T: PackedElement>(
+        data_blob: &[u8],
+        len: usize,
+        temp_dir: Option<&Path>,
+        col_name: &str,
+        type_tag: &str,
+        ext: &str,
+    ) -> io::Result<(MmapOrVec<T>, MmapOrVec<u8>)> {
+        let data_size = len * std::mem::size_of::<T>();
+        let null_size = len;
+        Self::check_blob_size(data_blob, data_size + null_size, type_tag, col_name)?;
+        let data =
+            Self::load_typed_vec::<T>(&data_blob[..data_size], len, temp_dir, col_name, ext)?;
+        let nulls =
+            Self::load_typed_vec::<u8>(&data_blob[data_size..], len, temp_dir, col_name, "null")?;
+        Ok((data, nulls))
+    }
+
+    /// Unpack a `string` column: `rc + 1` offsets, then the UTF-8 data, then
+    /// `rc` null flags.
+    ///
+    /// Every bound is validated here rather than at read time, because the row
+    /// readers slice the blob with `from_utf8_unchecked`.
+    fn unpack_string_column(
+        data_blob: &[u8],
+        rc: usize,
+        temp_dir: Option<&Path>,
+        col_name: &str,
+    ) -> io::Result<TypedColumn> {
+        // offsets: (rc+1) * u64, then str_data, then nulls: rc * u8
+        let offsets_size = rc
+            .checked_add(1)
+            .and_then(|count| count.checked_mul(std::mem::size_of::<u64>()))
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "string offset size overflow")
+            })?;
+        if data_blob.len() < offsets_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "column '{}' (string): blob too small for offsets ({} < {})",
+                    col_name,
+                    data_blob.len(),
+                    offsets_size
+                ),
+            ));
+        }
+        let offsets_bytes = &data_blob[..offsets_size];
+        let rest = &data_blob[offsets_size..];
+
+        // Determine string data length from last offset
+        let last_offset_u64 = u64::from_le_bytes(
+            offsets_bytes[offsets_size - 8..offsets_size]
+                .try_into()
+                .unwrap(),
+        );
+        let last_offset = usize::try_from(last_offset_u64).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("column '{col_name}' string data length exceeds usize"),
+            )
+        })?;
+        let null_size = rc;
+
+        let expected_rest = last_offset.checked_add(null_size).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "string data size overflow")
+        })?;
+        if rest.len() != expected_rest {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "column '{col_name}' (string): data+nulls has {} bytes; expected {expected_rest}",
+                    rest.len()
+                ),
+            ));
+        }
+        let str_bytes = &rest[..last_offset];
+        let null_bytes = &rest[last_offset..last_offset + null_size];
+
+        let validated = std::str::from_utf8(str_bytes).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("column '{col_name}' contains invalid UTF-8: {e}"),
+            )
+        })?;
+        Self::validate_string_offsets(offsets_bytes, validated, last_offset_u64, col_name)?;
+
+        let offsets =
+            Self::load_typed_vec::<u64>(offsets_bytes, rc + 1, temp_dir, col_name, "off")?;
+        let data = Self::load_bytes(str_bytes, temp_dir, col_name, "str")?;
+        let nulls = Self::load_typed_vec::<u8>(null_bytes, rc, temp_dir, col_name, "null")?;
+        Ok(TypedColumn::Str {
+            offsets,
+            data,
+            nulls,
+            relocated: HashMap::new(),
+        })
+    }
+
+    /// Reject an offset table that is not monotonic, in range, and aligned to
+    /// char boundaries of the (already whole-blob-validated) string data.
+    ///
+    /// A corrupt offset that splits a multi-byte code point would make the
+    /// per-row *slice* invalid UTF-8, breaking the `from_utf8_unchecked`
+    /// readers' invariant — whole-blob validation alone is not enough.
+    fn validate_string_offsets(
+        offsets_bytes: &[u8],
+        validated: &str,
+        last_offset_u64: u64,
+        col_name: &str,
+    ) -> io::Result<()> {
+        let mut previous = 0u64;
+        for (index, chunk) in offsets_bytes.chunks_exact(8).enumerate() {
+            let offset = u64::from_le_bytes(chunk.try_into().unwrap());
+            if (index == 0 && offset != 0)
+                || offset < previous
+                || offset > last_offset_u64
+                || !validated.is_char_boundary(offset as usize)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("column '{col_name}' has invalid string offset at index {index}"),
+                ));
+            }
+            previous = offset;
+        }
+        Ok(())
     }
 
     fn unpack_mixed_column(

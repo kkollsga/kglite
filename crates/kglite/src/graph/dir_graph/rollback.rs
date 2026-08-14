@@ -138,6 +138,8 @@ use petgraph::graph::NodeIndex;
 
 use super::DirGraph;
 use crate::datatypes::Value;
+use crate::graph::schema::{InternedKey, NodeData};
+use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::undo::{BucketId, UndoEntry, UndoJournal};
 use crate::graph::storage::{GraphRead, GraphWrite};
 
@@ -379,54 +381,15 @@ fn replay(graph: &mut DirGraph, journal: UndoJournal) -> ReplayFallout {
 
 /// Reverse one edit. The journal is already uninstalled, so the `GraphWrite`
 /// calls below are not re-captured.
+///
+/// A dispatcher only: each entry family owns a helper below, so an arm's undo
+/// story is read (and reviewed) next to the invariant it rests on rather than
+/// halfway down one long match.
 fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
     match entry {
-        UndoEntry::NodeAdded { idx, node_type } => {
-            // `type_indices` is reversed by the `BucketAppended` entry the
-            // create path recorded; only the derived per-type structures need
-            // invalidating here.
-            fallout.node_identity_changed(graph.interner.resolve(node_type).to_string());
-            // A node created by this statement can only carry edges this
-            // statement created, and those replayed first (they were captured
-            // later), so it is isolated by now.
-            debug_assert!(
-                graph
-                    .graph
-                    .edges_directed(idx, petgraph::Direction::Outgoing)
-                    .next()
-                    .is_none()
-                    && graph
-                        .graph
-                        .edges_directed(idx, petgraph::Direction::Incoming)
-                        .next()
-                        .is_none(),
-                "a rolled-back node must be isolated before removal"
-            );
-            GraphWrite::remove_node(&mut graph.graph, idx);
-        }
-        UndoEntry::NodeWeight { idx, prior } => {
-            // Both spellings of the type, so a claim under either is recomputed.
-            // The primary type is immutable in practice, but reading it costs
-            // one interner lookup on a path that only runs when a statement
-            // already failed.
-            let restored_type = graph.interner.resolve(prior.node_type).to_string();
-            if let Some(current) = GraphRead::node_type_of(&graph.graph, idx) {
-                let current = graph.interner.resolve(current).to_string();
-                if current != restored_type {
-                    fallout.stale_unique_indices.insert(current);
-                }
-            }
-            fallout.stale_unique_indices.insert(restored_type);
-            if let Some(slot) = GraphWrite::node_weight_mut(&mut graph.graph, idx) {
-                *slot = prior;
-            }
-        }
-        UndoEntry::NodeRemoved { idx, prior } => {
-            let type_name = graph.interner.resolve(prior.node_type).to_string();
-            let restored = GraphWrite::add_node(&mut graph.graph, prior);
-            debug_assert_slot_reused(restored.index(), idx.index(), "node");
-            fallout.node_identity_changed(type_name);
-        }
+        UndoEntry::NodeAdded { idx, node_type } => undo_node_added(graph, idx, node_type, fallout),
+        UndoEntry::NodeWeight { idx, prior } => undo_node_weight(graph, idx, prior, fallout),
+        UndoEntry::NodeRemoved { idx, prior } => undo_node_removed(graph, idx, prior, fallout),
         UndoEntry::EdgeAdded { idx } => {
             GraphWrite::remove_edge(&mut graph.graph, idx);
         }
@@ -448,96 +411,10 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
             bucket,
             idx,
             bucket_was_new,
-        } => match bucket {
-            BucketId::NodeType(name) => {
-                // Into this graph's own delta, never into a base a forked
-                // reader is holding — see `disk/type_index_layer.rs`. Falls
-                // back to the flattening retain when the append is not in the
-                // writable tail.
-                graph.type_indices.undo_append(&name, idx);
-                // Only drop the bucket if this statement introduced it: an
-                // empty bucket can legitimately pre-exist (a type whose nodes
-                // were all deleted earlier), and dropping that would be its
-                // own kind of drift.
-                if bucket_was_new {
-                    graph.type_indices.remove(&name);
-                }
-            }
-            BucketId::SecondaryLabel(label) => {
-                if let Some(members) = graph.secondary_label_index.get_mut(&label) {
-                    members.retain(|member| *member != idx);
-                    if bucket_was_new || members.is_empty() {
-                        graph.secondary_label_index.remove(&label);
-                    }
-                }
-            }
-            // The three user-index families share one shape: undo the push,
-            // then drop the bucket only if this statement created it. An
-            // emptied-but-pre-existing bucket is left in place because the
-            // maintenance paths leave one there too, and restoring the
-            // pre-statement graph means restoring that as well.
-            BucketId::PropertyValue { key, value } => {
-                if let Some(value_map) = graph.property_indices.get_mut(&key) {
-                    undo_bucket_append(value_map.get_mut(&value), idx);
-                    if bucket_was_new {
-                        value_map.remove(&value);
-                    }
-                }
-            }
-            BucketId::RangeValue { key, value } => {
-                if let Some(btree) = graph.range_indices.get_mut(&key) {
-                    undo_bucket_append(btree.get_mut(&value), idx);
-                    if bucket_was_new {
-                        btree.remove(&value);
-                    }
-                }
-            }
-            BucketId::CompositeTuple { key, value } => {
-                if let Some(comp_map) = graph.composite_indices.get_mut(&key) {
-                    undo_bucket_append(comp_map.get_mut(&value), idx);
-                    if bucket_was_new {
-                        comp_map.remove(&value);
-                    }
-                }
-            }
-        },
-        UndoEntry::BucketRemoved { bucket, idx, pos } => match bucket {
-            BucketId::NodeType(name) => {
-                let members = graph.type_indices.entry_or_default(name);
-                let pos = pos.min(members.len());
-                members.insert(pos, idx);
-            }
-            BucketId::SecondaryLabel(label) => {
-                let members = graph.secondary_label_index.entry(label).or_default();
-                let pos = pos.min(members.len());
-                members.insert(pos, idx);
-            }
-            // A bucket the statement emptied was dropped from its map by the
-            // maintenance path, so re-inserting has to recreate it. If the
-            // index itself is gone the entry is skipped: nothing to restore
-            // into, and a rolled-back statement never removes an index.
-            BucketId::PropertyValue { key, value } => {
-                if let Some(value_map) = graph.property_indices.get_mut(&key) {
-                    let members = value_map.entry_or_default(&value);
-                    let pos = pos.min(members.len());
-                    members.insert(pos, idx);
-                }
-            }
-            BucketId::RangeValue { key, value } => {
-                if let Some(btree) = graph.range_indices.get_mut(&key) {
-                    let members = btree.entry_or_default(&value);
-                    let pos = pos.min(members.len());
-                    members.insert(pos, idx);
-                }
-            }
-            BucketId::CompositeTuple { key, value } => {
-                if let Some(comp_map) = graph.composite_indices.get_mut(&key) {
-                    let members = comp_map.entry_or_default(&value);
-                    let pos = pos.min(members.len());
-                    members.insert(pos, idx);
-                }
-            }
-        },
+        } => undo_bucket_appended(graph, bucket, idx, bucket_was_new),
+        UndoEntry::BucketRemoved { bucket, idx, pos } => {
+            undo_bucket_removed(graph, bucket, idx, pos)
+        }
         UndoEntry::TimeseriesRemoved { node, prior } => {
             graph.timeseries_store.insert(node, *prior);
         }
@@ -557,14 +434,9 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
             // so the two are indistinguishable through every read surface —
             // including the `rollback_tests::fingerprint` oracle, which reads
             // the master rows directly.
-            let Some(type_name) = graph.interner.try_resolve(node_type).map(str::to_string) else {
-                return;
-            };
-            if let Some(store) = GraphWrite::column_store_mut(&mut graph.graph, node_type) {
-                let value = prior.unwrap_or(Value::Null);
-                std::sync::Arc::make_mut(store).set(row_id, key, &value, None);
-            }
-            columnar_type_touched(fallout, type_name);
+            edit_column_master(graph, node_type, fallout, |store| {
+                store.set(row_id, key, &prior.unwrap_or(Value::Null), None);
+            });
         }
         UndoEntry::ColumnarSchemaGrown {
             node_type,
@@ -576,13 +448,9 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
             // column is restored to its pre-statement content and only then
             // dropped, which keeps the two entries independent of each other's
             // internals.
-            let Some(type_name) = graph.interner.try_resolve(node_type).map(str::to_string) else {
-                return;
-            };
-            if let Some(store) = GraphWrite::column_store_mut(&mut graph.graph, node_type) {
-                std::sync::Arc::make_mut(store).restore_schema(prior_schema, prior_column_count);
-            }
-            columnar_type_touched(fallout, type_name);
+            edit_column_master(graph, node_type, fallout, |store| {
+                store.restore_schema(prior_schema, prior_column_count);
+            });
         }
         UndoEntry::ColumnarRowsAppended {
             node_type,
@@ -590,49 +458,255 @@ fn apply(graph: &mut DirGraph, entry: UndoEntry, fallout: &mut ReplayFallout) {
             prior_schema,
             prior_column_count,
             store_was_new,
-        } => {
-            // Rows first, then the columns the append's unseen keys grew:
-            // `truncate_rows` shortens every column that still exists, and
-            // `restore_schema` then drops the ones that should not exist at
-            // all. Both are truncations of a stack, so a statement that
-            // appended twice replays as two shrinking steps and lands on the
-            // pre-statement length exactly.
-            let Some(type_name) = graph.interner.try_resolve(node_type).map(str::to_string) else {
-                return;
-            };
-            if store_was_new {
-                GraphWrite::take_column_store(&mut graph.graph, node_type);
-            } else if let Some(store) = GraphWrite::column_store_mut(&mut graph.graph, node_type) {
-                let store = std::sync::Arc::make_mut(store);
-                store.truncate_rows(prior_row_count);
-                store.restore_schema(prior_schema, prior_column_count);
-            }
-            columnar_type_touched(fallout, type_name);
-        }
+        } => undo_columnar_rows_appended(
+            graph,
+            node_type,
+            prior_row_count,
+            prior_schema,
+            prior_column_count,
+            store_was_new,
+            fallout,
+        ),
         UndoEntry::ColumnarTitle {
             node_type,
             row_id,
             prior,
         } => {
-            let Some(type_name) = graph.interner.try_resolve(node_type).map(str::to_string) else {
-                return;
-            };
-            if let Some(store) = GraphWrite::column_store_mut(&mut graph.graph, node_type) {
-                let value = prior.unwrap_or(Value::Null);
-                std::sync::Arc::make_mut(store).set_title(row_id, &value);
-            }
-            columnar_type_touched(fallout, type_name);
+            edit_column_master(graph, node_type, fallout, |store| {
+                store.set_title(row_id, &prior.unwrap_or(Value::Null));
+            });
         }
         UndoEntry::ColumnarTombstone { node_type, row_id } => {
-            let Some(type_name) = graph.interner.try_resolve(node_type).map(str::to_string) else {
-                return;
-            };
-            if let Some(store) = GraphWrite::column_store_mut(&mut graph.graph, node_type) {
-                std::sync::Arc::make_mut(store).untombstone(row_id);
-            }
-            columnar_type_touched(fallout, type_name);
+            edit_column_master(graph, node_type, fallout, |store| {
+                store.untombstone(row_id);
+            });
         }
     }
+}
+
+/// Undo a node insertion: drop the node and invalidate its type's derived
+/// per-type structures.
+fn undo_node_added(
+    graph: &mut DirGraph,
+    idx: NodeIndex,
+    node_type: InternedKey,
+    fallout: &mut ReplayFallout,
+) {
+    // `type_indices` is reversed by the `BucketAppended` entry the create path
+    // recorded; only the derived per-type structures need invalidating here.
+    fallout.node_identity_changed(graph.interner.resolve(node_type).to_string());
+    // A node created by this statement can only carry edges this statement
+    // created, and those replayed first (they were captured later), so it is
+    // isolated by now.
+    debug_assert!(
+        graph
+            .graph
+            .edges_directed(idx, petgraph::Direction::Outgoing)
+            .next()
+            .is_none()
+            && graph
+                .graph
+                .edges_directed(idx, petgraph::Direction::Incoming)
+                .next()
+                .is_none(),
+        "a rolled-back node must be isolated before removal"
+    );
+    GraphWrite::remove_node(&mut graph.graph, idx);
+}
+
+/// Restore a node's pre-statement weight.
+fn undo_node_weight(
+    graph: &mut DirGraph,
+    idx: NodeIndex,
+    prior: NodeData,
+    fallout: &mut ReplayFallout,
+) {
+    // Both spellings of the type, so a claim under either is recomputed. The
+    // primary type is immutable in practice, but reading it costs one interner
+    // lookup on a path that only runs when a statement already failed.
+    let restored_type = graph.interner.resolve(prior.node_type).to_string();
+    if let Some(current) = GraphRead::node_type_of(&graph.graph, idx) {
+        let current = graph.interner.resolve(current).to_string();
+        if current != restored_type {
+            fallout.stale_unique_indices.insert(current);
+        }
+    }
+    fallout.stale_unique_indices.insert(restored_type);
+    if let Some(slot) = GraphWrite::node_weight_mut(&mut graph.graph, idx) {
+        *slot = prior;
+    }
+}
+
+/// Re-insert a removed node, which reverse replay lands back on slot `idx`.
+fn undo_node_removed(
+    graph: &mut DirGraph,
+    idx: NodeIndex,
+    prior: NodeData,
+    fallout: &mut ReplayFallout,
+) {
+    let type_name = graph.interner.resolve(prior.node_type).to_string();
+    let restored = GraphWrite::add_node(&mut graph.graph, prior);
+    debug_assert_slot_reused(restored.index(), idx.index(), "node");
+    fallout.node_identity_changed(type_name);
+}
+
+/// Reverse one inverted-index bucket append across all five bucket families.
+fn undo_bucket_appended(
+    graph: &mut DirGraph,
+    bucket: BucketId,
+    idx: NodeIndex,
+    bucket_was_new: bool,
+) {
+    match bucket {
+        BucketId::NodeType(name) => {
+            // Into this graph's own delta, never into a base a forked
+            // reader is holding — see `disk/type_index_layer.rs`. Falls
+            // back to the flattening retain when the append is not in the
+            // writable tail.
+            graph.type_indices.undo_append(&name, idx);
+            // Only drop the bucket if this statement introduced it: an
+            // empty bucket can legitimately pre-exist (a type whose nodes
+            // were all deleted earlier), and dropping that would be its
+            // own kind of drift.
+            if bucket_was_new {
+                graph.type_indices.remove(&name);
+            }
+        }
+        BucketId::SecondaryLabel(label) => {
+            if let Some(members) = graph.secondary_label_index.get_mut(&label) {
+                members.retain(|member| *member != idx);
+                if bucket_was_new || members.is_empty() {
+                    graph.secondary_label_index.remove(&label);
+                }
+            }
+        }
+        // The three user-index families share one shape: undo the push,
+        // then drop the bucket only if this statement created it. An
+        // emptied-but-pre-existing bucket is left in place because the
+        // maintenance paths leave one there too, and restoring the
+        // pre-statement graph means restoring that as well.
+        BucketId::PropertyValue { key, value } => {
+            if let Some(value_map) = graph.property_indices.get_mut(&key) {
+                undo_bucket_append(value_map.get_mut(&value), idx);
+                if bucket_was_new {
+                    value_map.remove(&value);
+                }
+            }
+        }
+        BucketId::RangeValue { key, value } => {
+            if let Some(btree) = graph.range_indices.get_mut(&key) {
+                undo_bucket_append(btree.get_mut(&value), idx);
+                if bucket_was_new {
+                    btree.remove(&value);
+                }
+            }
+        }
+        BucketId::CompositeTuple { key, value } => {
+            if let Some(comp_map) = graph.composite_indices.get_mut(&key) {
+                undo_bucket_append(comp_map.get_mut(&value), idx);
+                if bucket_was_new {
+                    comp_map.remove(&value);
+                }
+            }
+        }
+    }
+}
+
+/// Re-insert a node into the inverted-index bucket it was removed from, at the
+/// position it held.
+fn undo_bucket_removed(graph: &mut DirGraph, bucket: BucketId, idx: NodeIndex, pos: usize) {
+    match bucket {
+        BucketId::NodeType(name) => {
+            let members = graph.type_indices.entry_or_default(name);
+            let pos = pos.min(members.len());
+            members.insert(pos, idx);
+        }
+        BucketId::SecondaryLabel(label) => {
+            let members = graph.secondary_label_index.entry(label).or_default();
+            let pos = pos.min(members.len());
+            members.insert(pos, idx);
+        }
+        // A bucket the statement emptied was dropped from its map by the
+        // maintenance path, so re-inserting has to recreate it. If the
+        // index itself is gone the entry is skipped: nothing to restore
+        // into, and a rolled-back statement never removes an index.
+        BucketId::PropertyValue { key, value } => {
+            if let Some(value_map) = graph.property_indices.get_mut(&key) {
+                let members = value_map.entry_or_default(&value);
+                let pos = pos.min(members.len());
+                members.insert(pos, idx);
+            }
+        }
+        BucketId::RangeValue { key, value } => {
+            if let Some(btree) = graph.range_indices.get_mut(&key) {
+                let members = btree.entry_or_default(&value);
+                let pos = pos.min(members.len());
+                members.insert(pos, idx);
+            }
+        }
+        BucketId::CompositeTuple { key, value } => {
+            if let Some(comp_map) = graph.composite_indices.get_mut(&key) {
+                let members = comp_map.entry_or_default(&value);
+                let pos = pos.min(members.len());
+                members.insert(pos, idx);
+            }
+        }
+    }
+}
+
+/// Run one edit against a type's live master `ColumnStore` and report the type
+/// as touched.
+///
+/// The shared preamble of every columnar undo entry. Both lookups fail
+/// silently, and both failures mean the same thing — the type no longer exists
+/// to restore into, because the shell restore already rolled the schema back
+/// past it — so there is nothing to write and nothing to report.
+fn edit_column_master(
+    graph: &mut DirGraph,
+    node_type: InternedKey,
+    fallout: &mut ReplayFallout,
+    edit: impl FnOnce(&mut ColumnStore),
+) {
+    let Some(type_name) = graph.interner.try_resolve(node_type).map(str::to_string) else {
+        return;
+    };
+    if let Some(store) = GraphWrite::column_store_mut(&mut graph.graph, node_type) {
+        edit(std::sync::Arc::make_mut(store));
+    }
+    columnar_type_touched(fallout, type_name);
+}
+
+/// Truncate a statement's row appends away, dropping the store itself when the
+/// statement is what introduced it.
+///
+/// Rows first, then the columns the append's unseen keys grew: `truncate_rows`
+/// shortens every column that still exists, and `restore_schema` then drops the
+/// ones that should not exist at all. Both are truncations of a stack, so a
+/// statement that appended twice replays as two shrinking steps and lands on
+/// the pre-statement length exactly.
+///
+/// Not expressible through [`edit_column_master`]: the `store_was_new` arm
+/// removes the store rather than editing it.
+fn undo_columnar_rows_appended(
+    graph: &mut DirGraph,
+    node_type: InternedKey,
+    prior_row_count: u32,
+    prior_schema: std::sync::Arc<crate::graph::schema::TypeSchema>,
+    prior_column_count: usize,
+    store_was_new: bool,
+    fallout: &mut ReplayFallout,
+) {
+    let Some(type_name) = graph.interner.try_resolve(node_type).map(str::to_string) else {
+        return;
+    };
+    if store_was_new {
+        GraphWrite::take_column_store(&mut graph.graph, node_type);
+    } else if let Some(store) = GraphWrite::column_store_mut(&mut graph.graph, node_type) {
+        let store = std::sync::Arc::make_mut(store);
+        store.truncate_rows(prior_row_count);
+        store.restore_schema(prior_schema, prior_column_count);
+    }
+    columnar_type_touched(fallout, type_name);
 }
 
 /// Report a node type whose master column store the replay just wrote.

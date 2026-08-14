@@ -5,8 +5,8 @@
 [![License: MIT](https://img.shields.io/crates/l/kglite)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
 
 **Pure-Rust knowledge graph engine** — Cypher pipeline,
-snapshot/working CoW transactions, columnar / mmap / disk storage
-backends, optional RDF / OKF format loaders. Pre-packaged domain
+snapshot/working CoW transactions, columnar properties over memory /
+mmap / disk storage backends, optional RDF / OKF format loaders. Pre-packaged domain
 dataset loaders (SEC EDGAR, Sodir, Wikidata) live in the separate
 kglite-datasets project. Zero PyO3 in the dependency tree; embed
 directly from any Rust binary.

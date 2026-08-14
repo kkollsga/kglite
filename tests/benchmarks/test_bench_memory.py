@@ -1,6 +1,9 @@
-"""Benchmarks for memory management: columnar enable/disable, spill, unspill, vacuum.
+"""Benchmarks for memory management: spill, unspill, vacuum, and save.
 
-Compares fully in-memory vs part-memory/part-disk (spilled) performance.
+Compares fully heap-resident columns against columns spilled to disk under
+`set_memory_limit`. There is no shape to switch: properties live in per-type
+columns from the first node, and the only axis here is where those columns'
+bytes sit.
 Run with: pytest tests/benchmarks/test_bench_memory.py -m benchmark -v -s
 """
 
@@ -42,14 +45,19 @@ def _build_graph(n=5000):
 
 @pytest.fixture
 def graph_5k():
-    """5000-node graph (compact storage)."""
+    """5000-node graph, columns heap-resident.
+
+    Was two fixtures — `graph_5k` ("compact storage") and `graph_5k`
+    ("columnar, heap-backed") — with identical bodies, because the shapes they
+    named were never distinguishable by anything a fixture could do. One now.
+    """
     return _build_graph(5000)
 
 
 @pytest.fixture
-def graph_5k_columnar():
-    """5000-node graph (columnar, heap-backed)."""
-    return _build_graph(5000)
+def bench_graph_1k():
+    """1000-node graph — the shape the retired tracked cell measured."""
+    return _build_graph(1000)
 
 
 @pytest.fixture
@@ -92,17 +100,17 @@ def test_bench_unspill_5k(benchmark, graph_5k_spilled, tmp_path):
 
 
 @pytest.mark.benchmark
-def test_bench_query_where_heap_5k(benchmark, graph_5k_columnar):
-    """Filtered query on heap-backed columnar (5000 nodes)."""
+def test_bench_query_where_heap_5k(benchmark, graph_5k):
+    """Filtered query on heap-resident columns (5000 nodes)."""
     benchmark(
-        graph_5k_columnar.cypher,
+        graph_5k.cypher,
         "MATCH (n:Item) WHERE n.value > 4000 RETURN n.title, n.value",
     )
 
 
 @pytest.mark.benchmark
 def test_bench_query_where_spilled_5k(benchmark, graph_5k_spilled):
-    """Filtered query on spilled columnar (5000 nodes)."""
+    """Filtered query on spilled columns (5000 nodes)."""
     benchmark(
         graph_5k_spilled.cypher,
         "MATCH (n:Item) WHERE n.value > 4000 RETURN n.title, n.value",
@@ -110,17 +118,17 @@ def test_bench_query_where_spilled_5k(benchmark, graph_5k_spilled):
 
 
 @pytest.mark.benchmark
-def test_bench_query_match_heap_5k(benchmark, graph_5k_columnar):
-    """Simple MATCH on heap-backed columnar (5000 nodes)."""
+def test_bench_query_match_heap_5k(benchmark, graph_5k):
+    """Simple MATCH on heap-resident columns (5000 nodes)."""
     benchmark(
-        graph_5k_columnar.cypher,
+        graph_5k.cypher,
         "MATCH (n:Item) RETURN n.title, n.value LIMIT 100",
     )
 
 
 @pytest.mark.benchmark
 def test_bench_query_match_spilled_5k(benchmark, graph_5k_spilled):
-    """Simple MATCH on spilled columnar (5000 nodes)."""
+    """Simple MATCH on spilled columns (5000 nodes)."""
     benchmark(
         graph_5k_spilled.cypher,
         "MATCH (n:Item) RETURN n.title, n.value LIMIT 100",
@@ -128,17 +136,17 @@ def test_bench_query_match_spilled_5k(benchmark, graph_5k_spilled):
 
 
 @pytest.mark.benchmark
-def test_bench_query_aggregation_heap_5k(benchmark, graph_5k_columnar):
-    """Aggregation on heap-backed columnar."""
+def test_bench_query_aggregation_heap_5k(benchmark, graph_5k):
+    """Aggregation on heap-resident columns."""
     benchmark(
-        graph_5k_columnar.cypher,
+        graph_5k.cypher,
         "MATCH (n:Item) RETURN count(n) AS cnt, avg(n.value) AS avg_val",
     )
 
 
 @pytest.mark.benchmark
 def test_bench_query_aggregation_spilled_5k(benchmark, graph_5k_spilled):
-    """Aggregation on spilled columnar."""
+    """Aggregation on spilled columns."""
     benchmark(
         graph_5k_spilled.cypher,
         "MATCH (n:Item) RETURN count(n) AS cnt, avg(n.value) AS avg_val",
@@ -146,13 +154,18 @@ def test_bench_query_aggregation_spilled_5k(benchmark, graph_5k_spilled):
 
 
 # ---------------------------------------------------------------------------
-# Vacuum with columnar rebuild
+# Vacuum and consolidation
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.benchmark
-def test_bench_vacuum_columnar_5k(benchmark):
-    """Vacuum + columnar rebuild after deleting 60% of nodes."""
+def test_bench_vacuum_5k(benchmark):
+    """Vacuum after deleting 60% of nodes.
+
+    Was a `columnar` / `no_columnar` pair whose bodies were character-identical
+    — the "baseline comparison" arm never built a different graph, so the two
+    cells reported the same operation under two names.
+    """
 
     def run():
         g = _build_graph(5000)
@@ -164,42 +177,44 @@ def test_bench_vacuum_columnar_5k(benchmark):
 
 
 @pytest.mark.benchmark
-def test_bench_vacuum_no_columnar_5k(benchmark):
-    """Vacuum without columnar (baseline comparison)."""
+def test_bench_unspill_rebuild_1k(benchmark, bench_graph_1k):
+    """One full consolidation pass over a heap-resident graph's columns.
 
-    def run():
-        g = _build_graph(5000)
-        g.set_auto_vacuum(None)
-        g.cypher("MATCH (n:Item) WHERE n.value < 3000 DETACH DELETE n")
-        g.vacuum()
-
-    benchmark(run)
+    `unspill()` is the public route to the rebuild `save()` and `vacuum()` also
+    run. The cell lived in `test_bench_core.py` as `test_bench_columnar_enable`
+    and timed a `disable_columnar()` / `enable_columnar()` round trip; both are
+    gone and the operation is not the same one, so the tracked cell was retired
+    rather than renamed over an anchor value that measured something else. It
+    is untracked here until a release capture can baseline it on both
+    platforms.
+    """
+    benchmark(bench_graph_1k.unspill)
 
 
 # ---------------------------------------------------------------------------
-# Save benchmarks: heap vs spilled
+# Save: heap vs spilled
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.benchmark
-def test_bench_save_v3_heap_5k(benchmark, graph_5k_columnar, tmp_path):
-    """Save v3 .kgl from heap-backed columnar."""
+def test_bench_save_kgl_heap_5k(benchmark, graph_5k, tmp_path):
+    """Save a `.kgl` from heap-resident columns."""
     counter = [0]
 
     def save():
-        graph_5k_columnar.save(str(tmp_path / f"v3_{counter[0]}.kgl"))
+        graph_5k.save(str(tmp_path / f"save_{counter[0]}.kgl"))
         counter[0] += 1
 
     benchmark(save)
 
 
 @pytest.mark.benchmark
-def test_bench_save_v3_spilled_5k(benchmark, graph_5k_spilled, tmp_path):
-    """Save v3 .kgl from spilled columnar."""
+def test_bench_save_kgl_spilled_5k(benchmark, graph_5k_spilled, tmp_path):
+    """Save a `.kgl` from spilled columns."""
     counter = [0]
 
     def save():
-        graph_5k_spilled.save(str(tmp_path / f"v3_{counter[0]}.kgl"))
+        graph_5k_spilled.save(str(tmp_path / f"save_{counter[0]}.kgl"))
         counter[0] += 1
 
     benchmark(save)

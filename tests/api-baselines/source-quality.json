@@ -152,13 +152,6 @@
       "nesting": 7
     },
     {
-      "path": "crates/kglite/src/graph/dir_graph/disk_persistence.rs",
-      "qualified_name": "crate::DirGraph::write_disk_snapshot",
-      "lines": 249,
-      "branches": 43,
-      "nesting": 4
-    },
-    {
       "path": "crates/kglite/src/graph/features/equations.rs",
       "qualified_name": "crate::Evaluator::evaluate_single",
       "lines": 83,
@@ -521,13 +514,6 @@
       "lines": 521,
       "branches": 59,
       "nesting": 5
-    },
-    {
-      "path": "crates/kglite/src/graph/storage/column_store/mod.rs",
-      "qualified_name": "crate::ColumnStore::unpack_column",
-      "lines": 204,
-      "branches": 33,
-      "nesting": 3
     },
     {
       "path": "crates/kglite/src/graph/storage/disk/builder.rs",

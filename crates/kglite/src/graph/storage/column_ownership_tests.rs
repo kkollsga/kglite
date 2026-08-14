@@ -1284,3 +1284,202 @@ fn a_forked_columnar_replace_drops_the_properties_it_omits() {
         "and the held view keeps the row it was forked with"
     );
 }
+
+// ── Backend arms: the same invariants on Mapped and on Disk ────────────────
+//
+// Every fixture above is `DirGraph::new()`, i.e. `Memory`. That was the gap
+// filed as Track E after the 0.15.9 release review: the read-route and
+// ownership pins were only ever asked of one backend, so a backend that
+// resolved a property through some other replica — or that kept a second
+// handle on the store across a write — would have gone unnoticed here.
+//
+// The arms below re-ask the two load-bearing questions on the other two
+// backends. They are deliberately the *questions*, not the whole file: the
+// caller-class matrix (`r1_` … `r14_`) exercises reader code that sits above
+// the backend and cannot differ per backend, whereas "which store does a read
+// resolve" and "who holds it after a write" are exactly the backend's business.
+
+/// `n` `Item` nodes on `mode`, consolidated — the mapped/disk counterpart of
+/// [`sized_columnar`].
+///
+/// The preconditions are asserted rather than assumed: a fixture that silently
+/// landed on the wrong backend, or that carried no column store, would make
+/// every arm below pass without testing anything.
+fn sized_columnar_in_mode(
+    n: i64,
+    mode: crate::graph::storage::mode::StorageMode,
+    path: Option<&std::path::Path>,
+) -> DirGraph {
+    let mut g = crate::graph::storage::mode::new_dir_graph_in_mode(mode, path)
+        .expect("fixture backend must be constructible");
+    let rows: Vec<Vec<Value>> = (1..=n)
+        .map(|i| {
+            vec![
+                Value::Int64(i),
+                Value::String(format!("t{i}")),
+                Value::String(format!("c0-{i}")),
+                Value::Int64(i * 10),
+            ]
+        })
+        .collect();
+    let df = DataFrame::from_cypher_rows(
+        vec![
+            "id".to_string(),
+            "title".to_string(),
+            "c0".to_string(),
+            "c1".to_string(),
+        ],
+        rows,
+    )
+    .unwrap();
+    crate::graph::mutation::maintain::add_nodes(
+        &mut g,
+        df,
+        "Item".to_string(),
+        "id".to_string(),
+        Some("title".to_string()),
+        None,
+    )
+    .unwrap();
+    g.enable_columnar();
+    assert_eq!(
+        crate::graph::storage::mode::live_storage_mode(&g),
+        mode,
+        "fixture must be on the backend it names, or the arm tests Memory twice"
+    );
+    assert!(
+        g.column_store_count() > 0,
+        "fixture must own a master column store, or every arm below is vacuous"
+    );
+    g
+}
+
+fn mapped_columnar() -> DirGraph {
+    sized_columnar_in_mode(N, crate::graph::storage::mode::StorageMode::Mapped, None)
+}
+
+/// A read must resolve the store the **backend** owns, on `Mapped` too.
+///
+/// Red-first: writing the poison into a *clone* of the store instead of
+/// installing it turns this assertion red on `c0-1`.
+#[test]
+fn the_backend_store_is_the_only_read_route_on_mapped() {
+    let mut graph = mapped_columnar();
+    let idx = node_of(&graph, 1);
+    let row_id = node_row_id(&graph, idx).expect("columnar node");
+    let _guard = poison_property(
+        &mut graph,
+        "Item",
+        row_id,
+        "c0",
+        Value::String("TRUTH".into()),
+    );
+    assert_eq!(
+        graph.node_view(idx).unwrap().get_property_value("c0"),
+        Some(Value::String("TRUTH".into())),
+        "a mapped graph must read the store its backend owns"
+    );
+    assert_eq!(
+        read_one(&graph, "MATCH (n:Item) WHERE n.id = 1 RETURN n.c0"),
+        Value::String("TRUTH".into()),
+        "and the Cypher read route must resolve the same store"
+    );
+}
+
+/// A `SET` must mutate the mapped master **in place** and leave it uniquely
+/// owned, exactly as it does on `Memory`.
+///
+/// Two assertions, and the pointer one is the load-bearing half.
+/// "Uniquely owned afterwards" is satisfied trivially by a store that forked:
+/// `Arc::make_mut` installs a *fresh* allocation in the map, so the map's entry
+/// has one holder either way and only the old allocation is shared. Pinning the
+/// allocation identity across the statement is what distinguishes "mutated one
+/// cell" from "deep-copied every column of the type", which is the whole
+/// mechanism this file exists to guard.
+///
+/// Red-first: holding a second `Arc` on the master across the statement — what
+/// the pre-Phase-2 `ColumnarHandles` journal capture did — forces `make_mut` to
+/// fork and turns the pointer assertion red. Verified by doing exactly that.
+#[test]
+fn set_leaves_the_master_uniquely_owned_on_mapped() {
+    let mut graph = mapped_columnar();
+    let idx = node_of(&graph, 1);
+    let ikey = graph.interner.get_or_intern("c0");
+    let before = Arc::as_ptr(graph.column_store("Item").expect("master"));
+
+    run(
+        &mut graph,
+        "MATCH (n:Item) WHERE n.id = 1 SET n.c0 = 'WRITTEN'",
+    );
+
+    assert!(
+        std::ptr::eq(
+            before,
+            Arc::as_ptr(graph.column_store("Item").expect("master"))
+        ),
+        "a columnar SET on Mapped must mutate the master in place — a changed \
+         allocation means the statement deep-copied the type's columns"
+    );
+    assert!(
+        master_is_uniquely_owned(&graph),
+        "a committed columnar SET on Mapped must leave the master uniquely owned"
+    );
+    for (surface, got) in all_read_surfaces(&mut graph, idx, ikey) {
+        assert_eq!(
+            got,
+            Value::String("WRITTEN".into()),
+            "{surface} did not observe the SET on Mapped"
+        );
+    }
+}
+
+/// The same read-route question on `Disk`.
+///
+/// `DiskGraph` reaches a type's columns through its own arena rather than a
+/// heap map, so "the backend owns the store" is a different claim there and is
+/// worth asking separately. The write-ownership arm above has no disk
+/// counterpart on purpose: a disk graph takes the whole-graph rollback
+/// checkpoint (`supports_undo_journal() == false`), so nothing about the
+/// journal's handle on a store applies to it.
+///
+/// Red-first: dropping the `install_column_store` call inside `poison_row`
+/// leaves this reading `c0-1`.
+#[test]
+fn the_backend_store_is_the_only_read_route_on_disk() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut graph = sized_columnar_in_mode(
+        N,
+        crate::graph::storage::mode::StorageMode::Disk,
+        Some(dir.path()),
+    );
+    // Every direct node read on a disk graph must sit inside an open query
+    // guard (the arena SAFETY protocol in `disk/graph.rs`); the Cypher route
+    // opens its own. Hence the scoping — the guard borrows the graph the
+    // poison needs mutably.
+    let (idx, row_id) = {
+        let _query = graph.graph.begin_query();
+        let idx = node_of(&graph, 1);
+        let row_id = node_row_id(&graph, idx).expect("columnar node");
+        (idx, row_id)
+    };
+    let _guard = poison_property(
+        &mut graph,
+        "Item",
+        row_id,
+        "c0",
+        Value::String("TRUTH".into()),
+    );
+    {
+        let _query = graph.graph.begin_query();
+        assert_eq!(
+            graph.node_view(idx).unwrap().get_property_value("c0"),
+            Some(Value::String("TRUTH".into())),
+            "a disk graph must read the store its backend owns"
+        );
+    }
+    assert_eq!(
+        read_one(&graph, "MATCH (n:Item) WHERE n.id = 1 RETURN n.c0"),
+        Value::String("TRUTH".into()),
+        "and the Cypher read route must resolve the same store"
+    );
+}
