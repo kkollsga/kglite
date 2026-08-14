@@ -61,6 +61,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::datatypes::values::Value;
 use crate::graph::storage::interner::{InternedKey, StringInterner, STRIP_PROPERTIES};
+use crate::graph::storage::StrField;
 
 /// A node's columnar row — **identity only**.
 ///
@@ -172,6 +173,21 @@ impl PropertyStorage {
                 .get(&key)
                 .map(|v| matches!(v, Value::String(s) if s == target)),
             PropertyStorage::Columnar(_) => None,
+        }
+    }
+
+    /// Borrowed string read for a property. Mirrors [`Self::get`]'s resolution
+    /// (including its "a stored `Null` still resolves" behaviour, which is what
+    /// keeps the soft-alias fallback from firing over one).
+    #[inline]
+    pub(in crate::graph::storage) fn str_field(&self, key: InternedKey) -> StrField<'_> {
+        match self {
+            PropertyStorage::Map(map) => match map.get(&key) {
+                None => StrField::Absent,
+                Some(Value::String(s)) => StrField::Str(Cow::Borrowed(s.as_str())),
+                Some(_) => StrField::NotString,
+            },
+            PropertyStorage::Columnar(_) => StrField::Absent,
         }
     }
 

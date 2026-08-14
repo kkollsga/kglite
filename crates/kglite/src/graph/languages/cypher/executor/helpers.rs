@@ -5,7 +5,7 @@
 use super::super::ast::*;
 use super::super::result::*;
 use crate::datatypes::values::Value;
-use crate::graph::schema::{soft_alias_fallback, DirGraph, SoftAliasFallback};
+use crate::graph::schema::{soft_alias_fallback, DirGraph, InternedKey, SoftAliasFallback};
 use crate::graph::storage::{GraphRead, NodeView};
 use std::collections::{HashMap, HashSet};
 
@@ -370,7 +370,7 @@ pub(super) fn evaluate_comparison(
 pub fn resolve_node_property(node: NodeView<'_>, property: &str, graph: &DirGraph) -> Value {
     let node_type_str = node.node_type_str(&graph.interner);
     let resolved = graph.resolve_alias(node_type_str, property);
-    resolve_node_property_resolved(node, resolved, graph)
+    resolve_node_property_resolved(node, resolved, InternedKey::from_str(resolved), graph)
 }
 
 /// Hot-path variant of [`resolve_node_property`] for when the caller has
@@ -386,7 +386,20 @@ pub fn resolve_node_property_unaliased(
     property: &str,
     graph: &DirGraph,
 ) -> Value {
-    resolve_node_property_resolved(node, property, graph)
+    resolve_node_property_resolved(node, property, InternedKey::from_str(property), graph)
+}
+
+/// [`resolve_node_property_unaliased`] for a caller that has already interned
+/// the resolved name. `InternedKey::from_str` hashes the property name, and a
+/// scan that reads the same property from every row was paying that hash per
+/// row rather than per query.
+pub fn resolve_node_property_keyed(
+    node: NodeView<'_>,
+    property: &str,
+    key: InternedKey,
+    graph: &DirGraph,
+) -> Value {
+    resolve_node_property_resolved(node, property, key, graph)
 }
 
 /// Shared tail of [`resolve_node_property`] / [`resolve_node_property_unaliased`]:
@@ -394,15 +407,24 @@ pub fn resolve_node_property_unaliased(
 /// honouring the `id` / `title` virtuals, stored-property-wins (KG-1), the
 /// soft-alias fallbacks, and spatial virtual properties. `node_type_str` is
 /// resolved lazily — only the soft-alias / spatial branches need it.
+///
+/// `key` must be `InternedKey::from_str(resolved)`; it is a parameter only so
+/// a per-row caller can hoist the hash.
 #[inline]
-fn resolve_node_property_resolved(node: NodeView<'_>, resolved: &str, graph: &DirGraph) -> Value {
+fn resolve_node_property_resolved(
+    node: NodeView<'_>,
+    resolved: &str,
+    key: InternedKey,
+    graph: &DirGraph,
+) -> Value {
+    debug_assert_eq!(key, InternedKey::from_str(resolved));
     match resolved {
         "id" => node.id().into_owned(),
         "title" => node.title().into_owned(),
         _ => {
             // Stored property wins (covers a user property named `label`,
             // `type`, `node_type`, `name`, … — KG-1).
-            if let Some(val) = node.get_property_value(resolved) {
+            if let Some(val) = node.get_value(key) {
                 return val;
             }
             let node_type_str = node.node_type_str(&graph.interner);

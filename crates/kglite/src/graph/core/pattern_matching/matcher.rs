@@ -5,7 +5,7 @@
 // paths, and Rayon-parallelised expansion for large match sets.
 
 use crate::datatypes::values::Value;
-use crate::graph::core::filtering::{compare_values, values_equal};
+use crate::graph::core::filtering::{compare_values, json_single_element_string, values_equal};
 use crate::graph::languages::cypher::result::Bindings;
 use crate::graph::schema::{DirGraph, InternedKey, NodeData};
 use crate::graph::storage::column_store::ColumnStore;
@@ -158,6 +158,84 @@ fn global_alias_candidates(prop: &str, graph: &DirGraph) -> Vec<String> {
         }
     }
     out
+}
+
+/// `str::ends_with` with the mismatch decided on one byte.
+///
+/// `str::ends_with` on a runtime-length pattern lowers to a `memcmp` call
+/// through the dynamic-linker stub, and a filtered scan calls it once per
+/// candidate row while almost every row fails. Comparing the last byte first
+/// takes the call out of the failing path, which is the path a scan is.
+#[inline]
+fn str_ends_with(s: &str, suffix: &str) -> bool {
+    let (haystack, needle) = (s.as_bytes(), suffix.as_bytes());
+    match (needle.last(), haystack.last()) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(n), Some(h)) => {
+            n == h && haystack.len() >= needle.len() && {
+                let at = haystack.len() - needle.len();
+                &haystack[at..] == needle
+            }
+        }
+    }
+}
+
+/// `str::starts_with`, first byte first — see [`str_ends_with`].
+#[inline]
+fn str_starts_with(s: &str, prefix: &str) -> bool {
+    let (haystack, needle) = (s.as_bytes(), prefix.as_bytes());
+    match (needle.first(), haystack.first()) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(n), Some(h)) => {
+            n == h && haystack.len() >= needle.len() && &haystack[..needle.len()] == needle
+        }
+    }
+}
+
+/// The string test a matcher reduces to, or `None` when its answer needs more
+/// than the field's string form.
+///
+/// These four matchers are exactly the ones
+/// [`PatternExecutor::value_matches`] decides by looking at a `Value::String`
+/// and nothing else — every other value shape answers `false` there, which is
+/// what [`crate::graph::storage::StrField::is`] returns for
+/// `NotString`/`Absent`. Keeping this
+/// function beside `value_matches` is the whole safety argument: they must
+/// agree row for row, so the borrowed read can never see a different answer
+/// than the materialising one.
+///
+/// `Equals` reproduces `values_equal`'s string arm, JSON-single-element
+/// unwrapping included, because on the identity fields this route replaces
+/// `value_matches`, which used `values_equal`. Stored user properties keep
+/// their long-standing byte-equality fast path in
+/// [`PatternExecutor::prop_matches`] and never reach here.
+fn str_field_test(matcher: &PropertyMatcher) -> Option<impl Fn(&str) -> bool + '_> {
+    if !matches!(
+        matcher,
+        PropertyMatcher::Equals(Value::String(_))
+            | PropertyMatcher::StartsWith(_)
+            | PropertyMatcher::EndsWith(_)
+            | PropertyMatcher::Contains(_)
+    ) {
+        return None;
+    }
+    Some(move |s: &str| match matcher {
+        PropertyMatcher::Equals(Value::String(target)) => {
+            // The JSON-list arm needs a `["` on one side or the other, so one
+            // byte test rules it out for every ordinary string — this runs on
+            // every non-matching row of a scan.
+            s == target.as_str()
+                || ((s.starts_with('[') || target.starts_with('['))
+                    && (json_single_element_string(s) == Some(target.as_str())
+                        || json_single_element_string(target) == Some(s)))
+        }
+        PropertyMatcher::StartsWith(prefix) => str_starts_with(s, prefix),
+        PropertyMatcher::EndsWith(suffix) => str_ends_with(s, suffix),
+        PropertyMatcher::Contains(needle) => s.contains(needle.as_str()),
+        _ => unreachable!("guarded by the matches! above"),
+    })
 }
 
 // ============================================================================
@@ -1451,10 +1529,10 @@ impl<'a> PatternExecutor<'a> {
         key: InternedKey,
         matcher: &PropertyMatcher,
     ) -> bool {
-        // Zero-alloc fast path for `Equals(String)` on a user property.
-        // For columnar storage this bypasses cloning bytes out of the mmap
-        // into an owned String; for the staging `Map` it avoids an unnecessary
-        // Value comparison.
+        // Byte equality against a stored user property answers from the column
+        // without building a `StrField` at all — worth its own arm because
+        // `StrField` is wider than a register pair, so the general route below
+        // returns it through memory once per candidate row.
         if !matches!(
             field,
             "name" | "title" | "id" | "type" | "node_type" | "label"
@@ -1462,6 +1540,15 @@ impl<'a> PatternExecutor<'a> {
             if let PropertyMatcher::Equals(Value::String(target)) = matcher {
                 return node.str_prop_eq(key, target) == Some(true);
             }
+        }
+
+        // Zero-alloc route for every other matcher whose answer is a function
+        // of the string form alone — the identity fields' equality included.
+        // Under columnar storage the owned `Value::String` the general path
+        // materialises is one heap allocation *per candidate row*, which is the
+        // whole cost of a text-filter scan.
+        if let Some(test) = str_field_test(matcher) {
+            return node.resolved_field_str(type_str, field, key).is(test);
         }
 
         // Identity fields, then a stored property (a user `label`/`type`/
@@ -1559,7 +1646,7 @@ impl<'a> PatternExecutor<'a> {
                 above_lower && below_upper
             }
             PropertyMatcher::StartsWith(prefix) => match value {
-                Value::String(s) => s.starts_with(prefix.as_str()),
+                Value::String(s) => str_starts_with(s, prefix),
                 _ => false,
             },
             PropertyMatcher::Contains(needle) => match value {
@@ -1567,7 +1654,7 @@ impl<'a> PatternExecutor<'a> {
                 _ => false,
             },
             PropertyMatcher::EndsWith(suffix) => match value {
-                Value::String(s) => s.ends_with(suffix.as_str()),
+                Value::String(s) => str_ends_with(s, suffix),
                 _ => false,
             },
         }

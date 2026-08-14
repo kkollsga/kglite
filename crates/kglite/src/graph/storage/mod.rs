@@ -52,6 +52,46 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 // ──────────────────────────────────────────────────────────────────────────
+// StrField — a borrowed read for string-only tests
+// ──────────────────────────────────────────────────────────────────────────
+
+/// One field read in the *only* form a string predicate needs.
+///
+/// Every columnar string read through [`ColumnStore::get`] materialises a
+/// `Value::String`, one heap allocation per row — the whole cost of a
+/// `CONTAINS` / `STARTS WITH` / `ENDS WITH` / `=` scan once construction
+/// became columnar. `StrField` borrows out of the column instead, and keeps
+/// the two non-string outcomes distinct because the resolution order in
+/// [`NodeView::resolved_field`] depends on them: an *absent* field falls
+/// through to the structural soft alias, a field holding a **non-string**
+/// value does not.
+///
+/// `Cow` rather than `&str` for the one route that cannot borrow: the
+/// overflow bag decodes a blob per read.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StrField<'a> {
+    /// The field holds a string.
+    Str(std::borrow::Cow<'a, str>),
+    /// The field holds a value that is not a string. No string test can pass,
+    /// and no fallback applies — the field *resolved*.
+    NotString,
+    /// The field is absent or null for this row.
+    Absent,
+}
+
+impl StrField<'_> {
+    /// Apply a string test, answering `false` for every non-string outcome —
+    /// which is what every string matcher does with a non-string value.
+    #[inline]
+    pub fn is(&self, test: impl FnOnce(&str) -> bool) -> bool {
+        match self {
+            StrField::Str(s) => test(s),
+            StrField::NotString | StrField::Absent => false,
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // GraphRead — unified read interface over storage backends
 // ──────────────────────────────────────────────────────────────────────────
 

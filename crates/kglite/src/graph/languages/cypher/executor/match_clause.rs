@@ -10,7 +10,7 @@ use crate::graph::core::pattern_matching::{
     PatternMatch, PropertyMatcher,
 };
 use crate::graph::schema::InternedKey;
-use crate::graph::storage::GraphRead;
+use crate::graph::storage::{ColumnStore, GraphRead, NodeView};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::Direction;
 use rustc_hash::{FxHashMap, FxHashSet};

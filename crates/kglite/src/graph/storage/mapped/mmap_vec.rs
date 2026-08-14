@@ -633,6 +633,26 @@ impl<T: MmapPod> MmapOrVec<T> {
         }
     }
 
+    /// Borrowed view of the whole column.
+    ///
+    /// One `Heap`/`Mapped` dispatch for the whole read instead of one per
+    /// element: a per-row string read touches the null byte and two offsets,
+    /// and paid the match three times over.
+    #[inline]
+    pub fn as_slice(&self) -> &[T] {
+        match self {
+            MmapOrVec::Heap { data } => data.as_slice(),
+            MmapOrVec::Mapped { len, .. } if *len == 0 => &[],
+            // SAFETY: identical to `as_mut_slice` / `get` — the mmap holds
+            // `capacity * size_of::<T>()` bytes from offset 0, page-aligned,
+            // so `*len` elements are contiguous and naturally aligned.
+            MmapOrVec::Mapped { mmap, len, .. } => unsafe {
+                let mmap = mmap.as_ref().expect("non-empty MmapOrVec must be mapped");
+                std::slice::from_raw_parts(mmap.as_ptr() as *const T, *len)
+            },
+        }
+    }
+
     /// Get a mutable slice of the data. Works for both Heap and Mapped variants.
     ///
     /// SAFETY: For `Mapped`, the returned slice aliases the mmap's backing
@@ -1231,6 +1251,22 @@ impl MmapBytes {
         match self {
             MmapBytes::Heap { data } => data,
             MmapBytes::Mapped { mmap, len, .. } => &mmap[..*len],
+        }
+    }
+
+    /// Overwrite `bytes.len()` bytes starting at `start`, in place. `false`
+    /// when the range does not fit or the buffer is mapped.
+    ///
+    /// Heap-backed only by design: a mapped buffer's bytes belong to a file
+    /// this store may share, and the `Str` column's relocation overlay exists
+    /// precisely so a mapped base stays untouched.
+    pub fn overwrite_heap(&mut self, start: usize, bytes: &[u8]) -> bool {
+        match self {
+            MmapBytes::Heap { data } if start + bytes.len() <= data.len() => {
+                data[start..start + bytes.len()].copy_from_slice(bytes);
+                true
+            }
+            _ => false,
         }
     }
 

@@ -13,8 +13,10 @@
 use crate::datatypes::values::Value;
 use crate::graph::schema::InternedKey;
 use crate::graph::storage::type_build_meta::ColType;
+use crate::graph::storage::StrField;
 use chrono::NaiveDate;
 use memmap2::MmapMut;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -381,6 +383,85 @@ impl MmapColumnStore {
 
         // Fall back to overflow bag
         self.get_overflow_property(row_id, key)
+    }
+
+    /// Borrowed string read for (row_id, key) — the allocation-free form of
+    /// [`Self::get`], mirroring its resolution order.
+    pub fn str_field(&self, row_id: u32, key: InternedKey) -> StrField<'_> {
+        if row_id >= self.row_count {
+            return StrField::Absent;
+        }
+        let row = row_id as usize;
+        if let Some(col_ref) = self.col_map.get(&key) {
+            match col_ref {
+                ColRef::Fixed(idx) => {
+                    let fc = &self.fixed_cols[*idx];
+                    if !self.read_null(&fc.nulls, row) {
+                        return StrField::NotString;
+                    }
+                }
+                ColRef::Str(idx) => {
+                    let sc = &self.str_cols[*idx];
+                    if !self.read_null(&sc.nulls, row) {
+                        return StrField::Str(Cow::Borrowed(self.read_str(
+                            &sc.data,
+                            &sc.offsets,
+                            row,
+                        )));
+                    }
+                }
+            }
+        }
+        match self.get_overflow_property(row_id, key) {
+            Some(Value::String(s)) => StrField::Str(Cow::Owned(s)),
+            Some(_) => StrField::NotString,
+            None => StrField::Absent,
+        }
+    }
+
+    /// Borrowed read of the title column. Mirrors [`Self::get_title`].
+    pub fn title_field(&self, row_id: u32) -> StrField<'_> {
+        if row_id >= self.row_count {
+            return StrField::Absent;
+        }
+        let row = row_id as usize;
+        if self.title.nulls.len == 0 && self.title.data.len == 0 {
+            return StrField::Absent;
+        }
+        if self.read_null(&self.title.nulls, row) {
+            return StrField::Absent;
+        }
+        StrField::Str(Cow::Borrowed(self.read_str(
+            &self.title.data,
+            &self.title.offsets,
+            row,
+        )))
+    }
+
+    /// Borrowed read of the id column. Mirrors [`Self::get_id`]; a fixed-width
+    /// id column reads as `NotString`.
+    pub fn id_field(&self, row_id: u32) -> StrField<'_> {
+        if row_id >= self.row_count {
+            return StrField::Absent;
+        }
+        let row = row_id as usize;
+        if self.id_is_string {
+            let Some(sc) = self.id_str.as_ref() else {
+                return StrField::Absent;
+            };
+            if self.read_null(&sc.nulls, row) {
+                return StrField::Absent;
+            }
+            StrField::Str(Cow::Borrowed(self.read_str(&sc.data, &sc.offsets, row)))
+        } else {
+            let Some(fc) = self.id_fixed.as_ref() else {
+                return StrField::Absent;
+            };
+            if self.read_null(&fc.nulls, row) {
+                return StrField::Absent;
+            }
+            StrField::NotString
+        }
     }
 
     /// Read a fixed-width value from the mmap, dispatching on ColType.

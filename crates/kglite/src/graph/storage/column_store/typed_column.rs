@@ -10,7 +10,9 @@
 use crate::datatypes::values::Value;
 use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec, MmapPod};
 use crate::graph::storage::packed_codec::write_packed_values;
+use crate::graph::storage::StrField;
 use chrono::NaiveDate;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
@@ -127,6 +129,47 @@ fn push_pair<T: MmapPod>(
         return Err(ColumnPushError::Storage(error));
     }
     Ok(())
+}
+
+/// One row of a `Str` column, borrowed. `None` for out-of-range or null.
+///
+/// The single reader for the layout — every string read (predicate, grouping,
+/// projection, id/title) comes through here, so the per-element `Heap`/`Mapped`
+/// dispatch is taken once per array rather than once per access, and the
+/// relocation overlay (empty on every store that has not taken a string `SET`)
+/// is not hashed into at all until it has an entry.
+///
+/// `inline(always)`: three callers, all per-row, and the `Option<&str>` return
+/// plus the `Heap`/`Mapped` dispatch only fold away once it is inlined into
+/// them — left to the optimiser's discretion it cost a measured 14% on an
+/// equality scan.
+#[inline(always)]
+fn str_at<'c>(
+    offsets: &'c MmapOrVec<u64>,
+    data: &'c MmapBytes,
+    nulls: &'c MmapOrVec<u8>,
+    relocated: &'c HashMap<u32, String>,
+    row: u32,
+) -> Option<&'c str> {
+    let idx = row as usize;
+    if *nulls.as_slice().get(idx)? != 0 {
+        return None;
+    }
+    if !relocated.is_empty() {
+        if let Some(s) = relocated.get(&row) {
+            return Some(s.as_str());
+        }
+    }
+    let offsets = offsets.as_slice();
+    let start = *offsets.get(idx)? as usize;
+    let end = *offsets.get(idx + 1)? as usize;
+    let bytes = data.as_raw_bytes().get(start..end)?;
+    // SAFETY: `Str` column bytes are either written in-process from
+    // `Value::String` (`String::as_bytes()` — valid UTF-8 by Rust's core
+    // invariant) or come from a packed file via `unpack_column`, which
+    // validates the whole blob as UTF-8 and checks offset monotonicity and
+    // bounds at load time.
+    Some(unsafe { std::str::from_utf8_unchecked(bytes) })
 }
 
 /// Number of days from the Unix epoch to chrono's internal epoch.
@@ -387,27 +430,7 @@ impl TypedColumn {
                 data,
                 nulls,
                 relocated,
-            } => {
-                if idx >= nulls.len() {
-                    return None;
-                }
-                if nulls.get(idx) != 0 {
-                    return None;
-                }
-                if let Some(s) = relocated.get(&row) {
-                    return Some(Value::String(s.clone()));
-                }
-                let start = offsets.get(idx) as usize;
-                let end = offsets.get(idx + 1) as usize;
-                let bytes = data.slice(start, end);
-                // SAFETY: `Str` column bytes are either written in-process
-                // from `Value::String` (`String::as_bytes()` — valid UTF-8
-                // by Rust's core invariant) or come from a packed file via
-                // `unpack_column`, which validates the whole blob as UTF-8
-                // and checks offset monotonicity/bounds at load time.
-                let s = unsafe { String::from_utf8_unchecked(bytes.to_vec()) };
-                Some(Value::String(s))
-            }
+            } => str_at(offsets, data, nulls, relocated, row).map(|s| Value::String(s.to_owned())),
             TypedColumn::Mixed { data } => {
                 let val = data.get(idx)?;
                 if matches!(val, Value::Null) {
@@ -422,6 +445,41 @@ impl TypedColumn {
     /// Returns None if the column is not a Str variant, row is out of bounds, or null.
     #[inline]
     pub fn get_str(&self, row: u32) -> Option<&str> {
+        match self {
+            TypedColumn::Str {
+                offsets,
+                data,
+                nulls,
+                relocated,
+            } => str_at(offsets, data, nulls, relocated, row),
+            _ => None,
+        }
+    }
+
+    /// Whether this row holds a non-null value, without materialising it.
+    #[inline]
+    pub fn is_present(&self, row: u32) -> bool {
+        let idx = row as usize;
+        match self {
+            TypedColumn::Int64 { nulls, .. }
+            | TypedColumn::Float64 { nulls, .. }
+            | TypedColumn::UniqueId { nulls, .. }
+            | TypedColumn::Bool { nulls, .. }
+            | TypedColumn::Date { nulls, .. }
+            | TypedColumn::Str { nulls, .. } => nulls.as_slice().get(idx).copied() == Some(0),
+            TypedColumn::Mixed { data } => data.get(idx).is_some_and(|v| !matches!(v, Value::Null)),
+        }
+    }
+
+    /// Borrowed string read that also reports *why* it could not borrow.
+    ///
+    /// Unlike [`Self::get_str`] — a `Str`-only accessor whose `None` the disk
+    /// property index reads as "try the next route" — this answers for every
+    /// column shape, so a caller can tell an absent field from one holding a
+    /// non-string value. `Mixed` columns hold `Value`s and can still lend a
+    /// `&str` out of one.
+    #[inline]
+    pub fn str_field(&self, row: u32) -> StrField<'_> {
         let idx = row as usize;
         match self {
             TypedColumn::Str {
@@ -429,22 +487,21 @@ impl TypedColumn {
                 data,
                 nulls,
                 relocated,
-            } => {
-                if idx >= nulls.len() || nulls.get(idx) != 0 {
-                    return None;
-                }
-                if let Some(s) = relocated.get(&row) {
-                    return Some(s.as_str());
-                }
-                let start = offsets.get(idx) as usize;
-                let end = offsets.get(idx + 1) as usize;
-                let bytes = data.slice(start, end);
-                // SAFETY: same invariant as `get`'s Str arm — written
-                // in-process from `Value::String`, or UTF-8-validated at
-                // load time by `unpack_column`.
-                Some(unsafe { std::str::from_utf8_unchecked(bytes) })
-            }
-            _ => None,
+            } => match str_at(offsets, data, nulls, relocated, row) {
+                Some(s) => StrField::Str(Cow::Borrowed(s)),
+                None => StrField::Absent,
+            },
+            TypedColumn::Mixed { data } => match data.get(idx) {
+                None | Some(Value::Null) => StrField::Absent,
+                Some(Value::String(s)) => StrField::Str(Cow::Borrowed(s.as_str())),
+                Some(_) => StrField::NotString,
+            },
+            // Fixed-width columns never hold a string; `get` distinguishes
+            // present from null for them without allocating.
+            fixed => match fixed.get(row) {
+                Some(_) => StrField::NotString,
+                None => StrField::Absent,
+            },
         }
     }
 
@@ -532,17 +589,40 @@ impl TypedColumn {
             }
             (
                 TypedColumn::Str {
-                    nulls, relocated, ..
+                    offsets,
+                    data,
+                    nulls,
+                    relocated,
                 },
                 Value::String(s),
             ) => {
                 if idx >= nulls.len() {
                     return Err(());
                 }
-                // Park the new value in the relocated overlay. Mutating
-                // `offsets[idx+1]` in place corrupts row idx+1's start —
-                // see write_to for the on-save compaction.
-                relocated.insert(row, s.clone());
+                // A same-length replacement writes where the value already is.
+                // The overlay exists because `offsets[idx+1]` may not move —
+                // and a value of the same length does not move it. This is the
+                // whole cost of a re-`add_nodes` upsert, which rewrites every
+                // row's title: an overlay entry per row is a `String` clone
+                // plus a hash insert, and it never gets reclaimed until save.
+                let same_length = !relocated.contains_key(&row)
+                    && nulls.as_slice().get(idx).copied() == Some(0)
+                    && {
+                        let offsets = offsets.as_slice();
+                        match (offsets.get(idx), offsets.get(idx + 1)) {
+                            (Some(&start), Some(&end)) => {
+                                (end - start) as usize == s.len()
+                                    && data.overwrite_heap(start as usize, s.as_bytes())
+                            }
+                            _ => false,
+                        }
+                    };
+                if !same_length {
+                    // Park the new value in the relocated overlay. Mutating
+                    // `offsets[idx+1]` in place corrupts row idx+1's start —
+                    // see write_to for the on-save compaction.
+                    relocated.insert(row, s.clone());
+                }
                 nulls.set(idx, 0);
             }
             (

@@ -107,6 +107,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test_bench_save_kgl_new_file`, values carried across — same operation, same
   fixture. Nothing user-facing; recorded because the committed baseline files
   changed shape.
+- **Text filters, grouped counts and bulk upserts are back at their pre-columnar
+  cost.** Moving every graph to the column layout moved the reads with it, and
+  four things that used to borrow a value now copied one. A `CONTAINS` /
+  `STARTS WITH` / `ENDS WITH` / `=` filter materialised an owned `String` per
+  candidate row before testing it, and every string read hashed the (almost
+  always empty) string-update overlay first; a grouped `count()` re-hashed its
+  own property name and re-resolved the type's column store once per scanned
+  row; and `add_nodes` resolved every update's property keys back to strings
+  only to intern them again one call later, an allocation, a hash-map insert
+  and an interner probe per property per row. Filters now test the bytes where
+  they lie, a same-length title rewrite lands in place instead of in the update
+  overlay, and the upsert path keeps its interned keys throughout. Measured
+  against 0.15.14 on the tracked benchmarks (release, min, two agreeing runs):
+  suffix-filtered two-edge path +173% → +9-12%, `add_nodes` +24% → −3-6%,
+  grouped count top-K +24%/+20% → +3%/−3%, `WHERE n.value > …` +5% → parity.
+  On the same graph read directly against the published 0.15.14 wheel
+  (controls flat), a title `ENDS WITH` scan goes 2.88× → 1.08×, `CONTAINS`
+  1.87× → 1.15×, `STARTS WITH` 1.93× → 1.17×, a title equality 2.32× → 0.85×
+  and a property `ENDS WITH` 2.14× → 1.10×. What remains is the column
+  layout's own read cost — the value lives in its own column rather than
+  beside the node — and closing it needs a vectorised scan, not a further
+  micro-fix.
 
 ### Removed
 

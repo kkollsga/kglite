@@ -540,19 +540,21 @@ impl<'a> CypherExecutor<'a> {
             };
             // A typed group has one alias table for every candidate. Resolve
             // aliases once here instead of repeating two String-keyed lookups
-            // for every peer (notably `name` on Keyword/Judge/Function).
-            let direct_group_properties: Vec<(String, bool)> = group_key_indices
+            // for every peer (notably `name` on Keyword/Judge/Function). The
+            // interned key is hoisted with them: every group property read
+            // re-hashed its own name once per row otherwise.
+            let direct_group_properties: Vec<(String, InternedKey, bool)> = group_key_indices
                 .iter()
                 .map(|&idx| match &return_clause.items[idx].expression {
                     Expression::PropertyAccess { property, .. } => {
-                        if let Some(node_type) = group_node_type {
-                            (
-                                self.graph.resolve_alias(node_type, property).to_string(),
-                                true,
-                            )
-                        } else {
-                            (property.clone(), false)
-                        }
+                        let (resolved, pre_resolved) = match group_node_type {
+                            Some(node_type) => {
+                                (self.graph.resolve_alias(node_type, property).to_string(), true)
+                            }
+                            None => (property.clone(), false),
+                        };
+                        let key = InternedKey::from_str(&resolved);
+                        (resolved, key, pre_resolved)
                     }
                     _ => unreachable!("property_grouping checked every group expression"),
                 })
@@ -561,6 +563,14 @@ impl<'a> CypherExecutor<'a> {
             // (resolved group values, representative node, merged count)
             let mut groups: Vec<(Vec<Value>, petgraph::graph::NodeIndex, i64)> = Vec::new();
             let mut group_index: FxHashMap<Vec<Value>, usize> = FxHashMap::default();
+            // Scanned rows outnumber groups by orders of magnitude in the shape
+            // this path exists for, so the key is built into a reused buffer and
+            // only cloned when it opens a new group.
+            let mut key_scratch: Vec<Value> = Vec::with_capacity(group_key_indices.len());
+            // One store handle per node type instead of one probe per row:
+            // `node_view` re-resolves the backend's per-type map every call, and
+            // a grouped scan calls it once per candidate.
+            let mut store_memo: Option<(InternedKey, Option<&Arc<ColumnStore>>)> = None;
             let mut eval_row = ResultRow::new();
             eval_row
                 .node_bindings
@@ -578,43 +588,53 @@ impl<'a> CypherExecutor<'a> {
                 if match_count == 0 {
                     continue;
                 }
-                let key = if !self.graph.graph.is_disk() {
-                    let node = self.graph.graph.node_view(node_idx);
-                    direct_group_properties
-                        .iter()
-                        .map(|(property, pre_resolved)| match node {
-                            Some(node) if *pre_resolved => resolve_node_property_unaliased(
-                                node,
-                                property,
-                                self.graph,
-                            ),
+                key_scratch.clear();
+                if !self.graph.graph.is_disk() {
+                    let node = self.graph.graph.node_weight(node_idx).map(|data| {
+                        let store = match store_memo {
+                            Some((type_key, store)) if type_key == data.node_type => store,
+                            _ => {
+                                let store = self.graph.graph.column_store(data.node_type);
+                                store_memo = Some((data.node_type, store));
+                                store
+                            }
+                        };
+                        let resolved = data
+                            .properties
+                            .columnar_row_id()
+                            .and_then(|row_id| store.map(|store| (&**store, row_id)));
+                        NodeView::new(data, resolved)
+                    });
+                    key_scratch.extend(direct_group_properties.iter().map(
+                        |(property, key, pre_resolved)| match node {
+                            Some(node) if *pre_resolved => {
+                                resolve_node_property_keyed(node, property, *key, self.graph)
+                            }
                             Some(node) => resolve_node_property(node, property, self.graph),
                             None => Value::Null,
-                        })
-                        .collect()
+                        },
+                    ));
                 } else {
                     *eval_row
                         .node_bindings
                         .get_mut(group_var)
                         .expect("group binding inserted before property aggregation") = node_idx;
-                    let mut key = Vec::with_capacity(group_key_indices.len());
                     for &idx in &group_key_indices {
-                        key.push(self.evaluate_expression(
+                        key_scratch.push(self.evaluate_expression(
                             &return_clause.items[idx].expression,
                             &eval_row,
                         )?);
                     }
-                    key
-                };
-                if let Some(&group_idx) = group_index.get(&key) {
+                }
+                if let Some(&group_idx) = group_index.get(&key_scratch) {
                     groups[group_idx].2 = groups[group_idx]
                         .2
                         .checked_add(match_count)
                         .ok_or("count overflow while merging property groups")?;
                 } else {
                     let group_idx = groups.len();
-                    group_index.insert(key.clone(), group_idx);
-                    groups.push((key, node_idx, match_count));
+                    group_index.insert(key_scratch.clone(), group_idx);
+                    groups.push((key_scratch.clone(), node_idx, match_count));
                 }
             }
 

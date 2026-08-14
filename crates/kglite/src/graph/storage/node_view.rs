@@ -35,6 +35,7 @@ use std::collections::HashMap;
 use crate::datatypes::Value;
 use crate::graph::schema::{InternedKey, NodeData, NodeInfo, PropertyStorage, StringInterner};
 use crate::graph::storage::column_store::ColumnStore;
+use crate::graph::storage::StrField;
 
 /// A borrowed, backend-resolved read handle for one node.
 ///
@@ -209,11 +210,93 @@ impl<'a> NodeView<'a> {
         })
     }
 
+    /// Borrowed string read of an **alias-resolved matcher field** — the
+    /// allocation-free companion to [`Self::resolved_field`], for matchers that
+    /// only ever test the string form.
+    ///
+    /// The resolution order is `resolved_field`'s, step for step: identity
+    /// fields, then a stored property (which *resolves* even when it holds a
+    /// non-string, hence [`StrField::NotString`]), then the structural soft
+    /// alias. Any divergence here would make a `WHERE` clause see a different
+    /// value than the planner's statistics do.
+    #[inline]
+    pub fn resolved_field_str(
+        &self,
+        type_str: &'a str,
+        field: &str,
+        key: InternedKey,
+    ) -> StrField<'a> {
+        if field == "id" {
+            return self.id_field();
+        }
+        if field == "title" {
+            return self.title_field();
+        }
+        match self.str_field(key) {
+            StrField::Absent => {}
+            resolved => return resolved,
+        }
+        match crate::graph::schema::soft_alias_fallback(field) {
+            Some(crate::graph::schema::SoftAliasFallback::Title) => self.title_field(),
+            Some(crate::graph::schema::SoftAliasFallback::TypeString) => {
+                StrField::Str(Cow::Borrowed(type_str))
+            }
+            None => StrField::Absent,
+        }
+    }
+
+    /// Borrowed string read of a property. Mirrors [`Self::get`].
+    #[inline]
+    pub fn str_field(&self, key: InternedKey) -> StrField<'a> {
+        match self.store {
+            Some((store, row_id)) => store.str_field(row_id, key),
+            None => self.data.properties.str_field(key),
+        }
+    }
+
+    /// Borrowed string read of the node's title. Mirrors [`Self::title`].
+    #[inline]
+    pub fn title_field(&self) -> StrField<'a> {
+        Self::identity_str(
+            &self.data.title,
+            |store, row_id| store.title_field(row_id),
+            self.store,
+        )
+    }
+
+    /// Borrowed string read of the node's id. Mirrors [`Self::id`].
+    #[inline]
+    pub fn id_field(&self) -> StrField<'a> {
+        Self::identity_str(
+            &self.data.id,
+            |store, row_id| store.id_field(row_id),
+            self.store,
+        )
+    }
+
+    /// Shared shape of the two identity reads: the inline field wins unless it
+    /// carries the columnar `Null` sentinel, in which case the store answers.
+    #[inline]
+    fn identity_str(
+        inline: &'a Value,
+        from_store: impl FnOnce(&'a ColumnStore, u32) -> StrField<'a>,
+        store: Option<(&'a ColumnStore, u32)>,
+    ) -> StrField<'a> {
+        match inline {
+            Value::String(s) => StrField::Str(Cow::Borrowed(s.as_str())),
+            Value::Null => match store {
+                Some((store, row_id)) => from_store(store, row_id),
+                None => StrField::Absent,
+            },
+            _ => StrField::NotString,
+        }
+    }
+
     /// `true` when the property is present and non-`Null`.
     #[inline]
     pub fn contains(&self, key: InternedKey) -> bool {
         match self.store {
-            Some((store, row_id)) => store.get(row_id, key).is_some(),
+            Some((store, row_id)) => store.contains_value(row_id, key),
             None => self.data.properties.contains(key),
         }
     }

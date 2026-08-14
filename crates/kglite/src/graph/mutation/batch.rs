@@ -3,6 +3,7 @@ use crate::datatypes::Value;
 use crate::graph::schema::{
     DirGraph, EdgeData, InternedKey, NodeData, PropertyStorage, PROVISIONAL_KEY,
 };
+use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::property_storage::ColumnarRow;
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::{EdgeIndex, NodeIndex};
@@ -17,7 +18,7 @@ type DeferredColumnarRows = Vec<(NodeIndex, u32)>;
 
 /// Column stores held outright (refcount 1) for the duration of a mapped/disk
 /// append, keyed by node type — see `BatchProcessor::detach_columnar_stores`.
-type OwnedColumnStores = HashMap<String, crate::graph::storage::column_store::ColumnStore>;
+type OwnedColumnStores = HashMap<String, ColumnStore>;
 
 // Constants for batch size optimization
 const SMALL_BATCH_THRESHOLD: usize = 100;
@@ -44,7 +45,12 @@ pub enum NodeAction {
     Update {
         node_idx: NodeIndex,
         title: Option<Value>, // Changed to Option to indicate if title should be updated
-        properties: HashMap<String, Value>,
+        /// Pre-interned, exactly like `CreateInterned`: the ingest row builder
+        /// already has the keys interned, and resolving them back to `String`
+        /// here only to re-intern them in `apply_updates` cost a `String`
+        /// allocation, a `SipHash` map insert and an interner probe per
+        /// property per updated row.
+        properties: Vec<(InternedKey, Value)>,
         conflict_mode: ConflictHandling, // Added conflict mode
     },
     /// Create with pre-interned property keys (avoids re-interning per row)
@@ -95,7 +101,7 @@ struct NodeCreationInterned {
 struct NodeUpdate {
     node_idx: NodeIndex,
     title: Option<Value>, // Changed to Option
-    properties: HashMap<String, Value>,
+    properties: Vec<(InternedKey, Value)>,
     conflict_mode: ConflictHandling,
 }
 
@@ -198,6 +204,13 @@ impl BatchProcessor {
         let mut owned_stores: OwnedColumnStores =
             Self::detach_columnar_stores(&self.creates_interned, graph);
 
+        // The store this chunk is currently appending to, held out of the map
+        // for as long as consecutive rows share a type — which is every row of
+        // a `add_nodes` DataFrame. Looking it up in `owned_stores` per row cost
+        // two `String`-keyed (SipHash) probes on a path that then does one
+        // column push; a single `String` comparison replaces both.
+        let mut current: Option<(String, ColumnStore)> = None;
+
         // Process pre-interned creates (fast path — no string interning needed)
         for creation in self.creates_interned.drain(..) {
             let type_key = graph.interner.get_or_intern(&creation.node_type);
@@ -209,32 +222,29 @@ impl BatchProcessor {
             // round trip per node created, which cost nothing while only the
             // mapped and disk paths took it and costs every ingest now.
             let row_id = {
-                // `contains_key` + `get_mut` rather than `entry`, which would
-                // take an owned key and so allocate the type name once per
-                // *row* rather than once per type.
-                if !owned_stores.contains_key(&creation.node_type) {
-                    let schema = graph
-                        .type_schemas
-                        .get(&creation.node_type)
-                        .cloned()
-                        .unwrap_or_else(|| Arc::new(crate::graph::schema::TypeSchema::new()));
-                    let meta = graph
-                        .node_type_metadata
-                        .get(&creation.node_type)
-                        .cloned()
-                        .unwrap_or_default();
-                    owned_stores.insert(
-                        creation.node_type.clone(),
-                        crate::graph::storage::column_store::ColumnStore::new(
-                            schema,
-                            &meta,
-                            &graph.interner,
-                        ),
-                    );
+                if current
+                    .as_ref()
+                    .is_none_or(|(held, _)| *held != creation.node_type)
+                {
+                    if let Some((held, store)) = current.take() {
+                        owned_stores.insert(held, store);
+                    }
+                    let store = owned_stores.remove(&creation.node_type).unwrap_or_else(|| {
+                        let schema = graph
+                            .type_schemas
+                            .get(&creation.node_type)
+                            .cloned()
+                            .unwrap_or_else(|| Arc::new(crate::graph::schema::TypeSchema::new()));
+                        let meta = graph
+                            .node_type_metadata
+                            .get(&creation.node_type)
+                            .cloned()
+                            .unwrap_or_default();
+                        ColumnStore::new(schema, &meta, &graph.interner)
+                    });
+                    current = Some((creation.node_type.clone(), store));
                 }
-                let store = owned_stores
-                    .get_mut(&creation.node_type)
-                    .expect("just inserted");
+                let store = &mut current.as_mut().expect("installed just above").1;
                 // A key this store's schema has never seen appends one column
                 // inside `push_row`, back-filled with nulls. This used to
                 // rebuild the whole store instead — every row already in the
@@ -288,6 +298,9 @@ impl BatchProcessor {
             // invalidates the type's entry at return time so the next
             // lookup rebuilds from `type_indices` (the source of truth).
             stats.creates += 1;
+        }
+        if let Some((held, store)) = current.take() {
+            owned_stores.insert(held, store);
         }
 
         Self::reattach_columnar_stores(graph, deferred_columnar, owned_stores);
@@ -487,15 +500,7 @@ impl BatchProcessor {
                 continue;
             }
 
-            // Pre-intern property keys before borrowing graph.graph mutably.
-            let interned_props: Vec<(InternedKey, Value)> = update
-                .properties
-                .into_iter()
-                .map(|(k, v)| {
-                    let key = graph.interner.get_or_intern(&k);
-                    (key, v)
-                })
-                .collect();
+            let interned_props = update.properties;
 
             if is_disk {
                 // Resolve (type_name, row_id) from the disk slot.

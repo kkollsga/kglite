@@ -248,12 +248,10 @@ impl RowBuilder<'_> {
     }
 
     /// The batch action for one row: an update when the id already resolves to a
-    /// node, a create otherwise. The update path resolves keys back to strings
-    /// because it goes through the HashMap-based `NodeAction::Update` — less
-    /// frequent than create, which keeps its interned keys all the way down.
+    /// node, a create otherwise. Both arms keep the interned keys all the way
+    /// down.
     fn action(
         &self,
-        graph: &DirGraph,
         df_data: &DataFrame,
         row_idx: usize,
         id: Value,
@@ -262,18 +260,12 @@ impl RowBuilder<'_> {
     ) -> NodeAction {
         let properties_interned = self.properties(df_data, row_idx);
         match existing_idx {
-            Some(node_idx) => {
-                let mut properties = HashMap::with_capacity(properties_interned.len());
-                for (ik, v) in properties_interned {
-                    properties.insert(graph.interner.resolve(ik).to_string(), v);
-                }
-                NodeAction::Update {
-                    node_idx,
-                    title: self.should_update_title.then_some(title),
-                    properties,
-                    conflict_mode: self.conflict_mode,
-                }
-            }
+            Some(node_idx) => NodeAction::Update {
+                node_idx,
+                title: self.should_update_title.then_some(title),
+                properties: properties_interned,
+                conflict_mode: self.conflict_mode,
+            },
             None => NodeAction::CreateInterned {
                 node_type: self.node_type.to_string(),
                 id,
@@ -533,7 +525,7 @@ pub fn add_nodes(
             )?;
         }
 
-        let action = row_builder.action(graph, &df_data, row_idx, id, title, existing_idx);
+        let action = row_builder.action(&df_data, row_idx, id, title, existing_idx);
         batch.add_action(action, graph)?;
     }
 
@@ -1872,19 +1864,17 @@ pub fn update_node_properties(
 
     // Step 3: Prepare batch updates for nodes
     let batch_size = nodes.len();
+    let property_key = graph.interner.get_or_intern(&property_string);
     let mut batch = BatchProcessor::new(batch_size);
 
     for ((node_idx_opt, value), is_validated) in nodes.iter().zip(validated_nodes) {
         if let Some(node_idx) = node_idx_opt {
             if is_validated {
-                let mut properties = HashMap::new();
-                properties.insert(property_string.clone(), value.clone());
-
                 // Create update action
                 let action = NodeAction::Update {
                     node_idx: *node_idx,
                     title: None, // Don't update title
-                    properties,
+                    properties: vec![(property_key, value.clone())],
                     conflict_mode: ConflictHandling::Update,
                 };
 

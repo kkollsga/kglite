@@ -23,6 +23,7 @@ use crate::graph::storage::packed_codec::{
     decode_int64_delta, encode_int64_delta_if_smaller, IntColumnEncoding, PackedElement,
     INT64_DELTA_TAG,
 };
+use crate::graph::storage::StrField;
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
@@ -702,6 +703,92 @@ impl ColumnStore {
         }
         self.get_overflow_property(row_id, key)
             .map(|v| matches!(v, Value::String(ref s) if s == target))
+    }
+
+    /// Borrowed string read for (row_id, key) — the allocation-free form of
+    /// [`Self::get`] for callers that only ever test the string.
+    ///
+    /// Resolution order mirrors `get` exactly, including its fall-through
+    /// (a slot that holds nothing for this row defers to the mmap base and
+    /// then the overflow bag), so the two can never disagree about which
+    /// value a field resolves to.
+    pub fn str_field(&self, row_id: u32, key: InternedKey) -> StrField<'_> {
+        if row_id >= self.row_count
+            || self
+                .tombstones
+                .get(row_id as usize)
+                .copied()
+                .unwrap_or(false)
+        {
+            return StrField::Absent;
+        }
+        // In-memory overlay wins over mmap (mirrors `get` — Bug C fix).
+        if let Some(slot) = self.schema.slot(key) {
+            if let Some(col) = self.columns.get(slot as usize) {
+                match col.str_field(row_id) {
+                    StrField::Absent => {}
+                    resolved => return resolved,
+                }
+            }
+        }
+        if let Some(ref ms) = self.mmap_store {
+            return ms.str_field(row_id, key);
+        }
+        match self.get_overflow_property(row_id, key) {
+            Some(Value::String(s)) => StrField::Str(std::borrow::Cow::Owned(s)),
+            Some(_) => StrField::NotString,
+            None => StrField::Absent,
+        }
+    }
+
+    /// Whether (row_id, key) holds a non-null value. Mirrors [`Self::get`]'s
+    /// resolution without materialising the value — a presence probe used to
+    /// clone a whole string out of the column to then throw it away.
+    pub fn contains_value(&self, row_id: u32, key: InternedKey) -> bool {
+        if row_id >= self.row_count
+            || self
+                .tombstones
+                .get(row_id as usize)
+                .copied()
+                .unwrap_or(false)
+        {
+            return false;
+        }
+        if let Some(slot) = self.schema.slot(key) {
+            if let Some(col) = self.columns.get(slot as usize) {
+                if col.is_present(row_id) {
+                    return true;
+                }
+            }
+        }
+        if let Some(ref ms) = self.mmap_store {
+            return ms.get(row_id, key).is_some();
+        }
+        self.get_overflow_property(row_id, key).is_some()
+    }
+
+    /// Borrowed read of the reserved title column. Mirrors [`Self::get_title`].
+    #[inline]
+    pub fn title_field(&self, row_id: u32) -> StrField<'_> {
+        if let Some(ref col) = self.title_column {
+            return col.str_field(row_id);
+        }
+        if let Some(ref ms) = self.mmap_store {
+            return ms.title_field(row_id);
+        }
+        StrField::Absent
+    }
+
+    /// Borrowed read of the reserved id column. Mirrors [`Self::get_id`].
+    #[inline]
+    pub fn id_field(&self, row_id: u32) -> StrField<'_> {
+        if let Some(ref ms) = self.mmap_store {
+            return ms.id_field(row_id);
+        }
+        match self.id_column {
+            Some(ref col) => col.str_field(row_id),
+            None => StrField::Absent,
+        }
     }
 
     /// Resolve a property name to a column slot index.
