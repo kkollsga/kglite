@@ -2609,6 +2609,7 @@ pub fn kglite::api::NodeView<'a>::get_property_value(&self, key: &str) -> core::
 pub fn kglite::api::NodeView<'a>::get_value(&self, key: kglite::api::InternedKey) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::api::NodeView<'a>::has_property(&self, key: &str) -> bool
 pub fn kglite::api::NodeView<'a>::id(&self) -> alloc::borrow::Cow<'a, kglite::datatypes::values::Value>
+pub fn kglite::api::NodeView<'a>::id_field(&self) -> kglite::graph::storage::StrField<'a>
 pub fn kglite::api::NodeView<'a>::node_type(&self) -> kglite::api::InternedKey
 pub fn kglite::api::NodeView<'a>::node_type_str<'i>(&self, interner: &'i kglite::api::StringInterner) -> &'i str
 pub fn kglite::api::NodeView<'a>::properties_cloned(&self, interner: &kglite::api::StringInterner) -> std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
@@ -2617,8 +2618,11 @@ pub fn kglite::api::NodeView<'a>::property_keys(&self, interner: &'a kglite::api
 pub fn kglite::api::NodeView<'a>::property_pairs(&self) -> alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>
 pub fn kglite::api::NodeView<'a>::property_pairs_named(&self, interner: &kglite::api::StringInterner) -> alloc::vec::Vec<(alloc::string::String, kglite::datatypes::values::Value)>
 pub fn kglite::api::NodeView<'a>::resolved_field(&self, type_str: &str, field: &str, key: kglite::api::InternedKey) -> core::option::Option<alloc::borrow::Cow<'a, kglite::datatypes::values::Value>>
+pub fn kglite::api::NodeView<'a>::resolved_field_str(&self, type_str: &'a str, field: &str, key: kglite::api::InternedKey) -> kglite::graph::storage::StrField<'a>
+pub fn kglite::api::NodeView<'a>::str_field(&self, key: kglite::api::InternedKey) -> kglite::graph::storage::StrField<'a>
 pub fn kglite::api::NodeView<'a>::str_prop_eq(&self, key: kglite::api::InternedKey, target: &str) -> core::option::Option<bool>
 pub fn kglite::api::NodeView<'a>::title(&self) -> alloc::borrow::Cow<'a, kglite::datatypes::values::Value>
+pub fn kglite::api::NodeView<'a>::title_field(&self) -> kglite::graph::storage::StrField<'a>
 pub fn kglite::api::NodeView<'a>::to_node_info(&self, interner: &kglite::api::StringInterner) -> kglite::api::NodeInfo
 impl core::fmt::Debug for kglite::api::NodeView<'_>
 pub fn kglite::api::NodeView<'_>::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
