@@ -308,7 +308,10 @@ def test_binary_size_regression():
                       implementations and the deduped conflict-mode parse.
 
 
-      - 0.16.0:       20,264,992 bytes (≈19.3 MB). Grew with the shape-convergence + perf programs: cell-grained journal entries, v6 delta-varint codec + v5 read-compat, compiled scan-eval routes, per-column Arc store, NodeRemap; Compact deletion offset most of it.
+      - 0.16.0:       20,264,992 bytes (≈19.3 MB). Grew with the shape-convergence +
+        perf programs: cell-grained journal entries, v6 delta-varint codec +
+        v5 read-compat, compiled scan-eval routes, per-column Arc store,
+        NodeRemap; the Compact deletion offset most of it.
 
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise
