@@ -75,6 +75,15 @@ def capture_bolt_contract(path: Path) -> dict:
                         "RETURN a AS source, r AS edge, p AS path ORDER BY r.tag",
                     ),
                     "union_columns": _run(session, "RETURN 1 AS value UNION ALL RETURN 2 AS value"),
+                    # Wire-shape lock for the server-facts intercept (default
+                    # identity; versions vary per release so only name/edition
+                    # are captured).
+                    "components_row": _run(
+                        session,
+                        "CALL dbms.components() YIELD name, edition",
+                    ),
+                    # Bare CALL: declared columns in declared order.
+                    "bare_call_columns": _run(session, "CALL db.propertyKeys()"),
                 }
     finally:
         _teardown_bolt_server(proc)

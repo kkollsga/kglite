@@ -39,8 +39,8 @@
     "rows": [
       [
         {
-          "id": 0,
           "kind": "node",
+          "id": 0,
           "labels": [
             "N"
           ],
@@ -52,21 +52,21 @@
           }
         },
         {
-          "end": 1,
-          "id": 0,
           "kind": "relationship",
+          "id": 0,
+          "start": 0,
+          "end": 1,
+          "type": "R",
           "properties": {
             "tag": "first"
-          },
-          "start": 0,
-          "type": "R"
+          }
         },
         {
           "kind": "path",
           "nodes": [
             {
-              "id": 0,
               "kind": "node",
+              "id": 0,
               "labels": [
                 "N"
               ],
@@ -78,8 +78,8 @@
               }
             },
             {
-              "id": 1,
               "kind": "node",
+              "id": 1,
               "labels": [
                 "N"
               ],
@@ -93,22 +93,22 @@
           ],
           "relationships": [
             {
-              "end": 1,
-              "id": 0,
               "kind": "relationship",
+              "id": 0,
+              "start": 0,
+              "end": 1,
+              "type": "R",
               "properties": {
                 "tag": "first"
-              },
-              "start": 0,
-              "type": "R"
+              }
             }
           ]
         }
       ],
       [
         {
-          "id": 0,
           "kind": "node",
+          "id": 0,
           "labels": [
             "N"
           ],
@@ -120,21 +120,21 @@
           }
         },
         {
-          "end": 1,
-          "id": 1,
           "kind": "relationship",
+          "id": 1,
+          "start": 0,
+          "end": 1,
+          "type": "R",
           "properties": {
             "tag": "second"
-          },
-          "start": 0,
-          "type": "R"
+          }
         },
         {
           "kind": "path",
           "nodes": [
             {
-              "id": 0,
               "kind": "node",
+              "id": 0,
               "labels": [
                 "N"
               ],
@@ -146,8 +146,8 @@
               }
             },
             {
-              "id": 1,
               "kind": "node",
+              "id": 1,
               "labels": [
                 "N"
               ],
@@ -161,14 +161,14 @@
           ],
           "relationships": [
             {
-              "end": 1,
-              "id": 1,
               "kind": "relationship",
+              "id": 1,
+              "start": 0,
+              "end": 1,
+              "type": "R",
               "properties": {
                 "tag": "second"
-              },
-              "start": 0,
-              "type": "R"
+              }
             }
           ]
         }
@@ -185,6 +185,31 @@
       ],
       [
         2
+      ]
+    ]
+  },
+  "components_row": {
+    "keys": [
+      "name",
+      "edition"
+    ],
+    "rows": [
+      [
+        "kglite-bolt-server",
+        "community"
+      ]
+    ]
+  },
+  "bare_call_columns": {
+    "keys": [
+      "propertyKey"
+    ],
+    "rows": [
+      [
+        "name"
+      ],
+      [
+        "tag"
       ]
     ]
   }
