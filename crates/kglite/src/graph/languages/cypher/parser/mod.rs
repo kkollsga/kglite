@@ -440,6 +440,24 @@ impl CypherParser {
             return Err("Empty query".to_string());
         }
 
+        // A bare `CALL proc()` (no YIELD) is legal only as the entire
+        // statement — Neo4j's standalone-CALL rule. Mid-pipeline, YIELD is
+        // required: `execute_call` replaces the incoming row set instead of
+        // joining with it, so accepting the bare form there would silently
+        // drop bound rows.
+        if clauses.len() > 1 {
+            for clause in &clauses {
+                if matches!(&clause, Clause::Call(call) if call.yield_items.is_empty()) {
+                    return Err(
+                        "CALL requires a YIELD clause when combined with other clauses, \
+                         e.g. CALL pagerank() YIELD node, score. A bare CALL is only \
+                         valid as the entire statement."
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
         Ok(CypherQuery {
             clauses,
             explain,

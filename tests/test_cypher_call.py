@@ -352,14 +352,15 @@ class TestCallErrors:
         with pytest.raises(kglite.KgError, match="does not yield"):
             graph.cypher("CALL pagerank() YIELD node, community")
 
-    def test_missing_yield(self, graph):
+    def test_missing_yield_mid_pipeline(self, graph):
         # Phase A.2 / C2 — typed CypherSyntaxError (was ValueError).
-        # "CALL pagerank()" without YIELD is a parse error, not an
-        # execution error.
+        # Since 2026-08-15 a standalone "CALL pagerank()" is legal (bare CALL
+        # expands to the declared columns); YIELD stays mandatory only when
+        # the CALL is combined with other clauses.
         import kglite
 
         with pytest.raises(kglite.CypherSyntaxError, match="YIELD"):
-            graph.cypher("CALL pagerank()")
+            graph.cypher("MATCH (n) CALL pagerank()")
 
 
 class TestCallExplain:

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Standalone `CALL proc()` without `YIELD` — the form Neo4j clients and
+  cypher-shell send — now works for every procedure, returning all declared
+  columns in declared order. A bare `CALL` must be the entire statement;
+  combining it with other clauses still requires `YIELD`.
+
+### Changed
+
+- **Breaking (contract fix):** `CALL … YIELD` result columns now follow YIELD
+  order (Neo4j semantics). Previously they were inferred from the first row
+  and sorted alphabetically, so `YIELD type, name` answered `[name, type]`.
+- A `CALL` that yields zero rows now still reports its declared columns —
+  previously a Bolt client's `result.keys()` was empty for e.g.
+  `CALL db.indexes()` on a graph with no indexes.
+
 ### Fixed
 
 - Aggregates nested inside wrapper expressions in `RETURN`/`WITH` projections

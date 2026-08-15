@@ -859,4 +859,38 @@ mod tests {
             assert_eq!(c.yield_items.len(), 2);
         }
     }
+
+    #[test]
+    fn test_bare_call_parses_as_sole_statement() {
+        // Neo4j's standalone-CALL rule: no YIELD needed when the CALL is the
+        // entire statement. The executor expands the empty yield list to the
+        // procedure's declared columns.
+        for q in ["CALL db.labels()", "CALL pagerank()", "CALL db.indexes();"] {
+            let query = parse_cypher(q).unwrap_or_else(|e| panic!("{q}: {e}"));
+            assert_eq!(query.clauses.len(), 1, "{q}");
+            if let Clause::Call(c) = &query.clauses[0] {
+                assert!(c.yield_items.is_empty(), "{q}");
+            } else {
+                panic!("{q}: expected Clause::Call");
+            }
+        }
+    }
+
+    #[test]
+    fn test_bare_call_rejected_when_combined_with_other_clauses() {
+        // Mid-pipeline (or followed by RETURN), YIELD stays mandatory:
+        // execute_call replaces the incoming row set rather than joining, so
+        // accepting the bare form there would silently drop bound rows.
+        for q in [
+            "CALL db.labels() RETURN 1",
+            "MATCH (n) CALL db.labels()",
+            "CALL db.labels() CALL db.propertyKeys()",
+        ] {
+            let err = parse_cypher(q).unwrap_err().to_string();
+            assert!(
+                err.contains("CALL requires a YIELD clause"),
+                "{q}: unexpected error {err}"
+            );
+        }
+    }
 }

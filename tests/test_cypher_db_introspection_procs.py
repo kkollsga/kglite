@@ -204,3 +204,41 @@ def test_schema_and_property_keys_listed(small_graph):
     names = {r["name"]: r["yield_columns"] for r in rows}
     assert names.get("db.propertyKeys") == "propertyKey"
     assert names.get("db.schema") == "nodeType, properties"
+
+
+# ── Standalone CALL + the result-column contract (2026-08-15) ──────────────
+
+
+def test_bare_call_returns_all_declared_columns(small_graph):
+    """`CALL db.labels()` with no YIELD — the form every Neo4j client sends —
+    expands to the procedure's declared columns."""
+    rows = small_graph.cypher("CALL db.labels()").to_dicts()
+    assert rows and all(set(r) == {"label"} for r in rows)
+
+
+def test_bare_call_rejected_mid_pipeline(small_graph):
+    with pytest.raises(Exception, match="CALL requires a YIELD clause"):
+        small_graph.cypher("MATCH (n) CALL db.labels()")
+
+
+def test_call_columns_follow_yield_order(small_graph):
+    """Columns come back in YIELD order (Neo4j semantics), not sorted
+    alphabetically — pre-fix `YIELD type, name` answered [name, type]."""
+    df = small_graph.cypher("CALL db.indexes() YIELD type, name", to_df=True)
+    assert list(df.columns) == ["type", "name"]
+
+
+def test_zero_row_call_keeps_declared_columns(small_graph):
+    """A CALL that yields no rows still reports its columns — pre-fix a Bolt
+    client's result.keys() came back empty on `CALL db.indexes()` against a
+    fresh graph."""
+    df = small_graph.cypher("CALL db.indexes()", to_df=True)
+    assert len(df) == 0
+    assert list(df.columns) == [
+        "name",
+        "type",
+        "entityType",
+        "labelsOrTypes",
+        "properties",
+        "state",
+    ]

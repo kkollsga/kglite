@@ -770,18 +770,23 @@ impl CypherParser {
         };
         self.expect(&CypherToken::RParen)?;
 
-        // Parse YIELD clause (required)
-        if !self.check(&CypherToken::Yield) {
-            return Err(
-                "CALL requires a YIELD clause, e.g. CALL pagerank() YIELD node, score".to_string(),
-            );
-        }
-        self.advance(); // consume YIELD
-
-        let yield_items = self.parse_yield_items()?;
-        if yield_items.is_empty() {
-            return Err("YIELD requires at least one column name".to_string());
-        }
+        // YIELD is optional: a standalone `CALL proc()` returns every
+        // declared column in declared order (Neo4j semantics; the executor
+        // expands the empty list against the procedure's declared columns).
+        // `parse_query` enforces that the bare form is the entire statement —
+        // mid-pipeline CALL still requires YIELD, both to match Neo4j and
+        // because `execute_call` replaces the incoming row set rather than
+        // joining with it (see the acknowledgement at executor/load_csv.rs).
+        let yield_items = if self.check(&CypherToken::Yield) {
+            self.advance(); // consume YIELD
+            let items = self.parse_yield_items()?;
+            if items.is_empty() {
+                return Err("YIELD requires at least one column name".to_string());
+            }
+            items
+        } else {
+            Vec::new()
+        };
 
         Ok(Clause::Call(CallClause {
             procedure_name,

@@ -301,6 +301,28 @@ impl<'a> CypherExecutor<'a> {
         // Validate YIELD columns
         let valid_yields = valid_yield_columns(proc_name.as_str(), &clause.procedure_name)?;
 
+        // Standalone `CALL proc()` (no YIELD): expand to every declared
+        // column in declared order — Neo4j's semantics for a bare CALL. The
+        // parser guarantees the bare form is the entire statement, so the
+        // synthesized items can't shadow downstream bindings.
+        let synthesized_clause;
+        let clause = if clause.yield_items.is_empty() {
+            synthesized_clause = CallClause {
+                procedure_name: clause.procedure_name.clone(),
+                parameters: clause.parameters.clone(),
+                yield_items: valid_yields
+                    .iter()
+                    .map(|name| YieldItem {
+                        name: (*name).to_string(),
+                        alias: None,
+                    })
+                    .collect(),
+            };
+            &synthesized_clause
+        } else {
+            clause
+        };
+
         for item in &clause.yield_items {
             if !valid_yields.contains(&item.name.as_str()) {
                 return Err(format!(
@@ -981,7 +1003,17 @@ impl<'a> CypherExecutor<'a> {
 
         Ok(ResultSet {
             rows,
-            columns: Vec::new(),
+            // YIELD order (alias-or-name), matching Neo4j — not inferred.
+            // Pre-fix this was Vec::new(), so `finalize_result` reconstructed
+            // columns from the first row's key sets sorted alphabetically:
+            // `YIELD type, name` answered [name, type], and a zero-row CALL
+            // (e.g. db.indexes() on a fresh graph) answered no columns at
+            // all — a Bolt client's result.keys() came back empty.
+            columns: clause
+                .yield_items
+                .iter()
+                .map(|item| item.alias.clone().unwrap_or_else(|| item.name.clone()))
+                .collect(),
             lazy_return_items: None,
         })
     }
