@@ -489,8 +489,16 @@ impl<'a> CypherExecutor<'a> {
     /// whole-list clone on every element access. Returns `Some` only for the
     /// shapes whose value is already resident and borrowable — a variable
     /// projected into the row, a query parameter, or a property read off a
-    /// node binding (in-memory reads borrow; disk reads clone once, still
-    /// saving the second copy [`parse_list_value`] would make). Returns `None`
+    /// node binding.
+    ///
+    /// A property read borrows when its column can lend the value: an
+    /// in-memory `Mixed` column, which is where a list property lands, whether
+    /// it was created columnar or staged in a `Map`. The mmap base and the
+    /// overflow bag decode their values, so those clone once — still saving the
+    /// second copy [`parse_list_value`] would make. This sentence was false
+    /// between 0.16.0's always-columnar construction and the pin in
+    /// `node_view::tests`: every columnar read cloned, so a CREATEd list cost
+    /// its own length on every element access. Returns `None`
     /// for every other shape, and for the fallback branches of a property read
     /// (`id`/`title` virtuals, soft-alias, spatial), so the owned path handles
     /// them with unchanged semantics. Precedence matches `evaluate_variable`

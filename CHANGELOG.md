@@ -52,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`compact()`'s documentation now says what it does.** It merges a disk
+  graph's overflow edges into the CSR arrays and has never touched a single
+  property row, but its name and docstring read as general-purpose compaction —
+  so "call `compact()` to reclaim deleted rows" was a reasonable and wrong
+  reading. The docstring, the guide and the `vacuum()` reference now name the
+  three mechanisms separately: `compact()` for overflow edges, `save()` for
+  dead columnar rows, and nothing at all for freed node slots.
+
 - **BREAKING (Rust API) — `DirGraph::check_auto_vacuum` returns
   `Option<NodeRemap>` instead of `bool`.** `None` means no vacuum ran;
   `Some(remap)` carries the `old → new` node mapping the compaction produced,
@@ -123,8 +131,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A fluent selection survives a vacuum instead of silently emptying *and*
-  silently widening.** Auto-vacuum reset the held selection, and a reset
+- **Reading an element of a stored list costs the element again, not the
+  list.** `n.vec[i]` reads the container through the node's property store, and
+  0.16.0's always-columnar construction moved every CREATEd list out of the
+  storage arm that lends the value and into the one that cloned it — so each
+  element access copied the whole list, and 0.15.11's fix for exactly this was
+  silently undone. Measured on 200 nodes with 16 subscripts each, release
+  build: 0.19 µs per access at a stored length of 16 rising to 3.95 µs at 1024
+  — the per-access cost *was* the list's length. It is now flat at ~0.11 µs
+  across the same range (37x at length 1024), and the shape most exposed to it
+  is the vector-scoring idiom `reduce(i IN … | … n.emb[i] …)`. In-memory
+  columnar reads borrow again; mmap-backed and overflow-bag reads still decode
+  their value once, which is inherent to those layouts. A unit test now asserts
+  the *borrow* rather than the results, so the next storage change that
+  reintroduces the clone goes red on contact — the gate the original fix lacked.
+
+- **A disk save no longer writes the rows deleted nodes left behind.** A
+  `DELETE` on `storage="disk"` tombstones the node's slot and leaves its
+  property row in place — the store is append-only under mutation, and
+  `vacuum()` cannot reclaim it because a disk graph's node numbering is frozen
+  mmap — so the garbage accumulated for the process's whole life and then got
+  *written*, and reloaded, and written again. Measured: a 20,000-node graph
+  with half its nodes deleted wrote 848,890 bytes of columns against 424,445
+  for the same graph built from the survivors alone (2.00x), and reloading it
+  censused 20,000 rows for 10,000 live nodes. A save now rewrites each type's
+  columns without the unreferenced rows and renumbers the surviving rows
+  together with the node slots that name them, in the same published
+  generation: the fixture writes 424,445 bytes — byte-identical to its
+  compacted equivalent — and reloads with total rows equal to live rows. Row
+  ids are private to the column file and the slot array, so nothing else
+  moves: node indices, edges, held selections and every persisted index are
+  untouched. Types with no dead rows keep their store, mmap base included.
+  What a save still does *not* reclaim is the node slots themselves (16 bytes
+  plus a free-list entry per deleted node) — on the same fixture that leaves
+  the published directory 1.29x its compacted equivalent, down from 1.70x.
+
+ Auto-vacuum reset the held selection, and a reset
   selection reads as "no filter has been applied" — so one held handle
   answered `ids()` with `[]` and `len()` with the whole graph, two
   contradictory answers about the same set, triggered by a `DELETE` the caller

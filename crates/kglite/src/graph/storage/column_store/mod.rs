@@ -698,6 +698,22 @@ impl ColumnStore {
     /// Falls back to the overflow bag when the key isn't in the schema or the
     /// dense column value is null.
     pub fn get(&self, row_id: u32, key: InternedKey) -> Option<Value> {
+        self.get_cow(row_id, key).map(std::borrow::Cow::into_owned)
+    }
+
+    /// [`Self::get`] without the clone where the store can lend the value.
+    ///
+    /// Resolution is `get`'s, step for step — `get` *is* this method, owned —
+    /// so the two can never disagree about which value a key resolves to. The
+    /// borrow is only available for an in-memory `Mixed` column, the shape a
+    /// list property takes; a fixed-width or string column builds its `Value`
+    /// on read, and the mmap base and the overflow bag decode theirs, so those
+    /// arms are `Cow::Owned` by necessity rather than by choice.
+    ///
+    /// The caller that makes this matter is the executor's list subscript
+    /// (`n.vec[i]`), which would otherwise clone the entire list once per
+    /// element access.
+    pub fn get_cow(&self, row_id: u32, key: InternedKey) -> Option<std::borrow::Cow<'_, Value>> {
         if row_id >= self.row_count {
             return None;
         }
@@ -718,15 +734,21 @@ impl ColumnStore {
         // constructs ColumnStores via `from_mmap_store`. Bug C in the
         // 0.9.3 disk-mode regression report.
         if let Some(slot) = self.schema.slot(key) {
-            if let Some(val) = self.columns.get(slot as usize).and_then(|c| c.get(row_id)) {
-                return Some(val);
+            if let Some(col) = self.columns.get(slot as usize) {
+                if let Some(val) = col.get_ref(row_id) {
+                    return Some(std::borrow::Cow::Borrowed(val));
+                }
+                if let Some(val) = col.get(row_id) {
+                    return Some(std::borrow::Cow::Owned(val));
+                }
             }
         }
         if let Some(ref ms) = self.mmap_store {
-            return ms.get(row_id, key);
+            return ms.get(row_id, key).map(std::borrow::Cow::Owned);
         }
         // Fall back to overflow bag
         self.get_overflow_property(row_id, key)
+            .map(std::borrow::Cow::Owned)
     }
 
     /// Zero-allocation string equality check for (row_id, key) against `target`.

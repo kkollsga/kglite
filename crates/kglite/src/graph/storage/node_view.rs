@@ -131,10 +131,19 @@ impl<'a> NodeView<'a> {
     }
 
     /// Read a property by interned key. `None` when absent or `Value::Null`.
+    ///
+    /// **Borrows where the storage allows it**, which for a columnar node means
+    /// an in-memory `Mixed` column — the shape a list property takes. That is
+    /// not a detail: the executor's list subscript reads the container through
+    /// this method once per element, so an owning read makes `n.vec[i]` cost
+    /// the length of `n.vec`. The 0.15.11 fix that established the borrow was
+    /// undone by 0.16.0's always-columnar construction, which moved every list
+    /// out of the `Map` arm and into the columnar one; it is pinned now by
+    /// `tests::an_in_memory_list_property_is_borrowed_not_cloned`.
     #[inline]
     pub fn get(&self, key: InternedKey) -> Option<Cow<'a, Value>> {
         match self.store {
-            Some((store, row_id)) => store.get(row_id, key).map(Cow::Owned),
+            Some((store, row_id)) => store.get_cow(row_id, key),
             None => self.data.properties.get(key),
         }
     }
@@ -462,5 +471,85 @@ impl std::fmt::Debug for NodeView<'_> {
             .field("node_type", &self.data.node_type)
             .field("columnar_row", &self.store.map(|(_, r)| r))
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::schema::{ColumnarRow, TypeSchema};
+    use std::sync::Arc;
+
+    /// The regression pin the 0.15.11 borrow fix never had.
+    ///
+    /// That fix made a list property's container borrowable so the executor's
+    /// subscript (`n.vec[i]`) stops cloning the whole list per element access.
+    /// Nothing asserted the *borrow*, only the results — so when 0.16.0 made
+    /// construction always-columnar, every CREATEd list moved from the `Map`
+    /// arm (which borrows) to the columnar arm (which cloned), and the cost
+    /// came back silently: measured at 0.19 µs/access for a 16-element list
+    /// against 3.95 µs/access for a 1024-element one, release build.
+    ///
+    /// Asserting `Cow::Borrowed` is what makes it a pin: it goes red on the
+    /// clone itself, whatever storage refactor reintroduces it.
+    #[test]
+    fn an_in_memory_list_property_is_borrowed_not_cloned() {
+        let mut interner = StringInterner::new();
+        let key = interner.get_or_intern("vec");
+        let type_key = interner.get_or_intern("T");
+        let mut store = ColumnStore::new(Arc::new(TypeSchema::new()), &HashMap::new(), &interner);
+        let list = Value::List(vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)]);
+        let row_id = store.push_row(&[(key, list.clone())]);
+
+        let data = NodeData {
+            id: Value::Null,
+            title: Value::Null,
+            node_type: type_key,
+            properties: crate::graph::schema::PropertyStorage::Columnar(ColumnarRow::new(row_id)),
+        };
+        let view = NodeView::new(&data, Some((&store, row_id)));
+
+        let read = view.get(key).expect("the list property must resolve");
+        assert!(
+            matches!(read, Cow::Borrowed(_)),
+            "a columnar in-memory list must be borrowed, not cloned per read"
+        );
+        assert_eq!(*read, list);
+    }
+
+    /// The borrow must not change *what* a read resolves to, on any arm.
+    #[test]
+    fn borrowed_and_owned_reads_agree_across_column_shapes() {
+        let mut interner = StringInterner::new();
+        let list_key = interner.get_or_intern("vec");
+        let int_key = interner.get_or_intern("age");
+        let str_key = interner.get_or_intern("name");
+        let absent_key = interner.get_or_intern("nope");
+        let mut store = ColumnStore::new(Arc::new(TypeSchema::new()), &HashMap::new(), &interner);
+        let row_id = store.push_row(&[
+            (list_key, Value::List(vec![Value::Int64(7)])),
+            (int_key, Value::Int64(41)),
+            (str_key, Value::String("ada".into())),
+        ]);
+
+        for key in [list_key, int_key, str_key, absent_key] {
+            assert_eq!(
+                store.get_cow(row_id, key).map(|v| v.into_owned()),
+                store.get(row_id, key),
+                "the borrowing read diverged from the owning read"
+            );
+        }
+        // The fixed-width and string columns build their value on read and so
+        // cannot lend one — this is the shape of the borrow, asserted so a
+        // future "optimization" that pretends otherwise is caught here.
+        assert!(matches!(
+            store.get_cow(row_id, list_key),
+            Some(std::borrow::Cow::Borrowed(_))
+        ));
+        assert!(matches!(
+            store.get_cow(row_id, int_key),
+            Some(std::borrow::Cow::Owned(_))
+        ));
+        assert!(store.get_cow(row_id, absent_key).is_none());
     }
 }

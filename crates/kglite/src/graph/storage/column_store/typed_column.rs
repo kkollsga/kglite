@@ -520,6 +520,29 @@ impl TypedColumn {
         }
     }
 
+    /// Borrow the value at `row` when the column stores it as a `Value`.
+    ///
+    /// Only `Mixed` can answer: every other variant stores a decoded
+    /// representation (a packed int, a string arena) and has to *build* a
+    /// `Value` in [`Self::get`], so there is nothing to lend. `None` therefore
+    /// means "read it through `get`", not "absent" — callers pair the two.
+    ///
+    /// This exists for the values whose clone is unbounded: a `Mixed` column is
+    /// where a list property lands, and `get` clones the whole list on every
+    /// element access. Measured on a 200-node graph doing 16 subscripts per
+    /// node, release build: 0.19 µs/access at a stored length of 16 and
+    /// 3.95 µs/access at 1024 — the per-access cost was the *list's* length.
+    #[inline]
+    pub fn get_ref(&self, row: u32) -> Option<&Value> {
+        match self {
+            TypedColumn::Mixed { data } => match data.get(row as usize) {
+                Some(Value::Null) | None => None,
+                some => some,
+            },
+            _ => None,
+        }
+    }
+
     /// Get a string column value as a borrowed &str, avoiding heap allocation.
     /// Returns None if the column is not a Str variant, row is out of bounds, or null.
     #[inline]
