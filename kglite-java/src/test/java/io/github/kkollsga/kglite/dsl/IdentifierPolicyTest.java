@@ -37,9 +37,17 @@ class IdentifierPolicyTest {
     private static final List<String> NOT_RESERVED_ANYWHERE =
             List.of("DISTINCT", "COUNT", "Person", "value", "_private", "x1");
 
-    /** Words legal bare as a label or property key but not as a variable. */
+    /**
+     * Words legal bare as a label or property key but not as a variable.
+     *
+     * <p>{@code TRUE}, {@code FALSE} and {@code NULL} joined this list at engine 0.16.0. They are
+     * schema names in every name position — CYPHER.md, "Reserved keywords as names", citing
+     * openCypher's {@code SchemaName = SymbolicName | ReservedWord} — while
+     * {@code Variable = SymbolicName} keeps excluding them, which is exactly this asymmetry.
+     */
     private static final List<String> RESERVED_ONLY_FOR_VARIABLES =
-            List.of("ORDER", "IN", "IS", "NOT", "CREATE", "SET", "AS", "ON");
+            List.of("ORDER", "IN", "IS", "NOT", "CREATE", "SET", "AS", "ON", "TRUE", "FALSE",
+                    "NULL");
 
     @BeforeAll
     static void openGraph() {
@@ -73,16 +81,6 @@ class IdentifierPolicyTest {
             if (parses("MATCH (n:" + word + ") RETURN count(n) AS c")) {
                 wrong.add(word + ": bare use parsed, so it is not reserved after all");
             }
-            if (isBooleanLiteral(word)) {
-                // Probed: the tokenizer resolves these to the literal even inside backticks, so
-                // they are unrepresentable as labels and the DSL refuses them rather than emitting
-                // something the engine will reject at the caller's call site.
-                assertFalse(parses("MATCH (n:`" + word + "`) RETURN count(n) AS c"),
-                        word + ": now representable as a quoted label — the Ident rejection and "
-                                + "this expectation both need revisiting");
-                assertThrows(IllegalArgumentException.class, () -> Ident.label(word));
-                continue;
-            }
             if (!parses("MATCH (n:`" + word + "`) RETURN count(n) AS c")) {
                 wrong.add(word + ": quoted use failed, so quoting is not the escape");
             }
@@ -99,10 +97,6 @@ class IdentifierPolicyTest {
         for (String word : Ident.RESERVED_IN_VARIABLES) {
             if (parses("MATCH (" + word + ":Person) RETURN count(" + word + ") AS c")) {
                 wrong.add(word + ": bare use parsed, so it is not reserved after all");
-            }
-            if (isBooleanLiteral(word)) {
-                assertThrows(IllegalArgumentException.class, () -> Ident.variable(word));
-                continue;
             }
             if (!parses("MATCH (`" + word + "`:Person) RETURN count(`" + word + "`) AS c")) {
                 wrong.add(word + ": quoted use failed, so quoting is not the escape");
@@ -174,6 +168,28 @@ class IdentifierPolicyTest {
     }
 
     @Test
+    @DisplayName("the value literals are schema names in the key and relationship-type positions "
+            + "too")
+    void valueLiteralsAreSchemaNamesNotJustLabels() {
+        // CYPHER.md, "Reserved keywords as names": a schema name is
+        // `SymbolicName | ReservedWord`, so TRUE/FALSE/NULL are labels, relationship types *and*
+        // property keys written bare, in either case. The label and variable halves are covered
+        // by variableOnlyReservationsAreAsymmetric and variableReservationsHold above; these are
+        // the two positions neither of them reaches. The value position stays the literal, which
+        // the corpus pins independently (`with_filter_then_set` filters on `p.seen = true`).
+        for (String word : List.of("TRUE", "FALSE", "NULL", "true", "null")) {
+            assertTrue(parses("MATCH (n:Person) RETURN n." + word + " AS c"),
+                    word + ": bare property key rejected — it belongs in RESERVED_IN_PATTERNS");
+            assertEquals(word, Ident.propertyKey(word).toString(),
+                    word + ": must be emitted bare as a property key");
+        }
+        assertTrue(parses("MATCH (a:Person)-[:TRUE]->(b) RETURN count(b) AS c"),
+                "TRUE: bare relationship type rejected");
+        assertEquals("TRUE", Ident.relationshipType("TRUE").toString(),
+                "TRUE: must be emitted bare as a relationship type");
+    }
+
+    @Test
     @DisplayName("a quoted identifier still has a character set, and Ident refuses what the "
             + "dialect cannot parse")
     void quotedPatternIdentifiersHaveACharacterSet() {
@@ -229,9 +245,6 @@ class IdentifierPolicyTest {
                 if (!mutates(scratch, "MATCH (n:Person) REMOVE n.`" + word + "`")) {
                     wrong.add(word + ": quoted REMOVE key failed");
                 }
-                if (isBooleanLiteral(word)) {
-                    continue;
-                }
                 if (!mutates(scratch, "MERGE (:`" + word + "` {id: 1})")) {
                     wrong.add(word + ": quoted MERGE label failed");
                 }
@@ -258,10 +271,6 @@ class IdentifierPolicyTest {
         assertThrows(IllegalArgumentException.class, () -> Ident.propertyKey(""));
         assertThrows(IllegalArgumentException.class, () -> Ident.alias(""));
         assertThrows(IllegalArgumentException.class, () -> Ident.label(null));
-    }
-
-    private static boolean isBooleanLiteral(String word) {
-        return word.equals("TRUE") || word.equals("FALSE");
     }
 
     /** Whether the engine accepts a mutating statement at all; the effect is irrelevant here. */

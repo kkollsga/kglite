@@ -37,6 +37,13 @@
 //! and hands out clones, so a resolved label can never be served to a later
 //! call with different parameters.
 
+// Every function below is one step of the same walk and returns
+// `Result<(), KgError>`; KgError carries structured query context, so it trips
+// `result_large_err` uniformly. Boxing it here would change the signature of
+// every caller in the prepare path, which threads the unboxed error — so the
+// allowance is module-scoped once rather than repeated on each step.
+#![allow(clippy::result_large_err)]
+
 use std::collections::HashMap;
 
 use super::ast::*;
@@ -51,15 +58,11 @@ use crate::graph::core::pattern_matching::{ParamLabel, Pattern, PatternElement};
 /// Errors when a referenced parameter is missing or is not a string — a
 /// dynamic label has no sensible fallback, and silently matching nothing would
 /// hide the caller's bug behind an empty result.
-// KgError carries structured query context; boxing it would change the signature
-// of every caller in the prepare path.
-#[allow(clippy::result_large_err)]
 pub fn resolve(query: &mut CypherQuery, params: &HashMap<String, Value>) -> Result<(), KgError> {
     resolve_clauses(&mut query.clauses, params)
 }
 
 /// Look up one parameter and validate it as a name.
-#[allow(clippy::result_large_err)]
 fn bind<'a>(params: &'a HashMap<String, Value>, param: &str) -> Result<&'a str, KgError> {
     match params.get(param) {
         Some(Value::String(name)) => Ok(name),
@@ -86,7 +89,6 @@ fn execution_error(message: String) -> KgError {
 /// `slots(i)` yields the string slot for marker slot `i`; a marker whose slot
 /// no longer exists is impossible (the parser numbers them from the same list
 /// it fills) and is skipped rather than panicking.
-#[allow(clippy::result_large_err)]
 fn apply(
     markers: &mut Vec<ParamLabel>,
     params: &HashMap<String, Value>,
@@ -102,7 +104,6 @@ fn apply(
 
 /// One label slot, for the `SET`/`REMOVE`/`WHERE` forms that carry a single
 /// name and a single optional marker.
-#[allow(clippy::result_large_err)]
 fn apply_one(
     label: &mut String,
     marker: &mut Option<String>,
@@ -114,7 +115,6 @@ fn apply_one(
     Ok(())
 }
 
-#[allow(clippy::result_large_err)]
 fn resolve_clauses(clauses: &mut [Clause], params: &HashMap<String, Value>) -> Result<(), KgError> {
     for clause in clauses.iter_mut() {
         match clause {
@@ -178,7 +178,6 @@ fn resolve_clauses(clauses: &mut [Clause], params: &HashMap<String, Value>) -> R
     Ok(())
 }
 
-#[allow(clippy::result_large_err)]
 fn resolve_pattern(pattern: &mut Pattern, params: &HashMap<String, Value>) -> Result<(), KgError> {
     for element in &mut pattern.elements {
         match element {
@@ -219,7 +218,6 @@ fn resolve_pattern(pattern: &mut Pattern, params: &HashMap<String, Value>) -> Re
     Ok(())
 }
 
-#[allow(clippy::result_large_err)]
 fn resolve_create_elements(
     elements: &mut [CreateElement],
     params: &HashMap<String, Value>,
@@ -250,7 +248,6 @@ fn resolve_create_elements(
     Ok(())
 }
 
-#[allow(clippy::result_large_err)]
 fn resolve_set_items(
     items: &mut [SetItem],
     params: &HashMap<String, Value>,
@@ -268,7 +265,6 @@ fn resolve_set_items(
     Ok(())
 }
 
-#[allow(clippy::result_large_err)]
 fn resolve_return_item(
     item: &mut ReturnItem,
     params: &HashMap<String, Value>,
@@ -276,7 +272,6 @@ fn resolve_return_item(
     resolve_expression(&mut item.expression, params)
 }
 
-#[allow(clippy::result_large_err)]
 fn resolve_predicate(pred: &mut Predicate, params: &HashMap<String, Value>) -> Result<(), KgError> {
     match pred {
         Predicate::LabelCheck {
@@ -331,7 +326,6 @@ fn resolve_predicate(pred: &mut Predicate, params: &HashMap<String, Value>) -> R
 /// subquery, and the binders that carry a predicate of their own. Everything
 /// with no predicate or pattern under it is delegated to
 /// [`resolve_operand_expressions`], which exists only to reach these.
-#[allow(clippy::result_large_err)]
 fn resolve_expression(
     expr: &mut Expression,
     params: &HashMap<String, Value>,
@@ -394,7 +388,6 @@ fn resolve_expression(
 /// The purely structural half of the expression walk: variants that can only
 /// contain further *expressions*, recursed so a nested predicate or pattern
 /// deeper down still gets reached.
-#[allow(clippy::result_large_err)]
 fn resolve_operand_expressions(
     expr: &mut Expression,
     params: &HashMap<String, Value>,

@@ -653,13 +653,15 @@ final class Corpus {
                                 COMPANY.prop("title").as("company"))
                         .orderBy(PERSON.prop("id").asc()),
                 rows(row("id", 1L, "company", "Acme"),
-                        row("id", 3L, "company", "Acme")),
-                "a WHERE attaches to the stage it follows, optional or not. Note the recorded "
-                        + "engine behaviour: the predicate filters the rows the optional stage "
-                        + "produced, dropping the null-extended ones, rather than restricting the "
-                        + "optional match itself the way Neo4j does — Bob and Dee disappear "
-                        + "instead of appearing with a null company. Freezing it here means the "
-                        + "day it changes is a red test rather than a silent change of results"));
+                        row("id", 2L, "company", null),
+                        row("id", 3L, "company", "Acme"),
+                        row("id", 4L, "company", null)),
+                "a WHERE attaches to the stage it follows, optional or not — and on an OPTIONAL "
+                        + "MATCH it restricts the match rather than filtering the rows the match "
+                        + "produced, which is what Neo4j does. Bob (no WORKS_AT at all) and Dee "
+                        + "(one, but to a Berlin company) therefore come back null-extended "
+                        + "instead of disappearing. This entry froze the older, divergent "
+                        + "behaviour until the engine was fixed; it now pins the agreeing one"));
 
         entries.add(read(
                 "group_by_projection",

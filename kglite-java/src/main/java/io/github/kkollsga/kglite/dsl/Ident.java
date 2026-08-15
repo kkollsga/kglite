@@ -28,9 +28,13 @@ import java.util.Set;
  *       letter or {@code _} and may otherwise contain ASCII letters, digits, {@code _}, space,
  *       {@code .}, {@code -} and {@code /}. Every other character was probed to be a syntax
  *       error even inside backticks. Property keys and aliases accept anything backtick-free.
- *   <li>{@code TRUE} and {@code FALSE} are rejected in label, relationship-type and variable
- *       positions: the tokenizer resolves them to the boolean literal even when backticked, so
- *       they too are unrepresentable there. They are accepted as property keys and aliases.
+ *   <li>{@code TRUE}, {@code FALSE} and {@code NULL} are ordinary names in label,
+ *       relationship-type and property-key positions and are emitted <b>bare</b> — openCypher
+ *       spells a schema name as {@code SchemaName = SymbolicName | ReservedWord}, and the engine
+ *       follows it (CYPHER.md, "Reserved keywords as names"). In a <em>variable</em> position they
+ *       stay reserved and are emitted quoted: {@code Variable = SymbolicName} excludes them, and a
+ *       bare {@code true} is the literal in every expression, so such a variable could never be
+ *       read back.
  *   <li>A name is emitted <b>bare</b> when it matches {@code ^[A-Za-z_][A-Za-z0-9_]*$} and is not
  *       reserved in its position; otherwise it is emitted backtick-quoted. Both branches are safe
  *       because the only character that can break out of either form is the backtick, which
@@ -54,18 +58,22 @@ public final class Ident {
 
     /**
      * Words that break a <em>bare</em> label, relationship type or property key (probed
-     * exhaustively at engine 0.15.9). Backtick-quoting rescues all of them except the two
-     * boolean literals, which are rejected outright in pattern positions.
+     * exhaustively at engine 0.15.9). Backtick-quoting rescues all of them.
+     *
+     * <p>{@code TRUE}, {@code FALSE} and {@code NULL} left this set at engine 0.16.0: the dialect
+     * reads them as schema names in every name position, per openCypher's
+     * {@code SchemaName = SymbolicName | ReservedWord}. They remain reserved for variables.
      */
     static final Set<String> RESERVED_IN_PATTERNS = Set.of(
-            "MATCH", "WHERE", "RETURN", "WITH", "AND", "OR", "NULL", "TRUE", "FALSE", "CASE",
+            "MATCH", "WHERE", "RETURN", "WITH", "AND", "OR", "CASE",
             "WHEN", "THEN", "ELSE", "END", "EXISTS", "OPTIONAL", "UNWIND", "SKIP", "LIMIT");
 
     /**
      * Words that break a <em>bare</em> pattern variable. A strict superset of
      * {@link #RESERVED_IN_PATTERNS}: the variable position also rejects the clause and operator
-     * keywords that a label tolerates. {@code DISTINCT}, {@code COUNT}, {@code ANY}, {@code NONE}
-     * and {@code SINGLE} were probed to work bare and are deliberately absent.
+     * keywords that a label tolerates, and the three value literals that a label now accepts.
+     * {@code DISTINCT}, {@code COUNT}, {@code ANY}, {@code NONE} and {@code SINGLE} were probed to
+     * work bare and are deliberately absent.
      */
     static final Set<String> RESERVED_IN_VARIABLES = reservedVariables();
 
@@ -74,9 +82,6 @@ public final class Ident {
      * {@code MATCH}, {@code RETURN} and {@code NULL} — works bare in alias position.
      */
     static final Set<String> RESERVED_IN_ALIASES = Set.of();
-
-    /** Unrepresentable in label, relationship-type and variable positions, backticked or not. */
-    private static final Set<String> BOOLEAN_LITERALS = Set.of("TRUE", "FALSE");
 
     /** Characters beyond {@code [A-Za-z0-9_]} that a backticked pattern identifier may carry. */
     private static final String PATTERN_EXTRA_CHARS = " .-/";
@@ -94,8 +99,8 @@ public final class Ident {
      *
      * @param name the label text, as it should appear in the graph
      * @return the validated identifier
-     * @throws IllegalArgumentException if the name is empty, contains a backtick, uses a
-     *     character the dialect cannot represent in a label, or is a boolean literal
+     * @throws IllegalArgumentException if the name is empty, contains a backtick, or uses a
+     *     character the dialect cannot represent in a label
      */
     public static Ident label(String name) {
         return new Ident(name, Position.LABEL);
@@ -210,12 +215,6 @@ public final class Ident {
                             + "identifier surface trivially auditable.");
         }
         if (isPatternPosition(position)) {
-            if (BOOLEAN_LITERALS.contains(name.toUpperCase(Locale.ROOT))) {
-                throw new IllegalArgumentException(
-                        describe(position) + " may not be a boolean literal: " + quoted(name)
-                                + ". The tokenizer resolves it to TRUE/FALSE even when backticked, "
-                                + "so it is unrepresentable in this position.");
-            }
             int bad = firstUnrepresentableChar(name);
             if (bad >= 0) {
                 throw new IllegalArgumentException(
@@ -289,6 +288,9 @@ public final class Ident {
                 "ORDER", "BY", "ASC", "DESC", "IN", "IS", "CONTAINS", "STARTS", "ENDS", "ALL",
                 "NOT", "MERGE", "CREATE", "DELETE", "SET", "REMOVE", "UNION", "AS", "CALL",
                 "YIELD", "DETACH", "ON", "FOREACH", "XOR"));
+        // Names everywhere else, but never bare variables: `Variable = SymbolicName` excludes
+        // them, and a bare `true` reads as the literal in every expression position.
+        words.addAll(Set.of("TRUE", "FALSE", "NULL"));
         return Set.copyOf(words);
     }
 }

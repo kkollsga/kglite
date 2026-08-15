@@ -255,7 +255,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (true:Thing)` is still an error, in *both* parsers, because openCypher's
   `Variable = SymbolicName` excludes them and a bare `true` in an expression is
   the literal, so such a variable could never be read back; backticks make it
-  an ordinary variable.
+  an ordinary variable. The Java query DSL follows: `Ident.label("TRUE")` and
+  its relationship-type and property-key siblings used to throw
+  `IllegalArgumentException` as unrepresentable, and now build an identifier
+  that emits bare; a *variable* named that way still emits backtick-quoted.
 - **`OPTIONAL MATCH ... WHERE` no longer deletes the rows it was supposed to
   null-extend.** The predicate now belongs to the `OPTIONAL MATCH`, as
   openCypher's grammar and Neo4j both define it: it is applied while looking
