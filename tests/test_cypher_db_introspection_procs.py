@@ -282,3 +282,46 @@ def test_list_procedures_advertises_true_columns(small_graph):
     by = {r["name"]: r["yield_columns"] for r in rows}
     assert by["db.labels"] == "label"
     assert by["db.relationshipTypes"] == "relationshipType"
+
+
+# ── db.schema.visualization() (2026-08-15) ─────────────────────────────────
+
+
+def test_schema_visualization_shape():
+    """One row: virtual nodes (one per label, name/indexes/constraints
+    properties) + virtual relationships per (src, type, tgt) combination —
+    the shape Neo4j Browser's schema tab renders."""
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Person {name: 'ann'})-[:LIVES_IN]->(:City {name: 'Oslo'})")
+    g.cypher("CREATE (:Person {name: 'bob'})-[:KNOWS]->(:Person {name: 'cec'})")
+    g.cypher("CREATE INDEX FOR (p:Person) ON (p.name)")
+
+    rows = g.cypher("CALL db.schema.visualization()").to_dicts()
+    assert len(rows) == 1
+    nodes = rows[0]["nodes"]
+    by_label = {n["labels"][0]: n for n in nodes}
+    assert set(by_label) == {"Person", "City"}
+    assert by_label["Person"]["properties"]["name"] == "Person"
+    assert by_label["Person"]["properties"]["indexes"] == ["Person.name"]
+    assert by_label["City"]["properties"]["indexes"] == []
+
+    rels = rows[0]["relationships"]
+    triples = {(nodes_id_label(nodes, r["start"]), r["type"], nodes_id_label(nodes, r["end"])) for r in rels}
+    assert triples == {("Person", "KNOWS", "Person"), ("Person", "LIVES_IN", "City")}
+
+
+def nodes_id_label(nodes, vid):
+    return next(n["labels"][0] for n in nodes if n["id"] == vid)
+
+
+def test_schema_visualization_yield_subset():
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:A {x: 1})")
+    rows = g.cypher("CALL db.schema.visualization() YIELD nodes").to_dicts()
+    assert list(rows[0].keys()) == ["nodes"]
+
+
+def test_schema_visualization_listed_in_registry():
+    g = kglite.KnowledgeGraph()
+    names = {r["name"] for r in g.cypher("SHOW PROCEDURES YIELD name").to_dicts()}
+    assert "db.schema.visualization" in names

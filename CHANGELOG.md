@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously a Bolt client's `result.keys()` was empty for e.g.
   `CALL db.indexes()` on a graph with no indexes.
 
+- `CALL db.schema.visualization()` — Neo4j's schema-graph shape: one row of
+  virtual nodes (one per label, with name/indexes/constraints properties) and
+  virtual relationships per observed (source label, type, target label)
+  combination. This is what Neo4j Browser's schema tab renders.
 - `SHOW PROCEDURES [YIELD …]` lists every procedure with Neo4j's default
   columns (name, description, mode, worksOnSystem). It reads the same
   registry as `CALL list_procedures()` and CALL YIELD validation, fixing a

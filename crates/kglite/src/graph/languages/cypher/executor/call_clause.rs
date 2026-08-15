@@ -764,12 +764,16 @@ impl<'a> CypherExecutor<'a> {
             // db.schema() — one row per node type: its name + the sorted list
             // of its property names. The in-language counterpart of describe(),
             // reusing compute_schema() so the two never drift.
-            "db.schema" => super::schema_procedures::execute_schema_procedure(
-                self,
-                &proc_name,
-                &params,
-                &clause.yield_items,
-            )?,
+            // db.schema.visualization() is Neo4j Browser's schema tab: one
+            // row of virtual Node/Relationship values summarizing the schema.
+            "db.schema" | "db.schema.visualization" => {
+                super::schema_procedures::execute_schema_procedure(
+                    self,
+                    &proc_name,
+                    &params,
+                    &clause.yield_items,
+                )?
+            }
             // 2026-05-25 Batch 6 — graph + property introspection.
             //
             // db.graph_stats() yields one row with the top-level

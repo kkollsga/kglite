@@ -294,6 +294,12 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
         columns: &["nodeType", "properties"],
     },
     ProcedureSpec {
+        name: "db.schema.visualization",
+        aliases: &[],
+        description: "Schema graph for visualization: one row with virtual nodes (one per label; properties name/indexes/constraints) and virtual relationships (one per observed source-label/type/target-label combination). What Neo4j Browser's schema tab renders.",
+        columns: &["nodes", "relationships"],
+    },
+    ProcedureSpec {
         name: "db.graph_stats",
         aliases: &[],
         description: "Per-graph summary: node, edge, label, and relationship-type counts. Single row.",
