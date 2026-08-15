@@ -2571,6 +2571,14 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WHERE p.age > 999 RETURN {c: count(*)} AS r",
         None,
     ),
+    # Zero-length path assignment (fixed 2026-08-15): p must bind a one-node
+    # path, not NULL, on both optimizer legs.
+    (
+        "zero_length_path_assignment",
+        "small_graph",
+        "MATCH p = (n:Person) RETURN length(p) AS l, size(nodes(p)) AS c, n.name AS nm ORDER BY nm",
+        None,
+    ),
 ]
 
 

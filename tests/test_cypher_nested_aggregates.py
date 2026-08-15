@@ -141,3 +141,18 @@ def test_browser_meta_count_query(graph):
         {"result": {"name": "nodes", "data": 3}},
         {"result": {"name": "relationships", "data": 1}},
     ]
+
+
+# ── Zero-length paths (fixed 2026-08-15; measured via G.V()'s Data Explorer) ─
+
+
+def test_zero_length_path_assignment(graph):
+    """`MATCH p = (n:Label) RETURN p` binds a one-node, zero-hop path —
+    pre-fix p projected as NULL on every row (G.V()'s Data Explorer sends
+    exactly this shape and showed "No results" against real matches)."""
+    rows = graph.cypher("MATCH p = (s0 :Person)  RETURN p").to_dicts()
+    assert len(rows) == 2
+    assert all(r["p"] is not None for r in rows)
+    assert all(len(r["p"]["nodes"]) == 1 and r["p"]["relationships"] == [] for r in rows)
+    fns = graph.cypher("MATCH p = (n:Person {name: 'ann'}) RETURN length(p) AS l, size(nodes(p)) AS n").to_dicts()
+    assert fns == [{"l": 0, "n": 1}]

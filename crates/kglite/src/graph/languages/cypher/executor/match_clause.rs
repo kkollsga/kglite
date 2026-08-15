@@ -567,7 +567,21 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
         }
-        if node_vars.len() < 2 || edge_vars.is_empty() {
+        // Zero-length path: `MATCH p = (n:Label) RETURN p` binds p to a
+        // one-node path with no hops — Neo4j's semantics. Pre-fix this
+        // returned None, so `p` projected as NULL on every row (measured
+        // live 2026-08-15: G.V()'s Data Explorer issues exactly this shape
+        // and showed "No results" against a graph full of matches).
+        if edge_vars.is_empty() {
+            let single = node_vars.first()?;
+            let source_idx = row.node_bindings.get(*single)?;
+            return Some(PathBinding {
+                source: *source_idx,
+                hops: 0,
+                path: Vec::new(),
+            });
+        }
+        if node_vars.len() < 2 {
             return None;
         }
         let source_idx = row.node_bindings.get(node_vars[0])?;

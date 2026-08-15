@@ -56,6 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `MATCH p = (n:Label) RETURN p` (a zero-length path) now binds `p` to a
+  one-node path instead of null — measured live: G.V()'s Data Explorer sends
+  exactly this shape and showed "No results" against real matches.
+
 - Documentation now states Bolt-client compatibility as measured: the
   CI-tested drivers (Python/JS/Java) connect unchanged; Neo4j Browser needs
   `--neo4j-compat`; LangChain's `Neo4jGraph` needs `refresh_schema=False`
