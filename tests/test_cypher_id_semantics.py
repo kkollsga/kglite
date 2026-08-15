@@ -327,3 +327,39 @@ def test_absent_id_lookup_on_secondary_label():
     assert kg.cypher("MATCH (n:Director {id: 2}) RETURN n.name AS nm").to_list() == []
     assert kg.cypher("MATCH (n:Person {id: 1}) RETURN n.name AS nm").to_list() == [{"nm": "Ada"}]
     assert kg.cypher("MATCH (n:Person {id: 2}) RETURN n.name AS nm").to_list() == []
+
+
+# ── elementId() — Neo4j 5 element identity (added 2026-08-15) ──────────────
+
+
+def test_element_id_is_opaque_string_distinct_from_id():
+    """elementId() is the slot-keyed string the Bolt packer emits as
+    element_id; id() stays the logical/domain identity."""
+    kg = KnowledgeGraph()
+    kg.cypher("CREATE (:P {id: 'dom-1', name: 'ann'}) CREATE (:P {id: 'dom-2', name: 'bob'})")
+    rows = kg.cypher("MATCH (n:P) RETURN elementId(n) AS e, id(n) AS i ORDER BY e").to_list()
+    assert rows == [{"e": "0", "i": "dom-1"}, {"e": "1", "i": "dom-2"}]
+
+
+def test_element_id_relationship_matches_rel_id():
+    kg = KnowledgeGraph()
+    kg.cypher("CREATE (:P {id: 1})-[:KNOWS]->(:P {id: 2})")
+    rows = kg.cypher("MATCH ()-[r]->() RETURN elementId(r) AS e, id(r) AS i").to_list()
+    assert rows == [{"e": "0", "i": 0}]
+
+
+def test_element_id_round_trips_into_predicate():
+    """The client workflow: read node.element_id off a Bolt struct, use it in
+    a WHERE — the two must agree."""
+    kg = KnowledgeGraph()
+    kg.cypher("CREATE (:P {id: 1, name: 'ann'}) CREATE (:P {id: 2, name: 'bob'})")
+    eid = kg.cypher("MATCH (n:P {id: 2}) RETURN elementId(n) AS e").to_list()[0]["e"]
+    rows = kg.cypher("MATCH (n:P) WHERE elementId(n) = $eid RETURN n.name AS nm", params={"eid": eid}).to_list()
+    assert rows == [{"nm": "bob"}]
+
+
+def test_element_id_collected_node_and_null():
+    kg = KnowledgeGraph()
+    kg.cypher("CREATE (:P {id: 1})")
+    assert kg.cypher("MATCH (n:P) WITH collect(n) AS ns RETURN elementId(head(ns)) AS e").to_list() == [{"e": "0"}]
+    assert kg.cypher("RETURN elementId(null) AS e").to_list() == [{"e": None}]

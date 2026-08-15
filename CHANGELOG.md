@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `elementId(entity)` scalar function — Neo4j 5 element identity as an opaque
+  string, agreeing with the `element_id` the Bolt server packs on
+  Node/Relationship structs so clients can round-trip it into predicates.
+  Distinct from `id()`, which remains the logical (domain) identity.
 - Standalone `CALL proc()` without `YIELD` — the form Neo4j clients and
   cypher-shell send — now works for every procedure, returning all declared
   columns in declared order. A bare `CALL` must be the entire statement;

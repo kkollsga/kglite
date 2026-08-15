@@ -951,6 +951,35 @@
      "l": "Alpha"
     }
    ]
+  },
+  {
+   "id": "function.element_id_string",
+   "category": "function",
+   "requirement": "elementId(n) returns an opaque string identity for a bound node.",
+   "setup": [
+    "CREATE (:Only {x: 1})"
+   ],
+   "query": "MATCH (n:Only) RETURN elementId(n) AS e",
+   "expected": [
+    {
+     "e": "0"
+    }
+   ]
+  },
+  {
+   "id": "function.element_id_distinct_from_id",
+   "category": "function",
+   "requirement": "elementId() is the slot-keyed string identity; id() stays the logical domain identity. The two are different values with different types.",
+   "setup": [
+    "CREATE (:Person {id: 'dom-7', name: 'ann'})"
+   ],
+   "query": "MATCH (p:Person) RETURN elementId(p) AS e, id(p) AS i",
+   "expected": [
+    {
+     "e": "0",
+     "i": "dom-7"
+    }
+   ]
   }
  ]
 }
