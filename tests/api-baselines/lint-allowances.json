@@ -321,6 +321,10 @@
       "classification": "api-shape"
     },
     {
+      "identity": "crates/kglite/src/graph/languages/cypher/executor/columnar_write.rs::fn:grow_column_and_write:fn grow_column_and_write( graph: &mut DirGraph, node_type: &str, type_key: InternedKey, node_idx: NodeIndex, row_id: u32, key: InternedKey, value: &Value, forked: bool, prior: PriorCell, ) -> Option<Option<Value>>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
       "identity": "crates/kglite/src/graph/languages/cypher/executor/match_clause/fused_match.rs::fn:try_fast_with_aggregate_via_histogram:fn try_fast_with_aggregate_via_histogram( &self, pattern: &Pattern, with_clause: &WithClause, columns: &[String], group_var: &str, group_elem_idx: usize, group_key_indices: &[usize], count_indices: &[usize], ) -> Result<Option<Vec<ResultRow>>, String>::clippy::too_many_arguments",
       "classification": "transitional"
     },

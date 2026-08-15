@@ -285,6 +285,10 @@ pub(super) fn write_column_master(
 /// when the first value that happens to arrive is an integer — and a column
 /// typed wrong is a column the next write demotes to `Mixed`, which cannot be
 /// spilled.
+// The argument list IS the write's context — every item is a cheap
+// Copy/borrow the caller already holds, split out of write_column_master
+// purely for the size ceiling; a params struct would be ceremony around
+// one private call site on the measured-hot write path.
 #[allow(clippy::too_many_arguments)]
 fn grow_column_and_write(
     graph: &mut DirGraph,
