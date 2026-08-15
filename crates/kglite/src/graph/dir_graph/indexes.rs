@@ -55,6 +55,59 @@ fn note_maintenance_pass() {
     INDEX_MAINTENANCE_PASSES.set(INDEX_MAINTENANCE_PASSES.get() + 1);
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Whole-type index rebuilds ([`DirGraph::refresh_indexes_for_type`]) since
+    /// the last reset.
+    ///
+    /// The oracle for the bulk fold: a fold and a rebuild leave the same
+    /// *values*, so an equality assertion alone cannot tell which one ran, and
+    /// a fold that silently declined would pass every correctness pin in
+    /// `maintain::incremental_index_tests` by rebuilding. This is also the only
+    /// way to pin the fold-vs-rebuild cost gate, whose whole job is to choose
+    /// between two correct paths.
+    static TYPE_INDEX_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_type_index_rebuilds() {
+    TYPE_INDEX_REBUILDS.set(0);
+}
+
+/// Whole-type index rebuilds on this thread since the last reset.
+#[cfg(test)]
+pub(crate) fn type_index_rebuilds() -> usize {
+    TYPE_INDEX_REBUILDS.get()
+}
+
+/// What one node looked like *before* a bulk batch updated it, as the index
+/// fold needs to see it.
+///
+/// The whole reason `add_nodes` can fold an update instead of rebuilding: the
+/// batch overwrites the values in place, so the old bucket a node has to vacate
+/// and the unique tuple it has to release are only knowable from a read taken
+/// before the write. One read pass serves both — the property indexes and the
+/// constraint occupancy — which is why they are captured together rather than
+/// by two independent passes over the same rows.
+pub(crate) struct UpdatedRowPreImage {
+    pub(crate) node_idx: NodeIndex,
+    /// Old value of each [`DirGraph::maintained_index_properties`] entry.
+    /// `None` where the node carried no value for it.
+    indexed: Vec<(String, Option<Value>)>,
+    /// The unique tuples the node occupied before the batch. Empty when the
+    /// type declares no unique constraint.
+    claims: Vec<super::constraints::UniqueClaim>,
+}
+
+/// One planned bucket move: what an updated node has to leave, and what it has
+/// to join, for one maintained property.
+struct UpdateMove {
+    node_idx: NodeIndex,
+    property: String,
+    old: Option<Value>,
+    landed: Option<Value>,
+}
+
 /// One property name, pre-resolved and pre-interned for a per-node read loop.
 ///
 /// Built once by [`DirGraph::property_reader`], then handed to
@@ -454,43 +507,274 @@ impl DirGraph {
     /// removed it, and it would otherwise re-impose it on exactly the types a
     /// query-heavy application indexes.
     ///
-    /// Returns `false` — meaning "rebuild instead" — for the cases the
-    /// per-node path does not cover:
+    /// **Updated rows** are folded too, from the pre-image
+    /// [`Self::capture_update_pre_image`] took before the batch wrote: a row
+    /// whose indexed value moved vacates its old bucket and joins the new one,
+    /// and a row whose value did not move touches no bucket at all — which is
+    /// what keeps the untouched buckets byte-identical to a rebuild's. The
+    /// pre-image is also what lets a `UNIQUE` tuple be *released* rather than
+    /// re-derived, so a constrained type no longer forces the rebuild either.
     ///
-    /// - **Updated rows.** An upsert can move an already-indexed node between
-    ///   value buckets, which needs the old bucket vacated; the append path
-    ///   only ever joins one.
-    /// - **A `UNIQUE` / non-`id` `PRIMARY KEY` tuple on the type.** Occupancy
-    ///   is deliberately re-derived from live data by the rebuild (see
-    ///   [`Self::refresh_indexes_for_type`]) rather than claimed per row, and
-    ///   this path has no claims to commit.
+    /// Returns `false` — meaning "rebuild instead" — only when the appended
+    /// tail cannot be identified (the type's member vector is shorter than the
+    /// batch claims to have created), because the tail *is* how a created row
+    /// is mapped back to its node.
     ///
-    /// Bucket order is preserved either way: the rebuild walks the type's
-    /// members in order, so the appended nodes land at the end of their value
-    /// buckets — which is where appending puts them.
-    pub(crate) fn fold_appended_into_user_indexes(
+    /// **Bucket order.** For creates it is the rebuild's, exactly: the rebuild
+    /// walks the type's members in order, so the appended nodes land at the end
+    /// of their value buckets — which is where appending puts them. For an
+    /// update that *moves* a node, the node joins the end of its new bucket
+    /// where a rebuild would place it in member order; that is the same
+    /// divergence a Cypher `SET` has always produced
+    /// ([`Self::update_property_indices_for_set`] appends), and it is why the
+    /// fold-vs-rebuild pin asserts set equality plus untouched-bucket order
+    /// rather than whole-index byte equality.
+    pub(crate) fn fold_batch_into_user_indexes(
         &mut self,
         node_type: &str,
         created: usize,
-        updated: usize,
+        updated: &[UpdatedRowPreImage],
     ) -> bool {
-        if updated > 0 {
-            return false;
-        }
-        if self.unique_indices.keys().any(|(nt, _)| nt == node_type) {
-            return false;
-        }
-        if !self.type_has_user_indexes(node_type) {
+        let constrained = self.type_has_unique_constraints(node_type);
+        if !constrained && !self.type_has_user_indexes(node_type) {
             // Nothing to maintain — and nothing for the rebuild to do either.
             return true;
         }
-        let Some(tail) = self.appended_tail(node_type, created) else {
-            return false;
+        let tail = if created == 0 {
+            Vec::new()
+        } else {
+            match self.appended_tail(node_type, created) {
+                Some(tail) => tail,
+                None => return false,
+            }
         };
-        for node_idx in tail {
-            self.update_property_indices_for_add(node_type, node_idx);
+        // Plan the update arm before touching anything: which rows actually
+        // moved is what decides fold-vs-rebuild, and declining is only free
+        // while nothing has been mutated.
+        let moves = self.plan_update_moves(node_type, updated);
+        if !self.folding_moves_beats_a_rebuild(node_type, moves.len())
+            || (constrained
+                && !self.claiming_beats_a_rebuild(node_type, tail.len() + updated.len()))
+        {
+            return false;
+        }
+        for node_idx in &tail {
+            self.update_property_indices_for_add(node_type, *node_idx);
+        }
+        for mv in &moves {
+            self.apply_update_move(node_type, mv);
+        }
+        if constrained {
+            // Vacate before claiming, so a tuple one row gives up is free for
+            // the row that takes it. `release_unique_claims` only removes a
+            // tuple this node still occupies, so a release can never strip a
+            // claim another row of the same batch just committed.
+            for pre in updated {
+                self.release_unique_claims(&pre.claims, pre.node_idx);
+            }
+            for node_idx in tail.iter().chain(updated.iter().map(|pre| &pre.node_idx)) {
+                let claims = self.stored_unique_claims(node_type, *node_idx);
+                self.commit_unique_claims(&claims, *node_idx);
+            }
         }
         true
+    }
+
+    /// Whether claiming `rows` nodes' unique tuples one at a time is cheaper
+    /// than re-deriving the type's occupancy from every member.
+    ///
+    /// The create arm's counterpart to [`Self::folding_moves_beats_a_rebuild`],
+    /// and it matters for the *first* bulk load into a constrained type: every
+    /// row is a create, so a per-row claim would pay a reader, a map and a
+    /// tuple clone per node where `build_unique_index` pays one read. The
+    /// weight is the ratio between those two per-node costs, and the members
+    /// count already includes this batch's creates — so a first load, where
+    /// rows *are* the members, always takes the rebuild it took before.
+    fn claiming_beats_a_rebuild(&self, node_type: &str, rows: usize) -> bool {
+        /// Work to claim one node's tuples against re-deriving one member's.
+        const CLAIM_ELEMENT_WEIGHT: usize = 5;
+        let members = self.type_indices.get(node_type).map_or(0, |m| m.len());
+        rows.saturating_mul(CLAIM_ELEMENT_WEIGHT) <= members
+    }
+
+    /// Which updated rows actually have to move, and where.
+    ///
+    /// The comparison is against the value **as stored now**, not against what
+    /// the row asked for: a `conflict_handling` mode that skipped or merged the
+    /// write leaves the old value in place, and this then correctly plans
+    /// nothing. That is what makes the fold independent of which conflict mode
+    /// the batch ran under — and it is why the overwhelmingly common upsert (a
+    /// row re-asserting the values it already had) costs a read per maintained
+    /// property and no bucket edit at all.
+    ///
+    /// Read-only, deliberately: the count it returns is what
+    /// [`Self::folding_moves_beats_a_rebuild`] decides on, and that decision
+    /// has to be free to reverse.
+    fn plan_update_moves(
+        &mut self,
+        node_type: &str,
+        updated: &[UpdatedRowPreImage],
+    ) -> Vec<UpdateMove> {
+        let mut moves = Vec::new();
+        for pre in updated {
+            for (property, old) in &pre.indexed {
+                let landed = self.indexed_value(node_type, property, pre.node_idx);
+                match (old, landed) {
+                    (None, None) => {}
+                    (Some(before), Some(after)) if *before == after => {}
+                    (old, landed) => moves.push(UpdateMove {
+                        node_idx: pre.node_idx,
+                        property: property.clone(),
+                        old: old.clone(),
+                        landed,
+                    }),
+                }
+            }
+        }
+        moves
+    }
+
+    /// Apply one planned move: vacate the old bucket, join the new one.
+    fn apply_update_move(&mut self, node_type: &str, mv: &UpdateMove) {
+        match (&mv.old, &mv.landed) {
+            (Some(before), None) => {
+                // The value is gone (a `replace` that dropped the column).
+                // Vacating without joining is what a rebuild does with it:
+                // `create_index` files no bucket for an absent value.
+                self.update_property_indices_for_remove(
+                    node_type,
+                    mv.node_idx,
+                    &mv.property,
+                    before,
+                );
+            }
+            (old, Some(after)) => {
+                self.update_property_indices_for_set(
+                    node_type,
+                    mv.node_idx,
+                    &mv.property,
+                    old.as_ref(),
+                    after,
+                );
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// Whether folding `moves` bucket moves is cheaper than rebuilding the
+    /// type's covering indexes.
+    ///
+    /// **A move is not O(1).** Vacating a bucket is a `retain` over its
+    /// members, and a composite move rescans the whole composite index to find
+    /// the buckets the node currently sits in. So the fold is
+    /// O(moves × bucket) against the rebuild's O(members) per index: far
+    /// cheaper for the shape it exists for (ten rows into a 200k-row type) and
+    /// *quadratic* for a bulk re-load that moves a large fraction of the type —
+    /// which is the shape `refresh_indexes_for_type` was built for and handles
+    /// in one linear pass.
+    ///
+    /// Both sides are counted in element visits, with the rebuild's visit
+    /// weighted: reading a node's value, cloning it and hashing it into a map
+    /// is an order of magnitude more work than comparing two `NodeIndex`es, and
+    /// the weight keeps the comparison from declining a fold that is obviously
+    /// cheaper. It is a cost *model*, not a tuned constant — it decides between
+    /// two correct paths, so being wrong costs time and never an answer.
+    fn folding_moves_beats_a_rebuild(&self, node_type: &str, moves: usize) -> bool {
+        if moves == 0 {
+            return true;
+        }
+        /// Work per rebuilt element (value read + clone + hash insert) against
+        /// work per folded element (a `NodeIndex` compare).
+        const REBUILD_ELEMENT_WEIGHT: usize = 16;
+
+        let members = self.type_indices.get(node_type).map_or(0, |m| m.len());
+        let mut covering = 0usize;
+        // The longest bucket a single move may have to walk.
+        let mut worst_bucket = 1usize;
+        for ((nt, _), index) in &self.property_indices {
+            if nt == node_type {
+                covering += 1;
+                worst_bucket = worst_bucket.max(members / index.len().max(1));
+            }
+        }
+        for ((nt, _), index) in &self.range_indices {
+            if nt == node_type {
+                covering += 1;
+                worst_bucket = worst_bucket.max(members / index.len().max(1));
+            }
+        }
+        if self.composite_indices.keys().any(|(nt, _)| nt == node_type) {
+            covering += self
+                .composite_indices
+                .keys()
+                .filter(|(nt, _)| nt == node_type)
+                .count();
+            // A composite move scans every bucket of the index looking for the
+            // node, so its walk is the whole index rather than one bucket.
+            worst_bucket = worst_bucket.max(members);
+        }
+        if covering == 0 {
+            // Constraint-only type: occupancy bookkeeping is hash work per row,
+            // with no bucket to walk.
+            return true;
+        }
+        moves.saturating_mul(worst_bucket)
+            <= members
+                .saturating_mul(covering)
+                .saturating_mul(REBUILD_ELEMENT_WEIGHT)
+    }
+
+    /// The properties of `node_type` whose values a fold has to watch: every
+    /// property carrying a single-value index, plus every member of a composite
+    /// index on the type.
+    ///
+    /// A composite member need not carry an index of its own, and a change to
+    /// it still moves the node within the composite index — reading only the
+    /// single-value set would leave that node in a stale composite bucket.
+    pub(crate) fn maintained_index_properties(&self, node_type: &str) -> Vec<String> {
+        let mut properties: std::collections::BTreeSet<String> = self
+            .single_value_indexed_properties(node_type)
+            .into_iter()
+            .collect();
+        for (nt, members) in self.composite_indices.keys() {
+            if nt == node_type {
+                properties.extend(members.iter().cloned());
+            }
+        }
+        properties.into_iter().collect()
+    }
+
+    /// Read everything a fold will need to *undo* about `node_idx` before the
+    /// batch overwrites it: the old value of each maintained property, and the
+    /// unique tuples the node currently occupies.
+    ///
+    /// Called once per updated node, before the batch executes — after it, the
+    /// old values no longer exist anywhere. `properties` is
+    /// [`Self::maintained_index_properties`], resolved once per call rather
+    /// than per row.
+    pub(crate) fn capture_update_pre_image(
+        &mut self,
+        node_type: &str,
+        node_idx: NodeIndex,
+        properties: &[String],
+    ) -> UpdatedRowPreImage {
+        let indexed = properties
+            .iter()
+            .map(|property| {
+                let value = self.indexed_value(node_type, property, node_idx);
+                (property.clone(), value)
+            })
+            .collect();
+        let claims = if self.type_has_unique_constraints(node_type) {
+            self.stored_unique_claims(node_type, node_idx)
+        } else {
+            Vec::new()
+        };
+        UpdatedRowPreImage {
+            node_idx,
+            indexed,
+            claims,
+        }
     }
 
     /// Rebuild every in-memory secondary index that covers `node_type` from
@@ -517,6 +801,8 @@ impl DirGraph {
     /// scope here: they never land in `property_indices` (see
     /// [`Self::create_property_index_routed`]), so this helper cannot see them.
     pub(crate) fn refresh_indexes_for_type(&mut self, node_type: &str) -> usize {
+        #[cfg(test)]
+        TYPE_INDEX_REBUILDS.set(TYPE_INDEX_REBUILDS.get() + 1);
         let prop_keys = Self::keys_for_type(self.property_indices.keys(), node_type);
         let range_keys = Self::keys_for_type(self.range_indices.keys(), node_type);
         let comp_keys: Vec<Vec<String>> = self

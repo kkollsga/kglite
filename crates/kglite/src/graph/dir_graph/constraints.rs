@@ -88,6 +88,55 @@ impl DirGraph {
         !self.unique_indices.is_empty()
     }
 
+    /// Whether any unique constraint is declared on `node_type` — the gate the
+    /// bulk fold uses to decide whether it owes occupancy bookkeeping at all.
+    #[inline]
+    pub(crate) fn type_has_unique_constraints(&self, node_type: &str) -> bool {
+        self.has_unique_constraints() && self.unique_indices.keys().any(|(nt, _)| nt == node_type)
+    }
+
+    /// The unique tuples `node_idx` occupies **as stored**.
+    ///
+    /// The read half of incremental occupancy maintenance: the bulk fold takes
+    /// this before a batch (what to release) and after it (what to claim), so
+    /// the answer never depends on what a row *asked* for — a
+    /// `conflict_handling` mode that skipped or merged the write is reflected
+    /// automatically.
+    ///
+    /// Reads through [`DirGraph::read_indexed`] and returns through
+    /// [`Self::unique_claims`], the same two funnels
+    /// [`Self::build_unique_index`] uses, so a folded occupancy and a rebuilt
+    /// one cannot disagree about which tuple a node holds.
+    pub(crate) fn stored_unique_claims(
+        &mut self,
+        node_type: &str,
+        node_idx: NodeIndex,
+    ) -> Vec<UniqueClaim> {
+        let properties: Vec<String> = {
+            let mut names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+            for (nt, tuple) in self.unique_indices.keys() {
+                if nt == node_type {
+                    names.extend(tuple.iter().map(String::as_str));
+                }
+            }
+            names.into_iter().map(str::to_string).collect()
+        };
+        if properties.is_empty() {
+            return Vec::new();
+        }
+        let values: HashMap<String, Option<Value>> = properties
+            .into_iter()
+            .map(|property| {
+                let reader = self.property_reader(node_type, &property);
+                let value = self.read_indexed(&reader, node_idx);
+                (property, value)
+            })
+            .collect();
+        self.unique_claims(node_type, |property| {
+            values.get(property).cloned().flatten()
+        })
+    }
+
     /// Whether `(node_type, properties)` is declared UNIQUE. Property order is
     /// irrelevant — `(a, b)` and `(b, a)` are the same constraint.
     pub fn has_unique_constraint(&self, node_type: &str, properties: &[String]) -> bool {

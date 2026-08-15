@@ -370,8 +370,10 @@ fn folded_user_indexes_equal_the_rebuilt_ones() {
     assert_eq!(hits.len(), 15);
 }
 
-/// An upsert batch must rebuild rather than append: a moved value has to
-/// vacate its old bucket, which the per-node append path never does.
+/// An upsert batch must keep the index correct: a moved value has to vacate
+/// its old bucket, which the create-only fold never does. The fold reads a
+/// pre-image per updated node to do it; before that it declined outright and
+/// the whole index was rebuilt.
 #[test]
 fn an_upserting_batch_keeps_the_user_index_correct() {
     let frame = |rows: Vec<(i64, i64)>| {
@@ -461,5 +463,479 @@ fn string_ids_survive_an_incremental_append() {
                 .is_some(),
             "string id {id} lost"
         );
+    }
+}
+
+// ===========================================================================
+// The upsert and unique-constraint arms of the user-index fold
+//
+// Both used to decline: `updated > 0` and "the type carries a UNIQUE tuple"
+// each sent the whole call to `refresh_indexes_for_type`, an O(nodes-of-type)
+// rebuild per covering index (measured 2026-08-15, release, 200k-row type:
+// 14.4 ms for a ten-row upsert with two indexes, 23.0 ms for a ten-row append
+// under one constraint). The fold now reads a pre-image per updated node —
+// old indexed values and occupied tuples in one pass — and moves the node
+// itself.
+//
+// The pins below come in two kinds, and both are needed: the *mechanism* pins
+// plant a sentinel no rebuild can reproduce (a rebuild derives every entry
+// from live members, so it deletes the sentinel), which is what makes the
+// correctness pins non-vacuous — without them a declining fold would pass
+// every equality assertion in this section by rebuilding.
+// ===========================================================================
+
+/// `(id, bucket, code)` rows for a type with an index on `bucket` and a
+/// UNIQUE tuple available on `code`.
+fn upsert_frame(rows: &[(i64, i64, &str)]) -> DataFrame {
+    DataFrame::from_cypher_rows(
+        vec!["id".to_string(), "bucket".to_string(), "code".to_string()],
+        rows.iter()
+            .map(|(id, bucket, code)| {
+                vec![
+                    Value::Int64(*id),
+                    Value::Int64(*bucket),
+                    Value::String((*code).to_string()),
+                ]
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+fn upsert(graph: &mut DirGraph, rows: &[(i64, i64, &str)]) -> Result<NodeOperationReport, String> {
+    add_nodes(
+        graph,
+        upsert_frame(rows),
+        "Item".to_string(),
+        "id".to_string(),
+        Some("id".to_string()),
+        None,
+    )
+}
+
+/// Every bucket of every user index, as `(index, value, members in order)`.
+fn index_buckets(graph: &DirGraph) -> Vec<(String, String, Vec<usize>)> {
+    let mut out = Vec::new();
+    for ((node_type, property), index) in &graph.property_indices {
+        for (value, members) in index.iter() {
+            out.push((
+                format!("prop:{node_type}.{property}"),
+                format!("{value:?}"),
+                members.iter().map(|idx| idx.index()).collect(),
+            ));
+        }
+    }
+    for ((node_type, property), index) in &graph.range_indices {
+        for (value, members) in index.iter() {
+            out.push((
+                format!("range:{node_type}.{property}"),
+                format!("{value:?}"),
+                members.iter().map(|idx| idx.index()).collect(),
+            ));
+        }
+    }
+    for ((node_type, properties), index) in &graph.composite_indices {
+        for (value, members) in index.iter() {
+            out.push((
+                format!("comp:{node_type}.{}", properties.join("+")),
+                format!("{value:?}"),
+                members.iter().map(|idx| idx.index()).collect(),
+            ));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A 200-row type carrying a hash index, a range index and a composite index
+/// on `bucket`, plus a UNIQUE constraint on `code` when asked.
+///
+/// Sized against `UpdateFold::CAPTURE_RATIO`: a handful of rows into 200 is the
+/// streaming-upsert shape the fold serves, so these fixtures exercise the fold
+/// rather than the re-load path that declines to a rebuild (pinned separately
+/// by `a_mass_upsert_declines_to_the_rebuild`).
+fn upsert_fixture(constrained: bool) -> DirGraph {
+    let mut graph = DirGraph::new();
+    let seed: Vec<(i64, i64, String)> = (0..200).map(|i| (i, i % 3, format!("c{i}"))).collect();
+    let seed_rows: Vec<(i64, i64, &str)> = seed
+        .iter()
+        .map(|(id, bucket, code)| (*id, *bucket, code.as_str()))
+        .collect();
+    upsert(&mut graph, &seed_rows).unwrap();
+    graph.create_index("Item", "bucket");
+    graph.create_range_index("Item", "bucket");
+    graph.create_composite_index("Item", &["bucket", "code"]);
+    if constrained {
+        graph.create_unique_constraint("Item", &["code"]).unwrap();
+    }
+    graph
+}
+
+/// **The mechanism pin for the update arm.** An upsert must fold, not rebuild.
+///
+/// Same technique as `appending_to_an_indexed_type_does_not_rebuild_the_index`:
+/// a bucket no member of the type can produce survives a fold and cannot
+/// survive a rebuild.
+#[test]
+fn an_upsert_folds_the_user_index_instead_of_rebuilding_it() {
+    let mut graph = upsert_fixture(false);
+    let planted = NodeIndex::new(0);
+    graph
+        .property_indices
+        .get_mut(&("Item".to_string(), "bucket".to_string()))
+        .expect("the fixture declares the index")
+        .entry_or_default(&Value::Int64(9_999))
+        .push(planted);
+
+    // One updated row, one created row — the shape that used to decline.
+    upsert(&mut graph, &[(1, 7, "c1"), (99, 7, "c99")]).unwrap();
+
+    assert_eq!(
+        graph
+            .lookup_by_index("Item", "bucket", &Value::Int64(9_999))
+            .unwrap_or_default(),
+        vec![planted],
+        "the upsert rebuilt the whole index instead of folding its own rows"
+    );
+}
+
+/// **The mechanism pin for the constrained arm.** A type carrying a UNIQUE
+/// tuple must fold too — occupancy is now maintained, not re-derived.
+#[test]
+fn a_constrained_batch_folds_its_claims_instead_of_rebuilding_them() {
+    let mut graph = upsert_fixture(true);
+    let key = ("Item".to_string(), vec!["code".to_string()]);
+    let planted = NodeIndex::new(0);
+    graph
+        .unique_indices
+        .get_mut(&key)
+        .expect("the fixture declares the constraint")
+        .insert(
+            CompositeValue(vec![Value::String("sentinel".to_string())]),
+            planted,
+        );
+
+    upsert(&mut graph, &[(100, 1, "c100")]).unwrap();
+
+    assert_eq!(
+        graph
+            .unique_indices
+            .get(&key)
+            .and_then(|occupants| {
+                occupants.get(&CompositeValue(vec![Value::String("sentinel".to_string())]))
+            })
+            .copied(),
+        Some(planted),
+        "the constrained append re-derived occupancy instead of folding its claims"
+    );
+}
+
+/// **Values.** What the fold leaves behind must be what a rebuild would have
+/// produced — for creates, updates that move a value, and updates that do not.
+///
+/// Compared as a set of `(index, value, members)` with each bucket's members
+/// sorted, because a *moved* node joins the end of its new bucket where a
+/// rebuild would place it in member order. That divergence is deliberate and
+/// is exactly what a Cypher `SET` has always done; the order half is pinned
+/// separately below, on the buckets the batch did not touch.
+#[test]
+fn folded_upserts_hold_the_same_values_as_a_rebuild() {
+    let mut graph = upsert_fixture(true);
+    crate::graph::dir_graph::indexes::reset_type_index_rebuilds();
+    upsert(
+        &mut graph,
+        &[
+            (2, 7, "c2"),     // moves bucket, keeps its tuple
+            (3, 3 % 3, "x3"), // keeps bucket, moves its tuple
+            (4, 8, "x4"),     // moves both
+            (5, 5 % 3, "c5"), // moves nothing
+            (50, 1, "c50"),   // a create
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(
+        crate::graph::dir_graph::indexes::type_index_rebuilds(),
+        0,
+        "the batch rebuilt the type's indexes instead of folding, which would \
+         make every equality below vacuous"
+    );
+
+    let sorted = |mut buckets: Vec<(String, String, Vec<usize>)>| {
+        for entry in &mut buckets {
+            entry.2.sort();
+        }
+        buckets
+    };
+    let folded = sorted(index_buckets(&graph));
+    let folded_claims: Vec<_> = {
+        let mut claims: Vec<_> = graph
+            .unique_indices
+            .iter()
+            .flat_map(|(key, occupants)| {
+                occupants
+                    .iter()
+                    .map(move |(value, idx)| (key.clone(), format!("{value:?}"), idx.index()))
+            })
+            .collect();
+        claims.sort();
+        claims
+    };
+
+    graph.refresh_indexes_for_type("Item");
+    let rebuilt = sorted(index_buckets(&graph));
+    let rebuilt_claims: Vec<_> = {
+        let mut claims: Vec<_> = graph
+            .unique_indices
+            .iter()
+            .flat_map(|(key, occupants)| {
+                occupants
+                    .iter()
+                    .map(move |(value, idx)| (key.clone(), format!("{value:?}"), idx.index()))
+            })
+            .collect();
+        claims.sort();
+        claims
+    };
+
+    assert!(!folded.is_empty(), "the fixture must have indexed buckets");
+    assert_eq!(folded, rebuilt, "the fold and the rebuild disagree");
+    assert_eq!(
+        folded_claims, rebuilt_claims,
+        "folded unique occupancy disagrees with a re-derived one"
+    );
+}
+
+/// **Order.** A row whose indexed value did not move must not move within its
+/// bucket either — so an upsert that changes an unindexed column leaves every
+/// bucket byte-identical to a rebuild, member order included.
+#[test]
+fn an_upsert_that_moves_no_value_leaves_bucket_order_untouched() {
+    let mut graph = upsert_fixture(true);
+    let before = index_buckets(&graph);
+
+    // Same bucket, same code, on three existing rows.
+    upsert(&mut graph, &[(1, 1, "c1"), (4, 1, "c4"), (7, 1, "c7")]).unwrap();
+
+    assert_eq!(
+        before,
+        index_buckets(&graph),
+        "an upsert that changed no indexed value still moved nodes between \
+         (or within) buckets"
+    );
+    graph.refresh_indexes_for_type("Item");
+    assert_eq!(
+        before,
+        index_buckets(&graph),
+        "the untouched buckets differ from a rebuild's, order included"
+    );
+}
+
+/// **Claims: the vacated tuple is reusable.** The whole reason an update needs
+/// a pre-image on the constraint side — releasing what the node gave up.
+#[test]
+fn an_upsert_frees_the_unique_tuple_it_vacated() {
+    let mut graph = upsert_fixture(true);
+    // Node 3 gives up `c3`.
+    upsert(&mut graph, &[(3, 0, "moved")]).unwrap();
+    // Which a *different* node may now take.
+    upsert(&mut graph, &[(30, 0, "c3")]).expect("the vacated tuple must be free");
+
+    let holder = graph
+        .lookup_by_id_readonly("Item", &Value::Int64(30))
+        .expect("the new row exists");
+    assert_eq!(
+        graph
+            .unique_indices
+            .get(&("Item".to_string(), vec!["code".to_string()]))
+            .and_then(
+                |occupants| occupants.get(&CompositeValue(vec![Value::String("c3".to_string())]))
+            )
+            .copied(),
+        Some(holder),
+        "the freed tuple must be recorded against its new holder"
+    );
+}
+
+/// **Claims: still enforcing.** The fold maintains occupancy, so a duplicate
+/// of a tuple a *previous* batch claimed is refused — the create arm's claim
+/// must actually land.
+#[test]
+fn a_folded_claim_still_refuses_the_next_duplicate() {
+    let mut graph = upsert_fixture(true);
+    upsert(&mut graph, &[(60, 1, "fresh")]).unwrap();
+
+    let err = upsert(&mut graph, &[(61, 1, "fresh")])
+        .expect_err("a second node may not take a claimed tuple");
+    assert!(
+        err.contains("fresh"),
+        "the violation must name the duplicated value: {err}"
+    );
+}
+
+/// And a duplicate *within* one batch is refused as before — the staged
+/// per-row claims must not have replaced the batch-level dedup.
+#[test]
+fn a_duplicate_within_one_batch_is_still_refused() {
+    let mut graph = upsert_fixture(true);
+    let err = upsert(&mut graph, &[(70, 1, "twice"), (71, 1, "twice")])
+        .expect_err("two rows of one batch may not claim the same tuple");
+    assert!(err.contains("twice"), "unexpected violation: {err}");
+}
+
+/// **The cost gate.** A move is not O(1) — vacating a bucket walks it — so a
+/// batch that moves a large fraction of the type is cheaper to rebuild, and
+/// the fold has to say so. Without the gate a full re-load of a 200k-row type
+/// under a low-cardinality index is O(rows x bucket): minutes, against 12 ms
+/// for the rebuild it replaced.
+#[test]
+fn a_mass_upsert_declines_to_the_rebuild() {
+    let mut graph = DirGraph::new();
+    let seed: Vec<(i64, i64, String)> = (0..400).map(|i| (i, i % 2, format!("c{i}"))).collect();
+    let rows: Vec<(i64, i64, &str)> = seed
+        .iter()
+        .map(|(id, bucket, code)| (*id, *bucket, code.as_str()))
+        .collect();
+    upsert(&mut graph, &rows).unwrap();
+    graph.create_index("Item", "bucket");
+
+    // Ten rows moved: folded.
+    let ten: Vec<(i64, i64, &str)> = rows[..10]
+        .iter()
+        .map(|(id, _, code)| (*id, 9, *code))
+        .collect();
+    crate::graph::dir_graph::indexes::reset_type_index_rebuilds();
+    upsert(&mut graph, &ten).unwrap();
+    assert_eq!(
+        crate::graph::dir_graph::indexes::type_index_rebuilds(),
+        0,
+        "a ten-row upsert must fold"
+    );
+
+    // Every row moved: rebuilt.
+    let all: Vec<(i64, i64, &str)> = rows
+        .iter()
+        .map(|(id, bucket, code)| (*id, bucket + 100, *code))
+        .collect();
+    crate::graph::dir_graph::indexes::reset_type_index_rebuilds();
+    upsert(&mut graph, &all).unwrap();
+    assert_eq!(
+        crate::graph::dir_graph::indexes::type_index_rebuilds(),
+        1,
+        "a whole-type upsert must decline to the rebuild"
+    );
+
+    // And either way the index is right.
+    assert_eq!(
+        graph
+            .lookup_by_index("Item", "bucket", &Value::Int64(100))
+            .unwrap_or_default()
+            .len(),
+        200
+    );
+    assert!(graph
+        .lookup_by_index("Item", "bucket", &Value::Int64(9))
+        .unwrap_or_default()
+        .is_empty());
+}
+
+/// **The move gate, on its own.** A batch small enough to capture can still
+/// move enough rows to lose to the rebuild: vacating a bucket walks it, so a
+/// low-cardinality index makes each move O(members / distinct values).
+#[test]
+fn a_captured_batch_that_moves_many_rows_still_declines() {
+    let mut graph = DirGraph::new();
+    let seed: Vec<(i64, i64, String)> = (0..1_000).map(|i| (i, i % 2, format!("c{i}"))).collect();
+    let rows: Vec<(i64, i64, &str)> = seed
+        .iter()
+        .map(|(id, bucket, code)| (*id, *bucket, code.as_str()))
+        .collect();
+    upsert(&mut graph, &rows).unwrap();
+    graph.create_index("Item", "bucket");
+
+    // 100 rows: captured (100 x 4 < 1000), but every one of them moves, and
+    // each move walks a ~500-member bucket.
+    let moved: Vec<(i64, i64, &str)> = rows[..100]
+        .iter()
+        .map(|(id, _, code)| (*id, 42, *code))
+        .collect();
+    crate::graph::dir_graph::indexes::reset_type_index_rebuilds();
+    upsert(&mut graph, &moved).unwrap();
+    assert_eq!(
+        crate::graph::dir_graph::indexes::type_index_rebuilds(),
+        1,
+        "100 moves into two 500-member buckets must decline to the rebuild"
+    );
+
+    // Ten rows moving the same way stay on the fold.
+    let few: Vec<(i64, i64, &str)> = rows[200..210]
+        .iter()
+        .map(|(id, _, code)| (*id, 43, *code))
+        .collect();
+    crate::graph::dir_graph::indexes::reset_type_index_rebuilds();
+    upsert(&mut graph, &few).unwrap();
+    assert_eq!(
+        crate::graph::dir_graph::indexes::type_index_rebuilds(),
+        0,
+        "ten moves must fold"
+    );
+    assert_eq!(
+        graph
+            .lookup_by_index("Item", "bucket", &Value::Int64(43))
+            .unwrap_or_default()
+            .len(),
+        10
+    );
+    assert_eq!(
+        graph
+            .lookup_by_index("Item", "bucket", &Value::Int64(42))
+            .unwrap_or_default()
+            .len(),
+        100
+    );
+}
+
+/// **The claim gate.** A constrained type's *first* bulk load must still
+/// re-derive occupancy in one pass: claiming per row would pay a reader, a map
+/// and a tuple clone per node where `build_unique_index` pays one read.
+#[test]
+fn a_bulk_load_into_a_constrained_type_still_rebuilds_occupancy() {
+    let mut graph = DirGraph::new();
+    let seed: Vec<(i64, i64, String)> = (0..50).map(|i| (i, i % 3, format!("c{i}"))).collect();
+    let rows: Vec<(i64, i64, &str)> = seed
+        .iter()
+        .map(|(id, bucket, code)| (*id, *bucket, code.as_str()))
+        .collect();
+    upsert(&mut graph, &rows).unwrap();
+    graph.create_unique_constraint("Item", &["code"]).unwrap();
+
+    // A load as big as the type: rebuild.
+    let more: Vec<(i64, i64, String)> = (100..150).map(|i| (i, i % 3, format!("c{i}"))).collect();
+    let more_rows: Vec<(i64, i64, &str)> = more
+        .iter()
+        .map(|(id, bucket, code)| (*id, *bucket, code.as_str()))
+        .collect();
+    crate::graph::dir_graph::indexes::reset_type_index_rebuilds();
+    upsert(&mut graph, &more_rows).unwrap();
+    assert_eq!(
+        crate::graph::dir_graph::indexes::type_index_rebuilds(),
+        1,
+        "a load the size of the type must re-derive occupancy in one pass"
+    );
+
+    // A handful of rows into the same type: folded.
+    crate::graph::dir_graph::indexes::reset_type_index_rebuilds();
+    upsert(&mut graph, &[(300, 1, "c300"), (301, 1, "c301")]).unwrap();
+    assert_eq!(
+        crate::graph::dir_graph::indexes::type_index_rebuilds(),
+        0,
+        "two rows into a 100-member type must fold"
+    );
+
+    // Either way the constraint is enforcing, on rows from both batches.
+    for code in ["c120", "c300"] {
+        let err = upsert(&mut graph, &[(900, 1, code)])
+            .expect_err("a claimed tuple must still be refused");
+        assert!(err.contains(code), "unexpected violation: {err}");
     }
 }

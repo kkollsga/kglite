@@ -3,7 +3,7 @@ use crate::datatypes::{DataFrame, Value};
 use crate::graph::constraints::{ConstraintViolation, UniqueConstraintKey};
 use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOperationReport};
 use crate::graph::mutation::batch::{
-    BatchProcessor, ConflictHandling, ConnectionBatchProcessor, NodeAction,
+    BatchProcessor, BatchStats, ConflictHandling, ConnectionBatchProcessor, NodeAction,
 };
 use crate::graph::mutation::edge_props::{
     intern_edge_props, register_used_edge_property_names, resolve_edge_property_columns,
@@ -210,6 +210,97 @@ fn describe_skipped_rows(
              '{unique_id_field}'. If IDs are strings, pass \
              column_types={{'{unique_id_field}': 'string'}}"
         ));
+    }
+}
+
+/// The index bookkeeping a batch's *updated* rows owe, collected while the
+/// stored values are still the ones the batch is about to overwrite.
+///
+/// The fold that consumes this ([`DirGraph::fold_batch_into_user_indexes`])
+/// runs after the batch, when the old value of every indexed property — and
+/// the unique tuple each updated node occupied — is gone. Reading it there is
+/// impossible; reading it per row here is what replaced an O(nodes-of-type)
+/// rebuild per covering index.
+///
+/// Costs nothing on the common bulk-load shape: an unindexed, unconstrained
+/// type resolves `properties` to empty once per call and every row then takes
+/// one `bool` test.
+///
+/// **A capture is not free, and it is taken before anything is known.** The
+/// pre-image has to be read in the row loop, so a call cannot first find out
+/// how many rows update and then decide; by the time the fold could decline,
+/// the reads are spent. A batch whose row count is a large fraction of the
+/// type is therefore refused a capture up front — that is the re-load shape
+/// `refresh_indexes_for_type` exists for, and it keeps exactly the cost it had.
+struct UpdateFold {
+    /// [`DirGraph::maintained_index_properties`], resolved once per call.
+    properties: Vec<String>,
+    /// The type carries an index or a constraint, *and* this batch is small
+    /// enough against the type for a per-row capture to be worth taking.
+    capturing: bool,
+    /// Nodes already captured — a repeated id in one input updates one node,
+    /// whose pre-image is what stood before the *first* of those rows.
+    seen: HashSet<NodeIndex>,
+    /// Capture order, deliberately a `Vec`: a moved node joins the end of its
+    /// new bucket, so a `HashMap`'s iteration order would make an indexed
+    /// `MATCH`'s row order vary between processes.
+    pre_images: Vec<crate::graph::dir_graph::indexes::UpdatedRowPreImage>,
+}
+
+impl UpdateFold {
+    /// Rows-per-member below which a per-row capture is worth taking. A
+    /// capture reads and clones each maintained property of the row's node;
+    /// the rebuild it avoids reads every member of the type once. The ratio is
+    /// deliberately conservative — being wrong costs time on one call and
+    /// never an answer, since both paths leave the same index.
+    const CAPTURE_RATIO: usize = 4;
+
+    fn for_batch(graph: &DirGraph, node_type: &str, rows: usize) -> Self {
+        let properties = graph.maintained_index_properties(node_type);
+        let maintains = !properties.is_empty() || graph.type_has_unique_constraints(node_type);
+        let members = graph.type_indices.get(node_type).map_or(0, |m| m.len());
+        Self {
+            properties,
+            capturing: maintains && rows.saturating_mul(Self::CAPTURE_RATIO) < members,
+            seen: HashSet::new(),
+            pre_images: Vec::new(),
+        }
+    }
+
+    /// Capture one row's target, if the row updates a node and this call is
+    /// taking captures at all.
+    fn observe(&mut self, graph: &mut DirGraph, node_type: &str, existing_idx: Option<NodeIndex>) {
+        let Some(node_idx) = existing_idx.filter(|_| self.capturing) else {
+            return;
+        };
+        if self.seen.insert(node_idx) {
+            self.pre_images.push(graph.capture_update_pre_image(
+                node_type,
+                node_idx,
+                &self.properties,
+            ));
+        }
+    }
+
+    /// The pre-images the fold needs, or `None` when this call declined to take
+    /// them and the batch updated something anyway — in which case the fold
+    /// cannot know what to vacate and only the rebuild is correct.
+    fn pre_images(
+        &self,
+        updated: usize,
+    ) -> Option<&[crate::graph::dir_graph::indexes::UpdatedRowPreImage]> {
+        (self.capturing || updated == 0).then_some(&self.pre_images[..])
+    }
+
+    /// Fold this call's deltas into the type's covering indexes, falling back
+    /// to the whole-type rebuild wherever the fold declines.
+    fn fold_or_rebuild(&self, graph: &mut DirGraph, node_type: &str, stats: BatchStats) {
+        let folded = self.pre_images(stats.updates).is_some_and(|pre_images| {
+            graph.fold_batch_into_user_indexes(node_type, stats.creates, pre_images)
+        });
+        if !folded {
+            graph.refresh_indexes_for_type(node_type);
+        }
     }
 }
 
@@ -508,10 +599,6 @@ pub fn add_nodes(
     };
 
     let constraint_columns = ConstraintColumns::for_batch(graph, &node_type, &df_data);
-    // Tuples claimed by earlier rows of this same batch. A repeat inside one
-    // input is rejected even when neither row conflicts with the stored graph —
-    // otherwise the post-load index rebuild would silently keep one row and drop
-    // the other.
     let row_builder = RowBuilder {
         node_type: &node_type,
         interned_columns: &interned_columns,
@@ -521,9 +608,12 @@ pub fn add_nodes(
         conflict_mode,
     };
 
+    // Tuples claimed by earlier rows of this same batch: a repeat inside one
+    // input is refused even when neither row conflicts with stored data.
     let mut batch_claims: std::collections::HashSet<(UniqueConstraintKey, CompositeValue)> =
         std::collections::HashSet::new();
 
+    let mut update_fold = UpdateFold::for_batch(graph, &node_type, df_data.row_count());
     // Loaded ids raise the engine's auto-id high-water mark (applied once
     // after the loop, so the borrow stays out of the hot row path). Without
     // it, a load of sparse ids — one row with id 5 into an empty graph —
@@ -581,6 +671,7 @@ pub fn add_nodes(
             )?;
         }
 
+        update_fold.observe(graph, &node_type, existing_idx);
         let action = row_builder.action(&df_data, row_idx, id, title, existing_idx);
         batch.add_action(action, graph)?;
     }
@@ -615,14 +706,12 @@ pub fn add_nodes(
 
     // Same staleness hazard for the *secondary* indexes: the batch path skips
     // the per-write incremental maintenance the Cypher executor runs, and
-    // `try_index_lookup` trusts `property_indices` unconditionally — so an
-    // index built before this call would silently hide every row we just
-    // loaded. A creation-only batch gives each appended node that per-node
-    // maintenance directly; anything else rebuilds the covering indexes (a
-    // no-op when the type has none).
-    if !graph.fold_appended_into_user_indexes(&node_type, stats.creates, stats.updates) {
-        graph.refresh_indexes_for_type(&node_type);
-    }
+    // `try_index_lookup` trusts `property_indices` unconditionally, so a stale
+    // index silently hides every row this call loaded. Creates get the
+    // per-node maintenance a `CREATE` gives them; updates move buckets and
+    // re-claim tuples from `UpdateFold`'s pre-images; the rebuild stays the
+    // fallback (see `fold_batch_into_user_indexes` for which cases take it).
+    update_fold.fold_or_rebuild(graph, &node_type, stats);
 
     // Calculate elapsed time
     let elapsed_ms = metrics.processing_time * 1000.0; // Convert to milliseconds
