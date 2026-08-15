@@ -111,7 +111,15 @@ impl<'a> CypherExecutor<'a> {
                     None => Ok(Value::Null),
                 }
             }
-            // ── Timeseries functions ──────────────────────────────────────
+            // randomUUID() — RFC 4122 version-4 UUID string. Non-
+            // deterministic; classified alongside rand() in
+            // `is_row_independent` (where_clause.rs) so constant folding
+            // never collapses it to a single value across rows. No `uuid`
+            // crate dependency — 128 random bits from the same
+            // thread-local xorshift64 PRNG rand() uses (two u64 draws),
+            // version (4) and variant (10xx) bits stamped per the v4
+            // layout. Registered under the lowercased key `randomuuid`;
+            // the canonical Cypher spelling is randomUUID().
             "randomuuid" => {
                 if !args.is_empty() {
                     return Err("randomUUID() takes no arguments".into());
@@ -132,18 +140,9 @@ impl<'a> CypherExecutor<'a> {
                 );
                 Ok(Value::String(uuid))
             }
-            // localdatetime() / localtime() / time() — wall-clock
-            // temporal "now" values. KGLite's Value has no time-of-day
-            // variant (Value::DateTime wraps a date-only NaiveDate; see
-            // datatypes/values.rs), so these return ISO-8601 *strings*
-            // rather than lying about sub-day precision via a date-only
-            // Value::DateTime. The no-arg form returns local now; the
-            // single-string form validates/normalises and returns Null on
-            // unparseable input (mirrors datetime()'s Null-on-bad-input
-            // contract). Classified like datetime() — NOT added to the
-            // is_row_independent non-deterministic list, matching its
-            // sibling (the 0-arg "now" forms are evaluated per the same
-            // folding rules datetime() already follows).
+            // localdatetime() / localtime() / time() dispatch in
+            // temporal.rs via eval_local_temporal (documented on the
+            // helper in mod.rs).
             "rand" | "random" => {
                 // Top 53 bits → f64 mantissa to avoid precision loss.
                 let x = next_random_u64();

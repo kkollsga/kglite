@@ -194,15 +194,8 @@ impl<'a> CypherExecutor<'a> {
                     },
                 }
             }
-            // randomUUID() — RFC 4122 version-4 UUID string. Non-
-            // deterministic; classified alongside rand() in
-            // `is_row_independent` (where_clause.rs) so constant folding
-            // never collapses it to a single value across rows. No `uuid`
-            // crate dependency — we draw 128 random bits from the same
-            // thread-local xorshift64 PRNG that rand() uses (two u64
-            // draws), then stamp the version (4) and variant (10xx) bits
-            // per the v4 layout. Registered under the lowercased key
-            // `randomuuid`; the canonical Cypher spelling is randomUUID().
+            // randomUUID() lives in utility.rs (its doc comment travels
+            // with the arm there).
             _ => return Ok(None),
         };
         result.map(Some)

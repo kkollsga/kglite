@@ -409,12 +409,8 @@ impl<'a> CypherExecutor<'a> {
                     crate::graph::features::spatial::geometry_length_m(&geom),
                 ))
             }
-            // vector_score(node, embedding_property, query_vector [, metric])
-            // Returns the similarity score (f32→f64) for the node's embedding vs query vector.
-            //
-            // Performance: The constant arguments (property name, query vector, metric) are
-            // parsed once on the first call and cached in self.vs_cache. Subsequent rows
-            // skip JSON parsing, String allocation, and metric dispatch entirely.
+            // vector_score() dispatches in utility.rs (its doc comment
+            // travels with the arm there).
             _ => return Ok(None),
         };
         result.map(Some)
