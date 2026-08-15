@@ -15,15 +15,15 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<Option<Value>, String> {
         let result: Result<Value, String> = match name {
             "tointeger" | "toint" => {
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 Ok(to_integer(&val))
             }
             "tofloat" => {
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 Ok(to_float(&val))
             }
             "abs" => {
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
                     Value::Int64(n) => Ok(Value::Int64(n.abs())),
                     Value::Float64(f) => Ok(Value::Float64(f.abs())),
@@ -35,7 +35,7 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "ceil" | "ceiling" => {
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
                     Value::Null => Ok(Value::Null),
                     _ => match value_to_f64(&val) {
@@ -45,7 +45,7 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "floor" => {
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
                     Value::Null => Ok(Value::Null),
                     _ => match value_to_f64(&val) {
@@ -55,7 +55,7 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "round" => {
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
                     Value::Null => Ok(Value::Null),
                     _ => match value_to_f64(&val) {
@@ -78,7 +78,7 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "sqrt" => {
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
                     Value::Null => Ok(Value::Null),
                     _ => match value_to_f64(&val) {
@@ -88,7 +88,7 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "sign" => {
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
                     Value::Null => Ok(Value::Null),
                     _ => match value_to_f64(&val) {
@@ -100,7 +100,7 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "log" | "ln" => {
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
                     Value::Null => Ok(Value::Null),
                     _ => match value_to_f64(&val) {
@@ -110,7 +110,7 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "log10" => {
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
                     Value::Null => Ok(Value::Null),
                     _ => match value_to_f64(&val) {
@@ -120,7 +120,7 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "exp" => {
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
                     Value::Null => Ok(Value::Null),
                     _ => match value_to_f64(&val) {
@@ -133,7 +133,7 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 2 {
                     return Err("pow() requires 2 arguments: base, exponent".into());
                 }
-                let base_val = self.evaluate_expression(&args[0], row)?;
+                let base_val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 let exp_val = self.evaluate_expression(&args[1], row)?;
                 match (value_to_f64(&base_val), value_to_f64(&exp_val)) {
                     (Some(base), Some(exp)) => Ok(Value::Float64(base.powf(exp))),
@@ -150,7 +150,7 @@ impl<'a> CypherExecutor<'a> {
             // `Value::Null` short-circuits before coercion.
             "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "cot" | "haversin" | "degrees"
             | "radians" => {
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
                     Value::Null => Ok(Value::Null),
                     _ => match value_to_f64(&val) {
@@ -184,7 +184,7 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 2 {
                     return Err("atan2() requires 2 arguments: atan2(y, x)".into());
                 }
-                let y_val = self.evaluate_expression(&args[0], row)?;
+                let y_val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 let x_val = self.evaluate_expression(&args[1], row)?;
                 match (&y_val, &x_val) {
                     (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),

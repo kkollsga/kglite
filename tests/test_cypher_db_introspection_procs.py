@@ -410,3 +410,88 @@ def test_no_other_apoc_name_resolves():
         g.cypher("CALL apoc.meta.data()")
     with pytest.raises(Exception, match="Unknown procedure"):
         g.cypher("CALL apoc.version()")
+
+
+# ── SHOW FUNCTIONS (2026-08-15) ────────────────────────────────────────────
+# G.V() sends `SHOW FUNCTIONS YIELD name, description, signature` on connect;
+# without it the IDE's function autocomplete is dead. The listing is gated
+# against the real dispatcher in Rust
+# (scalar_functions::function_registry::tests::every_registry_name_dispatches),
+# so these tests only need to check the statement's shape.
+
+
+def test_show_functions_default_columns(small_graph):
+    df = small_graph.cypher("SHOW FUNCTIONS", to_df=True)
+    assert list(df.columns) == ["name", "category", "description"]
+    names = set(df["name"])
+    assert {"toUpper", "coalesce", "labels", "count"} <= names
+    # Rows are sorted by name and carry no empty descriptions.
+    assert list(df["name"]) == sorted(df["name"])
+    assert all(d for d in df["description"])
+
+
+def test_show_functions_signature_yield_is_the_gv_query(small_graph):
+    """The exact query G.V() sends (measured 2026-08-15)."""
+    rows = small_graph.cypher("SHOW FUNCTIONS YIELD name, description, signature").to_dicts()
+    assert rows
+    by = {r["name"]: r["signature"] for r in rows}
+    assert by["toUpper"] == "toUpper(input :: STRING) :: STRING?"
+    assert by["randomUUID"] == "randomUUID() :: STRING"
+    # `signature` is yieldable but not in the default column set, as in Neo4j.
+    assert "signature" not in small_graph.cypher("SHOW FUNCTIONS", to_df=True).columns
+
+
+def test_show_functions_yield_alias_and_aliases_column(small_graph):
+    df = small_graph.cypher("SHOW FUNCTIONS YIELD name AS fn", to_df=True)
+    assert list(df.columns) == ["fn"]
+    rows = small_graph.cypher("SHOW FUNCTIONS YIELD name, aliases").to_dicts()
+    by = {r["name"]: r["aliases"] for r in rows}
+    # An accepted alternate spelling is a field of its canonical row, not a
+    # row of its own — Neo4j lists canonical names only.
+    assert by["toUpper"] == ["toUpperCase"]
+    assert by["log"] == ["ln"]
+    assert by["floor"] == []
+    assert "toUpperCase" not in by
+
+
+def test_show_functions_listing_case_matches_the_callable(small_graph):
+    """Names are listed in their conventional camelCase spelling and the
+    parser lowercases before dispatch, so what the listing shows is callable
+    verbatim."""
+    assert small_graph.cypher("RETURN toUpper('a') AS v").to_dicts()[0]["v"] == "A"
+    assert small_graph.cypher("RETURN TOUPPER('a') AS v").to_dicts()[0]["v"] == "A"
+    assert small_graph.cypher("RETURN toUpperCase('a') AS v").to_dicts()[0]["v"] == "A"
+
+
+def test_show_functions_rejects_unknown_yield_and_where(small_graph):
+    with pytest.raises(Exception, match="does not yield"):
+        small_graph.cypher("SHOW FUNCTIONS YIELD nope")
+    with pytest.raises(Exception, match="YIELD projection"):
+        small_graph.cypher("SHOW FUNCTIONS WHERE name = 'toUpper'")
+
+
+def test_functions_and_procedures_are_separate_registries(small_graph):
+    """Two registries, two namespaces. `degree` is the one deliberate name in
+    both — `RETURN degree(n)` is a scalar function, `CALL degree()` is the
+    centrality procedure — and pinning the intersection keeps a third
+    collision from arriving unnoticed."""
+    functions = {r["name"] for r in small_graph.cypher("SHOW FUNCTIONS YIELD name").to_dicts()}
+    procedures = {r["name"] for r in small_graph.cypher("SHOW PROCEDURES YIELD name").to_dicts()}
+    assert functions & procedures == {"degree"}
+    assert "pagerank" not in functions
+    assert "toUpper" not in procedures
+
+
+def test_no_registry_function_panics_on_zero_args():
+    """Every listed function called with no arguments must ERROR, never
+    panic — pre-fix 26 single-arg functions indexed args[0] unguarded and
+    a bare `RETURN size()` killed the process (over Bolt: the connection)."""
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:A {x: 1})")
+    for row in g.cypher("SHOW FUNCTIONS YIELD name, category").to_dicts():
+        if row["category"] == "aggregate":
+            continue
+        try:
+            g.cypher(f"RETURN {row['name']}() AS v")
+        except BaseException as exc:  # noqa: BLE001 — panics surface as BaseException
+            assert type(exc).__name__ != "PanicException", row["name"]

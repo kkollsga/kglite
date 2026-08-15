@@ -15,28 +15,29 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<Option<Value>, String> {
         let result: Result<Value, String> = match name {
             "toupper" | "touppercase" => {
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
                     Value::String(s) => Ok(Value::String(s.to_uppercase())),
                     _ => Ok(Value::Null),
                 }
             }
             "tolower" | "tolowercase" => {
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
                     Value::String(s) => Ok(Value::String(s.to_lowercase())),
                     _ => Ok(Value::Null),
                 }
             }
             "tostring" => {
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 Ok(Value::String(format_value_compact(&val)))
             }
             "text_edit_distance" => {
                 if args.len() != 2 {
                     return Err("text_edit_distance() requires 2 arguments".into());
                 }
-                let a = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let a =
+                    coerce_to_string(self.evaluate_expression(super::first_arg(name, args)?, row)?);
                 let b = coerce_to_string(self.evaluate_expression(&args[1], row)?);
                 match (&a, &b) {
                     (Value::String(s1), Value::String(s2)) => {
@@ -49,7 +50,8 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 1 {
                     return Err("text_normalize() requires 1 argument".into());
                 }
-                let val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let val =
+                    coerce_to_string(self.evaluate_expression(super::first_arg(name, args)?, row)?);
                 match val {
                     Value::String(s) => {
                         let mut out = String::with_capacity(s.len());
@@ -77,7 +79,8 @@ impl<'a> CypherExecutor<'a> {
                         "text_jaccard() requires 2-3 arguments: (a, b [, separator])".into(),
                     );
                 }
-                let a = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let a =
+                    coerce_to_string(self.evaluate_expression(super::first_arg(name, args)?, row)?);
                 let b = coerce_to_string(self.evaluate_expression(&args[1], row)?);
                 let sep = if args.len() == 3 {
                     match self.evaluate_expression(&args[2], row)? {
@@ -112,7 +115,8 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 2 {
                     return Err("text_ngrams() requires 2 arguments: (string, n)".into());
                 }
-                let s_val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let s_val =
+                    coerce_to_string(self.evaluate_expression(super::first_arg(name, args)?, row)?);
                 let n_val = self.evaluate_expression(&args[1], row)?;
                 match (&s_val, &n_val) {
                     (Value::String(s), Value::Int64(n)) => {
@@ -138,7 +142,8 @@ impl<'a> CypherExecutor<'a> {
                 if args.is_empty() {
                     return Err("text_contains_any() requires at least 1 argument".into());
                 }
-                let s_val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let s_val =
+                    coerce_to_string(self.evaluate_expression(super::first_arg(name, args)?, row)?);
                 let s = match &s_val {
                     Value::String(s) => s.clone(),
                     _ => return Ok(Some(Value::Null)),
@@ -190,7 +195,8 @@ impl<'a> CypherExecutor<'a> {
                 if args.is_empty() {
                     return Err("text_starts_with_any() requires at least 1 argument".into());
                 }
-                let s_val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let s_val =
+                    coerce_to_string(self.evaluate_expression(super::first_arg(name, args)?, row)?);
                 let s = match &s_val {
                     Value::String(s) => s.clone(),
                     _ => return Ok(Some(Value::Null)),
@@ -255,7 +261,7 @@ impl<'a> CypherExecutor<'a> {
                         "text_match_regex() requires 2 or 3 args: (text, pattern[, flags])".into(),
                     );
                 }
-                let text = self.evaluate_expression(&args[0], row)?;
+                let text = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 let pattern = self.evaluate_expression(&args[1], row)?;
                 let flags: Option<String> = if args.len() == 3 {
                     match self.evaluate_expression(&args[2], row)? {
@@ -294,7 +300,8 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 2 {
                     return Err("split() requires 2 arguments: string, delimiter".into());
                 }
-                let str_val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let str_val =
+                    coerce_to_string(self.evaluate_expression(super::first_arg(name, args)?, row)?);
                 let delim_val = self.evaluate_expression(&args[1], row)?;
                 match (&str_val, &delim_val) {
                     (Value::String(s), Value::String(delim)) => {
@@ -316,7 +323,8 @@ impl<'a> CypherExecutor<'a> {
                         "replace() requires 3 arguments: string, search, replacement".into(),
                     );
                 }
-                let str_val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let str_val =
+                    coerce_to_string(self.evaluate_expression(super::first_arg(name, args)?, row)?);
                 let search_val = self.evaluate_expression(&args[1], row)?;
                 let replace_val = self.evaluate_expression(&args[2], row)?;
                 match (&str_val, &search_val, &replace_val) {
@@ -332,7 +340,8 @@ impl<'a> CypherExecutor<'a> {
                         "substring() requires 2-3 arguments: string, start [, length]".into(),
                     );
                 }
-                let str_val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let str_val =
+                    coerce_to_string(self.evaluate_expression(super::first_arg(name, args)?, row)?);
                 let start_val = self.evaluate_expression(&args[1], row)?;
                 match (&str_val, &start_val) {
                     (Value::String(s), Value::Int64(start)) => {
@@ -358,7 +367,8 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 2 {
                     return Err("left() requires 2 arguments: string, length".into());
                 }
-                let str_val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let str_val =
+                    coerce_to_string(self.evaluate_expression(super::first_arg(name, args)?, row)?);
                 let len_val = self.evaluate_expression(&args[1], row)?;
                 match (&str_val, &len_val) {
                     (Value::String(s), Value::Int64(len)) => {
@@ -372,7 +382,8 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 2 {
                     return Err("right() requires 2 arguments: string, length".into());
                 }
-                let str_val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let str_val =
+                    coerce_to_string(self.evaluate_expression(super::first_arg(name, args)?, row)?);
                 let len_val = self.evaluate_expression(&args[1], row)?;
                 match (&str_val, &len_val) {
                     (Value::String(s), Value::Int64(len)) => {
@@ -388,7 +399,8 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 1 {
                     return Err("trim() requires 1 argument: string".into());
                 }
-                let val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let val =
+                    coerce_to_string(self.evaluate_expression(super::first_arg(name, args)?, row)?);
                 match val {
                     Value::String(s) => Ok(Value::String(s.trim().to_string())),
                     _ => Ok(Value::Null),
@@ -398,7 +410,8 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 1 {
                     return Err("ltrim() requires 1 argument: string".into());
                 }
-                let val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let val =
+                    coerce_to_string(self.evaluate_expression(super::first_arg(name, args)?, row)?);
                 match val {
                     Value::String(s) => Ok(Value::String(s.trim_start().to_string())),
                     _ => Ok(Value::Null),
@@ -408,7 +421,8 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 1 {
                     return Err("rtrim() requires 1 argument: string".into());
                 }
-                let val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let val =
+                    coerce_to_string(self.evaluate_expression(super::first_arg(name, args)?, row)?);
                 match val {
                     Value::String(s) => Ok(Value::String(s.trim_end().to_string())),
                     _ => Ok(Value::Null),

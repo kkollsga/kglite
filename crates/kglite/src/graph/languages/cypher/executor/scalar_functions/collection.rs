@@ -18,7 +18,7 @@ impl<'a> CypherExecutor<'a> {
                 // Phase A.1 / C2 — native Value::List fast path;
                 // string fallback stays for legacy collect-as-JSON
                 // and parameter-passed lists.
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
                     Value::List(items) => Ok(Value::Int64(items.len() as i64)),
                     Value::Map(m) => Ok(Value::Int64(m.len() as i64)),
@@ -40,7 +40,7 @@ impl<'a> CypherExecutor<'a> {
                         return Ok(Some(Value::Int64(path.hops as i64)));
                     }
                 }
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 match val {
                     // Phase A.1 / C2 — native Value::List/Path/Map paths.
                     Value::List(items) => Ok(Value::Int64(items.len() as i64)),
@@ -71,7 +71,7 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 1 {
                     return Err("reverse() requires 1 argument".into());
                 }
-                match self.evaluate_expression(&args[0], row)? {
+                match self.evaluate_expression(super::first_arg(name, args)?, row)? {
                     // Cypher reverse() on a list reverses its elements.
                     Value::List(mut items) => {
                         items.reverse();
@@ -102,7 +102,7 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 1 {
                     return Err("head() requires 1 argument".into());
                 }
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 let items = parse_list_value(&val);
                 Ok(items.into_iter().next().unwrap_or(Value::Null))
             }
@@ -110,7 +110,7 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 1 {
                     return Err("last() requires 1 argument".into());
                 }
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = self.evaluate_expression(super::first_arg(name, args)?, row)?;
                 let items = parse_list_value(&val);
                 Ok(items.into_iter().last().unwrap_or(Value::Null))
             }
@@ -121,7 +121,7 @@ impl<'a> CypherExecutor<'a> {
                         "range() requires 2 or 3 arguments: range(start, end[, step])".into(),
                     );
                 }
-                let start = as_i64(&self.evaluate_expression(&args[0], row)?)?;
+                let start = as_i64(&self.evaluate_expression(super::first_arg(name, args)?, row)?)?;
                 let end = as_i64(&self.evaluate_expression(&args[1], row)?)?;
                 let step = if args.len() == 3 {
                     let s = as_i64(&self.evaluate_expression(&args[2], row)?)?;

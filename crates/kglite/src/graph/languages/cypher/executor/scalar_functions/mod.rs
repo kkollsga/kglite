@@ -9,6 +9,7 @@ use super::*;
 use crate::datatypes::values::Value;
 
 mod collection;
+mod function_registry;
 mod graph;
 mod numeric;
 mod shared;
@@ -19,6 +20,7 @@ mod timeseries;
 mod utility;
 mod vector;
 
+pub(super) use function_registry::{FunctionSpec, FUNCTIONS};
 use shared::*;
 
 impl<'a> CypherExecutor<'a> {
@@ -124,9 +126,29 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
+    /// Probe hook for the `function_registry` drift gate: the same dispatch
+    /// path a query takes, reachable from the sibling test module.
+    #[cfg(test)]
+    pub(super) fn test_evaluate_scalar_function(
+        &self,
+        name: &str,
+        args: &[Expression],
+        row: &ResultRow,
+    ) -> Result<Value, String> {
+        self.evaluate_scalar_function(name, args, row)
+    }
+
     /// Evaluate scalar (non-aggregate) functions by delegating to the
     /// per-category modules in order. Each `eval_*_fn` returns `Ok(None)`
     /// when it does not own `name`, so the first owner wins.
+    ///
+    /// **Adding a `match` arm to a category module means adding an entry to
+    /// [`function_registry::FUNCTIONS`]** — that table is what `SHOW
+    /// FUNCTIONS` lists, and a client's autocomplete only knows what it
+    /// advertises. The registry→dispatcher direction is enforced (every
+    /// registered name is executed against this chain by
+    /// `function_registry::tests::every_registry_name_dispatches`); this
+    /// direction is not, and cannot be, so it is a rule rather than a gate.
     pub(super) fn evaluate_scalar_function(
         &self,
         name: &str,
@@ -351,4 +373,15 @@ impl<'a> CypherExecutor<'a> {
     // ========================================================================
     // RETURN
     // ========================================================================
+}
+
+/// Checked first-argument fetch for the category dispatchers. Pre-fix,
+/// 26 single-argument functions indexed `&args[0]` unguarded, so a zero-arg
+/// call — `RETURN size()` — panicked with an index-out-of-bounds instead of
+/// erroring (measured 2026-08-15 across numeric/string/collection; over Bolt
+/// a panic aborts the connection). The parser permits empty argument lists,
+/// so the guard belongs here.
+pub(super) fn first_arg<'e>(name: &str, args: &'e [Expression]) -> Result<&'e Expression, String> {
+    args.first()
+        .ok_or_else(|| format!("{name}() requires at least one argument"))
 }
