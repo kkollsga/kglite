@@ -724,7 +724,10 @@ Three artifacts that prove ecosystem compatibility:
   start server, query.
 - **`examples/bolt_client_langchain.py`** — point LangChain's
   `Neo4jGraph` chain at `kglite-bolt-server` and answer a natural-
-  language question. Demonstrates the ecosystem unlock.
+  language question. *(Correction, 2026-08-15: this example was never
+  shipped — `Neo4jGraph.refresh_schema()` requires `apoc.meta.data()`,
+  which KGLite deliberately does not implement. The migration guide
+  documents the `refresh_schema=False` recipe instead.)*
 - **`examples/bolt_neo4j_browser.md`** — walkthrough for pointing
   Neo4j Browser at the server. Mostly just configuration, but
   proves the GUI works.

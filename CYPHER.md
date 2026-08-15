@@ -1597,9 +1597,9 @@ Import is explicit and total: an outer variable is visible inside the body **iff
 ## Schema Introspection (`CALL db.*`)
 
 Neo4j-compatible schema procedures for discovering what's in the graph
-without leaving Cypher. Every Bolt client (cypher-shell, Neo4j Browser,
-the Python `neo4j` driver) calls these to populate type palettes, drive
-autocomplete, and surface index advisors.
+without leaving Cypher. Bolt clients (cypher-shell, Neo4j Browser, the
+Python `neo4j` driver) call these to populate their type palettes and
+sidebars; `SHOW PROCEDURES` feeds autocomplete.
 
 | Procedure | YIELD columns | Returns |
 |-----------|---------------|---------|
@@ -1609,10 +1609,27 @@ autocomplete, and surface index advisors.
 | `CALL db.constraints()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties` | One row per declared constraint, sorted by `name`. `SHOW CONSTRAINTS` returns the same rows — see [Cypher constraint DDL](#cypher-constraint-ddl) |
 | `CALL db.propertyKeys()` | `propertyKey` | One row per declared property name (node + relationship), sorted alphabetically |
 | `CALL db.schema()` | `nodeType`, `properties` | One row per node-type with its sorted list of property names — the in-language counterpart of Python `describe()` |
+| `CALL db.schema.visualization()` | `nodes`, `relationships` | One row: virtual nodes (one per label; `name`/`indexes`/`constraints` properties) and virtual relationships per observed (source label, type, target label) combination — what Neo4j Browser's schema tab renders |
 
 Procedure names are case-insensitive on dispatch (Neo4j convention
 preserves camelCase in docs: `db.relationshipTypes`, not
 `db.relationship_types`). YIELD columns are case-sensitive.
+
+**Standalone CALL.** `YIELD` is optional when the `CALL` is the entire
+statement: `CALL db.labels()` returns every declared column in declared
+order — the form Neo4j clients and cypher-shell send. Combined with any
+other clause, `YIELD` is required. Result columns always follow YIELD
+order (alias-or-name), and a call that yields zero rows still reports its
+declared columns.
+
+**`SHOW PROCEDURES [YIELD …]`** lists every procedure (Neo4j's default
+columns: `name`, `description`, `mode`, `worksOnSystem`) from the same
+registry `CALL list_procedures()` reads. **Bolt server only:**
+`CALL dbms.components()`, `CALL dbms.showCurrentUser()`, and
+`SHOW DATABASES` are answered by `kglite-bolt-server` (they report server
+facts — identity, configured user, served database) and are not available
+in-process; see the
+[Bolt server guide](https://kglite.readthedocs.io/en/latest/operators/bolt-server.html).
 
 ```python
 # Enumerate node types

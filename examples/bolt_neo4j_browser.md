@@ -1,8 +1,16 @@
 # Pointing Neo4j Browser at kglite-bolt-server
 
 `kglite-bolt-server` speaks the Neo4j Bolt v5 wire protocol, so the
-**Neo4j Browser** — the standard graph GUI — connects to it unchanged. This
-walkthrough builds a small graph, serves it, and explores it in the browser.
+**Neo4j Browser** — the standard graph GUI — can connect to it when the
+server is started with `--neo4j-compat` (the Browser reads
+`dbms.components()` for its version banner, and the flag makes that row —
+and the handshake agent — report a Neo4j identity). This walkthrough builds
+a small graph, serves it, and explores it in the browser.
+
+> Browser's connect sequence varies across its releases; if your version
+> shows a connection error or an empty sidebar, run the server with
+> `RUST_LOG=debug` — every incoming query is logged, so the unmet call is
+> visible immediately.
 
 ## 1. Build a graph and save it
 
@@ -31,7 +39,7 @@ g.save("people.kgl")
 cargo build -p kglite-bolt-server --release
 
 # Serve the graph on the default Bolt port (7687):
-./target/release/kglite-bolt-server --graph people.kgl
+./target/release/kglite-bolt-server --graph people.kgl --neo4j-compat
 ```
 
 The server listens on `127.0.0.1:7687` with authentication **disabled** by
@@ -49,7 +57,7 @@ default. Useful flags:
 For read-only exploration, start it as:
 
 ```bash
-./target/release/kglite-bolt-server --graph people.kgl --readonly
+./target/release/kglite-bolt-server --graph people.kgl --readonly --neo4j-compat
 ```
 
 ## 3. Connect Neo4j Browser
@@ -62,8 +70,10 @@ Open Neo4j Browser (the desktop app, or the web build at
   with any values if you started with `--auth none`; with `--auth basic`,
   use the credentials you set).
 
-Click **Connect**. The browser performs the Bolt handshake against
-kglite-bolt-server exactly as it would against Neo4j.
+Click **Connect**. The browser performs the Bolt handshake and reads the
+server's identity from `dbms.components()`; under `--neo4j-compat` both
+report a Neo4j 5.26 identity (with the real product kept in the agent
+string).
 
 ## 4. Explore
 
@@ -94,8 +104,13 @@ MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a, r, b
 - **Writes** require `BEGIN`/`COMMIT` (the driver does this automatically)
   and a server started without `--readonly`. Mutations land in memory; they
   are not written back to the `.kgl` file.
-- **`db.*` procedures.** `CALL db.labels()` and `CALL db.relationshipTypes()`
-  work and return Neo4j-aligned column names (`label`, `relationshipType`),
-  so browser sidebar introspection populates correctly.
+- **Introspection.** The sidebar's label / relationship-type / property
+  lists come from `db.labels()`, `db.relationshipTypes()` and
+  `db.propertyKeys()`; the schema tab renders
+  `db.schema.visualization()`; `SHOW DATABASES`, `dbms.components()` and
+  `dbms.showCurrentUser()` are answered by the server. These are the calls
+  Browser's connect sequence makes — verified against the Bolt server with
+  the official Python driver; if your Browser version sends something more,
+  the `RUST_LOG=debug` query log will show it.
 - For a programmatic client instead of the GUI, see
   [`bolt_client_neo4j_python.py`](bolt_client_neo4j_python.py).

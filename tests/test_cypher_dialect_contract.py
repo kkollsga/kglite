@@ -24,7 +24,26 @@ CLAIM_SURFACES = [
     ROOT / "docs" / "operators" / "bolt-server.md",
     ROOT / "docs" / "operators" / "index.md",
     ROOT / "crates" / "kglite-bolt-server" / "README.md",
+    # The two strongest historical over-claims lived OUTSIDE this gate
+    # (found 2026-08-15): examples/ walkthroughs and the migration guides
+    # are exactly where compatibility gets over-narrated. Glob-expanded in
+    # claim_surface_files() so new files in either directory are gated the
+    # day they land.
 ]
+
+# Directories whose every Markdown file is a claim surface.
+CLAIM_SURFACE_GLOBS = [
+    (ROOT / "examples", "*.md"),
+    (ROOT / "docs" / "python" / "migrations", "*.md"),
+]
+
+
+def claim_surface_files():
+    files = list(CLAIM_SURFACES)
+    for directory, pattern in CLAIM_SURFACE_GLOBS:
+        files.extend(sorted(directory.glob(pattern)))
+    return files
+
 
 # Statuses that claim executable behavior and must therefore cite behavioral
 # cases from tests/cypher_contract/cases.json.
@@ -176,7 +195,11 @@ def _overclaims(text: str) -> list[str]:
 
 
 def test_public_claim_surfaces_do_not_promise_complete_or_drop_in_compatibility():
-    for path in CLAIM_SURFACES:
+    surfaces = claim_surface_files()
+    # The globs must actually expand — an empty glob silently un-gates a
+    # whole directory (the exact hole this extension closed).
+    assert len(surfaces) > len(CLAIM_SURFACES), "claim-surface globs expanded to nothing"
+    for path in surfaces:
         overclaims = _overclaims(path.read_text(encoding="utf-8"))
         assert not overclaims, f"{path}: over-claiming phrases {overclaims}"
 

@@ -233,6 +233,29 @@ refuse, and open at every level.
 
 ### Checkpoints
 
+### Server-facts verbs
+
+Besides `db.checkpoint()` (below), three read-only verbs are answered at the
+Bolt layer because they report server state the engine does not hold — the
+introspection calls Neo4j clients make on connect:
+
+- **`CALL dbms.components()`** — name / versions / edition, following
+  `--neo4j-compat` (see *Driver identity*). Edition is always `community`.
+- **`CALL dbms.showCurrentUser()`** — the configured `--auth-user`
+  (or `neo4j` under `--auth none`); roles and flags are empty. Answered from
+  server config: there is deliberately no per-session principal.
+- **`SHOW DATABASES`** — one row named `neo4j` (matching the routing
+  default), `default`/`home` true, `access`/`writer` reflecting
+  `--readonly`. The session `database=` field remains accepted-and-ignored;
+  this row is informational.
+
+All three take an optional `YIELD` naming a subset of their declared
+columns, like `db.checkpoint()`. They exist only over Bolt — in-process
+bindings have no server to describe. To see what any client sends on
+connect, run the server at `RUST_LOG=debug`: every incoming query is logged.
+
+### Checkpoints
+
 Three routes rewrite the served `.kgl`, and all three are the same operation:
 flush the log, stamp the checkpoint position, write the file, truncate the log.
 
@@ -323,17 +346,30 @@ checkpoint-truncates-the-log test, and every row of this matrix.
 
 ## Driver identity (`--neo4j-compat`)
 
-The handshake reports `kglite-bolt-server/<version>` by default. The official
-Python and JavaScript drivers accept that; the official **Java** driver requires
-a `Neo4j/` prefix and refuses the connection outright without one:
+The server's identity surfaces in **two places that always agree**: the
+handshake `server` agent, and the `CALL dbms.components()` row (name,
+versions, edition — always `community`). Both report
+`kglite-bolt-server/<version>` by default and the Neo4j-compatible spelling
+under `--neo4j-compat`.
 
-```
-UntrustedServerException: Server does not identify as a genuine Neo4j
-instance: 'kglite-bolt-server/0.14.5'
-```
+Two client families need the compatible spelling:
 
-Enable compatibility mode to serve JVM clients. Either route works, and the flag
-wins if both are set:
+- the official **Java** driver requires a `Neo4j/` agent prefix and refuses
+  the connection outright without one:
+
+  ```
+  UntrustedServerException: Server does not identify as a genuine Neo4j
+  instance: 'kglite-bolt-server/0.14.5'
+  ```
+
+- **GUI clients** (Neo4j Browser, G.V(), and other IDEs) read
+  `dbms.components()` to decide product and feature support, so they need
+  the flag too — under it the row reports `Neo4j Kernel` / `5.26.0` /
+  `community`. The official Python and JavaScript drivers accept the honest
+  default.
+
+Enable compatibility mode to serve those clients. Either route works, and the
+flag wins if both are set:
 
 ```bash
 kglite-bolt-server --graph graph.kgl --neo4j-compat

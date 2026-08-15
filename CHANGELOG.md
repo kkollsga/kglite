@@ -49,6 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Documentation now states Bolt-client compatibility as measured: the
+  CI-tested drivers (Python/JS/Java) connect unchanged; Neo4j Browser needs
+  `--neo4j-compat`; LangChain's `Neo4jGraph` needs `refresh_schema=False`
+  plus a hand-supplied schema (its refresh path requires APOC, which KGLite
+  does not ship); a `USE` clause is a syntax error (the session-level
+  `database=` field is what is accepted and ignored).
 - Trailing tokens after a MATCH pattern are now a syntax error. Previously
   `MATCH (n) bogus tokens` — including a typo'd keyword like `RETRUN n` —
   silently executed as `MATCH (n)`, running a different query than written.

@@ -46,13 +46,29 @@ For positioning detail see
 ### Path A — Bolt server (drop-in for driver code)
 
 `kglite-bolt-server` is a pure-Rust binary that speaks the
-[Bolt v5 wire protocol](https://neo4j.com/docs/bolt/current/). Any
-Neo4j-aware client — the official Python/JS/Java/Go drivers, Cypher
-Shell, Neo4j Browser, LangChain's `Neo4jGraph` — connects with **no
-consumer-side code changes** beyond the connection URL. Clients on the Java
-driver additionally need the server started with `--neo4j-compat` (see the note
-below); the change is server-side, so their code is still untouched. See the
-[Bolt server operator guide](../../operators/bolt-server.md).
+[Bolt v5 wire protocol](https://neo4j.com/docs/bolt/current/). The
+official **Python, JavaScript, and Java drivers are regression-tested in
+CI** and connect with no consumer-side code changes beyond the connection
+URL (the Java driver needs the server started with `--neo4j-compat` — see
+the note below; the change is server-side). Other Bolt v5 clients
+generally work within the documented protocol and Cypher dialect limits:
+
+- **cypher-shell** connects and queries; standalone `CALL proc()`,
+  `SHOW INDEXES/CONSTRAINTS/PROCEDURES`, and `SHOW DATABASES` answer.
+- **Neo4j Browser** requires `--neo4j-compat` (it reads
+  `dbms.components()` for its version banner) and then populates its
+  sidebar and schema tab from `db.labels()` / `db.relationshipTypes()` /
+  `db.propertyKeys()` / `db.schema.visualization()`. Verify against your
+  Browser version; its connect sequence varies across releases — run the
+  server at `RUST_LOG=debug` to see exactly what it sends.
+- **LangChain's `Neo4jGraph` does NOT work unchanged**: its
+  `refresh_schema()` calls `apoc.meta.data()` and its graph-document
+  writer uses `apoc.merge.*`, and KGLite ships no APOC (see the `apoc.*`
+  row below). Construct it with `refresh_schema=False` and supply the
+  schema text yourself (e.g. from `describe()`), and write through Cypher
+  rather than `add_graph_documents`.
+
+See the [Bolt server operator guide](../../operators/bolt-server.md).
 
 ```bash
 cargo install kglite-bolt-server
@@ -127,7 +143,7 @@ should work, but are untested — exercise them yourself first.
 | Read-only enforcement | `--readonly` rejects all mutations |
 | Auto-commit **mutations** | **Not supported** — wrap `CREATE`/`SET`/`DELETE`/`MERGE` in explicit `BEGIN`/`COMMIT`. Auto-commit reads work. (Drivers wrap writes in a tx anyway.) |
 | OCC on writes | Supported — stale-snapshot commits get `Neo.TransientError.Transaction.Outdated`. That class is retriable, so `session.execute_write` retries the unit of work for you; only hand-rolled `begin_transaction` code needs its own retry loop |
-| Multi-database (`USE db`) | **Not supported** — single graph; `USE` is accepted but ignored |
+| Multi-database (`USE db`) | **Not supported** — single graph. A `USE` clause is a syntax error; the *session-level* `database=` field is accepted and ignored, and `SHOW DATABASES` reports the single served graph as `neo4j` |
 | Causal consistency / bookmarks | **Not supported** — the `bookmark` field is not returned on COMMIT |
 | Multi-statement queries (`;`-separated) | **Not supported** — one statement per `session.run`, or group with `BEGIN`/`COMMIT` |
 | `db.labels()` / `db.relationshipTypes()` | Yield `label` / `relationshipType` (Neo4j-conventional names) over Bolt |
