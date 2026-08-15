@@ -47,29 +47,6 @@ impl TypeLookup {
         })
     }
 
-    /// Fast constructor using pre-built id_indices from DirGraph (avoids full-graph scan).
-    /// Falls back to graph scan if id_indices has been invalidated (e.g., after node deletion).
-    /// Does not build title_to_index since it's unused in the add_nodes hot path.
-    pub fn from_id_indices(
-        id_indices: &crate::graph::storage::disk::id_index::IdIndexStore,
-        graph: &GraphBackend,
-        node_type: String,
-    ) -> Result<Self, String> {
-        if node_type.is_empty() {
-            return Err("Node type cannot be empty".to_string());
-        }
-        if let Some(uid_map) = id_indices.materialize_type(&node_type) {
-            Ok(TypeLookup {
-                uid_to_index: uid_map,
-                title_to_index: FxHashMap::default(),
-                node_type,
-            })
-        } else {
-            // id_indices invalidated — fall back to graph scan
-            Self::new(graph, node_type)
-        }
-    }
-
     pub fn check_uid(&self, uid: &Value) -> Option<NodeIndex> {
         CombinedTypeLookup::lookup_with_type_fallback(&self.uid_to_index, uid)
     }

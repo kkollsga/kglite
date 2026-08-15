@@ -331,6 +331,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no row, per Cypher's three-valued logic. Ordering became total; comparison
   stayed partial.
 
+- **Rust API: `kglite::api` re-exports `Direction`, `NodeIndex` and
+  `EdgeIndex`.** They were already unavoidable in the curated surface —
+  `edges_directed`, `count_edges_filtered` and `fluent::filter_by_connection`
+  all name `Direction`, and every slot handle is a `NodeIndex` — so an embedder
+  had to add a direct `petgraph` dependency and pin *the same major* the engine
+  links, a mismatch surfacing as a type error at the call site rather than a
+  version warning. The version coupling is now the engine's to carry.
+
+- **Rust API (BREAKING): `NodeData::id` and `NodeData::title` are no longer
+  public fields.** Read them through the existing `id()` / `title()` accessors,
+  or — for a resolved value — through `GraphRead::get_node_id` /
+  `NodeView::id`. The fields were a footgun since 0.16.0 made every ingest path
+  columnar: on the memory and mapped backends the inline field holds a
+  `Value::Null` *sentinel* while the node's identity lives in its type's
+  column store, so a field read returned `Null` with nothing to warn the
+  caller. The accessors carry that contract in their docs and name the
+  resolving reads. `NodeData::new` / `new_preinterned` still take `id` and
+  `title` by value; `node_type` stays public.
+
+- **Rust API (BREAKING): `TypeLookup::from_id_indices` is removed.** It had no
+  caller in the workspace — `add_nodes` uses `TypeLookup::new` and the edge
+  path uses `CombinedTypeLookup::from_id_indices`, which is unchanged — and
+  its fast path materialised a whole type's id map, the cost this release
+  removed from `add_connections`.
+
 ### Fixed
 
 - **Opening a file that is not a kglite graph no longer blames an old

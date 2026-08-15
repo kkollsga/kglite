@@ -57,6 +57,19 @@ pub mod api {
     /// streams the benchmark/demo graph as CSVs + a manifest in bounded memory.
     /// Surfaced through the wheel as `kglite.graphgen(...)`.
     pub use crate::graphgen::{generate_to_dir as graphgen, GraphGenConfig, GraphGenStats};
+    /// The petgraph types this API's own signatures already speak.
+    ///
+    /// `NodeIndex` and `EdgeIndex` are the slot handles every `GraphRead` /
+    /// `GraphWrite` call takes and returns; `Direction` is the in/out argument
+    /// on every adjacency call (`edges_directed`, `count_edges_filtered`,
+    /// `fluent::filter_by_connection`). A consumer cannot call those without
+    /// naming them, so until now the curated surface required reaching around
+    /// itself for a direct `petgraph` dependency — and pinning *the same major*
+    /// as the engine links, since a mismatch there is a type error at the call
+    /// site rather than a version warning. Re-exported so the version coupling
+    /// is the engine's to carry.
+    pub use petgraph::graph::{EdgeIndex, NodeIndex};
+    pub use petgraph::Direction;
     // Thin pure-Rust graph handle for embedders + the free function
     // backing it. The wheel crate (`kglite-py`) defines its own,
     // Python-flavored `KnowledgeGraph` separately — same name,

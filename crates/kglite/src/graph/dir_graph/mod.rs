@@ -1313,8 +1313,9 @@ impl DirGraph {
 
     /// The raw stored node record — **topology and existence only**.
     ///
-    /// What the returned [`NodeData`]'s `id`/`title` fields hold is not the
-    /// same on every backend, and that asymmetry is deliberate:
+    /// What the returned [`NodeData`]'s [`id()`](NodeData::id) /
+    /// [`title()`](NodeData::title) hold is not the same on every backend, and
+    /// that asymmetry is deliberate:
     ///
     /// * **memory / mapped** — the inline fields are the `Value::Null`
     ///   sentinel. Every ingest path has been columnar since 0.16.0, so the

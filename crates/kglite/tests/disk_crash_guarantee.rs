@@ -57,7 +57,7 @@ fn titles(graph: &DirGraph) -> Vec<String> {
         .graph
         .node_indices()
         .filter_map(|idx| graph.get_node(idx))
-        .map(|node| match &node.title {
+        .map(|node| match node.title().as_ref() {
             Value::String(title) => title.to_string(),
             other => other.to_string(),
         })

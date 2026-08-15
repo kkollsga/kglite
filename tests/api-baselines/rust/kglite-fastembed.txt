@@ -1,5 +1,8 @@
 pub mod kglite
 pub mod kglite::api
+pub use kglite::api::Direction
+pub use kglite::api::EdgeIndex
+pub use kglite::api::NodeIndex
 pub mod kglite::api::algorithms
 pub enum kglite::api::algorithms::DistanceMetric
 pub kglite::api::algorithms::DistanceMetric::Cosine
@@ -1047,6 +1050,7 @@ pub fn kglite::api::fluent::MethodConfig::parse_resolve(s: &str) -> core::result
 pub struct kglite::api::fluent::PatternExecutor<'a>
 impl<'a> kglite::api::fluent::PatternExecutor<'a>
 pub fn kglite::api::fluent::PatternExecutor<'a>::execute(&self, pattern: &kglite::graph::core::pattern_matching::pattern::Pattern) -> core::result::Result<alloc::vec::Vec<kglite::api::fluent::PatternMatch>, alloc::string::String>
+impl<'a> kglite::api::fluent::PatternExecutor<'a>
 pub fn kglite::api::fluent::PatternExecutor<'a>::find_matching_nodes_pub(&self, pattern: &kglite::graph::core::pattern_matching::pattern::NodePattern) -> core::result::Result<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>, alloc::string::String>
 pub fn kglite::api::fluent::PatternExecutor<'a>::new(graph: &'a kglite::api::DirGraph, max_matches: core::option::Option<usize>) -> Self
 pub fn kglite::api::fluent::PatternExecutor<'a>::new_lightweight_with_params(graph: &'a kglite::api::DirGraph, max_matches: core::option::Option<usize>, params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> Self
@@ -1888,7 +1892,6 @@ pub struct kglite::api::storage::TypeLookup
 impl kglite::api::storage::TypeLookup
 pub fn kglite::api::storage::TypeLookup::check_title(&self, title: &kglite::datatypes::values::Value) -> core::option::Option<petgraph::graph_impl::NodeIndex>
 pub fn kglite::api::storage::TypeLookup::check_uid(&self, uid: &kglite::datatypes::values::Value) -> core::option::Option<petgraph::graph_impl::NodeIndex>
-pub fn kglite::api::storage::TypeLookup::from_id_indices(id_indices: &kglite::graph::storage::disk::id_index::IdIndexStore, graph: &kglite::api::storage::GraphBackend, node_type: alloc::string::String) -> core::result::Result<Self, alloc::string::String>
 pub fn kglite::api::storage::TypeLookup::new(graph: &kglite::api::storage::GraphBackend, node_type: alloc::string::String) -> core::result::Result<Self, alloc::string::String>
 impl core::clone::Clone for kglite::api::storage::TypeLookup
 pub fn kglite::api::storage::TypeLookup::clone(&self) -> kglite::api::storage::TypeLookup
@@ -2562,9 +2565,7 @@ pub fn kglite::api::KnowledgeGraph::from_arc(inner: alloc::sync::Arc<kglite::api
 pub fn kglite::api::KnowledgeGraph::set_embedder_native(&mut self, embedder: alloc::sync::Arc<dyn kglite::api::Embedder>)
 pub fn kglite::api::KnowledgeGraph::source_location(&self, name: &str, node_type: core::option::Option<&str>) -> kglite::api::code_entities::SourceLookup
 pub struct kglite::api::NodeData
-pub kglite::api::NodeData::id: kglite::datatypes::values::Value
 pub kglite::api::NodeData::node_type: kglite::api::InternedKey
-pub kglite::api::NodeData::title: kglite::datatypes::values::Value
 impl kglite::api::NodeData
 pub fn kglite::api::NodeData::id(&self) -> alloc::borrow::Cow<'_, kglite::datatypes::values::Value>
 pub fn kglite::api::NodeData::new(id: kglite::datatypes::values::Value, title: kglite::datatypes::values::Value, node_type: alloc::string::String, properties: std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>, interner: &mut kglite::api::StringInterner) -> Self

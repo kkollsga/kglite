@@ -1281,8 +1281,16 @@ pub fn soft_alias_fallback(resolved: &str) -> Option<SoftAliasFallback> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeData {
-    pub id: Value,
-    pub title: Value,
+    /// **Not public, deliberately.** Since 0.16.0 every ingest path is
+    /// columnar from the first node, so on the memory and mapped backends this
+    /// field holds the `Value::Null` *sentinel* and the node's canonical id
+    /// lives in its type's `ColumnStore`. A downstream consumer reading the
+    /// field got that sentinel with nothing to warn it; the accessor
+    /// [`NodeData::id`] says so, and points at the resolving reads
+    /// (`GraphRead::get_node_id`, `NodeView::id`) that answer what the caller
+    /// actually meant. Same for [`NodeData::title`].
+    pub(crate) id: Value,
+    pub(crate) title: Value,
     pub node_type: InternedKey,
     pub(crate) properties: PropertyStorage,
 }
