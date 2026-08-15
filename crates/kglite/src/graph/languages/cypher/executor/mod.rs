@@ -921,6 +921,7 @@ pub mod load_csv;
 pub mod match_clause;
 pub mod match_execution;
 pub(crate) mod ordering;
+mod procedure_registry;
 pub mod refresh_stats;
 pub mod regex_cache;
 pub mod return_clause;

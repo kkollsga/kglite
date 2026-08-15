@@ -909,7 +909,7 @@ pub struct CallClause {
 }
 
 /// A single YIELD item: output_name [AS alias]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct YieldItem {
     pub name: String,
     pub alias: Option<String>,
@@ -949,6 +949,13 @@ pub enum SchemaCommand {
     /// `SHOW INDEXES` — a read. Rows come from the same collector that backs
     /// `CALL db.indexes()`.
     ShowIndexes,
+    /// `SHOW PROCEDURES [YIELD …]` — a read over the procedure registry (the
+    /// same table `list_procedures` and YIELD validation consume). Neo4j
+    /// clients call this for autocomplete. Empty `yield_items` = the default
+    /// Neo4j column set (name, description, mode, worksOnSystem).
+    ShowProcedures {
+        yield_items: Vec<YieldItem>,
+    },
     /// Constraint DDL. Parsed into a typed command so a ported Neo4j schema
     /// script gets a specific unsupported-feature error at *execution* rather
     /// than a syntax error. Sprint 4b replaces that error with enforcement —

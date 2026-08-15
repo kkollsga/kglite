@@ -242,3 +242,43 @@ def test_zero_row_call_keeps_declared_columns(small_graph):
         "properties",
         "state",
     ]
+
+
+# ── SHOW PROCEDURES (2026-08-15) ───────────────────────────────────────────
+
+
+def test_show_procedures_default_columns(small_graph):
+    df = small_graph.cypher("SHOW PROCEDURES", to_df=True)
+    assert list(df.columns) == ["name", "description", "mode", "worksOnSystem"]
+    assert (df["mode"] == "READ").all()
+    names = set(df["name"])
+    assert {"pagerank", "db.labels", "list_procedures"} <= names
+
+
+def test_show_procedures_yield_projection_and_alias(small_graph):
+    df = small_graph.cypher("SHOW PROCEDURES YIELD name AS proc", to_df=True)
+    assert list(df.columns) == ["proc"]
+
+
+def test_show_procedures_agrees_with_list_procedures(small_graph):
+    """SHOW PROCEDURES and CALL list_procedures() read the same registry —
+    the drift this table replaced (list_procedures advertised db.labels as
+    yielding `name`; the validator said `label`) must stay impossible."""
+    shown = {r["name"] for r in small_graph.cypher("SHOW PROCEDURES YIELD name").to_dicts()}
+    listed = {r["name"] for r in small_graph.cypher("CALL list_procedures() YIELD name").to_dicts()}
+    assert shown == listed
+
+
+def test_show_procedures_rejects_unknown_yield_and_where(small_graph):
+    with pytest.raises(Exception, match="does not yield"):
+        small_graph.cypher("SHOW PROCEDURES YIELD nope")
+    with pytest.raises(Exception, match="YIELD projection"):
+        small_graph.cypher("SHOW PROCEDURES WHERE name = 'x'")
+
+
+def test_list_procedures_advertises_true_columns(small_graph):
+    """The registry fixed a drift: db.labels yields `label`, not `name`."""
+    rows = small_graph.cypher("CALL list_procedures() YIELD name, yield_columns").to_dicts()
+    by = {r["name"]: r["yield_columns"] for r in rows}
+    assert by["db.labels"] == "label"
+    assert by["db.relationshipTypes"] == "relationshipType"

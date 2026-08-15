@@ -37,8 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously a Bolt client's `result.keys()` was empty for e.g.
   `CALL db.indexes()` on a graph with no indexes.
 
+- `SHOW PROCEDURES [YIELD …]` lists every procedure with Neo4j's default
+  columns (name, description, mode, worksOnSystem). It reads the same
+  registry as `CALL list_procedures()` and CALL YIELD validation, fixing a
+  drift where `list_procedures` advertised `db.labels` as yielding `name`
+  (the real column is `label`).
+
 ### Fixed
 
+- Trailing tokens after a MATCH pattern are now a syntax error. Previously
+  `MATCH (n) bogus tokens` — including a typo'd keyword like `RETRUN n` —
+  silently executed as `MATCH (n)`, running a different query than written.
 - Aggregates nested inside wrapper expressions in `RETURN`/`WITH` projections
   now evaluate correctly instead of failing with "Aggregate function … cannot
   be used outside of RETURN/WITH": map literals (`RETURN {c: count(*)}`), list

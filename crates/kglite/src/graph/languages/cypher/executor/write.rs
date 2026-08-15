@@ -69,6 +69,7 @@ pub(crate) fn clause_is_mutation(clause: &Clause) -> bool {
         // the rollback checkpoint. The two `SHOW` forms are reads and stay on
         // the read engine.
         Clause::Schema(SchemaCommand::ShowIndexes)
+        | Clause::Schema(SchemaCommand::ShowProcedures { .. })
         | Clause::Schema(SchemaCommand::Constraint(ConstraintCommand::Show)) => false,
         Clause::Schema(_) => true,
         _ => false,

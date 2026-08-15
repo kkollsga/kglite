@@ -208,6 +208,7 @@ pub fn clause_display_name(clause: &Clause) -> String {
             }
             SchemaCommand::DropIndex(_) => "DropIndex".into(),
             SchemaCommand::ShowIndexes => "ShowIndexes".into(),
+            SchemaCommand::ShowProcedures { .. } => "ShowProcedures".into(),
             SchemaCommand::Constraint(ConstraintCommand::Create(_)) => "CreateConstraint".into(),
             SchemaCommand::Constraint(ConstraintCommand::Drop { .. }) => "DropConstraint".into(),
             SchemaCommand::Constraint(ConstraintCommand::Show) => "ShowConstraints".into(),

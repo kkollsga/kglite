@@ -148,8 +148,65 @@ fn index_info_to_row(info: &IndexInfo) -> ResultRow {
 pub(crate) fn is_schema_read(command: &SchemaCommand) -> bool {
     matches!(
         command,
-        SchemaCommand::ShowIndexes | SchemaCommand::Constraint(ConstraintCommand::Show)
+        SchemaCommand::ShowIndexes
+            | SchemaCommand::ShowProcedures { .. }
+            | SchemaCommand::Constraint(ConstraintCommand::Show)
     )
+}
+
+/// Default columns of `SHOW PROCEDURES` — Neo4j's default output shape, so a
+/// client reading positionally sees what it expects. `mode` is always "READ"
+/// (every KGLite procedure is a read; mutations are rejected upstream) and
+/// `worksOnSystem` is always false (there is no system database).
+const SHOW_PROCEDURES_COLUMNS: [&str; 4] = ["name", "description", "mode", "worksOnSystem"];
+
+/// `SHOW PROCEDURES [YIELD …]` — a read over the procedure registry, the
+/// same table `list_procedures` and CALL YIELD validation consume.
+fn show_procedures_result_set(yield_items: &[YieldItem]) -> Result<ResultSet, String> {
+    let default_items: Vec<YieldItem>;
+    let items: &[YieldItem] = if yield_items.is_empty() {
+        default_items = SHOW_PROCEDURES_COLUMNS
+            .iter()
+            .map(|name| YieldItem {
+                name: (*name).to_string(),
+                alias: None,
+            })
+            .collect();
+        &default_items
+    } else {
+        for item in yield_items {
+            if !SHOW_PROCEDURES_COLUMNS.contains(&item.name.as_str()) {
+                return Err(format!(
+                    "SHOW PROCEDURES does not yield '{}'. Available: {}",
+                    item.name,
+                    SHOW_PROCEDURES_COLUMNS.join(", ")
+                ));
+            }
+        }
+        yield_items
+    };
+
+    let mut out = ResultSet::new();
+    for spec in super::procedure_registry::PROCEDURES {
+        let mut row = ResultRow::new();
+        for item in items {
+            let alias = item.alias.as_deref().unwrap_or(&item.name);
+            let value = match item.name.as_str() {
+                "name" => Value::String(spec.name.to_string()),
+                "description" => Value::String(spec.description.to_string()),
+                "mode" => Value::String("READ".to_string()),
+                "worksOnSystem" => Value::Boolean(false),
+                _ => unreachable!("validated against SHOW_PROCEDURES_COLUMNS"),
+            };
+            row.projected.insert(alias.to_string(), value);
+        }
+        out.rows.push(row);
+    }
+    out.columns = items
+        .iter()
+        .map(|item| item.alias.clone().unwrap_or_else(|| item.name.clone()))
+        .collect();
+    Ok(out)
 }
 
 /// Execute a schema read. Precondition: [`is_schema_read`] returned true.
@@ -159,6 +216,7 @@ pub(crate) fn execute_schema_read(
 ) -> Result<ResultSet, String> {
     match command {
         SchemaCommand::ShowIndexes => Ok(show_indexes_result_set(graph)),
+        SchemaCommand::ShowProcedures { yield_items } => show_procedures_result_set(yield_items),
         SchemaCommand::Constraint(ConstraintCommand::Show) => {
             Ok(show_constraints_result_set(graph))
         }
@@ -207,8 +265,10 @@ fn dispatch_schema_mutation(
         SchemaCommand::Constraint(ConstraintCommand::Drop { name, if_exists }) => {
             execute_drop_constraint(graph, name, *if_exists)
         }
-        SchemaCommand::ShowIndexes | SchemaCommand::Constraint(ConstraintCommand::Show) => Err(
-            "internal: SHOW INDEXES / SHOW CONSTRAINTS are reads and must not reach the \
+        SchemaCommand::ShowIndexes
+        | SchemaCommand::ShowProcedures { .. }
+        | SchemaCommand::Constraint(ConstraintCommand::Show) => Err(
+            "internal: SHOW INDEXES / SHOW PROCEDURES / SHOW CONSTRAINTS are reads and must not reach the \
              mutation engine"
                 .to_string(),
         ),

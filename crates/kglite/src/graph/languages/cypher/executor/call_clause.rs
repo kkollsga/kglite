@@ -694,222 +694,33 @@ impl<'a> CypherExecutor<'a> {
                 )?
             }
             "list_procedures" => {
-                let procedures = [
-                    (
-                        "pagerank",
-                        "Compute PageRank centrality for all nodes",
-                        "node, score",
-                    ),
-                    (
-                        "betweenness",
-                        "Compute betweenness centrality for all nodes",
-                        "node, score",
-                    ),
-                    (
-                        "degree",
-                        "Compute degree centrality for all nodes",
-                        "node, score",
-                    ),
-                    (
-                        "closeness",
-                        "Compute closeness centrality for all nodes",
-                        "node, score",
-                    ),
-                    (
-                        "louvain",
-                        "Detect communities using multilevel Louvain (hierarchical). YIELD optional 'level' for the community hierarchy. Params: {resolution, weight_property, connection_types}",
-                        "node, community, level",
-                    ),
-                    (
-                        "leiden",
-                        "Detect communities using Leiden (multilevel, well-connected communities). YIELD optional 'level' for the hierarchy. Params: {resolution, weight_property, connection_types}",
-                        "node, community, level",
-                    ),
-                    (
-                        "label_propagation",
-                        "Detect communities using label propagation",
-                        "node, community",
-                    ),
-                    (
-                        "connected_components",
-                        "Find weakly connected components. Optional {node_type, relationship} scoping to a subgraph.",
-                        "node, component",
-                    ),
-                    (
-                        "k_core",
-                        "k-core decomposition (coreness per node). Optional {node_type, relationship} scoping. Filter WHERE coreness >= k for the k-core.",
-                        "node, coreness",
-                    ),
-                    (
-                        "clustering_coefficient",
-                        "Local clustering coefficient per node (how interconnected its neighbours are). Optional {node_type, relationship} scoping.",
-                        "node, coefficient",
-                    ),
-                    (
-                        "triangle_count",
-                        "Global triangle count + transitivity (global clustering coefficient) for the whole graph. Single aggregate row. Optional {node_type, relationship} scoping. (Alias: transitivity.)",
-                        "triangles, transitivity",
-                    ),
-                    (
-                        "eccentricity",
-                        "Per-node eccentricity (longest shortest path to any node in its component). All-pairs BFS, capped at 20k scoped nodes — narrow with {node_type, relationship}.",
-                        "node, eccentricity",
-                    ),
-                    (
-                        "diameter",
-                        "Graph diameter (max eccentricity). Single aggregate row. Same all-pairs cost + 20k-node cap as eccentricity.",
-                        "diameter",
-                    ),
-                    (
-                        "cluster",
-                        "Cluster nodes by spatial location or numeric properties (DBSCAN/K-means). Reads from preceding MATCH.",
-                        "node, cluster",
-                    ),
-                    (
-                        "orphan_node",
-                        "Rule: nodes of {type} with zero matching edges (default: any edge, both directions). \
-                         Optional: link_type='X' restricts to that connection type; direction='in'|'out'|'both'.",
-                        "node",
-                    ),
-                    (
-                        "self_loop",
-                        "Rule: nodes of {type} with a self-loop via {edge}",
-                        "node",
-                    ),
-                    (
-                        "cycle_2step",
-                        "Rule: a-{edge}->b-{edge}->a pairs where both nodes are of {type}",
-                        "node_a, node_b",
-                    ),
-                    (
-                        "missing_required_edge",
-                        "Rule: nodes of {type} with no outgoing edge of {edge} (direction-validated)",
-                        "node",
-                    ),
-                    (
-                        "missing_inbound_edge",
-                        "Rule: nodes of {type} with no incoming edge of {edge} (direction-validated)",
-                        "node",
-                    ),
-                    (
-                        "duplicate_title",
-                        "Rule: nodes of {type} whose title is shared with another node of the same type",
-                        "node",
-                    ),
-                    (
-                        "duplicate_id",
-                        "Rule: nodes of {type} whose id is shared with another node of the same type",
-                        "node",
-                    ),
-                    (
-                        "outline",
-                        "Projection: BFS spanning tree from node id {root} along {edge} — the tree structure (render with kglite.outline)",
-                        "node, depth, parent_id",
-                    ),
-                    (
-                        "null_property",
-                        "Rule: nodes of {type} where {property} is missing, null, or empty",
-                        "node",
-                    ),
-                    (
-                        "inverse_violation",
-                        "Rule: (a)-[rel_a]->(b) without a matching (b)-[rel_b]->(a)",
-                        "a, b",
-                    ),
-                    (
-                        "transitivity_violation",
-                        "Rule: (a)->(b)->(c) chains under {rel} where the direct (a)->(c) edge is absent",
-                        "a, b, c",
-                    ),
-                    (
-                        "cardinality_violation",
-                        "Rule: nodes of {type} whose outgoing-{edge} count is outside [min, max]",
-                        "node, count",
-                    ),
-                    (
-                        "type_domain_violation",
-                        "Rule: edges of {edge} whose source node is not of {expected_source} type",
-                        "source, target",
-                    ),
-                    (
-                        "type_range_violation",
-                        "Rule: edges of {edge} whose target node is not of {expected_target} type",
-                        "source, target",
-                    ),
-                    (
-                        "parallel_edges",
-                        "Rule: (a, b) pairs connected by more than one edge of {edge}",
-                        "a, b, count",
-                    ),
-                    (
-                        "kg_knn",
-                        "Spatial: k nearest nodes of {target_type} to ({lat}, {lon})",
-                        "node, distance_m",
-                    ),
-                    (
-                        "dead_code",
-                        "Functions with no inbound use edge (CALLS / REFERENCES_FN / HANDLES / IMPLEMENTED_BY / DECORATES); excludes tests, dunder and main (pass exclude_public to also drop pub/exported, include_tests to keep tests)",
-                        "node",
-                    ),
-                    (
-                        "rev_diff",
-                        "Multi-rev code graphs: added/removed/changed code entities between two revs {from, to}. Reads revs/rev_fp list props (stamped by a multi-rev code-graph build, e.g. codingest --revs). Optional {node_type} scoping.",
-                        "bucket, type, qualified_name, name, file, line",
-                    ),
-                    (
-                        "list_procedures",
-                        "List all available procedures",
-                        "name, description, yield_columns",
-                    ),
-                    // Phase A.3 — Neo4j-compatible schema introspection.
-                    (
-                        "db.labels",
-                        "All node-type names ('labels') in the graph, sorted",
-                        "name",
-                    ),
-                    (
-                        "db.relationshipTypes",
-                        "All connection-type names ('relationship types') in the graph, sorted",
-                        "name",
-                    ),
-                    (
-                        "db.indexes",
-                        "All indexes in the graph (equality, composite, range), sorted by name",
-                        "name, type, entityType, labelsOrTypes, properties, state",
-                    ),
-                    (
-                        "db.constraints",
-                        "All declared constraints (UNIQUENESS, NODE_KEY, NODE_PROPERTY_EXISTENCE), sorted by name",
-                        "name, type, entityType, labelsOrTypes, properties",
-                    ),
-                    (
-                        "db.propertyKeys",
-                        "All property keys declared in the graph (node + relationship), sorted",
-                        "propertyKey",
-                    ),
-                    (
-                        "db.schema",
-                        "One row per node type with its sorted property-name list",
-                        "nodeType, properties",
-                    ),
-                ];
+                // One row per registry entry — the registry is the single
+                // source of truth shared with YIELD validation and
+                // SHOW PROCEDURES (its predecessor here was a second
+                // hand-written list that had drifted from the validator).
                 let mut rows = Vec::new();
-                for (name, desc, yields) in &procedures {
+                for spec in super::procedure_registry::PROCEDURES {
                     let mut row = ResultRow::new();
                     for item in &clause.yield_items {
                         let alias = item.alias.as_deref().unwrap_or(&item.name);
                         match item.name.as_str() {
                             "name" => {
-                                row.projected
-                                    .insert(alias.to_string(), Value::String(name.to_string()));
+                                row.projected.insert(
+                                    alias.to_string(),
+                                    Value::String(spec.name.to_string()),
+                                );
                             }
                             "description" => {
-                                row.projected
-                                    .insert(alias.to_string(), Value::String(desc.to_string()));
+                                row.projected.insert(
+                                    alias.to_string(),
+                                    Value::String(spec.description.to_string()),
+                                );
                             }
                             "yield_columns" => {
-                                row.projected
-                                    .insert(alias.to_string(), Value::String(yields.to_string()));
+                                row.projected.insert(
+                                    alias.to_string(),
+                                    Value::String(spec.columns.join(", ")),
+                                );
                             }
                             _ => {}
                         }
@@ -1654,108 +1465,26 @@ pub(super) fn names_to_rows(names: &[String], yield_items: &[YieldItem]) -> Vec<
 }
 /// The YIELD columns a procedure exposes, or an unknown-procedure error.
 ///
-/// Extracted from `execute_call`, which was far past the size a single
-/// function should carry: this table is ~40 independent arms that have nothing
-/// to do with the call's execution, and every new procedure grew the caller.
-/// `display_name` is the user's spelling, for the error message.
+/// A thin view over [`super::procedure_registry`] — the single table that
+/// also feeds `list_procedures` and `SHOW PROCEDURES`, so the three can
+/// never drift apart again. `display_name` is the user's spelling, for the
+/// error message.
 fn valid_yield_columns(
     proc_name: &str,
     display_name: &str,
 ) -> Result<&'static [&'static str], String> {
-    let columns: &[&str] = match proc_name {
-        "pagerank"
-        | "betweenness"
-        | "betweenness_centrality"
-        | "degree"
-        | "degree_centrality"
-        | "closeness"
-        | "closeness_centrality" => &["node", "score"],
-        "louvain"
-        | "louvain_communities"
-        | "leiden"
-        | "leiden_communities"
-        | "label_propagation" => &["node", "community", "level"],
-        "connected_components" | "weakly_connected_components" => &["node", "component"],
-        "k_core" | "coreness" => &["node", "coreness"],
-        "ready_set" | "dependency_frontier" => &["node", "dependency_count"],
-        "clustering_coefficient" | "local_clustering_coefficient" => &["node", "coefficient"],
-        "triangle_count" | "transitivity" => &["triangles", "transitivity"],
-        "eccentricity" => &["node", "eccentricity"],
-        "diameter" => &["diameter"],
-        "cluster" => &["node", "cluster"],
-        "list_procedures" => &["name", "description", "yield_columns"],
-        "orphan_node"
-        | "self_loop"
-        | "missing_required_edge"
-        | "missing_inbound_edge"
-        | "duplicate_title"
-        | "duplicate_id"
-        | "null_property" => &["node"],
-        "outline" => &["node", "depth", "parent_id"],
-        "cycle_2step" => &["node_a", "node_b"],
-        "inverse_violation" => &["a", "b"],
-        "transitivity_violation" => &["a", "b", "c"],
-        "cardinality_violation" => &["node", "count"],
-        "type_domain_violation" | "type_range_violation" => &["source", "target"],
-        "parallel_edges" => &["a", "b", "count"],
-        "kg_knn" => &["node", "distance_m"],
-        "affected_tests" => &["test_file", "depth"],
-        "rev_diff" => &["bucket", "type", "qualified_name", "name", "file", "line"],
-        "dead_code" => &["node"],
-        "refresh_stats" => &["src_type", "edge_type", "tgt_type", "count"],
-        // Phase A.3 / Phase F (#7) — Neo4j-compatible schema
-        // introspection procedures. Yield column names match
-        // Neo4j's: db.labels() yields `label`, db.relationshipTypes()
-        // yields `relationshipType`. (Pre-Phase-F both yielded
-        // `name`; aliasing in the test fixtures was the workaround.)
-        "db.labels" => &["label"],
-        "db.relationshiptypes" => &["relationshipType"],
-        "db.indexes" => &[
-            "name",
-            "type",
-            "entityType",
-            "labelsOrTypes",
-            "properties",
-            "state",
-        ],
-        "db.constraints" => &["name", "type", "entityType", "labelsOrTypes", "properties"],
-        // 2026-05-25 broad-scan, Batch 6 — schema introspection
-        // procedures. graph_stats: per-graph summary; property_*:
-        // per-(label, property) statistics. Use case: an agent
-        // running `graph_overview` wants to know "how many nodes
-        // total, how big is each label" before crafting a query.
-        "db.graph_stats" => &[
-            "node_count",
-            "edge_count",
-            "label_count",
-            "relationship_type_count",
-        ],
-        "db.property_stats" => &["value_count", "null_count", "distinct_count"],
-        "db.property_uniqueness" => &["is_unique", "violation_count", "distinct_count"],
-        // Neo4j-compatible: db.propertyKeys() yields `propertyKey` (one row
-        // per declared property name); db.schema() yields one row per node
-        // type with its property-name list, the in-language counterpart of
-        // the Python `describe()` schema. Makes property keys + per-type
-        // schema reachable from a Cypher/Bolt client, not just describe().
-        "db.propertykeys" => &["propertyKey"],
-        "db.schema" => &["nodeType", "properties"],
-        _ => {
-            return Err(format!(
-                "Unknown procedure '{}'. Available: pagerank, betweenness, degree, \
-                 closeness, louvain, label_propagation, connected_components, \
-                 k_core, clustering_coefficient, \
-                 cluster, list_procedures, orphan_node, self_loop, cycle_2step, \
-                 missing_required_edge, missing_inbound_edge, duplicate_title, \
-                 duplicate_id, null_property, outline, inverse_violation, transitivity_violation, \
-                 cardinality_violation, type_domain_violation, \
-                 type_range_violation, parallel_edges, \
-                 db.labels, db.relationshipTypes, db.indexes, \
-                 db.propertyKeys, db.schema",
-                display_name
-            ));
-        }
-    };
-    Ok(columns)
+    match super::procedure_registry::find_procedure(proc_name) {
+        Some(spec) => Ok(spec.columns),
+        None => Err(format!(
+            "Unknown procedure '{}'. Available: {}",
+            display_name,
+            super::procedure_registry::PROCEDURES
+                .iter()
+                .map(|spec| spec.name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
 }
 
 /// Build `ResultRow`s for `db.indexes()` from structured `IndexInfo`.

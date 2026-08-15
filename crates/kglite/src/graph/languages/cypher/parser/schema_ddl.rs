@@ -86,8 +86,14 @@ impl CypherParser {
         } else {
             1
         };
-        self.soft_word_at(noun_offset)
-            .is_some_and(is_index_or_constraint_noun)
+        let is_show = soft_word_eq(word, "SHOW");
+        self.soft_word_at(noun_offset).is_some_and(|noun| {
+            is_index_or_constraint_noun(noun)
+                // PROCEDURES is a SHOW-only noun — `DROP PROCEDURES` stays an
+                // ordinary parse error.
+                || (is_show
+                    && (soft_word_eq(noun, "PROCEDURES") || soft_word_eq(noun, "PROCEDURE")))
+        })
     }
 
     /// Parse a whole schema-DDL statement, or `None` when the token stream does
@@ -259,6 +265,38 @@ impl CypherParser {
         // identifier, and means the same as the bare form.
         if self.check(&CypherToken::All) {
             self.advance();
+        }
+
+        // `SHOW PROCEDURES [YIELD name, …]` — a read over the procedure
+        // registry. Unlike the INDEXES/CONSTRAINTS forms below, this one
+        // accepts a YIELD projection: Neo4j clients (Browser autocomplete)
+        // send it, and the registry read has a natural column subset. WHERE
+        // and the other modifiers are still rejected.
+        if self
+            .soft_word_at(0)
+            .is_some_and(|w| soft_word_eq(w, "PROCEDURES") || soft_word_eq(w, "PROCEDURE"))
+        {
+            self.advance();
+            let yield_items = if self.check(&CypherToken::Yield) {
+                self.advance();
+                let items = self.parse_yield_items()?;
+                if items.is_empty() {
+                    return Err("YIELD requires at least one column name".to_string());
+                }
+                items
+            } else {
+                Vec::new()
+            };
+            if self.has_tokens() && !self.check(&CypherToken::Semicolon) {
+                return Err(
+                    "SHOW PROCEDURES supports at most a YIELD projection; WHERE and \
+                     other modifiers are not supported"
+                        .to_string(),
+                );
+            }
+            return Ok(Clause::Schema(SchemaCommand::ShowProcedures {
+                yield_items,
+            }));
         }
 
         let noun = self.expect_ddl_noun()?;

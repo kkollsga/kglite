@@ -713,9 +713,12 @@ class TestNamespacedProcedureParsing:
         with pytest.raises(kglite.KgError, match="Unknown procedure"):
             db_proc_graph.cypher("CALL db.bogus() YIELD name RETURN name")
 
-    def test_dotted_name_with_no_yield_errors(self, db_proc_graph):
-        with pytest.raises(kglite.KgError):
-            db_proc_graph.cypher("CALL db.labels()")
+    def test_dotted_name_with_no_yield_expands_to_declared_columns(self, db_proc_graph):
+        # Since 2026-08-15 a standalone bare CALL is legal and expands to the
+        # procedure's declared columns (Neo4j semantics); the pre-existing
+        # rejection this test pinned was the parser gap Neo4j clients hit.
+        rows = db_proc_graph.cypher("CALL db.labels()").to_dicts()
+        assert rows and all(set(r) == {"label"} for r in rows)
 
     def test_list_procedures_advertises_db_namespace(self, db_proc_graph):
         rows = list(db_proc_graph.cypher("CALL list_procedures() YIELD name RETURN name"))
