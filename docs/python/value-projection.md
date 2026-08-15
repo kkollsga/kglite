@@ -200,6 +200,28 @@ Bolt PackStream analogue. For other targets:
   the common-case query sizes. See
   [`docs/rust/c-abi.md`](../rust/c-abi.md).
 
+  Every JSON consumer — the C ABI, the CLI's `--mode json`, the MCP
+  server's recipe results — shares one converter,
+  `kglite::api::param::kglite_value_to_json`, and that converter's
+  object shapes deliberately mirror the Python binding's, so the same
+  query read two ways has the same field names:
+
+  | Variant | JSON |
+  | --- | --- |
+  | `Node` | `{"id", "labels": [...], "properties": {...}}` |
+  | `Relationship` | `{"id", "start", "end", "type", "properties": {...}}` |
+  | `Path` | `{"nodes": [...], "relationships": [...]}` |
+  | `DateTime` / `Timestamp` | ISO-8601 strings (`"2024-03-09"`, `"2024-03-09T14:30:05"`) |
+  | `Point` | `{"latitude", "longitude"}` |
+  | `Duration` | `{"months", "days", "seconds"}` |
+  | `UniqueId` / `NodeRef` | number |
+
+  Before 0.16.1 those variants had no arm at all and fell through to
+  their Rust `Debug` rendering, so `RETURN n` reached a JSON consumer
+  as the string `"Node(NodeValue { id: 7, .. })"`. The converter's
+  match is now exhaustive with no catch-all, so a new `Value` variant
+  cannot inherit that fall-through silently.
+
 The `Value::type_name() -> &'static str` method (at
 `crates/kglite/src/datatypes/values.rs`) returns the canonical PascalCase variant
 name — useful for binding-side dispatch tables. The `impl Display`

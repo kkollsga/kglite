@@ -247,6 +247,34 @@ mod tests {
         assert_eq!(parsed[0]["age"], serde_json::json!(25)); // number, not "25"
     }
 
+    /// `.mode json` on `RETURN n` must emit a real node object. Until
+    /// 0.16.1 it emitted the engine's Rust `Debug` string
+    /// (`"Node(NodeValue { id: 7, ... })"`), which no JSON consumer can
+    /// use — the same defect the C ABI and the MCP recipe path shared,
+    /// fixed once in `kglite_value_to_json`.
+    #[test]
+    fn json_renders_a_node_as_an_object() {
+        let mut props = std::collections::BTreeMap::new();
+        props.insert("name".to_string(), Value::String("Ada".into()));
+        let node = kglite::api::NodeValue {
+            id: 7,
+            labels: vec!["Person".to_string()],
+            properties: props,
+        };
+        let out = render_json(&["n".to_string()], &[vec![Value::Node(Box::new(node))]]);
+        assert!(
+            !out.contains("NodeValue"),
+            "the Debug rendering leaked into --mode json: {out}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed[0]["n"]["id"], serde_json::json!(7));
+        assert_eq!(parsed[0]["n"]["labels"], serde_json::json!(["Person"]));
+        assert_eq!(
+            parsed[0]["n"]["properties"]["name"],
+            serde_json::json!("Ada")
+        );
+    }
+
     #[test]
     fn mode_parse_roundtrip() {
         for m in [Mode::Table, Mode::Csv, Mode::Json] {

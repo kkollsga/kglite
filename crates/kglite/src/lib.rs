@@ -410,7 +410,7 @@ pub mod api {
         /// binding that took the mode from a user wants the latter.
         pub use crate::graph::io::open::{
             open_or_create_graph, open_or_create_graph_in_mode, GraphFileIdentity,
-            GraphWriterLease, OpenDisposition, OpenGraphResult,
+            GraphWriterLease, LeaseHolder, LeaseRefusal, OpenDisposition, OpenGraphResult,
         };
         /// General-purpose RDF loader (Turtle / N-Triples / N-Quads /
         /// TriG). Gated behind the `rdf` Cargo feature.

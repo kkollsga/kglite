@@ -136,6 +136,33 @@ fn positional_serialization_preserves_empty_rows_and_natural_values() {
     assert_eq!(output["result"]["rows"], json!([[7, ["x"]]]));
 }
 
+/// A recipe query that returns a node hands the agent a JSON object, not
+/// the engine's Rust `Debug` string. Until 0.16.1 `serialize_success` sent
+/// `"Node(NodeValue { id: 7, .. })"` — unparseable, and the same
+/// `kglite_value_to_json` defect the C ABI and CLI `--mode json` shared.
+#[test]
+fn a_returned_node_serializes_as_an_object_not_a_debug_string() {
+    let catalog = catalog("RETURN $name AS name");
+    let query = catalog.get("review").unwrap().get("lookup").unwrap();
+    let mut properties = std::collections::BTreeMap::new();
+    properties.insert("name".to_string(), KgliteValue::String("Ada".into()));
+    let node = KgliteValue::Node(Box::new(kglite::api::NodeValue {
+        id: 7,
+        labels: vec!["Person".to_string()],
+        properties,
+    }));
+    let result = cypher_result(vec!["n"], vec![vec![node]]);
+    let output = serde_json::to_value(serialize_success(&args(false), query, &result)).unwrap();
+    assert!(
+        !output.to_string().contains("NodeValue"),
+        "the Debug rendering leaked into the recipe result: {output}"
+    );
+    assert_eq!(
+        output["result"]["rows"],
+        json!([[{"id": 7, "labels": ["Person"], "properties": {"name": "Ada"}}]])
+    );
+}
+
 #[test]
 fn exact_cap_returns_all_or_an_error_with_observed_count() {
     let catalog = catalog("RETURN $name AS name");

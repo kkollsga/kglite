@@ -64,8 +64,40 @@ pub struct GraphWriterLease {
     file: File,
 }
 
+/// A refused acquisition, with the holder still **structured**.
+///
+/// [`GraphWriterLease::acquire`] flattens this to an `io::Error` whose message
+/// names the holder in prose, which is right for a human but forces a binding
+/// that wants the pid — the Java wrapper's `holder()`, an operator dashboard —
+/// to regex a sentence. Bindings take this instead and re-render the message
+/// their own way; the prose stays available as [`Self::error`].
+#[derive(Debug)]
+pub struct LeaseRefusal {
+    /// Who holds the lease. `Some` only on a contention refusal, and
+    /// best-effort even then: the record is published just *after* the lock is
+    /// taken, so a contender losing a startup race can read an empty one. Its
+    /// fields are individually optional for the same reason.
+    pub holder: Option<LeaseHolder>,
+    /// The error [`GraphWriterLease::acquire`] would have returned — the same
+    /// kind (`WouldBlock` for contention) and the same message.
+    pub error: io::Error,
+}
+
+impl From<LeaseRefusal> for io::Error {
+    fn from(refusal: LeaseRefusal) -> Self {
+        refusal.error
+    }
+}
+
 impl GraphWriterLease {
     pub fn acquire(graph_path: &Path, timeout: Duration) -> io::Result<Self> {
+        Self::acquire_ex(graph_path, timeout).map_err(io::Error::from)
+    }
+
+    /// [`Self::acquire`], keeping the holder structured on refusal. One
+    /// implementation, two return shapes — `acquire` is this plus a
+    /// projection, so the two can never disagree about who holds what.
+    pub fn acquire_ex(graph_path: &Path, timeout: Duration) -> Result<Self, LeaseRefusal> {
         let path = writer_lease_path(graph_path);
         let started = Instant::now();
         loop {
@@ -74,7 +106,8 @@ impl GraphWriterLease {
                 .write(true)
                 .create(true)
                 .truncate(false)
-                .open(&path)?;
+                .open(&path)
+                .map_err(LeaseRefusal::io)?;
             match file.try_lock_exclusive() {
                 Ok(()) => {
                     publish_owner_record(&writer_owner_path(graph_path));
@@ -82,15 +115,31 @@ impl GraphWriterLease {
                 }
                 Err(error) if is_lock_contended(&error) => {
                     if started.elapsed() >= timeout {
-                        return Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            contended_message(graph_path, &path),
-                        ));
+                        // Read the record once and derive *both* outputs from
+                        // it: a second read could see a different holder and
+                        // hand the caller a pid its own message contradicts.
+                        let holder = LeaseHolder::read(&writer_owner_path(graph_path));
+                        let message = contended_message(graph_path, &path, &holder);
+                        return Err(LeaseRefusal {
+                            holder: Some(holder),
+                            error: io::Error::new(io::ErrorKind::WouldBlock, message),
+                        });
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(LeaseRefusal::io(error)),
             }
+        }
+    }
+}
+
+impl LeaseRefusal {
+    /// A refusal that is a genuine I/O failure — nobody holds anything, so
+    /// there is no holder to report.
+    fn io(error: io::Error) -> Self {
+        Self {
+            holder: None,
+            error,
         }
     }
 }
@@ -165,10 +214,16 @@ fn publish_owner_record(owner_path: &Path) {
 /// the failed lock acquisition that precedes every read, so a record left
 /// behind by a crashed process is never mistaken for a live holder — nothing
 /// reads it unless someone currently holds the lock.
-#[derive(Debug, Default)]
-struct LeaseHolder {
-    pid: Option<u32>,
-    since: Option<String>,
+/// Public because a binding that wants the pid must not have to regex it back
+/// out of [`contended_message`]'s sentence — the Java wrapper's `holder()`
+/// promised "pid, and when the lease was taken" while returning the whole
+/// paragraph, which is the shape this type exists to remove.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LeaseHolder {
+    /// The holding process id, when the record could be read.
+    pub pid: Option<u32>,
+    /// RFC-3339 local timestamp of when the holder took the lease.
+    pub since: Option<String>,
 }
 
 impl LeaseHolder {
@@ -211,11 +266,19 @@ impl LeaseHolder {
         holder
     }
 
+    /// Whether the reported holder is this very process — an un-closed handle
+    /// in the caller's own code, not a deployment problem. Bindings that
+    /// render their own message need the same distinction
+    /// [`Self::describe`] makes, without parsing its prose.
+    pub fn is_self(&self) -> bool {
+        self.pid == Some(std::process::id())
+    }
+
     fn describe(&self) -> String {
         // A self-pid hit is not a deployment problem, it is an un-closed
         // handle in the caller's own code, and saying "another process" for
         // your own pid sends people hunting a process that does not exist.
-        if self.pid == Some(std::process::id()) {
+        if self.is_self() {
             return format!(
                 "this same process (pid {}), which has not closed an earlier open() of it",
                 std::process::id()
@@ -237,13 +300,13 @@ impl LeaseHolder {
 /// seeing one is to delete it. Deleting it does not release the lock (the OS
 /// already did that when the holder died) and only removes the record of who
 /// holds it, so the message says so before the reflex fires.
-fn contended_message(graph_path: &Path, lock_path: &Path) -> String {
+fn contended_message(graph_path: &Path, lock_path: &Path, holder: &LeaseHolder) -> String {
     format!(
         "{} is open for writing by {}; only one process may write a graph at a time. \
          The lock is released automatically when that process exits, even on a crash — \
          deleting {} does not release it.",
         graph_path.display(),
-        LeaseHolder::read(&writer_owner_path(graph_path)).describe(),
+        holder.describe(),
         lock_path.display()
     )
 }
@@ -954,6 +1017,65 @@ mod tests {
         let holder = LeaseHolder::read(&writer_owner_path(&graph));
         assert_eq!(holder.pid, Some(std::process::id()));
         assert!(holder.since.is_some(), "acquisition time must be recorded");
+    }
+
+    /// A refusal must hand the caller the pid and timestamp *as data*. Every
+    /// binding downstream (the Java wrapper's `holder()`, the C ABI's holder
+    /// JSON) previously had to find them inside `contended_message`'s
+    /// sentence, which is a parser for prose that no one owns.
+    #[test]
+    fn a_refusal_carries_the_holder_structured_not_only_in_prose() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("structured.kgl");
+        let _lease = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
+
+        let refusal = GraphWriterLease::acquire_ex(&graph, Duration::ZERO)
+            .err()
+            .expect("a held lease must be refused");
+        let holder = refusal.holder.expect("a contention refusal names a holder");
+        assert_eq!(holder.pid, Some(std::process::id()));
+        assert!(
+            holder.since.is_some(),
+            "acquisition time must be structured"
+        );
+        assert!(holder.is_self(), "this process is the holder");
+        assert_eq!(refusal.error.kind(), io::ErrorKind::WouldBlock);
+        // The prose message is still there, and still agrees with the fields.
+        assert!(refusal.error.to_string().contains("this same process"));
+    }
+
+    /// `acquire` is `acquire_ex` plus a projection: the same refusal, so the
+    /// two can never diverge on kind or message.
+    #[test]
+    fn acquire_is_acquire_ex_projected_to_its_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("projection.kgl");
+        let _lease = GraphWriterLease::acquire(&graph, Duration::ZERO).unwrap();
+
+        let flat = GraphWriterLease::acquire(&graph, Duration::ZERO)
+            .err()
+            .unwrap();
+        let structured = GraphWriterLease::acquire_ex(&graph, Duration::ZERO)
+            .err()
+            .unwrap();
+        assert_eq!(flat.kind(), structured.error.kind());
+        assert_eq!(flat.to_string(), structured.error.to_string());
+    }
+
+    /// A refusal that is *not* contention reports no holder — there is none,
+    /// and inventing one would send an operator after a process that never
+    /// existed.
+    #[test]
+    fn a_non_contention_refusal_reports_no_holder() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A lock path whose parent does not exist: the sidecar cannot be
+        // created, which is an I/O failure, not a held lease.
+        let graph = tmp.path().join("missing-dir").join("nowhere.kgl");
+        let refusal = GraphWriterLease::acquire_ex(&graph, Duration::ZERO)
+            .err()
+            .expect("an uncreatable lock sidecar must refuse");
+        assert!(refusal.holder.is_none(), "nobody holds an unopenable lock");
+        assert_ne!(refusal.error.kind(), io::ErrorKind::WouldBlock);
     }
 
     /// A second holder must overwrite the first's record rather than leave a

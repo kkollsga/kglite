@@ -43,6 +43,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which key was wrong. `mode` is `"merge"` (the default, and what `null` means)
   or `"replace"`; an unrecognised spelling is refused rather than defaulted.
 
+- **`kglite_writer_lease_acquire_ex` — the writer lease's holder as data.**
+  The existing symbol reports a refused acquisition only through
+  `out_error_msg`: a sentence written for a human, with the pid and the
+  acquisition time embedded in it. The new symbol adds `out_holder_json`,
+  carrying `{"pid", "since", "self", "message"}` — `pid`/`since` null when the
+  record could not be read (it is published just *after* the lock is taken, so
+  a contender losing a startup race sees an empty one), and `self` true when
+  the holder is the calling process itself, which is an un-closed handle in
+  the caller's own code rather than another deployment. `kglite_writer_lease_
+  acquire` is unchanged and both symbols run one shared body, so they cannot
+  disagree about a status code or a message. Additive-only per the ABI rule.
+  In Rust the same detail is `GraphWriterLease::acquire_ex` →
+  `Result<_, LeaseRefusal>` with a public `LeaseHolder { pid, since }`;
+  `acquire` is that, projected to its `io::Error`. The Java wrapper's
+  `holder()` still returns the whole prose paragraph — the symbol it needs now
+  exists but is listed `-` (declared, not bound) in `abi-contract.txt`.
+
 - **Auto-vacuum's state is readable, and relationship churn is now garbage it
   can see.** `graph_info()` gains `auto_vacuum_threshold` (the configured
   value, or `None` when disabled — `set_auto_vacuum` was write-only),
@@ -85,6 +102,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rejected. A missing parameter is an error, not an empty result.
 
 ### Changed
+
+- **BREAKING (JSON output shape) — nodes, relationships, paths, dates, points
+  and durations are real JSON now, not Rust `Debug` strings.** The shared
+  outbound converter `kglite_value_to_json` had a catch-all arm that rendered
+  every variant it did not name through `{:?}`, so `RETURN n` reached a JSON
+  consumer as the string `"Node(NodeValue { id: 7, labels: [\"T\"], .. })"` —
+  the engine's own pretty-printer, on the wire. That hit **three shipped
+  surfaces at once**: the C ABI's `kglite_cypher_result_rows_json`, the CLI's
+  `--mode json` / `--json`, and the MCP server's recipe-query results. (Bolt
+  and the Python wheel were never affected — both build their own structured
+  values.) The shapes now mirror the Python binding's exactly, so the same
+  query read two ways has the same field names: `Node` →
+  `{"id", "labels", "properties"}`, `Relationship` →
+  `{"id", "start", "end", "type", "properties"}`, `Path` →
+  `{"nodes", "relationships"}`, `DateTime`/`Timestamp` → ISO-8601 strings,
+  `Point` → `{"latitude", "longitude"}`, `Duration` →
+  `{"months", "days", "seconds"}`, `UniqueId`/`NodeRef` → numbers. Filed as
+  Changed rather than Fixed because a consumer that was parsing the `Debug`
+  strings — or merely storing them — now receives objects and numbers where it
+  received strings; nothing else about a result changes. The match is
+  exhaustive with no catch-all, so a future `Value` variant has to choose a
+  JSON shape at compile time instead of inheriting the leak.
 
 - **`compact()`'s documentation now says what it does.** It merges a disk
   graph's overflow edges into the CSR arrays and has never touched a single
@@ -164,6 +203,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stayed partial.
 
 ### Fixed
+
+- **Opening a file that is not a kglite graph no longer blames an old
+  kglite.** Every unrecognised header — a PNG, a CSV, a half-finished
+  download, a mistyped path — produced "This file was saved with an older
+  version of kglite" plus instructions to open it with the old binary and
+  export a portable copy: a false statement about the user's data, and advice
+  that sends them looking for a binary that never existed. `load_file` and
+  `load_kgl_bytes` now discriminate on the container magic: bytes starting
+  `RGF` really are a kglite container and keep the rebuild-and-re-save path
+  (now naming the version it found), and anything else is refused as "not a
+  kglite graph", naming the path and the first bytes it saw (hex, plus the
+  ASCII spelling when printable — which is how you recognise your own CSV) and
+  pointing out that a disk-mode graph is a directory, not a file inside one.
+  The v3 hard break and the too-new-container refusal are unchanged. All three
+  entry points shared the message and now share the discriminator; the
+  container magics and their refusals moved to `graph::io::magic`.
 
 - **`CREATE CONSTRAINT … IS :: <TYPE>`'s refusal advised a key the schema
   parser ignores.** The message pointed at

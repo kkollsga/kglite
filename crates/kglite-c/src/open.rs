@@ -11,7 +11,7 @@ use crate::graph::{classify_io_error, GraphState, KgliteGraph};
 use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
 use kglite::api::durable::DurabilityLevel;
-use kglite::api::io::{open_or_create_graph_in_mode, GraphWriterLease};
+use kglite::api::io::{open_or_create_graph_in_mode, GraphWriterLease, LeaseHolder};
 use kglite::api::storage::StorageMode;
 use std::ffi::{c_char, CStr};
 use std::path::Path;
@@ -108,9 +108,86 @@ pub unsafe extern "C" fn kglite_writer_lease_acquire(
     out_lease: *mut *mut KgliteWriterLease,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
+    unsafe {
+        acquire_lease(
+            path,
+            timeout_ms,
+            out_lease,
+            std::ptr::null_mut(),
+            out_error_msg,
+        )
+    }
+}
+
+/// [`kglite_writer_lease_acquire`], plus the holder as **JSON** rather than
+/// only inside the message's prose.
+///
+/// A binding that wants to surface the holding pid — the Java wrapper's
+/// `holder()`, an operator dashboard, a retry policy that backs off longer
+/// for a lease taken hours ago — otherwise has to regex a sentence written
+/// for humans, and re-parse it every time the wording improves. The engine
+/// already has the fields structured; this hands them over.
+///
+/// Additive: `kglite_writer_lease_acquire` is unchanged and stays supported.
+/// New callers should prefer this one.
+///
+/// # Arguments
+///
+/// Identical to [`kglite_writer_lease_acquire`], plus:
+///
+/// - `out_holder_json` (out, owned): on
+///   `KGLITE_STATUS_CODE_WRITER_LEASE_HELD`, an owned JSON object (free via
+///   [`kglite_free_string`](crate::kglite_free_string)); null on every other
+///   outcome, including success. May itself be null if the caller does not
+///   want the detail. The object is:
+///
+///   ```json
+///   {"pid": 4711, "since": "2026-08-15T09:12:03+02:00",
+///    "self": false, "message": "…the same prose out_error_msg carries…"}
+///   ```
+///
+///   `pid` and `since` are `null` when the holder's record could not be read
+///   — it is published just *after* the lock is taken, so a contender losing
+///   a startup race can see an empty one. `self` is true when the holder is
+///   the calling process itself (an un-closed handle in the caller's own
+///   code, not another deployment), which is a different remedy and so is
+///   reported as its own field rather than left for a pid comparison the
+///   caller may forget to make.
+///
+/// # Safety
+///
+/// As [`kglite_writer_lease_acquire`]; `out_holder_json` must be null or a
+/// valid writable slot.
+#[no_mangle]
+pub unsafe extern "C" fn kglite_writer_lease_acquire_ex(
+    path: *const c_char,
+    timeout_ms: u64,
+    out_lease: *mut *mut KgliteWriterLease,
+    out_holder_json: *mut *const c_char,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    unsafe { acquire_lease(path, timeout_ms, out_lease, out_holder_json, out_error_msg) }
+}
+
+/// The one acquisition body behind both exported symbols, so the plain and
+/// `_ex` forms can never disagree about a status code or a message.
+///
+/// # Safety
+///
+/// See [`kglite_writer_lease_acquire_ex`].
+unsafe fn acquire_lease(
+    path: *const c_char,
+    timeout_ms: u64,
+    out_lease: *mut *mut KgliteWriterLease,
+    out_holder_json: *mut *const c_char,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
     crate::ffi::status_boundary(
         out_error_msg,
-        || crate::ffi::init_out(out_lease, std::ptr::null_mut()),
+        || {
+            crate::ffi::init_out(out_lease, std::ptr::null_mut());
+            crate::ffi::init_out(out_holder_json, std::ptr::null());
+        },
         || {
             if path.is_null() || out_lease.is_null() {
                 return KgliteStatusCode::NullPointer;
@@ -119,24 +196,34 @@ pub unsafe extern "C" fn kglite_writer_lease_acquire(
                 Ok(s) => s,
                 Err(_) => return KgliteStatusCode::InvalidUtf8,
             };
-            match GraphWriterLease::acquire(Path::new(path_str), Duration::from_millis(timeout_ms))
-            {
+            match GraphWriterLease::acquire_ex(
+                Path::new(path_str),
+                Duration::from_millis(timeout_ms),
+            ) {
                 Ok(lease) => {
                     unsafe {
                         *out_lease = LeaseState::into_handle(lease);
                     }
                     KgliteStatusCode::Ok
                 }
-                Err(error) => {
+                Err(refusal) => {
                     // Contention is `WouldBlock` — its own retriable code,
                     // rather than the `FileIo` the generic classifier would
                     // give it, so a binding can tell "wait and retry" from
                     // "this path is broken" without parsing a message.
-                    let (code, message) = if error.kind() == std::io::ErrorKind::WouldBlock {
-                        (KgliteStatusCode::WriterLeaseHeld, error.to_string())
+                    let message = refusal.error.to_string();
+                    let (code, message) = if refusal.error.kind() == std::io::ErrorKind::WouldBlock
+                    {
+                        (KgliteStatusCode::WriterLeaseHeld, message)
                     } else {
-                        classify_io_error(&error)
+                        classify_io_error(&refusal.error)
                     };
+                    if code == KgliteStatusCode::WriterLeaseHeld {
+                        set_out_json(
+                            out_holder_json,
+                            &holder_json(refusal.holder.as_ref(), &message),
+                        );
+                    }
                     set_out_error(out_error_msg, &message);
                     code
                 }
@@ -301,6 +388,38 @@ fn set_out_error(out_error_msg: *mut *const c_char, message: &str) {
             *out_error_msg = alloc_c_string(message);
         }
     }
+}
+
+/// Fill an optional owned-string out-slot. Same ownership contract as
+/// [`set_out_error`]; separate name because the *content* is JSON, not prose.
+fn set_out_json(slot: *mut *const c_char, json: &str) {
+    if !slot.is_null() {
+        unsafe {
+            *slot = alloc_c_string(json);
+        }
+    }
+}
+
+/// Render a refused acquisition's holder as the documented JSON object.
+///
+/// Absent fields are emitted as explicit `null` rather than omitted, so a
+/// consumer reads one shape and can tell "unknown" from "not this build".
+fn holder_json(holder: Option<&LeaseHolder>, message: &str) -> String {
+    let (pid, since, is_self) = match holder {
+        Some(holder) => (
+            holder.pid.map(serde_json::Value::from),
+            holder.since.clone().map(serde_json::Value::from),
+            holder.is_self(),
+        ),
+        None => (None, None, false),
+    };
+    serde_json::json!({
+        "pid": pid.unwrap_or(serde_json::Value::Null),
+        "since": since.unwrap_or(serde_json::Value::Null),
+        "self": is_self,
+        "message": message,
+    })
+    .to_string()
 }
 
 /// Classify an error from [`open_or_create_graph_in_mode`]. The mode-aware

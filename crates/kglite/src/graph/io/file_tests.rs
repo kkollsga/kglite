@@ -135,10 +135,19 @@ mod atomic_save_tests {
         let v3_buf = [V3_MAGIC[0], V3_MAGIC[1], V3_MAGIC[2], V3_MAGIC[3], 0, 0];
         let err = load_kgl_bytes(&v3_buf).err().unwrap();
         assert!(err.to_string().contains("export_csv"));
-        // An unrecognized buffer carries the hint too.
+        // An unrecognized *kglite* container carries the hint too — it is a
+        // real graph this binary cannot read, so there is something to export.
+        let unreadable_container = [V6_MAGIC[0], V6_MAGIC[1], V6_MAGIC[2], 2, 0, 0];
+        let err = load_kgl_bytes(&unreadable_container).err().unwrap();
+        assert!(err.to_string().contains("from_blueprint"), "{err}");
+        // Bytes that are not a kglite container at all get the *opposite*
+        // treatment, deliberately (0.16.1): there is no graph to export, so
+        // recovery instructions would be advice about a file the user does
+        // not have. Rewritten from a pin that asserted the hint here.
         let bad = [0u8, 1, 2, 3, 4, 5];
-        let err = load_kgl_bytes(&bad).err().unwrap();
-        assert!(err.to_string().contains("from_blueprint"));
+        let err = load_kgl_bytes(&bad).err().unwrap().to_string();
+        assert!(!err.contains("from_blueprint"), "{err}");
+        assert!(err.contains("not a kglite graph"), "{err}");
     }
 
     /// Build a tiny graph carrying one HNSW-indexed embedding store.

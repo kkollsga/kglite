@@ -54,32 +54,14 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::graph::io::magic::{
+    newer_portable_format_error, unrecognized_magic_error, V3_HARD_BREAK_MSG, V3_MAGIC, V4_MAGIC,
+    V5_MAGIC, V6_MAGIC,
+};
 use crate::serde_codec;
 
 const MAX_CODEC_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DISK_SERDE_MAGIC: &[u8; 8] = b"KGLDSC1\0";
-
-/// Magic bytes for the v3 columnar format: "RGF\x03". Retained ONLY
-/// so the loader can detect a v3 file and emit a specific
-/// "rebuild your graph" error rather than a generic "unrecognized".
-const V3_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x03];
-
-/// Magic bytes for the v4 columnar format: "RGF\x04". Phase A.1 / C5
-/// introduced v4 alongside the `Value::Node`/`Relationship`/`Path`/
-/// `List`/`Map` enum extension. Hard break on v3 files (no read-compat
-/// path) per the docs/history/bolt-implementation.md plan.
-const V4_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x04];
-
-/// Magic bytes for the v5 columnar format. v5 retains the v4 section layout
-/// but adds an explicit codec tag and writes Serde payloads with Postcard.
-/// Still read (v5 files outlive the binary that wrote them); no longer
-/// written.
-const V5_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x05];
-
-/// Magic bytes for the v6 columnar format — what this binary writes. v6 is v5
-/// plus per-column integer encodings inside the packed column sections (see
-/// the module header). Both are decoded by the same reader.
-const V6_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x06];
 
 /// Current core data version. Bump ONLY when NodeData, EdgeData, or Value enum changes.
 /// This is independent of metadata — metadata uses JSON and handles changes via serde defaults.
@@ -1719,13 +1701,7 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
         if mmap[..3] == V6_MAGIC[..3] && mmap[3] > V6_MAGIC[3] {
             return Err(newer_portable_format_error(mmap[3]));
         }
-        return Err(io::Error::other(
-            "Unrecognized file format. This file was saved with an older version of kglite. \
-             Please rebuild the graph with the current version and save again. If you no \
-             longer have the original source but can still run the old binary, open the file \
-             there and export a portable copy with g.export_csv('backup/'), then rebuild here \
-             with kglite.from_blueprint('backup/blueprint.json').",
-        ));
+        return Err(unrecognized_magic_error(&mmap[..4], &format!("'{path}'")));
     }
 
     // Small files: direct read is faster
@@ -1746,13 +1722,7 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
     } else if buf[..3] == V6_MAGIC[..3] && buf[3] > V6_MAGIC[3] {
         Err(newer_portable_format_error(buf[3]))
     } else {
-        Err(io::Error::other(
-            "Unrecognized file format. This file was saved with an older version of kglite. \
-             Please rebuild the graph with the current version and save again. If you no \
-             longer have the original source but can still run the old binary, open the file \
-             there and export a portable copy with g.export_csv('backup/'), then rebuild here \
-             with kglite.from_blueprint('backup/blueprint.json').",
-        ))
+        Err(unrecognized_magic_error(&buf[..4], &format!("'{path}'")))
     }
 }
 
@@ -1779,20 +1749,8 @@ pub fn load_kgl_bytes(data: &[u8]) -> io::Result<Arc<DirGraph>> {
     } else if data[..3] == V6_MAGIC[..3] && data[3] > V6_MAGIC[3] {
         Err(newer_portable_format_error(data[3]))
     } else {
-        Err(io::Error::other(
-            "Unrecognized byte buffer — not a kglite graph (bad magic). It may be \
-             truncated, from an incompatible version, or not a .kgl payload at all. If it \
-             came from an older binary, re-export a portable copy there with \
-             g.export_csv('backup/') and rebuild via kglite.from_blueprint('backup/blueprint.json').",
-        ))
+        Err(unrecognized_magic_error(&data[..4], "the byte buffer"))
     }
-}
-
-fn newer_portable_format_error(version: u8) -> io::Error {
-    io::Error::other(format!(
-        "File uses .kgl container version {version}, but this library only supports up to version {}. Please upgrade kglite.",
-        V6_MAGIC[3]
-    ))
 }
 
 /// Contained break message for a pre-v3 embeddings section (model_id +
@@ -1804,21 +1762,6 @@ const EMBED_FORMAT_BREAK_MSG: &str =
      this binary. The graph's nodes/edges are fine — reload, re-run \
      embed_texts()/add_embeddings() to rebuild the vectors, and save again. \
      (Embeddings are a rebuildable cache; only the vector section broke.)";
-
-/// Hard-break message for v3 files in a v4 binary. Per the
-/// Phase A.1 user-decision in docs/history/bolt-implementation.md: no read-compat
-/// path; rebuild the graph from source. Message gives the operator
-/// enough breadcrumbs to know what changed and what to do.
-const V3_HARD_BREAK_MSG: &str = "kglite .kgl file format v3 is not supported by this binary. \
-     It predates the current RGF v5/Postcard container; the Value enum gained \
-     structured Node / Relationship / Path / List / Map variants, which changes \
-     the serialised property representation. Rebuild your graph from its \
-     original source (CSV, DataFrame, dataset loader) and save again, \
-     or downgrade kglite to the 0.9.x line if you need to read this \
-     file. If you no longer have the original source but can still run \
-     the old binary, open the file there and export a portable, \
-     format-stable copy with g.export_csv('backup/'), then rebuild here \
-     with kglite.from_blueprint('backup/blueprint.json').";
 
 /// Load a disk-mode graph from a directory.
 fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {

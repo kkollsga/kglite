@@ -1244,6 +1244,7 @@ impl core::marker::StructuralPartialEq for kglite::api::io::GraphFileIdentity
 pub struct kglite::api::io::GraphWriterLease
 impl kglite::api::io::GraphWriterLease
 pub fn kglite::api::io::GraphWriterLease::acquire(graph_path: &std::path::Path, timeout: core::time::Duration) -> core::io::error::Result<Self>
+pub fn kglite::api::io::GraphWriterLease::acquire_ex(graph_path: &std::path::Path, timeout: core::time::Duration) -> core::result::Result<Self, kglite::api::io::LeaseRefusal>
 impl core::ops::drop::Drop for kglite::api::io::GraphWriterLease
 pub fn kglite::api::io::GraphWriterLease::drop(&mut self)
 pub struct kglite::api::io::ImportStats
@@ -1251,6 +1252,28 @@ pub kglite::api::io::ImportStats::dropped_stores: usize
 pub kglite::api::io::ImportStats::imported: usize
 pub kglite::api::io::ImportStats::skipped: usize
 pub kglite::api::io::ImportStats::stores: usize
+pub struct kglite::api::io::LeaseHolder
+pub kglite::api::io::LeaseHolder::pid: core::option::Option<u32>
+pub kglite::api::io::LeaseHolder::since: core::option::Option<alloc::string::String>
+impl kglite::api::io::LeaseHolder
+pub fn kglite::api::io::LeaseHolder::is_self(&self) -> bool
+impl core::clone::Clone for kglite::api::io::LeaseHolder
+pub fn kglite::api::io::LeaseHolder::clone(&self) -> kglite::api::io::LeaseHolder
+impl core::cmp::Eq for kglite::api::io::LeaseHolder
+impl core::cmp::PartialEq for kglite::api::io::LeaseHolder
+pub fn kglite::api::io::LeaseHolder::eq(&self, other: &kglite::api::io::LeaseHolder) -> bool
+impl core::default::Default for kglite::api::io::LeaseHolder
+pub fn kglite::api::io::LeaseHolder::default() -> kglite::api::io::LeaseHolder
+impl core::fmt::Debug for kglite::api::io::LeaseHolder
+pub fn kglite::api::io::LeaseHolder::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::io::LeaseHolder
+pub struct kglite::api::io::LeaseRefusal
+pub kglite::api::io::LeaseRefusal::error: core::io::error::Error
+pub kglite::api::io::LeaseRefusal::holder: core::option::Option<kglite::api::io::LeaseHolder>
+impl core::convert::From<kglite::api::io::LeaseRefusal> for core::io::error::Error
+pub fn core::io::error::Error::from(refusal: kglite::api::io::LeaseRefusal) -> Self
+impl core::fmt::Debug for kglite::api::io::LeaseRefusal
+pub fn kglite::api::io::LeaseRefusal::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::io::NTriplesConfig
 pub kglite::api::io::NTriplesConfig::auto_type: bool
 pub kglite::api::io::NTriplesConfig::languages: core::option::Option<std::collections::hash::set::HashSet<alloc::string::String>>
@@ -2075,6 +2098,19 @@ impl core::fmt::Debug for kglite::api::SchemaInstall
 pub fn kglite::api::SchemaInstall::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for kglite::api::SchemaInstall
 impl core::marker::StructuralPartialEq for kglite::api::SchemaInstall
+pub enum kglite::api::SchemaParseErrorKind
+pub kglite::api::SchemaParseErrorKind::Key
+pub kglite::api::SchemaParseErrorKind::Type
+pub kglite::api::SchemaParseErrorKind::Value
+impl core::clone::Clone for kglite::api::SchemaParseErrorKind
+pub fn kglite::api::SchemaParseErrorKind::clone(&self) -> kglite::api::SchemaParseErrorKind
+impl core::cmp::Eq for kglite::api::SchemaParseErrorKind
+impl core::cmp::PartialEq for kglite::api::SchemaParseErrorKind
+pub fn kglite::api::SchemaParseErrorKind::eq(&self, other: &kglite::api::SchemaParseErrorKind) -> bool
+impl core::fmt::Debug for kglite::api::SchemaParseErrorKind
+pub fn kglite::api::SchemaParseErrorKind::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::SchemaParseErrorKind
+impl core::marker::StructuralPartialEq for kglite::api::SchemaParseErrorKind
 pub enum kglite::api::SelectionOperation
 pub kglite::api::SelectionOperation::Custom(alloc::string::String)
 pub kglite::api::SelectionOperation::Filter(std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::FilterCondition>)
@@ -2709,6 +2745,16 @@ impl serde_core::ser::Serialize for kglite::api::SchemaDefinition
 pub fn kglite::api::SchemaDefinition::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::SchemaDefinition
 pub fn kglite::api::SchemaDefinition::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub struct kglite::api::SchemaParseError
+pub kglite::api::SchemaParseError::kind: kglite::api::SchemaParseErrorKind
+pub kglite::api::SchemaParseError::message: alloc::string::String
+impl core::clone::Clone for kglite::api::SchemaParseError
+pub fn kglite::api::SchemaParseError::clone(&self) -> kglite::api::SchemaParseError
+impl core::error::Error for kglite::api::SchemaParseError
+impl core::fmt::Debug for kglite::api::SchemaParseError
+pub fn kglite::api::SchemaParseError::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for kglite::api::SchemaParseError
+pub fn kglite::api::SchemaParseError::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::SelectionLevel
 pub kglite::api::SelectionLevel::operations: alloc::vec::Vec<kglite::api::SelectionOperation>
 pub kglite::api::SelectionLevel::selections: std::collections::hash::map::HashMap<core::option::Option<petgraph::graph_impl::NodeIndex>, alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
@@ -3125,6 +3171,8 @@ pub fn kglite::api::is_canonical_node_column(key: &str) -> bool
 pub fn kglite::api::make_dir_graph_mut(arc: &mut alloc::sync::Arc<kglite::api::DirGraph>) -> &mut kglite::api::DirGraph
 pub fn kglite::api::parse_spatial_column_types_from_pairs(pairs: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>) -> core::result::Result<(core::option::Option<kglite::api::SpatialConfig>, alloc::vec::Vec<(alloc::string::String, alloc::string::String)>), alloc::string::String>
 pub fn kglite::api::parse_temporal_column_types_from_pairs(pairs: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>) -> core::result::Result<(core::option::Option<kglite::api::TemporalConfig>, alloc::vec::Vec<(alloc::string::String, alloc::string::String)>), alloc::string::String>
+pub fn kglite::api::schema_from_json(json: &str) -> core::result::Result<kglite::api::SchemaDefinition, kglite::api::SchemaParseError>
+pub fn kglite::api::schema_from_value(value: &kglite::datatypes::values::Value) -> core::result::Result<kglite::api::SchemaDefinition, kglite::api::SchemaParseError>
 pub mod kglite::datatypes
 pub mod kglite::datatypes::values
 pub enum kglite::datatypes::values::BorrowedValue<'a>

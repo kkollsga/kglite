@@ -22,8 +22,8 @@ use kglite_c::{
     kglite_session_execute_read, kglite_session_execute_read_batch,
     kglite_session_execute_read_opts, kglite_session_free, kglite_session_list_embeddings,
     kglite_session_new, kglite_session_save, kglite_session_set_embeddings,
-    kglite_writer_lease_acquire, kglite_writer_lease_free, KgliteCypherResult, KgliteGraph,
-    KgliteSession, KgliteStatusCode, KgliteWriterLease,
+    kglite_writer_lease_acquire, kglite_writer_lease_acquire_ex, kglite_writer_lease_free,
+    KgliteCypherResult, KgliteGraph, KgliteSession, KgliteStatusCode, KgliteWriterLease,
 };
 
 #[cfg(feature = "fastembed")]
@@ -1917,4 +1917,128 @@ fn a_schema_defined_through_c_survives_a_save() {
     );
     unsafe { kglite_session_free(reloaded) };
     let _ = std::fs::remove_file(&path);
+}
+
+/// `RETURN n` / `RETURN r` / `RETURN p` must reach a C consumer as JSON
+/// objects. Until 0.16.1 the shared `kglite_value_to_json` had a
+/// `Debug`-string fall-through, so the rows blob carried
+/// `"Node(NodeValue { id: 7, labels: [\"T\"], .. })"` — the Rust type's
+/// pretty-printer, on the wire of a language-agnostic ABI. The shape here
+/// mirrors the Python binding's `py_out::value_to_py` so a JSON consumer
+/// and a Python consumer of the same query read the same field names.
+#[test]
+fn graph_entities_cross_the_abi_as_json_objects() {
+    let session = empty_session();
+    let (rc, err) = try_mutate(
+        session,
+        "CREATE (a:T {id: 1, name: 'Ada'})-[:KNOWS {weight: 3}]->(b:T {id: 2, name: 'Bo'})",
+    );
+    assert_eq!(rc, KgliteStatusCode::Ok, "seed failed: {err:?}");
+
+    let rows = query_rows(session, "MATCH (n:T) WHERE n.id = 1 RETURN n", "{}");
+    let node = &rows[0]["n"];
+    assert!(
+        !rows.to_string().contains("NodeValue"),
+        "the Debug rendering leaked across the ABI: {rows}"
+    );
+    assert!(node.is_object(), "a node must be a JSON object, got {node}");
+    assert_eq!(node["labels"], serde_json::json!(["T"]));
+    assert_eq!(node["properties"]["name"], serde_json::json!("Ada"));
+    assert!(node["id"].is_number());
+
+    let rows = query_rows(session, "MATCH (:T)-[r:KNOWS]->(:T) RETURN r", "{}");
+    let rel = &rows[0]["r"];
+    assert_eq!(rel["type"], serde_json::json!("KNOWS"));
+    assert_eq!(rel["properties"]["weight"], serde_json::json!(3));
+    assert!(rel["start"].is_number() && rel["end"].is_number());
+
+    let rows = query_rows(session, "MATCH p = (:T)-[:KNOWS]->(:T) RETURN p", "{}");
+    let path = &rows[0]["p"];
+    assert_eq!(path["nodes"].as_array().map(Vec::len), Some(2));
+    assert_eq!(path["relationships"].as_array().map(Vec::len), Some(1));
+    assert_eq!(path["relationships"][0]["type"], serde_json::json!("KNOWS"));
+
+    unsafe { kglite_session_free(session) };
+}
+
+/// The `_ex` acquisition hands a refused caller the holder as data. Before
+/// 0.16.1 the only way across the ABI was the prose in `out_error_msg`, so
+/// every binding that wanted the pid — the Java wrapper's `holder()`, whose
+/// javadoc promises "pid, and when the lease was taken" — had to regex a
+/// sentence written for humans.
+#[test]
+fn lease_acquire_ex_reports_the_holder_as_json() {
+    let dir = std::env::temp_dir().join(format!("kglite_c_lease_ex_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("held.kgl");
+    let path_c = CString::new(path.to_str().unwrap()).unwrap();
+
+    // Success clears the holder slot: there is no holder to report.
+    let mut lease: *mut KgliteWriterLease = std::ptr::null_mut();
+    let mut holder: *const c_char = std::ptr::null();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_writer_lease_acquire_ex(
+            path_c.as_ptr(),
+            0,
+            &mut lease,
+            &mut holder as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    assert!(!lease.is_null() && holder.is_null() && err.is_null());
+
+    // The refusal carries pid / since / self as fields, not prose.
+    let mut contender: *mut KgliteWriterLease = std::ptr::null_mut();
+    let mut holder: *const c_char = std::ptr::null();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_writer_lease_acquire_ex(
+            path_c.as_ptr(),
+            0,
+            &mut contender,
+            &mut holder as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::WriterLeaseHeld);
+    assert!(contender.is_null());
+    assert!(!holder.is_null(), "a held lease must report its holder");
+    let parsed: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(holder) }.to_str().unwrap()).unwrap();
+    assert_eq!(
+        parsed["pid"],
+        serde_json::json!(std::process::id()),
+        "the holder is this test process: {parsed}"
+    );
+    assert!(
+        parsed["since"].as_str().is_some_and(|s| s.contains('T')),
+        "since must be an RFC-3339 timestamp: {parsed}"
+    );
+    assert_eq!(parsed["self"], serde_json::json!(true));
+    // The prose is still there, and still the same string the plain symbol
+    // would have produced.
+    // Owned before the free below — `message` outlives the C string.
+    let message = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_string();
+    assert_eq!(parsed["message"], serde_json::json!(message));
+    unsafe { kglite_free_string(holder) };
+    unsafe { kglite_free_string(err) };
+
+    // The plain symbol is unchanged — same code, same message.
+    let mut contender: *mut KgliteWriterLease = std::ptr::null_mut();
+    let mut plain_err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_writer_lease_acquire(path_c.as_ptr(), 0, &mut contender, &mut plain_err as *mut _)
+    };
+    assert_eq!(rc, KgliteStatusCode::WriterLeaseHeld);
+    assert_eq!(
+        unsafe { CStr::from_ptr(plain_err) }.to_str().unwrap(),
+        message
+    );
+    unsafe { kglite_free_string(plain_err) };
+
+    unsafe { kglite_writer_lease_free(lease) };
+    let _ = std::fs::remove_dir_all(&dir);
 }

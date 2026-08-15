@@ -8,6 +8,7 @@ pub mod export;
 pub mod export_sql;
 pub mod file;
 pub mod load_timing;
+pub(crate) mod magic;
 pub mod ntriples;
 pub mod open;
 #[cfg(feature = "rdf")]

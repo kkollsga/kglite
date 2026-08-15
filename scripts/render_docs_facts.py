@@ -96,9 +96,13 @@ def _engine_facts() -> tuple[list[str], int, int, str]:
         raise ValueError("StorageMode::as_str implementation not found")
     modes = re.findall(r'Self::\w+\s*=>\s*"([^"]+)"', as_str.group(1))
 
-    file_path = REPO_ROOT / "crates" / "kglite" / "src" / "graph" / "io" / "file.rs"
-    file_source = file_path.read_text(encoding="utf-8")
-    magic_versions = [int(value) for value in re.findall(r"const V(\d+)_MAGIC:", file_source)]
+    io_dir = REPO_ROOT / "crates" / "kglite" / "src" / "graph" / "io"
+    # The container magics live in io/magic.rs (split out of file.rs when the
+    # not-a-kglite-file discriminator landed); the core data version is still
+    # file.rs's.
+    magic_source = (io_dir / "magic.rs").read_text(encoding="utf-8")
+    magic_versions = [int(value) for value in re.findall(r"const V(\d+)_MAGIC:", magic_source)]
+    file_source = (io_dir / "file.rs").read_text(encoding="utf-8")
     core = re.search(r"CURRENT_CORE_DATA_VERSION:\s*u32\s*=\s*(\d+)", file_source)
     if not magic_versions or core is None:
         raise ValueError("persistence version constants not found")

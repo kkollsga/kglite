@@ -933,6 +933,54 @@ KgliteStatusCode kglite_writer_lease_acquire(const char *path,
                                              const char **out_error_msg);
 
 /**
+ * [`kglite_writer_lease_acquire`], plus the holder as **JSON** rather than
+ * only inside the message's prose.
+ *
+ * A binding that wants to surface the holding pid — the Java wrapper's
+ * `holder()`, an operator dashboard, a retry policy that backs off longer
+ * for a lease taken hours ago — otherwise has to regex a sentence written
+ * for humans, and re-parse it every time the wording improves. The engine
+ * already has the fields structured; this hands them over.
+ *
+ * Additive: `kglite_writer_lease_acquire` is unchanged and stays supported.
+ * New callers should prefer this one.
+ *
+ * # Arguments
+ *
+ * Identical to [`kglite_writer_lease_acquire`], plus:
+ *
+ * - `out_holder_json` (out, owned): on
+ *   `KGLITE_STATUS_CODE_WRITER_LEASE_HELD`, an owned JSON object (free via
+ *   [`kglite_free_string`](crate::kglite_free_string)); null on every other
+ *   outcome, including success. May itself be null if the caller does not
+ *   want the detail. The object is:
+ *
+ *   ```json
+ *   {"pid": 4711, "since": "2026-08-15T09:12:03+02:00",
+ *    "self": false, "message": "…the same prose out_error_msg carries…"}
+ *   ```
+ *
+ *   `pid` and `since` are `null` when the holder's record could not be read
+ *   — it is published just *after* the lock is taken, so a contender losing
+ *   a startup race can see an empty one. `self` is true when the holder is
+ *   the calling process itself (an un-closed handle in the caller's own
+ *   code, not another deployment), which is a different remedy and so is
+ *   reported as its own field rather than left for a pid comparison the
+ *   caller may forget to make.
+ *
+ * # Safety
+ *
+ * As [`kglite_writer_lease_acquire`]; `out_holder_json` must be null or a
+ * valid writable slot.
+ */
+
+KgliteStatusCode kglite_writer_lease_acquire_ex(const char *path,
+                                                uint64_t timeout_ms,
+                                                struct KgliteWriterLease **out_lease,
+                                                const char **out_holder_json,
+                                                const char **out_error_msg);
+
+/**
  * Release a writer lease and free its handle. Idempotent on null (no-op).
  *
  * This is the whole release protocol: there is no separate "unlock" call.

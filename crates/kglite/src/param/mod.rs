@@ -95,12 +95,24 @@ pub fn json_value_to_kglite_value(v: &serde_json::Value) -> Value {
 /// accepted ergonomics tradeoff, matching the Bolt / Neo4j result shape.
 ///
 /// Conventions:
-/// - `Null` → `null`; `Boolean` → bool; `Int64`/`Float64` → number
-///   (`null` for a non-finite float); `String` → string
+/// - `Null` → `null`; `Boolean` → bool; `Int64`/`Float64`/`UniqueId`/
+///   `NodeRef` → number (`null` for a non-finite float); `String` → string
 /// - `List` → array (recursing); `Map` → object (recursing)
-/// - graph/temporal/spatial variants (`Node`, `Relationship`, `Path`,
-///   `Duration`, `Point`) → their `Debug` string; a richer natural
-///   projection of those is a future refinement
+/// - `Node` → `{"id", "labels", "properties"}`; `Relationship` →
+///   `{"id", "start", "end", "type", "properties"}`; `Path` →
+///   `{"nodes", "relationships"}` — the same object shape the Python
+///   binding builds in `py_out::value_to_py`, so a JSON consumer and a
+///   Python consumer of the same query see the same field names
+/// - `DateTime` → `"YYYY-MM-DD"`; `Timestamp` → `"YYYY-MM-DDTHH:MM:SS"`;
+///   `Point` → `{"latitude", "longitude"}`; `Duration` →
+///   `{"months", "days", "seconds"}`
+///
+/// **The match is deliberately exhaustive — there is no catch-all arm.**
+/// Until 0.16.1 the fall-through rendered every unlisted variant as its
+/// Rust `Debug` string, so `RETURN n` reached C-ABI, CLI `--mode json`,
+/// MCP recipe and okf consumers as `"Node(NodeValue { id: 7, ... })"`.
+/// A new `Value` variant must now choose its JSON shape at compile time
+/// rather than silently inherit that leak.
 pub fn kglite_value_to_json(v: &Value) -> serde_json::Value {
     use serde_json::Value as J;
     match v {
@@ -117,8 +129,109 @@ pub fn kglite_value_to_json(v: &Value) -> serde_json::Value {
                 .map(|(k, v)| (k.clone(), kglite_value_to_json(v)))
                 .collect(),
         ),
-        other => J::String(format!("{other:?}")),
+        // Ids are opaque integers on every wire (Bolt encodes them as the
+        // Node struct's `identity`), so they render as numbers, not strings.
+        Value::UniqueId(u) => J::Number((*u).into()),
+        // NodeRef is an internal handle that should have been materialised
+        // before projection; the index is the only meaningful rendering, and
+        // it matches what the Python binding falls back to.
+        Value::NodeRef(idx) => J::Number((*idx).into()),
+        // ISO-8601, the only date spelling JSON consumers parse without a
+        // convention agreement. Second precision matches `Value::Timestamp`.
+        Value::DateTime(d) => J::String(d.format("%Y-%m-%d").to_string()),
+        Value::Timestamp(dt) => J::String(dt.format("%Y-%m-%dT%H:%M:%S").to_string()),
+        Value::Point { lat, lon } => J::Object(
+            [
+                ("latitude".to_string(), json_number(*lat)),
+                ("longitude".to_string(), json_number(*lon)),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        Value::Duration {
+            months,
+            days,
+            seconds,
+        } => J::Object(
+            [
+                ("months".to_string(), J::Number((*months).into())),
+                ("days".to_string(), J::Number((*days).into())),
+                ("seconds".to_string(), J::Number((*seconds).into())),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        Value::Node(node) => node_to_json(node),
+        Value::Relationship(rel) => rel_to_json(rel),
+        Value::Path(path) => J::Object(
+            [
+                (
+                    "nodes".to_string(),
+                    J::Array(path.nodes.iter().map(node_to_json).collect()),
+                ),
+                (
+                    "relationships".to_string(),
+                    J::Array(path.rels.iter().map(rel_to_json).collect()),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        ),
     }
+}
+
+/// A finite `f64` as a JSON number; `null` otherwise (JSON has no NaN /
+/// infinity, the same tradeoff `Value::Float64` already makes above).
+fn json_number(f: f64) -> serde_json::Value {
+    serde_json::Number::from_f64(f)
+        .map(serde_json::Value::Number)
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn properties_to_json(props: &std::collections::BTreeMap<String, Value>) -> serde_json::Value {
+    serde_json::Value::Object(
+        props
+            .iter()
+            .map(|(k, v)| (k.clone(), kglite_value_to_json(v)))
+            .collect(),
+    )
+}
+
+fn node_to_json(node: &crate::datatypes::values::NodeValue) -> serde_json::Value {
+    use serde_json::Value as J;
+    J::Object(
+        [
+            ("id".to_string(), J::Number(node.id.into())),
+            (
+                "labels".to_string(),
+                J::Array(node.labels.iter().map(|l| J::String(l.clone())).collect()),
+            ),
+            (
+                "properties".to_string(),
+                properties_to_json(&node.properties),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    )
+}
+
+fn rel_to_json(rel: &crate::datatypes::values::RelValue) -> serde_json::Value {
+    use serde_json::Value as J;
+    J::Object(
+        [
+            ("id".to_string(), J::Number(rel.id.into())),
+            ("start".to_string(), J::Number(rel.start_id.into())),
+            ("end".to_string(), J::Number(rel.end_id.into())),
+            ("type".to_string(), J::String(rel.rel_type.clone())),
+            (
+                "properties".to_string(),
+                properties_to_json(&rel.properties),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -244,5 +357,168 @@ mod tests {
         let j = serde_json::json!({"rows": [{"id": 1}, {"id": 2}]});
         let back = kglite_value_to_json(&json_value_to_kglite_value(&j));
         assert_eq!(back, j);
+    }
+
+    /// Build the node used by the graph-entity shape tests.
+    fn sample_node() -> crate::datatypes::values::NodeValue {
+        let mut props = std::collections::BTreeMap::new();
+        props.insert("name".to_string(), Value::String("Ada".into()));
+        props.insert("rank".to_string(), Value::Int64(1));
+        crate::datatypes::values::NodeValue {
+            id: 7,
+            labels: vec!["Person".to_string()],
+            properties: props,
+        }
+    }
+
+    fn sample_rel() -> crate::datatypes::values::RelValue {
+        let mut props = std::collections::BTreeMap::new();
+        props.insert("weight".to_string(), Value::Int64(3));
+        crate::datatypes::values::RelValue {
+            id: 11,
+            start_id: 7,
+            end_id: 8,
+            rel_type: "KNOWS".to_string(),
+            properties: props,
+        }
+    }
+
+    /// `RETURN n` through any JSON binding must be a real object, not the
+    /// `Debug` rendering of the Rust value. Shape mirrors the Python
+    /// binding's `py_out::value_to_py` so bindings agree.
+    #[test]
+    fn value_to_json_node_is_structured() {
+        assert_eq!(
+            kglite_value_to_json(&Value::Node(Box::new(sample_node()))),
+            serde_json::json!({
+                "id": 7,
+                "labels": ["Person"],
+                "properties": {"name": "Ada", "rank": 1},
+            })
+        );
+    }
+
+    #[test]
+    fn value_to_json_relationship_is_structured() {
+        assert_eq!(
+            kglite_value_to_json(&Value::Relationship(Box::new(sample_rel()))),
+            serde_json::json!({
+                "id": 11,
+                "start": 7,
+                "end": 8,
+                "type": "KNOWS",
+                "properties": {"weight": 3},
+            })
+        );
+    }
+
+    #[test]
+    fn value_to_json_path_is_structured() {
+        let path = crate::datatypes::values::PathValue {
+            nodes: vec![sample_node()],
+            rels: vec![sample_rel()],
+        };
+        let json = kglite_value_to_json(&Value::Path(Box::new(path)));
+        assert_eq!(json["nodes"][0]["id"], serde_json::json!(7));
+        assert_eq!(json["relationships"][0]["type"], serde_json::json!("KNOWS"));
+        assert_eq!(json["nodes"][0]["properties"]["name"], "Ada");
+    }
+
+    #[test]
+    fn value_to_json_temporal_and_spatial_are_natural() {
+        use chrono::{NaiveDate, NaiveTime};
+        let date = NaiveDate::from_ymd_opt(2024, 3, 9).unwrap();
+        assert_eq!(
+            kglite_value_to_json(&Value::DateTime(date)),
+            serde_json::json!("2024-03-09")
+        );
+        let stamp = date.and_time(NaiveTime::from_hms_opt(14, 30, 5).unwrap());
+        assert_eq!(
+            kglite_value_to_json(&Value::Timestamp(stamp)),
+            serde_json::json!("2024-03-09T14:30:05")
+        );
+        assert_eq!(
+            kglite_value_to_json(&Value::Point {
+                lat: 59.9,
+                lon: 10.7
+            }),
+            serde_json::json!({"latitude": 59.9, "longitude": 10.7})
+        );
+        assert_eq!(
+            kglite_value_to_json(&Value::Duration {
+                months: 1,
+                days: 2,
+                seconds: 30,
+            }),
+            serde_json::json!({"months": 1, "days": 2, "seconds": 30})
+        );
+    }
+
+    #[test]
+    fn value_to_json_id_variants_are_numbers() {
+        assert_eq!(
+            kglite_value_to_json(&Value::UniqueId(42)),
+            serde_json::json!(42)
+        );
+        assert_eq!(
+            kglite_value_to_json(&Value::NodeRef(5)),
+            serde_json::json!(5)
+        );
+    }
+
+    /// The class-level guard: no arm may render through `Debug`. A future
+    /// `Value` variant that forgets its arm fails here even if no consumer
+    /// test covers it yet.
+    #[test]
+    fn no_value_variant_renders_as_a_debug_string() {
+        use chrono::NaiveDate;
+        let date = NaiveDate::from_ymd_opt(2024, 3, 9).unwrap();
+        let every_variant = [
+            Value::Null,
+            Value::Boolean(true),
+            Value::Int64(1),
+            Value::Float64(1.5),
+            Value::String("s".into()),
+            Value::UniqueId(1),
+            Value::NodeRef(1),
+            Value::DateTime(date),
+            Value::Timestamp(date.and_hms_opt(0, 0, 0).unwrap()),
+            Value::Point { lat: 1.0, lon: 2.0 },
+            Value::Duration {
+                months: 1,
+                days: 1,
+                seconds: 1,
+            },
+            Value::List(vec![Value::Int64(1)]),
+            Value::Map(std::collections::BTreeMap::new()),
+            Value::Node(Box::new(sample_node())),
+            Value::Relationship(Box::new(sample_rel())),
+            Value::Path(Box::new(crate::datatypes::values::PathValue {
+                nodes: vec![sample_node()],
+                rels: vec![],
+            })),
+        ];
+        for value in &every_variant {
+            let rendered = kglite_value_to_json(value).to_string();
+            // Every `Debug` rendering of a non-scalar `Value` carries its
+            // Rust constructor name; a natural JSON rendering never does.
+            for constructor in [
+                "Node(",
+                "Relationship(",
+                "Path(",
+                "DateTime(",
+                "Timestamp(",
+                "Duration ",
+                "UniqueId(",
+                "NodeRef(",
+                "Point ",
+                "Int64(",
+            ] {
+                assert!(
+                    !rendered.contains(constructor),
+                    "{value:?} leaked a Debug rendering: {rendered}"
+                );
+            }
+        }
     }
 }
