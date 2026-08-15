@@ -1325,6 +1325,9 @@ impl core::default::Default for kglite::api::io::SubsetSpec
 pub fn kglite::api::io::SubsetSpec::default() -> kglite::api::io::SubsetSpec
 impl core::fmt::Debug for kglite::api::io::SubsetSpec
 pub fn kglite::api::io::SubsetSpec::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub const kglite::api::io::KGL_FORMAT_VERSION: u32
+pub const kglite::api::io::MIN_READABLE_WAL_FORMAT_VERSION: u8
+pub const kglite::api::io::WAL_FORMAT_VERSION: u8
 pub trait kglite::api::io::ProgressSink: core::marker::Send + core::marker::Sync
 pub fn kglite::api::io::ProgressSink::emit(&self, event: kglite::api::io::ProgressEvent<'_>) -> core::result::Result<(), kglite::api::io::Cancelled>
 pub fn kglite::api::io::export_embeddings_to_file(graph: &kglite::api::DirGraph, path: &str, filter: core::option::Option<&kglite::api::io::EmbeddingExportFilter>) -> core::io::error::Result<kglite::graph::io::file::vector_persistence::ExportStats>

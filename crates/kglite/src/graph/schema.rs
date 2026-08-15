@@ -863,6 +863,13 @@ pub type CompositeIndexKey = (String, Vec<String>);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CompositeValue(pub Vec<Value>);
 
+/// Current `.kgl` on-disk snapshot format version stamped into new saves.
+///
+/// The single source of truth for [`SaveMetadata::current`]; also surfaced to
+/// bindings through `kglite::api::io` so an embedder can report the persisted
+/// format it writes, distinct from the engine SemVer.
+pub const KGL_FORMAT_VERSION: u32 = 2;
+
 /// Metadata stamped into saved files for version tracking and portability warnings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SaveMetadata {
@@ -877,7 +884,7 @@ pub struct SaveMetadata {
 impl SaveMetadata {
     pub fn current() -> Self {
         SaveMetadata {
-            format_version: 2,
+            format_version: KGL_FORMAT_VERSION,
             library_version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }

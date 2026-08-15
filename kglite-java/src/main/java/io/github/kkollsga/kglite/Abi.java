@@ -65,6 +65,10 @@ final class Abi {
     private static final StructLayout ABI_VERSION_LAYOUT = MemoryLayout.structLayout(
             I32.withName("major"), I32.withName("minor"), I32.withName("patch"));
 
+    /** {@code struct KgliteStorageFormat { uint32_t kgl, wal, min_readable_wal; }}. */
+    private static final StructLayout STORAGE_FORMAT_LAYOUT = MemoryLayout.structLayout(
+            I32.withName("kgl"), I32.withName("wal"), I32.withName("min_readable_wal"));
+
     // ---- linkage ----------------------------------------------------------
     // Declaration order matters: LINKER / LOOKUP / BOUND must be initialized
     // before the first bind() call below them.
@@ -75,6 +79,8 @@ final class Abi {
 
     private static final MethodHandle ABI_VERSION =
             bind("kglite_abi_version", FunctionDescriptor.of(ABI_VERSION_LAYOUT));
+    private static final MethodHandle STORAGE_FORMAT_VERSION =
+            bind("kglite_storage_format_version", FunctionDescriptor.of(STORAGE_FORMAT_LAYOUT));
     private static final MethodHandle GRAPH_NEW_IN_MODE =
             bind("kglite_graph_new_in_mode", FunctionDescriptor.of(I32, PTR, PTR, PTR, PTR));
     private static final MethodHandle OPEN_OR_CREATE_IN_MODE = bind(
@@ -90,6 +96,16 @@ final class Abi {
             "kglite_session_execute_read", FunctionDescriptor.of(I32, PTR, PTR, PTR, PTR, PTR));
     private static final MethodHandle SESSION_EXECUTE_MUT = bind(
             "kglite_session_execute_mut", FunctionDescriptor.of(I32, PTR, PTR, PTR, PTR, PTR));
+    // The `_opts` forms add (timeout_ms, max_rows) as two uint64 arguments
+    // between params_json and the out-slots. `0` disables each option (no
+    // deadline / no row cap), per the header — the wrapper maps an absent
+    // timeout or an unlimited row budget to `0`.
+    private static final MethodHandle SESSION_EXECUTE_READ_OPTS = bind(
+            "kglite_session_execute_read_opts",
+            FunctionDescriptor.of(I32, PTR, PTR, PTR, I64, I64, PTR, PTR));
+    private static final MethodHandle SESSION_EXECUTE_MUT_OPTS = bind(
+            "kglite_session_execute_mut_opts",
+            FunctionDescriptor.of(I32, PTR, PTR, PTR, I64, I64, PTR, PTR));
     private static final MethodHandle SESSION_EXECUTE_MUT_BATCH = bind(
             "kglite_session_execute_mut_batch", FunctionDescriptor.of(I32, PTR, PTR, PTR, PTR));
     private static final MethodHandle SESSION_SAVE =
@@ -180,6 +196,26 @@ final class Abi {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment v = (MemorySegment) ABI_VERSION.invokeExact((SegmentAllocator) arena);
             return v.get(I32, 0) + "." + v.get(I32, 4) + "." + v.get(I32, 8);
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
+    }
+
+    /**
+     * {@code kglite_storage_format_version()} — the three on-disk format
+     * numbers, in the struct's field order: {@code {kgl, wal, min_readable_wal}}.
+     *
+     * @return the three {@code uint32} fields as {@code long}s, in field order
+     */
+    static long[] storageFormatVersion() {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment f =
+                    (MemorySegment) STORAGE_FORMAT_VERSION.invokeExact((SegmentAllocator) arena);
+            return new long[] {
+                Integer.toUnsignedLong(f.get(I32, 0)),
+                Integer.toUnsignedLong(f.get(I32, 4)),
+                Integer.toUnsignedLong(f.get(I32, 8)),
+            };
         } catch (Throwable t) {
             throw rethrow(t);
         }
@@ -277,6 +313,45 @@ final class Abi {
             MethodHandle handle = mutating ? SESSION_EXECUTE_MUT : SESSION_EXECUTE_READ;
             int rc = (int) handle.invokeExact(
                     session, cstr(arena, query), cstr(arena, paramsJson), outResult, outError);
+            check(rc, outError);
+            MemorySegment result = outResult.get(PTR, 0);
+            try {
+                return decodeRows(result);
+            } finally {
+                RESULT_FREE.invokeExact(result);
+            }
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
+    }
+
+    /**
+     * Run Cypher with execution options and decode the result.
+     *
+     * <p>As {@link #execute}, routing through {@code execute_read_opts} /
+     * {@code execute_mut_opts} with the two extra budget arguments. The header
+     * defines {@code 0} as "no deadline" / "no limit" for each, so an unbounded
+     * call passes {@code 0}; a non-zero {@code maxRows} the result would exceed
+     * is an engine error (a guard, never a silent truncation).
+     *
+     * @param session   the session handle
+     * @param query     the Cypher text
+     * @param paramsJson JSON object of bindings, or {@code null} for none
+     * @param mutating  {@code true} selects {@code execute_mut_opts}
+     * @param timeoutMs wall-clock budget in milliseconds; {@code 0} is no deadline
+     * @param maxRows   maximum rows the query may produce; {@code 0} is no limit
+     * @return the decoded rows
+     */
+    static java.util.List<Map<String, Object>> executeOpts(
+            MemorySegment session, String query, String paramsJson, boolean mutating,
+            long timeoutMs, long maxRows) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outResult = arena.allocate(PTR);
+            MemorySegment outError = arena.allocate(PTR);
+            MethodHandle handle = mutating ? SESSION_EXECUTE_MUT_OPTS : SESSION_EXECUTE_READ_OPTS;
+            int rc = (int) handle.invokeExact(
+                    session, cstr(arena, query), cstr(arena, paramsJson),
+                    timeoutMs, maxRows, outResult, outError);
             check(rc, outError);
             MemorySegment result = outResult.get(PTR, 0);
             try {
