@@ -866,13 +866,16 @@ impl KnowledgeGraph {
         Ok(false)
     }
 
-    /// Compact a disk-mode graph: merge overflow edges back into CSR arrays.
+    /// Merge a disk-mode graph's overflow edges back into its CSR arrays.
     /// Returns the number of overflow edges that were merged.
     /// Overflow edges accumulate when edges are added after the initial CSR build
     /// (e.g., after loading a graph and adding new connections).
     /// Compaction rebuilds the CSR to include all overflow edges, restoring
     /// optimal query performance.
     /// No-op if there are no overflow edges or the graph is not in disk mode.
+    ///
+    /// **Edges only.** Dead columnar rows are dropped by `save()`; node slots
+    /// freed by a delete are reclaimed by neither.
     fn compact(&mut self) -> PyResult<usize> {
         if !self.inner.graph.is_disk() {
             return Ok(0);

@@ -1905,8 +1905,10 @@ impl DirGraph {
     /// No-op if there are no tombstones (node_count == node_bound), and a
     /// no-op on the **disk** backend: its CSR arrays are frozen mmap, not a
     /// `StableDiGraph`, so there is no petgraph tombstone to compact — disk
-    /// reclaims space by publishing a fresh generation (`compact_disk`), not
-    /// by rebuilding in place. Rebuilding would also have to materialise the
+    /// reclaims space by publishing a fresh generation, whose columns are
+    /// written without the rows no live node points at
+    /// ([`DirGraph::save_disk`]), not by rebuilding in place. Rebuilding would
+    /// also have to materialise the
     /// whole graph on the heap, which is the one thing the disk backend
     /// exists to avoid.
     ///

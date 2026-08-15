@@ -75,9 +75,17 @@ primary store:
   `vacuum()` periodically (it also fires automatically once fragmentation
   crosses `auto_vacuum_threshold`). Scans are unaffected — measured at
   0.975–1.043× with 40% of rows tombstoned — so the cost of putting this off is
-  memory, not time. **`vacuum()` is a no-op on `storage="disk"`**: a disk
-  graph's deleted rows are not reclaimed at all today. Rebuild the directory if
-  that matters to you.
+  memory, not time. **`vacuum()` is a no-op on `storage="disk"`** — its node
+  numbering is frozen mmap, so there is no in-place rebuild to do. `save()`
+  reclaims instead: a disk save rewrites the columns without the rows no live
+  node points at, so the published directory and the graph that reloads from it
+  carry live rows only (measured: a 20k-node graph with half its nodes deleted
+  wrote 2.00x the column bytes of the same graph built from the survivors, and
+  now writes the same bytes). What a save does *not* reclaim is node slots: a
+  deleted node's 16-byte slot and its free-list entry are kept, so a disk
+  graph's node capacity only shrinks when the directory is rebuilt from a fresh
+  ingest. `compact()` is a separate, edge-only operation — it merges overflow
+  edges into the CSR and touches no rows.
 
 Batching mutations into multi-row statements is still worth doing — it
 amortises per-statement parsing, planning and checkpoint overhead — but it is

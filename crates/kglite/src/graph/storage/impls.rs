@@ -1370,7 +1370,7 @@ impl GraphRead for DiskGraph {
     /// free-listed `StableDiGraph`: there is no edge slot to leave behind, so
     /// the bound *is* the count. A disk graph therefore never reports edge
     /// fragmentation, which is correct — it reclaims by publishing a fresh
-    /// generation (`compact_disk`), not by compacting in place.
+    /// generation (`save_disk`), not by compacting in place.
     #[inline]
     fn edge_bound(&self) -> usize {
         DiskGraph::edge_count(self)

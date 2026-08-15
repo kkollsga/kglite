@@ -20,6 +20,59 @@ fn write_compressed_disk_serde<T: serde::Serialize + ?Sized>(
         .map_err(|e| format!("Failed to write {label}: {e}"))
 }
 
+/// An empty `ColumnStore` shaped like `source`: same schema, same column
+/// types, no rows.
+///
+/// The column types come off the source store rather than the type's declared
+/// metadata, so a column that was demoted (a heterogeneous property that
+/// became `Mixed`) is reproduced as it actually is instead of being re-derived
+/// into a shape its own values do not fit. An mmap-backed source carries its
+/// schema in the mapping rather than in `schema()`, and yields an empty store
+/// that regrows its columns from the first row of each key — the same path a
+/// fresh ingest takes.
+fn empty_store_like(source: &ColumnStore, interner: &StringInterner) -> ColumnStore {
+    let schema = source.schema_arc();
+    let mut column_types: HashMap<String, String> = HashMap::with_capacity(schema.len());
+    for (slot, key) in schema.iter() {
+        if let (Some(name), Some(type_str)) = (
+            interner.try_resolve(key),
+            source.column_type_str(slot as usize),
+        ) {
+            column_types.insert(name.to_string(), type_str.to_string());
+        }
+    }
+    ColumnStore::new(schema, &column_types, interner)
+}
+
+/// Append `source`'s row `row_id` to `destination`, returning its new row id.
+///
+/// `scratch` is the caller's reusable property buffer — this runs once per live
+/// node, and a fresh `Vec` per row was the allocation the in-memory rebuild
+/// pass had to hoist out for exactly the same reason.
+fn copy_row(
+    source: &ColumnStore,
+    row_id: u32,
+    destination: &mut ColumnStore,
+    scratch: &mut Vec<(InternedKey, Value)>,
+) -> u32 {
+    debug_assert!(
+        !source.is_tombstoned(row_id),
+        "a live node's row must not be tombstoned — copying one would silently \
+         write an empty row for a node that still exists"
+    );
+    // id/title live in the store's reserved columns on a disk graph (the
+    // node's inline fields hold the `Null` sentinel), so they are copied
+    // through the same reserved columns — and only when the source has them,
+    // or the copy would invent an all-null id column for a store that has
+    // none.
+    if source.has_id_title_columns() {
+        destination.push_id(&source.get_id(row_id).unwrap_or(Value::Null));
+        destination.push_title(&source.get_title(row_id).unwrap_or(Value::Null));
+    }
+    source.row_properties_into(row_id, scratch);
+    destination.push_row(scratch)
+}
+
 impl DirGraph {
     /// Convert the graph to disk-backed storage mode.
     /// Enables columnar storage first, then builds CSR edge arrays on disk.
@@ -116,9 +169,15 @@ impl DirGraph {
         Ok(())
     }
 
-    /// Compact a disk-mode graph: merge overflow edges back into CSR arrays.
+    /// Merge a disk-mode graph's overflow edges back into its CSR arrays.
     /// Returns the number of overflow edges that were merged.
     /// No-op if there are no overflow edges.
+    ///
+    /// **Edges only.** This does not touch columnar rows: dead rows left by
+    /// `DELETE` are dropped by [`Self::save_disk`], which rewrites the columns
+    /// without them (see [`Self::drop_dead_column_rows`]). Node slots freed by
+    /// a delete are not reclaimed by either — a disk graph's node capacity only
+    /// shrinks when the directory is rebuilt from a fresh ingest.
     pub fn compact_disk(&mut self) -> Result<usize, String> {
         self.prepare_disk_mutation()
             .map_err(|e| format!("disk mutation lease failed: {e}"))?;
@@ -271,15 +330,25 @@ impl DirGraph {
         // while a rewrite must compact first so every derived index is rebuilt
         // from the complete CSR. Use the lower layer's target-aware decision:
         // generation stages are distinct directories and always rewrite.
+        let mut rewriting = false;
         if let GraphBackend::Disk(ref mut dg) = self.graph {
             dg.begin_persist();
-            let disposition = dg.save_disposition(dir);
-            if disposition == crate::graph::storage::disk::graph_persist::SaveDisposition::Rewrite
-                && dg.has_overflow()
-            {
+            rewriting = dg.save_disposition(dir)
+                == crate::graph::storage::disk::graph_persist::SaveDisposition::Rewrite;
+            if rewriting && dg.has_overflow() {
                 dg.compact()
                     .map_err(|e| format!("disk compaction failed: {e}"))?;
             }
+        }
+        // Drop columnar rows no live node points at, so the columns this save
+        // writes carry only live data. Rewrite only: a seal extends the
+        // graph's current root and leaves the already-published columns in
+        // place, so renumbering rows there would leave every slot naming a row
+        // the published file does not have.
+        if rewriting {
+            self.drop_dead_column_rows();
+        }
+        if let GraphBackend::Disk(ref mut dg) = self.graph {
             // Auto-build the cross-type global title index so that
             // `MATCH (n {title: 'X'})` and `g.search(text)` are O(log N)
             // out of the box on every saved disk graph. Runs after
@@ -297,6 +366,130 @@ impl DirGraph {
                 .map_err(|e| format!("nid index build failed: {e}"))?;
         }
         Ok(())
+    }
+
+    /// Drop every columnar row no live node points at, renumbering the rows
+    /// that survive and the node slots that name them. Returns the number of
+    /// rows dropped.
+    ///
+    /// # Why a save needs this
+    ///
+    /// `DELETE` on a disk graph tombstones the node's slot and leaves its row
+    /// in the type's `ColumnStore` — the store is append-only under mutation,
+    /// and `vacuum()` cannot reclaim the row because a disk graph's node
+    /// numbering is frozen mmap. So the garbage accumulated across the
+    /// process's whole lifetime *and then got written*: measured before this
+    /// existed, a 20 k-node graph with half its nodes deleted wrote its
+    /// columns at 2.00x the size of the same graph built from the survivors,
+    /// and a reload censused every dead row back in — so the next save wrote
+    /// them again.
+    ///
+    /// # Why renumbering rows here is safe
+    ///
+    /// A disk graph binds a node to its row **explicitly**, through
+    /// `DiskNodeSlot::row_id`, and the slots are written by the same save that
+    /// writes the columns (`save_logical_node_slots`). Row ids are therefore
+    /// private to the pair of artifacts and can be reassigned as long as both
+    /// are rewritten together — which is exactly the rewrite disposition this
+    /// runs under. Nothing else is a row coordinate: `type_indices` /
+    /// `id_indices` and the global property indexes key on `NodeIndex`, and
+    /// the property indexes are (re)built after this returns.
+    ///
+    /// **Node slots are not renumbered**, only their `row_id` field — the
+    /// petgraph/CSR node numbering is untouched, so every held selection,
+    /// edge endpoint and index entry keeps meaning what it meant.
+    fn drop_dead_column_rows(&mut self) -> usize {
+        // Staged node writes still name *old* row ids, so they must land
+        // before anything is renumbered. `clear_arenas` is what `save_to_dir`
+        // would call moments later anyway; calling it here only moves it
+        // ahead of the renumbering.
+        if let GraphBackend::Disk(ref mut dg) = self.graph {
+            dg.clear_arenas();
+        }
+
+        // Live rows per type, from the slots themselves — the census on
+        // `DirGraph` counts `type_indices`, which is a different structure and
+        // must not be the one that decides what gets copied.
+        let slot_count = match &self.graph {
+            GraphBackend::Disk(dg) => dg.node_slot_len(),
+            _ => return 0,
+        };
+        let mut live_rows: HashMap<InternedKey, usize> = HashMap::new();
+        if let GraphBackend::Disk(dg) = &self.graph {
+            for index in 0..slot_count {
+                let slot = dg.node_slot(index);
+                if slot.is_alive() {
+                    *live_rows
+                        .entry(InternedKey::from_u64(slot.node_type))
+                        .or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Only types that actually carry garbage are rebuilt: a clean type
+        // keeps its store as-is, mmap base included.
+        let mut dropped = 0usize;
+        let mut destinations: HashMap<InternedKey, (Arc<ColumnStore>, ColumnStore)> =
+            HashMap::new();
+        for (type_key, store) in self.graph.column_stores_iter() {
+            let live = live_rows.get(&type_key).copied().unwrap_or(0);
+            let total = store.row_count() as usize;
+            if total <= live {
+                continue;
+            }
+            dropped += total - live;
+            let empty = empty_store_like(store, &self.interner);
+            destinations.insert(type_key, (Arc::clone(store), empty));
+        }
+        if destinations.is_empty() {
+            return 0;
+        }
+
+        // One pass over the slots, copying each live row into its type's
+        // replacement store and repointing the slot at the new row. Slot order
+        // is ascending node order, so the rewritten rows keep the locality the
+        // original build gave them.
+        //
+        // **Cost.** Nothing here builds a whole-graph structure of its own, but
+        // two allocations are sized by the *compacted types*: the replacement
+        // stores (the live data itself, heap-resident even where the store they
+        // replace was mmap-backed) and the node-slot overlay, which takes one
+        // entry per renumbered slot because a published generation's
+        // `node_slots.bin` may be mapped by other readers and must not be
+        // written through. A rewriting save already materialises every column
+        // as bytes to write `columns.bin`, so this is a constant-factor
+        // increase on a path that was already sized by the graph — not a new
+        // order of growth. It is also skipped entirely for a type with no dead
+        // rows, which is every type of a graph that has not deleted anything.
+        let mut pairs: Vec<(InternedKey, Value)> = Vec::new();
+        if let GraphBackend::Disk(ref mut dg) = self.graph {
+            for index in 0..slot_count {
+                let slot = dg.node_slot(index);
+                if !slot.is_alive() {
+                    continue;
+                }
+                let type_key = InternedKey::from_u64(slot.node_type);
+                let Some((source, destination)) = destinations.get_mut(&type_key) else {
+                    continue;
+                };
+                let row_id = copy_row(source, slot.row_id, destination, &mut pairs);
+                if row_id != slot.row_id {
+                    let mut moved = slot;
+                    moved.row_id = row_id;
+                    dg.set_node_slot(index, moved);
+                }
+            }
+        }
+
+        for (type_key, (_, store)) in destinations {
+            GraphWrite::install_column_store(&mut self.graph, type_key, Arc::new(store));
+        }
+        // The replacements are heap-resident even where the store they replace
+        // was mmap-backed, so the memory limit has to be re-enforced against
+        // them — same obligation the in-memory rebuild discharges at the end of
+        // `rebuild_column_stores`. No-op when no limit is set.
+        self.maybe_spill_columns();
+        dropped
     }
 
     /// Write the unified `columns.bin` mega-file for a graph that has none.

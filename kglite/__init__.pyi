@@ -3767,12 +3767,18 @@ class KnowledgeGraph:
         ...
 
     def compact(self) -> int:
-        """Compact a disk-mode graph: merge overflow edges back into CSR arrays.
+        """Merge a disk-mode graph's overflow edges back into its CSR arrays.
 
         Overflow edges accumulate when edges are added after the initial CSR
         build (e.g., after loading a graph and adding new connections).
         Compaction rebuilds the CSR to include all overflow edges, restoring
         optimal query performance.
+
+        **Edges only — this does not reclaim anything a delete left behind.**
+        Dead columnar rows are dropped by ``save()``, which rewrites a disk
+        graph's columns without them; node slots freed by a delete are not
+        reclaimed by either, so a disk graph's node capacity only shrinks when
+        the directory is rebuilt from a fresh ingest.
 
         Returns:
             Number of overflow edges that were merged. Returns 0 if there

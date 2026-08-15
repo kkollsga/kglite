@@ -914,3 +914,124 @@ def test_vacuum_after_delete_then_create_still_saves_and_reloads(mode, tmp_path)
     assert [(r["n.id"], r["n.title"]) for r in post] == expected, (
         f"{mode}: vacuum + delete-then-create round trip diverged"
     )
+
+
+# ---------------------------------------------------------------------------
+# Dead-row drop on disk save (T12)
+# ---------------------------------------------------------------------------
+
+
+def _current_generation(root: Path) -> Path:
+    """The generation directory the graph's `CURRENT` pointer selects."""
+    name = (root / "CURRENT").read_text(encoding="utf-8").strip()
+    return root / "generations" / name
+
+
+def _columnar_bytes(root: str) -> int:
+    """Bytes the published generation spends on columnar payload.
+
+    The unified `seg_000/columns.bin` plus any per-type `columns/<T>/columns.zst`
+    sidecar — i.e. exactly what a dead-row drop can shrink. Deliberately *not*
+    the whole directory: node slots and the free-slot metadata are sized by node
+    *capacity*, which only the parked slot-renumbering half of compaction would
+    reclaim.
+    """
+    gen = _current_generation(Path(root))
+    total = 0
+    for name in ("seg_000/columns.bin", "columns.bin"):
+        candidate = gen / name
+        if candidate.is_file():
+            total += candidate.stat().st_size
+    for sidecar in gen.glob("columns/*/columns.zst"):
+        total += sidecar.stat().st_size
+    return total
+
+
+def _build_docs(path: str, ids) -> KnowledgeGraph:
+    kg = KnowledgeGraph(storage="disk", path=path)
+    kg.add_nodes(
+        pd.DataFrame([{"id": i, "title": f"doc-{i}", "score": i * 2, "tag": f"t{i % 7}"} for i in ids]),
+        "Doc",
+        "id",
+        "title",
+    )
+    return kg
+
+
+def test_disk_save_drops_dead_columnar_rows(tmp_path):
+    """A disk save writes only rows a live node still points at.
+
+    Phase-0 measured the opposite: a 20k-node disk graph with half its nodes
+    deleted wrote its column payload at ~2x the size of the same graph built
+    with only the survivors, and the garbage survived the round trip (a reload
+    censused 20000 total / 10000 live). Both halves are asserted here — size,
+    because that is the user-visible cost, and the census, because a save that
+    merely *hid* the rows would leave the next save carrying them again.
+    """
+    n = 20_000
+    deleted_path = str(tmp_path / "half_deleted")
+    kg = _build_docs(deleted_path, range(n))
+    kg.cypher("MATCH (n:Doc) WHERE n.id % 2 = 0 DETACH DELETE n", timeout_ms=120_000)
+    kg.save(deleted_path)
+    del kg
+
+    compact_path = str(tmp_path / "compacted")
+    reference = _build_docs(compact_path, range(1, n, 2))
+    reference.save(compact_path)
+    del reference
+
+    dead, live = _columnar_bytes(deleted_path), _columnar_bytes(compact_path)
+    assert dead <= live * 1.05, (
+        f"half-deleted graph wrote {dead} columnar bytes vs {live} for its "
+        f"compacted equivalent ({dead / live:.2f}x) — dead rows were saved"
+    )
+
+    reloaded = kglite.load(deleted_path)
+    info = reloaded.graph_info()
+    assert info["columnar_total_rows"] == info["columnar_live_rows"] == n // 2, (
+        f"reload censused {info['columnar_total_rows']} total / {info['columnar_live_rows']} live rows"
+    )
+    assert _rows(reloaded.cypher("MATCH (n:Doc) RETURN count(n) AS c")) == [{"c": n // 2}]
+    sample = _rows(
+        reloaded.cypher(
+            "MATCH (n:Doc) WHERE n.id IN [1, 4999, 19999] "
+            "RETURN n.id AS id, n.title AS t, n.score AS s, n.tag AS g ORDER BY id"
+        )
+    )
+    assert sample == [
+        {"id": 1, "t": "doc-1", "s": 2, "g": "t1"},
+        {"id": 4999, "t": "doc-4999", "s": 9998, "g": "t1"},
+        {"id": 19999, "t": "doc-19999", "s": 39998, "g": "t0"},
+    ]
+
+
+def test_disk_save_compaction_survives_reused_slots_and_edges(tmp_path):
+    """Row renumbering must compose with delete-then-create and with edges.
+
+    The rows a compacting save keeps are not a prefix of the rows it drops: a
+    create after a delete appends a row while leaving a hole behind it, so the
+    surviving rows are renumbered *and* reordered relative to the node slots
+    that name them. Properties, titles and relationships are all asserted after
+    the round trip — a renumbering that lost track of which row belonged to
+    which node would keep the counts and scramble the values.
+    """
+    graph_path = str(tmp_path / "reused")
+    kg = _build_docs(graph_path, range(400))
+    kg.cypher("MATCH (n:Doc) WHERE n.id % 3 = 0 DETACH DELETE n")
+    kg.cypher(
+        "UNWIND range(1000, 1120) AS i CREATE (:Doc {id: i, title: 'doc-' + toString(i), score: i * 2, tag: 'new'})"
+    )
+    kg.cypher("MATCH (a:Doc {id: 1}), (b:Doc {id: 1000}) CREATE (a)-[:LINKS]->(b)")
+    kg.cypher("MATCH (a:Doc {id: 1100}), (b:Doc {id: 398}) CREATE (a)-[:LINKS]->(b)")
+
+    before = _rows(kg.cypher("MATCH (n:Doc) RETURN n.id, n.title, n.score, n.tag ORDER BY n.id"))
+    kg.save(graph_path)
+    del kg
+
+    reloaded = kglite.load(graph_path)
+    after = _rows(reloaded.cypher("MATCH (n:Doc) RETURN n.id, n.title, n.score, n.tag ORDER BY n.id"))
+    assert after == before
+    info = reloaded.graph_info()
+    assert info["columnar_total_rows"] == info["columnar_live_rows"] == len(before)
+    edges = _rows(reloaded.cypher("MATCH (a:Doc)-[:LINKS]->(b:Doc) RETURN a.id AS a, b.id AS b ORDER BY a"))
+    assert edges == [{"a": 1, "b": 1000}, {"a": 1100, "b": 398}]
