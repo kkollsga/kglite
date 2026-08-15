@@ -3,6 +3,7 @@
 //! and the pass wrappers) — a failed invariant names the pass that broke it,
 //! which is what turns a wrong-answer bug into a one-line diagnosis.
 
+#[cfg(debug_assertions)]
 use super::*;
 
 /// Sanity checks on the post-pass IR. Debug-only — release builds pay

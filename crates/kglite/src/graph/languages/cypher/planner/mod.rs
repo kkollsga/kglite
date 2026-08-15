@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 mod annotations;
 mod invariants;
+#[cfg(debug_assertions)]
 use invariants::debug_check_invariants;
 pub mod cost_model;
 pub mod fusion;
