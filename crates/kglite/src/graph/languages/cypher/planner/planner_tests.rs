@@ -2399,3 +2399,97 @@ fn test_top_k_still_bails_on_a_non_literal_limit() {
         "LIMIT must be a positive integer literal"
     );
 }
+
+// ── anchor_element_id ──────────────────────────────────────────────────────
+
+/// The clause's resolved slot anchors after a full optimizer run.
+fn anchors_of(query: &str, params: &HashMap<String, Value>) -> Vec<(String, usize)> {
+    let mut parsed = parse_cypher(query).unwrap();
+    let graph = DirGraph::new();
+    optimize(&mut parsed, &graph, params);
+    parsed
+        .clauses
+        .iter()
+        .filter_map(|c| match c {
+            Clause::Match(m) | Clause::OptionalMatch(m) => Some(&m.node_anchors),
+            _ => None,
+        })
+        .flatten()
+        .map(|(v, idx)| (v.clone(), idx.index()))
+        .collect()
+}
+
+#[test]
+fn test_element_id_anchor_literal_and_param_agree() {
+    let no_params = HashMap::new();
+    let params: HashMap<String, Value> =
+        HashMap::from([("eid".to_string(), Value::String("7".into()))]);
+
+    let literal = anchors_of("MATCH (v) WHERE elementId(v) = '7' RETURN v", &no_params);
+    assert_eq!(literal, vec![("v".to_string(), 7)]);
+
+    // The spelling a client actually sends — the round-tripped element_id as a
+    // bound parameter — must resolve to the same anchor as the literal.
+    assert_eq!(
+        anchors_of("MATCH (v) WHERE elementId(v) = $eid RETURN v", &params),
+        literal
+    );
+    // Commuted operands, and the integer spelling of the same slot.
+    assert_eq!(
+        anchors_of("MATCH (v) WHERE $eid = elementId(v) RETURN v", &params),
+        literal
+    );
+    assert_eq!(
+        anchors_of("MATCH (v) WHERE elementId(v) = 7 RETURN v", &no_params),
+        literal
+    );
+}
+
+#[test]
+fn test_element_id_anchor_bails_on_non_conjunctive_and_unusable_values() {
+    let no_params = HashMap::new();
+    let params: HashMap<String, Value> =
+        HashMap::from([("eid".to_string(), Value::String("7".into()))]);
+
+    // A disjunct constrains nothing: every node is still a candidate.
+    assert!(anchors_of(
+        "MATCH (v) WHERE elementId(v) = $eid OR v.name = 'x' RETURN v",
+        &params
+    )
+    .is_empty());
+    assert!(anchors_of("MATCH (v) WHERE NOT elementId(v) = $eid RETURN v", &params).is_empty());
+    // Not a slot: a name, a negative number, an unbound parameter.
+    assert!(anchors_of("MATCH (v) WHERE elementId(v) = 'abc' RETURN v", &no_params).is_empty());
+    assert!(anchors_of("MATCH (v) WHERE elementId(v) = -3 RETURN v", &no_params).is_empty());
+    assert!(anchors_of("MATCH (v) WHERE elementId(v) = $eid RETURN v", &no_params).is_empty());
+    // A variable this MATCH does not bind belongs to another clause's search
+    // space, so the anchor is not this clause's to record.
+    assert!(anchors_of(
+        "MATCH (a) MATCH (b) WHERE elementId(a) = $eid RETURN b",
+        &params
+    )
+    .is_empty());
+}
+
+#[test]
+fn test_element_id_anchor_reads_a_conjunct_and_the_scoped_optional_where() {
+    let params: HashMap<String, Value> =
+        HashMap::from([("eid".to_string(), Value::String("2".into()))]);
+
+    assert_eq!(
+        anchors_of(
+            "MATCH (v) WHERE v.name = 'x' AND elementId(v) = $eid RETURN v",
+            &params
+        ),
+        vec![("v".to_string(), 2)],
+        "the AND spine is descended"
+    );
+    assert_eq!(
+        anchors_of(
+            "MATCH (a:Person) OPTIONAL MATCH (v) WHERE elementId(v) = $eid RETURN v",
+            &params
+        ),
+        vec![("v".to_string(), 2)],
+        "OPTIONAL MATCH carries its WHERE inside the clause"
+    );
+}

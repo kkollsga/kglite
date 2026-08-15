@@ -67,6 +67,7 @@ impl CypherParser {
             limit_hint: None,
             distinct_node_hint: None,
             where_clause,
+            node_anchors: Vec::new(),
         };
         if optional {
             Ok(Clause::OptionalMatch(clause))

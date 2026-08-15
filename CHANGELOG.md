@@ -35,6 +35,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   string, agreeing with the `element_id` the Bolt server packs on
   Node/Relationship structs so clients can round-trip it into predicates.
   Distinct from `id()`, which remains the logical (domain) identity.
+- **`WHERE elementId(v) = <value>` is planned as a point lookup** (optimizer
+  pass `anchor_element_id`). `elementId()` is the node's slot, so the predicate
+  names exactly one candidate — but the pattern a client sends back after a
+  click carries no label, and an unlabelled `MATCH (v)` was a full node scan
+  with the predicate applied per row: 28 s for one G.V() node expansion, now
+  milliseconds. The planner records the slot on the MATCH and the executor
+  seeds it as a pre-binding. Both operand orders, a string or integer literal,
+  and a `$param` are recognised, and only the predicate's `AND` spine is read —
+  `elementId(v) = $x OR …` constrains nothing and is left alone. The anchor is
+  a search-space constraint only: the predicate is never removed, so a slot
+  that is out of range or no longer holds the expected node yields the rows the
+  predicate would have yielded anyway. Note the identity's own caveat, which
+  this inherits from `elementId()`: a slot is stable for the lifetime of the
+  loaded graph, not across a save/load rebuild, so an element id held across
+  one may name a different node — or none.
 - Standalone `CALL proc()` without `YIELD` — the form Neo4j clients and
   cypher-shell send — now works for every procedure, returning all declared
   columns in declared order. A bare `CALL` must be the entire statement;
@@ -65,6 +80,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registry as `CALL list_procedures()` and CALL YIELD validation, fixing a
   drift where `list_procedures` advertised `db.labels` as yielding `name`
   (the real column is `label`).
+- `SHOW FUNCTIONS [YIELD …]` lists every callable function with Neo4j's
+  default columns (name, category, description), and yields `signature` and
+  `aliases` on request. G.V() sends `SHOW FUNCTIONS YIELD name, description,
+  signature` on connect (measured) — until now a syntax error, which left the
+  IDE's function autocomplete empty while label and procedure autocomplete
+  worked. One row per canonical name: an accepted alternate spelling
+  (`toUpperCase` for `toUpper`, `ln` for `log`) is reported in that row's
+  `aliases` list rather than as a row of its own. The listing is not a
+  hand-maintained list that can drift from the engine: a Rust test executes
+  every registered name and alias through the real dispatcher chain and fails
+  the build on any entry the engine does not answer, and the aggregate
+  category is checked against the parser's aggregate classifier in both
+  directions.
 
 ### Fixed
 
@@ -94,6 +122,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching the scalar slice path — previously it serialized to a JSON string,
   which broke any consumer expecting an array (including Neo4j Browser's
   sidebar label list).
+- **Node lookup by id answers the same rows in every spelling.** `MATCH (n
+  {id: 2})`, `MATCH (n {id: $x})`, `WHERE id(n) = 2` and `WHERE id(n) = $x` all
+  denote "every node whose id is 2" and could return different results. Two
+  causes, both fixed: the untyped `{id: …}` anchor returned as soon as the
+  *first* node type's id index answered — so on a graph where the same id
+  exists under several labels it reported one arbitrary node, arbitrary because
+  the type map's iteration order is a hash map's and therefore not stable
+  across processes — and it recognised only a literal, so the `$param` spelling
+  fell past it into the exhaustive scan and answered the complete set. Separately,
+  `id(n) = $param` (either operand order) was not extracted as a pushable
+  equality at all, so the literal and the parameter also took different plans.
+  The anchor now unions one node per type, in ascending node order, and resolves
+  parameters; a measured 1-row-vs-68-rows divergence between the two spellings
+  is gone.
 
 ## [0.16.1] - 2026-08-15
 

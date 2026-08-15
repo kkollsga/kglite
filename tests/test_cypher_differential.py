@@ -2579,6 +2579,106 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH p = (n:Person) RETURN length(p) AS l, size(nodes(p)) AS c, n.name AS nm ORDER BY nm",
         None,
     ),
+    # ── id() literal vs parameter, on cross-type id collisions ───────────
+    #
+    # Fixed 2026-08-15. The four spellings below all denote "every node whose
+    # domain id is 2" and diverged from each other:
+    #
+    #   * the untyped `{id: X}` anchor returned on the FIRST type whose id
+    #     index answered, collapsing a cross-type collision to one arbitrary
+    #     node — arbitrary because the type map's key order is a HashMap's
+    #     (so the surviving row was not even stable across processes); and
+    #   * the anchor read only `PropertyMatcher::Equals`, so the `$param`
+    #     spelling fell past it into the full scan — which *is* exhaustive.
+    #     Meanwhile `WHERE id(v) = $x` was not pushed into the pattern at all
+    #     (try_extract_equality had no `id(v) = $param` arm), so the literal
+    #     and the parameter took different plans as well as different rows.
+    #     On the reporting graph that read 1 row vs 68.
+    #
+    # The fixture makes the collision the *normal* case: ids {1, 2} exist under
+    # all three labels, so any surviving first-type-wins behaviour answers 1
+    # where the corpus expects 3, on both optimizer legs.
+    (
+        "id_function_literal",
+        "cross_type_id_graph",
+        "MATCH (v) WHERE id(v) = 2 RETURN v.name AS nm ORDER BY nm",
+        None,
+    ),
+    (
+        "id_function_param",
+        "cross_type_id_graph",
+        "MATCH (v) WHERE id(v) = $x RETURN v.name AS nm ORDER BY nm",
+        {"x": 2},
+    ),
+    (
+        "id_pattern_literal",
+        "cross_type_id_graph",
+        "MATCH (n {id: 2}) RETURN n.name AS nm ORDER BY nm",
+        None,
+    ),
+    (
+        "id_pattern_param",
+        "cross_type_id_graph",
+        "MATCH (n {id: $x}) RETURN n.name AS nm ORDER BY nm",
+        {"x": 2},
+    ),
+    (
+        # The anchor as an expansion *start*: two of the three id-1 nodes have
+        # an outgoing edge, so a first-type-wins anchor counts 1 instead of 2.
+        "id_pattern_edge_anchor",
+        "cross_type_id_graph",
+        "MATCH (a {id: 1})-[r]->(b) RETURN count(r) AS c",
+        None,
+    ),
+    # ── elementId() slot anchoring (`anchor_element_id`, 2026-08-15) ─────
+    #
+    # `elementId(v)` is the node's slot, so the predicate names exactly one
+    # candidate — but the pattern an IDE sends back after a click carries no
+    # label, so the unanchored plan is a full node scan plus a per-row
+    # predicate (measured 28 s on a G.V() node-expansion round trip). The pass
+    # records the slot as a pre-binding.
+    #
+    # The anchor is a search-space constraint and the predicate is never
+    # removed, which is exactly what these entries pin: the anchored plan must
+    # answer what the unanchored one answers, in every shape — including the
+    # ones where the pass must decline (a disjunct constrains nothing) and the
+    # one where the slot does not exist.
+    #
+    # `small_graph` slots are 0/1/2 for Alice/Bob/Charlie, in insertion order.
+    (
+        "element_id_anchor_param",
+        "small_graph",
+        "MATCH (v) WHERE elementId(v) = $eid RETURN v.name AS nm",
+        {"eid": "0"},
+    ),
+    (
+        "element_id_anchor_literal",
+        "small_graph",
+        "MATCH (v) WHERE elementId(v) = '0' RETURN v.name AS nm",
+        None,
+    ),
+    (
+        "element_id_anchor_path",
+        "small_graph",
+        "MATCH p = (v)--() WHERE elementId(v) = $eid RETURN count(p) AS c",
+        {"eid": "0"},
+    ),
+    (
+        # Must NOT anchor: under OR every node is still a candidate, so an
+        # anchored plan would answer one row where the naive answers two.
+        "element_id_no_anchor_under_or",
+        "small_graph",
+        "MATCH (v) WHERE elementId(v) = $eid OR v.name = 'Bob' RETURN v.name AS nm ORDER BY nm",
+        {"eid": "0"},
+    ),
+    (
+        # A slot past the end of the graph: the pre-binding resolves to no
+        # node, which is what the predicate concludes too.
+        "element_id_out_of_range",
+        "small_graph",
+        "MATCH (v) WHERE elementId(v) = $eid RETURN v.name AS nm",
+        {"eid": "999999"},
+    ),
 ]
 
 
@@ -2608,6 +2708,45 @@ def vector_props_graph() -> kglite.KnowledgeGraph:
         columns=["vec"],
     )
     return g
+
+
+def build_cross_type_id_graph() -> kglite.KnowledgeGraph:
+    """Three labels sharing the same id space: Alpha/Beta/Gamma × ids {1, 2}.
+
+    Ids are unique *within* a type (no intra-type duplicates) and deliberately
+    reused *across* types — the shape `MATCH (n {id: 2})` must answer with one
+    node per label. Every node carries a distinct `name` so a collapsed result
+    names which label survived.
+
+    Two edges, from two different labels' id-1 node, so the anchor-as-expansion
+    -start shape counts more than one type's worth of edges:
+
+        Alpha#1 ─LINKS─► Beta#2
+        Beta#1  ─LINKS─► Gamma#2
+
+    Kept out of conftest and separate from `small_graph` — which is pinned by
+    absolute goldens across the suite — so adding the shape cannot move any
+    existing expectation.
+    """
+    import pandas as pd
+
+    g = kglite.KnowledgeGraph()
+    for label in ("Alpha", "Beta", "Gamma"):
+        g.add_nodes(
+            pd.DataFrame({"nid": [1, 2], "name": [f"{label.lower()}_1", f"{label.lower()}_2"]}),
+            label,
+            "nid",
+            "name",
+        )
+    g.add_connections(pd.DataFrame({"src": [1], "dst": [2]}), "LINKS", "Alpha", "src", "Beta", "dst")
+    g.add_connections(pd.DataFrame({"src": [1], "dst": [2]}), "LINKS", "Beta", "src", "Gamma", "dst")
+    return g
+
+
+@pytest.fixture
+def cross_type_id_graph() -> kglite.KnowledgeGraph:
+    """See :func:`build_cross_type_id_graph`."""
+    return build_cross_type_id_graph()
 
 
 @pytest.fixture
@@ -2957,6 +3096,7 @@ PASS_TRIGGER_CASES: dict[str, tuple[str, str]] = {
     "optimize_nested_queries": ("differential", "call_uncorrelated_body_fusion_then_limit"),
     "rewrite_count_bound_var_to_star": ("differential", "count_all_typed"),
     "push_where_into_match.1": ("differential", "where_eq"),
+    "anchor_element_id": ("differential", "element_id_anchor_param"),
     "fold_or_to_in": ("differential", "or_chain_to_in"),
     "push_where_into_match.2": ("differential", "or_chain_to_in"),
     "extract_pushable_rel_predicates": ("differential", "rel_property_filter"),
@@ -2995,6 +3135,11 @@ PASS_TRIGGER_CASES: dict[str, tuple[str, str]] = {
 # descending, OR vs AND) so a narrow gate regression cannot hide behind two
 # near-identical queries.
 PASS_SECONDARY_TRIGGER_CASES: dict[str, str] = {
+    # The parameter spelling of the pushed equality: `WHERE id(v) = $x` had no
+    # extraction arm at all until 2026-08-15, so `push_where_into_match.1`
+    # fired for the literal and silently declined the parameter. One pass maps
+    # to exactly one secondary case here, and `.1` had none.
+    "push_where_into_match.1": "id_function_param",
     "fold_or_to_in": "or_chain_reversed_literals",
     "push_where_into_match.2": "or_chain_reversed_literals",
     "desugar_multi_match_return_aggregate": "multi_match_two_property_group",

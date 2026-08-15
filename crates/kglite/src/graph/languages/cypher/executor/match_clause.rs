@@ -235,6 +235,36 @@ fn seed_projected_node_vars(pattern: &Pattern, row: &ResultRow) -> Option<Bindin
     extended
 }
 
+/// Extend `base` with this clause's planner-resolved slot anchors
+/// ([`MatchClause::node_anchors`], written by the `anchor_element_id` pass), so
+/// the `PatternExecutor` starts at the anchored node instead of scanning for
+/// it. Same mechanism and same rule as [`seed_projected_node_vars`]: an
+/// existing binding always wins, and `None` (no allocation) means nothing
+/// needed seeding — the common path.
+///
+/// Purely a search-space constraint. The `elementId(v) = …` predicate that
+/// produced the anchor is still evaluated, so an anchor naming a slot that no
+/// longer holds the expected node drops no row the predicate would have kept.
+pub(super) fn seed_clause_node_anchors(
+    clause: &MatchClause,
+    base: &Bindings<NodeIndex>,
+) -> Option<Bindings<NodeIndex>> {
+    if clause.node_anchors.is_empty() {
+        return None;
+    }
+    let mut extended: Option<Bindings<NodeIndex>> = None;
+    for (var, idx) in &clause.node_anchors {
+        if base.contains_key(var) {
+            continue; // an existing binding always wins
+        }
+        let ext = extended.get_or_insert_with(|| base.clone());
+        if !ext.contains_key(var) {
+            ext.insert(var.clone(), *idx);
+        }
+    }
+    extended
+}
+
 /// When a pattern re-uses a variable that is already bound on the incoming
 /// row only as a projected value (openCypher: the pattern must then match
 /// exactly that entity), seed the pattern so the `PatternExecutor` expands
@@ -443,7 +473,9 @@ impl<'a> CypherExecutor<'a> {
                     pattern
                 };
                 let seeded = seed_prebound_pattern_vars(pat, cur);
-                let pre_bindings = seeded.as_ref().unwrap_or(&cur.node_bindings);
+                let base = seeded.as_ref().unwrap_or(&cur.node_bindings);
+                let anchored = seed_clause_node_anchors(clause, base);
+                let pre_bindings = anchored.as_ref().unwrap_or(base);
                 let executor = PatternExecutor::with_bindings_and_params(
                     self.graph,
                     self.budget_probe_limit(None),

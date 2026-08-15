@@ -329,6 +329,85 @@ def test_absent_id_lookup_on_secondary_label():
     assert kg.cypher("MATCH (n:Person {id: 2}) RETURN n.name AS nm").to_list() == []
 
 
+# ── Cross-type id collisions: every spelling denotes the same nodes ────────
+
+
+def _cross_type_id_graph() -> KnowledgeGraph:
+    """Alpha/Beta/Gamma × ids {1, 2} — unique within a type, reused across."""
+    kg = KnowledgeGraph()
+    for label in ("Alpha", "Beta", "Gamma"):
+        kg.add_nodes(
+            pd.DataFrame({"nid": [1, 2], "name": [f"{label.lower()}_1", f"{label.lower()}_2"]}),
+            label,
+            "nid",
+            "name",
+        )
+    return kg
+
+
+def test_untyped_id_match_returns_one_node_per_label():
+    """`MATCH (n {id: 2})` is unscoped by label, so it answers with every node
+    whose id is 2 — one per type.
+
+    Fixed 2026-08-15. The untyped anchor returned on the first type whose id
+    index answered, collapsing the collision to a single node; because
+    `type_indices` is a HashMap, *which* node survived was not even stable
+    across processes. No correct consumer could have depended on the old
+    behaviour, so this golden replaces it outright.
+    """
+    kg = _cross_type_id_graph()
+
+    rows = kg.cypher("MATCH (n {id: 2}) RETURN n.name AS nm ORDER BY nm").to_list()
+    assert rows == [{"nm": "alpha_2"}, {"nm": "beta_2"}, {"nm": "gamma_2"}]
+
+    # Every returned node really carries id 2 — the union widened the answer
+    # without loosening the predicate.
+    ids = kg.cypher("MATCH (n {id: 2}) RETURN id(n) AS i").to_list()
+    assert ids == [{"i": 2}, {"i": 2}, {"i": 2}]
+
+    # The labels are distinct, i.e. it is one node per type rather than three
+    # rows from one type.
+    labels = sorted(r["l"][0] for r in kg.cypher("MATCH (n {id: 2}) RETURN labels(n) AS l").to_list())
+    assert labels == ["Alpha", "Beta", "Gamma"]
+
+
+def test_id_equality_literal_and_param_agree():
+    """`WHERE id(v) = 2` and `WHERE id(v) = $x` are the same query.
+
+    They were not: the parameter spelling had no extraction arm in
+    `try_extract_equality`, so only the literal was pushed into the pattern —
+    and with the pre-fix lossy untyped anchor the two plans then answered
+    different row sets (1 vs 68 on the reporting graph).
+    """
+    kg = _cross_type_id_graph()
+
+    literal = kg.cypher("MATCH (v) WHERE id(v) = 2 RETURN v.name AS nm ORDER BY nm").to_list()
+    param = kg.cypher("MATCH (v) WHERE id(v) = $x RETURN v.name AS nm ORDER BY nm", params={"x": 2}).to_list()
+    assert literal == param == [{"nm": "alpha_2"}, {"nm": "beta_2"}, {"nm": "gamma_2"}]
+
+    # The inline-map spellings are the same query again, both ways round.
+    inline_literal = kg.cypher("MATCH (n {id: 2}) RETURN n.name AS nm ORDER BY nm").to_list()
+    inline_param = kg.cypher("MATCH (n {id: $x}) RETURN n.name AS nm ORDER BY nm", params={"x": 2}).to_list()
+    assert inline_literal == inline_param == literal
+
+    # Commuted operands take the same path.
+    assert kg.cypher("MATCH (v) WHERE $x = id(v) RETURN v.name AS nm ORDER BY nm", params={"x": 2}).to_list() == literal
+
+
+def test_id_equality_literal_and_param_plan_identically():
+    """Same rows via the same plan: a divergence in *which passes fire* is how
+    the two spellings came to answer differently in the first place."""
+    kg = _cross_type_id_graph()
+
+    literal_ops = {r["operation"] for r in kg.cypher("EXPLAIN MATCH (v) WHERE id(v) = 2 RETURN v").to_list()}
+    param_ops = {
+        r["operation"] for r in kg.cypher("EXPLAIN MATCH (v) WHERE id(v) = $x RETURN v", params={"x": 2}).to_list()
+    }
+    assert literal_ops == param_ops
+    # Non-vacuity: the compared sets are the ones that carry the pushdown.
+    assert "OptimizerPass push_where_into_match.1" in literal_ops
+
+
 # ── elementId() — Neo4j 5 element identity (added 2026-08-15) ──────────────
 
 
@@ -356,6 +435,77 @@ def test_element_id_round_trips_into_predicate():
     eid = kg.cypher("MATCH (n:P {id: 2}) RETURN elementId(n) AS e").to_list()[0]["e"]
     rows = kg.cypher("MATCH (n:P) WHERE elementId(n) = $eid RETURN n.name AS nm", params={"eid": eid}).to_list()
     assert rows == [{"nm": "bob"}]
+
+
+def _anchor_graph() -> KnowledgeGraph:
+    """Five nodes in insertion order, so slots 0..4 are known, plus two edges
+    out of slot 0."""
+    kg = KnowledgeGraph()
+    kg.cypher("UNWIND range(1, 5) AS i CREATE (:P {id: i, name: 'n' + toString(i)})")
+    kg.cypher("MATCH (a:P {id: 1}), (b:P {id: 2}) CREATE (a)-[:R]->(b)")
+    kg.cypher("MATCH (a:P {id: 1}), (c:P {id: 3}) CREATE (a)-[:R]->(c)")
+    return kg
+
+
+def test_element_id_anchor_answers_what_the_scan_answers():
+    """`WHERE elementId(v) = …` is planned as a slot anchor (a pre-binding)
+    rather than a scan-plus-filter. The anchor constrains the search space
+    only — the predicate stays — so the anchored plan must answer exactly what
+    the unanchored one does, in every shape.
+
+    Motivation is speed, not semantics: the unlabelled `MATCH (v) WHERE
+    elementId(v) = $eid` an IDE sends back after a click was a full node scan
+    (measured 28 s on a G.V() node-expansion round trip).
+    """
+    kg = _anchor_graph()
+
+    def both(query, **kwargs):
+        anchored = kg.cypher(query, **kwargs).to_list()
+        assert anchored == kg.cypher(query, disable_optimizer=True, **kwargs).to_list()
+        return anchored
+
+    assert both("MATCH (v) WHERE elementId(v) = $eid RETURN v.name AS nm", params={"eid": "0"}) == [{"nm": "n1"}]
+    assert both("MATCH (v) WHERE elementId(v) = '0' RETURN v.name AS nm") == [{"nm": "n1"}]
+    # Expansion from the anchored node.
+    assert both("MATCH p = (v)--() WHERE elementId(v) = $eid RETURN count(p) AS c", params={"eid": "0"}) == [{"c": 2}]
+    # A slot past the end of the graph resolves to nothing rather than erroring.
+    assert both("MATCH (v) WHERE elementId(v) = $eid RETURN v.name AS nm", params={"eid": "999999"}) == []
+    # Under OR the pass must decline: every node is still a candidate.
+    assert both(
+        "MATCH (v) WHERE elementId(v) = $eid OR v.name = 'n4' RETURN v.name AS nm ORDER BY nm",
+        params={"eid": "0"},
+    ) == [{"nm": "n1"}, {"nm": "n4"}]
+    # An anchor never overrides a binding the query already made.
+    assert (
+        both(
+            "MATCH (a:P {id: 3}) WITH a MATCH (a) WHERE elementId(a) = $eid RETURN a.name AS nm",
+            params={"eid": "0"},
+        )
+        == []
+    )
+
+
+def test_element_id_anchor_fires_for_literal_and_param():
+    """Both spellings reach the pass — the parameter one especially, since it
+    is the only one a client actually sends."""
+    kg = _anchor_graph()
+
+    for query, kwargs in (
+        ("MATCH (v) WHERE elementId(v) = '0' RETURN v", {}),
+        ("MATCH (v) WHERE elementId(v) = $eid RETURN v", {"params": {"eid": "0"}}),
+    ):
+        ops = [row["operation"] for row in kg.cypher(f"EXPLAIN {query}", **kwargs).to_list()]
+        assert "OptimizerPass anchor_element_id" in ops, query
+
+    # Non-vacuity: the declined shape does not report the pass.
+    declined = [
+        row["operation"]
+        for row in kg.cypher(
+            "EXPLAIN MATCH (v) WHERE elementId(v) = $eid OR v.name = 'n4' RETURN v",
+            params={"eid": "0"},
+        ).to_list()
+    ]
+    assert "OptimizerPass anchor_element_id" not in declined
 
 
 def test_element_id_collected_node_and_null():

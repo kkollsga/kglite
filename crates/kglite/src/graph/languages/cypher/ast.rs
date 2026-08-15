@@ -324,6 +324,15 @@ pub struct MatchClause {
     /// asymmetry is deliberate; see [`WithClause::where_clause`] for the same
     /// in-clause shape on the projection side.
     pub where_clause: Option<WhereClause>,
+    /// Planner-resolved slot anchors from `WHERE elementId(v) = <literal|$param>`
+    /// — `(variable, slot)` pairs the executor seeds as pre-bindings.
+    ///
+    /// A **search-space constraint only**: the predicate that produced the
+    /// anchor is never removed, so a stale or wrong anchor cannot change which
+    /// rows the query answers — only which rows it has to visit. An anchor
+    /// naming a slot that does not exist simply matches nothing, which is what
+    /// the predicate would have decided anyway.
+    pub node_anchors: Vec<(String, petgraph::graph::NodeIndex)>,
 }
 
 /// Path variable assignment: `p = shortestPath(pattern)`
@@ -954,6 +963,14 @@ pub enum SchemaCommand {
     /// clients call this for autocomplete. Empty `yield_items` = the default
     /// Neo4j column set (name, description, mode, worksOnSystem).
     ShowProcedures {
+        yield_items: Vec<YieldItem>,
+    },
+    /// `SHOW FUNCTIONS [YIELD …]` — a read over the function registry
+    /// (`executor::scalar_functions::function_registry`), whose every entry is
+    /// gated against the real dispatcher. Neo4j clients (G.V(), Browser) call
+    /// this for function autocomplete. Empty `yield_items` = the default Neo4j
+    /// column set (name, category, description).
+    ShowFunctions {
         yield_items: Vec<YieldItem>,
     },
     /// Constraint DDL. Parsed into a typed command so a ported Neo4j schema

@@ -781,6 +781,40 @@ pub(super) fn try_extract_equality(
         }
     }
 
+    // id(variable) = $param and its commutation — resolved from bound
+    // params exactly like the `v.prop = $x` arms above. These were never
+    // written, so `WHERE id(v) = 2` pushed into the pattern while
+    // `WHERE id(v) = $x` did not: with the pre-fix lossy untyped id anchor
+    // that meant a literal and a parameter answered DIFFERENT rows
+    // (measured 1 vs 68, 2026-08-15). The two spellings must plan
+    // identically — the same equivalence dynamic labels promise.
+    if let (Expression::FunctionCall { name, args, .. }, Expression::Parameter(pname)) =
+        (left, right)
+    {
+        if name == "id" {
+            if let (Some(Expression::Variable(var)), Some(val)) =
+                (args.first(), params.get(pname.as_str()))
+            {
+                if match_vars.iter().any(|(v, _)| v == var) {
+                    return Some((var.clone(), "id".to_string(), val.clone()));
+                }
+            }
+        }
+    }
+    if let (Expression::Parameter(pname), Expression::FunctionCall { name, args, .. }) =
+        (left, right)
+    {
+        if name == "id" {
+            if let (Some(Expression::Variable(var)), Some(val)) =
+                (args.first(), params.get(pname.as_str()))
+            {
+                if match_vars.iter().any(|(v, _)| v == var) {
+                    return Some((var.clone(), "id".to_string(), val.clone()));
+                }
+            }
+        }
+    }
+
     None
 }
 

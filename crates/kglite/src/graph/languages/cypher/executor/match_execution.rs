@@ -170,11 +170,24 @@ impl<'a> CypherExecutor<'a> {
                     } else {
                         None
                     };
-                    let executor = PatternExecutor::new_lightweight_with_params(
-                        self.graph,
-                        pattern_limit,
-                        self.params,
-                    )
+                    // A slot anchor (`WHERE elementId(v) = …`) seeds the
+                    // variable as a pre-binding, turning the leading scan into
+                    // a point lookup. Search-space only — the predicate stays.
+                    let unbound: Bindings<petgraph::graph::NodeIndex> = Bindings::new();
+                    let anchors = match_clause::seed_clause_node_anchors(clause, &unbound);
+                    let executor = match anchors.as_ref() {
+                        Some(pre_bindings) => PatternExecutor::with_bindings_and_params(
+                            self.graph,
+                            pattern_limit,
+                            pre_bindings,
+                            self.params,
+                        ),
+                        None => PatternExecutor::new_lightweight_with_params(
+                            self.graph,
+                            pattern_limit,
+                            self.params,
+                        ),
+                    }
                     .set_deadline(self.deadline)
                     .set_cancel(self.cancel)
                     .set_distinct_target(matcher_distinct_target);
@@ -307,8 +320,9 @@ impl<'a> CypherExecutor<'a> {
                         // `existing_row` via `pre_bindings` must end before
                         // the move/merge below.
                         let matches = {
-                            let pre_bindings =
-                                seeded.as_ref().unwrap_or(&existing_row.node_bindings);
+                            let base = seeded.as_ref().unwrap_or(&existing_row.node_bindings);
+                            let anchored = match_clause::seed_clause_node_anchors(clause, base);
+                            let pre_bindings = anchored.as_ref().unwrap_or(base);
                             let executor = PatternExecutor::with_bindings_and_params(
                                 self.graph,
                                 self.budget_probe_limit(remaining),
@@ -477,7 +491,9 @@ impl<'a> CypherExecutor<'a> {
                         // pins the pattern to that edge — seed its endpoints
                         // so the executor doesn't enumerate every edge.
                         let seeded = match_clause::seed_prebound_pattern_vars(pat, cur);
-                        let pre_bindings = seeded.as_ref().unwrap_or(&cur.node_bindings);
+                        let base = seeded.as_ref().unwrap_or(&cur.node_bindings);
+                        let anchored = match_clause::seed_clause_node_anchors(clause, base);
+                        let pre_bindings = anchored.as_ref().unwrap_or(base);
                         let executor = PatternExecutor::with_bindings_and_params(
                             self.graph,
                             exec_limit,

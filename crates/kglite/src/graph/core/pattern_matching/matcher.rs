@@ -565,22 +565,33 @@ impl<'a> PatternExecutor<'a> {
             // plain string property now (0.11.0) — it falls through to the
             // cross-type global-property-index path below, which serves the
             // `nid` index in O(log N) (built on save_disk / lazily in memory).
-            let id_val_opt = ["id"].iter().find_map(|k| {
-                if let Some(PropertyMatcher::Equals(v)) = props.get(*k) {
-                    Some(v)
-                } else {
-                    None
-                }
+            // Params resolve here exactly as the typed path does
+            // (try_index_lookup's EqualsParam arm) — pre-fix `{id: $x}` fell
+            // past this anchor into the full scan, so the literal and the
+            // parameter spelling answered DIFFERENT rows on graphs with
+            // duplicate ids (measured 2026-08-15: 1 vs 68).
+            let id_val_opt = ["id"].iter().find_map(|k| match props.get(*k) {
+                Some(PropertyMatcher::Equals(v)) => Some(v),
+                Some(PropertyMatcher::EqualsParam(name)) => self.params.get(name.as_str()),
+                _ => None,
             });
             if let Some(id_val) = id_val_opt {
+                // Union over every type's id index — one node per (type, id),
+                // the semantics the duplicate-id warning documents. Pre-fix
+                // this returned on the FIRST type with a hit, collapsing
+                // cross-type id collisions to one arbitrary node (HashMap key
+                // order — nondeterministic across processes).
+                let mut hits: Vec<petgraph::graph::NodeIndex> = Vec::new();
                 for node_type in self.graph.type_indices.keys() {
                     if let Some(idx) = self.graph.lookup_by_id_readonly(node_type, id_val) {
                         if props.len() == 1 || self.node_matches_properties(idx, props) {
-                            return Ok(vec![idx]);
+                            hits.push(idx);
                         }
                     }
                 }
-                return Ok(vec![]);
+                // Deterministic row order regardless of type-map iteration.
+                hits.sort_unstable();
+                return Ok(hits);
             }
             // Cross-type fast paths: for any Equals(String) or
             // StartsWith(String), consult the persistent global index

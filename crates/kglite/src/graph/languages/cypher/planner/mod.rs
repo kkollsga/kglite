@@ -18,6 +18,7 @@ pub mod cost_model;
 pub mod fusion;
 pub mod index_selection;
 pub mod join_order;
+mod node_anchor;
 pub mod rel_predicate_pushdown;
 pub mod schema_check;
 pub mod simplification;
@@ -38,6 +39,7 @@ use join_order::{
     optimize_pattern_start_node, reorder_cyclic_pattern_edges, reorder_match_clauses,
     reorder_match_patterns,
 };
+use node_anchor::anchor_element_id;
 use rel_predicate_pushdown::extract_pushable_rel_predicates_with_params;
 use simplification::{
     desugar_multi_match_return_aggregate, fold_or_to_in, fold_pass_through_with,
@@ -77,6 +79,7 @@ type PassFn = fn(&mut CypherQuery, &PassCtx);
 /// | `rewrite_count_bound_var_to_star` | safe-by-shape | Rewrites a `count(v)` expression in place; never spans clauses. |
 /// | `push_where_into_match` (×2) | safe-by-shape | Matches adjacent `(Match\|OptionalMatch, Where)`, plus an `OptionalMatch` whose WHERE is the clause's own (`MatchClause::where_clause`) — that form pushes into its *own* patterns, so no window is spanned at all. A CallSubquery is neither, so it breaks the adjacency window. Prior-scope helpers under-report CALL outputs → under-push (conservative). |
 /// | `fold_or_to_in` | safe-by-shape | Rewrites a WHERE predicate in place — the standalone clause or a MATCH's own. |
+/// | `anchor_element_id` | safe-by-shape | Reads a MATCH's own WHERE plus the adjacent `Clause::Where`, and writes only a hint on that same MATCH. A CallSubquery is neither a MATCH nor a WHERE, so it enters no window; and the hint constrains the search space only (the predicate stays), so even a hint written against a body it could not see would change no answer. |
 /// | `extract_pushable_rel_predicates` | safe-by-shape | Matches `(Match, Where)` adjacency only. |
 /// | `fold_pass_through_with` | **guarded** | Folds only `WITH`. Its downstream-ref check now records a CallSubquery's import names + body refs (see `collect_clause_variables`) so a `WITH` a correlated CALL depends on is never folded away. |
 /// | `desugar_multi_match_return_aggregate` | safe-by-shape | Requires `Match, Match, Return` ADJACENT; a CallSubquery between two MATCHes breaks adjacency. |
@@ -112,6 +115,10 @@ pub const PASSES: &[(&str, PassFn)] = &[
     ("fold_or_to_in", pass_fold_or_to_in),
     // second push_where pass: catches IN predicates created by fold_or_to_in
     ("push_where_into_match.2", pass_push_where_into_match),
+    // Slot anchors from elementId() equality. Must precede the join-order
+    // passes: they read `node_anchors` to score an anchored variable as
+    // fully selective.
+    ("anchor_element_id", pass_anchor_element_id),
     (
         "extract_pushable_rel_predicates",
         pass_extract_pushable_rel_predicates,
@@ -528,6 +535,33 @@ pub(crate) fn seed_ignoring_fusion_passes() -> &'static HashSet<String> {
 /// path still relies on.
 fn pass_push_where_into_match(query: &mut CypherQuery, ctx: &PassCtx) {
     push_where_into_match(query, ctx.params)
+}
+
+/// **Pass:** `anchor_element_id` — Record the slot named by
+/// `WHERE elementId(v) = <literal|$param>` on the MATCH clause, so the
+/// executor seeds it as a pre-binding instead of scanning for it.
+///
+/// **Precondition:** a `Clause::Match`/`Clause::OptionalMatch` with a WHERE —
+/// its own (the scoped `OPTIONAL MATCH` form) or the adjacent standalone one.
+///
+/// **Pattern matched:** an `Equals` comparison, either operand order, between
+/// `elementId(v)` — where `v` is a node variable of *this* clause's patterns —
+/// and a value that parses to a non-negative slot. Only the predicate's `And`
+/// spine is descended.
+///
+/// **Rewrite:** pushes `(v, NodeIndex)` onto `MatchClause::node_anchors`. The
+/// predicate is left standing, so this narrows the candidate set without
+/// owning the answer: an out-of-range or stale slot resolves to no node, which
+/// is what the retained predicate would have concluded.
+///
+/// **Why-bail:** `Or`/`Not`/`Xor` are not descended (a disjunct constrains
+/// nothing, and a negation inverts the reasoning); a non-numeric, negative or
+/// unbound value does not name a slot; a variable this clause does not bind
+/// belongs to another clause's search space. Conflicting anchors on one
+/// variable keep the first — two of them cannot both hold, and the predicate
+/// rejects the loser.
+fn pass_anchor_element_id(query: &mut CypherQuery, ctx: &PassCtx) {
+    anchor_element_id(query, ctx.params)
 }
 
 /// **Pass:** `fold_or_to_in` — Rewrite `(a.x = v1 OR a.x = v2 OR ...)`

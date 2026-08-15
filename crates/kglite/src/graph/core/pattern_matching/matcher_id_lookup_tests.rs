@@ -253,6 +253,141 @@ fn string_id_hit_and_miss() {
     );
 }
 
+// ── The untyped `{id: X}` anchor: cross-type union, literal == param ──────
+//
+// `MATCH (n {id: 2})` has no label to scope the id space, so it means "every
+// node whose id is 2" — one per type that carries the key. Two defects lived
+// on that path until 2026-08-15:
+//
+//   * it returned on the FIRST type whose index answered, so a cross-type id
+//     collision collapsed to one arbitrary node — arbitrary because
+//     `type_indices` is a `HashMap`, so which one survived was not stable; and
+//   * it read only `PropertyMatcher::Equals`, so `{id: $x}` fell past the
+//     anchor into the exhaustive scan and answered a *different* (complete)
+//     set than the literal.
+
+/// Two nodes per label under three labels, ids {1, 2} reused across all of
+/// them and unique within each. Every id index is warm.
+fn cross_type_docs() -> DirGraph {
+    let mut graph = DirGraph::new();
+    run(
+        &mut graph,
+        "CREATE (:Alpha {id: 1, name: 'a1'}), (:Alpha {id: 2, name: 'a2'}), \
+         (:Beta {id: 1, name: 'b1'}), (:Beta {id: 2, name: 'b2'}), \
+         (:Gamma {id: 1, name: 'g1'}), (:Gamma {id: 2, name: 'g2'})",
+    );
+    for node_type in ["Alpha", "Beta", "Gamma"] {
+        graph.build_id_index(node_type);
+        assert!(graph.id_indices.contains_key(node_type));
+    }
+    graph
+}
+
+/// Run an untyped node pattern through the public matcher entry point.
+fn untyped_lookup(
+    graph: &DirGraph,
+    props: HashMap<String, PropertyMatcher>,
+    params: &HashMap<String, Value>,
+) -> Vec<NodeIndex> {
+    let pattern = NodePattern {
+        variable: None,
+        node_type: None,
+        extra_labels: Vec::new(),
+        properties: Some(props),
+        label_params: Vec::new(),
+    };
+    PatternExecutor::new_lightweight_with_params(graph, None, params)
+        .find_matching_nodes_pub(&pattern)
+        .expect("untyped id anchor must not error")
+}
+
+/// The union: one node per type carrying the id, in ascending `NodeIndex`
+/// order. Ascending order is the contract because the source of the hits is a
+/// `HashMap` iteration — without the sort the *row order* would change between
+/// processes even once the set became right.
+#[test]
+fn untyped_id_anchor_unions_every_type() {
+    let graph = cross_type_docs();
+    let params = HashMap::new();
+
+    let hits = untyped_lookup(&graph, eq_props("id", Value::Int64(2)), &params);
+    assert_eq!(
+        hits.len(),
+        3,
+        "one node per type carrying id 2, not the first"
+    );
+    let mut sorted = hits.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        hits, sorted,
+        "hits must be emitted in ascending NodeIndex order"
+    );
+
+    // The names prove the union spans all three types rather than repeating
+    // one type's node.
+    assert_eq!(count_rows(&graph, "MATCH (n {id: 2}) RETURN n.name"), 3);
+    assert_eq!(count_rows(&graph, "MATCH (n {id: 1}) RETURN n.name"), 3);
+}
+
+/// The parameter spelling resolves through the same anchor and answers the
+/// identical set — not merely the same count.
+#[test]
+fn untyped_id_anchor_param_equals_literal() {
+    let graph = cross_type_docs();
+
+    let literal = untyped_lookup(&graph, eq_props("id", Value::Int64(2)), &HashMap::new());
+
+    let params: HashMap<String, Value> = HashMap::from([("x".to_string(), Value::Int64(2))]);
+    let param_props = HashMap::from([(
+        "id".to_string(),
+        PropertyMatcher::EqualsParam("x".to_string()),
+    )]);
+    let parameterized = untyped_lookup(&graph, param_props, &params);
+
+    assert_eq!(
+        parameterized, literal,
+        "`{{id: $x}}` and `{{id: 2}}` denote the same nodes and must answer identically"
+    );
+    assert_eq!(literal.len(), 3);
+}
+
+/// The absent-id contract holds on the untyped path for both spellings: empty,
+/// and — because every type's index is built and authoritative — without a
+/// scan inventing anything.
+#[test]
+fn untyped_absent_id_is_empty_for_literal_and_param() {
+    let graph = cross_type_docs();
+
+    assert!(untyped_lookup(&graph, eq_props("id", Value::Int64(999)), &HashMap::new()).is_empty());
+
+    let params: HashMap<String, Value> = HashMap::from([("x".to_string(), Value::Int64(999))]);
+    let param_props = HashMap::from([(
+        "id".to_string(),
+        PropertyMatcher::EqualsParam("x".to_string()),
+    )]);
+    assert!(untyped_lookup(&graph, param_props, &params).is_empty());
+
+    // …and the typed anchor's own fast-empty is untouched by the union change.
+    assert_eq!(
+        lookup(&graph, "Alpha", &eq_props("id", Value::Int64(999))),
+        Some(Vec::new()),
+        "the typed fast-empty must still answer without falling through to a scan"
+    );
+}
+
+/// A param naming nothing in the bound set must not be *treated* as a literal
+/// id: the anchor declines and the ordinary property scan answers (nothing, as
+/// no node stores a property called `id`).
+#[test]
+fn untyped_unbound_param_does_not_anchor() {
+    let graph = cross_type_docs();
+    let param_props = HashMap::from([(
+        "id".to_string(),
+        PropertyMatcher::EqualsParam("x".to_string()),
+    )]);
+    assert!(untyped_lookup(&graph, param_props, &HashMap::new()).is_empty());
+}
+
 /// A conjunction whose id predicate misses is empty regardless of the other
 /// predicates, and one whose id predicate hits still honours them.
 #[test]

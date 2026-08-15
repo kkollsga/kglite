@@ -19,6 +19,12 @@ pub(super) fn optimize_pattern_start_node(query: &mut CypherQuery, graph: &DirGr
     let mut bound_vars: HashSet<String> = HashSet::new();
 
     for clause in &mut query.clauses {
+        // A variable anchored to a slot by `anchor_element_id` is pre-bound at
+        // runtime exactly as a prior clause's variable is, so it scores as
+        // fully selective here too — otherwise `(v)-[:T]->(t:Type)` reads as
+        // "unconstrained start" and gets reversed away from the one node the
+        // anchor already found.
+        anchor_vars(clause, &mut bound_vars);
         let (patterns, path_assignments) = match clause {
             Clause::Match(m) => (&mut m.patterns, &m.path_assignments),
             Clause::OptionalMatch(m) => (&mut m.patterns, &m.path_assignments),
@@ -87,6 +93,18 @@ pub(super) fn optimize_pattern_start_node(query: &mut CypherQuery, graph: &DirGr
                 }
             }
         }
+    }
+}
+
+/// Add this clause's planner-resolved slot anchors (`anchor_element_id`) to
+/// `bound_vars`. An anchored variable resolves to a single `NodeIndex` when the
+/// executor seeds it, which is what `bound_vars` means here.
+fn anchor_vars(clause: &Clause, bound_vars: &mut HashSet<String>) {
+    let (Clause::Match(m) | Clause::OptionalMatch(m)) = clause else {
+        return;
+    };
+    for (var, _) in &m.node_anchors {
+        bound_vars.insert(var.clone());
     }
 }
 
@@ -556,6 +574,9 @@ pub(super) fn reorder_match_patterns(query: &mut CypherQuery, graph: &DirGraph) 
     let mut bound_vars: HashSet<String> = HashSet::new();
 
     for clause in &mut query.clauses {
+        // See `anchor_vars`: a slot-anchored variable is pre-bound at runtime,
+        // so the pattern that starts on it is the selective one.
+        anchor_vars(clause, &mut bound_vars);
         let mc = match clause {
             Clause::Match(mc) => mc,
             Clause::OptionalMatch(mc) => {

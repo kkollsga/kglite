@@ -428,6 +428,54 @@ def test_bench_unwind_point_lookup_hits(benchmark, hot_graph):
 
 
 # ---------------------------------------------------------------------------
+# elementId() slot anchoring — the unlabelled point lookup an IDE sends
+# ---------------------------------------------------------------------------
+#
+# `MATCH (v) WHERE elementId(v) = $eid` carries no label, so without the
+# `anchor_element_id` pass it is a full node scan plus a per-row predicate
+# (measured 28 s on a G.V() node-expansion round trip). Anchored, the slot is
+# seeded as a pre-binding and the shape is a point lookup. The hit cells below
+# must land in the same order of magnitude as the id point lookup above; the
+# out-of-range cell is the miss control — it must not cost a scan either.
+
+
+@pytest.mark.benchmark
+def test_bench_element_id_untyped_param(benchmark, hot_graph):
+    """`MATCH (v) WHERE elementId(v) = $eid` — the round-tripped element_id."""
+    result = benchmark(
+        lambda: hot_graph.cypher(
+            "MATCH (v) WHERE elementId(v) = $eid RETURN v.name AS nm",
+            params={"eid": "1234"},
+        )
+    )
+    assert len(result.to_list()) == 1
+
+
+@pytest.mark.benchmark
+def test_bench_element_id_neighbourhood(benchmark, hot_graph):
+    """The expansion the anchor exists for: neighbours of the clicked node."""
+    result = benchmark(
+        lambda: hot_graph.cypher(
+            "MATCH p=(v)--() WHERE elementId(v) = $eid RETURN count(p) AS c",
+            params={"eid": "1234"},
+        )
+    )
+    assert result.to_list()[0]["c"] > 0
+
+
+@pytest.mark.benchmark
+def test_bench_element_id_out_of_range_miss(benchmark, hot_graph):
+    """A slot past the end of the graph — the miss control: no rows, no scan."""
+    result = benchmark(
+        lambda: hot_graph.cypher(
+            "MATCH (v) WHERE elementId(v) = $eid RETURN v.name AS nm",
+            params={"eid": "9999999"},
+        )
+    )
+    assert result.to_list() == []
+
+
+# ---------------------------------------------------------------------------
 # IN membership over a large list
 # ---------------------------------------------------------------------------
 #
