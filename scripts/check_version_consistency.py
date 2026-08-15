@@ -1969,6 +1969,19 @@ def run_notify(
 #: Add an entry when a release removes or changes a public symbol; never edit
 #: an existing release's set to mean "the current release".
 BREAKING_SYMBOLS_BY_VERSION: dict[str, list[str]] = {
+    # 0.16.1 — the backlog-zero train (semver-major set, shipped in a patch
+    # per project policy). Wire note: kglite_value_to_json now emits
+    # structured JSON for Node/Relationship/Path/temporal/Point/Duration/
+    # UniqueId/NodeRef where it emitted Debug strings — a behavior break for
+    # any consumer parsing the old strings via the C ABI, CLI --mode json,
+    # or MCP recipe results.
+    "0.16.1": [
+        "DirGraph::check_auto_vacuum",
+        "NodeData::id",
+        "NodeData::title",
+        "TypeLookup::from_id_indices",
+        "kglite_value_to_json",
+    ],
     # 0.15.9 — D1/D2 Rust-API surgery (semver-major, shipped in a patch per
     # project policy; Python and C surfaces were additive-only that release).
     "0.15.9": [
