@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version-gate (Neo4j Browser, G.V()) need `--neo4j-compat`. Edition is
   always `community`. `SHOW DATABASES` returns one row named `neo4j`
   (matching the routing default) with `access` reflecting `--readonly`.
+- Bolt server: `EXPLAIN` now follows the Bolt contract — zero records, with
+  the plan tree (operators, estimated rows, optimizer passes) in the SUCCESS
+  summary's `plan` metadata, so driver `summary.plan` consumers and IDE plan
+  tabs render. `PROFILE` executes normally and deliberately reports no
+  per-operator statistics (none are collected; fabricating them would
+  mislead).
 - Bolt server: every incoming query is logged at debug level — run a client
   at `RUST_LOG=debug` to capture its exact connect sequence.
 - `elementId(entity)` scalar function — Neo4j 5 element identity as an opaque

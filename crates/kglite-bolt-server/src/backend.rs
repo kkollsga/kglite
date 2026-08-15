@@ -614,7 +614,7 @@ impl BoltBackend for KgliteBackend {
 
         let elapsed_ms = elapsed_start.elapsed().as_millis() as i64;
 
-        let records: Vec<BoltRecord> = result
+        let mut records: Vec<BoltRecord> = result
             .rows
             .iter()
             .map(|row| {
@@ -629,6 +629,25 @@ impl BoltBackend for KgliteBackend {
             ("type".to_string(), BoltValue::String(type_str.to_string())),
             ("t_last".to_string(), BoltValue::Integer(elapsed_ms)),
         ]);
+
+        // EXPLAIN follows the Bolt contract: ZERO records, and the plan in
+        // the SUCCESS metadata's `plan` key. The engine answers EXPLAIN as
+        // step rows (step/operation/estimated_rows); pre-fix those rows were
+        // forwarded as records with no `plan` metadata, so every plan-tab
+        // consumer (Neo4j Browser, G.V() — a documented ✅ feature in its
+        // support matrix) rendered blank, and drivers saw records where the
+        // contract promises none. PROFILE stays a passthrough: the engine
+        // collects no per-operator statistics, and fabricating dbHits/rows
+        // would mislead — the Memgraph precedent (plan without profiling) is
+        // an accepted shape.
+        let mut columns = result.columns;
+        if strip_keyword_ci(trimmed, "explain").is_some() {
+            if let Some(plan) = plan_from_explain_rows(&columns, &result.rows) {
+                summary.insert("plan".to_string(), plan);
+                records.clear();
+                columns = Vec::new();
+            }
+        }
         if let Some(stats) = &result.stats {
             let stats_dict = BoltDict::from([
                 (
@@ -657,7 +676,7 @@ impl BoltBackend for KgliteBackend {
 
         Ok(ResultStream {
             metadata: ResultMetadata {
-                columns: result.columns,
+                columns,
                 extra: BoltDict::new(),
             },
             records,
@@ -1290,6 +1309,83 @@ fn parse_server_facts_call(query: &str) -> Option<ServerFactsCall> {
         });
     }
     None
+}
+
+/// Convert the engine's EXPLAIN step rows into Neo4j's nested Bolt plan
+/// shape: each node `{operatorType, args, identifiers, children}`, with the
+/// FINAL pipeline step as the root (Neo4j's root is the last operator) and
+/// each earlier step nested as its single child. `OptimizerPass <name>` rows
+/// are not operators — they are collected into the root's
+/// `args["optimizer-passes"]` list. Returns `None` when the shape is not the
+/// engine's EXPLAIN output (leaving the stream untouched).
+fn plan_from_explain_rows(
+    columns: &[String],
+    rows: &[Vec<kglite::datatypes::values::Value>],
+) -> Option<BoltValue> {
+    use kglite::datatypes::values::Value;
+
+    let step_idx = columns.iter().position(|c| c == "step")?;
+    let op_idx = columns.iter().position(|c| c == "operation")?;
+    let est_idx = columns.iter().position(|c| c == "estimated_rows")?;
+
+    let mut steps: Vec<(i64, String, Option<i64>)> = Vec::new();
+    let mut passes: Vec<BoltValue> = Vec::new();
+    for row in rows {
+        let step = match row.get(step_idx)? {
+            Value::Int64(i) => *i,
+            _ => return None,
+        };
+        let op = match row.get(op_idx)? {
+            Value::String(s) => s.clone(),
+            _ => return None,
+        };
+        let est = match row.get(est_idx) {
+            Some(Value::Int64(i)) => Some(*i),
+            _ => None,
+        };
+        if let Some(name) = op.strip_prefix("OptimizerPass ") {
+            passes.push(BoltValue::String(name.to_string()));
+        } else {
+            steps.push((step, op, est));
+        }
+    }
+    if steps.is_empty() {
+        return None;
+    }
+    steps.sort_by_key(|(step, _, _)| *step);
+
+    // Fold from the first step outward: the last operator becomes the root.
+    let mut node: Option<BoltValue> = None;
+    let last = steps.len() - 1;
+    for (i, (_, op, est)) in steps.into_iter().enumerate() {
+        let mut args = BoltDict::new();
+        if let Some(est) = est {
+            args.insert("EstimatedRows".to_string(), BoltValue::Float(est as f64));
+        }
+        if i == last {
+            args.insert(
+                "runtime".to_string(),
+                BoltValue::String("kglite".to_string()),
+            );
+            if !passes.is_empty() {
+                args.insert(
+                    "optimizer-passes".to_string(),
+                    BoltValue::List(std::mem::take(&mut passes)),
+                );
+            }
+        }
+        let children = match node.take() {
+            Some(child) => vec![child],
+            None => Vec::new(),
+        };
+        node = Some(BoltValue::Dict(BoltDict::from([
+            ("operatorType".to_string(), BoltValue::String(op)),
+            ("args".to_string(), BoltValue::Dict(args)),
+            ("identifiers".to_string(), BoltValue::List(Vec::new())),
+            ("children".to_string(), BoltValue::List(children)),
+        ])));
+    }
+    node
 }
 
 /// Project `(column, value)` pairs onto the client's yielded columns and wrap

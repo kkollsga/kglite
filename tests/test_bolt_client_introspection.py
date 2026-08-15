@@ -186,3 +186,41 @@ def test_element_id_round_trip_over_the_wire(bolt_server):
                 )
             )
     assert [r["e"] for r in back] == [eid]
+
+
+# ── EXPLAIN/PROFILE Bolt contract (2026-08-15) ─────────────────────────────
+
+
+def test_explain_returns_plan_metadata_and_zero_records(bolt_server):
+    """Neo4j's contract: EXPLAIN yields no records; the plan rides in the
+    SUCCESS summary. Pre-fix the engine's step rows were forwarded as records
+    with no plan metadata, so plan tabs (Browser, G.V()) rendered blank."""
+    with GraphDatabase.driver(bolt_server, auth=None) as driver:
+        with driver.session() as session:
+            result = session.run("EXPLAIN MATCH (p:Person)-[:KNOWS]->(q) RETURN p.name ORDER BY p.name LIMIT 2")
+            records = list(result)
+            summary = result.consume()
+    assert records == []
+    plan = summary.plan
+    assert plan is not None
+    assert plan["args"]["runtime"] == "kglite"
+    assert "optimizer-passes" in plan["args"]
+    # Root is the final operator; the chain bottoms out at the Match.
+    node = plan
+    while node.get("children"):
+        assert len(node["children"]) == 1
+        node = node["children"][0]
+    assert node["operatorType"].startswith("Match")
+
+
+def test_profile_still_executes_without_fabricated_stats(bolt_server):
+    """No per-operator statistics exist in the engine, so PROFILE executes
+    normally and reports no profile — the Memgraph shape (plan without
+    profiling), never fabricated dbHits."""
+    with GraphDatabase.driver(bolt_server, auth=None) as driver:
+        with driver.session() as session:
+            result = session.run("PROFILE MATCH (p:Person) RETURN count(p) AS c")
+            records = list(result)
+            summary = result.consume()
+    assert records[0]["c"] == 4
+    assert summary.profile is None
