@@ -1623,8 +1623,12 @@ order (alias-or-name), and a call that yields zero rows still reports its
 declared columns.
 
 **`SHOW PROCEDURES [YIELD …]`** lists every procedure (Neo4j's default
-columns: `name`, `description`, `mode`, `worksOnSystem`) from the same
-registry `CALL list_procedures()` reads. **Bolt server only:**
+columns: `name`, `description`, `mode`, `worksOnSystem`; `signature`
+yieldable) from the same registry `CALL list_procedures()` reads.
+**`SHOW FUNCTIONS [YIELD …]`** lists every scalar and aggregate function
+(default columns `name`, `category`, `description`; `signature` and
+`aliases` yieldable) from a registry whose every entry is test-verified to
+dispatch — IDEs use both for autocomplete. **Bolt server only:**
 `CALL dbms.components()`, `CALL dbms.showCurrentUser()`, and
 `SHOW DATABASES` are answered by `kglite-bolt-server` (they report server
 facts — identity, configured user, served database) and are not available
@@ -2600,7 +2604,14 @@ storage mode (in-memory / mapped / disk). `CREATE (n {id: X})` and
 `add_nodes(unique_id_field='id')` both make `X` the identity; `MATCH (n {id: X})`
 finds it; it survives save → load. `id` is unique by convention — if duplicate
 ids are created, `MATCH (n {id: X})` returns one node per id (a stderr warning
-is emitted; use `MERGE` or dedupe the input). To audit a type for collisions
+is emitted; use `MERGE` or dedupe the input). Precisely: one node per
+**(type, id)** — an unlabeled `{id: X}` (or `WHERE id(n) = X`) anchors through
+every type's id index and returns one node per type holding X, in
+deterministic order, identically for literal and `$param` spellings. With
+*intra-type* duplicates present, the anchored plan still answers one node per
+type while `disable_optimizer=True` filters every duplicate — the documented
+one-per-id collapse, only observable on graphs already emitting the
+duplicate-id warning. To audit a type for collisions
 after the fact, `CALL duplicate_id({type: 'Artifact'}) YIELD node` yields every
 node of that type whose id is shared (the identity-column sibling of
 `duplicate_title`).
