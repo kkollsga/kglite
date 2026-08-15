@@ -70,6 +70,7 @@ pub(crate) fn clause_is_mutation(clause: &Clause) -> bool {
         // the read engine.
         Clause::Schema(SchemaCommand::ShowIndexes)
         | Clause::Schema(SchemaCommand::ShowProcedures { .. })
+        | Clause::Schema(SchemaCommand::ShowFunctions { .. })
         | Clause::Schema(SchemaCommand::Constraint(ConstraintCommand::Show)) => false,
         Clause::Schema(_) => true,
         _ => false,

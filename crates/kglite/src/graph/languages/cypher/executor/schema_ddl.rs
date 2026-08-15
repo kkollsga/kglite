@@ -150,6 +150,7 @@ pub(crate) fn is_schema_read(command: &SchemaCommand) -> bool {
         command,
         SchemaCommand::ShowIndexes
             | SchemaCommand::ShowProcedures { .. }
+            | SchemaCommand::ShowFunctions { .. }
             | SchemaCommand::Constraint(ConstraintCommand::Show)
     )
 }
@@ -228,6 +229,79 @@ fn show_procedures_result_set(yield_items: &[YieldItem]) -> Result<ResultSet, St
     Ok(out)
 }
 
+/// Columns of `SHOW FUNCTIONS`. `name`, `category` and `description` are
+/// Neo4j's default output shape; `signature` and `aliases` are yieldable
+/// extras — G.V() sends `SHOW FUNCTIONS YIELD name, description, signature`
+/// (measured 2026-08-15), and `aliases` is the one thing Neo4j's shape cannot
+/// express about this engine (`toUpper`/`toUpperCase` are one function).
+const SHOW_FUNCTIONS_COLUMNS: [&str; 5] =
+    ["name", "category", "description", "signature", "aliases"];
+
+/// Columns in Neo4j's *default* (no-YIELD) SHOW FUNCTIONS output.
+const SHOW_FUNCTIONS_DEFAULT: [&str; 3] = ["name", "category", "description"];
+
+/// `SHOW FUNCTIONS [YIELD …]` — a read over the function registry, whose every
+/// entry is gated against the real scalar dispatcher (see
+/// `scalar_functions::function_registry`). One row per canonical name; an alias
+/// is reported in that row's `aliases` list rather than as a row of its own,
+/// matching Neo4j's canonical-names-only listing.
+fn show_functions_result_set(yield_items: &[YieldItem]) -> Result<ResultSet, String> {
+    let default_items: Vec<YieldItem>;
+    let items: &[YieldItem] = if yield_items.is_empty() {
+        default_items = SHOW_FUNCTIONS_DEFAULT
+            .iter()
+            .map(|name| YieldItem {
+                name: (*name).to_string(),
+                alias: None,
+            })
+            .collect();
+        &default_items
+    } else {
+        for item in yield_items {
+            if !SHOW_FUNCTIONS_COLUMNS.contains(&item.name.as_str()) {
+                return Err(format!(
+                    "SHOW FUNCTIONS does not yield '{}'. Available: {}",
+                    item.name,
+                    SHOW_FUNCTIONS_COLUMNS.join(", ")
+                ));
+            }
+        }
+        yield_items
+    };
+
+    let mut specs: Vec<&'static super::scalar_functions::FunctionSpec> =
+        super::scalar_functions::FUNCTIONS.iter().collect();
+    specs.sort_by_key(|spec| spec.name);
+
+    let mut out = ResultSet::new();
+    for spec in specs {
+        let mut row = ResultRow::new();
+        for item in items {
+            let alias = item.alias.as_deref().unwrap_or(&item.name);
+            let value = match item.name.as_str() {
+                "name" => Value::String(spec.name.to_string()),
+                "category" => Value::String(spec.category.to_string()),
+                "description" => Value::String(spec.description.to_string()),
+                "signature" => Value::String(spec.signature.to_string()),
+                "aliases" => Value::List(
+                    spec.aliases
+                        .iter()
+                        .map(|a| Value::String((*a).to_string()))
+                        .collect(),
+                ),
+                _ => unreachable!("validated against SHOW_FUNCTIONS_COLUMNS"),
+            };
+            row.projected.insert(alias.to_string(), value);
+        }
+        out.rows.push(row);
+    }
+    out.columns = items
+        .iter()
+        .map(|item| item.alias.clone().unwrap_or_else(|| item.name.clone()))
+        .collect();
+    Ok(out)
+}
+
 /// Execute a schema read. Precondition: [`is_schema_read`] returned true.
 pub(crate) fn execute_schema_read(
     graph: &DirGraph,
@@ -236,6 +310,7 @@ pub(crate) fn execute_schema_read(
     match command {
         SchemaCommand::ShowIndexes => Ok(show_indexes_result_set(graph)),
         SchemaCommand::ShowProcedures { yield_items } => show_procedures_result_set(yield_items),
+        SchemaCommand::ShowFunctions { yield_items } => show_functions_result_set(yield_items),
         SchemaCommand::Constraint(ConstraintCommand::Show) => {
             Ok(show_constraints_result_set(graph))
         }
@@ -286,9 +361,10 @@ fn dispatch_schema_mutation(
         }
         SchemaCommand::ShowIndexes
         | SchemaCommand::ShowProcedures { .. }
+        | SchemaCommand::ShowFunctions { .. }
         | SchemaCommand::Constraint(ConstraintCommand::Show) => Err(
-            "internal: SHOW INDEXES / SHOW PROCEDURES / SHOW CONSTRAINTS are reads and must not reach the \
-             mutation engine"
+            "internal: SHOW INDEXES / SHOW PROCEDURES / SHOW FUNCTIONS / SHOW CONSTRAINTS are reads \
+             and must not reach the mutation engine"
                 .to_string(),
         ),
     }

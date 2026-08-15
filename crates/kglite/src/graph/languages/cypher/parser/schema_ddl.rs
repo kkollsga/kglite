@@ -89,10 +89,9 @@ impl CypherParser {
         let is_show = soft_word_eq(word, "SHOW");
         self.soft_word_at(noun_offset).is_some_and(|noun| {
             is_index_or_constraint_noun(noun)
-                // PROCEDURES is a SHOW-only noun — `DROP PROCEDURES` stays an
-                // ordinary parse error.
-                || (is_show
-                    && (soft_word_eq(noun, "PROCEDURES") || soft_word_eq(noun, "PROCEDURE")))
+                // PROCEDURES and FUNCTIONS are SHOW-only nouns — `DROP
+                // PROCEDURES` stays an ordinary parse error.
+                || (is_show && registry_noun_for_word(noun).is_some())
         })
     }
 
@@ -267,15 +266,12 @@ impl CypherParser {
             self.advance();
         }
 
-        // `SHOW PROCEDURES [YIELD name, …]` — a read over the procedure
-        // registry. Unlike the INDEXES/CONSTRAINTS forms below, this one
-        // accepts a YIELD projection: Neo4j clients (Browser autocomplete)
-        // send it, and the registry read has a natural column subset. WHERE
-        // and the other modifiers are still rejected.
-        if self
-            .soft_word_at(0)
-            .is_some_and(|w| soft_word_eq(w, "PROCEDURES") || soft_word_eq(w, "PROCEDURE"))
-        {
+        // `SHOW PROCEDURES [YIELD …]` / `SHOW FUNCTIONS [YIELD …]` — reads over
+        // the procedure and function registries. Unlike the INDEXES/CONSTRAINTS
+        // forms below, these accept a YIELD projection: Neo4j clients (Browser
+        // and G.V() autocomplete) send it, and a registry read has a natural
+        // column subset. WHERE and the other modifiers are still rejected.
+        if let Some(noun) = self.soft_word_at(0).and_then(registry_noun_for_word) {
             self.advance();
             let yield_items = if self.check(&CypherToken::Yield) {
                 self.advance();
@@ -288,14 +284,15 @@ impl CypherParser {
                 Vec::new()
             };
             if self.has_tokens() && !self.check(&CypherToken::Semicolon) {
-                return Err(
-                    "SHOW PROCEDURES supports at most a YIELD projection; WHERE and \
+                return Err(format!(
+                    "SHOW {noun} supports at most a YIELD projection; WHERE and \
                      other modifiers are not supported"
-                        .to_string(),
-                );
+                ));
             }
-            return Ok(Clause::Schema(SchemaCommand::ShowProcedures {
-                yield_items,
+            return Ok(Clause::Schema(if noun == "PROCEDURES" {
+                SchemaCommand::ShowProcedures { yield_items }
+            } else {
+                SchemaCommand::ShowFunctions { yield_items }
             }));
         }
 
@@ -686,6 +683,19 @@ fn index_type_for_word(word: &str) -> Option<DdlIndexType> {
         .map(|(_, index_type)| *index_type)
 }
 
+/// The two `SHOW`-only registry nouns, singular and plural, normalised to the
+/// plural spelling used in error messages. `None` for anything else — that is
+/// what keeps `DROP PROCEDURES` / `DROP FUNCTIONS` ordinary parse errors.
+fn registry_noun_for_word(word: &str) -> Option<&'static str> {
+    if soft_word_eq(word, "PROCEDURES") || soft_word_eq(word, "PROCEDURE") {
+        Some("PROCEDURES")
+    } else if soft_word_eq(word, "FUNCTIONS") || soft_word_eq(word, "FUNCTION") {
+        Some("FUNCTIONS")
+    } else {
+        None
+    }
+}
+
 /// True for the four `SHOW`/`DROP` nouns, singular and plural.
 fn is_index_or_constraint_noun(word: &str) -> bool {
     ["INDEX", "INDEXES", "CONSTRAINT", "CONSTRAINTS"]
@@ -725,6 +735,51 @@ mod tests {
             .map(|q| panic!("`{input}` unexpectedly parsed to {:?}", q.clauses))
             .unwrap_err()
             .to_string()
+    }
+
+    /// `SHOW FUNCTIONS` mirrors `SHOW PROCEDURES`: both spellings of the noun,
+    /// an optional YIELD projection with aliases, and everything else rejected.
+    #[test]
+    fn show_functions_accepts_both_spellings_and_a_yield_projection() {
+        assert_eq!(
+            schema("SHOW FUNCTIONS"),
+            SchemaCommand::ShowFunctions {
+                yield_items: Vec::new()
+            }
+        );
+        assert_eq!(
+            schema("SHOW FUNCTION"),
+            SchemaCommand::ShowFunctions {
+                yield_items: Vec::new()
+            }
+        );
+        // The exact query G.V() sends on connect (measured 2026-08-15).
+        let SchemaCommand::ShowFunctions { yield_items } =
+            schema("SHOW FUNCTIONS YIELD name, description, signature")
+        else {
+            panic!("not a ShowFunctions");
+        };
+        let names: Vec<&str> = yield_items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["name", "description", "signature"]);
+        assert!(yield_items.iter().all(|i| i.alias.is_none()));
+
+        let SchemaCommand::ShowFunctions { yield_items } =
+            schema("SHOW FUNCTIONS YIELD name AS fn")
+        else {
+            panic!("not a ShowFunctions");
+        };
+        assert_eq!(yield_items[0].alias.as_deref(), Some("fn"));
+    }
+
+    /// FUNCTIONS is a SHOW-only noun, and the modifier rejection names the
+    /// noun the reader typed rather than a hard-coded PROCEDURES.
+    #[test]
+    fn show_functions_rejects_modifiers_and_drop() {
+        assert!(parse_error("SHOW FUNCTIONS WHERE name = 'toUpper'")
+            .contains("SHOW FUNCTIONS supports at most a YIELD projection"));
+        assert!(parse_error("SHOW PROCEDURES WHERE name = 'pagerank'")
+            .contains("SHOW PROCEDURES supports at most a YIELD projection"));
+        assert!(!parse_error("DROP FUNCTIONS").is_empty());
     }
 
     #[test]
