@@ -574,7 +574,7 @@ impl<'a> CypherExecutor<'a> {
         // and showed "No results" against a graph full of matches).
         if edge_vars.is_empty() {
             let single = node_vars.first()?;
-            let source_idx = row.node_bindings.get(*single)?;
+            let source_idx = row.node_bindings.get(single)?;
             return Some(PathBinding {
                 source: *source_idx,
                 hops: 0,

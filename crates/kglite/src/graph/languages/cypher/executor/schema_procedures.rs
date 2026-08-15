@@ -271,7 +271,17 @@ fn schema_type_properties_rows(
     if node_side {
         let schema = crate::graph::introspection::schema_overview::compute_schema(executor.graph);
         for (node_type, overview) in &schema.node_types {
-            let mut props: Vec<(&String, &String)> = overview.properties.iter().collect();
+            // A property whose every observed value is null has no type to
+            // report. In Neo4j's model a null property is an absent one, so
+            // such a row cannot exist there — and emitting our "Null" type
+            // string breaks strict clients (G.V()'s schema builder rejects
+            // the whole payload over one unknown type name; measured
+            // 2026-08-15 on a graph with four all-null columns).
+            let mut props: Vec<(&String, &String)> = overview
+                .properties
+                .iter()
+                .filter(|(_, ty)| ty.as_str() != "Null")
+                .collect();
             props.sort();
             if props.is_empty() {
                 push_row(node_type, Some(node_type), None);
@@ -298,6 +308,10 @@ fn schema_type_properties_rows(
                     .and_then(|info| info.property_types.get(name))
                     .cloned()
                     .unwrap_or_else(|| "Any".to_string());
+                // Same all-null rule as the node side.
+                if ty == "Null" {
+                    continue;
+                }
                 push_row(&stat.connection_type, None, Some((name, &ty)));
             }
         }
