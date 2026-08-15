@@ -152,16 +152,22 @@ class KnowledgeGraphTest {
             graph.cypher("CREATE (a:Person {id: 1, title: 'Ada'})-[:KNOWS {since: 2020}]->"
                     + "(b:Person {id: 2, title: 'Grace'})");
 
-            // The documented trap: a whole node/relationship/path has no JSON
-            // shape, so it arrives as the engine's Debug rendering in a String.
+            // Whole nodes and relationships arrive as structured maps (the
+            // pre-0.17 Debug-string rendering is gone; the javadoc table pins
+            // these shapes).
             Object node = graph.query("MATCH (p:Person {id: 1}) RETURN p AS p").get(0).get("p");
-            assertTrue(node instanceof String,
-                    "RETURN of a whole node is documented as a String, got " + node.getClass());
-            assertTrue(((String) node).startsWith("Node("),
-                    "the debug rendering the docs quote, got " + node);
+            assertTrue(node instanceof Map,
+                    "RETURN of a whole node is a structured Map, got " + node.getClass());
+            Map<?, ?> nodeMap = (Map<?, ?>) node;
+            assertEquals(List.of("Person"), nodeMap.get("labels"), "node.labels");
+            assertEquals("Ada", ((Map<?, ?>) nodeMap.get("properties")).get("title"),
+                    "node.properties carries the stored values");
             Object rel = graph.query("MATCH ()-[r:KNOWS]->() RETURN r AS r").get(0).get("r");
-            assertTrue(rel instanceof String && ((String) rel).startsWith("Relationship("),
-                    "RETURN of a whole relationship is documented as a String, got " + rel);
+            assertTrue(rel instanceof Map, "RETURN of a whole relationship is a Map, got " + rel);
+            Map<?, ?> relMap = (Map<?, ?>) rel;
+            assertEquals("KNOWS", relMap.get("type"), "relationship.type");
+            assertEquals(2020L, ((Map<?, ?>) relMap.get("properties")).get("since"),
+                    "relationship.properties");
 
             // ...and the routes the docs point at instead.
             Map<String, Object> parts = graph.query(

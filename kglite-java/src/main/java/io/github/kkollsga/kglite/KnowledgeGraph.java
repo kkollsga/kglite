@@ -82,17 +82,17 @@ import java.util.Optional;
  *   <tr><td>map</td><td>{@link Map}</td><td>Insertion-ordered; keys are
  *           {@code String}.</td></tr>
  *   <tr><td>node, relationship, path, temporal</td><td>{@link String}</td>
- *       <td><strong>An engine-side debug rendering, not a structured value</strong>
- *           — see below.</td></tr>
+ *       <td>A structured {@code Map} — see below.</td></tr>
  * </table>
  *
- * <p><strong>Return the parts of a node, relationship or path you want, not
- * the whole value.</strong> The C ABI serialises result cells as JSON, and a
- * whole node, relationship or path arrives as the engine's own {@code Debug}
- * rendering in a {@code String}: {@code RETURN n} yields
- * {@code "Node(NodeValue { id: 0, labels: [\"Person\"], properties: {…} })"}.
- * It is a stable-enough string to eyeball and a terrible thing to parse. Return
- * what you actually want instead — every one of these is a first-class value:
+ * <p><strong>Whole nodes, relationships and paths arrive as structured
+ * maps</strong> (since 0.17): {@code RETURN n} yields a {@code Map} with
+ * {@code id}, {@code labels} and {@code properties} keys; a relationship has
+ * {@code id}, {@code start}, {@code end}, {@code type} and {@code properties};
+ * a path has {@code nodes} and {@code relationships}. Earlier releases
+ * rendered these as the engine's {@code Debug} string. Returning the parts
+ * you want is still often clearer — every one of these is a first-class
+ * value:
  *
  * <pre>{@code
  * RETURN p.title AS name          // -> String
