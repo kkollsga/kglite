@@ -530,6 +530,44 @@ impl IdIndexStore {
         })
     }
 
+    /// Borrow `source`'s and `target`'s **overlay-resident** id indices in
+    /// place for the length of one bulk pass, and run `f` against them.
+    ///
+    /// This is the probing counterpart to [`Self::materialize_type`]: one
+    /// lock acquisition and two borrowed entries, where materializing pays a
+    /// map insert per node *of the whole type* before the first row is looked
+    /// at. On a property-free `add_connections` at 100k nodes / 24k edges,
+    /// materializing was 53% of the call (samply, 2026-08-15) and grew with
+    /// the graph while the row count stayed fixed.
+    ///
+    /// Returns `None` — without calling `f` — unless **both** types are in the
+    /// overlay, which is every heap-resident graph and every type a loaded
+    /// graph has since mutated. A base (mmap) entry is deliberately excluded:
+    /// its Integer variant answers a probe with a binary search over the
+    /// mapped file, so trading one materialization for R such probes is a
+    /// regime question rather than a win, and the caller keeps the
+    /// materializing path there.
+    ///
+    /// `f` must not re-enter the store — the read lock is held for its whole
+    /// execution.
+    pub fn with_overlay_type_pair<R>(
+        &self,
+        source: &str,
+        target: &str,
+        f: impl FnOnce(&TypeEntry, &TypeEntry) -> R,
+    ) -> Option<R> {
+        let overlay = self.overlay.read().unwrap();
+        let source_entry = overlay.get(source)?;
+        // Same type: one entry serves both ends, exactly as the materializing
+        // path shared its single map.
+        let target_entry = if source == target {
+            source_entry
+        } else {
+            overlay.get(target)?
+        };
+        Some(f(source_entry, target_entry))
+    }
+
     /// Materialize the full `id → NodeIndex` map for a type, or None when the
     /// type isn't indexed. Used by the add_nodes conflict-check fast path.
     pub fn materialize_type(&self, name: &str) -> Option<FxHashMap<Value, NodeIndex>> {

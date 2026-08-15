@@ -870,6 +870,166 @@ pub fn add_edges_from_specs(
     Ok(report)
 }
 
+/// What one `add_connections` frame's rows resolved to, produced before any
+/// mutation runs (see the call site for why the split exists).
+struct ResolvedEndpoints {
+    /// `(row, source, target)` for the rows whose endpoints both exist.
+    matched: Vec<(usize, NodeIndex, NodeIndex)>,
+    /// Rows held back because an endpoint is missing, with their raw ids.
+    /// The missing ids are vivified as provisional stubs (Pass B) and these
+    /// rows replayed (Pass C) — an edge to a missing endpoint is never
+    /// dropped.
+    deferred: Vec<(usize, Value, Value)>,
+    /// Deduped, order-preserving ids to vivify.
+    missing_sources: Vec<Value>,
+    missing_targets: Vec<Value>,
+    null_source_rows: usize,
+    null_target_rows: usize,
+}
+
+/// Resolve every row's endpoints against the endpoint types' id indices.
+///
+/// Probes `graph.id_indices` in place when both types are overlay-resident —
+/// the case for every heap-resident graph — and otherwise falls back to
+/// exactly the lookup this replaced (`CombinedTypeLookup::from_id_indices`,
+/// which materializes a base entry or, failing that, scans the graph).
+fn resolve_endpoints(
+    graph: &DirGraph,
+    df_data: &DataFrame,
+    source_type: &str,
+    target_type: &str,
+    source_id_idx: usize,
+    target_id_idx: usize,
+) -> Result<ResolvedEndpoints, String> {
+    if let Some(resolved) =
+        graph
+            .id_indices
+            .with_overlay_type_pair(source_type, target_type, |source, target| {
+                scan_endpoint_rows(
+                    df_data,
+                    source_id_idx,
+                    target_id_idx,
+                    |id| source.get(id),
+                    |id| target.get(id),
+                )
+            })
+    {
+        return Ok(resolved);
+    }
+    let lookup = CombinedTypeLookup::from_id_indices(
+        &graph.id_indices,
+        &graph.graph,
+        source_type.to_string(),
+        target_type.to_string(),
+    )?;
+    Ok(scan_endpoint_rows(
+        df_data,
+        source_id_idx,
+        target_id_idx,
+        |id| lookup.check_source(id),
+        |id| lookup.check_target(id),
+    ))
+}
+
+/// The row walk both resolution paths share; generic over the two probes so
+/// each one monomorphizes into a direct call.
+fn scan_endpoint_rows(
+    df_data: &DataFrame,
+    source_id_idx: usize,
+    target_id_idx: usize,
+    check_source: impl Fn(&Value) -> Option<NodeIndex>,
+    check_target: impl Fn(&Value) -> Option<NodeIndex>,
+) -> ResolvedEndpoints {
+    let mut out = ResolvedEndpoints {
+        matched: Vec::with_capacity(df_data.row_count()),
+        deferred: Vec::new(),
+        missing_sources: Vec::new(),
+        missing_targets: Vec::new(),
+        null_source_rows: 0,
+        null_target_rows: 0,
+    };
+    let mut seen_missing_source: HashSet<Value> = HashSet::new();
+    let mut seen_missing_target: HashSet<Value> = HashSet::new();
+
+    for row_idx in 0..df_data.row_count() {
+        let source_id = match df_data.get_value_by_index(row_idx, source_id_idx) {
+            Some(Value::Null) | None => {
+                out.null_source_rows += 1;
+                continue;
+            }
+            Some(id) => id,
+        };
+        let target_id = match df_data.get_value_by_index(row_idx, target_id_idx) {
+            Some(Value::Null) | None => {
+                out.null_target_rows += 1;
+                continue;
+            }
+            Some(id) => id,
+        };
+        match (check_source(&source_id), check_target(&target_id)) {
+            (Some(source_idx), Some(target_idx)) => {
+                out.matched.push((row_idx, source_idx, target_idx))
+            }
+            (s_opt, t_opt) => {
+                if s_opt.is_none() && seen_missing_source.insert(source_id.clone()) {
+                    out.missing_sources.push(source_id.clone());
+                }
+                if t_opt.is_none() && seen_missing_target.insert(target_id.clone()) {
+                    out.missing_targets.push(target_id.clone());
+                }
+                out.deferred.push((row_idx, source_id, target_id));
+            }
+        }
+    }
+    out
+}
+
+/// Resolve an already-extracted `(row, source_id, target_id)` list — the
+/// deferred-row replay. Same index precedence as [`resolve_endpoints`];
+/// returns one entry per input row, in order.
+fn resolve_pairs(
+    graph: &DirGraph,
+    source_type: &str,
+    target_type: &str,
+    rows: &[(usize, Value, Value)],
+) -> Result<Vec<Option<(NodeIndex, NodeIndex)>>, String> {
+    fn walk(
+        rows: &[(usize, Value, Value)],
+        check_source: impl Fn(&Value) -> Option<NodeIndex>,
+        check_target: impl Fn(&Value) -> Option<NodeIndex>,
+    ) -> Vec<Option<(NodeIndex, NodeIndex)>> {
+        rows.iter()
+            .map(|(_, source_id, target_id)| {
+                match (check_source(source_id), check_target(target_id)) {
+                    (Some(s), Some(t)) => Some((s, t)),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    if let Some(resolved) =
+        graph
+            .id_indices
+            .with_overlay_type_pair(source_type, target_type, |source, target| {
+                walk(rows, |id| source.get(id), |id| target.get(id))
+            })
+    {
+        return Ok(resolved);
+    }
+    let lookup = CombinedTypeLookup::from_id_indices(
+        &graph.id_indices,
+        &graph.graph,
+        source_type.to_string(),
+        target_type.to_string(),
+    )?;
+    Ok(walk(
+        rows,
+        |id| lookup.check_source(id),
+        |id| lookup.check_target(id),
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn add_connections(
     graph: &mut DirGraph,
@@ -937,11 +1097,30 @@ pub fn add_connections(
         .as_ref()
         .and_then(|field| df_data.get_column_index(field));
 
-    let lookup = CombinedTypeLookup::from_id_indices(
-        &graph.id_indices,
-        &graph.graph,
-        source_type.clone(),
-        target_type.clone(),
+    // Endpoint resolution is its own pass over the frame, ahead of every
+    // mutation, because the id-index probe borrows `graph.id_indices` while
+    // the batch needs `&mut graph`. Splitting it that way is what lets the
+    // probe read the index *in place*: the per-call materialized
+    // `id -> NodeIndex` map it replaces cost one insert per node of the whole
+    // endpoint type and was 53% of a property-free `add_connections` at 100k
+    // nodes / 24k edges (samply, 2026-08-15), growing with the graph while
+    // the row count stayed fixed. It is snapshot-equivalent to the old code:
+    // that map was also built before the first mutation, and nothing in the
+    // mutating passes below moves an existing node's id.
+    let ResolvedEndpoints {
+        matched,
+        deferred,
+        missing_sources,
+        missing_targets,
+        null_source_rows: skipped_null_source,
+        null_target_rows: skipped_null_target,
+    } = resolve_endpoints(
+        graph,
+        &df_data,
+        &source_type,
+        &target_type,
+        source_id_idx,
+        target_id_idx,
     )?;
     let mut batch = ConnectionBatchProcessor::new(df_data.row_count());
     // Set the conflict handling mode
@@ -952,18 +1131,7 @@ pub fn add_connections(
         .contains_key(&connection_type);
     batch.set_skip_existence_check(is_initial_load);
 
-    let mut skipped_count = 0;
-    let mut skipped_null_source = 0;
-    let mut skipped_null_target = 0;
-    // Edges whose endpoint has no node are deferred — not dropped: the
-    // missing endpoints are vivified as provisional stub nodes (Pass B)
-    // and the rows replayed (Pass C). `missing_*` are deduped ordered
-    // id lists; `deferred` holds (row, source_id, target_id).
-    let mut deferred: Vec<(usize, Value, Value)> = Vec::new();
-    let mut missing_sources: Vec<Value> = Vec::new();
-    let mut missing_targets: Vec<Value> = Vec::new();
-    let mut seen_missing_source: HashSet<Value> = HashSet::new();
-    let mut seen_missing_target: HashSet<Value> = HashSet::new();
+    let mut skipped_count = skipped_null_source + skipped_null_target;
 
     let property_columns = resolve_edge_property_columns(
         &df_data,
@@ -990,45 +1158,8 @@ pub fn add_connections(
         properties
     };
 
-    // Pass A — connect rows whose endpoints both exist; defer the rest.
-    for row_idx in 0..df_data.row_count() {
-        let source_id = match df_data.get_value_by_index(row_idx, source_id_idx) {
-            Some(Value::Null) | None => {
-                skipped_count += 1;
-                skipped_null_source += 1;
-                continue;
-            }
-            Some(id) => id,
-        };
-        let target_id = match df_data.get_value_by_index(row_idx, target_id_idx) {
-            Some(Value::Null) | None => {
-                skipped_count += 1;
-                skipped_null_target += 1;
-                continue;
-            }
-            Some(id) => id,
-        };
-
-        let (source_idx, target_idx) = match (
-            lookup.check_source(&source_id),
-            lookup.check_target(&target_id),
-        ) {
-            (Some(src_idx), Some(tgt_idx)) => (src_idx, tgt_idx),
-            (s_opt, t_opt) => {
-                // One or both endpoints missing — defer the row rather
-                // than drop the edge. The missing ids are vivified as
-                // provisional stubs in Pass B, then replayed in Pass C.
-                if s_opt.is_none() && seen_missing_source.insert(source_id.clone()) {
-                    missing_sources.push(source_id.clone());
-                }
-                if t_opt.is_none() && seen_missing_target.insert(target_id.clone()) {
-                    missing_targets.push(target_id.clone());
-                }
-                deferred.push((row_idx, source_id, target_id));
-                continue;
-            }
-        };
-
+    // Pass A — connect the rows whose endpoints both exist (resolved above).
+    for (row_idx, source_idx, target_idx) in matched {
         update_node_titles(
             graph,
             source_idx,
@@ -1061,19 +1192,14 @@ pub fn add_connections(
 
     // Pass C — replay the deferred rows now that every endpoint exists.
     if !deferred.is_empty() {
-        let lookup2 = CombinedTypeLookup::from_id_indices(
-            &graph.id_indices,
-            &graph.graph,
-            source_type.clone(),
-            target_type.clone(),
-        )?;
-        for (row_idx, source_id, target_id) in deferred {
-            let (source_idx, target_idx) = match (
-                lookup2.check_source(&source_id),
-                lookup2.check_target(&target_id),
-            ) {
-                (Some(s), Some(t)) => (s, t),
-                _ => {
+        // Same resolve-then-mutate split as Pass A, re-read after Pass B so
+        // the freshly vivified stubs are visible.
+        let replayed = resolve_pairs(graph, &source_type, &target_type, &deferred)?;
+        for ((row_idx, _, _), endpoints) in deferred.iter().zip(replayed) {
+            let row_idx = *row_idx;
+            let (source_idx, target_idx) = match endpoints {
+                Some(pair) => pair,
+                None => {
                     // Vivification did not produce the node — count as
                     // a genuine skip (should not happen in practice).
                     skipped_count += 1;
@@ -1126,8 +1252,8 @@ pub fn add_connections(
     update_schema_node(
         graph,
         &connection_type,
-        lookup.get_source_type(),
-        lookup.get_target_type(),
+        &source_type,
+        &target_type,
         batch.get_schema_properties(),
     )?;
 

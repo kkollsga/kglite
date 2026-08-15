@@ -235,12 +235,4 @@ impl CombinedTypeLookup {
             _ => None,
         }
     }
-
-    pub fn get_source_type(&self) -> &str {
-        &self.source_type
-    }
-
-    pub fn get_target_type(&self) -> &str {
-        &self.target_type
-    }
 }
