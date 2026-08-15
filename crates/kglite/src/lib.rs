@@ -434,6 +434,16 @@ pub mod api {
             pass_a_scan, pass_a_scan_to_file, save_subset, save_subset_streaming_disk, RankIndex,
             SubsetSpec,
         };
+        /// The persisted-format version numbers this build reads and writes:
+        /// [`KGL_FORMAT_VERSION`] is the `.kgl` snapshot format stamped into new
+        /// saves, [`WAL_FORMAT_VERSION`] the write-ahead-log frame format, and
+        /// [`MIN_READABLE_WAL_FORMAT_VERSION`] the oldest WAL frame format this
+        /// build can replay. All three are distinct from the engine SemVer a
+        /// binding reads via the ABI version probe — they describe the on-disk
+        /// format lifecycle, not the library version. Exposed so a binding can
+        /// report the storage format it operates against.
+        pub use crate::graph::schema::KGL_FORMAT_VERSION;
+        pub use crate::graph::wal::{MIN_READABLE_WAL_FORMAT_VERSION, WAL_FORMAT_VERSION};
     }
 
     /// Storage backend configuration — the in-memory / mmap / disk backends

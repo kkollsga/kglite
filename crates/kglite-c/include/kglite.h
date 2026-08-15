@@ -119,6 +119,27 @@ typedef struct KgliteAbiVersion {
 } KgliteAbiVersion;
 
 /**
+ * The persisted-format version numbers this build reads and writes. Distinct
+ * from [`KgliteAbiVersion`], which is the engine SemVer: this describes the
+ * on-disk format lifecycle, so an embedder can report the storage version it
+ * operates against and refuse a file it cannot read.
+ */
+typedef struct KgliteStorageFormat {
+  /**
+   * `.kgl` snapshot format version stamped into new saves.
+   */
+  uint32_t kgl;
+  /**
+   * Write-ahead-log frame format version this build writes.
+   */
+  uint32_t wal;
+  /**
+   * Oldest write-ahead-log frame format version this build can replay.
+   */
+  uint32_t min_readable_wal;
+} KgliteStorageFormat;
+
+/**
  * Rust-heap statistics from kglite's tracking allocator.
  */
 typedef struct KgMemStats {
@@ -213,6 +234,27 @@ typedef struct KgliteCypherResult {
  * ```
  */
  struct KgliteAbiVersion kglite_abi_version(void);
+
+/**
+ * Return the on-disk storage format versions this library reads and writes.
+ *
+ * The `.kgl` snapshot format (`kgl`) is the primary number a binding surfaces
+ * as its persisted-format version; `wal` and `min_readable_wal` describe the
+ * write-ahead-log frame format for a binding that needs the durability detail
+ * too. All three are independent of the engine SemVer reported by
+ * [`kglite_abi_version`] — a patch release can change the engine version
+ * without touching any of these, and a format bump moves one of these without
+ * implying an ABI-major change.
+ *
+ * # Examples
+ *
+ * ```c
+ * KgliteStorageFormat f = kglite_storage_format_version();
+ * printf("kgl format v%u, wal v%u (min readable v%u)\n",
+ *        f.kgl, f.wal, f.min_readable_wal);
+ * ```
+ */
+ struct KgliteStorageFormat kglite_storage_format_version(void);
 
 /**
  * Return current Rust-heap statistics from kglite's tracking allocator.

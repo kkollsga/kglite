@@ -2,6 +2,7 @@ package io.github.kkollsga.kglite;
 
 import java.lang.foreign.MemorySegment;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -150,11 +151,15 @@ public final class KnowledgeGraph implements AutoCloseable {
     private final NativeHandle session;
     private final StorageMode storageMode;
     private final StorageMode convertedFrom;
+    private final boolean readOnly;
 
-    private KnowledgeGraph(MemorySegment session, StorageMode storageMode, StorageMode convertedFrom) {
+    private KnowledgeGraph(
+            MemorySegment session, StorageMode storageMode, StorageMode convertedFrom,
+            boolean readOnly) {
         this.session = new NativeHandle(session, "KnowledgeGraph", Abi::sessionFree);
         this.storageMode = storageMode;
         this.convertedFrom = convertedFrom;
+        this.readOnly = readOnly;
     }
 
     // ---- factories --------------------------------------------------------
@@ -169,7 +174,7 @@ public final class KnowledgeGraph implements AutoCloseable {
      * @throws KgliteException if the engine could not allocate it
      */
     public static KnowledgeGraph createInMemory() {
-        return sessionOver(Abi.graphNewInMode(StorageMode.MEMORY.wire(), null), null);
+        return sessionOver(Abi.graphNewInMode(StorageMode.MEMORY.wire(), null), null, false);
     }
 
     /**
@@ -188,7 +193,7 @@ public final class KnowledgeGraph implements AutoCloseable {
             throw new KgliteException("KnowledgeGraph.create requires a storage mode");
         }
         String pathText = path == null ? null : path.toAbsolutePath().toString();
-        return sessionOver(Abi.graphNewInMode(mode.wire(), pathText), null);
+        return sessionOver(Abi.graphNewInMode(mode.wire(), pathText), null, false);
     }
 
     /**
@@ -244,14 +249,76 @@ public final class KnowledgeGraph implements AutoCloseable {
         if (path == null) {
             throw new KgliteException("KnowledgeGraph.open requires a path");
         }
+        return openInternal(path, mode, false);
+    }
+
+    /**
+     * Open the graph at {@code path} and mark this handle <strong>read-only</strong>.
+     *
+     * <p>The read path is unchanged — {@link #query(String)} works exactly as it
+     * does on a normally-opened graph — but every mutation through this handle
+     * ({@link #cypher(String)}, {@link #beginTransaction()}) is refused with a
+     * {@link ReadOnlyGraphException} raised <em>before</em> the call reaches
+     * native code. As with {@link #open(Path)}, a missing path is an error, not
+     * a silent creation.
+     *
+     * <p><strong>This is a convention-level guard on this wrapper instance, not
+     * storage-level immutability.</strong> The engine has no read-only open
+     * mode, so the file itself is not locked and a different handle over the
+     * same path — a second {@link KnowledgeGraph}, the CLI, any C-ABI process —
+     * can still write it. What this buys is a local guarantee: a stray write
+     * through <em>this</em> object is a thrown exception rather than a silent
+     * change. A read-only session takes no {@link WriterLease}, and
+     * {@link #save(Path)} is deliberately still allowed — copying a read-only
+     * view elsewhere does not mutate the graph.
+     *
+     * @param path the graph path (a {@code .kgl} file or a disk-graph directory)
+     * @return the opened graph, marked read-only
+     * @throws KgliteException if the path is absent, unreadable, or not a graph
+     * @see #openReadOnly(Path, StorageMode)
+     */
+    public static KnowledgeGraph openReadOnly(Path path) {
+        return openReadOnly(path, null);
+    }
+
+    /**
+     * Open the graph at {@code path} in an explicit mode and mark this handle
+     * <strong>read-only</strong>.
+     *
+     * <p>As {@link #openReadOnly(Path)}, additionally naming the storage mode
+     * the same way {@link #open(Path, StorageMode)} does — so a missing path is
+     * created (and, for a mode that differs, an existing graph is converted).
+     * The read-only guard applies to the resulting handle regardless; it never
+     * blocks the mode conversion that opening performs, only later writes
+     * through Cypher and transactions.
+     *
+     * @param path the graph path
+     * @param mode the mode to create or convert into, or {@code null} to leave
+     *     the decision to the recorded checkpoint (in which case a missing path
+     *     is an error)
+     * @return the opened graph, marked read-only
+     * @throws KgliteException if the path is absent with a {@code null} mode,
+     *     the mode is unknown, the conversion cannot happen in place, or the
+     *     file is unreadable or malformed
+     * @see #openReadOnly(Path)
+     */
+    public static KnowledgeGraph openReadOnly(Path path, StorageMode mode) {
+        return openInternal(path, mode, true);
+    }
+
+    private static KnowledgeGraph openInternal(Path path, StorageMode mode, boolean readOnly) {
+        if (path == null) {
+            throw new KgliteException("KnowledgeGraph.open requires a path");
+        }
         String[] converted = new String[1];
         MemorySegment graph = Abi.openOrCreateInMode(
                 path.toAbsolutePath().toString(), mode == null ? null : mode.wire(), converted);
         return sessionOver(
-                graph, converted[0] == null ? null : StorageMode.fromWire(converted[0]));
+                graph, converted[0] == null ? null : StorageMode.fromWire(converted[0]), readOnly);
     }
 
-    private static KnowledgeGraph sessionOver(MemorySegment graph, StorageMode convertedFrom) {
+    private static KnowledgeGraph sessionOver(
+            MemorySegment graph, StorageMode convertedFrom, boolean readOnly) {
         // Read the mode while we still hold a graph handle: kglite_session_new
         // consumes it, and the ABI's accessor is graph-scoped. The value cannot
         // go stale — nothing converts a graph once it is inside a session.
@@ -264,7 +331,7 @@ public final class KnowledgeGraph implements AutoCloseable {
             throw e;
         }
         // Abi.sessionNew moves the graph handle in, and frees it if the move fails.
-        return new KnowledgeGraph(Abi.sessionNew(graph), mode, convertedFrom);
+        return new KnowledgeGraph(Abi.sessionNew(graph), mode, convertedFrom, readOnly);
     }
 
     // ---- queries ----------------------------------------------------------
@@ -365,6 +432,75 @@ public final class KnowledgeGraph implements AutoCloseable {
     }
 
     /**
+     * Run a Cypher statement (the <strong>write</strong> path) under a
+     * wall-clock timeout.
+     *
+     * <p>As {@link #cypher(String)}, plus a deadline: past {@code timeout} the
+     * statement is abandoned and a {@link KgliteException} with
+     * {@link KgliteException#statusName()} {@code "CypherTimeout"} is thrown,
+     * rolling the whole statement back. As on {@link #query(String, Duration)},
+     * a {@code null}, zero, or negative {@code timeout} means <em>no</em>
+     * deadline.
+     *
+     * @param query   the Cypher text
+     * @param timeout the wall-clock budget, or {@code null} for none
+     * @return one insertion-ordered, unmodifiable map per row
+     * @throws KgliteException on any engine failure, including the timeout
+     * @throws ReadOnlyGraphException if this graph was opened read-only
+     * @throws IllegalStateException if this graph is closed
+     */
+    public List<Map<String, Object>> cypher(String query, Duration timeout) {
+        return runOpts(query, Map.of(), true, timeout, 0L);
+    }
+
+    /**
+     * Run a parameterised Cypher statement (the <strong>write</strong> path)
+     * under a wall-clock timeout.
+     *
+     * <p>Combines {@link #cypher(String, Map)} and {@link #cypher(String,
+     * Duration)}.
+     *
+     * @param query   the Cypher text, referring to bindings as {@code $name}
+     * @param params  the bindings; may be empty, never {@code null}
+     * @param timeout the wall-clock budget, or {@code null} for none
+     * @return one insertion-ordered, unmodifiable map per row
+     * @throws KgliteException on any engine failure, including the timeout
+     * @throws ReadOnlyGraphException if this graph was opened read-only
+     * @throws IllegalStateException if this graph is closed
+     */
+    public List<Map<String, Object>> cypher(
+            String query, Map<String, Object> params, Duration timeout) {
+        return runOpts(query, params, true, timeout, 0L);
+    }
+
+    /**
+     * Run a parameterised Cypher statement (the <strong>write</strong> path)
+     * under a wall-clock timeout and a row budget.
+     *
+     * <p>The fullest write overload. {@code maxRows} is a runaway-result guard:
+     * a statement that would return more than {@code maxRows} rows is an engine
+     * error (a {@link KgliteException}, statement rolled back), <em>not</em> a
+     * silent truncation — add a {@code LIMIT} clause to bound output instead.
+     * {@code 0} (and any negative value) means no row limit, matching a
+     * {@code null}/zero {@code timeout} meaning no deadline.
+     *
+     * @param query   the Cypher text, referring to bindings as {@code $name}
+     * @param params  the bindings; may be empty, never {@code null}
+     * @param timeout the wall-clock budget, or {@code null} for none
+     * @param maxRows the maximum rows the statement may produce; {@code 0} is
+     *     unlimited
+     * @return one insertion-ordered, unmodifiable map per row
+     * @throws KgliteException on any engine failure, including the timeout or
+     *     the row-budget overflow
+     * @throws ReadOnlyGraphException if this graph was opened read-only
+     * @throws IllegalStateException if this graph is closed
+     */
+    public List<Map<String, Object>> cypher(
+            String query, Map<String, Object> params, Duration timeout, long maxRows) {
+        return runOpts(query, params, true, timeout, maxRows);
+    }
+
+    /**
      * Run a read-only Cypher statement against a consistent snapshot — the
      * <strong>read</strong> path.
      *
@@ -415,15 +551,120 @@ public final class KnowledgeGraph implements AutoCloseable {
         return run(query, params, false);
     }
 
+    /**
+     * Run a read-only Cypher statement (the <strong>read</strong> path) under a
+     * wall-clock timeout.
+     *
+     * <p>As {@link #query(String)}, plus a deadline: past {@code timeout} the
+     * query is abandoned and a {@link KgliteException} with
+     * {@link KgliteException#statusName()} {@code "CypherTimeout"} is thrown.
+     *
+     * <p><strong>Zero is not "expire immediately".</strong> The C ABI reads a
+     * {@code timeout_ms} of {@code 0} as "no deadline", so this method maps a
+     * {@code null} timeout, {@link Duration#ZERO}, and any negative
+     * {@code Duration} all to unlimited. To actually bound a query, pass a
+     * positive {@code Duration} such as {@link Duration#ofSeconds(long)
+     * Duration.ofSeconds(5)}.
+     *
+     * @param query   the Cypher text
+     * @param timeout the wall-clock budget, or {@code null} for none
+     * @return one insertion-ordered, unmodifiable map per row
+     * @throws KgliteException on any engine failure, including the timeout
+     * @throws IllegalStateException if this graph is closed
+     */
+    public List<Map<String, Object>> query(String query, Duration timeout) {
+        return runOpts(query, Map.of(), false, timeout, 0L);
+    }
+
+    /**
+     * Run a parameterised read-only Cypher statement (the <strong>read</strong>
+     * path) under a wall-clock timeout.
+     *
+     * <p>Combines {@link #query(String, Map)} and {@link #query(String,
+     * Duration)}.
+     *
+     * @param query   the Cypher text, referring to bindings as {@code $name}
+     * @param params  the bindings; may be empty, never {@code null}
+     * @param timeout the wall-clock budget, or {@code null} for none
+     * @return one insertion-ordered, unmodifiable map per row
+     * @throws KgliteException on any engine failure, including the timeout
+     * @throws IllegalStateException if this graph is closed
+     */
+    public List<Map<String, Object>> query(
+            String query, Map<String, Object> params, Duration timeout) {
+        return runOpts(query, params, false, timeout, 0L);
+    }
+
+    /**
+     * Run a parameterised read-only Cypher statement (the <strong>read</strong>
+     * path) under a wall-clock timeout and a row budget.
+     *
+     * <p>The fullest read overload. {@code maxRows} is a runaway-result guard:
+     * a query that would return more than {@code maxRows} rows is an engine
+     * error (a {@link KgliteException}), <em>not</em> a silent truncation — add
+     * a {@code LIMIT} clause to bound output instead. {@code 0} (and any
+     * negative value) means no row limit, matching a {@code null}/zero
+     * {@code timeout} meaning no deadline.
+     *
+     * @param query   the Cypher text, referring to bindings as {@code $name}
+     * @param params  the bindings; may be empty, never {@code null}
+     * @param timeout the wall-clock budget, or {@code null} for none
+     * @param maxRows the maximum rows the query may produce; {@code 0} is
+     *     unlimited
+     * @return one insertion-ordered, unmodifiable map per row
+     * @throws KgliteException on any engine failure, including the timeout or
+     *     the row-budget overflow
+     * @throws IllegalStateException if this graph is closed
+     */
+    public List<Map<String, Object>> query(
+            String query, Map<String, Object> params, Duration timeout, long maxRows) {
+        return runOpts(query, params, false, timeout, maxRows);
+    }
+
     private List<Map<String, Object>> run(String query, Map<String, Object> params, boolean mutating) {
+        String paramsJson = prepareRun(query, params, mutating);
+        return session.use(handle -> Abi.execute(handle, query, paramsJson, mutating));
+    }
+
+    private List<Map<String, Object>> runOpts(
+            String query, Map<String, Object> params, boolean mutating,
+            Duration timeout, long maxRows) {
+        String paramsJson = prepareRun(query, params, mutating);
+        long timeoutMs = timeoutMillis(timeout);
+        long rows = maxRows < 0 ? 0 : maxRows;
+        return session.use(handle ->
+                Abi.executeOpts(handle, query, paramsJson, mutating, timeoutMs, rows));
+    }
+
+    /** Validate the shared arguments, enforce the read-only guard, and encode params. */
+    private String prepareRun(String query, Map<String, Object> params, boolean mutating) {
         if (query == null) {
             throw new KgliteException("a Cypher query cannot be null");
         }
         if (params == null) {
             throw new KgliteException("params cannot be null; pass Map.of() for none");
         }
-        String paramsJson = params.isEmpty() ? null : Json.writeObject(params);
-        return session.use(handle -> Abi.execute(handle, query, paramsJson, mutating));
+        if (mutating && readOnly) {
+            throw new ReadOnlyGraphException(
+                    "this graph was opened read-only; cypher() and beginTransaction() are refused. "
+                            + "Use query() for reads, or open() for a writable handle.");
+        }
+        return params.isEmpty() ? null : Json.writeObject(params);
+    }
+
+    /**
+     * Map a caller's {@link Duration} to the C ABI's {@code timeout_ms}, where
+     * {@code 0} means "no deadline". A {@code null} timeout, and a zero or
+     * negative {@code Duration}, all map to {@code 0} (unlimited) — the ABI has
+     * no "expire immediately" spelling, and a non-positive budget is read as
+     * "do not impose one".
+     */
+    private static long timeoutMillis(Duration timeout) {
+        if (timeout == null) {
+            return 0L;
+        }
+        long millis = timeout.toMillis();
+        return millis <= 0 ? 0L : millis;
     }
 
     /**
@@ -455,9 +696,15 @@ public final class KnowledgeGraph implements AutoCloseable {
      * built, and they block only for the commit itself.
      *
      * @return a new, empty transaction
+     * @throws ReadOnlyGraphException if this graph was opened read-only
      * @throws IllegalStateException if this graph is closed
      */
     public Transaction beginTransaction() {
+        if (readOnly) {
+            throw new ReadOnlyGraphException(
+                    "this graph was opened read-only; beginTransaction() is refused. "
+                            + "Use query() for reads, or open() for a writable handle.");
+        }
         session.checkOpen();
         return new Transaction(session);
     }
@@ -807,6 +1054,33 @@ public final class KnowledgeGraph implements AutoCloseable {
      */
     public static String nativeAbiVersion() {
         return Abi.abiVersion();
+    }
+
+    /**
+     * The on-disk storage format versions the loaded native library reads and
+     * writes — the {@code .kgl} snapshot format and the write-ahead-log frame
+     * format.
+     *
+     * <p><strong>Distinct from {@link #nativeAbiVersion()}.</strong> That is the
+     * engine's SemVer; this is the persisted-format lifecycle. A library upgrade
+     * that leaves the file format untouched keeps {@link StorageFormat#kgl()}
+     * the same while the ABI version moves, and a format bump moves
+     * {@link StorageFormat#kgl()} without an ABI-major change. Use
+     * {@link StorageFormat#kgl()} as the "storage version" for a {@code .kgl}
+     * file — for example to record which format a checkpoint was written under,
+     * or to warn before handing a file to an older build.
+     *
+     * <p>A static read of compile-time constants in the native library; it opens
+     * no graph and touches no path.
+     *
+     * @return the storage format versions
+     * @throws ExceptionInInitializerError if no native library could be
+     *     resolved or linked — see {@link #nativeAbiVersion()} for the shape of
+     *     that failure
+     */
+    public static StorageFormat storageFormatVersion() {
+        long[] v = Abi.storageFormatVersion();
+        return new StorageFormat(v[0], v[1], v[2]);
     }
 
     /**

@@ -68,6 +68,54 @@ pub extern "C" fn kglite_abi_version() -> KgliteAbiVersion {
     )
 }
 
+/// The persisted-format version numbers this build reads and writes. Distinct
+/// from [`KgliteAbiVersion`], which is the engine SemVer: this describes the
+/// on-disk format lifecycle, so an embedder can report the storage version it
+/// operates against and refuse a file it cannot read.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KgliteStorageFormat {
+    /// `.kgl` snapshot format version stamped into new saves.
+    pub kgl: u32,
+    /// Write-ahead-log frame format version this build writes.
+    pub wal: u32,
+    /// Oldest write-ahead-log frame format version this build can replay.
+    pub min_readable_wal: u32,
+}
+
+/// Return the on-disk storage format versions this library reads and writes.
+///
+/// The `.kgl` snapshot format (`kgl`) is the primary number a binding surfaces
+/// as its persisted-format version; `wal` and `min_readable_wal` describe the
+/// write-ahead-log frame format for a binding that needs the durability detail
+/// too. All three are independent of the engine SemVer reported by
+/// [`kglite_abi_version`] — a patch release can change the engine version
+/// without touching any of these, and a format bump moves one of these without
+/// implying an ABI-major change.
+///
+/// # Examples
+///
+/// ```c
+/// KgliteStorageFormat f = kglite_storage_format_version();
+/// printf("kgl format v%u, wal v%u (min readable v%u)\n",
+///        f.kgl, f.wal, f.min_readable_wal);
+/// ```
+#[no_mangle]
+pub extern "C" fn kglite_storage_format_version() -> KgliteStorageFormat {
+    crate::ffi::value_boundary(
+        KgliteStorageFormat {
+            kgl: 0,
+            wal: 0,
+            min_readable_wal: 0,
+        },
+        || KgliteStorageFormat {
+            kgl: kglite::api::io::KGL_FORMAT_VERSION,
+            wal: kglite::api::io::WAL_FORMAT_VERSION as u32,
+            min_readable_wal: kglite::api::io::MIN_READABLE_WAL_FORMAT_VERSION as u32,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +135,20 @@ mod tests {
                 env!("CARGO_PKG_VERSION_PATCH"),
             )
         );
+    }
+
+    #[test]
+    fn storage_format_matches_core_constants() {
+        let f = kglite_storage_format_version();
+        // Derived from the core constants, never hard-coded here — the same
+        // drift guard the ABI version probe carries.
+        assert_eq!(f.kgl, kglite::api::io::KGL_FORMAT_VERSION);
+        assert_eq!(f.wal, kglite::api::io::WAL_FORMAT_VERSION as u32);
+        assert_eq!(
+            f.min_readable_wal,
+            kglite::api::io::MIN_READABLE_WAL_FORMAT_VERSION as u32
+        );
+        // The `.kgl` format is the one an embedder reports; it is currently 2.
+        assert_eq!(f.kgl, 2);
     }
 }

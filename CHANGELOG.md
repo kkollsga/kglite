@@ -55,6 +55,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   columns in declared order. A bare `CALL` must be the entire statement;
   combining it with other clauses still requires `YIELD`.
 
+- **Java: per-query timeout and row-budget overloads on `query`/`cypher`.**
+  `query(cypher, Duration timeout)`, `query(cypher, params, timeout)` and
+  `query(cypher, params, timeout, long maxRows)` (and the matching `cypher(...)`
+  write-path overloads) bind the C ABI's `kglite_session_execute_read_opts` /
+  `kglite_session_execute_mut_opts`. `timeout` past which the statement returns
+  a `CypherTimeout` error; `maxRows` a runaway-result guard that *errors* on
+  overflow rather than truncating (add a `LIMIT` to bound output). Following the
+  C ABI, a `null`/zero/negative `Duration` and a `maxRows` of `0` both mean
+  "unlimited" — `0` is not "expire immediately".
+- **Java: `KnowledgeGraph.storageFormatVersion()`** returns a `StorageFormat`
+  record — the `.kgl` on-disk snapshot format version plus the write-ahead-log
+  frame format versions — over a new additive C ABI function
+  `kglite_storage_format_version()`. This is the persisted-format lifecycle,
+  distinct from the engine SemVer reported by `nativeAbiVersion()`.
+- **Java: `KnowledgeGraph.openReadOnly(Path)`** (and `openReadOnly(Path,
+  StorageMode)`) open a graph with a wrapper-enforced read-only guard: `query()`
+  works, while `cypher()` and `beginTransaction()` are refused with a
+  `ReadOnlyGraphException` raised before the call crosses into native code. A
+  convention-level guard on the handle, documented as such — the engine has no
+  read-only open mode, so it does not lock the file against other processes.
+
 ### Changed
 
 - **Breaking (contract fix):** `CALL … YIELD` result columns now follow YIELD
