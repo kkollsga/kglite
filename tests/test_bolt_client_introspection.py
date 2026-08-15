@@ -224,3 +224,16 @@ def test_profile_still_executes_without_fabricated_stats(bolt_server):
             summary = result.consume()
     assert records[0]["c"] == 4
     assert summary.profile is None
+
+
+def test_explain_plan_carries_string_representation(bolt_server):
+    """G.V()'s plan tab reads args['string-representation'] unconditionally
+    (NPE without it, verified by decompilation) — the root carries a rendered
+    text plan, Neo4j's convention."""
+    with GraphDatabase.driver(bolt_server, auth=None) as driver:
+        with driver.session() as session:
+            result = session.run("EXPLAIN MATCH (p:Person) RETURN p.name LIMIT 2")
+            list(result)
+            plan = result.consume().plan
+    text = plan["args"]["string-representation"]
+    assert "Match" in text and "\n" in text

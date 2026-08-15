@@ -1354,6 +1354,33 @@ fn plan_from_explain_rows(
     }
     steps.sort_by_key(|(step, _, _)| *step);
 
+    // Text rendering of the plan for `args["string-representation"]` on the
+    // root — Neo4j puts its ASCII plan there, and G.V()'s plan tab reads the
+    // key UNCONDITIONALLY (`summary.plan().arguments().get("string-
+    // representation").asString()`, verified by decompilation after its tab
+    // rendered an NPE against a plan without it). Root operator first,
+    // matching the tree orientation.
+    let text: String = {
+        let mut lines = Vec::with_capacity(steps.len() + passes.len());
+        for (_, op, est) in steps.iter().rev() {
+            match est {
+                Some(est) => lines.push(format!("+ {op}  (estimated rows: {est})")),
+                None => lines.push(format!("+ {op}")),
+            }
+        }
+        if !passes.is_empty() {
+            let names: Vec<&str> = passes
+                .iter()
+                .filter_map(|p| match p {
+                    BoltValue::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .collect();
+            lines.push(format!("optimizer passes: {}", names.join(", ")));
+        }
+        lines.join("\n")
+    };
+
     // Fold from the first step outward: the last operator becomes the root.
     let mut node: Option<BoltValue> = None;
     let last = steps.len() - 1;
@@ -1363,6 +1390,10 @@ fn plan_from_explain_rows(
             args.insert("EstimatedRows".to_string(), BoltValue::Float(est as f64));
         }
         if i == last {
+            args.insert(
+                "string-representation".to_string(),
+                BoltValue::String(text.clone()),
+            );
             args.insert(
                 "runtime".to_string(),
                 BoltValue::String("kglite".to_string()),
