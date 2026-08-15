@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zero-row case now yields one row (`{c: 0}`) per Cypher aggregation
   semantics. This also unblocks Neo4j Browser's connect-time metadata queries
   over the Bolt server.
+- `collect(x)[..k]` (a slice over an aggregate) now returns a real list,
+  matching the scalar slice path — previously it serialized to a JSON string,
+  which broke any consumer expecting an array (including Neo4j Browser's
+  sidebar label list).
 
 ## [0.16.1] - 2026-08-15
 

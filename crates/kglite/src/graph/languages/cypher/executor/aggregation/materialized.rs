@@ -682,12 +682,15 @@ impl<'a> CypherExecutor<'a> {
                     len as usize
                 };
 
+                // A real list, not a JSON string: the scalar path returns
+                // `Value::List` for `[1,2,3][..2]`, and pre-fix this arm's
+                // `Value::String(format!("[…]"))` made `collect(x)[..2]`
+                // (and Neo4j Browser's `COLLECT(label)[..1000]`) come back
+                // as a string a Bolt client can't use as an array.
                 if s >= e {
-                    Ok(Value::String("[]".to_string()))
+                    Ok(Value::List(Vec::new()))
                 } else {
-                    let sliced = &items[s..e];
-                    let formatted: Vec<String> = sliced.iter().map(format_value_json).collect();
-                    Ok(Value::String(format!("[{}]", formatted.join(", "))))
+                    Ok(Value::List(items[s..e].to_vec()))
                 }
             }
             Expression::IndexAccess { expr: inner, index } => {

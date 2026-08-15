@@ -100,7 +100,35 @@ def test_size_of_collect_still_works(graph):
     assert rows[0]["r"] == 2
 
 
+def test_collect_slice_returns_list(graph):
+    """`collect(x)[..k]` is a list, matching the scalar slice path — pre-fix
+    the aggregate-path ListSlice arm serialized to a JSON string."""
+    rows = graph.cypher("MATCH (p:Person) RETURN collect(p.name)[..1] AS r")
+    assert isinstance(rows[0]["r"], list)
+    rows = graph.cypher("MATCH (p:Person) RETURN collect(p.name)[..0] AS r")
+    assert rows[0]["r"] == []
+
+
 # ── The Neo4j Browser connect sequence, verbatim from dbMetaDuck.ts ──
+
+
+def test_browser_meta_types_query(graph):
+    rows = graph.cypher(
+        "CALL db.labels() YIELD label\n"
+        "RETURN {name:'labels', data:COLLECT(label)[..1000]} AS result\n"
+        "UNION ALL\n"
+        "CALL db.relationshipTypes() YIELD relationshipType\n"
+        "RETURN {name:'relationshipTypes', data:COLLECT(relationshipType)[..1000]} AS result\n"
+        "UNION ALL\n"
+        "CALL db.propertyKeys() YIELD propertyKey\n"
+        "RETURN {name:'propertyKeys', data:COLLECT(propertyKey)[..1000]} AS result"
+    ).to_dicts()
+    by_name = {row["result"]["name"]: row["result"]["data"] for row in rows}
+    assert sorted(by_name["labels"]) == ["City", "Person"]
+    assert by_name["relationshipTypes"] == ["LIVES_IN"]
+    assert "age" in by_name["propertyKeys"]
+    # The sidebar needs real arrays, not JSON strings.
+    assert all(isinstance(v, list) for v in by_name.values())
 
 
 def test_browser_meta_count_query(graph):

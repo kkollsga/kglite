@@ -1109,8 +1109,8 @@ pub(super) fn parse_value_token(s: &str) -> Value {
 }
 
 /// Extract the value of `key` from a map-shaped string of the form
-/// `{"k1": v1, "k2": v2, ...}` produced by [`format_value_json`] over a
-/// [`super::Expression::MapLiteral`]. Returns `None` if the input doesn't
+/// `{"k1": v1, "k2": v2, ...}` (the executor's own JSON-style serialization
+/// of a [`super::Expression::MapLiteral`]). Returns `None` if the input doesn't
 /// look like a map or the key isn't present. The grammar is
 /// closed (always emitted by the executor itself), so a small ad-hoc
 /// parser is enough — no `serde_json` dependency.
@@ -1220,17 +1220,6 @@ pub(super) fn split_top_level_commas(s: &str) -> Vec<&str> {
 // Delegate to shared value_operations module
 pub(super) fn format_value_compact(val: &Value) -> String {
     crate::graph::core::value_operations::format_value_compact(val)
-}
-/// JSON-safe value formatting: strings are quoted, others are as-is.
-/// Used for list serialization so py_convert can parse via json.loads.
-pub(super) fn format_value_json(val: &Value) -> String {
-    match val {
-        Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
-        Value::Null => "null".to_string(),
-        Value::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
-        Value::NodeRef(idx) => format!("\"__nref:{}\"", idx),
-        _ => format_value_compact(val),
-    }
 }
 pub(super) fn value_to_f64(val: &Value) -> Option<f64> {
     crate::graph::core::value_operations::value_to_f64(val)
