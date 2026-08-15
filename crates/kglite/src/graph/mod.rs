@@ -25,6 +25,7 @@ pub mod io;
 pub mod languages;
 pub mod mutation;
 pub mod schema;
+pub mod schema_json;
 pub mod session;
 pub mod storage;
 pub mod wal;

@@ -1082,6 +1082,80 @@ KgliteStatusCode kglite_open_or_create_graph_in_mode(const char *path,
  void kglite_cypher_result_free(struct KgliteCypherResult *result);
 
 /**
+ * Install a declarative schema on the session's graph.
+ *
+ * `schema_json` is a JSON object in the one schema dialect kglite speaks —
+ * the same one the Python wheel's `define_schema` takes, parsed by the same
+ * core function:
+ *
+ * ```json
+ * {
+ *   "nodes": {
+ *     "Person": {
+ *       "required":       ["id", "name"],
+ *       "optional":       ["email"],
+ *       "types":          {"id": "integer", "name": "string"},
+ *       "primary_key":    "id",
+ *       "unique":         [["email"]],
+ *       "layer":          "managed",
+ *       "auto_timestamp": true
+ *     }
+ *   },
+ *   "connections": {
+ *     "KNOWS": {
+ *       "source":              "Person",
+ *       "target":              "Person",
+ *       "cardinality":         "many-to-many",
+ *       "required_properties": ["since"],
+ *       "property_types":      {"since": "integer"}
+ *     }
+ *   }
+ * }
+ * ```
+ *
+ * `source` and `target` are the only mandatory keys anywhere; an absent
+ * `nodes` or `connections` section is a no-op, so a document may declare
+ * either half alone.
+ *
+ * `mode` (may be null) is `"merge"` or `"replace"`; null means `"merge"`.
+ * **Merge** scopes the declaration to the types the document names — every
+ * other type keeps its constraints. **Replace** makes this document the whole
+ * schema, so every type it does not name *stops being enforced*. The Python
+ * wrapper emits a warning naming each constraint a replace withdraws; C has no
+ * warning channel, so pass `"replace"` only when withdrawing is the intent.
+ *
+ * Installing a schema installs the UNIQUE / NODE KEY constraints it declares,
+ * so the call fails when data already in the graph violates one. In that case
+ * **nothing changes** — neither the schema nor the indexes — and the caller
+ * can fix the data and retry.
+ *
+ * # Errors
+ *
+ * - `KGLITE_ERR_NULL_POINTER` — `session` or `schema_json` is null.
+ * - `KGLITE_ERR_INVALID_UTF8` — `schema_json` is not valid UTF-8.
+ * - `KGLITE_ERR_INVALID_ARGUMENT` — the JSON did not parse, the document is
+ *   not in the dialect above, or `mode` is not `"merge"` / `"replace"`; the
+ *   message says which.
+ * - A constraint status (`KGLITE_ERR_CONSTRAINT_VIOLATION` and friends) when
+ *   existing data violates a declared constraint; the message names it.
+ *
+ * **The schema is not durable until saved.** Call
+ * [`kglite_session_save`](crate::kglite_session_save) to persist it.
+ *
+ * # Safety
+ *
+ * `session` must be a valid handle from
+ * [`kglite_session_new`](crate::kglite_session_new). `schema_json` must be a
+ * null-terminated UTF-8 string; `mode` null or the same. `out_error_msg` must
+ * be null or a valid writable slot.
+ */
+
+KgliteStatusCode kglite_define_schema(struct KgliteSession *session,
+                                      const char *schema_json,
+                                      const char *mode,
+                                      const char **out_error_msg);
+
+/**
  * Create a new session from a graph handle. The session takes
  * ownership of the graph — the caller MUST NOT call
  * [`kglite_graph_free`](crate::kglite_graph_free) on the handle

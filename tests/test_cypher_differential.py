@@ -2470,7 +2470,80 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (n:Doc {tag: 'Oslo'}) RETURN n.title AS t ORDER BY t",
         None,
     ),
+    # ── vector math over list properties (dot / cosine / norm) ──
+    # These read a *list-valued* property, which no other corpus fixture
+    # carries. The projected + ORDER BY + LIMIT shape is the one the top-k
+    # retention and projection passes rewrite, so a pass that mangles a
+    # function call over a list column shows up here as a row-set divergence.
+    (
+        "vector_cosine_ranking",
+        "vector_props_graph",
+        "MATCH (d:Doc) RETURN d.title AS t, cosine(d.vec, $q) AS s ORDER BY s DESC, t",
+        {"q": [1.0, 0.0]},
+    ),
+    (
+        "vector_cosine_topk",
+        "vector_props_graph",
+        "MATCH (d:Doc) RETURN d.title AS t, cosine(d.vec, [1, 0]) AS s ORDER BY s DESC, t LIMIT 2",
+        None,
+    ),
+    (
+        "vector_dot_in_where",
+        "vector_props_graph",
+        "MATCH (d:Doc) WHERE dot(d.vec, [1, 0]) > 0.5 RETURN d.title AS t ORDER BY t",
+        None,
+    ),
+    (
+        "vector_norm_projection",
+        "vector_props_graph",
+        "MATCH (d:Doc) RETURN d.title AS t, norm(d.vec) AS n ORDER BY t",
+        None,
+    ),
+    # The zero vector's cosine is NULL: both paths must agree on the null,
+    # and on where it sorts.
+    (
+        "vector_cosine_null_arm",
+        "vector_props_graph",
+        "MATCH (d:Doc) WHERE cosine(d.vec, [1, 0]) IS NULL RETURN d.title AS t ORDER BY t",
+        None,
+    ),
+    # Two stored vectors against each other — the cross-join shape.
+    (
+        "vector_pairwise",
+        "vector_props_graph",
+        "MATCH (a:Doc) MATCH (b:Doc) WHERE a.title < b.title "
+        "RETURN a.title AS a, b.title AS b, dot(a.vec, b.vec) AS s ORDER BY a, b",
+        None,
+    ),
 ]
+
+
+@pytest.fixture
+def vector_props_graph() -> kglite.KnowledgeGraph:
+    """Nodes carrying a genuinely list-valued numeric property.
+
+    Separate from `small_graph` / `json_list_props_graph` — which are pinned by
+    absolute goldens elsewhere — so adding the shape cannot move any existing
+    expectation. `zero` is the control for the undefined-cosine arm: its norm
+    is 0, so `cosine(...)` on it is NULL while `dot`/`norm` stay numbers.
+    """
+    import pandas as pd
+
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "doc_id": [1, 2, 3, 4],
+                "title": ["axis", "diag", "opposite", "zero"],
+                "vec": [[1.0, 0.0], [1.0, 1.0], [-1.0, 0.0], [0.0, 0.0]],
+            }
+        ),
+        "Doc",
+        "doc_id",
+        "title",
+        columns=["vec"],
+    )
+    return g
 
 
 @pytest.fixture

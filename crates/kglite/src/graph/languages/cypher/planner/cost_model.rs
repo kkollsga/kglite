@@ -105,8 +105,13 @@ pub(super) fn estimate_expression_cost(expr: &Expression) -> u32 {
                 "substring" | "replace" | "split" => 5,
                 "abs" | "ceil" | "ceiling" | "floor" | "round" | "sqrt" | "sign" => 2,
                 "vector_score" => 200, // Embedding lookup + similarity computation
+                // One pass over a list-valued property: dearer than a scalar
+                // op, far cheaper than vector_score's store lookup. `dot` and
+                // `cosine` walk two vectors, `norm` one.
+                "dot" | "cosine" => 40,
+                "norm" => 20,
                 "valid_at" | "valid_during" => 5, // 2 property lookups + 2 comparisons
-                _ => 5,                // Unknown functions get moderate cost
+                _ => 5,                           // Unknown functions get moderate cost
             };
             let arg_cost: u32 = args.iter().map(estimate_expression_cost).sum();
             base + arg_cost

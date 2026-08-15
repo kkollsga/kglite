@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`dot(a, b)`, `cosine(a, b)` and `norm(a)` — vector math over ordinary list
+  properties.** `vector_score` and `embedding_norm` read the registered
+  *embedding store*; these three read whatever list-valued data a query has to
+  hand — a stored list column, a list literal, a `$param` bound to a list, a
+  `collect()` — so vectors that live in the graph as plain data are queryable
+  without registering a store or an embedder, and two nodes' own vectors can be
+  compared against each other. Available to every binding through Cypher.
+  A `null` argument (including a missing property) makes the call `null`, so a
+  partially-vectorised corpus still returns its rows. Three cases are errors
+  rather than a quiet `null`, because each describes a data bug that a `null`
+  would hide inside a column of otherwise plausible scores: vectors of
+  different lengths (the message names both — Neo4j's `vector.similarity.*`
+  family likewise compares only equal dimensions), a non-numeric element (the
+  message names the vector and the position; Neo4j's GDS substitutes `0.0` for
+  a `null` element and we deliberately do not, since a zeroed component changes
+  the answer without changing its shape), and a non-list argument. `cosine` of a
+  zero-length vector is `null` — `0/0` is undefined — which differs from
+  `vector_score`, whose `0.0` exists because a top-k ranking needs a total order.
+- **`kglite_define_schema` — declarative schemas from the C ABI**, so a Java,
+  Go or .NET consumer can declare `primary_key`, `unique`, `required`, `types`,
+  `layer` and `auto_timestamp` instead of reaching for Cypher DDL for the parts
+  it covers. It takes the **same schema document Python's `define_schema`
+  takes**, parsed by the same core function
+  (`kglite::api::schema_from_json` / `schema_from_value`) rather than a
+  C-ABI-local walk. That matters because a published C signature never changes
+  within an ABI major: had the C surface shipped the serialized
+  `{"node_schemas": {"T": {"required_fields": …}}}` shape it would have created
+  a second, permanent schema dialect. The Python wrapper now delegates to the
+  same parser, so the two cannot drift; every refusal keeps the Python
+  exception class it always raised (`TypeError` / `KeyError` / `ValueError`),
+  and a shape PyO3 used to reject with a generic extraction message now says
+  which key was wrong. `mode` is `"merge"` (the default, and what `null` means)
+  or `"replace"`; an unrecognised spelling is refused rather than defaulted.
+
 - **Auto-vacuum's state is readable, and relationship churn is now garbage it
   can see.** `graph_info()` gains `auto_vacuum_threshold` (the configured
   value, or `None` when disabled — `set_auto_vacuum` was write-only),
@@ -130,6 +164,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stayed partial.
 
 ### Fixed
+
+- **`CREATE CONSTRAINT … IS :: <TYPE>`'s refusal advised a key the schema
+  parser ignores.** The message pointed at
+  `define_schema({'nodes': {'T': {'field_types': …}}})` — the *Rust field's*
+  name. The dialect's key is `types`, and an unrecognised key is silently
+  dropped, so a user who followed the advice declared nothing and
+  `validate_schema()` then reported no violations: precisely the
+  enforces-nothing-but-reports-success outcome the refusal exists to prevent.
+  The message now names `types` and is binding-neutral (no `kg.` prefix), since
+  the schema route is reachable from every binding now that the C ABI has
+  `kglite_define_schema`.
 
 - **Reading an element of a stored list costs the element again, not the
   list.** `n.vec[i]` reads the container through the node's property store, and

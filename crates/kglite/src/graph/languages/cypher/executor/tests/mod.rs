@@ -11,6 +11,7 @@
 //! - [`semantics`] — absolute goldens for expression semantics (duplicate
 //!   result columns, `datetime()` time/zone, integer overflow and div-by-zero)
 //! - [`strings`] — string functions and procedure list arguments
+//! - [`vectors`] — `dot` / `cosine` / `norm` over list-valued data
 #![allow(clippy::approx_constant)]
 
 use super::helpers::*;
@@ -30,6 +31,7 @@ mod lists;
 mod mutations;
 mod semantics;
 mod strings;
+mod vectors;
 
 /// Test helper: unwraps evaluate_comparison Result for use in assert!()
 pub(super) fn cmp(left: &Value, op: &ComparisonOp, right: &Value) -> bool {

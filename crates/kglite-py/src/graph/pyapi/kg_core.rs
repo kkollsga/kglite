@@ -17,12 +17,11 @@ use kglite_core::api::mutation::OperationReport;
 use kglite_core::api::session::CsvImportPolicy;
 use kglite_core::api::GraphRead;
 use kglite_core::api::{
-    ConnectionSchemaDefinition, NodeSchemaDefinition, SchemaDefinition, SchemaInstall,
+    schema_from_value, SchemaDefinition, SchemaInstall, SchemaParseError, SchemaParseErrorKind,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use pyo3::{Bound, IntoPyObjectExt};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Adapter: routes pure-Rust [`ProgressEvent`]s into a Python callable.
@@ -1169,9 +1168,15 @@ impl KnowledgeGraph {
         schema_dict: &Bound<'_, PyDict>,
         replace: bool,
     ) -> PyResult<Self> {
-        let mut schema = SchemaDefinition::new();
-        parse_node_schemas(schema_dict, &mut schema)?;
-        parse_connection_schemas(schema_dict, &mut schema)?;
+        // The schema grammar lives in core (`kglite::api::schema_from_value`),
+        // not here: the C ABI's `kglite_define_schema` parses the same dialect
+        // through the same function, and a published C signature can never
+        // change within an ABI major — a second, binding-local grammar would
+        // be a permanent fork. `py_value_to_value` is the same dict→Value
+        // converter every parameter takes, so a Python dict and a JSON
+        // document reach the parser as the identical value.
+        let schema = schema_from_value(&py_in::py_value_to_value(schema_dict.as_any())?)
+            .map_err(schema_parse_to_pyerr)?;
 
         // Replacing withdraws the declarations of every type this call did not
         // name, so say which enforcement is going away. The default merge cannot
@@ -1981,213 +1986,18 @@ fn warn_about_constraints_dropped_by_replace(
     )
 }
 
-/// Parse `define_schema`'s `nodes` mapping into `schema`.
-///
-/// Absent or non-dict `nodes` is a no-op rather than an error, matching the
-/// long-standing behaviour of the inline walk this was extracted from.
-fn parse_node_schemas(
-    schema_dict: &Bound<'_, PyDict>,
-    schema: &mut SchemaDefinition,
-) -> PyResult<()> {
-    let Some(nodes_dict) = schema_dict.get_item("nodes")? else {
-        return Ok(());
-    };
-    let Ok(nodes) = nodes_dict.cast::<PyDict>() else {
-        return Ok(());
-    };
-    for (node_type_key, node_schema_val) in nodes.iter() {
-        let node_type: String = node_type_key.extract()?;
-        let node_schema_dict = node_schema_val.cast::<PyDict>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-                "Schema for node type '{}' must be a dictionary",
-                node_type
-            ))
-        })?;
-
-        let mut node_schema = NodeSchemaDefinition::default();
-        if let Some(required) = node_schema_dict.get_item("required")? {
-            node_schema.required_fields = required.extract::<Vec<String>>()?;
-        }
-        if let Some(optional) = node_schema_dict.get_item("optional")? {
-            node_schema.optional_fields = optional.extract::<Vec<String>>()?;
-        }
-        if let Some(types) = node_schema_dict.get_item("types")? {
-            let types_dict = types.cast::<PyDict>().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyTypeError, _>("types must be a dictionary")
-            })?;
-            for (field, type_val) in types_dict.iter() {
-                node_schema
-                    .field_types
-                    .insert(field.extract::<String>()?, type_val.extract::<String>()?);
-            }
-        }
-
-        parse_node_declarations(&node_type, node_schema_dict, &mut node_schema)?;
-        schema.add_node_schema(node_type, node_schema);
+/// Map a core schema-parse refusal onto the Python exception class its class
+/// names, so `define_schema` raises exactly what its hand-written walk used to:
+/// a wrong shape is a `TypeError`, a missing key a `KeyError`, an unaccepted
+/// value a `ValueError`. The grammar and the messages live in core
+/// (`kglite::api::schema_from_value`); only the exception *class* is
+/// Python-specific, which is why the kind travels rather than being baked in.
+fn schema_parse_to_pyerr(e: SchemaParseError) -> PyErr {
+    match e.kind {
+        SchemaParseErrorKind::Type => PyErr::new::<pyo3::exceptions::PyTypeError, _>(e.message),
+        SchemaParseErrorKind::Key => PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.message),
+        SchemaParseErrorKind::Value => PyErr::new::<pyo3::exceptions::PyValueError, _>(e.message),
     }
-    Ok(())
-}
-
-/// Parse `define_schema`'s `connections` mapping into `schema`. The edge
-/// counterpart of [`parse_node_schemas`]; `source`/`target` are the only
-/// required keys.
-fn parse_connection_schemas(
-    schema_dict: &Bound<'_, PyDict>,
-    schema: &mut SchemaDefinition,
-) -> PyResult<()> {
-    let Some(connections_dict) = schema_dict.get_item("connections")? else {
-        return Ok(());
-    };
-    let Ok(connections) = connections_dict.cast::<PyDict>() else {
-        return Ok(());
-    };
-    for (conn_type_key, conn_schema_val) in connections.iter() {
-        let conn_type: String = conn_type_key.extract()?;
-        let conn_schema_dict = conn_schema_val.cast::<PyDict>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-                "Schema for connection type '{}' must be a dictionary",
-                conn_type
-            ))
-        })?;
-
-        let mut conn_schema = ConnectionSchemaDefinition {
-            source_type: required_endpoint(conn_schema_dict, &conn_type, "source")?,
-            target_type: required_endpoint(conn_schema_dict, &conn_type, "target")?,
-            cardinality: None,
-            required_properties: Vec::new(),
-            property_types: HashMap::new(),
-            auto_timestamp: None,
-        };
-
-        if let Some(cardinality) = conn_schema_dict.get_item("cardinality")? {
-            conn_schema.cardinality = Some(cardinality.extract::<String>()?);
-        }
-        // Opt-in freshness provenance for edges of this type.
-        if let Some(ts_val) = conn_schema_dict.get_item("auto_timestamp")? {
-            conn_schema.auto_timestamp = Some(ts_val.extract::<bool>()?);
-        }
-        if let Some(required_props) = conn_schema_dict.get_item("required_properties")? {
-            conn_schema.required_properties = required_props.extract::<Vec<String>>()?;
-        }
-        if let Some(prop_types) = conn_schema_dict.get_item("property_types")? {
-            let types_dict = prop_types.cast::<PyDict>().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "property_types must be a dictionary",
-                )
-            })?;
-            for (field, type_val) in types_dict.iter() {
-                conn_schema
-                    .property_types
-                    .insert(field.extract::<String>()?, type_val.extract::<String>()?);
-            }
-        }
-
-        schema.add_connection_schema(conn_type, conn_schema);
-    }
-    Ok(())
-}
-
-/// One of a connection schema's two mandatory endpoint keys.
-fn required_endpoint(
-    conn_schema_dict: &Bound<'_, PyDict>,
-    conn_type: &str,
-    key: &str,
-) -> PyResult<String> {
-    conn_schema_dict
-        .get_item(key)?
-        .ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                "Connection '{}' missing required '{}' field",
-                conn_type, key
-            ))
-        })?
-        .extract()
-}
-
-/// Parse the opt-in per-node-type declarations `define_schema` accepts beyond
-/// the field list: `primary_key`, `unique`, `layer`, and `auto_timestamp`.
-///
-/// Grouped here because they share a shape — each is absent or validated — and
-/// because keeping them inline made `define_schema` a single function that both
-/// walked the schema dict and validated every leaf of it.
-fn parse_node_declarations(
-    node_type: &str,
-    node_schema_dict: &Bound<'_, PyDict>,
-    node_schema: &mut NodeSchemaDefinition,
-) -> PyResult<()> {
-    // Any property may be the primary key: `id` is enforced through the O(1)
-    // per-type id-index, anything else through a unique secondary index that
-    // `set_schema` installs. Either way the key is unique *and* required
-    // (NODE KEY semantics).
-    if let Some(pk_val) = node_schema_dict.get_item("primary_key")? {
-        let pk: String = pk_val.extract()?;
-        if pk.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "primary_key for node type '{node_type}' must name a property."
-            )));
-        }
-        node_schema.primary_key = Some(pk);
-    }
-
-    if let Some(unique_val) = node_schema_dict.get_item("unique")? {
-        node_schema.unique = Some(parse_unique_declaration(node_type, &unique_val)?);
-    }
-
-    // The ownership layer for the two-writer contract. An unknown value is
-    // rejected as a typo-guard.
-    if let Some(layer_val) = node_schema_dict.get_item("layer")? {
-        let layer: String = layer_val.extract()?;
-        if layer != "managed" && layer != "runtime" {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "layer for node type '{node_type}' must be 'managed' or 'runtime'. \
-                 Got '{layer}'."
-            )));
-        }
-        node_schema.layer = Some(layer);
-    }
-
-    // Freshness provenance: stamp `updated_at` (+ the caller's git_sha) on every
-    // write to this type.
-    if let Some(ts_val) = node_schema_dict.get_item("auto_timestamp")? {
-        node_schema.auto_timestamp = Some(ts_val.extract::<bool>()?);
-    }
-
-    Ok(())
-}
-
-/// Parse `define_schema`'s optional `unique` declaration for one node type into
-/// a list of property tuples, so `[["email"], ["first", "last"]]` declares one
-/// single-property and one composite constraint.
-///
-/// A bare property name and a flat list of names are both natural mistakes that
-/// would otherwise declare something surprising, so the two shorthands are
-/// accepted explicitly rather than guessed at: a flat list becomes one
-/// single-property constraint per entry, not one composite over all of them.
-fn parse_unique_declaration(
-    node_type: &str,
-    unique_val: &Bound<'_, PyAny>,
-) -> PyResult<Vec<Vec<String>>> {
-    let tuples: Vec<Vec<String>> = if let Ok(single) = unique_val.extract::<String>() {
-        vec![vec![single]]
-    } else if let Ok(flat) = unique_val.extract::<Vec<String>>() {
-        flat.into_iter().map(|property| vec![property]).collect()
-    } else {
-        unique_val.extract::<Vec<Vec<String>>>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "unique for node type '{node_type}' must be a property name, a list of \
-                 property names, or a list of property tuples — e.g. 'email', ['email'], \
-                 or [['first', 'last']]."
-            ))
-        })?
-    };
-    for tuple in &tuples {
-        if tuple.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "unique for node type '{node_type}' contains an empty property tuple."
-            )));
-        }
-    }
-    Ok(tuples)
 }
 
 fn build_disabled_passes(

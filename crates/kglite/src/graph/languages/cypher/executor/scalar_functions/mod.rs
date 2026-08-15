@@ -17,6 +17,7 @@ mod string;
 mod temporal;
 mod timeseries;
 mod utility;
+mod vector;
 
 use shared::*;
 
@@ -151,6 +152,9 @@ impl<'a> CypherExecutor<'a> {
             return Ok(v);
         }
         if let Some(v) = self.eval_timeseries_fn(name, args, row)? {
+            return Ok(v);
+        }
+        if let Some(v) = self.eval_vector_fn(name, args, row)? {
             return Ok(v);
         }
         if let Some(v) = self.eval_utility_fn(name, args, row)? {

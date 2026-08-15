@@ -283,3 +283,159 @@ class TestManagedReloadGuard:
         import kglite
 
         assert kglite.load(p).schema_definition()["nodes"]["Task"]["auto_timestamp"] is True
+
+
+class TestSchemaDialectIsShared:
+    """`define_schema` parses through the core chokepoint, not a Python-local walk.
+
+    The grammar lives in `kglite::api::schema_from_value`; the C ABI's
+    `kglite_define_schema` parses the same document through the same function.
+    That is what keeps the C surface — where a published signature can never
+    change within an ABI major — from acquiring a second, permanent dialect.
+    These tests pin the Python end of the contract: the accepted shapes, and
+    the exception *class* each refusal keeps.
+    """
+
+    def test_every_declaration_key_round_trips(self):
+        graph = KnowledgeGraph()
+        graph.define_schema(
+            {
+                "nodes": {
+                    "User": {
+                        "required": ["id", "email"],
+                        "optional": ["nickname"],
+                        "types": {"email": "string"},
+                        "primary_key": "email",
+                        "unique": [["handle"]],
+                        "layer": "managed",
+                        "auto_timestamp": True,
+                    }
+                },
+                "connections": {
+                    "KNOWS": {
+                        "source": "User",
+                        "target": "User",
+                        "cardinality": "many-to-many",
+                        "required_properties": ["since"],
+                        "property_types": {"since": "integer"},
+                    }
+                },
+            }
+        )
+        constraints = {
+            row["name"]: row["type"]
+            for row in graph.cypher("CALL db.constraints() YIELD name, type RETURN name, type").to_list()
+        }
+        assert constraints["User.email"] == "NODE_KEY"
+        assert constraints["User.handle"] == "UNIQUENESS"
+        assert constraints["User.id"] == "NODE_PROPERTY_EXISTENCE"
+
+    @pytest.mark.parametrize(
+        "unique,expected_constraints",
+        [
+            ("email", ["U.email"]),
+            (["email", "handle"], ["U.email", "U.handle"]),
+            ([["first", "last"]], ["U.(first, last)"]),
+        ],
+    )
+    def test_the_three_unique_shorthands(self, unique, expected_constraints):
+        # A flat list is one single-property constraint *per entry*, not one
+        # composite over all of them.
+        graph = KnowledgeGraph()
+        graph.define_schema({"nodes": {"U": {"unique": unique}}})
+        names = sorted(row["name"] for row in graph.cypher("CALL db.constraints() YIELD name RETURN name").to_list())
+        assert names == sorted(expected_constraints)
+
+    def test_a_tuple_is_accepted_wherever_a_list_is(self):
+        # `py_value_to_value` maps a tuple to the same list Value a list maps
+        # to, exactly as PyO3's `Vec<String>` extraction used to accept both.
+        graph = KnowledgeGraph()
+        graph.define_schema({"nodes": {"N": {"required": ("id", "title")}}})
+        assert graph.has_schema()
+
+    def test_either_section_may_stand_alone(self):
+        graph = KnowledgeGraph()
+        graph.define_schema({"connections": {"R": {"source": "A", "target": "B"}}})
+        assert graph.has_schema()
+        # A non-dict section is ignored rather than rejected — long-standing
+        # behaviour of the walk this delegates to.
+        KnowledgeGraph().define_schema({"nodes": ["Person"]})
+
+    @pytest.mark.parametrize(
+        "schema,exc,needle",
+        [
+            ({"nodes": {"P": ["required"]}}, TypeError, "must be a dictionary"),
+            (
+                {"nodes": {"P": {"required": 7}}},
+                TypeError,
+                "must be a list of property names",
+            ),
+            ({"nodes": {"P": {"types": ["id"]}}}, TypeError, "types must be a dictionary"),
+            (
+                {"nodes": {"P": {"auto_timestamp": 1}}},
+                TypeError,
+                "must be true or false",
+            ),
+            (
+                {"nodes": {"P": {"primary_key": ""}}},
+                ValueError,
+                "must name a property.",
+            ),
+            (
+                {"nodes": {"P": {"layer": "other"}}},
+                ValueError,
+                "'managed' or 'runtime'",
+            ),
+            (
+                {"nodes": {"P": {"unique": 7}}},
+                ValueError,
+                "must be a property name, a list of property names",
+            ),
+            (
+                {"nodes": {"P": {"unique": [[]]}}},
+                ValueError,
+                "contains an empty property tuple.",
+            ),
+            (
+                {"connections": {"R": {"target": "B"}}},
+                KeyError,
+                "missing required 'source' field",
+            ),
+            (
+                {"connections": {"R": {"source": "A"}}},
+                KeyError,
+                "missing required 'target' field",
+            ),
+        ],
+    )
+    def test_each_refusal_keeps_its_python_exception_class(self, schema, exc, needle):
+        # The core parser carries the *class* of refusal so the wrapper can
+        # raise Python's conventional exception rather than flattening
+        # everything to one type.
+        graph = KnowledgeGraph()
+        with pytest.raises(exc) as excinfo:
+            graph.define_schema(schema)
+        assert needle in str(excinfo.value)
+        assert not graph.has_schema(), "a rejected declaration must install nothing"
+
+    def test_the_property_type_ddl_refusal_names_the_key_the_parser_accepts(self):
+        """The refusal used to suggest `field_types` — the Rust field's name.
+
+        The schema dialect's key is `types`; `field_types` is silently ignored,
+        so a user who followed the old advice declared nothing and
+        `validate_schema()` then reported no violations — the exact
+        enforces-nothing-but-reports-success outcome the message exists to
+        prevent.
+        """
+        graph = KnowledgeGraph()
+        df = pd.DataFrame({"id": [1], "title": ["a"], "age": ["not an int"]})
+        graph.add_nodes(df, "Person", "id", "title", columns=["age"])
+        with pytest.raises(Exception) as excinfo:
+            graph.cypher("CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER")
+        message = str(excinfo.value)
+        assert "field_types" not in message, message
+        assert "'types': {'age': 'integer'}" in message, message
+
+        # And the key it names actually works.
+        graph.define_schema({"nodes": {"Person": {"types": {"age": "integer"}}}})
+        assert [e["error_type"] for e in graph.validate_schema()] == ["type_mismatch"]

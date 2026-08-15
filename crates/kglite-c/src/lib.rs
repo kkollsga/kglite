@@ -24,6 +24,8 @@
 //!   execute_mut.
 //! - [`embeddings`] — packed-float embedding ingest + vector-index build on
 //!   the session.
+//! - [`schema`] — declarative schema installation (`kglite_define_schema`),
+//!   sharing Python's one schema dialect.
 //! - [`result`] — `KgliteCypherResult` opaque handle + JSON accessors.
 //! - [`alloc`] — tracking global allocator + `kglite_memory_stats`.
 //!
@@ -38,6 +40,7 @@ mod ffi;
 pub mod graph;
 pub mod open;
 pub mod result;
+pub mod schema;
 pub mod session;
 pub mod status;
 pub mod strings;
@@ -53,6 +56,7 @@ pub use embeddings::*;
 pub use graph::*;
 pub use open::*;
 pub use result::*;
+pub use schema::*;
 pub use session::*;
 pub use status::*;
 pub use strings::*;

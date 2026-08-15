@@ -100,6 +100,18 @@ pub mod api {
     pub use crate::graph::schema::{
         CowSelection, CurrentSelection, PlanStep, SelectionLevel, SelectionOperation,
     };
+    /// The single external schema **dialect** — the `{"nodes": {...},
+    /// "connections": {...}}` shape users write — and its parser. Every
+    /// binding's `define_schema` routes through here rather than hand-walking
+    /// its own dict: the Python wheel converts its dict to a [`Value`] and
+    /// calls `schema_from_value`, the C ABI's `kglite_define_schema` parses
+    /// JSON with `schema_from_json`. Keeping one grammar matters most for the
+    /// C ABI, where a published signature can never change within a major, so
+    /// a second dialect would be permanent. `SchemaParseErrorKind` lets a
+    /// binding raise its own conventional exception class.
+    pub use crate::graph::schema_json::{
+        schema_from_json, schema_from_value, SchemaParseError, SchemaParseErrorKind,
+    };
     /// Arena guard for direct `GraphRead` traversals on disk-backed graphs.
     /// Acquire via [`DirGraph::begin_read_pass`] and keep alive while
     /// borrowed node/edge weights live; `None` on memory/mapped backends.

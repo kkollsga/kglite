@@ -1142,6 +1142,18 @@ fn fallible_exports_clear_all_outputs_before_validation() {
     assert!(json.is_null() && error.is_null());
 
     error = sentinel_cstr;
+    let rc = unsafe {
+        kglite_c::kglite_define_schema(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            &mut error,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(error.is_null());
+
+    error = sentinel_cstr;
     let rc =
         unsafe { kglite_c::kglite_save_graph(std::ptr::null_mut(), std::ptr::null(), &mut error) };
     assert_eq!(rc, KgliteStatusCode::NullPointer);
@@ -1630,4 +1642,279 @@ fn build_vector_index_without_a_store_errors() {
     assert!(!err.is_null(), "a rejected build must explain itself");
     unsafe { kglite_free_string(err) };
     unsafe { kglite_session_free(session) };
+}
+
+// ── declarative schema (kglite_define_schema) ────────────────────────
+
+/// Call `kglite_define_schema`, returning (status, error-msg).
+fn define_schema(
+    session: *mut KgliteSession,
+    schema_json: &str,
+    mode: Option<&str>,
+) -> (KgliteStatusCode, Option<String>) {
+    let json = CString::new(schema_json).unwrap();
+    let mode_c = mode.map(|m| CString::new(m).unwrap());
+    let mode_ptr = mode_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
+    let mut err: *const c_char = std::ptr::null();
+    let status =
+        unsafe { kglite_c::kglite_define_schema(session, json.as_ptr(), mode_ptr, &mut err) };
+    let err_msg = (!err.is_null()).then(|| {
+        let s = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_string();
+        unsafe { kglite_free_string(err) };
+        s
+    });
+    (status, err_msg)
+}
+
+/// Run a mutation for its status + message rather than asserting success.
+fn try_mutate(session: *mut KgliteSession, query: &str) -> (KgliteStatusCode, Option<String>) {
+    let q = CString::new(query).unwrap();
+    let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    let status = unsafe {
+        kglite_session_execute_mut(
+            session,
+            q.as_ptr(),
+            std::ptr::null(),
+            &mut result as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    if !result.is_null() {
+        unsafe { kglite_cypher_result_free(result) };
+    }
+    let err_msg = (!err.is_null()).then(|| {
+        let s = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_string();
+        unsafe { kglite_free_string(err) };
+        s
+    });
+    (status, err_msg)
+}
+
+fn empty_session() -> *mut KgliteSession {
+    let graph = kglite_graph_new();
+    let mut session: *mut KgliteSession = std::ptr::null_mut();
+    assert_eq!(
+        unsafe { kglite_session_new(graph, &mut session as *mut _) },
+        KgliteStatusCode::Ok
+    );
+    session
+}
+
+/// The round trip that matters: a schema declared through the C ABI must come
+/// back out of the C ABI *and be enforced*. Reading it back from
+/// `CALL db.constraints()` proves it was recorded; the rejected duplicate
+/// proves it was installed, which a JSON echo alone would not.
+#[test]
+fn define_schema_installs_constraints_readable_through_the_abi() {
+    let session = empty_session();
+    let (rc, err) = define_schema(
+        session,
+        r#"{"nodes": {"User": {"required": ["id", "email"],
+                               "types": {"email": "string"},
+                               "primary_key": "email",
+                               "unique": [["handle"]]}},
+            "connections": {"KNOWS": {"source": "User", "target": "User"}}}"#,
+        None,
+    );
+    assert_eq!(rc, KgliteStatusCode::Ok, "define_schema failed: {err:?}");
+    assert!(err.is_none());
+
+    // Recorded: both declared constraints come back through the same ABI.
+    let rows = query_rows(
+        session,
+        "CALL db.constraints() YIELD name, type, properties RETURN name, type, properties \
+         ORDER BY name",
+        "{}",
+    );
+    let names: Vec<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.iter().any(|n| n.contains("email")) && names.iter().any(|n| n.contains("handle")),
+        "declared constraints must be readable back: {names:?}"
+    );
+
+    // Installed: the primary key is enforced on the write path.
+    let (rc, _) = try_mutate(
+        session,
+        "CREATE (:User {id: 1, email: 'a@x.com', handle: 'a'})",
+    );
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    let (rc, err) = try_mutate(
+        session,
+        "CREATE (:User {id: 2, email: 'a@x.com', handle: 'b'})",
+    );
+    assert_ne!(
+        rc,
+        KgliteStatusCode::Ok,
+        "a duplicate primary key must be rejected"
+    );
+    assert!(
+        err.unwrap_or_default().to_lowercase().contains("email"),
+        "the rejection must name the offending property"
+    );
+    unsafe { kglite_session_free(session) };
+}
+
+/// Merge scopes the withdrawal to the types the call names; replace does not.
+/// The default (a null `mode`) is merge — the mode whose mistake is a rejected
+/// write rather than an admitted duplicate.
+#[test]
+fn merge_keeps_undeclared_types_enforced_and_replace_withdraws_them() {
+    for (mode, user_still_enforced) in [
+        (None, true),
+        (Some("merge"), true),
+        (Some("replace"), false),
+    ] {
+        let session = empty_session();
+        assert_eq!(
+            define_schema(
+                session,
+                r#"{"nodes": {"User": {"primary_key": "email"}}}"#,
+                None
+            )
+            .0,
+            KgliteStatusCode::Ok
+        );
+        assert_eq!(
+            try_mutate(session, "CREATE (:User {id: 1, email: 'a@x.com'})").0,
+            KgliteStatusCode::Ok
+        );
+        // A second declaration that never mentions User.
+        assert_eq!(
+            define_schema(
+                session,
+                r#"{"nodes": {"Task": {"primary_key": "ref"}}}"#,
+                mode
+            )
+            .0,
+            KgliteStatusCode::Ok,
+            "mode {mode:?}"
+        );
+        let rejected = try_mutate(session, "CREATE (:User {id: 2, email: 'a@x.com'})").0
+            != KgliteStatusCode::Ok;
+        assert_eq!(
+            rejected, user_still_enforced,
+            "mode {mode:?}: User.email enforcement should be {user_still_enforced}"
+        );
+        unsafe { kglite_session_free(session) };
+    }
+}
+
+/// Every refusal arrives as a status *and* a message. A silent
+/// `INVALID_ARGUMENT` would leave a binding unable to say what was wrong.
+#[test]
+fn define_schema_rejections_carry_a_message() {
+    let session = empty_session();
+    for (json, mode, needle) in [
+        (r#"{"nodes":"#, None, "could not be parsed"),
+        (r#"[]"#, None, "must be a dictionary"),
+        (
+            r#"{"nodes": {"P": {"layer": "other"}}}"#,
+            None,
+            "'managed' or 'runtime'",
+        ),
+        (
+            r#"{"connections": {"R": {"target": "B"}}}"#,
+            None,
+            "missing required 'source' field",
+        ),
+        (
+            r#"{"nodes": {}}"#,
+            Some("Replace"),
+            "unknown schema install mode",
+        ),
+    ] {
+        let (rc, err) = define_schema(session, json, mode);
+        assert_eq!(rc, KgliteStatusCode::InvalidArgument, "{json} / {mode:?}");
+        let message = err.unwrap_or_default();
+        assert!(
+            message.contains(needle),
+            "message for {json} must contain {needle:?}, got {message:?}"
+        );
+    }
+    unsafe { kglite_session_free(session) };
+}
+
+/// A declaration that existing data already violates leaves the graph exactly
+/// as it was — the promise `set_schema` documents, checked through the ABI.
+#[test]
+fn a_violated_declaration_changes_nothing() {
+    let session = empty_session();
+    assert_eq!(
+        try_mutate(
+            session,
+            "CREATE (:User {id: 1, email: 'dup@x.com'}), (:User {id: 2, email: 'dup@x.com'})"
+        )
+        .0,
+        KgliteStatusCode::Ok
+    );
+    let (rc, err) = define_schema(
+        session,
+        r#"{"nodes": {"User": {"primary_key": "email"}}}"#,
+        None,
+    );
+    assert_ne!(rc, KgliteStatusCode::Ok, "existing duplicates must refuse");
+    assert!(err.is_some(), "a refusal must explain itself");
+    // Nothing installed: a third duplicate is still accepted.
+    assert_eq!(
+        try_mutate(session, "CREATE (:User {id: 3, email: 'dup@x.com'})").0,
+        KgliteStatusCode::Ok,
+        "a refused declaration must not have installed a constraint"
+    );
+    unsafe { kglite_session_free(session) };
+}
+
+/// A schema installed through C survives a save/load, so the C-side
+/// declaration is a real graph property rather than session state.
+#[test]
+fn a_schema_defined_through_c_survives_a_save() {
+    let session = empty_session();
+    assert_eq!(
+        define_schema(
+            session,
+            r#"{"nodes": {"User": {"primary_key": "email"}}}"#,
+            None
+        )
+        .0,
+        KgliteStatusCode::Ok
+    );
+    let path = std::env::temp_dir().join(format!(
+        "kglite-c-define-schema-{}-{:?}.kgl",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let path_c = CString::new(path.to_string_lossy().into_owned()).unwrap();
+    let mut err: *const c_char = std::ptr::null();
+    assert_eq!(
+        unsafe { kglite_session_save(session, path_c.as_ptr(), 1, &mut err) },
+        KgliteStatusCode::Ok
+    );
+    unsafe { kglite_session_free(session) };
+
+    let mut graph: *mut KgliteGraph = std::ptr::null_mut();
+    assert_eq!(
+        unsafe { kglite_load_file(path_c.as_ptr(), &mut graph, &mut err) },
+        KgliteStatusCode::Ok
+    );
+    let mut reloaded: *mut KgliteSession = std::ptr::null_mut();
+    assert_eq!(
+        unsafe { kglite_session_new(graph, &mut reloaded) },
+        KgliteStatusCode::Ok
+    );
+    assert_eq!(
+        try_mutate(reloaded, "CREATE (:User {id: 1, email: 'a@x.com'})").0,
+        KgliteStatusCode::Ok
+    );
+    assert_ne!(
+        try_mutate(reloaded, "CREATE (:User {id: 2, email: 'a@x.com'})").0,
+        KgliteStatusCode::Ok,
+        "the saved schema must still be enforced after a reload"
+    );
+    unsafe { kglite_session_free(reloaded) };
+    let _ = std::fs::remove_file(&path);
 }

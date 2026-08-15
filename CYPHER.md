@@ -477,6 +477,9 @@ graph.cypher("""
 | `text_score(n, prop, query, metric)` | With explicit metric (`'cosine'`, `'dot_product'`, `'euclidean'`, `'poincare'`) |
 | `vector_score(n, prop, vector [, metric])` | Semantic similarity against a pre-computed embedding vector (pass a list of floats directly, no `set_embedder()` needed) |
 | `embedding_norm(n, prop)` | L2 norm of embedding vector (hierarchy depth in Poincaré space: 0=root, ~1=leaf) |
+| `dot(a, b)` | Dot product of two list-valued vectors |
+| `cosine(a, b)` | Cosine similarity of two list-valued vectors |
+| `norm(a)` | Euclidean (L2) length of a list-valued vector |
 | `ts_sum(n.ch [, 'start'] [, 'end'])` | Sum of timeseries values (date-string range) |
 | `ts_avg(n.ch [, 'start'] [, 'end'])` | Average of timeseries values |
 | `ts_min(n.ch [, 'start'] [, 'end'])` | Minimum timeseries value |
@@ -561,6 +564,54 @@ the `summary` column are scored as `vector_score(a, 'summary_emb', …)`.
 > the candidates, scoring is the exact brute-force scan. So building an index
 > speeds up "search the whole corpus by similarity"; a heavily-filtered query
 > stays exact.
+
+### Vector math over list properties — `dot` / `cosine` / `norm`
+
+`vector_score` and `embedding_norm` read the **embedding store**
+(`set_embeddings(...)`). `dot(a, b)`, `cosine(a, b)` and `norm(a)` read
+**ordinary list-valued data** instead — a stored list property, a list literal,
+a `$param` bound to a list, a `collect()`. Use them when the vectors live in
+the graph as data rather than in a registered store, or to compare two nodes'
+vectors against each other.
+
+```cypher
+// Rank documents against a query vector held in a parameter.
+MATCH (d:Doc)
+RETURN d.title, cosine(d.vec, $q) AS score
+ORDER BY score DESC LIMIT 10
+```
+
+```cypher
+// Compare two nodes' own stored vectors — no store, no embedder.
+MATCH (a:Doc {id: 1}), (b:Doc {id: 2})
+RETURN dot(a.vec, b.vec) AS dot, cosine(a.vec, b.vec) AS cos, norm(a.vec) AS len
+```
+
+Semantics:
+
+| Case | Result |
+|------|--------|
+| Any argument is `null` (including a missing property) | `null` |
+| The two vectors have different lengths | **error** naming both lengths |
+| An element is not a number (a string, a `null`, a bool) | **error** naming the vector and the position |
+| An argument is not a list | **error** — reported even when the other argument is `null` |
+| `cosine` where either vector has zero length | `null` (`0/0` is undefined) |
+| `norm([])`, `dot([], [])` | `0.0` (the empty sum) |
+
+A length mismatch is an error rather than `null` because a 384-dimension vector
+meeting a 768-dimension one is a data bug, and a `null` would sit unremarked in
+a column of otherwise plausible scores — the same reason Neo4j's
+`vector.similarity.*` family only compares equal dimensions. A `null` *element*
+is likewise not silently treated as `0.0` (Neo4j's GDS does substitute zero),
+because a zeroed component changes the answer without changing its shape.
+
+`cosine` returns `null` rather than `0.0` for a zero-length vector; that
+differs from `vector_score`, which answers `0.0` there because a top-k ranking
+needs a total order over every candidate.
+
+A property whose value is a *bracketed string* (`'[3.0, 4.0]'`) is read as a
+list here, exactly as `size()` / `head()` / `last()` read it, so a graph that
+stored its vectors as text answers too.
 
 ## Spatial Functions
 
@@ -2271,7 +2322,7 @@ works — never a syntax error, and **never a success that enforces nothing**.
 
 | Statement | Why, and what to use |
 |---|---|
-| `REQUIRE n.p IS :: INTEGER` | No write-time property-type constraint exists. Accepting it would report success while enforcing nothing, so it is refused. `lock_schema()` rejects a write whose value disagrees with the node type's recorded property type; `validate_schema()` audits existing data against `define_schema`'s `field_types` |
+| `REQUIRE n.p IS :: INTEGER` | No write-time property-type constraint exists. Accepting it would report success while enforcing nothing, so it is refused. `lock_schema()` rejects a write whose value disagrees with the node type's recorded property type; `validate_schema()` audits existing data against `define_schema`'s per-type `types` map |
 | `REQUIRE n.p IS TYPED STRING` | The same thing, spelled the Neo4j 5 way |
 | `REQUIRE n.id IS UNIQUE` / `IS NODE KEY` | Uniqueness over the identity field — under **any** spelling that resolves to it, `id` itself or the node type's own id column (`person_id`) — is refused. `id` is a `NodeData` field, not an entry in the property map, so the write-path claim is never produced and the constraint would admit duplicates while reporting success. Declare the node type's primary key instead: `define_schema({'nodes': {'Person': {'primary_key': 'id'}}})` probes the per-type id index on every write path, and `MERGE` is the idempotent alternative to `CREATE`. Only `id` is affected — `title`, a column aliased to `title`, and ordinary properties all enforce correctly. `IS NOT NULL` on `id` **is** accepted: it is present by construction, so the requirement is genuinely satisfied |
 | `FOR ()-[r:T]-() REQUIRE r.p IS UNIQUE` | KGLite constrains node properties only |

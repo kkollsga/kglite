@@ -848,21 +848,31 @@ fn reject_structural_uniqueness(
 /// `IS :: <TYPE>` / `IS TYPED <TYPE>`.
 ///
 /// KGLite has no write-time property-type constraint to route this to. The
-/// `field_types` map a `define_schema` call accepts is checked only by the
-/// offline `validate_schema()`, and the write-time check a locked schema
-/// performs reads `node_type_metadata` — the observed per-type property types —
-/// not `field_types`. Declaring one here would therefore report success while
-/// enforcing nothing on the next write, which is the one outcome worse than an
-/// error: users build data-integrity assumptions on a constraint that reported
-/// success.
+/// per-type `types` map a `define_schema` call accepts (stored as
+/// `NodeSchemaDefinition::field_types`) is checked only by the offline
+/// `validate_schema()`, and the write-time check a locked schema performs reads
+/// `node_type_metadata` — the observed per-type property types — not that map.
+/// Declaring one here would therefore report success while enforcing nothing on
+/// the next write, which is the one outcome worse than an error: users build
+/// data-integrity assumptions on a constraint that reported success.
+///
+/// The suggestion names the **schema dialect's** key, `types` — not the Rust
+/// field's name. Spelling it `field_types` (as this message did until 0.16.1)
+/// advised a key the parser ignores, so a user who followed it declared nothing
+/// and `validate_schema()` then reported no violations: the exact
+/// enforces-nothing-but-reports-success failure the message exists to prevent.
+/// The prose is binding-neutral for the same reason the unsupported-index
+/// messages are: the schema route is reachable from every binding now
+/// (`kglite_define_schema` in the C ABI), so a `kg.`-prefixed Python spelling
+/// would be wrong for most callers who read it.
 fn unsupported_property_type_message(label: &str, properties: &[String], declared: &str) -> String {
     format!(
         "CREATE CONSTRAINT ... IS :: {declared} is not supported: KGLite has no write-time \
          property-type constraint, so accepting this would report success while enforcing \
-         nothing. Two routes do enforce types: `kg.lock_schema()` rejects a write whose value \
-         disagrees with the node type's recorded property type, and \
-         `kg.define_schema({{'nodes': {{'{label}': {{'field_types': {{'{}': '{}'}}}}}}}})` plus \
-         `kg.validate_schema()` reports every existing violation. Use \
+         nothing. Two routes do enforce types: `lock_schema()` rejects a write whose value \
+         disagrees with the node type's recorded property type, and declaring \
+         `define_schema({{'nodes': {{'{label}': {{'types': {{'{}': '{}'}}}}}}}})` plus \
+         `validate_schema()` reports every existing violation. Use \
          `REQUIRE {}{} IS NOT NULL` if presence, rather than type, is what you need.",
         properties.first().map(String::as_str).unwrap_or("prop"),
         declared.to_lowercase(),
@@ -1479,6 +1489,19 @@ mod tests {
             assert!(err.contains("is not supported"), "for `{query}`: {err}");
             assert!(err.contains("lock_schema"), "for `{query}`: {err}");
             assert!(err.contains("validate_schema"), "for `{query}`: {err}");
+            // The suggestion must name the key the schema parser actually
+            // accepts. Until 0.16.1 it said `field_types` — the Rust field's
+            // name, which the dialect ignores — so following the advice
+            // declared nothing and validate_schema() then found no violations.
+            assert!(
+                err.contains("'types': {'age': 'integer'}"),
+                "the suggested key must be the dialect's, for `{query}`: {err}"
+            );
+            assert!(!err.contains("field_types"), "for `{query}`: {err}");
+            // Binding-neutral: this reaches C / Java callers through
+            // kglite_define_schema, so a `kg.` Python spelling would be wrong
+            // for most readers.
+            assert!(!err.contains("kg."), "for `{query}`: {err}");
             assert!(
                 graph.get_schema().is_none(),
                 "a rejected statement must declare nothing"
