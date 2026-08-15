@@ -1009,3 +1009,132 @@ mod atomic_save_tests {
         );
     }
 }
+
+/// Saving **while a lazy view holds the graph** — the `GraphBackend::Forked`
+/// arm of `Serialize`, which is the only caller of
+/// `ForkedGraph::to_memory_graph`.
+///
+/// Nothing exercised it before 2026-08-15: every save test in this file owns
+/// its graph outright, so the serializer always took the `Memory` arm. The
+/// forked arm is a *different* code path — it folds the overlay into a
+/// throwaway deep copy of the shared base — and getting it wrong is silent:
+/// the save succeeds, the file is well-formed, and it is simply missing (or
+/// duplicating) whatever the writer did while the view was outstanding.
+#[cfg(test)]
+mod save_while_forked_tests {
+    use super::*;
+    use crate::datatypes::Value;
+    use crate::graph::dir_graph::DirGraph;
+    use crate::graph::handle::make_dir_graph_mut;
+    use crate::graph::session::execute::{execute_mut, ExecuteOptions};
+    use crate::graph::storage::GraphRead;
+    use std::collections::HashMap;
+
+    fn run(graph: &mut DirGraph, query: &str) {
+        let params = HashMap::new();
+        let opts = ExecuteOptions::eager(&params);
+        execute_mut(graph, query, &opts).unwrap_or_else(|e| panic!("query failed: {query}: {e}"));
+    }
+
+    /// Every `Item` as `(id, title, qty)`, sorted — read through `node_view`,
+    /// so it resolves the column store rather than a bare `NodeData` field.
+    fn items(graph: &DirGraph) -> Vec<(Value, Value, Option<Value>)> {
+        let mut out: Vec<_> = graph
+            .graph
+            .node_indices()
+            .filter_map(|idx| graph.graph.node_view(idx))
+            .map(|node| {
+                (
+                    node.id().into_owned(),
+                    node.title().into_owned(),
+                    node.get_property_value("qty"),
+                )
+            })
+            .collect();
+        out.sort_by_key(|(id, _, _)| format!("{id:?}"));
+        out
+    }
+
+    /// A `.kgl` written from a forked backend must carry the **writer's**
+    /// content — the overlay's appended nodes and its copy-on-write edits —
+    /// and the view must be untouched by the save.
+    ///
+    /// Both halves matter and neither implies the other. An overlay dropped on
+    /// the floor writes the *view's* graph under the writer's name (lost
+    /// writes); an overlay folded into the shared base instead of a copy
+    /// writes the right file and corrupts the view (`to_memory_graph`'s
+    /// `deep_clone` is what separates them, and it is one word away from
+    /// `Arc::clone`).
+    #[test]
+    fn a_save_while_a_view_is_held_writes_the_writers_graph_and_leaves_the_view_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forked.kgl");
+        let path_str = path.to_str().unwrap();
+
+        let mut base = DirGraph::new();
+        run(
+            &mut base,
+            "CREATE (:Item {id: 1, name: 'a', qty: 10}), (:Item {id: 2, name: 'b', qty: 20})",
+        );
+        let mut writer = Arc::new(base);
+        // The lazy view: an `Arc` handle held across the write *and* the save.
+        let view = Arc::clone(&writer);
+        let view_before = items(&view);
+        assert_eq!(view_before.len(), 2, "fixture");
+
+        {
+            let graph = make_dir_graph_mut(&mut writer);
+            assert!(
+                graph.graph.is_forked(),
+                "precondition: a held view must fork the writer, or this test saves a \
+                 plain backend and proves nothing"
+            );
+            run(graph, "MATCH (n:Item {id: 1}) SET n.qty = 999");
+            run(graph, "CREATE (:Item {id: 3, name: 'c', qty: 30})");
+        }
+
+        // `save_inmemory_with` decomposed, so the precondition can be asserted
+        // between its two halves: the consolidation pass must leave the backend
+        // forked, or `Serialize`'s `Forked` arm never runs.
+        prepare_kgl_write(&mut writer);
+        assert!(
+            writer.graph.is_forked(),
+            "precondition: the graph handed to the serializer must still be an overlay"
+        );
+        let want = items(&writer);
+        write_kgl(&writer, path_str).unwrap();
+
+        // Non-vacuity: the writer's content is *different* from the view's in
+        // both directions an overlay can differ — an appended node and an
+        // overwritten cell.
+        assert_eq!(want.len(), 3, "the overlay's appended node must be there");
+        assert!(
+            want.iter()
+                .any(|(id, _, qty)| *id == Value::Int64(1) && *qty == Some(Value::Int64(999))),
+            "the overlay's copy-on-write edit must be there: {want:?}"
+        );
+        assert_ne!(want, view_before);
+
+        let loaded = load_file(path_str).unwrap();
+        assert_eq!(
+            items(&loaded),
+            want,
+            "a save taken while a view is held must persist the writer's graph, \
+             overlay included"
+        );
+
+        assert_eq!(
+            items(&writer),
+            want,
+            "the save must not consume the overlay it serialized — `to_memory_graph` \
+             folds into a *copy*, and folding in place (the tempting way to skip that \
+             copy) would empty the live writer as a side effect of saving it"
+        );
+        assert_eq!(
+            items(&view),
+            view_before,
+            "the held view must be byte-identical after the writer saved — a save that \
+             folded the overlay into the shared base instead of a copy would show up here"
+        );
+    }
+}

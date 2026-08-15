@@ -70,7 +70,7 @@ type Level<K> = HashMap<K, Option<Vec<NodeIndex>>>;
 /// spike of ~5x the median into one round in eight (D2 Phase 3 residual profile
 /// §B). A stack only grows while a reader is continuously held; any mutation
 /// with nothing shared folds it back to one level.
-pub(super) const MAX_LAYER_DEPTH: usize = 32;
+pub(crate) const MAX_LAYER_DEPTH: usize = 32;
 
 /// A user index's `value -> members` map.
 ///

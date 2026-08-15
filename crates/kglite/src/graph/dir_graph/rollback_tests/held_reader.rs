@@ -1,5 +1,6 @@
 //! D2 Phase 2 — rollback while a reader holds the base
 
+use super::unique_claims::{seeded_with_unique_name, unique_fingerprint};
 use super::*;
 
 /// A failed statement run while a reader is holding the graph must leave
@@ -17,6 +18,15 @@ use super::*;
 /// over-specified (petgraph slot identity, inverted-index bucket *order*, schema
 /// metadata, master column rows), so *any* base mutation shows up here, not just
 /// one that changes a value a query would return.
+///
+/// The **unique** arm covers what `fingerprint` structurally cannot: unique
+/// claims live in `unique_indices`, which the fingerprint does not read at all
+/// (it is parked by `swap_data_scale` and restored by a per-type rebuild, not
+/// by the journal). Its rollback path is therefore a *different* mechanism, and
+/// until 2026-08-15 it had never been run on a forked backend — where the
+/// journal's inverse ops replay through the overlay while the rebuild reads the
+/// types those ops reported. A phantom or lost claim here rejects or admits
+/// writes forever after, and no other assertion in this file can see it.
 #[test]
 fn a_rollback_while_a_reader_is_held_touches_neither_graph() {
     use crate::graph::handle::make_dir_graph_mut;
@@ -26,9 +36,18 @@ fn a_rollback_while_a_reader_is_held_touches_neither_graph() {
         ("plain", seeded as fn() -> DirGraph),
         ("columnar", seeded_columnar as fn() -> DirGraph),
         ("indexed", seeded_indexed as fn() -> DirGraph),
+        ("unique", seeded_with_unique_name as fn() -> DirGraph),
     ] {
         let mut writer = Arc::new(build());
         let reader = Arc::clone(&writer);
+
+        let claims_before = unique_fingerprint(&reader);
+        assert_eq!(
+            !claims_before.is_empty(),
+            name == "unique",
+            "{name}: only the unique arm may hold declared constraints, and it must — \
+             otherwise the claim assertions below are vacuous"
+        );
 
         // Fingerprinting needs `&mut`, and the reader is shared — so read
         // through a clone of it. The clone is a copy-on-write overlay over the
@@ -69,7 +88,108 @@ fn a_rollback_while_a_reader_is_held_touches_neither_graph() {
             "{name}: the writer's failed statement must roll back exactly, \
              overlay or not"
         );
+        assert_eq!(
+            unique_fingerprint(&writer),
+            claims_before,
+            "{name}: the failed statement claimed 'first' and must have released it — \
+             a claim surviving a rollback rejects that value forever"
+        );
+        assert_eq!(
+            unique_fingerprint(&reader),
+            claims_before,
+            "{name}: the reader's occupancy map must be untouched by the writer's \
+             constraint bookkeeping"
+        );
     }
+}
+
+/// The **clone fallback**: a graph whose free lists are non-empty cannot be
+/// forked, so a write taken while a reader holds it must deep-copy — and be
+/// correct.
+///
+/// `forked::can_fork` is the predicate, and its unit tests cover the predicate
+/// alone. Nothing covered what the `DirGraph` above it then *does*: every other
+/// held-reader test in this file seeds a graph that has never deleted anything,
+/// so they all take the overlay path and the fallback branch of
+/// `GraphBackend::clone` was reached by no test at all. It is the branch that
+/// has to stay right when the fast one cannot run — a deep copy that shared the
+/// base instead (the `g.clone()`-instead-of-`deep_clone()` slip the code's own
+/// comment warns about, one character wide) would let every later write mutate
+/// the reader's snapshot in place.
+///
+/// Both directions are pinned: the fallback must fire *and* cost exactly one
+/// whole-graph copy, so neither "it forked after a delete" (slot identity
+/// broken) nor "it copied per statement" (the cliff D2 removed) can pass.
+#[test]
+fn a_write_under_a_held_reader_after_a_delete_takes_the_clone_path() {
+    use crate::graph::handle::make_dir_graph_mut;
+    use crate::graph::storage::backend::{backend_clone_nodes, reset_backend_clone_count};
+    use std::sync::Arc;
+
+    let mut writer = Arc::new(seeded());
+    // A delete is what puts a slot on petgraph's free list; from here the
+    // overlay cannot reproduce append indices, so `can_fork` refuses.
+    run(
+        Arc::make_mut(&mut writer),
+        "MATCH (n:Item {id: 3}) DETACH DELETE n",
+    );
+    let live_nodes = writer.graph.node_count();
+
+    let reader = Arc::clone(&writer);
+    let reader_before = fingerprint(&mut (*reader).clone());
+
+    reset_backend_clone_count();
+    let graph = make_dir_graph_mut(&mut writer);
+    assert!(
+        !graph.graph.is_forked(),
+        "a graph with a non-empty free list must NOT fork — the overlay hands out \
+         append indices petgraph would reuse from the free list, and the fold-back \
+         would then mis-key every DirGraph index recorded against them"
+    );
+    assert_eq!(
+        backend_clone_nodes(),
+        live_nodes,
+        "the fallback is a genuine deep copy of the base, not an Arc share"
+    );
+
+    // Correct, not merely separate: the write lands, the delete stays deleted,
+    // and a re-created id is found by the id index rather than the tombstone.
+    run(graph, "CREATE (:Item {id: 4, name: 'd', qty: 40})");
+    run(graph, "CREATE (:Item {id: 3, name: 'c-again', qty: 33})");
+    assert_eq!(item_prop(graph, 4, "qty"), Some(Value::Int64(40)));
+    assert_eq!(item_prop(graph, 3, "qty"), Some(Value::Int64(33)));
+    assert_eq!(
+        graph.graph.node_count(),
+        live_nodes + 2,
+        "both creates must be live nodes"
+    );
+
+    reset_backend_clone_count();
+    run(graph, "CREATE (:Item {id: 5, name: 'e', qty: 50})");
+    assert_eq!(
+        backend_clone_nodes(),
+        0,
+        "the copy is paid once at the fork point — a per-statement copy here is the \
+         cliff the overlay exists to remove, wearing the fallback's hat"
+    );
+
+    assert_eq!(
+        fingerprint(&mut (*reader).clone()),
+        reader_before,
+        "the reader's snapshot must be untouched by every one of those writes"
+    );
+    let mut reader_now = (*reader).clone();
+    assert_eq!(
+        reader_now.lookup_by_id("Item", &Value::Int64(4)),
+        None,
+        "none of the writer's three creates may be visible through the reader — the \
+         observable half of the deep copy, in the direction a shared backend breaks"
+    );
+    assert_eq!(
+        reader_now.lookup_by_id("Item", &Value::Int64(3)),
+        None,
+        "and the id the writer re-created must still read as deleted here"
+    );
 }
 
 /// The forked backend must take the **journal** path, not the clone checkpoint

@@ -559,8 +559,12 @@ raised by the wrapper before it reached the engine reports `WrapperError` /
 Two shapes worth knowing:
 
 - **`WriterLeaseHeldException`** (a `KgliteException` subclass, status 102) is
-  the one failure you retry rather than fix; `holder()` names the pid holding
-  it and since when. `WriterLease.acquire(path, Duration)` retries for you.
+  the one failure you retry rather than fix. `holder()` names the pid holding
+  it and since when, as prose; `pid()`, `since()` and `self()` are the same
+  facts as fields, so a retry policy or a dashboard never has to regex the
+  sentence. `self()` is the case worth branching on — the lease is held by an
+  un-closed `WriterLease` in *this* JVM, which is a bug to fix rather than a
+  contention to wait out. `WriterLease.acquire(path, Duration)` retries for you.
 - **A missing native library** surfaces as `ExceptionInInitializerError`, not
   `KgliteException` — resolution happens in a static initializer. The *cause*
   is the `KgliteException` naming every location tried, so log the cause; a

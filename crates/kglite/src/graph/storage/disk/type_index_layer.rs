@@ -92,7 +92,7 @@ use petgraph::graph::NodeIndex;
 /// `|bucket| / K` per fork, and K = 8 put a spike of ~5x the median into one
 /// round in eight (D2 Phase 3 residual profile §B). K = 32 keeps the worst case
 /// near 2x the median without retaining a deep stack of deltas.
-const MAX_LAYER_DEPTH: usize = 32;
+pub(crate) const MAX_LAYER_DEPTH: usize = 32;
 
 /// One node type's member list.
 ///

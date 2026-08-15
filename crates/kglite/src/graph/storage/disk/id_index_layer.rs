@@ -108,7 +108,38 @@ pub enum TypeEntry {
 /// retained delta, and 32 already moves the worst case from ~5x the median to
 /// ~2x. Raising it further is tuning against one benchmark's hold window rather
 /// than against a mechanism.
-const MAX_CHAIN_DEPTH: u16 = 32;
+pub(crate) const MAX_CHAIN_DEPTH: u16 = 32;
+
+/// The measured value, pinned as a value rather than as a symbol.
+///
+/// Every test below is written in terms of `MAX_CHAIN_DEPTH`, which makes them
+/// *any*-value tests: set it to 1 or to 4096 and they all still pass, because
+/// the expectations move with it. The number itself is the finding — the D2
+/// Phase 3 profile above rejects 8 (a ~5x-median spike in one round in eight)
+/// and rejects raising it past 32 (128 measured identically and only deepens
+/// the read-miss probe) — so the number gets a check of its own. Changing it is
+/// legitimate; changing it *without a new measurement* is what this stops.
+const _: () = assert!(
+    MAX_CHAIN_DEPTH == 32,
+    "MAX_CHAIN_DEPTH is a measured value (D2 Phase 3 residual profile §B), not a \
+     free parameter — re-measure the held-view cell's mean before moving it, and \
+     update the doc comment with the new numbers"
+);
+
+/// The three layered-index caps are **one** tuning decision, taken once and
+/// applied to three mechanisms with the same amortisation curve. Each of the
+/// other two documents itself as "matches `id_index_layer::MAX_CHAIN_DEPTH`",
+/// which is a claim no compiler was checking: any one of them could be edited
+/// alone and the other two would go on advertising a value they no longer
+/// shared. This is that claim, enforced.
+const _: () = assert!(
+    MAX_CHAIN_DEPTH as usize == super::type_index_layer::MAX_LAYER_DEPTH
+        && MAX_CHAIN_DEPTH as usize == crate::graph::dir_graph::index_layer::MAX_LAYER_DEPTH,
+    "the layered-index depth caps have drifted apart: id_index_layer::MAX_CHAIN_DEPTH, \
+     type_index_layer::MAX_LAYER_DEPTH and dir_graph::index_layer::MAX_LAYER_DEPTH \
+     (shared with range_index_layer) each document themselves as matching the others, \
+     so they move together or the doc comments are lying"
+);
 
 impl Default for TypeEntry {
     fn default() -> Self {
@@ -520,5 +551,48 @@ mod tests {
             "a chain must collapse once nothing shares it"
         );
         assert_eq!(writer.len(), MAX_CHAIN_DEPTH as usize * 3 + 1);
+    }
+
+    /// The cap is **32**, and the flatten fires on the 33rd fork — asserted in
+    /// literals, not in terms of the constant.
+    ///
+    /// `a_never_compacted_chain_stays_bounded_and_correct` above is written
+    /// entirely in `MAX_CHAIN_DEPTH`, so it passes at any value: at 1 it would
+    /// flatten every round (the O(N_type) cost the tuning removed), at 4096 it
+    /// would retain 4096 deltas and probe all of them on a read miss, and the
+    /// suite would stay green through either. The two static assertions beside
+    /// the constant pin the *number*; this pins the **behaviour** the number
+    /// buys, which is where a change to the comparison itself (`>=` vs `>`, or
+    /// a saturating increment that stops climbing) would show up instead.
+    #[test]
+    fn the_chain_flattens_on_the_thirty_third_uncompacted_fork() {
+        let mut writer = owned(&[(0, 0)]);
+        let mut readers = Vec::new();
+        let mut depths = Vec::new();
+        for round in 1..=34u32 {
+            readers.push(TypeEntry::layered_over(writer.share()));
+            writer.insert(Value::UniqueId(round), NodeIndex::new(round as usize));
+            depths.push(writer.depth());
+        }
+
+        // Rounds 1..=32 climb one level each; round 33 is the flatten, which
+        // resets the chain to a single fresh level; round 34 climbs from there.
+        let expected: Vec<u16> = (1..=32).chain([1, 2]).collect();
+        assert_eq!(
+            depths, expected,
+            "the chain must climb to exactly 32 and wrap on the 33rd fork"
+        );
+
+        // The flatten is lossless: every id written before it still resolves,
+        // and the oldest reader still sees only its own snapshot.
+        for round in 1..=34u32 {
+            assert_eq!(
+                writer.get(&Value::UniqueId(round)),
+                Some(NodeIndex::new(round as usize)),
+                "id {round} lost across the flatten"
+            );
+        }
+        assert_eq!(writer.get(&Value::UniqueId(0)), Some(NodeIndex::new(0)));
+        assert_eq!(readers[0].get(&Value::UniqueId(1)), None);
     }
 }

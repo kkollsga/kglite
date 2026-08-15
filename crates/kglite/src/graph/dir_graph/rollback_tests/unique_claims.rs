@@ -21,12 +21,12 @@ use super::*;
 type UniqueClaims = Vec<(String, usize)>;
 
 /// `(node_type, constraint properties, claims)` per declared constraint.
-type UniqueFingerprint = Vec<(String, Vec<String>, UniqueClaims)>;
+pub(super) type UniqueFingerprint = Vec<(String, Vec<String>, UniqueClaims)>;
 
 /// The whole occupancy map, per declared constraint: constraint tuple → the
 /// claimed values and the slot holding each. Slot-level so a claim that comes
 /// back pointing at the wrong node is a failure, not just a missing one.
-fn unique_fingerprint(graph: &DirGraph) -> UniqueFingerprint {
+pub(super) fn unique_fingerprint(graph: &DirGraph) -> UniqueFingerprint {
     let mut out: Vec<_> = graph
         .unique_indices
         .iter()
@@ -50,7 +50,7 @@ fn unique_fingerprint(graph: &DirGraph) -> UniqueFingerprint {
 /// `property_indices`, so `journal_covers` stays true. If that ever changes,
 /// these tests would silently start exercising the clone path and prove
 /// nothing — so the precondition is checked, not assumed.
-fn seeded_with_unique_name() -> DirGraph {
+pub(super) fn seeded_with_unique_name() -> DirGraph {
     let mut graph = seeded();
     run(
         &mut graph,

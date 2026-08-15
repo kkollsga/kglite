@@ -51,6 +51,35 @@ class WriterLeaseTest {
     }
 
     @Test
+    @DisplayName("the refusal carries the holder as fields, not only as prose")
+    void contentionCarriesTheStructuredHolder(@TempDir Path dir) {
+        Path path = dir.resolve("structured.kgl");
+        try (WriterLease held = WriterLease.acquire(path)) {
+            assertNotNull(held);
+
+            WriterLeaseHeldException refused = assertThrows(
+                    WriterLeaseHeldException.class, () -> WriterLease.acquire(path));
+
+            // The whole point of binding kglite_writer_lease_acquire_ex: these
+            // three come out of the engine's structured holder record, not out
+            // of a regex over a sentence written for a human reading a log.
+            assertEquals(Long.valueOf(ProcessHandle.current().pid()), refused.pid(),
+                    "this JVM is the holder, so the structured pid must be ours");
+            assertNotNull(refused.since(), "the holder record must carry its acquisition time");
+            assertTrue(refused.since().matches("\\d{4}-\\d{2}-\\d{2}T.*"),
+                    "since() must be an RFC-3339 timestamp: " + refused.since());
+            assertTrue(refused.self(),
+                    "a lease held by the calling process must report self() = true — a "
+                            + "different problem (an un-closed handle here) with a different fix");
+
+            // The prose and the fields describe one holder, so a caller that
+            // still logs holder() sees the same pid the fields report.
+            assertTrue(refused.holder().contains(String.valueOf(refused.pid())),
+                    "holder() and pid() must agree: " + refused.holder());
+        }
+    }
+
+    @Test
     @DisplayName("close is idempotent")
     void closeIsIdempotent(@TempDir Path dir) {
         Path path = dir.resolve("idempotent.kgl");

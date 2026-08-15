@@ -57,8 +57,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   In Rust the same detail is `GraphWriterLease::acquire_ex` →
   `Result<_, LeaseRefusal>` with a public `LeaseHolder { pid, since }`;
   `acquire` is that, projected to its `io::Error`. The Java wrapper's
-  `holder()` still returns the whole prose paragraph — the symbol it needs now
-  exists but is listed `-` (declared, not bound) in `abi-contract.txt`.
+  `holder()` still returns the whole prose paragraph; the Java wrapper now
+  binds the new symbol and adds the fields beside it (below).
+
+- **Java: `WriterLeaseHeldException.pid()`, `.since()` and `.self()`.** The
+  refusal has always named the holding process — inside a sentence, which a
+  caller wanting the pid had to regex and then re-regex every time the wording
+  improved. These read the structured record `kglite_writer_lease_acquire_ex`
+  returns instead: `pid()` and `since()` (RFC-3339, so a retry policy can back
+  off longer for a lease taken hours ago) are `null` when the holder's record
+  could not be read, and `self()` distinguishes an un-closed `WriterLease` in
+  the caller's own JVM — a different problem with a different fix — from
+  another deployment. `holder()` is unchanged. A malformed holder record
+  degrades to absent fields rather than turning a retriable refusal into a
+  parse failure.
 
 - **Auto-vacuum's state is readable, and relationship churn is now garbage it
   can see.** `graph_info()` gains `auto_vacuum_threshold` (the configured

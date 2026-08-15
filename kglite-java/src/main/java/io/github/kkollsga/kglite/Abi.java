@@ -26,7 +26,7 @@ import java.util.Set;
  * exact set the ABI contract test checks against the header.
  *
  * <p>Hand-written rather than {@code jextract}-generated: the bound surface is
- * 17 functions of pointers, {@code uint32}/{@code uint64} scalars and one
+ * 23 functions of pointers, {@code uint32}/{@code uint64} scalars and one
  * three-word return struct, with no unions, callbacks or varargs, so the
  * generator would add a separate early-access toolchain to every build in
  * exchange for a class that must stay package-private anyway. Header drift is
@@ -117,6 +117,16 @@ final class Abi {
             bind("kglite_cypher_result_free", FunctionDescriptor.ofVoid(PTR));
     private static final MethodHandle LEASE_ACQUIRE =
             bind("kglite_writer_lease_acquire", FunctionDescriptor.of(I32, PTR, I64, PTR, PTR));
+    // The `_ex` form is what {@link #leaseAcquire} actually calls: it adds one
+    // out-parameter carrying the holder as JSON, which is where
+    // WriterLeaseHeldException's pid()/since()/self() come from. The header's
+    // own rationale for adding it is that a binding otherwise has to regex a
+    // sentence written for humans and re-parse it every time the wording
+    // improves. The plain symbol stays bound because it stays exported and the
+    // contract test audits the whole surface either way.
+    private static final MethodHandle LEASE_ACQUIRE_EX = bind(
+            "kglite_writer_lease_acquire_ex",
+            FunctionDescriptor.of(I32, PTR, I64, PTR, PTR, PTR));
     private static final MethodHandle LEASE_FREE =
             bind("kglite_writer_lease_free", FunctionDescriptor.ofVoid(PTR));
     // The static form, not kglite_status_code_name: identical text, but the
@@ -479,14 +489,19 @@ final class Abi {
         }
     }
 
-    /** {@code kglite_writer_lease_acquire} — returns an owned lease handle. */
+    /** {@code kglite_writer_lease_acquire_ex} — returns an owned lease handle. */
     static MemorySegment leaseAcquire(String path, long timeoutMillis) {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment outLease = arena.allocate(PTR);
+            MemorySegment outHolder = arena.allocate(PTR);
             MemorySegment outError = arena.allocate(PTR);
-            int rc = (int) LEASE_ACQUIRE.invokeExact(
-                    cstr(arena, path), timeoutMillis, outLease, outError);
-            check(rc, outError);
+            int rc = (int) LEASE_ACQUIRE_EX.invokeExact(
+                    cstr(arena, path), timeoutMillis, outLease, outHolder, outError);
+            // Taken (and therefore freed) before the status is judged, on every
+            // outcome: the header documents it as NULL on success, so this is a
+            // no-op there, and reading it unconditionally means no future status
+            // code can leak it.
+            check(rc, outError, takeString(outHolder.get(PTR, 0)));
             return outLease.get(PTR, 0);
         } catch (Throwable t) {
             throw rethrow(t);
@@ -560,6 +575,17 @@ final class Abi {
      * out-error string. No-op on {@link #STATUS_OK}.
      */
     private static void check(int code, MemorySegment outError) {
+        check(code, outError, null);
+    }
+
+    /**
+     * {@link #check(int, MemorySegment)} with the structured holder record
+     * {@code kglite_writer_lease_acquire_ex} returns alongside its error
+     * string. Every other entry point passes {@code null} — none of them can
+     * produce a holder, and a lease refusal reaching them still raises the same
+     * typed exception, just without the fields.
+     */
+    private static void check(int code, MemorySegment outError, String holderJson) {
         if (code == STATUS_OK) {
             return;
         }
@@ -567,7 +593,7 @@ final class Abi {
         String name = statusName(code);
         String message = detail == null || detail.isEmpty() ? name : name + ": " + detail;
         if (code == STATUS_WRITER_LEASE_HELD) {
-            throw new WriterLeaseHeldException(code, name, message, detail);
+            throw new WriterLeaseHeldException(code, name, message, detail, holderJson);
         }
         throw new KgliteException(code, name, message);
     }

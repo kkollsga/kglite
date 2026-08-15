@@ -336,3 +336,155 @@ fn read_sidecar(wpath: &Path) -> Result<Vec<WalFrame>, DurableOpenError> {
 fn unreplayed(frames: &[WalFrame], checkpoint_lsn: u64) -> bool {
     frames.iter().any(|f| f.lsn > checkpoint_lsn)
 }
+
+/// The `Recording(Forked)` composition — a durable owner opened while a lazy
+/// view is outstanding.
+///
+/// [`open_log`] takes `make_dir_graph_mut` *before* it wraps, so a graph with a
+/// live reader is forked first and the capture layer then wraps an **overlay**,
+/// not a plain `Memory`. Every durability test until 2026-08-15 owned its graph
+/// outright, so `RecordingGraph<GraphBackend>` had only ever wrapped `Memory`,
+/// `Mapped` or `Disk`; the overlay composition — where every captured
+/// `NodeIndex` is one the overlay handed out and every write is copy-on-write
+/// against a shared base — was entirely unexercised.
+///
+/// The failure it guards is silent and unrecoverable: ops resolved against the
+/// wrong graph, or writes that never reach the capture buffer at all, produce a
+/// log that replays into a graph missing committed data, and nothing complains
+/// until the crash.
+#[cfg(test)]
+mod recording_over_a_fork_tests {
+    use super::*;
+    use crate::datatypes::Value;
+    use crate::graph::io::file::{load_file, save_graph};
+    use crate::graph::session::execute::{execute_mut, ExecuteOptions};
+    use crate::graph::storage::recording::resolve_ops;
+    use crate::graph::storage::GraphRead;
+    use std::collections::HashMap;
+
+    fn run(graph: &mut DirGraph, query: &str) {
+        let params = HashMap::new();
+        let opts = ExecuteOptions::eager(&params);
+        execute_mut(graph, query, &opts).unwrap_or_else(|e| panic!("query failed: {query}: {e}"));
+    }
+
+    /// Every `Person` as `(id, age)`, sorted.
+    fn people(graph: &DirGraph) -> Vec<(i64, i64)> {
+        let mut out: Vec<(i64, i64)> = graph
+            .graph
+            .node_indices()
+            .filter_map(|idx| graph.graph.node_view(idx))
+            .filter_map(
+                |node| match (node.id().into_owned(), node.get_property_value("age")) {
+                    (Value::Int64(id), Some(Value::Int64(age))) => Some((id, age)),
+                    _ => None,
+                },
+            )
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// A write taken on a `Recording(Forked)` backend must be logged, and the
+    /// log must replay onto the checkpoint that predates it.
+    ///
+    /// The held view is the second half: it must see neither the write nor the
+    /// replay, before or after the crash. An overlay that leaked into its
+    /// shared base would show up as the writer's data appearing under the
+    /// reader's snapshot — with the log still describing it, so recovery would
+    /// then apply it twice.
+    #[test]
+    fn a_durable_write_over_a_held_view_is_logged_and_replays() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("durable.kgl");
+        let path_str = path.to_string_lossy().to_string();
+
+        let mut seed = Arc::new(DirGraph::new());
+        run(
+            make_dir_graph_mut(&mut seed),
+            "CREATE (:Person {id: 1, name: 'Alice', age: 30})",
+        );
+        save_graph(&mut seed, &path_str).unwrap();
+
+        let mut writer = load_file(&path_str).unwrap();
+        // The lazy view: held across the durable open, the write, and the crash.
+        let view = Arc::clone(&writer);
+        let checkpoint_state = people(&view);
+        assert_eq!(checkpoint_state, vec![(1, 30)], "fixture");
+
+        let (mut wal, next_lsn) = open_log(&mut writer, &path, DurabilityLevel::Full)
+            .expect("a full durable open over a clean checkpoint")
+            .expect("level 'full' must hand back a log");
+        {
+            let recording = writer
+                .graph
+                .recording()
+                .expect("open_log must wrap the graph for capture");
+            assert!(
+                recording.inner().is_forked(),
+                "precondition: the held view must have forked the graph *before* the \
+                 capture layer wrapped it, or this is the plain Memory arm again"
+            );
+        }
+
+        let raw = {
+            let dir = make_dir_graph_mut(&mut writer);
+            run(dir, "MATCH (p:Person {id: 1}) SET p.age = 31");
+            run(dir, "CREATE (:Person {id: 2, name: 'Bob', age: 7})");
+            assert!(
+                dir.graph
+                    .recording()
+                    .is_some_and(|rg| rg.inner().is_forked()),
+                "both writes must stay overlay-expressible under the wrapper, or the \
+                 composition under test flattened before it was measured"
+            );
+            dir.graph
+                .recording_mut()
+                .expect("the capture layer must survive the writes")
+                .take_ops()
+        };
+        assert!(
+            !raw.is_empty(),
+            "a write through Recording(Forked) must reach the capture buffer — an empty \
+             buffer here is an unlogged commit, i.e. silent data loss on the next crash"
+        );
+        let ops = {
+            let dir = writer.as_ref();
+            resolve_ops(&raw, &dir.graph, &dir.interner, |idx| {
+                dir.secondary_label_names(idx)
+            })
+        };
+        wal.append(&WalFrame { lsn: next_lsn, ops }).unwrap();
+        wal.sync().unwrap();
+
+        let live = people(&writer);
+        assert_eq!(live, vec![(1, 31), (2, 7)], "the writer's own state");
+
+        // Crash: the log holds the frame, no checkpoint was ever taken.
+        drop(wal);
+        drop(writer);
+
+        let mut recovered = load_file(&path_str).unwrap();
+        assert_eq!(
+            people(&recovered),
+            checkpoint_state,
+            "non-vacuity: the checkpoint alone must NOT contain the logged write, or \
+             replay has nothing to prove"
+        );
+        open_log(&mut recovered, &path, DurabilityLevel::Full)
+            .expect("recovery must replay the frame")
+            .expect("level 'full' must hand back a log");
+        assert_eq!(
+            people(&recovered),
+            live,
+            "replaying the frame a Recording(Forked) backend produced must reconstruct \
+             the writer's state exactly"
+        );
+
+        assert_eq!(
+            people(&view),
+            checkpoint_state,
+            "the held view must never have seen the durable writer's overlay"
+        );
+    }
+}
