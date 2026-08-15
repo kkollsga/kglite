@@ -706,6 +706,25 @@ jobs:
         # immediate second capture; runner noise doesn't — so a first-capture
         # failure triggers exactly one recapture, and only a repeated failure
         # is red. Both captures are uploaded as evidence either way.
+        #
+        # The two legs measure different things and are gated differently.
+        #
+        # Leg 1 — candidate vs the 0.13.2 wheel benchmarked *in this same job,
+        # on this same runner, minutes apart*. Machine speed cancels out, so
+        # 20% is a real 20% and stays there.
+        #
+        # Leg 2 — candidate vs `current.linux.json`, a capture committed from
+        # some *other* runner at some *other* time. Its delta carries the
+        # runner-to-runner spread on top of the code's, and the recorded flakes
+        # are all in this leg: 0.14.3 failed at +21.6%, and `return_node_10k`
+        # has flaked at +26-32% in runs where the normalized read moved +4%.
+        # 20% here is below the instrument's own noise, so it fires on machine
+        # variance and trains everyone to re-run it. 30% clears every recorded
+        # flake and still catches gross absolute drift — which is all this leg
+        # is for; leg 1 is the one that catches a real regression, and its 20%
+        # is untouched. Widening is deliberately preferred over dropping the
+        # leg: a slow, uniform slide that leg 1 renormalizes away has to show
+        # up somewhere.
         run: |
           compare() {
             python scripts/compare_bench.py \
@@ -713,7 +732,7 @@ jobs:
               --metric min --threshold 20 --require-exact-set \
             && python scripts/compare_bench.py \
               tests/benchmarks/baselines/current.linux.json "$1" \
-              --metric min --threshold 20 --require-exact-set
+              --metric min --threshold 30 --require-exact-set
           }
           if compare .bench-candidate.json; then
             exit 0

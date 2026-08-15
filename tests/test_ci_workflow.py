@@ -380,14 +380,25 @@ def test_linux_perf_gate_uses_isolated_released_wheel_reference() -> None:
         assert [arg for arg in args if arg.startswith("--benchmark-json=")], f"capture without --benchmark-json: {args}"
 
     _assert_runs(perf, "sleep 30")
+    # Two legs, two thresholds, and the asymmetry is the point (the workflow
+    # step carries the full reasoning). Leg 1 compares the candidate against a
+    # reference benchmarked in this same job on this same runner, so machine
+    # speed cancels and 20% is a real 20%. Leg 2 compares it against a capture
+    # committed from another runner at another time, so its delta carries the
+    # runner-to-runner spread as well — every recorded flake landed there
+    # (0.14.3 at +21.6%, return_node_10k at +26-32% while the normalized read
+    # moved +4%), which is why it is 30 and not 20.
     _assert_runs(
         perf,
         'python scripts/compare_bench.py .bench-reference-0.13.2.json "$1" '
         "--metric min --threshold 20 --require-exact-set "
         '&& python scripts/compare_bench.py tests/benchmarks/baselines/current.linux.json "$1" '
-        "--metric min --threshold 20 --require-exact-set",
+        "--metric min --threshold 30 --require-exact-set",
     )
+    # Exactly two comparisons in the whole job, so a third leg (or a stray
+    # threshold somewhere else in it) cannot slip past the literal above.
     assert tokens.count("--require-exact-set") == 2
+    assert tokens.count("--threshold") == 2
 
     # Retry-once contract: a first-capture regression verdict triggers exactly
     # one recapture; only a repeated failure is red.
