@@ -2515,6 +2515,62 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN a.title AS a, b.title AS b, dot(a.vec, b.vec) AS s ORDER BY a, b",
         None,
     ),
+    # ── aggregates nested in map/list literals (fixed 2026-08-15) ──
+    # Pre-fix the materialized evaluator only handled top-level aggregates:
+    # `RETURN {c: count(*)}` died with "Aggregate function 'count' cannot be
+    # used outside of RETURN/WITH" (while sitting in RETURN), and
+    # `[count(*)]` wasn't classified as an aggregate projection at all.
+    # These also pin the ListLiteral classifier arm, which feeds the
+    # planner-simplification aggregation gates — a plan-shape change there
+    # must keep both legs in agreement.
+    (
+        "nested_agg_map_literal",
+        "small_graph",
+        "MATCH (p:Person) RETURN {name:'people', data: count(*)} AS r",
+        None,
+    ),
+    (
+        "nested_agg_list_literal",
+        "small_graph",
+        "MATCH (p:Person) RETURN [count(*), min(p.age)] AS r",
+        None,
+    ),
+    (
+        "nested_agg_collect_slice_in_map",
+        "small_graph",
+        "MATCH (p:Person) RETURN {data: collect(p.name)[..2]} AS r",
+        None,
+    ),
+    (
+        "nested_agg_grouped_map",
+        "small_graph",
+        "MATCH (p:Person) RETURN p.age AS a, {c: count(*)} AS r ORDER BY a",
+        None,
+    ),
+    (
+        "nested_agg_case_result",
+        "small_graph",
+        "MATCH (p:Person) RETURN CASE WHEN true THEN count(*) ELSE 0 END AS r",
+        None,
+    ),
+    (
+        "nested_agg_predicate_expr",
+        "small_graph",
+        "MATCH (p:Person) RETURN count(*) > 2 AS r",
+        None,
+    ),
+    (
+        "nested_agg_negate",
+        "small_graph",
+        "MATCH (p:Person) RETURN -count(*) AS r",
+        None,
+    ),
+    (
+        "nested_agg_empty_rowset",
+        "small_graph",
+        "MATCH (p:Person) WHERE p.age > 999 RETURN {c: count(*)} AS r",
+        None,
+    ),
 ]
 
 

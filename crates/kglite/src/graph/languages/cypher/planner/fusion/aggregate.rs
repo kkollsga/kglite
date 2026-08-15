@@ -305,6 +305,7 @@ fn aggregates_only_count(expr: &Expression) -> bool {
         }
         Expression::ExprPropertyAccess { expr, .. } => aggregates_only_count(expr),
         Expression::MapLiteral(entries) => entries.iter().all(|(_, e)| aggregates_only_count(e)),
+        Expression::ListLiteral(items) => items.iter().all(aggregates_only_count),
         // Leaves / non-aggregate-bearing forms can't introduce a non-count
         // aggregate, so they're trivially fine.
         _ => true,

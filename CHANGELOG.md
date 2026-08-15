@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Aggregates nested inside wrapper expressions in `RETURN`/`WITH` projections
+  now evaluate correctly instead of failing with "Aggregate function … cannot
+  be used outside of RETURN/WITH": map literals (`RETURN {c: count(*)}`), list
+  literals (`RETURN [count(*)]`), negation, CASE results, comparisons
+  (`count(*) > 2`), map projections (`n {.x, total: count(*)}`), and list
+  comprehensions over `collect(...)`. Grouped and `WITH` forms included; the
+  zero-row case now yields one row (`{c: 0}`) per Cypher aggregation
+  semantics. This also unblocks Neo4j Browser's connect-time metadata queries
+  over the Bolt server.
+
 ## [0.16.1] - 2026-08-15
 
 ### Added

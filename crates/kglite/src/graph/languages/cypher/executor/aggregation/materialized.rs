@@ -744,6 +744,17 @@ impl<'a> CypherExecutor<'a> {
             }
             // Non-aggregate expression in an aggregation context - evaluate with first row
             _ => {
+                if is_aggregate_expression(expr) {
+                    // A wrapper without a dedicated arm above whose subtree
+                    // holds an aggregate — `{c: count(*)}`, `[collect(x)]`,
+                    // `-count(*)`, `CASE … THEN count(*)`, `count(*) > 2`.
+                    // Pre-fix these fell through to the per-row evaluation
+                    // below and died in the scalar dispatcher with
+                    // "Aggregate function … cannot be used outside of
+                    // RETURN/WITH" (same class as the pre-0.9.6 ListSlice
+                    // bug documented at planner/fusion/aggregate.rs).
+                    return self.evaluate_nested_aggregate(expr, rows);
+                }
                 if let Some(row) = rows.first() {
                     self.evaluate_expression(expr, row)
                 } else {
@@ -751,6 +762,215 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
         }
+    }
+
+    /// Evaluate a wrapper expression whose subtree contains aggregates but
+    /// which has no dedicated arm in `evaluate_aggregate_with_rows` —
+    /// `RETURN {c: count(*)}`, `[collect(x)]`, `-count(*)`,
+    /// `CASE WHEN … THEN count(*) END`, `count(*) > 2`,
+    /// `n {.x, total: count(*)}`, `[v IN collect(x) | v * 2]`.
+    ///
+    /// One substitution level: every direct aggregate-bearing child is
+    /// evaluated over the whole row set (recursing back through
+    /// `evaluate_aggregate_with_rows`, which re-enters here for deeper
+    /// wrappers) and bound to a `__nested_agg_N` placeholder in a copy of
+    /// the first row; the rewritten wrapper then evaluates as a plain scalar
+    /// against that row, so non-aggregate parts keep their first-row
+    /// bindings — the same contract as the non-aggregate catch-all.
+    ///
+    /// Wrapper shapes the rewriter does not know fall back to plain
+    /// first-row evaluation, preserving the pre-existing error for them.
+    fn evaluate_nested_aggregate(
+        &self,
+        expr: &Expression,
+        rows: &[&ResultRow],
+    ) -> Result<Value, String> {
+        let mut synth = rows
+            .first()
+            .map(|r| (*r).clone())
+            .unwrap_or_else(ResultRow::new);
+        let mut counter = 0usize;
+        match self.substitute_aggregate_children(expr, rows, &mut synth, &mut counter)? {
+            Some(rewritten) => self.evaluate_expression(&rewritten, &synth),
+            None => {
+                if let Some(row) = rows.first() {
+                    self.evaluate_expression(expr, row)
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+        }
+    }
+
+    /// Replace one direct child: an aggregate-bearing child evaluates over
+    /// the whole row set and becomes a placeholder `Variable`; a plain child
+    /// is kept verbatim (it will evaluate against the synthesized first-row
+    /// copy exactly as before).
+    fn bind_aggregate_child(
+        &self,
+        child: &Expression,
+        rows: &[&ResultRow],
+        synth: &mut ResultRow,
+        counter: &mut usize,
+    ) -> Result<Expression, String> {
+        if is_aggregate_expression(child) {
+            let value = self.evaluate_aggregate_with_rows(child, rows)?;
+            let key = format!("__nested_agg_{counter}");
+            *counter += 1;
+            synth.projected.insert(key.clone(), value);
+            Ok(Expression::Variable(key))
+        } else {
+            Ok(child.clone())
+        }
+    }
+
+    /// One-level structural rewrite of a wrapper expression. The variant set
+    /// deliberately mirrors `ast::is_aggregate_expression`'s recursion set
+    /// (the classifier decides what routes to the aggregation path; anything
+    /// it routes here must be rebuildable here). `Ok(None)` = shape not
+    /// handled, caller falls back to first-row evaluation.
+    fn substitute_aggregate_children(
+        &self,
+        expr: &Expression,
+        rows: &[&ResultRow],
+        synth: &mut ResultRow,
+        counter: &mut usize,
+    ) -> Result<Option<Expression>, String> {
+        let rewritten = match expr {
+            Expression::MapLiteral(entries) => {
+                let mut out = Vec::with_capacity(entries.len());
+                for (key, value) in entries {
+                    out.push((
+                        key.clone(),
+                        self.bind_aggregate_child(value, rows, synth, counter)?,
+                    ));
+                }
+                Expression::MapLiteral(out)
+            }
+            Expression::ListLiteral(items) => Expression::ListLiteral(
+                items
+                    .iter()
+                    .map(|item| self.bind_aggregate_child(item, rows, synth, counter))
+                    .collect::<Result<_, _>>()?,
+            ),
+            Expression::Negate(inner) => Expression::Negate(Box::new(
+                self.bind_aggregate_child(inner, rows, synth, counter)?,
+            )),
+            Expression::Case {
+                operand,
+                when_clauses,
+                else_expr,
+            } => Expression::Case {
+                // Mirror the classifier: only THEN/ELSE results are treated
+                // as aggregate positions; operand and WHEN conditions pass
+                // through untouched.
+                operand: operand.clone(),
+                when_clauses: when_clauses
+                    .iter()
+                    .map(|(cond, result)| {
+                        Ok::<_, String>((
+                            cond.clone(),
+                            self.bind_aggregate_child(result, rows, synth, counter)?,
+                        ))
+                    })
+                    .collect::<Result<_, _>>()?,
+                else_expr: match else_expr {
+                    Some(e) => Some(Box::new(
+                        self.bind_aggregate_child(e, rows, synth, counter)?,
+                    )),
+                    None => None,
+                },
+            },
+            Expression::ListComprehension {
+                variable,
+                list_expr,
+                filter,
+                map_expr,
+            } => Expression::ListComprehension {
+                variable: variable.clone(),
+                list_expr: Box::new(
+                    self.bind_aggregate_child(list_expr, rows, synth, counter)?,
+                ),
+                // filter/map reference the comprehension variable and run
+                // per element — they cannot be pre-evaluated here.
+                filter: filter.clone(),
+                map_expr: map_expr.clone(),
+            },
+            Expression::MapProjection { variable, items } => Expression::MapProjection {
+                variable: variable.clone(),
+                items: items
+                    .iter()
+                    .map(|item| match item {
+                        MapProjectionItem::Alias { key, expr } => {
+                            Ok::<_, String>(MapProjectionItem::Alias {
+                                key: key.clone(),
+                                expr: self.bind_aggregate_child(expr, rows, synth, counter)?,
+                            })
+                        }
+                        other => Ok(other.clone()),
+                    })
+                    .collect::<Result<_, _>>()?,
+            },
+            Expression::PredicateExpr(pred) => Expression::PredicateExpr(Box::new(
+                self.substitute_in_predicate(pred, rows, synth, counter)?,
+            )),
+            Expression::ExprPropertyAccess { expr: inner, property } => {
+                Expression::ExprPropertyAccess {
+                    expr: Box::new(self.bind_aggregate_child(inner, rows, synth, counter)?),
+                    property: property.clone(),
+                }
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(rewritten))
+    }
+
+    /// Predicate arm of the one-level rewrite. Mirrors the predicate variants
+    /// `ast::is_aggregate_expression` recurses into; anything else is cloned
+    /// verbatim (an aggregate hiding in an unmirrored variant keeps its
+    /// pre-existing per-row rejection).
+    fn substitute_in_predicate(
+        &self,
+        pred: &Predicate,
+        rows: &[&ResultRow],
+        synth: &mut ResultRow,
+        counter: &mut usize,
+    ) -> Result<Predicate, String> {
+        Ok(match pred {
+            Predicate::Comparison {
+                left,
+                operator,
+                right,
+            } => Predicate::Comparison {
+                left: self.bind_aggregate_child(left, rows, synth, counter)?,
+                operator: *operator,
+                right: self.bind_aggregate_child(right, rows, synth, counter)?,
+            },
+            Predicate::StartsWith { expr, pattern } => Predicate::StartsWith {
+                expr: self.bind_aggregate_child(expr, rows, synth, counter)?,
+                pattern: self.bind_aggregate_child(pattern, rows, synth, counter)?,
+            },
+            Predicate::EndsWith { expr, pattern } => Predicate::EndsWith {
+                expr: self.bind_aggregate_child(expr, rows, synth, counter)?,
+                pattern: self.bind_aggregate_child(pattern, rows, synth, counter)?,
+            },
+            Predicate::Contains { expr, pattern } => Predicate::Contains {
+                expr: self.bind_aggregate_child(expr, rows, synth, counter)?,
+                pattern: self.bind_aggregate_child(pattern, rows, synth, counter)?,
+            },
+            Predicate::In { expr, list } => Predicate::In {
+                expr: self.bind_aggregate_child(expr, rows, synth, counter)?,
+                list: list
+                    .iter()
+                    .map(|e| self.bind_aggregate_child(e, rows, synth, counter))
+                    .collect::<Result<_, _>>()?,
+            },
+            Predicate::InExpression { expr, list_expr } => Predicate::InExpression {
+                expr: self.bind_aggregate_child(expr, rows, synth, counter)?,
+                list_expr: self.bind_aggregate_child(list_expr, rows, synth, counter)?,
+            },
+            other => other.clone(),
+        })
     }
 
     /// Collect numeric values from rows for aggregate computation

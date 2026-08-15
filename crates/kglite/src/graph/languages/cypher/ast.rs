@@ -1116,28 +1116,36 @@ impl ConstraintRequirement {
 /// Check if an expression contains an aggregate function call.
 /// Function names are normalized to lowercase at parse time, so direct
 /// comparison against lowercase literals is sufficient.
+/// Is `name` one of the aggregate function names? The single source of truth
+/// for the aggregate name set — `is_aggregate_expression` classifies with it,
+/// and the nested-aggregate evaluator uses it to find the maximal aggregate
+/// calls it must evaluate over the whole row set.
+pub fn is_aggregate_function_name(name: &str) -> bool {
+    matches!(
+        name,
+        "count"
+            | "sum"
+            | "avg"
+            | "mean"
+            | "average"
+            | "min"
+            | "max"
+            | "collect"
+            | "std"
+            | "stdev"
+            | "variance"
+            | "var_samp"
+            | "median"
+            | "mode"
+            | "percentile_cont"
+            | "percentile_disc"
+    )
+}
+
 pub fn is_aggregate_expression(expr: &Expression) -> bool {
     match expr {
         Expression::FunctionCall { name, args, .. } => {
-            if matches!(
-                name.as_str(),
-                "count"
-                    | "sum"
-                    | "avg"
-                    | "mean"
-                    | "average"
-                    | "min"
-                    | "max"
-                    | "collect"
-                    | "std"
-                    | "stdev"
-                    | "variance"
-                    | "var_samp"
-                    | "median"
-                    | "mode"
-                    | "percentile_cont"
-                    | "percentile_disc"
-            ) {
+            if is_aggregate_function_name(name.as_str()) {
                 return true;
             }
             // Non-aggregate function wrapping aggregate args (e.g. size(collect(...)))
@@ -1190,6 +1198,12 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
         Expression::MapLiteral(entries) => entries
             .iter()
             .any(|(_, expr)| is_aggregate_expression(expr)),
+        // `RETURN [count(*), collect(x)]` — a list literal wrapping aggregates
+        // is an aggregate projection. Absent this arm the query routes to the
+        // plain projection path and dies with "Aggregate function 'count'
+        // cannot be used outside of RETURN/WITH" (same class as the pre-0.9.6
+        // ListSlice bug documented at planner/fusion/aggregate.rs).
+        Expression::ListLiteral(items) => items.iter().any(is_aggregate_expression),
         Expression::PredicateExpr(pred) => match pred.as_ref() {
             Predicate::Comparison { left, right, .. } => {
                 is_aggregate_expression(left) || is_aggregate_expression(right)
