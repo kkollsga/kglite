@@ -858,7 +858,17 @@ impl Parser {
 pub fn parse_pattern(input: &str) -> Result<Pattern, String> {
     let tokens = tokenize(input)?;
     let mut parser = Parser::new(tokens);
-    parser.parse_pattern()
+    let pattern = parser.parse_pattern()?;
+    // The whole input must be one pattern. Pre-fix, trailing tokens were
+    // silently discarded, so `MATCH (n) bogus tokens` — including a typo'd
+    // keyword (`RETRUN n`) — executed as `MATCH (n)` with no error and a
+    // different meaning than the user wrote.
+    if let Some(tok) = parser.peek() {
+        return Err(format!(
+            "unexpected trailing input after pattern: {tok:?} (in {input:?})"
+        ));
+    }
+    Ok(pattern)
 }
 
 #[cfg(test)]

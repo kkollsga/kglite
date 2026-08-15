@@ -377,3 +377,41 @@ def test_map_projection_accepts_soft_keyword_keys():
     assert g.cypher("MATCH (n:T) RETURN n {.order} AS m").scalar() == {"order": 3}
     assert g.cypher("MATCH (n:T) RETURN n {.ORDER} AS m").scalar() == {"ORDER": 5}
     assert g.cypher("MATCH (n:T) RETURN n {order: n.id} AS m").scalar() == {"order": 7}
+
+
+# ── Trailing-token strictness after MATCH patterns (fixed 2026-08-15) ──────
+
+
+class TestTrailingTokensAfterPattern:
+    """`MATCH (n) bogus tokens` used to execute as `MATCH (n)` — the pattern
+    re-serializer swallowed everything to the next clause boundary and the
+    pattern parser silently discarded tokens after the pattern. A typo'd
+    keyword (`RETRUN`) therefore ran a *different query* with no error."""
+
+    def test_trailing_garbage_after_match_is_a_syntax_error(self):
+        import kglite
+
+        g = kglite.KnowledgeGraph()
+        g.cypher("CREATE (:A {x: 1})")
+        for q in [
+            "MATCH (n) bogus tokens here",
+            "MATCH (n) RETRUN n",
+            "MATCH (n) SHOW INDEXES",
+            "MATCH (n) SHOW PROCEDURES",
+        ]:
+            with pytest.raises(kglite.CypherSyntaxError, match="trailing"):
+                g.cypher(q)
+
+    def test_legitimate_match_shapes_still_parse(self):
+        import kglite
+
+        g = kglite.KnowledgeGraph()
+        g.cypher("CREATE (:A {x: 1})-[:R]->(:B {x: 2})")
+        for q in [
+            "MATCH (n) RETURN n",
+            "MATCH (a)-[:R]->(b) RETURN a, b",
+            "MATCH (a), (b) RETURN a, b",
+            "MATCH p = shortestPath((a)-[*]-(b)) RETURN p",
+            "MATCH (n) WHERE n.x > 0 RETURN n",
+        ]:
+            assert g.cypher(q) is not None
