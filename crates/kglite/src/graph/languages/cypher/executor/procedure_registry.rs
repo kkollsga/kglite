@@ -300,6 +300,18 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
         columns: &["nodes", "relationships"],
     },
     ProcedureSpec {
+        name: "db.schema.nodeTypeProperties",
+        aliases: &[],
+        description: "Typed node schema: one row per (label, property) with propertyTypes and mandatory — the shape Neo4j clients load their data model from. A property-less label emits one row with null propertyName.",
+        columns: &["nodeType", "nodeLabels", "propertyName", "propertyTypes", "mandatory"],
+    },
+    ProcedureSpec {
+        name: "db.schema.relTypeProperties",
+        aliases: &[],
+        description: "Typed relationship schema: one row per (type, property) with propertyTypes and mandatory. A property-less type emits one row with null propertyName.",
+        columns: &["relType", "propertyName", "propertyTypes", "mandatory"],
+    },
+    ProcedureSpec {
         name: "db.graph_stats",
         aliases: &[],
         description: "Per-graph summary: node, edge, label, and relationship-type counts. Single row.",

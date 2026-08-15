@@ -158,14 +158,21 @@ pub(crate) fn is_schema_read(command: &SchemaCommand) -> bool {
 /// client reading positionally sees what it expects. `mode` is always "READ"
 /// (every KGLite procedure is a read; mutations are rejected upstream) and
 /// `worksOnSystem` is always false (there is no system database).
-const SHOW_PROCEDURES_COLUMNS: [&str; 4] = ["name", "description", "mode", "worksOnSystem"];
+/// `signature` is yieldable but not in the default set, matching Neo4j —
+/// G.V() sends `SHOW PROCEDURES YIELD name, description, signature`
+/// (measured 2026-08-15).
+const SHOW_PROCEDURES_COLUMNS: [&str; 5] =
+    ["name", "description", "mode", "worksOnSystem", "signature"];
+
+/// Columns in Neo4j's *default* (no-YIELD) SHOW PROCEDURES output.
+const SHOW_PROCEDURES_DEFAULT: [&str; 4] = ["name", "description", "mode", "worksOnSystem"];
 
 /// `SHOW PROCEDURES [YIELD …]` — a read over the procedure registry, the
 /// same table `list_procedures` and CALL YIELD validation consume.
 fn show_procedures_result_set(yield_items: &[YieldItem]) -> Result<ResultSet, String> {
     let default_items: Vec<YieldItem>;
     let items: &[YieldItem] = if yield_items.is_empty() {
-        default_items = SHOW_PROCEDURES_COLUMNS
+        default_items = SHOW_PROCEDURES_DEFAULT
             .iter()
             .map(|name| YieldItem {
                 name: (*name).to_string(),
@@ -196,6 +203,18 @@ fn show_procedures_result_set(yield_items: &[YieldItem]) -> Result<ResultSet, St
                 "description" => Value::String(spec.description.to_string()),
                 "mode" => Value::String("READ".to_string()),
                 "worksOnSystem" => Value::Boolean(false),
+                // Neo4j-style signature. KGLite procedures take one optional
+                // config map, so the input side is uniform; outputs are the
+                // declared columns, untyped (ANY?).
+                "signature" => Value::String(format!(
+                    "{}(config = {{}} :: MAP?) :: ({})",
+                    spec.name,
+                    spec.columns
+                        .iter()
+                        .map(|c| format!("{c} :: ANY?"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
                 _ => unreachable!("validated against SHOW_PROCEDURES_COLUMNS"),
             };
             row.projected.insert(alias.to_string(), value);

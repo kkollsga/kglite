@@ -8,6 +8,33 @@ use crate::datatypes::values::Value;
 use crate::graph::storage::GraphRead;
 
 impl<'a> CypherExecutor<'a> {
+    /// `elementId(entity)` — Neo4j 5 element identity: an opaque STRING,
+    /// distinct from `id()`. Keyed off the graph slot index — the same
+    /// number the Bolt packer emits as `element_id` on Node/Relationship
+    /// structs (value_adapter) — so a client can round-trip
+    /// `node.element_id` into an `elementId(n) = $eid` predicate. NOT the
+    /// logical `id()` value, which is the user's domain id. Inherits the
+    /// packer's caveat: stable for the lifetime of the loaded graph, not
+    /// across a save/load rebuild. `None` = unresolvable → Null.
+    fn eval_element_id(&self, args: &[Expression], row: &ResultRow) -> Option<Value> {
+        let arg = args.first()?;
+        if let Expression::Variable(var) = arg {
+            if let Some(edge) = row.edge_bindings.get(var) {
+                return Some(Value::String(edge.edge_index.index().to_string()));
+            }
+        }
+        if let Ok(Value::Relationship(rel)) = self.evaluate_expression(arg, row) {
+            return Some(Value::String(rel.id.to_string()));
+        }
+        if let Some(idx) = self.node_arg_index(arg, row) {
+            return Some(Value::String(idx.index().to_string()));
+        }
+        if let Ok(Value::Node(nv)) = self.evaluate_expression(arg, row) {
+            return Some(Value::String(nv.id.to_string()));
+        }
+        None
+    }
+
     pub(super) fn eval_graph_fn(
         &self,
         name: &str,
@@ -76,33 +103,7 @@ impl<'a> CypherExecutor<'a> {
                 }
                 Ok(Value::Null)
             }
-            "elementid" => {
-                // Neo4j 5 element identity: an opaque STRING, distinct from
-                // id(). Keyed off the graph slot index — the same number the
-                // Bolt packer emits as `element_id` on Node/Relationship
-                // structs (value_adapter) — so a client can round-trip
-                // `node.element_id` into an `elementId(n) = $eid` predicate.
-                // NOT the logical id() value, which is the user's domain id.
-                // Inherits the packer's caveat: stable for the lifetime of
-                // the loaded graph, not across a save/load rebuild.
-                if let Some(arg) = args.first() {
-                    if let Expression::Variable(var) = arg {
-                        if let Some(edge) = row.edge_bindings.get(var) {
-                            return Ok(Some(Value::String(edge.edge_index.index().to_string())));
-                        }
-                    }
-                    if let Ok(Value::Relationship(rel)) = self.evaluate_expression(arg, row) {
-                        return Ok(Some(Value::String(rel.id.to_string())));
-                    }
-                    if let Some(idx) = self.node_arg_index(arg, row) {
-                        return Ok(Some(Value::String(idx.index().to_string())));
-                    }
-                    if let Ok(Value::Node(nv)) = self.evaluate_expression(arg, row) {
-                        return Ok(Some(Value::String(nv.id.to_string())));
-                    }
-                }
-                Ok(Value::Null)
-            }
+            "elementid" => Ok(self.eval_element_id(args, row).unwrap_or(Value::Null)),
             "id" => {
                 // Relationship identity is the stable edge slot used by every
                 // binding and by materialised RelValue results.

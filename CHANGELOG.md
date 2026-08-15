@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously a Bolt client's `result.keys()` was empty for e.g.
   `CALL db.indexes()` on a graph with no indexes.
 
+- `CALL db.schema.nodeTypeProperties()` / `db.schema.relTypeProperties()` —
+  Neo4j's typed-schema pair, measured as the calls G.V()'s data-model load
+  makes: one row per (type, property) with `propertyTypes` in Neo4j's type
+  vocabulary (Long/Double/String/…); a property-less type emits one row with
+  null `propertyName`. `SHOW PROCEDURES` additionally yields a `signature`
+  column (not in the default set, matching Neo4j) — the exact
+  `YIELD name, description, signature` G.V() sends now answers.
 - `CALL db.schema.visualization()` — Neo4j's schema-graph shape: one row of
   virtual nodes (one per label, with name/indexes/constraints properties) and
   virtual relationships per observed (source label, type, target label)

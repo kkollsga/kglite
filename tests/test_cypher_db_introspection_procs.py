@@ -325,3 +325,51 @@ def test_schema_visualization_listed_in_registry():
     g = kglite.KnowledgeGraph()
     names = {r["name"] for r in g.cypher("SHOW PROCEDURES YIELD name").to_dicts()}
     assert "db.schema.visualization" in names
+
+
+# ── db.schema.nodeTypeProperties / relTypeProperties (2026-08-15) ──────────
+# Measured as the calls G.V()'s data-model load makes; Neo4j Browser's
+# schema code path uses the same pair.
+
+
+@pytest.fixture
+def typed_graph():
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Person {name: 'ann', age: 28})-[:KNOWS {since: 2020}]->(:Person {name: 'bob', age: 35})")
+    g.cypher("CREATE (:Empty)")
+    return g
+
+
+def test_node_type_properties_shape(typed_graph):
+    rows = typed_graph.cypher("CALL db.schema.nodeTypeProperties()").to_dicts()
+    person = [r for r in rows if r["nodeType"] == ":`Person`"]
+    by_prop = {r["propertyName"]: r for r in person}
+    assert by_prop["age"]["propertyTypes"] == ["Long"]
+    assert by_prop["name"]["propertyTypes"] == ["String"]
+    assert by_prop["age"]["nodeLabels"] == ["Person"]
+    assert all(r["mandatory"] is False for r in person)
+    # A property-less label still appears — one row, null propertyName.
+    empty = [r for r in rows if r["nodeType"] == ":`Empty`"]
+    assert len(empty) == 1 and empty[0]["propertyName"] is None
+
+
+def test_rel_type_properties_shape(typed_graph):
+    rows = typed_graph.cypher("CALL db.schema.relTypeProperties()").to_dicts()
+    assert rows == [
+        {
+            "relType": ":`KNOWS`",
+            "propertyName": "since",
+            "propertyTypes": ["Long"],
+            "mandatory": False,
+        }
+    ]
+
+
+def test_show_procedures_signature_yield(typed_graph):
+    """The exact YIELD G.V() sends (measured 2026-08-15). `signature` is
+    yieldable but not in the default column set, matching Neo4j."""
+    rows = typed_graph.cypher("SHOW PROCEDURES YIELD name, description, signature").to_dicts()
+    by = {r["name"]: r["signature"] for r in rows}
+    assert by["db.labels"] == "db.labels(config = {} :: MAP?) :: (label :: ANY?)"
+    default = typed_graph.cypher("SHOW PROCEDURES", to_df=True)
+    assert "signature" not in default.columns

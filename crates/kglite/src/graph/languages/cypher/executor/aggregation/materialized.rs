@@ -745,25 +745,34 @@ impl<'a> CypherExecutor<'a> {
                 let r = self.evaluate_aggregate_with_rows(right, rows)?;
                 Ok(crate::graph::core::value_operations::string_concat(&l, &r))
             }
-            // Non-aggregate expression in an aggregation context - evaluate with first row
-            _ => {
-                if is_aggregate_expression(expr) {
-                    // A wrapper without a dedicated arm above whose subtree
-                    // holds an aggregate — `{c: count(*)}`, `[collect(x)]`,
-                    // `-count(*)`, `CASE … THEN count(*)`, `count(*) > 2`.
-                    // Pre-fix these fell through to the per-row evaluation
-                    // below and died in the scalar dispatcher with
-                    // "Aggregate function … cannot be used outside of
-                    // RETURN/WITH" (same class as the pre-0.9.6 ListSlice
-                    // bug documented at planner/fusion/aggregate.rs).
-                    return self.evaluate_nested_aggregate(expr, rows);
-                }
-                if let Some(row) = rows.first() {
-                    self.evaluate_expression(expr, row)
-                } else {
-                    Ok(Value::Null)
-                }
-            }
+            // Everything else: an aggregate-bearing wrapper without a
+            // dedicated arm (routed to the nested-aggregate rewrite), or a
+            // plain non-aggregate expression (evaluated against the first
+            // row). See `evaluate_aggregation_fallback`.
+            _ => self.evaluate_aggregation_fallback(expr, rows),
+        }
+    }
+
+    /// The `evaluate_aggregate_with_rows` catch-all. A wrapper whose subtree
+    /// holds an aggregate — `{c: count(*)}`, `[collect(x)]`, `-count(*)`,
+    /// `CASE … THEN count(*)`, `count(*) > 2` — routes to the
+    /// nested-aggregate rewrite (pre-fix these fell through to per-row
+    /// evaluation and died in the scalar dispatcher with "Aggregate function
+    /// … cannot be used outside of RETURN/WITH", the same class as the
+    /// pre-0.9.6 ListSlice bug documented at planner/fusion/aggregate.rs).
+    /// A plain non-aggregate expression evaluates against the first row.
+    fn evaluate_aggregation_fallback(
+        &self,
+        expr: &Expression,
+        rows: &[&ResultRow],
+    ) -> Result<Value, String> {
+        if is_aggregate_expression(expr) {
+            return self.evaluate_nested_aggregate(expr, rows);
+        }
+        if let Some(row) = rows.first() {
+            self.evaluate_expression(expr, row)
+        } else {
+            Ok(Value::Null)
         }
     }
 
