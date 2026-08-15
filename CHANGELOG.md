@@ -96,6 +96,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bulk-loaded edge properties (`add_connections`) now record their observed
+  types instead of registering everything as "Unknown" — typed rel schemas
+  reach every schema consumer (the Cypher CREATE path already did this).
+  Graphs written before this fix keep their recorded "Unknown"s until edges
+  are rewritten.
+- The Bolt `EXPLAIN` plan root now carries `args["string-representation"]`
+  (a rendered text plan, Neo4j's convention) — G.V()'s plan tab reads the
+  key unconditionally and threw without it.
+
 - `MATCH p = (n:Label) RETURN p` (a zero-length path) now binds `p` to a
   one-node path instead of null — measured live: G.V()'s Data Explorer sends
   exactly this shape and showed "No results" against real matches.

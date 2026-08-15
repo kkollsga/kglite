@@ -860,7 +860,7 @@ pub fn add_edges_from_specs(
             &edge_type,
             &source_type,
             &target_type,
-            batch.get_schema_properties(),
+            batch.schema_property_types(graph),
         )?;
 
         let (stats, _metrics) = batch.execute(graph, edge_type)?;
@@ -1254,7 +1254,7 @@ pub fn add_connections(
         &connection_type,
         &source_type,
         &target_type,
-        batch.get_schema_properties(),
+        batch.schema_property_types(graph),
     )?;
 
     // Execute the batch and get the statistics
@@ -1835,7 +1835,7 @@ fn update_schema_node(
     connection_type: &str,
     source_type: &str,
     target_type: &str,
-    properties: &HashSet<InternedKey>,
+    prop_types: HashMap<String, String>,
 ) -> Result<(), String> {
     if !graph.has_node_type(source_type) {
         return Err(format!(
@@ -1850,18 +1850,10 @@ fn update_schema_node(
         ));
     }
 
-    // Build property type map — all connection properties default to "Unknown".
-    // The batch carries interned keys; names are resolved once here, per call.
-    let prop_types: HashMap<String, String> = properties
-        .iter()
-        .map(|prop| {
-            (
-                graph.interner.resolve(*prop).to_string(),
-                "Unknown".to_string(),
-            )
-        })
-        .collect();
-
+    // The caller supplies observed types (batch.schema_property_types) —
+    // "Unknown" survives only for properties never seen with a non-null
+    // value. Pre-fix every bulk-loaded edge property registered as
+    // "Unknown" here regardless of its values.
     graph.upsert_connection_type_metadata(connection_type, source_type, target_type, prop_types);
     Ok(())
 }
@@ -2113,7 +2105,7 @@ pub fn create_connections(
             &connection_type,
             &source,
             &target,
-            batch.get_schema_properties(),
+            batch.schema_property_types(graph),
         )?;
     }
 

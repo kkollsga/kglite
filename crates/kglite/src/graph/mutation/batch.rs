@@ -742,6 +742,13 @@ impl ConnectionBatchStats {
 pub struct ConnectionBatchProcessor {
     connections: Vec<ConnectionCreation>,
     schema_properties: HashSet<InternedKey>,
+    /// First observed concrete type per property key (Value::type_name
+    /// vocabulary). Pre-fix the bulk loaders registered every edge property
+    /// as "Unknown" — the schema procedures then reported untyped edge
+    /// properties to every client (measured 2026-08-15: all 59 sodir rel
+    /// properties showed `unknown` in G.V()'s Data Explorer), while the
+    /// Cypher CREATE path recorded real types.
+    schema_property_types: HashMap<InternedKey, &'static str>,
     capacity: usize,
     batch_type: BatchType,
     metrics: BatchMetrics,
@@ -761,6 +768,7 @@ impl ConnectionBatchProcessor {
         ConnectionBatchProcessor {
             connections: Vec::with_capacity(capacity),
             schema_properties: HashSet::new(),
+            schema_property_types: HashMap::new(),
             capacity,
             batch_type,
             metrics: BatchMetrics::default(),
@@ -812,8 +820,12 @@ impl ConnectionBatchProcessor {
         // are registered — a caller that skipped its null cells (every one of
         // them does) must not see an all-null column materialize in the
         // connection type's property list.
-        for (key, _) in &properties {
+        for (key, value) in &properties {
             self.schema_properties.insert(*key);
+            let type_name = value.type_name();
+            if type_name != "Null" {
+                self.schema_property_types.entry(*key).or_insert(type_name);
+            }
         }
 
         self.connections.push(ConnectionCreation {
@@ -1033,6 +1045,24 @@ impl ConnectionBatchProcessor {
     /// Callers resolve them through `graph.interner` when they need names.
     pub fn get_schema_properties(&self) -> &HashSet<InternedKey> {
         &self.schema_properties
+    }
+
+    /// Resolved property → type-name map for schema registration: every
+    /// tracked key, typed by its first concrete observation, "Unknown" only
+    /// for keys never seen with a non-null value.
+    pub fn schema_property_types(&self, graph: &DirGraph) -> HashMap<String, String> {
+        self.schema_properties
+            .iter()
+            .map(|key| {
+                (
+                    graph.interner.resolve(*key).to_string(),
+                    self.schema_property_types
+                        .get(key)
+                        .map(|t| (*t).to_string())
+                        .unwrap_or_else(|| "Unknown".to_string()),
+                )
+            })
+            .collect()
     }
 }
 

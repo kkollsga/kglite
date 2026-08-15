@@ -495,3 +495,22 @@ def test_no_registry_function_panics_on_zero_args():
             g.cypher(f"RETURN {row['name']}() AS v")
         except BaseException as exc:  # noqa: BLE001 — panics surface as BaseException
             assert type(exc).__name__ != "PanicException", row["name"]
+
+
+def test_bulk_loaded_edge_properties_are_typed():
+    """add_connections must record observed property types like the Cypher
+    CREATE path — pre-fix every bulk-loaded edge property registered as
+    'Unknown' (all 59 sodir rel properties showed `unknown` in G.V())."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(pd.DataFrame({"id": [1, 2], "name": ["a", "b"]}), "P", "id", "name")
+    g.add_connections(
+        pd.DataFrame({"src": [1], "tgt": [2], "since": [2020], "w": [0.5], "tag": ["x"]}),
+        "KNOWS",
+        "P",
+        "src",
+        "P",
+        "tgt",
+    )
+    rows = g.cypher("CALL db.schema.relTypeProperties() YIELD propertyName, propertyTypes").to_dicts()
+    types = {r["propertyName"]: r["propertyTypes"] for r in rows}
+    assert types == {"since": ["Long"], "tag": ["String"], "w": ["Double"]}
