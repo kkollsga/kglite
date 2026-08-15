@@ -791,6 +791,7 @@ async fn serve() -> Result<()> {
         advertised_addr,
         csv_import,
         identity,
+        cli.auth_user.clone(),
     );
     // Keep the served graph reachable after the backend moves into the
     // server: `serve` consumes the builder, and the exit hook below runs once

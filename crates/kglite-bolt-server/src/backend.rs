@@ -98,7 +98,29 @@ impl ServerIdentity {
     fn is_rejected_by_agent_gate(self) -> bool {
         matches!(self, Self::Kglite)
     }
+
+    /// The `(name, version)` pair `CALL dbms.components()` reports — the
+    /// sibling of [`Self::product_string`], kept on the same enum so the
+    /// handshake agent and the components row can never drift apart.
+    ///
+    /// Honest by default, compatible on request, exactly like the agent:
+    /// GUIs (Neo4j Browser, G.V()) read this row to decide feature support,
+    /// so `--neo4j-compat` reports the Neo4j LTS line whose wire surface
+    /// this server targets, while the default names the real product. The
+    /// edition is always "community" — never "enterprise", which would
+    /// unlock client features this server does not have.
+    pub(crate) fn components_row(self, version: &str) -> (String, String) {
+        match self {
+            Self::Kglite => ("kglite-bolt-server".to_string(), version.to_string()),
+            Self::Neo4jCompatible => ("Neo4j Kernel".to_string(), NEO4J_COMPAT_VERSION.to_string()),
+        }
+    }
 }
+
+/// The edition `dbms.components()` always reports. A constant, not a config:
+/// "enterprise" advertises RBAC, clustering, and multi-database features this
+/// server does not have.
+const COMPONENTS_EDITION: &str = "community";
 
 /// Bolt backend wrapping a loaded kglite graph.
 ///
@@ -191,6 +213,11 @@ pub struct KgliteBackend {
     /// Product identifier reported in the Bolt handshake. Server-wide: the
     /// handshake happens before any per-session policy could apply.
     identity: ServerIdentity,
+    /// The `--auth-user` value, when `--auth basic` is configured.
+    /// `dbms.showCurrentUser()` answers from this server config — NOT from
+    /// per-session state, which deliberately does not exist (see
+    /// `set_session_auth`: the principal is validated at LOGON and dropped).
+    auth_user: Option<String>,
 }
 
 /// Per-Bolt-transaction state. Wraps the canonical
@@ -305,6 +332,7 @@ impl KgliteBackend {
         advertised_addr: String,
         csv_import: CsvImportPolicy,
         identity: ServerIdentity,
+        auth_user: Option<String>,
     ) -> Self {
         Self {
             session: Arc::new(session),
@@ -317,6 +345,7 @@ impl KgliteBackend {
             advertised_addr,
             csv_import,
             identity,
+            auth_user,
         }
     }
 
@@ -511,6 +540,13 @@ impl BoltBackend for KgliteBackend {
 
         // Empty or whitespace-only query.
         let trimmed = query.trim();
+
+        // The one place every RUN passes through: at debug level this is the
+        // capture point for what a client actually sends — run a GUI against
+        // the server at RUST_LOG=debug and the log is the client's connect
+        // sequence, which is how the next unmet introspection verb gets
+        // found (measured, not guessed).
+        tracing::debug!(query = %trimmed, in_tx = transaction.is_some(), "execute");
         if trimmed.is_empty() {
             return Err(BoltError::Protocol(
                 "empty Cypher query — RUN requires a non-empty statement".into(),
@@ -544,6 +580,14 @@ impl BoltBackend for KgliteBackend {
         // before parameter decoding because the verb takes none.
         if let Some(call) = parse_checkpoint_call(trimmed) {
             return self.run_checkpoint(&call, transaction.is_some());
+        }
+
+        // Server-facts verbs (dbms.components / dbms.showCurrentUser /
+        // SHOW DATABASES): answered here for the same reason as
+        // db.checkpoint — the engine has none of the state they report.
+        // Reads, so they are fine inside a transaction.
+        if let Some(call) = parse_server_facts_call(trimmed) {
+            return Ok(self.run_server_facts(&call));
         }
 
         // Decode params (C.3). Errors here are genuine client errors
@@ -1083,30 +1127,8 @@ fn strip_keyword_ci<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
 /// re-casing one would hand the driver a record whose key is not the key the
 /// client asked for. Only the exact verb is a bolt-layer verb.
 fn parse_checkpoint_call(query: &str) -> Option<CheckpointCall> {
-    let mut body = query.trim();
-    if let Some(stripped) = body.strip_suffix(';') {
-        body = stripped.trim_end();
-    }
-    let rest = strip_keyword_ci(body, "call")?;
-    let rest = strip_keyword_ci(rest, "db.checkpoint")?;
-    let rest = rest.strip_prefix('(')?.trim_start();
-    let rest = rest.strip_prefix(')')?.trim_start();
-    if rest.is_empty() {
-        return Some(CheckpointCall {
-            columns: CHECKPOINT_COLUMNS.to_vec(),
-        });
-    }
-    let yielded = strip_keyword_ci(rest, "yield")?;
-    let mut columns: Vec<&'static str> = Vec::with_capacity(CHECKPOINT_COLUMNS.len());
-    for raw in yielded.split(',') {
-        let name = raw.trim();
-        let canonical = CHECKPOINT_COLUMNS.iter().find(|column| **column == name)?;
-        if columns.contains(canonical) {
-            return None;
-        }
-        columns.push(*canonical);
-    }
-    Some(CheckpointCall { columns })
+    parse_procedure_call(query, "db.checkpoint", &CHECKPOINT_COLUMNS)
+        .map(|columns| CheckpointCall { columns })
 }
 
 /// Build the single-record result a `db.checkpoint()` call answers with,
@@ -1153,7 +1175,229 @@ fn checkpoint_stream(
     }
 }
 
+/// Declared output columns of `CALL dbms.components()`, in declaration
+/// order — the shape Neo4j yields, which Neo4j Browser reads as its very
+/// first call (`serverInfoQuery` in the Browser source) to draw the
+/// name/version/edition banner.
+const COMPONENTS_COLUMNS: [&str; 3] = ["name", "versions", "edition"];
+
+/// Declared output columns of `CALL dbms.showCurrentUser()` (Neo4j shape).
+const SHOW_CURRENT_USER_COLUMNS: [&str; 3] = ["username", "roles", "flags"];
+
+/// Columns of `SHOW DATABASES`, the Neo4j 5 set. Clients key on `name`,
+/// `default`, `home`, and `currentStatus`; the rest are present so a client
+/// reading the full row does not find columns missing.
+const SHOW_DATABASES_COLUMNS: [&str; 13] = [
+    "name",
+    "type",
+    "aliases",
+    "access",
+    "address",
+    "role",
+    "writer",
+    "requestedStatus",
+    "currentStatus",
+    "statusMessage",
+    "default",
+    "home",
+    "constituents",
+];
+
+/// A bolt-layer *server-facts* verb: identity, user, database roster. Like
+/// `db.checkpoint()`, these are answered here because the Cypher engine has
+/// none of the state they report — no server identity (`--neo4j-compat`
+/// lives in this crate), no auth config, no advertised address. An
+/// engine-side implementation would make `graph.cypher("CALL
+/// dbms.components()")` in the wheel answer questions about a server that
+/// is not running.
+#[derive(Debug, PartialEq, Eq)]
+enum ServerFactsVerb {
+    DbmsComponents,
+    DbmsShowCurrentUser,
+    ShowDatabases,
+}
+
+/// A recognized server-facts invocation and the columns it asked for.
+#[derive(Debug, PartialEq, Eq)]
+struct ServerFactsCall {
+    verb: ServerFactsVerb,
+    columns: Vec<&'static str>,
+}
+
+/// Recognize `CALL <proc>()`, optionally followed by `YIELD` naming a subset
+/// of `declared`; `None` for anything else. Shares `parse_checkpoint_call`'s
+/// deliberate narrowness: arguments, aliases, unknown or repeated or
+/// differently-cased YIELD columns all fall through to the engine and its
+/// standard "Unknown procedure" error.
+fn parse_procedure_call(
+    query: &str,
+    proc: &str,
+    declared: &'static [&'static str],
+) -> Option<Vec<&'static str>> {
+    let mut body = query.trim();
+    if let Some(stripped) = body.strip_suffix(';') {
+        body = stripped.trim_end();
+    }
+    let rest = strip_keyword_ci(body, "call")?;
+    let rest = strip_keyword_ci(rest, proc)?;
+    let rest = rest.strip_prefix('(')?.trim_start();
+    let rest = rest.strip_prefix(')')?.trim_start();
+    if rest.is_empty() {
+        return Some(declared.to_vec());
+    }
+    let yielded = strip_keyword_ci(rest, "yield")?;
+    let mut columns: Vec<&'static str> = Vec::with_capacity(declared.len());
+    for raw in yielded.split(',') {
+        let name = raw.trim();
+        let canonical = declared.iter().find(|column| **column == name)?;
+        if columns.contains(canonical) {
+            return None;
+        }
+        columns.push(*canonical);
+    }
+    Some(columns)
+}
+
+/// Recognize the server-facts verbs. `SHOW DATABASES` is matched in its
+/// plain statement form only — a `YIELD`/`WHERE` tail falls through to the
+/// engine (and its parse error), which is the honest answer until the
+/// engine grows SHOW projections.
+fn parse_server_facts_call(query: &str) -> Option<ServerFactsCall> {
+    if let Some(columns) = parse_procedure_call(query, "dbms.components", &COMPONENTS_COLUMNS) {
+        return Some(ServerFactsCall {
+            verb: ServerFactsVerb::DbmsComponents,
+            columns,
+        });
+    }
+    if let Some(columns) =
+        parse_procedure_call(query, "dbms.showcurrentuser", &SHOW_CURRENT_USER_COLUMNS)
+    {
+        return Some(ServerFactsCall {
+            verb: ServerFactsVerb::DbmsShowCurrentUser,
+            columns,
+        });
+    }
+    let mut body = query.trim();
+    if let Some(stripped) = body.strip_suffix(';') {
+        body = stripped.trim_end();
+    }
+    let rest = strip_keyword_ci(body, "show")?;
+    let rest = strip_keyword_ci(rest, "databases")?;
+    if rest.is_empty() {
+        return Some(ServerFactsCall {
+            verb: ServerFactsVerb::ShowDatabases,
+            columns: SHOW_DATABASES_COLUMNS.to_vec(),
+        });
+    }
+    None
+}
+
+/// Project `(column, value)` pairs onto the client's yielded columns and wrap
+/// them as a single-record read stream.
+fn server_facts_stream(
+    columns: &[&'static str],
+    values: &[(&'static str, BoltValue)],
+    started: Instant,
+) -> ResultStream {
+    let record: Vec<BoltValue> = columns
+        .iter()
+        .map(|column| {
+            values
+                .iter()
+                .find(|(name, _)| name == column)
+                .map(|(_, value)| value.clone())
+                .unwrap_or(BoltValue::Null)
+        })
+        .collect();
+    ResultStream {
+        metadata: ResultMetadata {
+            columns: columns.iter().map(|c| (*c).to_string()).collect(),
+            extra: BoltDict::new(),
+        },
+        records: vec![BoltRecord { values: record }],
+        summary: BoltDict::from([
+            ("type".to_string(), BoltValue::String("r".to_string())),
+            (
+                "t_last".to_string(),
+                BoltValue::Integer(started.elapsed().as_millis() as i64),
+            ),
+        ]),
+    }
+}
+
 impl KgliteBackend {
+    /// Answer a recognized server-facts verb from server state.
+    fn run_server_facts(&self, call: &ServerFactsCall) -> ResultStream {
+        let started = Instant::now();
+        match call.verb {
+            ServerFactsVerb::DbmsComponents => {
+                let (name, version) = self.identity.components_row(env!("CARGO_PKG_VERSION"));
+                server_facts_stream(
+                    &call.columns,
+                    &[
+                        ("name", BoltValue::String(name)),
+                        (
+                            "versions",
+                            BoltValue::List(vec![BoltValue::String(version)]),
+                        ),
+                        ("edition", BoltValue::String(COMPONENTS_EDITION.to_string())),
+                    ],
+                    started,
+                )
+            }
+            ServerFactsVerb::DbmsShowCurrentUser => {
+                // Server config, not session state: `--auth basic` is one
+                // shared credential and the principal is deliberately not
+                // stored per session. "neo4j" under `--auth none` matches
+                // what clients expect from an auth-less server.
+                let username = self
+                    .auth_user
+                    .clone()
+                    .unwrap_or_else(|| "neo4j".to_string());
+                server_facts_stream(
+                    &call.columns,
+                    &[
+                        ("username", BoltValue::String(username)),
+                        ("roles", BoltValue::List(Vec::new())),
+                        ("flags", BoltValue::List(Vec::new())),
+                    ],
+                    started,
+                )
+            }
+            ServerFactsVerb::ShowDatabases => {
+                // One row, named "neo4j" — the same default `route()` answers
+                // (:924), so ROUTE and SHOW DATABASES cannot contradict each
+                // other. The session `database` field stays accept-anything;
+                // this row is informational. `access`/`writer` reflect
+                // `--readonly` honestly.
+                let access = if self.readonly {
+                    "read-only"
+                } else {
+                    "read-write"
+                };
+                server_facts_stream(
+                    &call.columns,
+                    &[
+                        ("name", BoltValue::String("neo4j".to_string())),
+                        ("type", BoltValue::String("standard".to_string())),
+                        ("aliases", BoltValue::List(Vec::new())),
+                        ("access", BoltValue::String(access.to_string())),
+                        ("address", BoltValue::String(self.advertised_addr.clone())),
+                        ("role", BoltValue::String("primary".to_string())),
+                        ("writer", BoltValue::Boolean(!self.readonly)),
+                        ("requestedStatus", BoltValue::String("online".to_string())),
+                        ("currentStatus", BoltValue::String("online".to_string())),
+                        ("statusMessage", BoltValue::String(String::new())),
+                        ("default", BoltValue::Boolean(true)),
+                        ("home", BoltValue::Boolean(true)),
+                        ("constituents", BoltValue::List(Vec::new())),
+                    ],
+                    started,
+                )
+            }
+        }
+    }
+
     /// Build the canonical `ExecuteOptions` the bolt-server uses for
     /// every query. Eager rows (`lazy_eligible: false`) — bolt-server
     /// materializes every result into BoltRecords before handing
@@ -1442,6 +1686,7 @@ mod tests {
             "127.0.0.1:0".into(),
             CsvImportPolicy::Denied,
             ServerIdentity::default(),
+            None,
         );
         let session = SessionHandle("disk-session".into());
 
@@ -1490,6 +1735,7 @@ mod tests {
             "127.0.0.1:0".into(),
             CsvImportPolicy::Denied,
             ServerIdentity::default(),
+            None,
         )
     }
 
@@ -1843,6 +2089,129 @@ mod tests {
         }
     }
 
+    /// Server-facts recognizer: every spelling that must intercept, and the
+    /// columns it selects.
+    #[test]
+    fn server_facts_recognizes_the_verbs() {
+        let cases: [(&str, ServerFactsVerb, &[&str]); 6] = [
+            (
+                "CALL dbms.components()",
+                ServerFactsVerb::DbmsComponents,
+                &["name", "versions", "edition"],
+            ),
+            (
+                "CALL dbms.components() YIELD name, versions, edition",
+                ServerFactsVerb::DbmsComponents,
+                &["name", "versions", "edition"],
+            ),
+            (
+                "call DBMS.COMPONENTS() yield edition",
+                ServerFactsVerb::DbmsComponents,
+                &["edition"],
+            ),
+            (
+                "CALL dbms.showCurrentUser()",
+                ServerFactsVerb::DbmsShowCurrentUser,
+                &["username", "roles", "flags"],
+            ),
+            (
+                "SHOW DATABASES",
+                ServerFactsVerb::ShowDatabases,
+                &SHOW_DATABASES_COLUMNS,
+            ),
+            (
+                "show databases;",
+                ServerFactsVerb::ShowDatabases,
+                &SHOW_DATABASES_COLUMNS,
+            ),
+        ];
+        for (query, verb, columns) in cases {
+            let call = parse_server_facts_call(query)
+                .unwrap_or_else(|| panic!("must intercept: {query:?}"));
+            assert_eq!(call.verb, verb, "{query:?}");
+            assert_eq!(call.columns, columns, "{query:?}");
+        }
+    }
+
+    /// Everything else falls through to the engine — arguments, aliases,
+    /// unknown columns, SHOW modifiers the intercept does not implement.
+    #[test]
+    fn server_facts_rejects_everything_else() {
+        let cases = [
+            "CALL dbms.components(true)",
+            "CALL dbms.components() YIELD name AS n",
+            "CALL dbms.components() YIELD nope",
+            "CALL dbms.components() YIELD name, name",
+            "CALL dbms.componentsExtra()",
+            "CALL dbms.components() RETURN 1",
+            "SHOW DATABASE",
+            "SHOW DATABASES YIELD name",
+            "SHOW DATABASES WHERE name = 'neo4j'",
+            "SHOW DEFAULT DATABASE",
+            "RETURN 'CALL dbms.components()' AS s",
+        ];
+        for query in cases {
+            assert_eq!(
+                parse_server_facts_call(query),
+                None,
+                "must fall through to the engine: {query:?}"
+            );
+        }
+    }
+
+    /// components_row follows the identity — and the row can never disagree
+    /// with the handshake agent, because both come from the same enum.
+    #[test]
+    fn components_row_follows_identity() {
+        let (name, version) = ServerIdentity::Kglite.components_row("9.9.9");
+        assert_eq!(name, "kglite-bolt-server");
+        assert_eq!(version, "9.9.9");
+        let (name, version) = ServerIdentity::Neo4jCompatible.components_row("9.9.9");
+        assert_eq!(name, "Neo4j Kernel");
+        assert_eq!(version, NEO4J_COMPAT_VERSION);
+    }
+
+    /// Row content over the wire shape: username from server config, and the
+    /// SHOW DATABASES row that must agree with route()'s default db name.
+    #[test]
+    fn server_facts_rows_answer_from_server_state() {
+        let backend = memory_backend();
+        let user_call = parse_server_facts_call("CALL dbms.showCurrentUser()").unwrap();
+        let stream = backend.run_server_facts(&user_call);
+        assert_eq!(
+            stream.records[0].values[0],
+            BoltValue::String("neo4j".to_string()),
+            "auth none reports the conventional neo4j principal"
+        );
+
+        let mut with_user = memory_backend();
+        with_user.auth_user = Some("ops".to_string());
+        let stream = with_user.run_server_facts(&user_call);
+        assert_eq!(
+            stream.records[0].values[0],
+            BoltValue::String("ops".to_string())
+        );
+
+        let db_call = parse_server_facts_call("SHOW DATABASES").unwrap();
+        let readonly = memory_backend_at(unique_disk_path().join("ro.kgl"), true);
+        let stream = readonly.run_server_facts(&db_call);
+        let row = &stream.records[0].values;
+        let col = |name: &str| {
+            SHOW_DATABASES_COLUMNS
+                .iter()
+                .position(|c| *c == name)
+                .unwrap()
+        };
+        assert_eq!(row[col("name")], BoltValue::String("neo4j".to_string()));
+        assert_eq!(
+            row[col("access")],
+            BoltValue::String("read-only".to_string())
+        );
+        assert_eq!(row[col("writer")], BoltValue::Boolean(false));
+        assert_eq!(row[col("default")], BoltValue::Boolean(true));
+        assert_eq!(row[col("home")], BoltValue::Boolean(true));
+    }
+
     /// The digest-skip, and its mutation check: a checkpoint after an
     /// unchanged graph must skip, and a checkpoint after a *committed write*
     /// must save again. Without the second half a parser that always skipped
@@ -1995,6 +2364,7 @@ mod tests {
             "127.0.0.1:0".into(),
             CsvImportPolicy::Denied,
             ServerIdentity::default(),
+            None,
         );
         let session = SessionHandle("disk-session".into());
 

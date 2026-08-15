@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Bolt server: `CALL dbms.components()`, `CALL dbms.showCurrentUser()`, and
+  `SHOW DATABASES` are answered at the server (they report server facts the
+  engine does not hold). `dbms.components()` follows the server identity:
+  `kglite-bolt-server/<version>` by default, `Neo4j Kernel 5.26.0` under
+  `--neo4j-compat` — the same switch as the handshake agent, so GUIs that
+  version-gate (Neo4j Browser, G.V()) need `--neo4j-compat`. Edition is
+  always `community`. `SHOW DATABASES` returns one row named `neo4j`
+  (matching the routing default) with `access` reflecting `--readonly`.
+- Bolt server: every incoming query is logged at debug level — run a client
+  at `RUST_LOG=debug` to capture its exact connect sequence.
 - `elementId(entity)` scalar function — Neo4j 5 element identity as an opaque
   string, agreeing with the `element_id` the Bolt server packs on
   Node/Relationship structs so clients can round-trip it into predicates.
