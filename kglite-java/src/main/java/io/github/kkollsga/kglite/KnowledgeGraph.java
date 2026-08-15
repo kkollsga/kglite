@@ -86,7 +86,7 @@ import java.util.Optional;
  * </table>
  *
  * <p><strong>Whole nodes, relationships and paths arrive as structured
- * maps</strong> (since 0.17): {@code RETURN n} yields a {@code Map} with
+ * maps</strong> (since 0.16.1): {@code RETURN n} yields a {@code Map} with
  * {@code id}, {@code labels} and {@code properties} keys; a relationship has
  * {@code id}, {@code start}, {@code end}, {@code type} and {@code properties};
  * a path has {@code nodes} and {@code relationships}. Earlier releases

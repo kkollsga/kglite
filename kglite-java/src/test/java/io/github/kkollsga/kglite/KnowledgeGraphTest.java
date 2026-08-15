@@ -153,7 +153,7 @@ class KnowledgeGraphTest {
                     + "(b:Person {id: 2, title: 'Grace'})");
 
             // Whole nodes and relationships arrive as structured maps (the
-            // pre-0.17 Debug-string rendering is gone; the javadoc table pins
+            // pre-0.16.1 Debug-string rendering is gone; the javadoc table pins
             // these shapes).
             Object node = graph.query("MATCH (p:Person {id: 1}) RETURN p AS p").get(0).get("p");
             assertTrue(node instanceof Map,
