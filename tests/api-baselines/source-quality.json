@@ -125,13 +125,6 @@
     },
     {
       "path": "crates/kglite/src/graph/core/pattern_matching/matcher.rs",
-      "qualified_name": "crate::PatternExecutor<'a>::execute",
-      "lines": 355,
-      "branches": 43,
-      "nesting": 7
-    },
-    {
-      "path": "crates/kglite/src/graph/core/pattern_matching/matcher.rs",
       "qualified_name": "crate::PatternExecutor<'a>::expand_from_node",
       "lines": 226,
       "branches": 41,
@@ -455,8 +448,8 @@
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::add_connections",
-      "lines": 293,
-      "branches": 36,
+      "lines": 259,
+      "branches": 28,
       "nesting": 3
     },
     {

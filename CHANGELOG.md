@@ -103,6 +103,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`add_connections` reads the endpoint types' id index in place instead of
+  copying it — the per-call cost no longer grows with the graph.** Release,
+  two agreeing runs, in-memory and non-durable, against an unchanged-path
+  control: 24 000 edges over two connection types, into a single node type,
+  with the *edge* count held fixed while the node count grows. Without edge
+  properties 3.34 -> 2.09 ms at 20k nodes, 8.05 -> 2.93 ms at 100k, 20.85 ->
+  4.15 ms at 400k; with three property columns 6.50 -> 5.23, 11.53 -> 6.15 and
+  23.73 -> 7.51 ms. The old shape is visible in the 0.16.0 column: 6x the
+  nodes cost 6x the time to add *the same edges*. Every call materialized a
+  fresh `id -> node` map over the whole endpoint type before looking at its
+  first row — 53% of a property-free call at 100k nodes in the profile, and
+  the reason a second `add_connections` over the same type paid for the same
+  map again. Rows are now resolved against the live index in one pass, ahead
+  of the mutating pass (the two cannot hold the graph at once), which is
+  snapshot-equivalent: the map it replaced was also built before the first
+  mutation. Types whose index is not heap-resident — an unmutated type of a
+  loaded disk graph — keep the previous path, whose mmap-resident probes are
+  a different trade. One degenerate case changes answer: a type holding *both*
+  a `Float64` and a `UniqueId` spelling of the same numeric id on different
+  nodes now resolves an `Int64` edge endpoint the way every read path already
+  did (`MATCH {id: ...}`, `MERGE`), rather than the other way round.
+- **A `LIMIT`ed relationship pattern stops building start nodes it will never
+  reach — 3.2x on the tracked multi-binding projection.** Release, two
+  agreeing runs, with a same-graph node-only control that stays flat (42.7 ->
+  43.1 µs): `MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a, r, b LIMIT 100`
+  over 10k nodes / 30k edges, 305 -> 96 µs; the same shape at `LIMIT 10`
+  35.0 -> 13.5 µs. The candidate start set is deliberately capped at 100x the
+  requested rows so a sparse pattern can still fill the limit, and every one
+  of those candidates was turned into a match record up front — 10 000 of them
+  to answer for 100, where building and dropping them was 60% of pattern
+  execution. The expansion now builds each start record as it reaches it, so
+  the early exit that already bounded the *work* now bounds the *allocation*
+  too. Uncapped patterns are unchanged (they consume every candidate anyway).
+
 - **`add_nodes` maintains a type's indexes and unique constraints instead of
   rebuilding them — 170-219x on the upsert and constrained shapes.** Release,
   two agreeing runs, against an unchanged-path read control and a create-only
