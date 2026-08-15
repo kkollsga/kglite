@@ -132,6 +132,13 @@
     },
     {
       "path": "crates/kglite/src/graph/core/pattern_matching/matcher.rs",
+      "qualified_name": "crate::PatternExecutor<'a>::find_matching_nodes",
+      "lines": 207,
+      "branches": 42,
+      "nesting": 7
+    },
+    {
+      "path": "crates/kglite/src/graph/core/pattern_matching/matcher.rs",
       "qualified_name": "crate::PatternExecutor<'a>::try_index_lookup",
       "lines": 237,
       "branches": 42,
@@ -224,7 +231,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/call_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_call",
-      "lines": 552,
+      "lines": 554,
       "branches": 101,
       "nesting": 5
     },
@@ -259,8 +266,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_execution.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_match",
-      "lines": 463,
-      "branches": 79,
+      "lines": 479,
+      "branches": 81,
       "nesting": 9
     },
     {
@@ -274,7 +281,7 @@
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/collection.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_collection_fn",
       "lines": 179,
-      "branches": 60,
+      "branches": 66,
       "nesting": 4
     },
     {
@@ -287,22 +294,22 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/numeric.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_numeric_fn",
-      "lines": 200,
-      "branches": 100,
+      "lines": 193,
+      "branches": 114,
       "nesting": 5
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/spatial.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_spatial_fn",
-      "lines": 411,
+      "lines": 407,
       "branches": 145,
       "nesting": 8
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/string.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_string_fn",
-      "lines": 411,
-      "branches": 155,
+      "lines": 425,
+      "branches": 173,
       "nesting": 7
     },
     {
@@ -315,7 +322,7 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/utility.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_utility_fn",
-      "lines": 308,
+      "lines": 307,
       "branches": 90,
       "nesting": 4
     },
