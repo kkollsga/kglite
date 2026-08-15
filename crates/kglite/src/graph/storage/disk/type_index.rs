@@ -315,6 +315,33 @@ impl<'a> TypeNodesRef<'a> {
     /// If a caller has mutated an `Overlay` slice with `push` (or via the
     /// `entry_or_default` path) without re-sorting, this method may give
     /// false negatives — see the `contains` fallback above.
+    ///
+    /// **That is a live, if currently unreachable, wrong-answer risk, and the
+    /// obvious repair is the wrong one.** A false negative here is not a slow
+    /// lookup: the fused count-by-peer route uses this as a per-peer *type
+    /// filter* (`match_clause/fused_match.rs`), so a member the search cannot
+    /// find is a row dropped from a result. No failing executor input has been
+    /// constructed — the fused paths that could produce one exclude via the
+    /// generic route — but the invariant is an accident of `NodeIndex`
+    /// allocation order, not something anything maintains.
+    ///
+    /// Sorting on insert (`TypeIndexStore::push_to_type`) was measured and
+    /// **rejected**, 2026-08-15: it costs nothing on ingest (below the timer
+    /// floor at 200k one-shot and 20k incremental creates), but it breaks a
+    /// different contract. `DirGraph::appended_tail` defines a bulk append's
+    /// delta as the bucket's *tail*, and both post-append index folds
+    /// (`fold_appended_ids_into_index`, `fold_appended_into_user_indexes`) read
+    /// it; an ordered insert puts a slot-reusing create in the middle, so the
+    /// folds index the wrong nodes. `maintain::incremental_index_tests::
+    /// deleting_then_recreating_an_id_repoints_the_index` fails outright on it
+    /// — the recreated id ends up unindexed and a spurious duplicate-id warning
+    /// fires. Insert order is load-bearing beyond this method.
+    ///
+    /// The shape that closes it without touching insert order: carry an
+    /// `ascending` flag on `TypeBucket`, maintained O(1) in `push` (one
+    /// comparison against the last member) and cleared by `to_mut`, the one
+    /// unconstrained mutator; surface it through `TypeNodesRef`; fall back to
+    /// the linear `contains` here when it is false.
     pub fn binary_search_idx(&self, idx: NodeIndex) -> bool {
         match self {
             TypeNodesRef::Overlay(s) => s.binary_search(&idx).is_ok(),

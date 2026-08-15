@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+use super::column_filter::{self, ColumnFilter};
 use super::pattern::{
     AnchorSide, ConnTypeFilter, EdgeDirection, EdgePattern, MatchBinding, NodePattern, PathHop,
     Pattern, PatternElement, PatternMatch, PropertyMatcher,
@@ -54,6 +55,10 @@ struct TypeScanMemo<'a> {
     type_str: &'a str,
     store: Option<&'a std::sync::Arc<ColumnStore>>,
     props: Vec<ResolvedMatcher<'a>>,
+    /// The same matchers compiled to the columns they read, when every one of
+    /// them resolves through exactly one column of this type's store. `None`
+    /// means the row route answers — see [`ColumnFilter`] for the decline list.
+    filter: Option<ColumnFilter<'a>>,
 }
 
 /// Whether adding `candidate` would reuse a relationship already consumed by
@@ -212,7 +217,7 @@ fn str_starts_with(s: &str, prefix: &str) -> bool {
 /// user properties are answered before this by the byte fast path in
 /// [`PatternExecutor::prop_matches`], which calls the same function through
 /// `str_prop_eq`, so the two routes cannot disagree.
-fn str_field_test(matcher: &PropertyMatcher) -> Option<impl Fn(&str) -> bool + '_> {
+pub(super) fn str_field_test(matcher: &PropertyMatcher) -> Option<impl Fn(&str) -> bool + '_> {
     if !matches!(
         matcher,
         PropertyMatcher::Equals(Value::String(_))
@@ -229,6 +234,85 @@ fn str_field_test(matcher: &PropertyMatcher) -> Option<impl Fn(&str) -> bool + '
         PropertyMatcher::Contains(needle) => s.contains(needle.as_str()),
         _ => unreachable!("guarded by the matches! above"),
     })
+}
+
+/// Whether `value` satisfies `matcher`, given the query's parameters.
+///
+/// Cross-type numeric comparison throughout (Int64 <-> UniqueId <-> Float64).
+/// Free rather than a `PatternExecutor` method because the column-major scan
+/// filter needs it and holds no executor; `PatternExecutor::value_matches` is
+/// this, with `self.params` supplied.
+pub(super) fn value_matches(
+    params: &HashMap<String, Value>,
+    value: &Value,
+    matcher: &PropertyMatcher,
+) -> bool {
+    match matcher {
+        PropertyMatcher::Equals(expected) => values_equal(value, expected),
+        PropertyMatcher::EqualsParam(name) => params
+            .get(name.as_str())
+            .is_some_and(|expected| values_equal(value, expected)),
+        // EqualsVar / EqualsNodeProp should be resolved to Equals before
+        // pattern matching. If they reach here unresolved, no match is possible.
+        PropertyMatcher::EqualsVar(_) | PropertyMatcher::EqualsNodeProp { .. } => false,
+        // One coercion-normalized probe against the set the planner built
+        // with the pattern — not a scan of the list per candidate node.
+        PropertyMatcher::In(values) => values.matches(value),
+        PropertyMatcher::GreaterThan(threshold) => {
+            compare_values(value, threshold) == Some(std::cmp::Ordering::Greater)
+        }
+        PropertyMatcher::GreaterOrEqual(threshold) => {
+            matches!(
+                compare_values(value, threshold),
+                Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+            )
+        }
+        PropertyMatcher::LessThan(threshold) => {
+            compare_values(value, threshold) == Some(std::cmp::Ordering::Less)
+        }
+        PropertyMatcher::LessOrEqual(threshold) => {
+            matches!(
+                compare_values(value, threshold),
+                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+            )
+        }
+        PropertyMatcher::Range {
+            lower,
+            lower_inclusive,
+            upper,
+            upper_inclusive,
+        } => {
+            let above_lower = if *lower_inclusive {
+                matches!(
+                    compare_values(value, lower),
+                    Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                )
+            } else {
+                compare_values(value, lower) == Some(std::cmp::Ordering::Greater)
+            };
+            let below_upper = if *upper_inclusive {
+                matches!(
+                    compare_values(value, upper),
+                    Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                )
+            } else {
+                compare_values(value, upper) == Some(std::cmp::Ordering::Less)
+            };
+            above_lower && below_upper
+        }
+        PropertyMatcher::StartsWith(prefix) => match value {
+            Value::String(s) => str_starts_with(s, prefix),
+            _ => false,
+        },
+        PropertyMatcher::Contains(needle) => match value {
+            Value::String(s) => s.contains(needle.as_str()),
+            _ => false,
+        },
+        PropertyMatcher::EndsWith(suffix) => match value {
+            Value::String(s) => str_ends_with(s, suffix),
+            _ => false,
+        },
+    }
 }
 
 // ============================================================================
@@ -1089,7 +1173,22 @@ impl<'a> PatternExecutor<'a> {
             let Some(memo) = memo.as_ref() else {
                 continue;
             };
-            if self.node_matches_resolved(self.node_view_of(data, memo.store), memo) {
+            // Column-major where the type's store can answer every matcher on
+            // its own (`ColumnFilter`), row-major otherwise — and row-major for
+            // the individual node a compiled filter hands back, which is how a
+            // node carrying an inline identity value stays correct in a graph
+            // whose other nodes are columnar.
+            let matched = memo
+                .filter
+                .as_ref()
+                .and_then(|filter| {
+                    let row = data.properties.columnar_row_id()?;
+                    filter.matches(data, row, self.params)
+                })
+                .unwrap_or_else(|| {
+                    self.node_matches_resolved(self.node_view_of(data, memo.store), memo)
+                });
+            if matched {
                 out.push(idx);
             }
         }
@@ -1599,94 +1698,42 @@ impl<'a> PatternExecutor<'a> {
         props: &'m HashMap<String, PropertyMatcher>,
     ) -> Option<TypeScanMemo<'m>> {
         let type_str = self.graph.interner.try_resolve(type_key)?;
+        let store = self.graph.graph.column_store(type_key);
+        let resolved: Vec<ResolvedMatcher<'m>> = props
+            .iter()
+            .map(|(key, matcher)| {
+                let field = self.graph.resolve_alias(type_str, key);
+                ResolvedMatcher {
+                    field,
+                    key: InternedKey::from_str(field),
+                    matcher,
+                }
+            })
+            .collect();
+        let filter = column_filter::column_filter_enabled()
+            .then(|| {
+                ColumnFilter::compile(store, resolved.iter().map(|r| (r.field, r.key, r.matcher)))
+            })
+            .flatten();
         Some(TypeScanMemo {
             type_key,
             type_str,
-            store: self.graph.graph.column_store(type_key),
-            props: props
-                .iter()
-                .map(|(key, matcher)| {
-                    let field = self.graph.resolve_alias(type_str, key);
-                    ResolvedMatcher {
-                        field,
-                        key: InternedKey::from_str(field),
-                        matcher,
-                    }
-                })
-                .collect(),
+            store,
+            props: resolved,
+            filter,
         })
     }
 
     /// Check if a value matches a property matcher.
-    /// Uses cross-type numeric comparison (Int64 <-> UniqueId <-> Float64).
+    ///
+    /// Delegates to the free [`value_matches`] so the column-major scan filter
+    /// ([`super::column_filter`]), which has no `PatternExecutor` to call a
+    /// method on, evaluates the *same* body. A scan carrying its own copy of
+    /// these comparisons is a scan that can disagree with the row route about
+    /// what a query means.
+    #[inline]
     fn value_matches(&self, value: &Value, matcher: &PropertyMatcher) -> bool {
-        match matcher {
-            PropertyMatcher::Equals(expected) => values_equal(value, expected),
-            PropertyMatcher::EqualsParam(name) => self
-                .params
-                .get(name.as_str())
-                .is_some_and(|expected| values_equal(value, expected)),
-            // EqualsVar / EqualsNodeProp should be resolved to Equals before
-            // pattern matching. If they reach here unresolved, no match is possible.
-            PropertyMatcher::EqualsVar(_) | PropertyMatcher::EqualsNodeProp { .. } => false,
-            // One coercion-normalized probe against the set the planner built
-            // with the pattern — not a scan of the list per candidate node.
-            PropertyMatcher::In(values) => values.matches(value),
-            PropertyMatcher::GreaterThan(threshold) => {
-                compare_values(value, threshold) == Some(std::cmp::Ordering::Greater)
-            }
-            PropertyMatcher::GreaterOrEqual(threshold) => {
-                matches!(
-                    compare_values(value, threshold),
-                    Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-                )
-            }
-            PropertyMatcher::LessThan(threshold) => {
-                compare_values(value, threshold) == Some(std::cmp::Ordering::Less)
-            }
-            PropertyMatcher::LessOrEqual(threshold) => {
-                matches!(
-                    compare_values(value, threshold),
-                    Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-                )
-            }
-            PropertyMatcher::Range {
-                lower,
-                lower_inclusive,
-                upper,
-                upper_inclusive,
-            } => {
-                let above_lower = if *lower_inclusive {
-                    matches!(
-                        compare_values(value, lower),
-                        Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-                    )
-                } else {
-                    compare_values(value, lower) == Some(std::cmp::Ordering::Greater)
-                };
-                let below_upper = if *upper_inclusive {
-                    matches!(
-                        compare_values(value, upper),
-                        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-                    )
-                } else {
-                    compare_values(value, upper) == Some(std::cmp::Ordering::Less)
-                };
-                above_lower && below_upper
-            }
-            PropertyMatcher::StartsWith(prefix) => match value {
-                Value::String(s) => str_starts_with(s, prefix),
-                _ => false,
-            },
-            PropertyMatcher::Contains(needle) => match value {
-                Value::String(s) => s.contains(needle.as_str()),
-                _ => false,
-            },
-            PropertyMatcher::EndsWith(suffix) => match value {
-                Value::String(s) => str_ends_with(s, suffix),
-                _ => false,
-            },
-        }
+        value_matches(self.params, value, matcher)
     }
 
     /// Expand from a source node via an edge pattern to nodes matching node pattern

@@ -3,6 +3,7 @@
 use crate::datatypes::values::Value;
 use crate::graph::constraints::ConstraintKind;
 use crate::graph::schema::{DirGraph, InternedKey};
+use crate::graph::storage::column_store::TypedColumn;
 use crate::graph::storage::GraphRead;
 use petgraph::Direction;
 use rustc_hash::FxHashMap;
@@ -795,6 +796,83 @@ impl PropAccum {
             }
         }
     }
+
+    /// Whether this accumulator still needs the *value* of a row, or only
+    /// whether the row holds one.
+    ///
+    /// Once the distinct set is capped and the first non-null value has named
+    /// the property's type, the only thing left to learn from a row is that it
+    /// is non-null — which every column shape can answer from its null byte,
+    /// without building the `Value` the row loop had to build. On a
+    /// high-cardinality string column that is the difference between one heap
+    /// allocation per row and none.
+    #[inline]
+    fn needs_value(&self) -> bool {
+        self.value_set.len() < self.value_cap || self.first_type.is_none()
+    }
+
+    /// Fold one whole column into this accumulator, in `rows` order.
+    ///
+    /// The column-major half of the scan: `rows` is visited once per property
+    /// instead of every property being visited once per row, so the per-`(row,
+    /// property)` map probe of the row loop is hoisted to one probe per
+    /// property and the column's dispatch is resolved once for the whole walk.
+    /// Visit order within a property is `rows` order — the same order the row
+    /// loop saw them in — so `first_type` (the only order-sensitive field here)
+    /// is unchanged.
+    ///
+    /// The arms differ only in how cheaply they can answer "non-null":
+    /// `Mixed` lends its `Value`, `Float64` must be *read* because a NaN counts
+    /// as null here ([`is_null_value`]) while its null byte says otherwise, and
+    /// every other shape can answer from the null byte alone once the
+    /// accumulator stops needing values.
+    ///
+    /// Returns whether any row yielded a value — which is exactly whether the
+    /// row loop's `row_properties` would have emitted this key for any node in
+    /// the scan, and therefore whether the property belongs in the output at
+    /// all. It is **not** `non_null > 0`: an all-NaN column yields values that
+    /// count as null, and the row loop reported it.
+    fn add_column(&mut self, col: &TypedColumn, rows: &[u32]) -> bool {
+        let mut yielded = false;
+        match col {
+            // A `Mixed` column already holds `Value`s: borrow rather than
+            // clone, which matters because this is where a list property lands
+            // and `get` would copy the whole list per row.
+            TypedColumn::Mixed { .. } => {
+                for &row in rows {
+                    if let Some(value) = col.get_ref(row) {
+                        yielded = true;
+                        self.add(value);
+                    }
+                }
+            }
+            // NaN is null to `is_null_value` but not to the null byte, so this
+            // column can never take the presence-only shortcut. Reading it
+            // allocates nothing.
+            TypedColumn::Float64 { .. } => {
+                for &row in rows {
+                    if let Some(value) = col.get(row) {
+                        yielded = true;
+                        self.add(&value);
+                    }
+                }
+            }
+            _ => {
+                for &row in rows {
+                    if self.needs_value() {
+                        if let Some(value) = col.get(row) {
+                            yielded = true;
+                            self.add(&value);
+                        }
+                    } else if col.is_present(row) {
+                        yielded = true;
+                        self.non_null += 1;
+                    }
+                }
+            }
+        }
+        yielded
+    }
 }
 
 /// Accumulator keys for the two synthetic built-in fields.
@@ -807,6 +885,59 @@ fn builtin_accum_keys() -> (InternedKey, InternedKey) {
     (InternedKey::from_str("id"), InternedKey::from_str("title"))
 }
 
+// Test hook: force `accumulate_property_values` down its row-major route.
+//
+// The column-major path has to produce byte-identical stats, and the only way
+// to assert that is to run the *same* fixture both ways in one process. This
+// is the decline switch the equivalence test flips — not a configuration knob;
+// it does not exist outside `cfg(test)`.
+#[cfg(test)]
+thread_local! {
+    static FORCE_ROW_MAJOR_STATS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with the column-major stats path declined.
+#[cfg(test)]
+pub(crate) fn with_row_major_stats<R>(f: impl FnOnce() -> R) -> R {
+    FORCE_ROW_MAJOR_STATS.set(true);
+    let out = f();
+    FORCE_ROW_MAJOR_STATS.set(false);
+    out
+}
+
+/// The rows `scan_indices` occupy in their type's column store, or `None` when
+/// the store cannot answer the scan column-major.
+///
+/// Three things disqualify a store, all of them because the *row* read resolves
+/// through more than its dense columns and a column walk would silently drop
+/// what the extra sources contribute (`ColumnStore::row_properties`): an mmap
+/// base (mapped mode), an overflow bag (built by the disk loader), and any node
+/// in the scan whose properties are still inline rather than columnar. A
+/// tombstoned row yields no properties at all through the row route, so it is
+/// dropped here rather than declining the whole scan.
+fn columnar_scan_rows(
+    graph: &DirGraph,
+    store: &crate::graph::storage::ColumnStore,
+    scan_indices: &[petgraph::graph::NodeIndex],
+) -> Option<Vec<u32>> {
+    #[cfg(test)]
+    if FORCE_ROW_MAJOR_STATS.get() {
+        return None;
+    }
+    if store.has_mmap_base() || store.has_overflow() {
+        return None;
+    }
+    let mut rows = Vec::with_capacity(scan_indices.len());
+    for &idx in scan_indices {
+        let node = graph.node_view(idx)?;
+        let row = node.data().properties.columnar_row_id()?;
+        if !store.is_tombstoned(row) {
+            rows.push(row);
+        }
+    }
+    Some(rows)
+}
+
 /// Single pass over `scan_indices`, folding id / title / every stored property
 /// into `accum`.
 ///
@@ -816,6 +947,14 @@ fn builtin_accum_keys() -> (InternedKey, InternedKey) {
 /// type). Names are resolved once, after the scan, in
 /// [`compute_property_stats`].
 ///
+/// **Column-major where the store allows it** ([`columnar_scan_rows`]): the
+/// stored properties are folded one whole column at a time
+/// ([`PropAccum::add_column`]), which turns the row loop's per-`(row, property)`
+/// accumulator probe into one probe per property and lets a capped property
+/// answer from its null byte instead of materialising a `Value` per row. The
+/// identity fields still come from the node walk — they resolve through
+/// `NodeView`, which prefers an inline value over the store's column.
+///
 /// Reads through [`NodeView`](crate::graph::storage::NodeView): the previous
 /// `NodeData::property_iter` route yielded **nothing** for columnar storage, so
 /// on a saved graph this pass contributed no values at all and the stats
@@ -824,11 +963,19 @@ fn builtin_accum_keys() -> (InternedKey, InternedKey) {
 /// `property_pairs_named`, minus the per-key `String`.
 fn accumulate_property_values(
     graph: &DirGraph,
+    node_type: &str,
     scan_indices: &[petgraph::graph::NodeIndex],
     value_cap: usize,
     accum: &mut FxHashMap<InternedKey, PropAccum>,
 ) {
     let (id_key, title_key) = builtin_accum_keys();
+    let store = graph.graph.column_store(InternedKey::from_str(node_type));
+    // Resolved before the walk, never mid-walk: a scan that discovered an
+    // inline node halfway through would have to re-visit the rows it had
+    // already folded column-major.
+    let column_major = store
+        .and_then(|store| columnar_scan_rows(graph, store, scan_indices).map(|rows| (store, rows)));
+
     for &idx in scan_indices {
         let Some(node) = graph.node_view(idx) else {
             continue;
@@ -841,11 +988,36 @@ fn accumulate_property_values(
             .entry(title_key)
             .or_insert_with(|| PropAccum::new(value_cap))
             .add(&node.title());
-        for (key, value) in node.property_pairs() {
-            accum
-                .entry(key)
-                .or_insert_with(|| PropAccum::new(value_cap))
-                .add(&value);
+        if column_major.is_none() {
+            for (key, value) in node.property_pairs() {
+                accum
+                    .entry(key)
+                    .or_insert_with(|| PropAccum::new(value_cap))
+                    .add(&value);
+            }
+        }
+    }
+
+    let Some((store, rows)) = column_major else {
+        return;
+    };
+    for (slot, key) in store.schema().iter() {
+        let Some(col) = store.column(slot as usize) else {
+            continue;
+        };
+        // A key no row in the scan carries must stay *out* of the map: the row
+        // loop only ever inserted a key it had a value for, and an empty entry
+        // would add a property row to `describe`'s output.
+        match accum.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut existing) => {
+                existing.get_mut().add_column(col, &rows);
+            }
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                let mut fresh = PropAccum::new(value_cap);
+                if fresh.add_column(col, &rows) {
+                    vacant.insert(fresh);
+                }
+            }
         }
     }
 }
@@ -937,7 +1109,13 @@ pub fn compute_property_stats(
         }
     }
 
-    accumulate_property_values(graph, &scan_indices, value_cap, &mut interned_accum);
+    accumulate_property_values(
+        graph,
+        node_type,
+        &scan_indices,
+        value_cap,
+        &mut interned_accum,
+    );
     let mut accum = resolve_accum_names(graph, interned_accum);
 
     // When sampling, scale non_null counts to the full population
@@ -1204,4 +1382,299 @@ pub fn compute_sample<'a>(
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod column_major_stats_tests {
+    use super::*;
+    use crate::datatypes::DataFrame;
+    use crate::graph::dir_graph::DirGraph;
+
+    /// A fixture whose columns cover every arm `PropAccum::add_column`
+    /// distinguishes, plus the shapes the row loop resolves differently:
+    /// low- and high-cardinality strings (capped vs enumerated distinct sets),
+    /// ints, floats **including a NaN** (null to `is_null_value`, non-null to
+    /// the null byte), booleans, a sparse column (nulls in the middle), a
+    /// `Mixed` column holding lists, and a property literally named `id`.
+    fn wide_fixture(n: i64) -> DirGraph {
+        let mut graph = DirGraph::new();
+        let columns: Vec<String> = [
+            "key",
+            "label",
+            "bucket",
+            "unique_text",
+            "count",
+            "ratio",
+            "flag",
+            "sparse",
+            "vec",
+            "id",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let rows: Vec<Vec<Value>> = (0..n)
+            .map(|i| {
+                vec![
+                    Value::Int64(i),
+                    Value::String(format!("Item_{i}")),
+                    Value::String(format!("bucket_{}", i % 3)),
+                    Value::String(format!("text-{i}-{}", i * 7)),
+                    Value::Int64(i * 10),
+                    if i % 11 == 0 {
+                        Value::Float64(f64::NAN)
+                    } else {
+                        Value::Float64(i as f64 / 3.0)
+                    },
+                    Value::Boolean(i % 2 == 0),
+                    if i % 4 == 0 {
+                        Value::Null
+                    } else {
+                        Value::String(format!("s{i}"))
+                    },
+                    Value::List(vec![Value::Int64(i), Value::Int64(i + 1)]),
+                    Value::String(format!("shadow-{i}")),
+                ]
+            })
+            .collect();
+        let df = DataFrame::from_cypher_rows(columns, rows).unwrap();
+        crate::graph::mutation::maintain::add_nodes(
+            &mut graph,
+            df,
+            "Item".to_string(),
+            "key".to_string(),
+            Some("label".to_string()),
+            None,
+        )
+        .unwrap();
+        graph.enable_columnar();
+        graph
+    }
+
+    /// The Track-H shape: many wide, high-cardinality string properties, the
+    /// case whose per-row `String` materialisation the column-major path is
+    /// meant to remove. Shared with the release A/B probe.
+    pub(super) fn wide_probe_fixture(n: i64) -> DirGraph {
+        let mut graph = DirGraph::new();
+        let names = [
+            "key",
+            "label",
+            "citation",
+            "summary",
+            "section",
+            "court",
+            "docket",
+            "para",
+            "keywords",
+            "source_url",
+            "decided",
+            "pages",
+        ];
+        let columns: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        let rows: Vec<Vec<Value>> = (0..n)
+            .map(|i| {
+                vec![
+                    Value::Int64(i),
+                    Value::String(format!("Decision {i}")),
+                    Value::String(format!("HR-{}-{i}-A", 1900 + (i % 120))),
+                    Value::String(format!(
+                        "A summary of decision {i} running to a realistic width for a \
+                         law-shaped corpus, with clause {} and reference {}.",
+                        i % 37,
+                        i * 13
+                    )),
+                    Value::String(format!("section_{}", i % 24)),
+                    Value::String(format!("court_{}", i % 9)),
+                    Value::String(format!("{}-{:06}", i % 4, i)),
+                    Value::String(format!("paragraph {} of {}", i % 60, 60)),
+                    Value::String(format!("kw_{},kw_{},kw_{}", i % 11, i % 17, i % 23)),
+                    Value::String(format!("https://example.invalid/decisions/{i}")),
+                    Value::Int64(1900 + (i % 120)),
+                    Value::Int64(i % 400),
+                ]
+            })
+            .collect();
+        let df = DataFrame::from_cypher_rows(columns, rows).unwrap();
+        crate::graph::mutation::maintain::add_nodes(
+            &mut graph,
+            df,
+            "Item".to_string(),
+            "key".to_string(),
+            Some("label".to_string()),
+            None,
+        )
+        .unwrap();
+        graph.enable_columnar();
+        graph
+    }
+
+    /// Everything the two routes must agree on, in a comparable form.
+    /// `sample` is deliberately excluded: it is documented as "one real value,
+    /// not the same value every time" and is drawn from a `HashSet` whose
+    /// iteration order is randomised per process.
+    fn comparable(stats: &[PropertyStatInfo]) -> Vec<(String, String, usize, usize, bool, bool)> {
+        stats
+            .iter()
+            .map(|s| {
+                (
+                    s.property_name.clone(),
+                    s.type_string.clone(),
+                    s.non_null,
+                    s.unique,
+                    s.approx,
+                    s.values.is_some(),
+                )
+            })
+            .collect()
+    }
+
+    fn both_routes(graph: &DirGraph, max_values: usize, sample: Option<usize>) {
+        let column_major = compute_property_stats(graph, "Item", max_values, sample).unwrap();
+        let row_major =
+            with_row_major_stats(|| compute_property_stats(graph, "Item", max_values, sample))
+                .unwrap();
+        assert_eq!(
+            comparable(&column_major),
+            comparable(&row_major),
+            "column-major stats diverged from the row loop (max_values={max_values}, \
+             sample={sample:?})"
+        );
+        // Enumerated value sets are a stronger claim than the counts: where a
+        // property is under the cap, the two routes must report the *same
+        // values*, sorted identically.
+        for (col, row) in column_major.iter().zip(row_major.iter()) {
+            assert_eq!(
+                col.values, row.values,
+                "enumerated values diverged for {}",
+                col.property_name
+            );
+        }
+    }
+
+    #[test]
+    fn column_major_stats_match_the_row_loop() {
+        let graph = wide_fixture(64);
+        // 16 is `describe`'s own threshold: `bucket` stays under it (3 distinct)
+        // while `unique_text` blows past it, so one call exercises both the
+        // enumerated and the capped-and-presence-counted paths.
+        both_routes(&graph, 16, None);
+        // max_values = 0 keeps every distinct set uncapped — the arm where the
+        // presence shortcut must never engage.
+        both_routes(&graph, 0, None);
+        both_routes(&graph, 1024, None);
+        both_routes(&graph, 16, Some(8));
+    }
+
+    #[test]
+    fn column_major_stats_match_the_row_loop_after_writes() {
+        let mut graph = wide_fixture(48);
+        let params = std::collections::HashMap::new();
+        let opts = crate::graph::session::ExecuteOptions::eager(&params);
+        // A differing-length string `SET` lands in the `Str` column's
+        // relocation overlay rather than its byte arena — the one shape whose
+        // rows are not a straight slice walk.
+        crate::graph::session::execute_mut(
+            &mut graph,
+            "MATCH (n:Item) WHERE n.count < 100 SET n.bucket = 'relocated-to-a-much-longer-value'",
+            &opts,
+        )
+        .unwrap();
+        // A key the store's schema never saw grows a column back-filled with
+        // nulls, so most rows are absent for it.
+        crate::graph::session::execute_mut(
+            &mut graph,
+            "MATCH (n:Item) WHERE n.count < 30 SET n.late = 'added'",
+            &opts,
+        )
+        .unwrap();
+        both_routes(&graph, 16, None);
+
+        // Deleting rows tombstones them; a tombstoned row yields no properties
+        // through either route.
+        crate::graph::session::execute_mut(
+            &mut graph,
+            "MATCH (n:Item) WHERE n.count > 400 DELETE n",
+            &opts,
+        )
+        .unwrap();
+        both_routes(&graph, 16, None);
+        both_routes(&graph, 0, None);
+    }
+
+    /// The equivalence test is only worth its runtime if the two routes can
+    /// actually disagree — i.e. if the fixture really takes the column-major
+    /// path. Proven by the one observable difference between them: the row
+    /// loop reads through `NodeView::property_pairs`, the column path does not.
+    #[test]
+    fn the_fixture_takes_the_column_major_path() {
+        let graph = wide_fixture(8);
+        let store = graph
+            .graph
+            .column_store(InternedKey::from_str("Item"))
+            .expect("fixture must be columnar");
+        let indices: Vec<_> = graph.type_indices.get("Item").unwrap().to_vec();
+        assert_eq!(
+            columnar_scan_rows(&graph, store, &indices).map(|rows| rows.len()),
+            Some(8),
+            "the fixture must qualify for the column-major path, or the \
+             equivalence test compares the row loop with itself"
+        );
+        assert!(
+            with_row_major_stats(|| columnar_scan_rows(&graph, store, &indices)).is_none(),
+            "the decline hook must actually decline"
+        );
+    }
+}
+
+/// In-process A/B probe for the column-major stats path.
+///
+/// Both routes run against the same fixture in the same binary, so the
+/// comparison is immune to the build-to-build variance a two-wheel A/B carries
+/// — the only difference between the two timings is
+/// [`columnar_scan_rows`]'s answer. Release profile only; a debug reading is
+/// invalid (project performance protocol) and the probe says so rather than
+/// producing a number nobody should quote.
+///
+/// `cargo test -p kglite --release --lib -- --ignored --nocapture stats_column_major_ab`
+#[cfg(test)]
+mod column_major_stats_probe {
+    use super::column_major_stats_tests::wide_probe_fixture;
+    use super::{compute_property_stats, with_row_major_stats};
+    use std::time::Instant;
+
+    fn min_of(rounds: usize, mut f: impl FnMut()) -> f64 {
+        let mut best = f64::MAX;
+        for _ in 0..rounds {
+            let start = Instant::now();
+            f();
+            best = best.min(start.elapsed().as_secs_f64() * 1e3);
+        }
+        best
+    }
+
+    #[test]
+    #[ignore = "perf probe — release profile only"]
+    fn stats_column_major_ab() {
+        if cfg!(debug_assertions) {
+            panic!("run this probe with --release; a debug-profile number is invalid");
+        }
+        for nodes in [5_000i64, 50_000] {
+            let graph = wide_probe_fixture(nodes);
+            // Warm the caches both ways before either is timed.
+            let _ = compute_property_stats(&graph, "Item", 16, None).unwrap();
+            let _ = with_row_major_stats(|| compute_property_stats(&graph, "Item", 16, None));
+            let rounds = if nodes <= 5_000 { 40 } else { 10 };
+            let row = min_of(rounds, || {
+                with_row_major_stats(|| compute_property_stats(&graph, "Item", 16, None)).unwrap();
+            });
+            let col = min_of(rounds, || {
+                compute_property_stats(&graph, "Item", 16, None).unwrap();
+            });
+            println!(
+                "compute_property_stats  n={nodes:>6}  row-major {row:8.3} ms  \
+                 column-major {col:8.3} ms  speedup {:.2}x",
+                row / col
+            );
+        }
+    }
 }

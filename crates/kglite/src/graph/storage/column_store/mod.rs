@@ -548,6 +548,19 @@ impl ColumnStore {
         self.mmap_store.is_some()
     }
 
+    /// Whether any row can resolve a property through the overflow bag.
+    ///
+    /// The companion disqualifier to [`Self::has_mmap_base`] for readers that
+    /// walk the dense columns directly: `get`/`row_properties` fall through to
+    /// the bag when a dense column has nothing for a row, so a column-major
+    /// walk of a store carrying one would silently drop those values. Only the
+    /// disk loader builds a bag; every in-memory and packed-`.kgl` store
+    /// answers `false`.
+    #[inline]
+    pub(crate) fn has_overflow(&self) -> bool {
+        self.overflow_offsets.is_some()
+    }
+
     /// Convert an mmap-backed store into a fully owned store before rows are
     /// appended. Append overlays start at row zero, so keeping the mmap base
     /// alongside them would misalign id/title/property columns and make a

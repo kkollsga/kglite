@@ -10,6 +10,7 @@
 //! The three files deliberately mirror the lifecycle of a pattern: parsed,
 //! typed, then matched.
 
+pub(crate) mod column_filter;
 pub mod matcher;
 pub mod parser;
 pub mod pattern;

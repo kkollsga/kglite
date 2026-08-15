@@ -103,6 +103,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Filtered scans and `describe` read the column, not the row.** Both were
+  asking a columnar store the same question once per row and re-deriving the
+  machinery each time; both now resolve it once and walk the column.
+  - **`describe` / `describe_types` property statistics: 4.0-4.3x faster**
+    (release, in-process A/B over the same fixture, two agreeing runs; 5k
+    nodes x 12 wide string properties 1.71 -> 0.43 ms, 50k 17.9 -> 4.2 ms).
+    The row loop materialised every property of every node as an owned
+    `Value` to increment a counter and probed the accumulator map once per
+    `(row, property)`; the column-major pass probes once per *property*, and a
+    property whose distinct set is already capped is counted from its null
+    byte without building a `Value` at all. Output is unchanged — pinned by an
+    equivalence test that runs the same fixture through both routes and
+    compares counts, distinct sets and enumerated values, across sampling,
+    capped and uncapped thresholds, relocated strings, a grown schema and
+    tombstoned rows. Declines to the row loop where a row resolves through
+    more than its dense columns (mapped-mode mmap base, the disk loader's
+    overflow bag, a node whose properties are still inline).
+  - **Property-filtered `MATCH` scans: up to 1.44x.** Two agreeing release
+    runs at 50k rows, against an unchanged-path control: suffix filter on a
+    type's title 1.43-1.44x, on a stored string property 1.37-1.40x,
+    `CONTAINS` 1.16-1.28x, numeric range 1.29-1.32x, `>` 1.15-1.16x, float `>`
+    1.32-1.34x, boolean equality 1.11-1.12x, string equality flat (its byte
+    fast arm was already the tuned path). The per-row work removed is the
+    field-name comparisons, the schema hash probe that resolved the property's
+    column slot, and the store's bounds and tombstone re-checks — all
+    functions of the node's *type*, which a scan already resolves once. Part
+    of the numeric gain (6-13% on the four numeric cells) is the column's
+    heap/mmap dispatch being taken once per scan rather than three times per
+    row, the hoist string columns already had. Predicate semantics are the
+    row route's own two functions, called from the new path rather than
+    reimplemented, and a differential sweep of 33 queries x every column shape
+    (including relocated strings, tombstones, delete-then-create, a `Mixed`
+    list column, NaN floats, sparse columns and row-storage graphs) asserts
+    the two routes agree row for row.
+
 - **BREAKING (JSON output shape) — nodes, relationships, paths, dates, points
   and durations are real JSON now, not Rust `Debug` strings.** The shared
   outbound converter `kglite_value_to_json` had a catch-all arm that rendered
