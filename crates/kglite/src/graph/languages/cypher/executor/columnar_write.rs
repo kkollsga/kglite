@@ -9,7 +9,7 @@
 //! resurrected by the next clause's handle sweep).
 
 use crate::datatypes::values::Value;
-use crate::graph::schema::DirGraph;
+use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::undo::{ColumnarPreImages, ColumnarWrite};
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::NodeIndex;
@@ -24,9 +24,31 @@ use std::sync::Arc;
 pub(super) struct ColumnMasterWrite<'a> {
     pub(super) node_idx: NodeIndex,
     pub(super) node_type: &'a str,
+    /// `node_type`, interned. Resolved by the caller because it is a fact about
+    /// the *statement*, not the row: hashing the type name per written row is
+    /// what this field removes from a 100k-row `SET`.
+    pub(super) type_key: InternedKey,
     pub(super) property: &'a str,
+    /// `property`, interned — same reasoning as `type_key`. Interning here also
+    /// *registers* the name, which is what lets `save()` resolve the key back
+    /// to a string; the caller must therefore hand over a key it obtained from
+    /// the graph's `StringInterner`, never a bare `InternedKey::from_str`.
+    pub(super) key: InternedKey,
     pub(super) value: &'a Value,
     pub(super) row_id: Option<u32>,
+}
+
+/// Whether a master-store write owes its caller the cell's prior value.
+///
+/// `Skip` is not an optimisation of the *journal* — the undo pre-image is taken
+/// either way — it is the read the caller does not consume. `SET` discards it
+/// (its index maintenance reads the old value through `node_view`, before the
+/// write); `REMOVE` returns it. Reading it regardless cost a `Value` clone per
+/// written row, which is an allocation per row for a string property.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PriorCell {
+    Skip,
+    Read,
 }
 
 /// Write one property through the in-memory columnar master store, reporting
@@ -88,16 +110,46 @@ pub(super) fn set_via_column_master(graph: &mut DirGraph, write: ColumnMasterWri
     if graph.graph.is_disk() || write.property == "title" || write.property == "name" {
         return false;
     }
-    let key = graph.interner.get_or_intern(write.property);
+    // The keys are the caller's, resolved once per statement instead of per
+    // row — so the one thing this path can no longer see for itself is whether
+    // they name what is being written. Both are pure functions of the name
+    // (FNV-1a), so the check is exact.
+    debug_assert_eq!(
+        write.key,
+        InternedKey::from_str(write.property),
+        "the caller's interned key must name the property being written"
+    );
+    debug_assert_eq!(
+        write.type_key,
+        InternedKey::from_str(write.node_type),
+        "the caller's interned key must name the node type being written"
+    );
     write_column_master(
         graph,
-        write.node_type,
-        write.node_idx,
-        row_id,
-        key,
-        write.value,
+        MasterCell {
+            node_type: write.node_type,
+            type_key: write.type_key,
+            node_idx: write.node_idx,
+            row_id,
+            key: write.key,
+            value: write.value,
+        },
+        PriorCell::Skip,
     )
     .is_some()
+}
+
+/// One resolved cell of a master column store — the addressing
+/// [`write_column_master`] needs, with every name already interned.
+pub(super) struct MasterCell<'a> {
+    /// Only the cold path (a property the type has no column for yet) reads
+    /// this, to find the declared column type in `node_type_metadata`.
+    pub(super) node_type: &'a str,
+    pub(super) type_key: InternedKey,
+    pub(super) node_idx: NodeIndex,
+    pub(super) row_id: u32,
+    pub(super) key: InternedKey,
+    pub(super) value: &'a Value,
 }
 
 /// Write one cell of a type's master column store, with the journalling both
@@ -111,21 +163,38 @@ pub(super) fn set_via_column_master(graph: &mut DirGraph, write: ColumnMasterWri
 /// 1. read the cell's prior value (and, if the write introduces a new
 ///    property, the pre-growth schema) into the undo journal — after step 3
 ///    the prior value no longer exists anywhere;
-/// 2. read the prior cell value again for the caller's result and for index
-///    maintenance — the journal's copy is consumed by the journal;
+/// 2. read the prior cell value again for the caller that asked for one — the
+///    journal's copy is consumed by the journal;
 /// 3. `Arc::make_mut` and write — **in place**, because nothing else holds the
 ///    master, which is what makes a one-cell write cost O(1);
 /// 4. note the one mutated node for the WAL, since this bypasses the recorded
 ///    `GraphWrite` path.
+///
+/// # What is resolved once per statement, and what per row
+///
+/// The store handle, the type key, the property key and the key's column slot
+/// are all facts about the `(type, property)` pair. The row loop used to
+/// re-derive all four — a type-name hash, a `column_stores` probe for the
+/// declared-type check, a second probe for the write, and two `TypeSchema`
+/// lookups — so a 100k-row `SET` paid them 100k times to write one column.
+/// What is left per row is the journal capture, one `column_stores` probe, one
+/// slot lookup answered through a *shared* borrow, and the cell write. The two
+/// `Arc::make_mut` uniqueness checks (store, then column) stay: they are the
+/// price of the copy-on-write sharing a fork and a held view rely on, and
+/// nothing safe removes them.
 pub(super) fn write_column_master(
     graph: &mut DirGraph,
-    node_type: &str,
-    node_idx: NodeIndex,
-    row_id: u32,
-    key: crate::graph::schema::InternedKey,
-    value: &crate::datatypes::values::Value,
+    cell: MasterCell<'_>,
+    prior: PriorCell,
 ) -> Option<Option<crate::datatypes::values::Value>> {
-    let type_key = crate::graph::schema::InternedKey::from_str(node_type);
+    let MasterCell {
+        node_type,
+        type_key,
+        node_idx,
+        row_id,
+        key,
+        value,
+    } = cell;
 
     // (1) Pre-image first, and cell-grained: the journal takes the value this
     // write is about to destroy, never a handle on the store holding it.
@@ -149,31 +218,24 @@ pub(super) fn write_column_master(
     // defect this design removed.
     let forked = graph.graph.is_forked();
 
-    // Column typing for a property the store has no column for yet. Declared
-    // metadata wins over the value in hand, because it knows `float64` when the
-    // first value that happens to arrive is an integer — and a column typed
-    // wrong is a column the next write demotes to `Mixed`, which cannot be
-    // spilled. Resolved only on that cold path: the steady-state SET writes an
-    // existing column and never pays the lookup.
-    let declared_type: Option<String> = {
-        let needs_column = graph
-            .graph
-            .column_store(type_key)
-            .is_some_and(|store| store.slot(key).is_none());
-        if needs_column {
-            graph.interner.try_resolve(key).and_then(|name| {
-                graph
-                    .node_type_metadata
-                    .get(node_type)
-                    .and_then(|props| props.get(name))
-                    .cloned()
-            })
-        } else {
-            None
-        }
-    };
     let master = graph.graph.column_store_mut(type_key)?;
-    let prior_value = master.get(row_id, key); // (2)
+    // The key's column, resolved through the shared borrow — no privatisation,
+    // and the answer the write below would otherwise look up again. `None` is
+    // the cold path: a property the type has no column for yet, which needs
+    // `node_type_metadata` (a different field of `graph`) and therefore cannot
+    // run while the store is borrowed.
+    let Some(slot) = master.slot(key) else {
+        return grow_column_and_write(
+            graph, node_type, type_key, node_idx, row_id, key, value, forked, prior,
+        );
+    };
+    let prior_value = match prior {
+        // Deliberately `get`, not a slot-addressed read: the full resolution
+        // also consults the mmap base and the overflow bag, and a `REMOVE` must
+        // report the value a read would have returned.
+        PriorCell::Read => master.get(row_id, key), // (2)
+        PriorCell::Skip => None,
+    };
 
     // The rollback invariant, asserted at the exact point it matters — and it
     // is the *inverse* of the pre-Phase-2 one. The journal used to hold the
@@ -194,12 +256,67 @@ pub(super) fn write_column_master(
     // clone counter (`rollback_tests::a_columnar_statement_clones_no_store`).
     let shared = Arc::strong_count(master) > 1;
     let before = Arc::as_ptr(master);
-    Arc::make_mut(master).set(row_id, key, value, declared_type.as_deref()); // (3)
+    Arc::make_mut(master).set_at_slot(row_id, slot, value); // (3)
     debug_assert!(
         forked || shared || std::ptr::eq(before, Arc::as_ptr(master)),
         "a columnar write copied a master that nothing else was holding; \
          `Arc::make_mut` on a uniquely-owned handle must mutate in place"
     );
     graph.graph.note_recorded_node_upsert(node_idx); // (4)
+    Some(prior_value)
+}
+
+/// The cold half of [`write_column_master`]: the type's store has no column for
+/// `key` yet, so the write grows the schema.
+///
+/// Split out because the declared column type lives in `node_type_metadata` —
+/// a field of `graph` the store borrow excludes — and because it runs once per
+/// `(type, property)` in a statement's lifetime, never in the row loop. The
+/// *outer* `None` keeps its one meaning, "the type has no master store".
+///
+/// A missing column does **not** mean a missing value, which is why this path
+/// still honours a `PriorCell::Read`: on a mapped graph the value can live in
+/// the store's mmap base or its overflow bag, both of which `get` resolves and
+/// neither of which has a dense column until something writes one. Dropping
+/// that read would make `REMOVE n.x` report nothing removed — and skip the
+/// index eviction — for exactly the properties a `.kgl` load leaves there.
+///
+/// Declared metadata wins over the value in hand, because it knows `float64`
+/// when the first value that happens to arrive is an integer — and a column
+/// typed wrong is a column the next write demotes to `Mixed`, which cannot be
+/// spilled.
+#[allow(clippy::too_many_arguments)]
+fn grow_column_and_write(
+    graph: &mut DirGraph,
+    node_type: &str,
+    type_key: InternedKey,
+    node_idx: NodeIndex,
+    row_id: u32,
+    key: InternedKey,
+    value: &Value,
+    forked: bool,
+    prior: PriorCell,
+) -> Option<Option<Value>> {
+    let declared_type: Option<String> = graph.interner.try_resolve(key).and_then(|name| {
+        graph
+            .node_type_metadata
+            .get(node_type)
+            .and_then(|props| props.get(name))
+            .cloned()
+    });
+    let master = graph.graph.column_store_mut(type_key)?;
+    let prior_value = match prior {
+        PriorCell::Read => master.get(row_id, key),
+        PriorCell::Skip => None,
+    };
+    let shared = Arc::strong_count(master) > 1;
+    let before = Arc::as_ptr(master);
+    Arc::make_mut(master).set(row_id, key, value, declared_type.as_deref());
+    debug_assert!(
+        forked || shared || std::ptr::eq(before, Arc::as_ptr(master)),
+        "a columnar write copied a master that nothing else was holding; \
+         `Arc::make_mut` on a uniquely-owned handle must mutate in place"
+    );
+    graph.graph.note_recorded_node_upsert(node_idx);
     Some(prior_value)
 }

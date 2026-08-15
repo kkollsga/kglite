@@ -3,7 +3,9 @@
 
 use super::super::ast::*;
 use super::super::result::*;
-use super::columnar_write::{set_via_column_master, write_column_master, ColumnMasterWrite};
+use super::columnar_write::{
+    set_via_column_master, write_column_master, ColumnMasterWrite, MasterCell, PriorCell,
+};
 use super::identity_fields::{
     check_identity_uniqueness, create_identity, merge_expected_props, remove_write_field,
     CreatedIdentity, IdentityAliases,
@@ -1485,66 +1487,8 @@ fn execute_set(
         }
     }
 
-    // Stamp the reserved provenance keys (updated_at + caller git_sha/
-    // modified_by) once per modified node of an opted-in type — one clock read
-    // for the whole SET. Writes through the in-memory columnar master (fast
-    // path) or the per-node setter, mirroring the property writes above; the
-    // type-schema slot + metadata are registered so they persist. No
-    // equality-index update — provenance is range-queried, not equality-matched.
-    if !nodes_to_stamp.is_empty() {
-        let prov = graph.provenance_props();
-        for (node_idx, node_type) in &nodes_to_stamp {
-            // Arena guard: node_weight materializes on the disk backend
-            // (protocol in disk/graph.rs); scoped so the borrow ends before
-            // the &mut writes below.
-            let columnar_row_id = {
-                let _arena_guard = graph.graph.begin_query();
-                graph
-                    .graph
-                    .node_weight(*node_idx)
-                    .and_then(|n| n.properties.columnar_row_id())
-            };
-            for &(pname, ref pval) in &prov {
-                let key = graph.interner.get_or_intern(pname);
-                // Read-check first — see the note in `apply_landed_property_write`.
-                let needs_key = graph
-                    .type_schemas
-                    .get(node_type)
-                    .is_some_and(|schema| schema.slot(key).is_none());
-                if needs_key {
-                    if let Some(schema_arc) = graph.type_schemas_mut().get_mut(node_type) {
-                        Arc::make_mut(schema_arc).add_key(key);
-                    }
-                }
-                let wrote = set_via_column_master(
-                    graph,
-                    ColumnMasterWrite {
-                        node_idx: *node_idx,
-                        node_type,
-                        property: pname,
-                        value: pval,
-                        row_id: columnar_row_id,
-                    },
-                );
-                if !wrote {
-                    let key = graph.interner.get_or_intern(pname);
-                    GraphWrite::set_node_property(&mut graph.graph, *node_idx, key, pval.clone());
-                }
-            }
-        }
-        // The catalogue entry for each provenance key is a fact about the
-        // *type*, not about the node — so it is recorded once per stamped type
-        // rather than once per stamped node per key, which is what the loop
-        // above used to do (a fresh `HashMap` and two `String`s each time).
-        let stamped_types: std::collections::HashSet<&String> = nodes_to_stamp.values().collect();
-        let prop_types: HashMap<String, String> = prov
-            .iter()
-            .map(|(pname, pval)| (pname.to_string(), value_type_name(pval)))
-            .collect();
-        for node_type in stamped_types {
-            graph.upsert_node_type_metadata(node_type, prop_types.clone());
-        }
-    }
+    // Freshness provenance for the nodes this statement modified.
+    stamp_node_provenance(graph, &nodes_to_stamp);
 
     // Edge freshness provenance: bump the reserved keys (updated_at + caller
     // git_sha/modified_by) once per modified edge of an opted-in type.
@@ -1574,6 +1518,75 @@ fn execute_set(
     Ok(())
 }
 
+/// Stamp the reserved provenance keys on every node a `SET` modified.
+///
+/// Lifted out of `execute_set`, which is the only caller: it is the last of
+/// that function's four concerns (rows, map items, node stamps, edge stamps)
+/// and shares nothing with the others but the set of nodes to stamp.
+fn stamp_node_provenance(graph: &mut DirGraph, nodes_to_stamp: &HashMap<NodeIndex, String>) {
+    // Stamp the reserved provenance keys (updated_at + caller git_sha/
+    // modified_by) once per modified node of an opted-in type — one clock read
+    // for the whole SET. Writes through the in-memory columnar master (fast
+    // path) or the per-node setter, mirroring the property writes above; the
+    // type-schema slot + metadata are registered so they persist. No
+    // equality-index update — provenance is range-queried, not equality-matched.
+    if !nodes_to_stamp.is_empty() {
+        let prov = graph.provenance_props();
+        for (node_idx, node_type) in nodes_to_stamp {
+            // Arena guard: node_weight materializes on the disk backend
+            // (protocol in disk/graph.rs); scoped so the borrow ends before
+            // the &mut writes below.
+            let columnar_row_id = {
+                let _arena_guard = graph.graph.begin_query();
+                graph
+                    .graph
+                    .node_weight(*node_idx)
+                    .and_then(|n| n.properties.columnar_row_id())
+            };
+            let type_key = InternedKey::from_str(node_type);
+            for &(pname, ref pval) in &prov {
+                let key = graph.interner.get_or_intern(pname);
+                // Read-check first — see the note in `apply_landed_property_write`.
+                let needs_key = graph
+                    .type_schemas
+                    .get(node_type)
+                    .is_some_and(|schema| schema.slot(key).is_none());
+                if needs_key {
+                    if let Some(schema_arc) = graph.type_schemas_mut().get_mut(node_type) {
+                        Arc::make_mut(schema_arc).add_key(key);
+                    }
+                }
+                let wrote = set_via_column_master(
+                    graph,
+                    ColumnMasterWrite {
+                        node_idx: *node_idx,
+                        node_type,
+                        type_key,
+                        property: pname,
+                        key,
+                        value: pval,
+                        row_id: columnar_row_id,
+                    },
+                );
+                if !wrote {
+                    GraphWrite::set_node_property(&mut graph.graph, *node_idx, key, pval.clone());
+                }
+            }
+        }
+        // The catalogue entry for each provenance key is a fact about the
+        // *type*, not about the node — so it is recorded once per stamped type
+        // rather than once per stamped node per key, which is what the loop
+        // above used to do (a fresh `HashMap` and two `String`s each time).
+        let stamped_types: std::collections::HashSet<&String> = nodes_to_stamp.values().collect();
+        let prop_types: HashMap<String, String> = prov
+            .iter()
+            .map(|(pname, pval)| (pname.to_string(), value_type_name(pval)))
+            .collect();
+        for node_type in stamped_types {
+            graph.upsert_node_type_metadata(node_type, prop_types.clone());
+        }
+    }
+}
 /// Execute a DELETE clause, removing nodes and/or edges from the graph.
 fn execute_delete(
     graph: &mut DirGraph,
@@ -1827,11 +1840,15 @@ fn execute_remove(
                             // roll back to.
                             cleared_via_master = write_column_master(
                                 graph,
-                                &node_type_str,
-                                *node_idx,
-                                row_id,
-                                key,
-                                &Value::Null,
+                                MasterCell {
+                                    node_type: &node_type_str,
+                                    type_key: InternedKey::from_str(&node_type_str),
+                                    node_idx: *node_idx,
+                                    row_id,
+                                    key,
+                                    value: &Value::Null,
+                                },
+                                PriorCell::Read,
                             );
                         }
                     }

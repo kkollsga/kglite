@@ -103,6 +103,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`add_nodes` maintains a type's indexes and unique constraints instead of
+  rebuilding them — 170-219x on the upsert and constrained shapes.** Release,
+  two agreeing runs, against an unchanged-path read control and a create-only
+  reference cell that stays flat (86 -> 83 µs, inside the session's own 4%
+  drift): a ten-row **upsert** into a 200k-row type carrying a hash and a range
+  index 14.35 ms -> 85 µs (170x); a ten-row **append** into a 200k-row type
+  under a `UNIQUE` constraint 22.99 ms -> 105 µs (219x); the two together (an
+  upsert on a constrained type) 22.41 ms -> 105 µs (213x). The path already
+  folded creation-only batches; it declined outright when any row updated an
+  existing node, and whenever the type carried a `UNIQUE` or non-`id`
+  `PRIMARY KEY` tuple, and each decline rebuilt every covering index from
+  every member of the type. Both declines are gone: one
+  read pass per updated node, taken before the batch writes, captures the old
+  value of each indexed property *and* the tuples the node occupies, so an
+  update can vacate the bucket it leaves and release the tuple it gives up —
+  and a row that re-asserts the value it already had touches no bucket at all,
+  which is the common upsert. Occupancy for created rows is claimed from the
+  node as stored, so a `conflict_handling` mode that skipped or merged a write
+  cannot make the index disagree with the data.
+  - **What still rebuilds, deliberately:** a batch whose row count is a large
+    fraction of the type, and a batch that turns out to move a large fraction
+    of it. Reading a pre-image costs something and vacating a bucket walks it,
+    so folding is O(rows) reads plus O(moves x bucket) against the rebuild's
+    one linear pass — cheap for a streaming upsert, quadratic for a full
+    re-load. Two gates pick the cheaper path per call (both test-pinned in
+    both directions), so a whole-type re-load keeps exactly the cost it had.
+  - **One visible behaviour change:** when an upsert *changes* an indexed
+    value, the moved node joins the end of its new value bucket rather than
+    landing in member order. Bucket order is the row order an indexed `MATCH`
+    without `ORDER BY` returns, so such a query can order those rows
+    differently than before — the same divergence a Cypher `SET` has always
+    produced. Rows whose indexed value did not change keep their position
+    exactly.
+- **A Cypher `SET` resolves its write target once per statement, not once per
+  written row.** The row loop re-derived the store handle, the type key, the
+  property key and the key's column slot for every row — a type-name hash, a
+  `column_stores` probe for the declared-type check, a second probe for the
+  write, an interner registration and two `TypeSchema` lookups — and then read
+  the cell's *prior* value that only `REMOVE` consumes, which is an allocation
+  per row for a string property. A 100k-row `SET` of a string property is
+  **8-11% faster** (release: 32.05 ms before, against eight runs across four
+  sessions after — every one of them faster, 28.52 ms on the landed build and
+  31.09 ms at worst); the same statement writing an `Int64` moves within that
+  cell's between-session spread, which is the expected shape — the removed
+  read is a *clone*, so what it returns scales with the value. The
+  two `Arc::make_mut` uniqueness checks per written cell are unchanged: they
+  are the price of the copy-on-write sharing a fork and a held view depend on.
+
 - **Filtered scans and `describe` read the column, not the row.** Both were
   asking a columnar store the same question once per row and re-deriving the
   machinery each time; both now resolve it once and walk the column.

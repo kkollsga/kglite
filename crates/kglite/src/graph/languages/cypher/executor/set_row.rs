@@ -71,6 +71,12 @@ struct PropertyFacts {
     /// value has a *different* type name (a heterogeneous `CASE`, say) still
     /// records, so last-write-wins is preserved exactly.
     recorded_type: &'static str,
+    /// The property name, interned **and registered** in the graph's
+    /// `StringInterner` — the key the write itself is addressed by. Interning
+    /// registers the name, which is what lets `save()` resolve the key back to
+    /// a string, and it is a fact about the name rather than the row: the write
+    /// path used to hash and register it once per written row.
+    key: InternedKey,
 }
 
 /// The per-row half of a `SET`'s bookkeeping — what is left once [`SetMemos`]
@@ -90,6 +96,9 @@ struct RowBookkeeping {
     record_metadata: Option<&'static str>,
     /// The type opted into `updated_at` stamping.
     auto_timestamp: bool,
+    /// The written property, interned once per statement — see
+    /// [`PropertyFacts::key`].
+    key: InternedKey,
 }
 
 /// A single-property node `SET` that has already landed in storage, as the
@@ -229,6 +238,7 @@ pub(super) fn apply_node_property_set<'a>(
         property,
         value.type_name(),
         facts,
+        &mut graph.interner,
     );
 
     // Fast path for Columnar storage when the graph's master
@@ -253,7 +263,9 @@ pub(super) fn apply_node_property_set<'a>(
         ColumnMasterWrite {
             node_idx,
             node_type: node_type_str,
+            type_key,
             property: write_field,
+            key: owed.key,
             value: &value,
             row_id: columnar_row_id,
         },
@@ -313,7 +325,9 @@ fn finish_node_property_write(
     // A `title` write touches the node's title field, not the property map, so
     // it registers no schema key — under either spelling of that field.
     if write.owed.register_schema_key && write.write_field != "title" {
-        let ik = InternedKey::from_str(write.property);
+        // The memo's key — interned from `property` when the memo took it, so
+        // it is the same value `InternedKey::from_str` would recompute here.
+        let ik = write.owed.key;
         // Read-check before taking `&mut`: `type_schemas` is `Arc`-shared with
         // the rollback shell (`dir_graph::schema_cow`), so `type_schemas_mut()`
         // copies the whole O(types) map — and this runs per written row, almost
@@ -379,31 +393,40 @@ fn row_bookkeeping<'a>(
     property: &'a str,
     value_type: &'static str,
     type_facts: &TypeFacts,
+    interner: &mut crate::graph::storage::interner::StringInterner,
 ) -> RowBookkeeping {
     use std::collections::hash_map::Entry;
 
-    let mut owed = RowBookkeeping {
-        maintains_indexes: type_facts.maintains_indexes,
-        register_schema_key: true,
-        record_metadata: Some(value_type),
-        auto_timestamp: type_facts.auto_timestamp,
-    };
-    match memo.entry((type_key, property)) {
+    let mut register_schema_key = true;
+    let mut record_metadata = Some(value_type);
+    let key = match memo.entry((type_key, property)) {
         Entry::Occupied(mut seen) => {
-            owed.register_schema_key = false;
+            register_schema_key = false;
+            let key = seen.get().key;
             if seen.get().recorded_type == value_type {
-                owed.record_metadata = None;
+                record_metadata = None;
             } else {
                 seen.insert(PropertyFacts {
                     recorded_type: value_type,
+                    key,
                 });
             }
+            key
         }
         Entry::Vacant(slot) => {
+            let key = interner.get_or_intern(property);
             slot.insert(PropertyFacts {
                 recorded_type: value_type,
+                key,
             });
+            key
         }
+    };
+    RowBookkeeping {
+        maintains_indexes: type_facts.maintains_indexes,
+        register_schema_key,
+        record_metadata,
+        auto_timestamp: type_facts.auto_timestamp,
+        key,
     }
-    owed
 }

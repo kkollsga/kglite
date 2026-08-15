@@ -979,7 +979,28 @@ impl ColumnStore {
                 self.append_column_typed(key, type_str)
             }
         };
-        let col = Arc::make_mut(&mut self.columns[slot as usize]);
+        self.set_at_slot(row_id, slot, value)
+    }
+
+    /// [`Self::set`] with the column already resolved — the cell write itself.
+    ///
+    /// The key→slot resolution is a fact about the `(type, property)` pair, not
+    /// about the row, so a statement writing one property over N rows can
+    /// resolve it once and call this N times ([`Self::slot`] answers it through
+    /// a shared borrow, with no privatisation). `set` is this method plus the
+    /// resolution, so the two cannot disagree about where a value lands.
+    ///
+    /// Returns `false` for a row past the store's end (matching `set`) or a
+    /// slot past its columns — the latter is unreachable while the caller pairs
+    /// this with `slot`, which is why nothing here grows the schema.
+    pub fn set_at_slot(&mut self, row_id: u32, slot: u16, value: &Value) -> bool {
+        if row_id >= self.row_count {
+            return false;
+        }
+        let Some(handle) = self.columns.get_mut(slot as usize) else {
+            return false;
+        };
+        let col = Arc::make_mut(handle);
         // A file-backed column is written **through its mapping** — it is not
         // pulled onto the heap first. `MmapOrVec::set` writes into the
         // `map_mut` region, and every writable mapped column here lives in a

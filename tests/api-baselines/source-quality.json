@@ -350,8 +350,8 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
       "qualified_name": "crate::execute_set",
-      "lines": 323,
-      "branches": 42,
+      "lines": 265,
+      "branches": 35,
       "nesting": 8
     },
     {
@@ -462,8 +462,8 @@
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::add_nodes",
-      "lines": 233,
-      "branches": 19,
+      "lines": 231,
+      "branches": 18,
       "nesting": 3
     },
     {
