@@ -312,6 +312,18 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
         columns: &["relType", "propertyName", "propertyTypes", "mandatory"],
     },
     ProcedureSpec {
+        name: "apoc.meta.nodeTypeProperties",
+        aliases: &[],
+        description: "APOC-compatibility shim over db.schema.nodeTypeProperties: same typed node schema under APOC's column set (adds totalObservations/propertyObservations). One of exactly two apoc.* names KGLite answers; schema clients (G.V()) call the APOC pair first.",
+        columns: &["nodeType", "nodeLabels", "propertyName", "propertyTypes", "mandatory", "propertyObservations", "totalObservations"],
+    },
+    ProcedureSpec {
+        name: "apoc.meta.relTypeProperties",
+        aliases: &[],
+        description: "APOC-compatibility shim over db.schema.relTypeProperties, adding the endpoint columns (sourceNodeLabels/targetNodeLabels) the db.schema contract lacks - one row per observed (source, type, target) pairing. This is what schema-graph clients draw their edges from.",
+        columns: &["relType", "sourceNodeLabels", "targetNodeLabels", "propertyName", "propertyTypes", "mandatory", "propertyObservations", "totalObservations"],
+    },
+    ProcedureSpec {
         name: "db.graph_stats",
         aliases: &[],
         description: "Per-graph summary: node, edge, label, and relationship-type counts. Single row.",

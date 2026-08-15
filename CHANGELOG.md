@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version-gate (Neo4j Browser, G.V()) need `--neo4j-compat`. Edition is
   always `community`. `SHOW DATABASES` returns one row named `neo4j`
   (matching the routing default) with `access` reflecting `--readonly`.
+- `CALL apoc.meta.nodeTypeProperties()` / `apoc.meta.relTypeProperties()` —
+  APOC-compatibility shims over the db.schema pair, adding APOC's columns:
+  crucially the rel side's `sourceNodeLabels`/`targetNodeLabels` (one row per
+  observed source/type/target pairing), which schema-graph clients require to
+  draw edges. Scoped to exactly these two names; all other `apoc.*` remains
+  rejected.
 - Bolt server: `EXPLAIN` now follows the Bolt contract — zero records, with
   the plan tree (operators, estimated rows, optimizer passes) in the SUCCESS
   summary's `plan` metadata, so driver `summary.plan` consumers and IDE plan

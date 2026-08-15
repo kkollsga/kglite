@@ -769,7 +769,9 @@ impl<'a> CypherExecutor<'a> {
             "db.schema"
             | "db.schema.visualization"
             | "db.schema.nodetypeproperties"
-            | "db.schema.reltypeproperties" => super::schema_procedures::execute_schema_procedure(
+            | "db.schema.reltypeproperties"
+            | "apoc.meta.nodetypeproperties"
+            | "apoc.meta.reltypeproperties" => super::schema_procedures::execute_schema_procedure(
                 self,
                 &proc_name,
                 &params,

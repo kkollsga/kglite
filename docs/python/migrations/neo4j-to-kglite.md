@@ -141,7 +141,7 @@ should work, but are untested — exercise them yourself first.
 | Auth | `--auth basic` with `--auth-user` / `--auth-pass`; default `--auth none` accepts any LOGON. No RBAC, users, or roles. |
 | TLS (`bolt+s://` / `neo4j+s://`) | Supported via `--tls-cert` + `--tls-key` |
 | Read-only enforcement | `--readonly` rejects all mutations |
-| Auto-commit **mutations** | **Not supported** — wrap `CREATE`/`SET`/`DELETE`/`MERGE` in explicit `BEGIN`/`COMMIT`. Auto-commit reads work. (Drivers wrap writes in a tx anyway.) |
+| Auto-commit **mutations** | **Not supported** — wrap `CREATE`/`SET`/`DELETE`/`MERGE` in explicit `BEGIN`/`COMMIT` (`session.execute_write` does this for you). Auto-commit reads work. Note: not every client wraps writes — G.V()'s query editor sends writes auto-commit and surfaces the server's rejection message verbatim (measured 2026-08-15) |
 | OCC on writes | Supported — stale-snapshot commits get `Neo.TransientError.Transaction.Outdated`. That class is retriable, so `session.execute_write` retries the unit of work for you; only hand-rolled `begin_transaction` code needs its own retry loop |
 | Multi-database (`USE db`) | **Not supported** — single graph. A `USE` clause is a syntax error; the *session-level* `database=` field is accepted and ignored, and `SHOW DATABASES` reports the single served graph as `neo4j` |
 | Causal consistency / bookmarks | **Not supported** — the `bookmark` field is not returned on COMMIT |
@@ -406,7 +406,7 @@ Notable **absent** functions a Neo4j user will miss (verified against
 
 | Neo4j | KGLite status | Note / workaround |
 |---|---|---|
-| `apoc.*` (all) | Not supported | No APOC library; use Python or built-in functions |
+| `apoc.*` | Not supported, with exactly two exceptions | No APOC library. `apoc.meta.nodeTypeProperties()` / `apoc.meta.relTypeProperties()` are served as compatibility shims (schema clients read endpoint labels only from them); every other `apoc.*` name — including `apoc.meta.data()` — is rejected |
 | `point({latitude, longitude})` | Map form not supported | KGLite uses `point(lat, lon)` (**latitude-first**); WKT strings are longitude-first per OGC |
 | `point.distance(a, b)` | Use top-level `distance(a, b)` | Geodesic (WGS84); also `contains`, `intersects`, `centroid`, `area`, `perimeter`, geometry primitives (`geom_*`) — all present |
 | `duration('P1Y2M')` (ISO-8601) | Map form only | `duration({years: 1, months: 2})`; `duration.between(d1, d2)` fills `days` only (date-only `DateTime`) |

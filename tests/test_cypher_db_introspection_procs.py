@@ -373,3 +373,40 @@ def test_show_procedures_signature_yield(typed_graph):
     assert by["db.labels"] == "db.labels(config = {} :: MAP?) :: (label :: ANY?)"
     default = typed_graph.cypher("SHOW PROCEDURES", to_df=True)
     assert "signature" not in default.columns
+
+
+# ── apoc.meta.* compatibility shims (2026-08-15) ───────────────────────────
+
+
+def test_apoc_meta_rel_type_properties_carries_endpoints():
+    """The APOC shape's whole reason to exist: sourceNodeLabels /
+    targetNodeLabels per observed (source, type, target) pairing — the
+    columns schema-graph clients (G.V(), measured) draw their edges from,
+    absent from the db.schema.* contract."""
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Person {name: 'a'})-[:LIVES_IN {since: 2020}]->(:City {name: 'O'})")
+    g.cypher("CREATE (:Company {name: 'x'})-[:LIVES_IN]->(:City {name: 'B'})")
+    rows = g.cypher("CALL apoc.meta.relTypeProperties() YIELD relType, sourceNodeLabels, targetNodeLabels").to_dicts()
+    pairs = {(r["sourceNodeLabels"][0], r["relType"], r["targetNodeLabels"][0]) for r in rows}
+    assert pairs == {("Person", ":`LIVES_IN`", "City"), ("Company", ":`LIVES_IN`", "City")}
+
+
+def test_apoc_meta_node_type_properties_matches_db_schema():
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Person {name: 'a', age: 3})")
+    apoc = g.cypher("CALL apoc.meta.nodeTypeProperties() YIELD nodeType, propertyName, propertyTypes").to_dicts()
+    native = g.cypher("CALL db.schema.nodeTypeProperties() YIELD nodeType, propertyName, propertyTypes").to_dicts()
+    assert apoc == native
+    counts = g.cypher("CALL apoc.meta.nodeTypeProperties() YIELD totalObservations").to_dicts()
+    assert all(r["totalObservations"] == 1 for r in counts)
+
+
+def test_no_other_apoc_name_resolves():
+    """The shim is scoped to exactly two names — the apoc namespace stays
+    otherwise closed (no accidental 'we have APOC' impression)."""
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:A {x: 1})")
+    with pytest.raises(Exception, match="Unknown procedure"):
+        g.cypher("CALL apoc.meta.data()")
+    with pytest.raises(Exception, match="Unknown procedure"):
+        g.cypher("CALL apoc.version()")

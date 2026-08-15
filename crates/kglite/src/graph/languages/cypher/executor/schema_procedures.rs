@@ -76,6 +76,21 @@ pub(super) fn execute_schema_procedure(
             schema_type_properties_rows(
                 executor,
                 proc_name == "db.schema.nodetypeproperties",
+                false,
+                yield_items,
+            )
+        }
+        // The two APOC schema names, served as deliberate compatibility
+        // shims: same data as the db.schema.* pair, under APOC's column set —
+        // including the rel side's sourceNodeLabels/targetNodeLabels, which
+        // the db.schema.* contract lacks and which clients (G.V(), measured
+        // 2026-08-15) require to draw schema-graph edges at all. Scoped to
+        // exactly these two names: no other apoc.* resolves.
+        "apoc.meta.nodetypeproperties" | "apoc.meta.reltypeproperties" => {
+            schema_type_properties_rows(
+                executor,
+                proc_name == "apoc.meta.nodetypeproperties",
+                true,
                 yield_items,
             )
         }
@@ -226,6 +241,7 @@ fn schema_visualization_rows(
 fn schema_type_properties_rows(
     executor: &CypherExecutor<'_>,
     node_side: bool,
+    apoc_shape: bool,
     yield_items: &[YieldItem],
 ) -> Result<Vec<ResultRow>, String> {
     // Neo4j's typed-schema pair — measured as the calls G.V()'s
@@ -235,23 +251,53 @@ fn schema_type_properties_rows(
     // as :`Name`, propertyTypes as a one-element list, and a
     // property-less type still emits one row with null propertyName
     // so the type itself is visible to the client.
+    //
+    // `apoc_shape` serves the same data under APOC's column set —
+    // crucially including `sourceNodeLabels`/`targetNodeLabels` on the rel
+    // side, which the db.schema.* contract does not carry. Clients build
+    // their schema GRAPH (which labels connect via which types) exclusively
+    // from those columns: G.V()'s schema view had 98 disconnected boxes and
+    // its no-code path picker offered zero (A)-[R]->(B) paths until these
+    // two names answered. In apoc shape the rel side emits one row per
+    // observed (source, type, target) pairing.
+
+    struct RowSpec<'a> {
+        type_name: &'a str,
+        labels: Option<&'a str>,
+        endpoints: Option<(&'a str, &'a str)>,
+        prop: Option<(&'a str, &'a str)>,
+        count: usize,
+    }
 
     let mut rows = Vec::new();
-    let mut push_row = |type_name: &str, labels: Option<&str>, prop: Option<(&str, &str)>| {
+    let mut push_row = |spec: RowSpec<'_>| {
         let mut row = ResultRow::new();
         for item in yield_items {
             let alias = item.alias.as_deref().unwrap_or(&item.name);
             let value = match item.name.as_str() {
-                "nodeType" | "relType" => Value::String(format!(":`{type_name}`")),
-                "nodeLabels" => match labels {
+                "nodeType" | "relType" => Value::String(format!(":`{}`", spec.type_name)),
+                "nodeLabels" => match spec.labels {
                     Some(l) => Value::List(vec![Value::String(l.to_string())]),
                     None => Value::Null,
                 },
-                "propertyName" => match prop {
+                "sourceNodeLabels" => match spec.endpoints {
+                    Some((s, _)) => Value::List(vec![Value::String(s.to_string())]),
+                    None => Value::List(Vec::new()),
+                },
+                "targetNodeLabels" => match spec.endpoints {
+                    Some((_, t)) => Value::List(vec![Value::String(t.to_string())]),
+                    None => Value::List(Vec::new()),
+                },
+                "totalObservations" => Value::Int64(spec.count as i64),
+                "propertyObservations" => match spec.prop {
+                    Some(_) => Value::Int64(spec.count as i64),
+                    None => Value::Int64(0),
+                },
+                "propertyName" => match spec.prop {
                     Some((name, _)) => Value::String(name.to_string()),
                     None => Value::Null,
                 },
-                "propertyTypes" => match prop {
+                "propertyTypes" => match spec.prop {
                     Some((_, ty)) => {
                         Value::List(vec![Value::String(neo4j_type_name(ty).to_string())])
                     }
@@ -284,10 +330,22 @@ fn schema_type_properties_rows(
                 .collect();
             props.sort();
             if props.is_empty() {
-                push_row(node_type, Some(node_type), None);
+                push_row(RowSpec {
+                    type_name: node_type,
+                    labels: Some(node_type),
+                    endpoints: None,
+                    prop: None,
+                    count: overview.count,
+                });
             }
             for (name, ty) in props {
-                push_row(node_type, Some(node_type), Some((name, ty)));
+                push_row(RowSpec {
+                    type_name: node_type,
+                    labels: Some(node_type),
+                    endpoints: None,
+                    prop: Some((name, ty)),
+                    count: overview.count,
+                });
             }
         }
     } else {
@@ -295,24 +353,61 @@ fn schema_type_properties_rows(
             executor.graph,
         );
         for stat in &stats {
-            let mut props: Vec<&String> = stat.property_names.iter().collect();
-            props.sort();
-            if props.is_empty() {
-                push_row(&stat.connection_type, None, None);
-            }
-            for name in props {
-                let ty = executor
-                    .graph
-                    .connection_type_metadata
-                    .get(&stat.connection_type)
-                    .and_then(|info| info.property_types.get(name))
-                    .cloned()
-                    .unwrap_or_else(|| "Any".to_string());
+            let mut props: Vec<(&String, String)> = stat
+                .property_names
+                .iter()
+                .map(|name| {
+                    let ty = executor
+                        .graph
+                        .connection_type_metadata
+                        .get(&stat.connection_type)
+                        .and_then(|info| info.property_types.get(name))
+                        .cloned()
+                        .unwrap_or_else(|| "Any".to_string());
+                    (name, ty)
+                })
                 // Same all-null rule as the node side.
-                if ty == "Null" {
-                    continue;
+                .filter(|(_, ty)| ty != "Null")
+                .collect();
+            props.sort();
+
+            // apoc shape: one row set per observed (source, target) pairing;
+            // db.schema shape: one per type (the contract has no endpoint
+            // columns, so pairings would be indistinguishable duplicates).
+            let pairings: Vec<Option<(&str, &str)>> = if apoc_shape {
+                let mut pairs = Vec::new();
+                for source in &stat.source_types {
+                    for target in &stat.target_types {
+                        pairs.push(Some((source.as_str(), target.as_str())));
+                    }
                 }
-                push_row(&stat.connection_type, None, Some((name, &ty)));
+                if pairs.is_empty() {
+                    pairs.push(None);
+                }
+                pairs
+            } else {
+                vec![None]
+            };
+
+            for endpoints in pairings {
+                if props.is_empty() {
+                    push_row(RowSpec {
+                        type_name: &stat.connection_type,
+                        labels: None,
+                        endpoints,
+                        prop: None,
+                        count: stat.count,
+                    });
+                }
+                for (name, ty) in &props {
+                    push_row(RowSpec {
+                        type_name: &stat.connection_type,
+                        labels: None,
+                        endpoints,
+                        prop: Some((name, ty)),
+                        count: stat.count,
+                    });
+                }
             }
         }
     }
