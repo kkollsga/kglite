@@ -35,6 +35,42 @@ impl<'a> CypherExecutor<'a> {
         None
     }
 
+    /// `id(x)` — KGLite's logical identity for a node or relationship.
+    ///
+    /// Split out of [`Self::eval_graph_fn`] so the common `id(n)` bound-node
+    /// case reads the id column directly, *ahead* of the relationship fallback,
+    /// without evaluating and discarding a full `Value::Node`. Order matters:
+    /// a bound relationship variable (edge slot) is checked first, then a bound
+    /// node, then expression-valued args (a relationship value such as
+    /// `id(head(relationships(p)))`, or a materialised node value).
+    fn eval_id_fn(&self, args: &[Expression], row: &ResultRow) -> Result<Option<Value>, String> {
+        let Some(arg) = args.first() else {
+            return Ok(Some(Value::Null));
+        };
+        if let Expression::Variable(var) = arg {
+            if let Some(edge) = row.edge_bindings.get(var) {
+                return Ok(Some(Value::Int64(edge.edge_index.index() as i64)));
+            }
+        }
+        if let Some(idx) = self.node_arg_index(arg, row) {
+            if let Some(node) = self.graph.graph.node_view(idx) {
+                return Ok(Some(node.id().into_owned()));
+            }
+        }
+        if let Ok(value) = self.evaluate_expression(arg, row) {
+            match value {
+                Value::Relationship(rel) => return Ok(Some(Value::Int64(rel.id as i64))),
+                Value::Node(nv) => {
+                    return Ok(Some(
+                        nv.properties.get("id").cloned().unwrap_or(Value::Null),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(Some(Value::Null))
+    }
+
     pub(super) fn eval_graph_fn(
         &self,
         name: &str,
@@ -104,34 +140,7 @@ impl<'a> CypherExecutor<'a> {
                 Ok(Value::Null)
             }
             "elementid" => Ok(self.eval_element_id(args, row).unwrap_or(Value::Null)),
-            "id" => {
-                // Relationship identity is the stable edge slot used by every
-                // binding and by materialised RelValue results.
-                if let Some(arg) = args.first() {
-                    if let Expression::Variable(var) = arg {
-                        if let Some(edge) = row.edge_bindings.get(var) {
-                            return Ok(Some(Value::Int64(edge.edge_index.index() as i64)));
-                        }
-                    }
-                    if let Ok(Value::Relationship(rel)) = self.evaluate_expression(arg, row) {
-                        return Ok(Some(Value::Int64(rel.id as i64)));
-                    }
-
-                    // id(n) returns KGLite's logical node id. Accept a bound
-                    // variable, NodeRef, or materialised node value.
-                    if let Some(idx) = self.node_arg_index(arg, row) {
-                        if let Some(node) = self.graph.graph.node_view(idx) {
-                            return Ok(Some(resolve_node_property(node, "id", self.graph)));
-                        }
-                    }
-                    if let Ok(Value::Node(nv)) = self.evaluate_expression(arg, row) {
-                        return Ok(Some(
-                            nv.properties.get("id").cloned().unwrap_or(Value::Null),
-                        ));
-                    }
-                }
-                Ok(Value::Null)
-            }
+            "id" => return self.eval_id_fn(args, row),
             // shortest_path_length(a, b) → undirected BFS hop count
             // between two bound node variables. Real query: "how many
             // hops from A to B" without materializing the full path.

@@ -78,6 +78,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`id(n)` on a bound node no longer materialises the whole node.** The `id()`
+  scalar previously evaluated its argument into a full `Value::Node` (id, title,
+  and every property) to test for a relationship, then discarded it before
+  reading the id. For a bound node variable it now reads the id column directly,
+  ahead of the relationship fallback — `MATCH (n:Person) RETURN id(n)` over 10k
+  nodes drops ~43% (1.43 ms → 0.81 ms, release). Semantics are unchanged for
+  every argument shape, including `id(r)` on a relationship and
+  `id(head(relationships(p)))` on a relationship-valued expression.
+
 - **Breaking (contract fix):** `CALL … YIELD` result columns now follow YIELD
   order (Neo4j semantics). Previously they were inferred from the first row
   and sorted alphabetically, so `YIELD type, name` answered `[name, type]`.

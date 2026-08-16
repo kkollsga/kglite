@@ -594,6 +594,18 @@ def test_bench_return_node_10k(benchmark, node_projection_graph):
 
 
 @pytest.mark.benchmark
+def test_bench_return_id_10k(benchmark, node_projection_graph):
+    """RETURN id(n) over 10k nodes — node-identity projection only.
+
+    Companion to `return_node_10k`: isolates the id-resolution path
+    (`NodeView::id()` → ColumnStore) from full-node materialization, so a
+    regression in identity reads is visible without the property/label
+    materialization cost on top. `id(n)` must not pay full-node materialization.
+    """
+    benchmark(node_projection_graph.cypher, "MATCH (n:Person) RETURN id(n)")
+
+
+@pytest.mark.benchmark
 def test_bench_return_node_rel_node_100(benchmark, node_projection_graph):
     """Multi-binding projection: `a`, `r`, `b` LIMIT 100.
 
