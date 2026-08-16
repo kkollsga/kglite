@@ -60,9 +60,9 @@ pub(crate) struct Cli {
     /// Run a configuration self-test instead of serving: re-spawn this binary
     /// with the same flags, drive a live MCP handshake (initialize →
     /// tools/list → activate → cypher_query), and print green/red per
-    /// capability (tools present, graph hydrates, github tools when a token is
-    /// set). Exits non-zero if any check fails, so it doubles as a deployment
-    /// smoke gate.
+    /// capability (tools present, graph hydrates, github tools when the
+    /// manifest opts in and a token is set). Exits non-zero if any check
+    /// fails, so it doubles as a deployment smoke gate.
     #[arg(long)]
     pub(crate) selftest: bool,
 

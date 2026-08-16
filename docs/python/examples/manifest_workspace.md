@@ -62,7 +62,7 @@ workspace:
 - ping
 - read_source / grep / list_source
 - set_root_dir                 # local-mode only
-- github_issues / github_api   # if GITHUB_TOKEN is in env
+- github_issues / github_api   # needs builtins.github: true + GITHUB_TOKEN
 ```
 
 ## The flow
@@ -127,7 +127,8 @@ argument from the active root's git config. Agents can call
 ```
 
 without supplying `repo_name`; the active workspace repo is used as
-the fallback. The token still has to be in env / walked-up `.env`.
+the fallback. Registration still needs both halves: `builtins.github:
+true` in the manifest, and the token in env / walked-up `.env`.
 
 ## Performance notes
 
@@ -170,6 +171,7 @@ name: Open Source Explorer
 env_file: ../.env             # walks up to find GITHUB_TOKEN for github_*
 builtins:
   temp_cleanup: on_overview
+  github: true                # opt in to github_issues / github_api
 extensions:
   csv_http_server: true       # FORMAT CSV → localhost URL (CORS-enabled)
 instructions: |
@@ -203,6 +205,10 @@ Key choices:
   this walks up one level from the workspace dir to find the `.env`.
   Loads `GITHUB_TOKEN` for `github_issues` + `github_api`. Without a
   token those tools don't register at boot.
+- **`builtins.github: true`** — the opt-in that makes those tools
+  eligible at all. It is `false` by default: since mcp-methods 0.4.5 a
+  reachable token never widens a server's surface on its own, so a
+  GitHub-focused deployment like this one has to say so explicitly.
 - **`builtins.temp_cleanup: on_overview`** — wipes the temp/ dir on
   every bare `graph_overview()` call. With `csv_http_server` enabled,
   every `FORMAT CSV` export writes a file to temp/; without cleanup
@@ -257,7 +263,7 @@ For `--workspace <dir>` mode (no `workspace.kind: local`):
 - ping
 - repo_management              # github clone tracker
 - read_source / grep / list_source   # against the active repo
-- github_issues / github_api   # if GITHUB_TOKEN was loaded
+- github_issues / github_api   # needs builtins.github: true + GITHUB_TOKEN
 ```
 
 Note: `set_root_dir` is **only** in the `workspace.kind: local`

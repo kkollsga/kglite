@@ -638,12 +638,25 @@ class TestSourceRootMode:
 
 
 class TestGithubTools:
-    """`github_issues` / `github_api` boot-register only when GITHUB_TOKEN is reachable.
+    """`github_issues` / `github_api` boot-register behind *two* gates.
+
+    Since mcp-methods 0.4.5: the manifest must opt in with
+    `builtins.github: true`, and only then does a reachable GITHUB_TOKEN
+    decide whether the tools are listed. Every test here supplies the opt-in
+    manifest so it isolates the token gate — without it they would all pass
+    on the manifest gate alone and prove nothing about tokens.
 
     The binary's `.env` walk-up means a sibling `mcp-methods/.env` will leak
     a token even if we clear our own env; we run unauthorized tests in an
     isolated tmp working directory above which no `.env` lives.
     """
+
+    @staticmethod
+    def _optin_manifest(tmp_path: Path) -> Path:
+        """A manifest whose only job is `builtins.github: true`."""
+        manifest = tmp_path / "github_optin_mcp.yaml"
+        manifest.write_text("name: github test\nbuiltins:\n  github: true\n", encoding="utf-8")
+        return manifest
 
     def test_unauthorized_hides_github_tools(self, graph_fixture: Path, tmp_path: Path):
         # Walk-up looks at cwd, source-root, workspace, watch — pick a tmp
@@ -653,7 +666,9 @@ class TestGithubTools:
         isolated_cwd = tmp_path / "no_env_here"
         isolated_cwd.mkdir()
         client = _spawn(
-            ["--graph", str(graph_fixture)],
+            # Opted in, so the only thing left to hide the tools is the
+            # missing token — which is what this test is about.
+            ["--graph", str(graph_fixture), "--mcp-config", str(self._optin_manifest(tmp_path))],
             cwd=isolated_cwd,
             env_remove=["GITHUB_TOKEN", "GH_TOKEN"],
         )
@@ -671,9 +686,9 @@ class TestGithubTools:
         GITHUB_TOKEN is None,
         reason="No GITHUB_TOKEN reachable (env or sibling mcp-methods/.env).",
     )
-    def test_authorized_lists_github_tools(self, graph_fixture: Path):
+    def test_authorized_lists_github_tools(self, graph_fixture: Path, tmp_path: Path):
         client = _spawn(
-            ["--graph", str(graph_fixture)],
+            ["--graph", str(graph_fixture), "--mcp-config", str(self._optin_manifest(tmp_path))],
             env_extra={"GITHUB_TOKEN": GITHUB_TOKEN or ""},
         )
         try:
@@ -687,10 +702,10 @@ class TestGithubTools:
         not _github_live_enabled(),
         reason="set KGLITE_GITHUB_INTEGRATION=1 and provide GITHUB_TOKEN to run live GitHub calls",
     )
-    def test_github_api_call(self, graph_fixture: Path):
+    def test_github_api_call(self, graph_fixture: Path, tmp_path: Path):
         """Live GitHub call against a stable public endpoint."""
         client = _spawn(
-            ["--graph", str(graph_fixture)],
+            ["--graph", str(graph_fixture), "--mcp-config", str(self._optin_manifest(tmp_path))],
             env_extra={"GITHUB_TOKEN": GITHUB_TOKEN or ""},
         )
         try:
@@ -705,9 +720,9 @@ class TestGithubTools:
         not _github_live_enabled(),
         reason="set KGLITE_GITHUB_INTEGRATION=1 and provide GITHUB_TOKEN to run live GitHub calls",
     )
-    def test_github_issues_search(self, graph_fixture: Path):
+    def test_github_issues_search(self, graph_fixture: Path, tmp_path: Path):
         client = _spawn(
-            ["--graph", str(graph_fixture)],
+            ["--graph", str(graph_fixture), "--mcp-config", str(self._optin_manifest(tmp_path))],
             env_extra={"GITHUB_TOKEN": GITHUB_TOKEN or ""},
         )
         try:
@@ -732,17 +747,26 @@ class TestToolsAllowlist:
 
     The deployment shape is a domain embedder serving one graph and wanting
     three tools. Without the key its surface is the union of everything that
-    registered — including routes an *ambient environment variable* pulls in:
-    a `GITHUB_TOKEN` exported for unrelated reasons adds `github_api` /
-    `github_issues` / `screen_stargazers` to a music server. The token arm below
-    proves that widening is real and then proves the allowlist closes it.
+    registered — but as of mcp-methods 0.4.5 an *ambient credential* is no
+    longer part of that union: `github_api` / `github_issues` /
+    `screen_stargazers` register only when the manifest opts in with
+    `builtins.github: true`, so a `GITHUB_TOKEN` exported for unrelated
+    reasons can no longer widen a music server's surface on its own.
+
+    Two independent things are asserted below, because either alone would be
+    weak. Default-off: the token adds nothing to a surface that never opted
+    in. Opt-in works: a manifest that *does* say `builtins.github: true`,
+    with the same token, registers all three — which is what stops the
+    default-off assertion from passing merely because GitHub registration
+    broke entirely. The allowlist arm is now belt-and-braces on top.
     """
 
     ALLOWED = {"cypher_query", "graph_overview", "ping"}
+    GITHUB_TOOLS = {"github_api", "github_issues", "screen_stargazers"}
 
     @pytest.fixture
-    def deployment(self, tmp_path: Path) -> tuple[Path, Path, Path]:
-        """An isolated graph + two manifests differing only in the allowlist."""
+    def deployment(self, tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+        """An isolated graph + three manifests: allowlisted, open, GitHub opt-in."""
         root = tmp_path / "domain_server"
         root.mkdir()
         kgl = root / "domain.kgl"
@@ -754,7 +778,9 @@ class TestToolsAllowlist:
         )
         open_surface = root / "open_mcp.yaml"
         open_surface.write_text("name: domain\n", encoding="utf-8")
-        return kgl, allowed, open_surface
+        github_optin = root / "github_optin_mcp.yaml"
+        github_optin.write_text("name: domain\nbuiltins:\n  github: true\n", encoding="utf-8")
+        return kgl, allowed, open_surface, github_optin
 
     @staticmethod
     def _tool_names(kgl: Path, manifest: Path, token: Optional[str] = None) -> set[str]:
@@ -771,8 +797,8 @@ class TestToolsAllowlist:
         finally:
             client.shutdown()
 
-    def test_allowlist_is_the_entire_tool_surface(self, deployment: tuple[Path, Path, Path]):
-        kgl, allowed, open_surface = deployment
+    def test_allowlist_is_the_entire_tool_surface(self, deployment: tuple[Path, Path, Path, Path]):
+        kgl, allowed, open_surface, _ = deployment
         # Control: the same deployment without the key serves far more than
         # three tools, so the assertion below cannot pass vacuously.
         open_names = self._tool_names(kgl, open_surface)
@@ -781,8 +807,8 @@ class TestToolsAllowlist:
 
         assert self._tool_names(kgl, allowed) == self.ALLOWED
 
-    def test_a_dropped_tool_is_rejected_on_call_not_merely_unlisted(self, deployment: tuple[Path, Path, Path]):
-        kgl, allowed, _ = deployment
+    def test_a_dropped_tool_is_rejected_on_call_not_merely_unlisted(self, deployment: tuple[Path, Path, Path, Path]):
+        kgl, allowed, _, _ = deployment
         client = _spawn(
             ["--graph", str(kgl), "--mcp-config", str(allowed)],
             cwd=kgl.parent,
@@ -795,22 +821,60 @@ class TestToolsAllowlist:
         finally:
             client.shutdown()
 
-    def test_an_ambient_github_token_cannot_widen_the_allowlisted_surface(self, deployment: tuple[Path, Path, Path]):
-        kgl, allowed, open_surface = deployment
-        # Step 1 — prove the widening this feature exists to stop. If this
-        # assertion ever fails, the token no longer registers tools and the
-        # comparison below would be vacuous: fix the premise, don't drop it.
+    def test_an_ambient_github_token_widens_no_surface(self, deployment: tuple[Path, Path, Path, Path]):
+        """mcp-methods 0.4.5: a reachable token is not an intent to register.
+
+        Pre-0.4.5 this same deployment gained `github_api` / `github_issues` /
+        `screen_stargazers` from the token alone, with no manifest saying so.
+        Now the surface is identical either way — and the opt-in test below is
+        what proves that identity is default-off rather than GitHub
+        registration being broken outright.
+        """
+        kgl, allowed, open_surface, _ = deployment
+
+        # No allowlist at all: the token must not add a thing.
         open_tokenless = self._tool_names(kgl, open_surface)
         open_with_token = self._tool_names(kgl, open_surface, token="dummy-value")
-        added_by_token = open_with_token - open_tokenless
-        assert "github_api" in added_by_token and "github_issues" in added_by_token, (
-            "premise broken: an ambient GITHUB_TOKEN no longer registers GitHub tools "
-            f"(added: {sorted(added_by_token)}) — the allowlist comparison would prove nothing"
+        assert open_with_token == open_tokenless, (
+            "an ambient GITHUB_TOKEN changed a non-opted-in surface "
+            f"(added: {sorted(open_with_token - open_tokenless)}, "
+            f"removed: {sorted(open_tokenless - open_with_token)})"
+        )
+        assert not (self.GITHUB_TOOLS & open_with_token), (
+            "GitHub tools registered without `builtins.github: true` in the manifest: "
+            f"{sorted(self.GITHUB_TOOLS & open_with_token)}"
         )
 
-        # Step 2 — same token, allowlisted manifest: identical to the tokenless run.
+        # Belt-and-braces: the allowlist independently pins the surface, so it
+        # holds even if the framework default ever regresses back to token-keyed.
         assert self._tool_names(kgl, allowed, token="dummy-value") == self._tool_names(kgl, allowed)
         assert self._tool_names(kgl, allowed, token="dummy-value") == self.ALLOWED
+
+    def test_builtins_github_opt_in_registers_the_github_tools(self, deployment: tuple[Path, Path, Path, Path]):
+        """The other half of default-off: opting in must actually work.
+
+        Without this, `test_an_ambient_github_token_widens_no_surface` would
+        pass just as happily if GitHub registration were removed entirely.
+        Both of 0.4.5's boot-time gates are exercised here: the manifest
+        opt-in, and token reachability (registration keys off token
+        *presence* — `has_git_token()` is an env/.env lookup, no live
+        validation — so a dummy value is enough).
+        """
+        kgl, _, _, github_optin = deployment
+
+        optin_with_token = self._tool_names(kgl, github_optin, token="dummy-value")
+        assert self.GITHUB_TOOLS <= optin_with_token, (
+            "`builtins.github: true` + a reachable token did not register the GitHub tools "
+            f"(missing: {sorted(self.GITHUB_TOOLS - optin_with_token)})"
+        )
+
+        # Gate 2 in isolation: opted in, but no token reachable → still hidden,
+        # so the agent never sees a tool that cannot succeed.
+        optin_tokenless = self._tool_names(kgl, github_optin)
+        assert not (self.GITHUB_TOOLS & optin_tokenless), (
+            "GitHub tools registered with `builtins.github: true` but no token reachable: "
+            f"{sorted(self.GITHUB_TOOLS & optin_tokenless)}"
+        )
 
 
 # ── Test: .env auto-discovery (walk-up from mode dir + env_file: override) ──
@@ -821,7 +885,16 @@ class TestEnvFileLoading:
     which walks up from the mode dir looking for `.env`. Explicit `env_file:`
     YAML key overrides walk-up. Regression coverage for A3 in the operator
     feedback: pre-fix, the shim never invoked the loader, so .env was never
-    found and GitHub tools were silently hidden."""
+    found and GitHub tools were silently hidden.
+
+    The observable for "the token was loaded" is still GitHub-tool
+    registration, but since mcp-methods 0.4.5 that also requires the manifest
+    to opt in with `builtins.github: true` — so each case below pairs its
+    `.env` arrangement with an opt-in manifest. `--mcp-config` composes with
+    `--source-root` and does not move the walk-up anchor, which
+    `resolve_env_start_dir` derives from the mode alone."""
+
+    GITHUB_OPT_IN = "name: env test\nbuiltins:\n  github: true\n"
 
     def test_walk_up_from_workspace_finds_env(self, tmp_path: Path):
         """Putting `.env` one dir above the workspace should be discovered."""
@@ -830,9 +903,12 @@ class TestEnvFileLoading:
         (outer / ".env").write_text("GITHUB_TOKEN=ghp_walkup_test_token_not_real\n", encoding="utf-8")
         ws = outer / "workspace"
         ws.mkdir()
+        # No `env_file:` key here — that would override the walk-up under test.
+        manifest = tmp_path / "optin_mcp.yaml"
+        manifest.write_text(self.GITHUB_OPT_IN, encoding="utf-8")
         # Use --source-root mode (workspace mode would try to read inventory).
         client = _spawn(
-            ["--source-root", str(ws)],
+            ["--source-root", str(ws), "--mcp-config", str(manifest)],
             cwd=tmp_path,  # neutral cwd that has no .env
             env_remove=["GITHUB_TOKEN", "GH_TOKEN"],
         )
@@ -853,7 +929,10 @@ class TestEnvFileLoading:
         env_dir.mkdir()
         (env_dir / "my.env").write_text("GITHUB_TOKEN=ghp_explicit_test_token_not_real\n", encoding="utf-8")
         manifest = tmp_path / "explicit_mcp.yaml"
-        manifest.write_text("name: Explicit Env Test\nenv_file: stash/my.env\n", encoding="utf-8")
+        manifest.write_text(
+            "name: Explicit Env Test\nenv_file: stash/my.env\nbuiltins:\n  github: true\n",
+            encoding="utf-8",
+        )
         client = _spawn(
             ["--mcp-config", str(manifest)],
             cwd=tmp_path,
@@ -874,8 +953,10 @@ class TestEnvFileLoading:
         register even if no .env exists at the walk-up location."""
         ws = tmp_path / "workspace_no_env"
         ws.mkdir()
+        manifest = tmp_path / "optin_mcp.yaml"
+        manifest.write_text(self.GITHUB_OPT_IN, encoding="utf-8")
         client = _spawn(
-            ["--source-root", str(ws)],
+            ["--source-root", str(ws), "--mcp-config", str(manifest)],
             cwd=ws,
             env_extra={"GITHUB_TOKEN": "ghp_via_env_not_real"},
         )

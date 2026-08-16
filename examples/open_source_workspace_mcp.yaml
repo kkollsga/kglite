@@ -85,11 +85,17 @@ workspace:
   applies_to: ./*
 
 # .env walk-up loads GITHUB_TOKEN (or GH_TOKEN) for github_issues +
-# github_api. Without a token those tools don't register at boot.
+# github_api. Both halves are required: `builtins.github: true` below
+# declares the intent, and the token decides whether the opted-in tools
+# can actually work. Without either, they don't register at boot.
 env_file: ../.env
 
 builtins:
   temp_cleanup: on_overview
+  # This deployment is *about* GitHub repos, so it opts in. Default is
+  # false — as of mcp-methods 0.4.5 an ambient token never registers
+  # these tools on a server whose manifest doesn't ask for them.
+  github: true
 
 # Localhost CSV server: `FORMAT CSV` in cypher_query writes to
 # `<workspace>/temp/kglite-<hash>.csv` and returns a fetch URL the

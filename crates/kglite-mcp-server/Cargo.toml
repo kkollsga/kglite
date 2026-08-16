@@ -39,7 +39,12 @@ path = "src/main.rs"
 # which landed in 0.4.1. Version 0.4.4 aligns the framework's public
 # types with rmcp 3.1.1; resolving an older 0.4.x alongside our direct
 # rmcp 3 dependency produces incompatible public handler types.
-mcp-methods = { version = "0.4.4", default-features = false, features = ["server"] }
+# 0.4.5 is a behavioural floor, not just a compile one: below it, GitHub
+# tools register on token *reachability* alone, so an ambient GITHUB_TOKEN
+# widens a deployment's agent-visible surface without its manifest saying
+# so. From 0.4.5 that needs `builtins.github: true`, which is what our
+# tools_allow contract and the smoke suite's default-off arms assert.
+mcp-methods = { version = "0.4.5", default-features = false, features = ["server"] }
 
 # kglite (pure-Rust core) — no pyo3 in the resulting binary, no
 # libpython link. The 0.10.1 lift moved KnowledgeGraph +

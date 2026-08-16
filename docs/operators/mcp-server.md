@@ -19,10 +19,15 @@ installation.
 
 What a server exposes is the union of everything that registered: framework
 builtins, the source tools the mode binds, KGLite's graph tools, manifest Cypher
-tools, and routes that appear from the environment — an ambient `GITHUB_TOKEN`
-exported for unrelated reasons adds the GitHub tools to a server whose manifest
-never mentions GitHub. `extensions.tools_allow` inverts that: name the tools the
-deployment is meant to expose, and everything else is hidden.
+tools, and routes that appear from a dependency or a mode change without the
+manifest ever naming them. `extensions.tools_allow` inverts that: name the tools
+the deployment is meant to expose, and everything else is hidden.
+
+One long-standing case of this was closed upstream in mcp-methods 0.4.5: an
+ambient `GITHUB_TOKEN` exported for unrelated reasons used to add the GitHub
+tools to a server whose manifest never mentions GitHub. They now register only
+when the manifest opts in with `builtins.github: true`. That removes one route
+at the source; the allowlist is what bounds the rest.
 
 ```yaml
 # /data/graph_mcp.yaml
@@ -44,7 +49,8 @@ Details worth knowing before writing one:
 - **Names are the final, agent-visible ones.** A `tools:` override that renames
   `ping` to `domain_ping` means the allowlist must say `domain_ping`.
 - **Naming a tool that is not registered in this boot is harmless.** Conditional
-  routes (`github_api` without a token, `load_graph` without `--writable`,
+  routes (`github_api` without the `builtins.github` opt-in or without a token,
+  `load_graph` without `--writable`,
   `explore` on a non-code graph) can be listed safely, so one manifest works
   across environments.
 - **It only removes.** Listing a tool some other rule hid — `repo_management` in

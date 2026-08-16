@@ -3,10 +3,16 @@
 //! A deployment that serves one domain graph usually wants a handful of tools,
 //! but the server's surface is the *union* of everything that happened to
 //! register: framework builtins, source tools bound by the mode, credential-gated
-//! routes (an ambient `GITHUB_TOKEN` in the operator's environment registers the
-//! GitHub tools without the manifest ever mentioning them), KGLite's graph tools,
-//! manifest Cypher tools and downstream domain routes. Naming the ones to *drop*
-//! is a losing game: the list grows from the outside.
+//! routes, KGLite's graph tools, manifest Cypher tools and downstream domain
+//! routes. Naming the ones to *drop* is a losing game: the list grows from the
+//! outside.
+//!
+//! One such source has since been closed upstream — before mcp-methods 0.4.5 an
+//! ambient `GITHUB_TOKEN` in the operator's environment registered the GitHub
+//! tools without the manifest ever mentioning them; they now need
+//! `builtins.github: true`. That is one route fixed at the source, not the
+//! general problem: any dependency can still add a route this deployment never
+//! asked for.
 //!
 //! `extensions.tools_allow` inverts it. The manifest names the final tool surface
 //! and everything else is disabled — so a new route arriving from a dependency,
@@ -28,7 +34,8 @@ use crate::*;
 /// Three properties are deliberate:
 ///
 /// 1. **Naming an absent route is a no-op, never an error.** Half the routes
-///    worth allowing are conditional — GitHub tools appear only with a token,
+///    worth allowing are conditional — GitHub tools appear only when the
+///    manifest opts in and a token is reachable,
 ///    `explore`/`read_code_source` only on a code graph, `save_graph`/`load_graph`
 ///    only on a write-enabled server. A list that errored on the absent ones
 ///    would force operators to maintain a different manifest per environment,
@@ -199,8 +206,9 @@ mod tools_allow_tests {
         }
     }
 
-    /// Conditional routes (token-gated GitHub tools, mode-gated code tools,
-    /// writable-only lifecycle tools) legitimately do not exist in every boot.
+    /// Conditional routes (opt-in + token-gated GitHub tools, mode-gated code
+    /// tools, writable-only lifecycle tools) legitimately do not exist in
+    /// every boot.
     #[test]
     fn naming_a_route_that_never_registered_is_a_no_op() {
         let mut server = server_with(&[]);

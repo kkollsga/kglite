@@ -52,9 +52,17 @@ instructions: |
     5. read_code_source(qualified_name='Type::m')  — single-call source read
     6. read_source(file_path=..., grep='...')      — direct file slice
 
-  GitHub tools (when GITHUB_TOKEN is in .env):
+  GitHub tools (opted in below via builtins.github, active when GITHUB_TOKEN is in .env):
   - github_issues(number=N) / github_issues(query='...')  — issues, PRs, discussions
   - github_api(path)                                       — raw read-only GitHub REST GET
+
+# Reviewing code usually means reading the PR and issues around it, so this
+# archetype opts in. The default is false: as of mcp-methods 0.4.5 a
+# GITHUB_TOKEN that happens to be reachable never registers these tools by
+# itself — the manifest has to ask. Drop this block for an offline-only
+# reviewer, or set `screen_stargazers: false` to keep issues/api without it.
+builtins:
+  github: true
 
 workspace:
   kind: local

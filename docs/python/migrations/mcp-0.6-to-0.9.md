@@ -160,7 +160,7 @@ with explicit error messages.
 | `save_graph`                    | `save_graph` (gated on `builtins.save_graph: true`)    | Off by default — operators must opt in via manifest. Pre-0.9.x always exposed it. |
 | `repo_management`               | `repo_management` (workspace + local-workspace modes)  | Same surface: name / delete / update / force_rebuild. The bundled version uses the validated mcp-methods Rust path (clone-and-track, inventory, atomic root swap). |
 | `set_root_dir`                  | `set_root_dir` (local-workspace mode only)             | Same surface. Sibling swap under the workspace root sandbox. |
-| (custom github wrapper)         | `github_issues` / `github_api`                         | Built-in; auto-registers when `GITHUB_TOKEN` (or `GH_TOKEN`) is in env. |
+| (custom github wrapper)         | `github_issues` / `github_api`                         | Built-in, gated on `builtins.github: true` **and** `GITHUB_TOKEN` (or `GH_TOKEN`) in env. Off by default — operators must opt in via manifest (mcp-methods 0.4.5+; earlier versions auto-registered on the token alone). |
 
 ## Embedder transition
 

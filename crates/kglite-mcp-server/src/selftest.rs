@@ -376,8 +376,9 @@ fn check_recipe_tools(
     }
 }
 
-/// 3. github tools — informational (honest listing: present iff a token is
-///    reachable), never a hard failure.
+/// 3. github tools — informational, never a hard failure. Honest listing:
+///    present iff the manifest opted in with `builtins.github: true` *and* a
+///    token is reachable. Absence is the default, not a fault.
 fn check_github_tools(names: &[String], checks: &mut Vec<(&'static str, Check)>) {
     let gh: Vec<&str> = ["github_issues", "github_api", "screen_stargazers"]
         .into_iter()
@@ -386,7 +387,11 @@ fn check_github_tools(names: &[String], checks: &mut Vec<(&'static str, Check)>)
     if gh.is_empty() {
         checks.push((
             "github tools",
-            Check::Skip("none registered (no GITHUB_TOKEN reachable, or disabled)".into()),
+            Check::Skip(
+                "none registered (needs `builtins.github: true` in the manifest, then a \
+                 reachable GITHUB_TOKEN)"
+                    .into(),
+            ),
         ));
     } else {
         checks.push((

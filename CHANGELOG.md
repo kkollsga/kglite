@@ -59,6 +59,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **GitHub MCP tools now require an explicit `builtins.github: true` opt-in
+  (mcp-methods 0.4.5).** `github_issues`, `github_api`, and
+  `screen_stargazers` used to register whenever a GitHub token was *reachable*
+  — a `GITHUB_TOKEN` exported for unrelated reasons, or one the `.env` walk-up
+  found several directories above the server's root, silently added three
+  authenticated GitHub tools to a server whose manifest never mentioned
+  GitHub. A reachable credential is not a declaration of intent, so
+  registration is now off by default and the manifest declares it; the token
+  only decides whether the opted-in tools can actually work.
+  `builtins.screen_stargazers` is subordinate — with `github` off it registers
+  nothing whatever its value.
+
+  **Deployments that want GitHub tooling must add the key**, otherwise the
+  three tools disappear from `tools/list` at the next restart:
+
+  ```yaml
+  builtins:
+    github: true
+  ```
+
+  Both bundled examples that advertise GitHub tools
+  (`open_source_workspace_mcp.yaml`, `local_code_review_mcp.yaml`) now set it.
+  `--selftest` reports the opt-in as the first thing to check when the tools
+  are absent.
+
 - **A read-only `--graph` MCP server no longer holds the graph file's
   single-writer lock.** The server took the cross-process writer lease on the
   served path at boot and held it for its whole lifetime, so any other process

@@ -154,7 +154,7 @@ line per capability:
 kglite-mcp-server --selftest  (mode: single-graph)
   ✓ server initializes: serverInfo.name = KGLite (single-graph)
   ✓ graph tools registered: cypher_query + graph_overview present
-  – github tools: none registered (no GITHUB_TOKEN reachable, or disabled)
+  – github tools: none registered (needs `builtins.github: true` in the manifest, then a reachable GITHUB_TOKEN)
   ✓ graph hydrates: MATCH (n) RETURN count(n) → 1 row(s):
 Selftest PASSED — the server is configured correctly.
 ```
@@ -483,6 +483,10 @@ trust:
 builtins:
   save_graph: false                   # Default false — gate write-back tool.
   temp_cleanup: on_overview           # Wipe temp/ on every bare graph_overview().
+  github: false                       # Default false — opt in to github_issues /
+                                      # github_api / screen_stargazers. A reachable
+                                      # token alone never registers them.
+  screen_stargazers: true             # Only meaningful when github: true.
 extensions:                           # kglite-specific addons (see matrix below).
   embedder:
     library: sentence-transformers    # or fastembed (py) / fastembed-rs (cargo)
@@ -857,8 +861,9 @@ Common post-boot pitfalls, grouped by symptom.
 
 ### `github_issues` says "could not auto-detect from git remote"
 
-`GITHUB_TOKEN` (or `GH_TOKEN`) isn't in the server's environment.
-The token is loaded from:
+The manifest is missing `builtins.github: true` (the default — an ambient
+token alone registers nothing), or `GITHUB_TOKEN` (or `GH_TOKEN`) isn't in
+the server's environment. The token is loaded from:
 
 1. The process environment when the server boots.
 2. The manifest's `env_file:` path (explicit).
@@ -909,7 +914,8 @@ tool needs to register. Most common cases:
 - `read_source` / `grep` / `list_source` missing — no source root
   is configured (no `source_root:` in the manifest, no `--source-root`
   CLI flag, and `--graph` parent auto-bind didn't fire).
-- `github_issues` / `github_api` missing — no `GITHUB_TOKEN` in env.
+- `github_issues` / `github_api` missing — the manifest doesn't set
+  `builtins.github: true` (the default), or no `GITHUB_TOKEN` in env.
 - `save_graph` missing — you're not in `--graph` mode OR the
   manifest doesn't set `builtins.save_graph: true`.
 
@@ -999,7 +1005,7 @@ will my agent see?"
 | `read_source` / `grep` / `list_source` | a source root is configured (`--source-root`, `--graph` parent auto-bind, manifest `source_root:`, or active workspace repo) | All three register together; never registered independently. |
 | `repo_management` | `codingest-mcp --workspace` clone-tracker mode | Not registered in local-workspace mode; use `set_root_dir` there. |
 | `set_root_dir` | `workspace.kind: local` only | **Unbounded unless `workspace.sandbox_root` is set** (kglite 0.15.5+, mcp-methods 0.4.3+). Without that key a swap may point the server at any readable directory; `workspace.root` is the *starting* root, not a boundary. |
-| `github_issues` / `github_api` | `GITHUB_TOKEN` (or `GH_TOKEN`) reachable at boot | Token loaded from process env, walk-up `.env`, or explicit `env_file:`. Tools are registered together; never one without the other. |
+| `github_issues` / `github_api` | `builtins.github: true` in the manifest **and** `GITHUB_TOKEN` (or `GH_TOKEN`) reachable at boot | Opt-in is required as of mcp-methods 0.4.5 — an ambient token no longer registers anything on its own. Token loaded from process env, walk-up `.env`, or explicit `env_file:`. Tools are registered together; never one without the other. |
 | Manifest `tools[].cypher` entries | the manifest declares them AND the mode supports cypher (anything but `--source-root` and bare) | Tool names cannot collide with the built-ins above. |
 | `list_recipe_queries` / `run_recipe_query` | `extensions.cypher_recipes` is a non-empty valid catalog | Both fixed names register together. Listing works without a graph; running requires an active, fresh graph. |
 
