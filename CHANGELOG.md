@@ -40,6 +40,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A read-only `--graph` MCP server no longer holds the graph file's
+  single-writer lock.** The server took the cross-process writer lease on the
+  served path at boot and held it for its whole lifetime, so any other process
+  that opened that `.kgl` the normal way — `kglite.open(path)`, which locks by
+  default — was refused for as long as the server ran, by an error that named a
+  pid but nothing about an MCP server. A read-only deployment never writes the
+  file, so the lease protected nothing there while blocking exactly the
+  workflow it is paired with: rebuilding the served graph in place. External
+  rebuilders can now lock and republish the file while the server serves (pair
+  it with `reload_graph` or `extensions.graph_watch`), and several read-only
+  servers can share one `.kgl`. A torn rewrite arriving mid-load was already
+  refused by the load path's identity check, which leaves the previous graph
+  serving. Servers that can write the file — `--writable`, or
+  `builtins.save_graph: true` — keep today's exclusive lease, and so do
+  disk-graph directories under any mode, whose columns stay memory-mapped while
+  they are served.
+
 - **A read-only `--graph` MCP server no longer offers `explore` or
   `read_code_source` when the loaded graph has no `Function` or `Class`
   nodes.** Both are code-graph tools: `explore` pins its entry types and its

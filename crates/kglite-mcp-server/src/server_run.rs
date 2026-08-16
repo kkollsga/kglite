@@ -104,6 +104,38 @@ async fn boot_csv_http(
     Ok(cfg)
 }
 
+/// Whether this deployment can write the graph file it serves — `--writable`
+/// (which implies `save_graph`: an agent that mutates needs to persist) or a
+/// manifest that enables `save_graph` on its own.
+///
+/// Read twice, once for each thing that follows from it: which write tools get
+/// registered ([`tools::Builtins`]) and whether the server takes the path's
+/// cross-process writer lease ([`writer_lease_policy`]). One function so those
+/// two can never disagree about what "this server writes the graph" means.
+fn graph_writes_enabled(manifest: Option<&mcp_methods::server::Manifest>, cli: &Cli) -> bool {
+    manifest.map(|m| m.builtins.save_graph).unwrap_or(false) || cli.writable
+}
+
+/// Whether to take the single-writer lease on the served path.
+///
+/// A read-only server never rewrites the file, so holding its lease refuses
+/// every external rebuilder (`kglite.open(path)` fails fast) for the server's
+/// whole lifetime and buys nothing back — and it stops two read-only servers
+/// from serving one `.kgl`. Write-enabled deployments keep the exclusive lease;
+/// so do disk-graph directories, whose retained mmaps make an external writer
+/// genuinely unsafe rather than merely stale (see
+/// `GraphState::takes_writer_lease`).
+fn writer_lease_policy(
+    manifest: Option<&mcp_methods::server::Manifest>,
+    cli: &Cli,
+) -> tools::WriterLeasePolicy {
+    if graph_writes_enabled(manifest, cli) {
+        tools::WriterLeasePolicy::Exclusive
+    } else {
+        tools::WriterLeasePolicy::ReadOnly
+    }
+}
+
 /// P4 + P5 (operator feedback): builtin toggles from the manifest.
 ///   - P5 `save_graph`: gate registration on `builtins.save_graph: true`.
 ///     Historically always-on, exposing a destructive operation to the agent on
@@ -117,10 +149,7 @@ fn boot_builtins(
     manifest_base: &Path,
 ) -> tools::Builtins {
     tools::Builtins {
-        save_graph: manifest.map(|m| m.builtins.save_graph).unwrap_or(false)
-            // Write mode implies save_graph (an agent that mutates needs to
-            // persist) so `--writable` alone gives the full workbench.
-            || cli.writable,
+        save_graph: graph_writes_enabled(manifest, cli),
         writable: cli.writable,
         temp_cleanup_on_overview: manifest
             .map(|m| {
@@ -277,7 +306,12 @@ pub(crate) async fn run_async(
 
     let graph_state = GraphState::new(workspace_graph_mode(&mode))
         .with_value_codecs(boot_value_codecs(manifest.as_ref())?)
-        .with_workspace_graph(workspace_graph.map(Arc::new));
+        .with_workspace_graph(workspace_graph.map(Arc::new))
+        // Declared here rather than from `builtins` (built below, after the
+        // csv_http boot it needs) because `bind_mode` performs the boot open on
+        // the very next line — a policy set later would arrive after the lease
+        // decision it governs. Both read the same `graph_writes_enabled`.
+        .with_writer_lease_policy(writer_lease_policy(manifest.as_ref(), &cli));
 
     // Mode-specific bindings: source roots, workspace handle, initial graph
     // build. Extracted to `bind_mode` so this boot fn reads as a sequence of
@@ -436,6 +470,42 @@ mod graph_watch_manifest_tests {
             boot_graph_watch(Some(&on)).expect("explicit true parses"),
             "extensions.graph_watch: true must reach the watcher wiring; if this fails \
              the key is parsed and then dropped"
+        );
+    }
+
+    /// Boot wiring for the writer-lease policy: which deployments own the
+    /// served path. The state-level consequences (lease taken or not, disk
+    /// directories exempt) are pinned in `tools::tests::lifecycle`; this pins
+    /// the mapping from CLI/manifest to policy, since a knob that is computed
+    /// and then dropped is this crate's recurring defect shape.
+    #[test]
+    fn only_write_enabled_deployments_take_the_writer_lease() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let read_only = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl"]);
+        assert_eq!(
+            writer_lease_policy(None, &read_only),
+            tools::WriterLeasePolicy::ReadOnly,
+            "a read-only --graph server must leave the file lockable by a rebuilder"
+        );
+
+        let writable = Cli::parse_from(["kglite-mcp-server", "--graph", "g.kgl", "--writable"]);
+        assert_eq!(
+            writer_lease_policy(None, &writable),
+            tools::WriterLeasePolicy::Exclusive,
+            "--writable owns the file it serves"
+        );
+
+        // `save_graph` without `--writable`: still a writer of that file.
+        let saver = manifest_with(tmp.path(), "name: saver\nbuiltins:\n  save_graph: true\n");
+        assert_eq!(
+            writer_lease_policy(Some(&saver), &read_only),
+            tools::WriterLeasePolicy::Exclusive
+        );
+        let plain = manifest_with(tmp.path(), "name: plain\n");
+        assert_eq!(
+            writer_lease_policy(Some(&plain), &read_only),
+            tools::WriterLeasePolicy::ReadOnly,
+            "a manifest that enables nothing must not re-arm the lease"
         );
     }
 

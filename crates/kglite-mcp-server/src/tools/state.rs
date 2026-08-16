@@ -17,6 +17,34 @@ use kglite::api::{Embedder, KnowledgeGraph};
 
 use crate::tools::*;
 
+/// Whether this server takes the cross-process single-writer lease
+/// (`<path>.lock`, `GraphWriterLease`) on the graph path it opens.
+///
+/// The lease is what stops two writers from each building a full snapshot and
+/// having the last `save()` win. A server that can never write the file it
+/// serves buys nothing with it and costs the operator a great deal: while it is
+/// held, `kglite.open(path)` — the default, locking open an external rebuilder
+/// uses — is refused outright for the server's whole lifetime, with an error
+/// that never mentions this server.
+///
+/// [`Self::Exclusive`] is the [`Default`] on purpose: a construction path that
+/// forgets to declare a policy keeps the historical, conservative behaviour.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WriterLeasePolicy {
+    /// Own the path: take the lease on every open. What a `--writable` /
+    /// `save_graph`-enabled server does, because it really can rewrite the file.
+    #[default]
+    Exclusive,
+    /// Read-only deployment: skip the lease for a regular-file graph, so
+    /// external rebuilders (and other read-only servers) can lock the same
+    /// `.kgl`. A torn in-place rewrite arriving mid-load is already caught by
+    /// the load path's `GraphFileIdentity` before/after check, which fails the
+    /// load and leaves the previously served graph installed.
+    ///
+    /// Not unconditional — see [`GraphState::takes_writer_lease`].
+    ReadOnly,
+}
+
 /// Shared active-graph state. Cloning is cheap (Arc).
 #[derive(Clone, Default)]
 pub struct GraphState {
@@ -70,6 +98,10 @@ pub struct GraphState {
     /// `register_kglite_tools` has cloned the state into every tool closure,
     /// so a plain field would only ever reach the boot clone.
     pub(crate) embedder: Arc<RwLock<Option<Arc<dyn Embedder>>>>,
+    /// Whether opens take the cross-process writer lease. Server-config, set
+    /// once at boot via [`with_writer_lease_policy`](Self::with_writer_lease_policy)
+    /// — before `bind_mode` performs the boot open — and carried by every clone.
+    pub(crate) writer_lease_policy: WriterLeasePolicy,
 }
 
 impl GraphState {
@@ -93,6 +125,34 @@ impl GraphState {
     pub fn with_workspace_graph(mut self, hooks: Option<Arc<WorkspaceGraphHooks>>) -> Self {
         self.workspace_graph_hooks = hooks;
         self
+    }
+
+    /// Declare whether this server owns the graph file it opens. Builder form,
+    /// set once at boot like [`Self::with_value_codecs`] — and, unlike the
+    /// embedder, it must be set *before* `bind_mode` opens the boot graph,
+    /// which is why it is a builder field rather than interior mutability.
+    pub fn with_writer_lease_policy(mut self, policy: WriterLeasePolicy) -> Self {
+        self.writer_lease_policy = policy;
+        self
+    }
+
+    /// Whether opening `path` should take the writer lease.
+    ///
+    /// [`WriterLeasePolicy::ReadOnly`] skips it only for a **regular file** —
+    /// the atomically-republished `.kgl` case. Two targets keep the lease even
+    /// there:
+    ///
+    /// - a **disk-graph directory**: a tree of retained mmaps behind a `CURRENT`
+    ///   pointer, where an external writer mutating a column under our live
+    ///   mapping is memory corruption, not a stale read;
+    /// - a **path that does not exist yet**: this open is about to *create* the
+    ///   graph, which is a write regardless of what the tool surface allows
+    ///   afterwards.
+    fn takes_writer_lease(&self, path: &Path) -> bool {
+        match self.writer_lease_policy {
+            WriterLeasePolicy::Exclusive => true,
+            WriterLeasePolicy::ReadOnly => !path.is_file(),
+        }
     }
 
     /// Whether an external builder is injected. Activation hooks branch on
@@ -183,7 +243,7 @@ impl GraphState {
         let reuse_existing = read_lock(&self.inner)
             .as_ref()
             .is_some_and(|active| active.source_path.as_deref() == Some(path));
-        let mut writer_lease = if reuse_existing {
+        let mut writer_lease = if reuse_existing || !self.takes_writer_lease(path) {
             None
         } else {
             Some(

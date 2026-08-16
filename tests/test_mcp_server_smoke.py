@@ -428,6 +428,40 @@ class TestGraphMode:
         finally:
             client.shutdown()
 
+    def test_readonly_server_leaves_the_graph_lockable(self, graph_fixture: Path):
+        """A read-only server must not hold the served file's writer lease.
+
+        It never writes that file, and while it held the lease an external
+        rebuilder's ``kglite.open(path)`` — which locks by default — was refused
+        for the server's whole lifetime. The cross-process claim is the point,
+        so this drives the real binary rather than a state object: the boot
+        wiring is the part a unit test cannot see.
+        """
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            rebuilder = kglite.open(str(graph_fixture))
+            try:
+                assert list(rebuilder.cypher("MATCH (n) RETURN count(n) AS c"))[0]["c"] == 4
+            finally:
+                rebuilder.close()
+            # The server is unaffected by the external open and keeps serving.
+            r = client.call_tool("cypher_query", {"query": "MATCH (n) RETURN count(n) AS c"})
+            assert "4" in _text_content(r)
+        finally:
+            client.shutdown()
+
+    def test_writable_server_keeps_the_graph_locked(self, graph_fixture: Path):
+        """The other half of the contract — and the proof the test above is not
+        passing because locking stopped working. A `--writable` server owns the
+        file it serves, so a second writer is still refused."""
+        client = _spawn(["--graph", str(graph_fixture), "--writable"])
+        try:
+            with pytest.raises(Exception) as caught:
+                kglite.open(str(graph_fixture))
+            assert "only one process may write" in str(caught.value)
+        finally:
+            client.shutdown()
+
     def test_readonly_rejects_mutation(self, graph_fixture: Path):
         # Default (no --writable): mutations are rejected.
         client = _spawn(["--graph", str(graph_fixture)])

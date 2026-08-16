@@ -44,6 +44,14 @@ consecutive failures the watcher stops retrying until a `reload_graph` call
 succeeds. Single-file graphs only — a disk-graph *directory* logs a boot warning
 and starts no watcher, and `reload_graph` remains its refresh path.
 
+A read-only server does not hold the graph's single-writer lock, so a rebuilder
+can open the served `.kgl` with `kglite.open(path)` and republish it in place
+while the server keeps answering queries — and several read-only servers can
+serve one file at once. Servers that can write the file (`--writable`, or
+`builtins.save_graph: true`) keep the exclusive lock for their lifetime, as do
+disk-graph directories in every mode, because their columns stay memory-mapped
+while served.
+
 ## Writable workbench
 
 ```bash

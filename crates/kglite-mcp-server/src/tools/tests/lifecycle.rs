@@ -325,6 +325,117 @@ fn a_failed_reload_keeps_the_previous_graph_serving() {
     );
 }
 
+// ── writer-lease scoping: who owns the served path ──────────────────────────
+//
+// A `--writable` / `save_graph` server owns the file it serves and holds the
+// cross-process lease for its lifetime. A read-only `--graph` server never
+// writes that file, and holding the lease there only refuses the external
+// rebuilder that wants to republish it (`kglite.open(path)` fails fast, and
+// its error names nothing about this server).
+//
+// Gap, deliberately not covered here: the disk-graph *directory* case, which
+// keeps the lease under either policy. Building a disk graph needs the
+// multi-file arena/`CURRENT` scaffolding, which is exercised by the engine's
+// own storage tests and by `tests/test_storage_parity.py`; the branch it takes
+// here is one `path.is_file()` check shared with the missing-path case below.
+
+/// Whether a process that is *not* this state can take the path's writer lease
+/// right now. Fail-fast (`Duration::ZERO`) — a contended lease answers
+/// immediately, exactly as `kglite.open(path)` asks it to.
+fn external_lease_is_available(path: &std::path::Path) -> bool {
+    kglite::api::io::GraphWriterLease::acquire(path, Duration::ZERO).is_ok()
+}
+
+#[test]
+fn a_read_only_state_leaves_the_served_file_lockable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("read_only.kgl");
+    seed_with_nodes(&p, 1);
+
+    let s = GraphState::default().with_writer_lease_policy(WriterLeasePolicy::ReadOnly);
+    s.open_or_create(&p, None).unwrap();
+    assert_eq!(s.schema().unwrap().0, 1, "the graph must be served");
+
+    assert!(
+        read_lock(&s.inner)
+            .as_ref()
+            .is_some_and(|active| active.writer_lease.is_none()),
+        "a read-only state must not hold a lease on a regular-file graph"
+    );
+    assert!(
+        external_lease_is_available(&p),
+        "an external rebuilder must be able to lock the file a read-only server serves"
+    );
+}
+
+#[test]
+fn a_write_enabled_state_keeps_the_served_file_locked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("write_enabled.kgl");
+    seed_with_nodes(&p, 1);
+
+    // The default policy — what every constructor that declares nothing gets.
+    let s = GraphState::default();
+    assert_eq!(s.writer_lease_policy, WriterLeasePolicy::Exclusive);
+    s.open_or_create(&p, None).unwrap();
+
+    assert!(
+        !external_lease_is_available(&p),
+        "a write-enabled server must keep refusing a second writer"
+    );
+    drop(s);
+    assert!(
+        external_lease_is_available(&p),
+        "and must release the path when it goes away"
+    );
+}
+
+#[test]
+fn a_read_only_state_creating_a_missing_graph_still_takes_the_lease() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("created.kgl");
+
+    // Creating the graph *is* a write, whatever the tool surface allows later,
+    // so the lease is taken even under the read-only policy.
+    let s = GraphState::default().with_writer_lease_policy(WriterLeasePolicy::ReadOnly);
+    s.create_in_mode(&p, StorageMode::Memory).unwrap();
+    assert!(
+        !external_lease_is_available(&p),
+        "a created graph is owned by the process that created it"
+    );
+}
+
+#[test]
+fn a_leaseless_reload_still_serves_the_new_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("leaseless_reload.kgl");
+    let outside = tmp.path().join("rebuilt.kgl");
+    seed_with_nodes(&p, 1);
+    seed_with_nodes(&outside, 3);
+
+    let s = GraphState::default().with_writer_lease_policy(WriterLeasePolicy::ReadOnly);
+    s.open_or_create(&p, None).unwrap();
+    let generation_before = generation(&s);
+
+    // The rebuild an unleased path makes possible: an external process locks
+    // the file, republishes it, and releases.
+    {
+        let _external = kglite::api::io::GraphWriterLease::acquire(&p, Duration::ZERO)
+            .expect("the external rebuilder must get the lease");
+        std::fs::rename(&outside, &p).unwrap();
+    }
+
+    // Same-path reload with no lease to carry across: the `reuse_existing`
+    // branch takes `None` from the old slot and the swap proceeds.
+    s.open_or_create(&p, None).unwrap();
+    assert_eq!(s.schema().unwrap().0, 3, "reload must serve the new bytes");
+    assert_eq!(generation(&s), generation_before + 1);
+    assert!(
+        external_lease_is_available(&p),
+        "the reload must not have quietly acquired a lease"
+    );
+}
+
 #[test]
 fn write_path_creates_and_reads_back() {
     let mut a = fresh_active();
