@@ -724,6 +724,95 @@ class TestGithubTools:
             client.shutdown()
 
 
+# ── Test: extensions.tools_allow (closed-by-default tool surface) ─────────
+
+
+class TestToolsAllowlist:
+    """`extensions.tools_allow:` pins the whole agent-visible tool surface.
+
+    The deployment shape is a domain embedder serving one graph and wanting
+    three tools. Without the key its surface is the union of everything that
+    registered — including routes an *ambient environment variable* pulls in:
+    a `GITHUB_TOKEN` exported for unrelated reasons adds `github_api` /
+    `github_issues` / `screen_stargazers` to a music server. The token arm below
+    proves that widening is real and then proves the allowlist closes it.
+    """
+
+    ALLOWED = {"cypher_query", "graph_overview", "ping"}
+
+    @pytest.fixture
+    def deployment(self, tmp_path: Path) -> tuple[Path, Path, Path]:
+        """An isolated graph + two manifests differing only in the allowlist."""
+        root = tmp_path / "domain_server"
+        root.mkdir()
+        kgl = root / "domain.kgl"
+        _build_fixture_graph(kgl)
+        allowed = root / "allowlist_mcp.yaml"
+        allowed.write_text(
+            "name: domain\nextensions:\n  tools_allow:\n    - cypher_query\n    - graph_overview\n    - ping\n",
+            encoding="utf-8",
+        )
+        open_surface = root / "open_mcp.yaml"
+        open_surface.write_text("name: domain\n", encoding="utf-8")
+        return kgl, allowed, open_surface
+
+    @staticmethod
+    def _tool_names(kgl: Path, manifest: Path, token: Optional[str] = None) -> set[str]:
+        # `env_remove` runs before `env_extra` in `_spawn`, so the tokenless arm
+        # is genuinely tokenless and the token arm carries exactly one token.
+        client = _spawn(
+            ["--graph", str(kgl), "--mcp-config", str(manifest)],
+            cwd=kgl.parent,
+            env_extra={"GITHUB_TOKEN": token} if token else None,
+            env_remove=["GITHUB_TOKEN", "GH_TOKEN"],
+        )
+        try:
+            return {t["name"] for t in client.list_tools()}
+        finally:
+            client.shutdown()
+
+    def test_allowlist_is_the_entire_tool_surface(self, deployment: tuple[Path, Path, Path]):
+        kgl, allowed, open_surface = deployment
+        # Control: the same deployment without the key serves far more than
+        # three tools, so the assertion below cannot pass vacuously.
+        open_names = self._tool_names(kgl, open_surface)
+        assert self.ALLOWED < open_names
+        assert {"grep", "read_source", "list_source"} <= open_names
+
+        assert self._tool_names(kgl, allowed) == self.ALLOWED
+
+    def test_a_dropped_tool_is_rejected_on_call_not_merely_unlisted(self, deployment: tuple[Path, Path, Path]):
+        kgl, allowed, _ = deployment
+        client = _spawn(
+            ["--graph", str(kgl), "--mcp-config", str(allowed)],
+            cwd=kgl.parent,
+            env_remove=["GITHUB_TOKEN", "GH_TOKEN"],
+        )
+        try:
+            assert "pong" in _text_content(client.call_tool("ping")).lower()
+            with pytest.raises(RuntimeError, match="tool not found"):
+                client.call_tool("grep", {"pattern": "anything"})
+        finally:
+            client.shutdown()
+
+    def test_an_ambient_github_token_cannot_widen_the_allowlisted_surface(self, deployment: tuple[Path, Path, Path]):
+        kgl, allowed, open_surface = deployment
+        # Step 1 — prove the widening this feature exists to stop. If this
+        # assertion ever fails, the token no longer registers tools and the
+        # comparison below would be vacuous: fix the premise, don't drop it.
+        open_tokenless = self._tool_names(kgl, open_surface)
+        open_with_token = self._tool_names(kgl, open_surface, token="dummy-value")
+        added_by_token = open_with_token - open_tokenless
+        assert "github_api" in added_by_token and "github_issues" in added_by_token, (
+            "premise broken: an ambient GITHUB_TOKEN no longer registers GitHub tools "
+            f"(added: {sorted(added_by_token)}) — the allowlist comparison would prove nothing"
+        )
+
+        # Step 2 — same token, allowlisted manifest: identical to the tokenless run.
+        assert self._tool_names(kgl, allowed, token="dummy-value") == self._tool_names(kgl, allowed)
+        assert self._tool_names(kgl, allowed, token="dummy-value") == self.ALLOWED
+
+
 # ── Test: .env auto-discovery (walk-up from mode dir + env_file: override) ──
 
 

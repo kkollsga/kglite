@@ -15,6 +15,50 @@ skills, value codecs, an embedder, and CSV-over-localhost export. Point MCP
 clients at the absolute executable path to avoid an older PATH-shadowing
 installation.
 
+## Pinning the tool surface
+
+What a server exposes is the union of everything that registered: framework
+builtins, the source tools the mode binds, KGLite's graph tools, manifest Cypher
+tools, and routes that appear from the environment — an ambient `GITHUB_TOKEN`
+exported for unrelated reasons adds the GitHub tools to a server whose manifest
+never mentions GitHub. `extensions.tools_allow` inverts that: name the tools the
+deployment is meant to expose, and everything else is hidden.
+
+```yaml
+# /data/graph_mcp.yaml
+name: My Graph
+extensions:
+  tools_allow:
+    - cypher_query
+    - graph_overview
+    - ping
+```
+
+That server lists exactly those three tools, in every environment, and a route
+arriving later — from a new dependency, an exported credential, or a mode change
+— cannot widen the surface without an edit to the list. Hidden tools are
+unlisted and rejected when called by name.
+
+Details worth knowing before writing one:
+
+- **Names are the final, agent-visible ones.** A `tools:` override that renames
+  `ping` to `domain_ping` means the allowlist must say `domain_ping`.
+- **Naming a tool that is not registered in this boot is harmless.** Conditional
+  routes (`github_api` without a token, `load_graph` without `--writable`,
+  `explore` on a non-code graph) can be listed safely, so one manifest works
+  across environments.
+- **It only removes.** Listing a tool some other rule hid — `repo_management` in
+  a local workspace, a `hidden: true` override — does not bring it back.
+- **The list is the whole surface**, not an addition to a default set: omit
+  `ping` and the server has no `ping`. An explicit `tools_allow: []` is taken
+  literally and leaves no tools at all.
+- A manifest that configures `extensions.cypher_recipes` must list
+  `list_recipe_queries` and `run_recipe_query`; omitting them is refused at boot
+  rather than serving a catalog no agent can reach.
+- A malformed value (not a list, or an element that is not a string) fails boot
+  instead of being ignored — an allowlist that silently fails open is worse than
+  none.
+
 ## Refreshing a rebuilt graph
 
 The graph is read once at boot and served from memory, so a `.kgl` rebuilt by

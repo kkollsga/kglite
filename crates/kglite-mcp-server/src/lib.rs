@@ -47,6 +47,7 @@ mod selftest;
 mod server_run;
 mod skills;
 mod tools;
+mod tools_allow;
 mod value_codecs;
 mod watcher;
 
@@ -59,6 +60,7 @@ pub(crate) use extensions::*;
 pub(crate) use modes::*;
 pub(crate) use server_run::*;
 pub(crate) use skills::*;
+pub(crate) use tools_allow::*;
 pub(crate) use watcher::*;
 
 pub use crate::embedder::PyEmbedderFactory;

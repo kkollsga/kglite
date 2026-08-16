@@ -38,6 +38,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it), and single-file graphs only — a disk-graph directory logs a boot
   warning and starts no watcher, with `reload_graph` still covering it.
 
+- **`extensions.tools_allow: [...]` — a closed-by-default MCP tool surface.**
+  A server's tool list has always been the union of everything that happened to
+  register: framework builtins, the mode's source tools, KGLite's graph tools,
+  manifest Cypher tools, downstream domain routes — and routes that arrive from
+  the *environment*, since an ambient `GITHUB_TOKEN` exported for unrelated
+  reasons registers `github_api`, `github_issues`, and `screen_stargazers` on a
+  server whose manifest never mentions GitHub. A deployment that wanted three
+  tools could not express that: the things to remove were owned by other layers
+  and the list grew from the outside. Naming the allowed tools in the manifest
+  now pins the whole surface — everything else is hidden (unlisted, and rejected
+  when called by name), so no dependency, credential, or mode change can widen
+  it without an edit to that list. Matching is against the final, agent-visible
+  names, so a `tools:` rename is honoured; naming a tool that did not register
+  in this boot is a deliberate no-op, which keeps one manifest valid across
+  environments where GitHub tools, write-lifecycle tools, or the code tools come
+  and go. The allowlist only removes: a route another rule hid stays hidden.
+  A configured `extensions.cypher_recipes` must keep its two fixed routes, and
+  a malformed value fails boot rather than silently leaving the surface open.
+
 ### Changed
 
 - **A read-only `--graph` MCP server no longer holds the graph file's

@@ -73,6 +73,38 @@ fn boot_graph_watch(manifest: Option<&mcp_methods::server::Manifest>) -> Result<
         .context("extensions.graph_watch must be a boolean (true or false)")
 }
 
+/// `extensions.tools_allow: [name, ...]` — the closed-by-default tool surface.
+///
+/// Absent key = no allowlist = every registered route stays visible (today's
+/// behaviour). Present, it names the *final* tool surface: see
+/// [`apply_tool_allowlist`] for what that means and what it deliberately does
+/// not do. An explicit empty list is honoured literally — a server with no
+/// tools — because the alternative (silently treating `[]` as "no allowlist")
+/// would widen a surface an operator asked to close.
+///
+/// A non-list value, or a non-string element, is a boot error rather than a
+/// dropped key: an allowlist that silently fails open is worse than no
+/// allowlist, and "parsed and then ignored" is this crate's recurring defect
+/// shape (`graph_watch`, `temp_cleanup`).
+fn boot_tools_allow(
+    manifest: Option<&mcp_methods::server::Manifest>,
+) -> Result<Option<Vec<String>>> {
+    let Some(raw) = manifest.and_then(|m| m.extensions.get("tools_allow")) else {
+        return Ok(None);
+    };
+    let items = raw
+        .as_array()
+        .context("extensions.tools_allow must be a list of tool names")?;
+    let mut names = Vec::with_capacity(items.len());
+    for item in items {
+        let name = item.as_str().with_context(|| {
+            format!("extensions.tools_allow entries must be tool names (strings); found {item}")
+        })?;
+        names.push(name.to_owned());
+    }
+    Ok(Some(names))
+}
+
 /// Directory the manifest was loaded from — the base both `csv_http_server`
 /// (resolving `dir:`) and `temp_cleanup` (finding the directory to wipe)
 /// resolve against. Falls back to cwd when there's no manifest.
@@ -280,6 +312,7 @@ pub(crate) async fn run_async(
     // Parsed here, at the top of boot, so a malformed value fails the server
     // rather than surfacing as a watcher that quietly never fires.
     let graph_watch = boot_graph_watch(manifest.as_ref())?;
+    let tools_allow = boot_tools_allow(manifest.as_ref())?;
 
     // Manifest `workspace.kind: local` wins over CLI flags — promote before
     // mode-specific binding so the rest of boot sees `Mode::LocalWorkspace`.
@@ -412,6 +445,17 @@ pub(crate) async fn run_async(
         domain_tools,
     )?;
 
+    // Last, and only here: the allowlist closes the surface once *every* route
+    // source has registered and `apply_bundled_tool_overrides` (at the tail of
+    // `register_extension_tools`) has settled the final names. Applying it any
+    // earlier would let a later registration re-widen the surface, and would
+    // match against pre-rename names the agent never sees. Before skills, so a
+    // `tool_registered:` predicate sees the closed surface.
+    if let Some(allow) = tools_allow.as_deref() {
+        apply_tool_allowlist(&mut server, allow, recipe_catalog_summary.is_some())
+            .context("extensions.tools_allow could not be applied")?;
+    }
+
     let _watch_handle = spawn_mode_watcher(&mode, &graph_state, graph_watch)?;
 
     // Bare-mode (no manifest) deployments don't get skills — the
@@ -436,13 +480,13 @@ pub(crate) async fn run_async(
     Ok(())
 }
 
-/// `extensions.graph_watch` must survive the whole chain: spelled in a YAML
+/// Every boot knob read here must survive the whole chain: spelled in a YAML
 /// file, accepted by mcp-methods' loader (which validates nothing inside
-/// `extensions:`), and read back here as a bool. Loading through the real
-/// loader rather than constructing a `Manifest` is deliberate — a struct
-/// literal would skip the two steps most likely to break.
+/// `extensions:`), and read back here as the type the wiring expects. Loading
+/// through the real loader rather than constructing a `Manifest` is deliberate
+/// — a struct literal would skip the two steps most likely to break.
 #[cfg(test)]
-mod graph_watch_manifest_tests {
+mod boot_manifest_tests {
     use super::*;
 
     fn manifest_with(dir: &Path, body: &str) -> mcp_methods::server::Manifest {
@@ -507,6 +551,75 @@ mod graph_watch_manifest_tests {
             tools::WriterLeasePolicy::ReadOnly,
             "a manifest that enables nothing must not re-arm the lease"
         );
+    }
+
+    /// Same chain, same reasoning as `graph_watch`: spelled in YAML, passed
+    /// through mcp-methods' loader (which validates nothing inside
+    /// `extensions:`), read back here as a list of names. The absent-key arm is
+    /// what makes the present-key arm mean anything.
+    #[test]
+    fn tools_allow_defaults_to_absent_and_reads_the_manifest_list() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(boot_tools_allow(None)
+            .expect("no manifest parses")
+            .is_none());
+        let bare = manifest_with(tmp.path(), "name: bare\n");
+        assert!(
+            boot_tools_allow(Some(&bare))
+                .expect("bare manifest parses")
+                .is_none(),
+            "an absent key must leave the surface open"
+        );
+
+        let listed = manifest_with(
+            tmp.path(),
+            "name: listed\nextensions:\n  tools_allow:\n    - cypher_query\n    - graph_overview\n    - ping\n",
+        );
+        assert_eq!(
+            boot_tools_allow(Some(&listed)).expect("list parses"),
+            Some(vec![
+                "cypher_query".to_string(),
+                "graph_overview".to_string(),
+                "ping".to_string(),
+            ]),
+            "extensions.tools_allow must reach the router wiring; if this fails the key is \
+             parsed and then dropped"
+        );
+
+        let empty = manifest_with(tmp.path(), "name: empty\nextensions:\n  tools_allow: []\n");
+        assert_eq!(
+            boot_tools_allow(Some(&empty)).expect("empty list parses"),
+            Some(Vec::new()),
+            "an explicit empty list closes the surface completely — it is not 'no allowlist'"
+        );
+    }
+
+    #[test]
+    fn a_malformed_tools_allow_fails_boot() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let scalar = manifest_with(
+            tmp.path(),
+            "name: scalar\nextensions:\n  tools_allow: cypher_query\n",
+        );
+        let error = boot_tools_allow(Some(&scalar))
+            .expect_err("a scalar must fail boot, not be ignored")
+            .to_string();
+        assert!(error.contains("must be a list"), "{error}");
+
+        let null = manifest_with(tmp.path(), "name: null\nextensions:\n  tools_allow:\n");
+        assert!(
+            boot_tools_allow(Some(&null)).is_err(),
+            "an empty (null) value is a typo, not an empty list"
+        );
+
+        let mistyped = manifest_with(
+            tmp.path(),
+            "name: mistyped\nextensions:\n  tools_allow:\n    - ping\n    - 7\n",
+        );
+        let error = boot_tools_allow(Some(&mistyped))
+            .expect_err("a non-string element must fail boot")
+            .to_string();
+        assert!(error.contains("must be tool names"), "{error}");
     }
 
     #[test]
