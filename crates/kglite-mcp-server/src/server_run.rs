@@ -264,7 +264,15 @@ pub(crate) async fn run_async(
         // Local workspaces activate a directory with `set_root_dir`; the
         // GitHub clone-oriented `repo_management` tool is mutually exclusive
         // and would steer agents toward the wrong activation protocol.
-        server.tool_router_mut().remove_route("repo_management");
+        //
+        // Disable, never remove: `remove_route` drops the entry from
+        // `router.map`, and `apply_bundled_tool_overrides` hard-errors on any
+        // manifest override naming a route that is not in that map — so a
+        // local-workspace manifest carrying `bundled: repo_management` (hide,
+        // rename, or description) would fail every boot with "unknown route".
+        // `disable_route` keeps the entry and hides it the same way (unlisted,
+        // rejected on call) while leaving overrides resolvable.
+        server.tool_router_mut().disable_route("repo_management");
     }
     register_kglite_tools(
         &mut server,

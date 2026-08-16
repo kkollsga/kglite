@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A local-workspace MCP server no longer refuses to boot when its manifest
+  mentions `repo_management`.** Local workspaces activate a directory with
+  `set_root_dir`, so the GitHub clone-oriented `repo_management` tool is hidden
+  at startup — but it was hidden by *removing* the route from the router, and
+  manifest `tools:` overrides are validated against the routes the router still
+  knows. Any local-workspace manifest carrying a `bundled: repo_management`
+  entry — hiding it explicitly, renaming it, or just replacing its description —
+  therefore died on every start with "manifest bundled-tool override targets
+  unknown route". The tool is now hidden by disabling the route instead: it is
+  still absent from `tools/list` and still rejected when called directly, and
+  overrides naming it resolve normally (a hide override leaves it hidden).
+
 ## [0.16.2] - 2026-08-16
 
 ### Added

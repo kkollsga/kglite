@@ -197,6 +197,50 @@ mod bundled_override_tests {
         assert!(error.to_string().contains("conflicts"));
     }
 
+    /// The local-workspace boot path hides `repo_management` before manifest
+    /// overrides run. It must hide it by *disabling* the route, because the
+    /// unknown-route bail above reads `router.map`: a removed route makes any
+    /// manifest naming it a hard boot error, while a disabled one resolves.
+    /// Both halves are asserted so the constraint cannot silently invert.
+    #[test]
+    fn hiding_a_route_before_overrides_must_disable_it_not_remove_it() {
+        let manifest_yaml = "tools:\n  - bundled: repo_management\n    hidden: true\n";
+
+        fn workspace_server() -> McpServer {
+            let mut server = McpServer::new(ServerOptions::default());
+            server.register_typed_tool::<CollisionArgs, _>(
+                "repo_management",
+                "Stub repo-management route.",
+                |_| "stub".to_string(),
+            );
+            server
+        }
+
+        // Pre-fix boot shape: the route is gone from `map`, so the manifest
+        // override targets a name the router no longer knows.
+        let (_dir, manifest) = load_manifest(manifest_yaml);
+        let mut removed = workspace_server();
+        removed.tool_router_mut().remove_route("repo_management");
+        let error = apply_bundled_tool_overrides(&mut removed, &manifest)
+            .expect_err("a removed route must still be rejected as unknown");
+        assert!(error.to_string().contains("unknown route"));
+
+        // Fixed boot shape: same user-visible effect, override resolves.
+        let (_dir, manifest) = load_manifest(manifest_yaml);
+        let mut disabled = workspace_server();
+        disabled.tool_router_mut().disable_route("repo_management");
+        assert!(disabled.tool_router_mut().is_disabled("repo_management"));
+
+        apply_bundled_tool_overrides(&mut disabled, &manifest)
+            .expect("a manifest may hide an already-disabled route");
+
+        assert!(
+            disabled.tool_router_mut().is_disabled("repo_management"),
+            "the hide override must leave the route disabled, not re-enable it"
+        );
+        assert!(!disabled.tool_router_mut().has_route("repo_management"));
+    }
+
     fn recipe_catalog() -> Arc<recipe_queries::RecipeCatalog> {
         Arc::new(
             recipe_queries::RecipeCatalog::from_manifest_value(Some(&json!({
