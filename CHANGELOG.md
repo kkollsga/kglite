@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A read-only `--graph` MCP server no longer offers `explore` or
+  `read_code_source` when the loaded graph has no `Function` or `Class`
+  nodes.** Both are code-graph tools: `explore` pins its entry types and its
+  traversal edge whitelist to code node types, so on a non-code graph it can
+  only ever answer "no match" while still occupying a slot in every agent's
+  tool list; and `read_code_source`'s optional `node_type` argument turned it
+  into a general reader of whatever `file_path` properties the graph carried,
+  with no code-graph purpose to justify the disk access. Legal, oil-and-gas,
+  music and other data-only deployments now present a tool list containing
+  only tools that can actually do something. The decision is made once at
+  boot, applies to `--graph` mode only (other modes have no graph yet when
+  tools register), and exempts `--writable` servers, where `load_graph` can
+  swap in a code graph at any time. `crates/kglite-mcp-server/skills/read_code_source.md`
+  documented this behaviour before it existed; its wording is now accurate.
+
 ### Fixed
 
 - **A local-workspace MCP server no longer refuses to boot when its manifest

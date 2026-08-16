@@ -26,7 +26,7 @@ applies_when:
 
 `read_code_source` is the **symbol-to-slice tool**: given a qualified name (e.g. `foo.bar.MyClass.method`), it resolves to the source file, returns the slice covering the symbol's body, and prepends a `file_path:line_start-line_end` header. It collapses the "Cypher query found a Function; now I want to see its code" workflow into one call — saving the agent one round trip vs. `cypher_query` for the file_path + `read_source` for the slice.
 
-The tool only works against graphs that have **Function** and **Class** nodes (i.e. code graphs built by a code-graph builder such as codingest). It is not registered when those types are absent — and the framework auto-gates this skill via `applies_when: graph_has_node_type: [Function, Class]` so it doesn't appear in `prompts/list` for legal/o&g/data-only deployments.
+The tool only works against graphs that have **Function** and **Class** nodes (i.e. code graphs built by a code-graph builder such as codingest). A read-only `--graph` server whose graph lacks those types does not offer it at all — it is disabled at boot, so it never appears in `tools/list` (write-enabled servers keep it, because `load_graph` can swap a code graph in at runtime). The framework separately auto-gates this skill via `applies_when: graph_has_node_type: [Function, Class]` so it doesn't appear in `prompts/list` for legal/o&g/data-only deployments.
 
 ## Quick Reference
 

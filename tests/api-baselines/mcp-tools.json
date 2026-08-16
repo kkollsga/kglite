@@ -19,45 +19,6 @@
       }
     },
     {
-      "name": "explore",
-      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code graph.",
-      "inputSchema": {
-        "properties": {
-          "include_source": {
-            "description": "Whether to include grouped source slices for the entry points. Default true.",
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "max_depth": {
-            "description": "Hops for the neighborhood traversal. Default 2.",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "max_entities": {
-            "description": "Top N entry points after lexical ranking. Default 10.",
-            "minimum": 1,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "query": {
-            "description": "Free-text topic. Matched against Function/Class names, signatures, and docstrings \u2014 exact name matches rank highest. Pass a symbol or a short phrase, not a sentence.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "query"
-        ],
-        "type": "object"
-      }
-    },
-    {
       "name": "graph_overview",
       "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
       "inputSchema": {
@@ -208,68 +169,6 @@
             ]
           }
         },
-        "type": "object"
-      }
-    },
-    {
-      "name": "read_code_source",
-      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-graph node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
-      "inputSchema": {
-        "properties": {
-          "end_line": {
-            "description": "Override the entity's end line (1-indexed, inclusive). Defaults to the entity's defined end.",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "grep": {
-            "description": "Regex pattern to filter lines. Returns matching lines plus context.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "grep_context": {
-            "description": "Lines of context around each grep match (default 2).",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "max_chars": {
-            "description": "Cap output size in characters.",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "node_type": {
-            "description": "Optional node-type hint when the qualified name is ambiguous (e.g. 'Function', 'Struct').",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "qualified_name": {
-            "description": "Fully-qualified entity name to resolve (e.g. 'mypkg.parser.parse_file', 'KnowledgeGraph::cypher').",
-            "type": "string"
-          },
-          "start_line": {
-            "description": "Override the entity's start line (1-indexed). Defaults to the entity's defined start.",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "qualified_name"
-        ],
         "type": "object"
       }
     },
@@ -1229,45 +1128,6 @@
       }
     },
     {
-      "name": "explore",
-      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code graph.",
-      "inputSchema": {
-        "properties": {
-          "include_source": {
-            "description": "Whether to include grouped source slices for the entry points. Default true.",
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "max_depth": {
-            "description": "Hops for the neighborhood traversal. Default 2.",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "max_entities": {
-            "description": "Top N entry points after lexical ranking. Default 10.",
-            "minimum": 1,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "query": {
-            "description": "Free-text topic. Matched against Function/Class names, signatures, and docstrings \u2014 exact name matches rank highest. Pass a symbol or a short phrase, not a sentence.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "query"
-        ],
-        "type": "object"
-      }
-    },
-    {
       "name": "graph_overview",
       "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
       "inputSchema": {
@@ -1429,68 +1289,6 @@
             ]
           }
         },
-        "type": "object"
-      }
-    },
-    {
-      "name": "read_code_source",
-      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-graph node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
-      "inputSchema": {
-        "properties": {
-          "end_line": {
-            "description": "Override the entity's end line (1-indexed, inclusive). Defaults to the entity's defined end.",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "grep": {
-            "description": "Regex pattern to filter lines. Returns matching lines plus context.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "grep_context": {
-            "description": "Lines of context around each grep match (default 2).",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "max_chars": {
-            "description": "Cap output size in characters.",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "node_type": {
-            "description": "Optional node-type hint when the qualified name is ambiguous (e.g. 'Function', 'Struct').",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "qualified_name": {
-            "description": "Fully-qualified entity name to resolve (e.g. 'mypkg.parser.parse_file', 'KnowledgeGraph::cypher').",
-            "type": "string"
-          },
-          "start_line": {
-            "description": "Override the entity's start line (1-indexed). Defaults to the entity's defined start.",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "qualified_name"
-        ],
         "type": "object"
       }
     },

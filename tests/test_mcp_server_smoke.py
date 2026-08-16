@@ -1214,6 +1214,95 @@ class TestExploreAndSkills:
         assert "is_benchmark" in tools["cypher_query"]
 
 
+# ── Test: code-tool gating on non-code graphs ─────────────────────────────
+
+
+CODE_TOOLS = ("explore", "read_code_source")
+
+
+class TestCodeToolGating:
+    """`explore` and `read_code_source` are code-graph tools: `explore` pins its
+    entry types and traversal edges to code node types (so it is structurally
+    dead on a graph without them), and `read_code_source(node_type=...)` would
+    otherwise read arbitrary `file_path` properties off disk. A read-only
+    `--graph` server whose graph has no Function/Class nodes therefore hides
+    both. The gate is a *boot-time* decision, scoped to `--graph` mode and
+    exempting `--writable` (see `code_tools_are_dead` in server_run.rs)."""
+
+    @pytest.fixture
+    def code_graph(self, tmp_path: Path) -> Path:
+        """A minimal Function/Class graph — the negative control for the gate."""
+        project = tmp_path / "gated_proj"
+        project.mkdir()
+        (project / "m.py").write_text("def hub():\n    return 1\n\nclass Bar:\n    pass\n", encoding="utf-8")
+        kgl = project / "code.kgl"
+        _build_code_graph_kgl(
+            kgl,
+            [
+                {"id": "m.hub", "name": "hub", "file_path": "m.py", "line_number": 1, "end_line": 2},
+                {"id": "m.Bar", "name": "Bar", "kind": "Class", "file_path": "m.py", "line_number": 4, "end_line": 5},
+            ],
+        )
+        return kgl
+
+    def _names(self, args: list[str]) -> set[str]:
+        client = _spawn(args)
+        try:
+            return {t["name"] for t in client.list_tools()}
+        finally:
+            client.shutdown()
+
+    def test_non_code_readonly_graph_hides_both_code_tools(self, graph_fixture: Path):
+        """The Person/KNOWS fixture has no Function/Class — both tools go."""
+        names = self._names(["--graph", str(graph_fixture)])
+        for tool in CODE_TOOLS:
+            assert tool not in names, f"{tool} must be hidden on a non-code read-only graph"
+        # The gate must be surgical: everything else still registers.
+        assert {"cypher_query", "graph_overview", "read_source", "grep"} <= names
+
+    def test_code_graph_keeps_both_code_tools(self, code_graph: Path):
+        """Negative control — the same read-only mode over a code graph."""
+        names = self._names(["--graph", str(code_graph)])
+        for tool in CODE_TOOLS:
+            assert tool in names, f"{tool} must stay on a code graph"
+
+    def test_writable_non_code_graph_keeps_both_code_tools(self, graph_fixture: Path):
+        """Writable servers are exempt: `load_graph` can swap a code graph in at
+        runtime and there is no router access from a tool handler to re-enable a
+        disabled route afterwards."""
+        names = self._names(["--graph", str(graph_fixture), "--writable"])
+        for tool in CODE_TOOLS:
+            assert tool in names, f"{tool} must stay on a writable server"
+
+    def test_local_workspace_keeps_both_code_tools(self, tmp_path: Path):
+        """Over-broad-gate canary. Local-workspace mode has no graph at boot, so
+        a mode-blind gate would strip `explore` from exactly the deployments
+        that need it (the code-review / open-source servers)."""
+        root = tmp_path / "ws-root"
+        root.mkdir()
+        (root / "demo.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+        manifest = tmp_path / "ws_mcp.yaml"
+        manifest.write_text(f"name: Gating Canary\nworkspace:\n  kind: local\n  root: {root}\n", encoding="utf-8")
+        names = self._names(["--mcp-config", str(manifest)])
+        for tool in CODE_TOOLS:
+            assert tool in names, f"{tool} must stay in local-workspace mode"
+
+    def test_manifest_may_override_a_gated_route(self, graph_fixture: Path, tmp_path: Path):
+        """The gate disables the routes instead of skipping registration, so a
+        manifest `bundled:` override naming one still resolves at boot. Removing
+        the route instead would make this manifest a hard boot failure
+        ("override targets unknown route"). The Rust unit test in
+        bundled_overrides.rs proves the *mechanism* on a stub router; this
+        proves the real boot ordering — the gate runs before
+        `apply_bundled_tool_overrides`, with the real route names."""
+        manifest = tmp_path / "override_mcp.yaml"
+        manifest.write_text("name: Gated Override\ntools:\n  - bundled: explore\n    hidden: true\n", encoding="utf-8")
+        names = self._names(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
+        # Boot survived (a dead server raises in _spawn), and the tool stays hidden.
+        assert "explore" not in names
+        assert "cypher_query" in names
+
+
 # ── Test: runtime graph-over-grep steering footers (mcp-methods 0.3.46 hook) ──
 
 

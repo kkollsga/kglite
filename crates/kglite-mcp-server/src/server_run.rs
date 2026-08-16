@@ -153,6 +153,42 @@ fn register_kglite_tools(
     Ok(())
 }
 
+/// Whether `explore` and `read_code_source` should be hidden for this boot.
+///
+/// Both tools are code-graph tools. `explore` pins its entry types and its
+/// traversal edge whitelist to code node types, so on a graph without
+/// `Function`/`Class` it can only ever return "no match" — it is structurally
+/// dead, and its presence in `tools/list` is pure misdirection. Worse,
+/// `read_code_source`'s optional `node_type` argument makes it a
+/// general-purpose reader of whatever `file_path` properties the graph
+/// happens to carry, so on a non-code graph it is a way to pull arbitrary
+/// files off disk with no code-graph purpose to justify it.
+///
+/// Three constraints are deliberate and settled — do not "improve" them
+/// without revisiting the reasoning:
+///
+/// 1. **This is a boot-time snapshot of a runtime property.** Every other
+///    `has_node_type` consumer (skill `applies_when:` predicates, the result
+///    footers) re-evaluates per call; this one cannot, because tool handlers
+///    have no access to the router and so nothing can re-enable a route once
+///    the server is running. A same-path graph reload rarely changes the
+///    graph's *class* (a code graph stays a code graph), so the staleness
+///    window is accepted. If handlers ever gain router access, make it live.
+/// 2. **Writable servers are exempt.** `load_graph` can swap a code graph in
+///    at any time, and by (1) there would be no way to re-enable the routes
+///    afterwards — so a writable server keeps both tools regardless of what
+///    it booted with.
+/// 3. **Graph mode only.** Every other mode has no graph at boot, so
+///    `has_node_type` is uniformly `false` there and a mode-blind gate would
+///    strip `explore` from exactly the deployments that need it most
+///    (local-workspace and GitHub-repo code servers, whose graphs are built
+///    after registration).
+fn code_tools_are_dead(mode: &Mode, builtins: &tools::Builtins, graph_state: &GraphState) -> bool {
+    matches!(mode, Mode::Graph { .. })
+        && !builtins.writable
+        && !(graph_state.has_node_type("Function") || graph_state.has_node_type("Class"))
+}
+
 /// `extensions.embedder:` in the manifest selects the embedding backend for
 /// `text_score()`:
 ///   - `backend: fastembed` — the Rust-native fastembed-rs adapter (cargo
@@ -274,6 +310,10 @@ pub(crate) async fn run_async(
         // rejected on call) while leaving overrides resolvable.
         server.tool_router_mut().disable_route("repo_management");
     }
+    // Whether the two code-graph tools are structurally applicable to what
+    // this server actually serves. Read before `builtins` moves into
+    // `register_kglite_tools` below.
+    let gate_code_tools = code_tools_are_dead(&mode, &builtins, &graph_state);
     register_kglite_tools(
         &mut server,
         &graph_state,
@@ -283,6 +323,15 @@ pub(crate) async fn run_async(
         csv_http_arc.clone(),
         source_roots_provider,
     )?;
+    if gate_code_tools {
+        // Disable, never skip registration: an unregistered name is absent
+        // from `router.map`, and `apply_bundled_tool_overrides` hard-errors on
+        // any manifest override naming a route that is not in that map (see
+        // the `repo_management` comment above). Disabling keeps overrides
+        // resolvable while producing the same user-visible effect.
+        server.tool_router_mut().disable_route("explore");
+        server.tool_router_mut().disable_route("read_code_source");
+    }
     bind_manifest_embedder(
         manifest.as_ref(),
         py_embedder_factory.as_ref(),
