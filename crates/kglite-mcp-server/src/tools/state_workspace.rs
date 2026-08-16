@@ -210,8 +210,12 @@ impl GraphState {
         let result = (hooks.build)(request)
             .map_err(|e| anyhow::anyhow!("workspace-graph build hook failed: {e}"))?;
         let (graph, revisions) = result.into_parts();
+        let mut kg = KnowledgeGraph::from_arc(graph);
+        // A producer rebuild is a graph swap like any other: re-apply the
+        // state's bound embedder so `text_score()` survives it.
+        self.apply_bound_embedder(&mut kg);
         let active = ActiveGraph {
-            kg: KnowledgeGraph::from_arc(graph),
+            kg,
             source_path: None,
             writer_lease: None,
             root: Some(root.to_path_buf()),

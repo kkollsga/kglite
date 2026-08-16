@@ -52,6 +52,18 @@ pub struct GraphState {
     /// External workspace-graph lifecycle extension. Set once at boot and
     /// carried by every clone so lazy watch rebuilds use the same producer.
     pub(crate) workspace_graph_hooks: Option<Arc<WorkspaceGraphHooks>>,
+    /// The manifest-declared embedder (`extensions.embedder`), bound once at
+    /// boot and re-applied to every graph this state installs.
+    ///
+    /// It lives here rather than only on the active `KnowledgeGraph` because a
+    /// handle's embedder does not survive a swap: `KnowledgeGraph::from_arc`
+    /// starts at `embedder: None`, so `load_graph` / `create_graph` / a
+    /// workspace rebuild used to leave `text_score()` dead for the rest of the
+    /// process. Interior mutability rather than a `with_*` builder field:
+    /// [`bind_embedder`](Self::bind_embedder) runs *after*
+    /// `register_kglite_tools` has cloned the state into every tool closure,
+    /// so a plain field would only ever reach the boot clone.
+    pub(crate) embedder: Arc<RwLock<Option<Arc<dyn Embedder>>>>,
 }
 
 impl GraphState {
@@ -172,7 +184,10 @@ impl GraphState {
         // that is silently missing another writer's committed frames.
         let opened = open_or_create_graph_in_mode(path, requested_mode, DurabilityLevel::Off)
             .map_err(|e| anyhow::anyhow!("kglite graph open/create failed: {e}"))?;
-        let kg = KnowledgeGraph::from_arc(opened.graph);
+        let mut kg = KnowledgeGraph::from_arc(opened.graph);
+        // Off-lock, before publication: the new handle carries no embedder of
+        // its own, so the boot-bound one is re-applied here.
+        self.apply_bound_embedder(&mut kg);
         let mut guard = write_lock(&self.inner);
         if reuse_existing {
             writer_lease = guard.as_mut().and_then(|active| active.writer_lease.take());
@@ -224,14 +239,29 @@ impl GraphState {
         ))
     }
 
+    /// Bind the embedder `text_score()` uses. Held on the state, so it applies
+    /// to the active graph *and* to every graph installed afterwards.
     pub fn bind_embedder(&self, embedder: Arc<dyn Embedder>) -> Result<()> {
+        *write_lock(&self.embedder) = Some(Arc::clone(&embedder));
         let mut guard = write_lock(&self.inner);
         let Some(active) = guard.as_mut() else {
-            tracing::warn!("embedder loaded before any graph is active; binding deferred");
+            tracing::debug!("embedder loaded before any graph is active; binding deferred");
             return Ok(());
         };
         active.kg.set_embedder_native(embedder);
         Ok(())
+    }
+
+    /// Apply the state's bound embedder (if any) to a freshly built graph
+    /// handle. Every path that installs a new [`ActiveGraph`] must pass its
+    /// handle through here before publication — `KnowledgeGraph::from_arc`
+    /// yields `embedder: None`, and a swap that skips this step silently
+    /// disables `text_score()` for the rest of the process.
+    pub(crate) fn apply_bound_embedder(&self, kg: &mut KnowledgeGraph) {
+        let bound = read_lock(&self.embedder).as_ref().map(Arc::clone);
+        if let Some(embedder) = bound {
+            kg.set_embedder_native(embedder);
+        }
     }
 
     pub fn schema(&self) -> Option<(u64, u64)> {

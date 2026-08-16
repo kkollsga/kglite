@@ -26,6 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`text_score()` no longer stops working after an MCP server swaps graphs.**
+  The embedder declared by `extensions.embedder` was bound once at boot to the
+  graph that happened to be active, and nothing re-applied it afterwards — so
+  the first `load_graph` or `create_graph` on a writable server, and every
+  workspace-graph rebuild, installed a fresh graph with no embedder and left
+  every later `text_score()` call failing with "requires a registered embedding
+  model". The binding is now held by the server and re-applied to each graph it
+  installs, so one boot-time declaration covers the whole session. An embedder
+  declared before any graph exists is likewise applied to the first graph that
+  arrives, instead of being dropped with a warning.
+
 - **A local-workspace MCP server no longer refuses to boot when its manifest
   mentions `repo_management`.** Local workspaces activate a directory with
   `set_root_dir`, so the GitHub clone-oriented `repo_management` tool is hidden

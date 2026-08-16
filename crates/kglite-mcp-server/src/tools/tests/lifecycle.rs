@@ -283,3 +283,127 @@ fn new_edge_type_via_write_path_registers() {
     .unwrap();
     assert!(out.contains('1'), "expected 1 edge, got: {out}");
 }
+
+// ── embedder survival across graph swaps ────────────────────────────────────
+
+/// Deterministic two-dimension embedder: enough for `text_score()` to embed
+/// its query text, with no model download and no I/O.
+struct TestEmbedder;
+
+impl kglite::api::Embedder for TestEmbedder {
+    fn dimension(&self) -> usize {
+        2
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        Ok(texts.iter().map(|t| vec![t.len() as f32, 1.0]).collect())
+    }
+
+    fn model_id(&self) -> Option<String> {
+        Some("test/deterministic".into())
+    }
+}
+
+/// Run a `text_score()` read through the same seam the `cypher_query` tool
+/// uses (`opts.embedder = kg.embedder().cloned()`). The engine resolves the
+/// query text into a vector *before* matching, so an empty graph still
+/// exercises the embedder lookup.
+fn text_score_result(state: &GraphState) -> Result<String, String> {
+    state
+        .with_kg(|kg| {
+            run_cypher_inner(
+                kg,
+                "MATCH (d:Doc) RETURN text_score(d, 'body', 'hello') AS s",
+                std::collections::HashMap::new(),
+                None,
+                None,
+            )
+        })
+        .expect("a graph must be active")
+}
+
+/// Whether the engine refused the query for want of a bound embedder — the
+/// exact user-visible symptom of a dropped binding.
+fn missing_embedder(outcome: &Result<String, String>) -> bool {
+    outcome
+        .as_ref()
+        .err()
+        .is_some_and(|e| e.contains("requires a registered embedding model"))
+}
+
+#[test]
+fn bound_embedder_survives_a_graph_swap() {
+    // `bind_manifest_embedder` binds once at boot; the `load_graph` tool then
+    // swaps a *fresh* `KnowledgeGraph` (embedder: None) into the slot. Before
+    // the fix, `text_score()` silently died at the first swap.
+    let pa = tmp_kgl("embedder_swap_a");
+    let pb = tmp_kgl("embedder_swap_b");
+    // The swap target has to exist on disk: `load_graph` passes no storage
+    // mode, so `open_or_create` opens rather than creates.
+    let seed = GraphState::default();
+    seed.create_in_mode(&pb, StorageMode::Memory).unwrap();
+    seed.save_as(&pb).unwrap();
+    drop(seed);
+
+    let s = GraphState::default();
+    s.create_in_mode(&pa, StorageMode::Memory).unwrap();
+    s.bind_embedder(Arc::new(TestEmbedder)).unwrap();
+    assert!(
+        s.with_kg(|kg| kg.embedder().is_some()).unwrap(),
+        "bind_embedder must reach the active graph"
+    );
+    let before = text_score_result(&s);
+    assert!(
+        !missing_embedder(&before),
+        "sanity: text_score resolves before the swap, got {before:?}"
+    );
+
+    s.load_kgl(&pb).unwrap();
+
+    assert!(
+        s.with_kg(|kg| kg.embedder().is_some()).unwrap(),
+        "the boot-bound embedder must survive a load_graph swap"
+    );
+    let after = text_score_result(&s);
+    assert!(
+        !missing_embedder(&after),
+        "text_score must still resolve after load_graph, got {after:?}"
+    );
+    drop(s);
+    let _ = std::fs::remove_file(&pa);
+    let _ = std::fs::remove_file(&pb);
+}
+
+#[test]
+fn embedder_bound_before_any_graph_reaches_the_first_one() {
+    // Boot order: `bind_manifest_embedder` runs after tool registration, and
+    // modes that install no graph at boot bind against an empty slot. The
+    // binding is deferred, as the code has always claimed — not discarded.
+    let p = tmp_kgl("embedder_deferred");
+    let s = GraphState::default();
+    s.bind_embedder(Arc::new(TestEmbedder)).unwrap();
+    s.create_in_mode(&p, StorageMode::Memory).unwrap();
+    assert!(
+        s.with_kg(|kg| kg.embedder().is_some()).unwrap(),
+        "an embedder bound before the first graph must reach it"
+    );
+    drop(s);
+    let _ = std::fs::remove_file(&p);
+}
+
+#[test]
+fn bound_embedder_survives_a_workspace_rebuild() {
+    // The workspace producer publishes its own fresh `KnowledgeGraph`; a lazy
+    // rebuild is a graph swap like any other.
+    let s = GraphState::new(Some(WorkspaceGraphMode::LocalWorkspace))
+        .with_workspace_graph(Some(test_hooks()));
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let root = workspace.path().to_path_buf();
+    s.bind_embedder(Arc::new(TestEmbedder)).unwrap();
+    s.build_workspace_graph(&root, None)
+        .expect("install workspace graph");
+    assert!(
+        s.with_kg(|kg| kg.embedder().is_some()).unwrap(),
+        "the boot-bound embedder must survive a workspace graph build"
+    );
+}
