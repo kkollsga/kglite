@@ -320,7 +320,12 @@ def test_binary_size_regression():
         define_schema C symbols, and the magic/io split.
 
 
-      - 0.16.2:       20,464,160 bytes (≈19.5 MB). +100 KB over 0.16.1, almost all from the Neo4j-client compatibility surface (Bolt dbms.*/SHOW DATABASES intercepts, elementId + its slot-anchor planner pass, apoc.meta/db.schema shims, EXPLAIN plan metadata); smaller additions from the Java query-options C-ABI binding (storage-format-version + execute_*_opts).
+      - 0.16.2:       20,464,160 bytes (≈19.5 MB). +100 KB over 0.16.1,
+        almost all from the Neo4j-client compatibility surface (Bolt
+        dbms.*/SHOW DATABASES intercepts, elementId + its slot-anchor
+        planner pass, apoc.meta/db.schema shims, EXPLAIN plan metadata);
+        smaller additions from the Java query-options C-ABI binding
+        (storage-format-version + execute_*_opts).
 
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise
