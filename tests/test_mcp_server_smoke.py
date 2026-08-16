@@ -1351,6 +1351,68 @@ class TestReloadGraph:
             client.shutdown()
 
 
+class TestGraphWatch:
+    """`extensions.graph_watch: true` arms a filesystem watch on the served
+    `.kgl`: an external rewrite marks the graph, and the *next* graph tool call
+    serves the new bytes without anyone calling `reload_graph`. Opt-in — the
+    control test below pins that a server without the key never moves."""
+
+    @staticmethod
+    def _rewrite(kgl: Path) -> None:
+        """Republish the served file with different contents. kglite's save
+        writes a sibling temp file and renames it over, so this is exactly the
+        atomic-republish event shape a real producer emits (and the sibling
+        churn the watch callback has to filter out)."""
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"id": [9], "title": ["Zoe"], "city": ["Tromso"]}), "Person", "id", "title")
+        g.save(str(kgl))
+
+    @staticmethod
+    def _titles(client: McpClient) -> str:
+        return _text_content(client.call_tool("cypher_query", {"query": "MATCH (p:Person) RETURN p.title AS t"}))
+
+    def test_manifest_opt_in_reloads_after_an_external_rewrite(self, graph_fixture: Path, tmp_path: Path):
+        # `--graph X.kgl` auto-finds `X_mcp.yaml` beside it, so the manifest
+        # needs no CLI flag — the deployment shape an operator actually uses.
+        (tmp_path / "fixture_mcp.yaml").write_text(
+            "name: Graph Watch\nextensions:\n  graph_watch: true\n", encoding="utf-8"
+        )
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            before = self._titles(client)
+            assert "Alice" in before and "Zoe" not in before, before
+
+            self._rewrite(graph_fixture)
+
+            # The watch debounces (500 ms) and the reload is lazy, so poll the
+            # tool instead of guessing one sleep long enough to be non-flaky.
+            deadline = time.monotonic() + 10.0
+            after = ""
+            while time.monotonic() < deadline:
+                after = self._titles(client)
+                if "Zoe" in after:
+                    break
+                time.sleep(0.25)
+            assert "Zoe" in after and "Alice" not in after, after
+        finally:
+            client.shutdown()
+
+    def test_without_the_manifest_key_a_rewrite_is_not_picked_up(self, graph_fixture: Path):
+        """The control arm: the same rewrite against a server with no
+        `graph_watch` key must leave the served graph alone (`reload_graph` is
+        the only refresh there). A fixed short wait is right here — the
+        assertion is an absence, and 2 s is well past the 500 ms debounce."""
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            assert "Alice" in self._titles(client)
+            self._rewrite(graph_fixture)
+            time.sleep(2.0)
+            after = self._titles(client)
+            assert "Alice" in after and "Zoe" not in after, after
+        finally:
+            client.shutdown()
+
+
 # ── Test: runtime graph-over-grep steering footers (mcp-methods 0.3.46 hook) ──
 
 

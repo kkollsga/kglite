@@ -29,7 +29,8 @@ pub struct GraphState {
     pub(crate) rebuild_gate: Arc<WorkspaceRebuildGate>,
     /// Deferred-rebuild slot. The watcher tags the active root here
     /// (cheap, microseconds — sets the slot, drops the lock); each
-    /// MCP tool entry calls [`ensure_workspace_graph_fresh`] which atomically
+    /// MCP tool entry calls [`GraphState::ensure_graph_fresh`], which for a
+    /// workspace mode dispatches to `ensure_workspace_graph_fresh` — atomically
     /// `take()`s the slot and rebuilds. Pattern: do the actual work
     /// lazily, never on the watcher thread. N FS events between two
     /// tool calls → 1 rebuild with one target-bound union of accepted paths.
@@ -40,6 +41,11 @@ pub struct GraphState {
     /// implementing the [`MAX_CONSECUTIVE_REBUILD_FAILURES`] hot-fail
     /// guard.
     pub(crate) rebuild_status: Arc<RwLock<RebuildStatus>>,
+    /// `--graph` mode's counterpart to `pending_rebuild` + `rebuild_status`:
+    /// the flag an armed `extensions.graph_watch` watcher sets when the served
+    /// file is rewritten, plus that reload's failure bookkeeping. Untouched
+    /// (and never contended) in every other mode — see `graph_reload`.
+    pub(crate) graph_reload: Arc<RwLock<GraphReloadStatus>>,
     /// Workspace mode used to build request/relevance context. `None` for
     /// graph/source-root/bare modes that never ask a producer to build.
     pub(crate) workspace_mode: Option<WorkspaceGraphMode>,
@@ -111,13 +117,19 @@ impl GraphState {
         self.value_codecs.as_deref().map(|v| v.as_slice())
     }
 
-    /// A one-line warning describing the last failed lazy rebuild, or
-    /// `None` when the last rebuild succeeded (the common case).
+    /// A one-line warning describing the last failed lazy refresh, or
+    /// `None` when the last one succeeded (the common case).
     /// Appended to tool output wherever the graph's built-at identity
     /// appears, so an agent knows the graph it queries is staler than
     /// the filesystem.
+    ///
+    /// Two producers, one channel: workspace modes refresh by rebuilding from
+    /// their producer, `--graph` mode by re-reading its file. At most one can
+    /// have a failure recorded — a state is only ever in one of those modes.
     pub fn rebuild_error_note(&self) -> Option<String> {
-        let failure = self.workspace_rebuild_failure()?;
+        let Some(failure) = self.workspace_rebuild_failure() else {
+            return self.graph_reload_error_note();
+        };
         let age = humanize_age(failure.failed_at);
         let note = format!(
             "WARNING: workspace graph rebuild failed {age} ago ({} consecutive \
@@ -212,6 +224,11 @@ impl GraphState {
         });
         drop(guard);
         drop(previous);
+        // A graph is installed from this path, so whatever made previous
+        // reloads fail is behind us: clear the failure counter (and with it any
+        // watcher dormancy) for every open route — boot, `load_graph`,
+        // `create_graph`, `reload_graph`, and the lazy watch reload alike.
+        self.clear_graph_reload_failures();
         Ok(opened.disposition)
     }
 

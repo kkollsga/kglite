@@ -54,6 +54,25 @@ fn boot_value_codecs(
     Ok((!codecs.is_empty()).then(|| Arc::new(codecs)))
 }
 
+/// `extensions.graph_watch: true` — opt-in filesystem watch on the served
+/// `.kgl` in `--graph` mode.
+///
+/// Off by default: watching costs an OS watch registration and makes the served
+/// graph change under a client that never asked for it, so it stays an operator
+/// decision. When on, an external rewrite of the file marks the graph for
+/// reload and the next graph tool call re-reads it (`tools::graph_reload`).
+/// Applies only to `--graph` mode; `resolve_graph_watch_target` warns and
+/// declines everywhere else. A non-boolean value is a boot error rather than a
+/// silently ignored key — that is the "parsed and then dropped" shape this
+/// crate has already had to fix twice.
+fn boot_graph_watch(manifest: Option<&mcp_methods::server::Manifest>) -> Result<bool> {
+    let Some(raw) = manifest.and_then(|m| m.extensions.get("graph_watch")) else {
+        return Ok(false);
+    };
+    raw.as_bool()
+        .context("extensions.graph_watch must be a boolean (true or false)")
+}
+
 /// Directory the manifest was loaded from — the base both `csv_http_server`
 /// (resolving `dir:`) and `temp_cleanup` (finding the directory to wipe)
 /// resolve against. Falls back to cwd when there's no manifest.
@@ -229,6 +248,9 @@ pub(crate) async fn run_async(
     let manifest = load_manifest(&cli, &mode).context("manifest load failed")?;
     let recipe_catalog = boot_recipe_catalog(manifest.as_ref())?;
     let recipe_catalog_summary = recipe_catalog.discovery_summary();
+    // Parsed here, at the top of boot, so a malformed value fails the server
+    // rather than surfacing as a watcher that quietly never fires.
+    let graph_watch = boot_graph_watch(manifest.as_ref())?;
 
     // Manifest `workspace.kind: local` wins over CLI flags — promote before
     // mode-specific binding so the rest of boot sees `Mode::LocalWorkspace`.
@@ -356,7 +378,7 @@ pub(crate) async fn run_async(
         domain_tools,
     )?;
 
-    let _watch_handle = spawn_mode_watcher(&mode, &graph_state)?;
+    let _watch_handle = spawn_mode_watcher(&mode, &graph_state, graph_watch)?;
 
     // Bare-mode (no manifest) deployments don't get skills — the
     // `skills:` declaration lives in the manifest. Operators who want
@@ -378,4 +400,55 @@ pub(crate) async fn run_async(
         .context("failed to start MCP service over stdio")?;
     service.waiting().await?;
     Ok(())
+}
+
+/// `extensions.graph_watch` must survive the whole chain: spelled in a YAML
+/// file, accepted by mcp-methods' loader (which validates nothing inside
+/// `extensions:`), and read back here as a bool. Loading through the real
+/// loader rather than constructing a `Manifest` is deliberate — a struct
+/// literal would skip the two steps most likely to break.
+#[cfg(test)]
+mod graph_watch_manifest_tests {
+    use super::*;
+
+    fn manifest_with(dir: &Path, body: &str) -> mcp_methods::server::Manifest {
+        let path = dir.join("graph_watch_mcp.yaml");
+        std::fs::write(&path, body).expect("write manifest");
+        mcp_methods::server::load_manifest(&path).expect("manifest loads")
+    }
+
+    #[test]
+    fn graph_watch_defaults_off_and_reads_the_manifest_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(
+            !boot_graph_watch(None).expect("no manifest parses"),
+            "no manifest must leave the watcher off"
+        );
+        let bare = manifest_with(tmp.path(), "name: bare\n");
+        assert!(
+            !boot_graph_watch(Some(&bare)).expect("bare manifest parses"),
+            "an absent key must leave the watcher off — otherwise the on-arm proves nothing"
+        );
+        let off = manifest_with(tmp.path(), "name: off\nextensions:\n  graph_watch: false\n");
+        assert!(!boot_graph_watch(Some(&off)).expect("explicit false parses"));
+        let on = manifest_with(tmp.path(), "name: on\nextensions:\n  graph_watch: true\n");
+        assert!(
+            boot_graph_watch(Some(&on)).expect("explicit true parses"),
+            "extensions.graph_watch: true must reach the watcher wiring; if this fails \
+             the key is parsed and then dropped"
+        );
+    }
+
+    #[test]
+    fn a_non_boolean_graph_watch_fails_boot() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bad = manifest_with(
+            tmp.path(),
+            "name: bad\nextensions:\n  graph_watch: yes-please\n",
+        );
+        let error = boot_graph_watch(Some(&bad))
+            .expect_err("a non-boolean value must fail boot, not be ignored")
+            .to_string();
+        assert!(error.contains("must be a boolean"), "{error}");
+    }
 }

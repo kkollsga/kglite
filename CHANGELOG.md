@@ -23,6 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   serving and returns the error. On a write-enabled server it discards unsaved
   in-memory changes — call `save_graph` first.
 
+- **`extensions.graph_watch: true` — opt-in filesystem watch that refreshes a
+  `--graph` server automatically.** With the key set in the manifest, the
+  server watches the served `.kgl` and re-reads it on the next graph tool call
+  after another process rewrites it, so a client querying a periodically
+  rebuilt graph stays current without calling `reload_graph`. The watch
+  callback only marks the graph: the re-read is lazy (a tool call pays for it,
+  never the watcher thread) and single-flight, so many writes between two
+  queries cost one reload, and the sibling temp/lock files an atomic republish
+  creates are filtered out. A failed re-read keeps the previous graph serving
+  and attaches a staleness warning to results; after three consecutive
+  failures the watcher-driven reload goes dormant until a `reload_graph`
+  succeeds. Off by default, `--graph` mode only (other modes warn and ignore
+  it), and single-file graphs only — a disk-graph directory logs a boot
+  warning and starts no watcher, with `reload_graph` still covering it.
+
 ### Changed
 
 - **A read-only `--graph` MCP server no longer offers `explore` or

@@ -188,7 +188,7 @@ pub fn register(
     if writable {
         server.register_typed_tool::<CypherArgs, _>("cypher_query", cypher_desc, move |args| {
             let csv = csv.clone();
-            s.ensure_workspace_graph_fresh();
+            s.ensure_graph_fresh();
             let codecs = s.value_codecs();
             let scope = args.write_scope.clone();
             let git_sha = args.git_sha.clone();
@@ -212,7 +212,7 @@ pub fn register(
     } else {
         server.register_typed_tool::<ReadCypherArgs, _>("cypher_query", cypher_desc, move |args| {
             let csv = csv.clone();
-            s.ensure_workspace_graph_fresh();
+            s.ensure_graph_fresh();
             let codecs = s.value_codecs();
             let body = s.with_active(|g| run_cypher_tool(g, &args.query, codecs, csv.as_deref()));
             s.with_rebuild_warning(body)
@@ -230,7 +230,7 @@ pub fn register(
          cypher=true|[...] for drill-down.",
         move |args| {
             let is_bare = prepare_overview(&args, cleanup_temp, temp_dir.as_deref());
-            s.ensure_workspace_graph_fresh();
+            s.ensure_graph_fresh();
             let body = s.with_active(|g| run_overview(g, &args));
             let body = s.with_rebuild_warning(body);
             overview_decorations.render(body, is_bare)
@@ -242,7 +242,7 @@ pub fn register(
             "save_graph",
             "Persist the active graph to its source .kgl file (single-graph mode only).",
             move |_| {
-                s.ensure_workspace_graph_fresh();
+                s.ensure_graph_fresh();
                 // Mutable access: the save must go through the active
                 // graph's own Arc so `prepare_save`'s `Arc::make_mut` sees
                 // refcount 1 (no whole-graph deep copy per save).
@@ -293,7 +293,7 @@ pub fn register(
             "Save the active graph to an explicit path and rebind the save target there. \
              Write-enabled servers only.",
             move |args| {
-                s.ensure_workspace_graph_fresh();
+                s.ensure_graph_fresh();
                 match s.save_as(Path::new(&args.path)) {
                     Ok(msg) => msg,
                     Err(e) => e,

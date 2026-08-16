@@ -25,6 +25,25 @@ and reports the new node/edge counts. A failed re-read keeps the current graph
 serving and returns the error; on a `--writable` server a reload discards
 unsaved in-memory changes, so call `save_graph` first.
 
+To make that automatic, put `graph_watch` in the manifest beside the `.kgl`:
+
+```yaml
+# /data/graph_mcp.yaml, next to /data/graph.kgl
+name: My Graph
+extensions:
+  graph_watch: true
+```
+
+The server then watches the served file and re-reads it on the next graph tool
+call after an external rewrite — no `reload_graph` call needed. It is off by
+default and applies to `--graph` mode only. The reload is lazy (a query, not
+the filesystem event, pays for it) and single-flight, so a producer that writes
+several times between two queries costs one re-read. A re-read that fails keeps
+the previous graph serving and attaches a warning to tool results; after three
+consecutive failures the watcher stops retrying until a `reload_graph` call
+succeeds. Single-file graphs only — a disk-graph *directory* logs a boot warning
+and starts no watcher, and `reload_graph` remains its refresh path.
+
 ## Writable workbench
 
 ```bash

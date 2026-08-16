@@ -47,7 +47,7 @@ impl GraphState {
         query: &str,
         params: HashMap<String, Value>,
     ) -> std::result::Result<ExecuteOutcome, CypherRunError> {
-        self.ensure_workspace_graph_fresh();
+        self.ensure_graph_fresh();
         let guard = read_lock(&self.inner);
         let active = guard.as_ref().ok_or(CypherRunError::NoActiveGraph)?;
         execute_cypher_inner(&active.kg, query, params, self.value_codecs())
@@ -67,7 +67,7 @@ impl GraphState {
         query: &str,
         params: HashMap<String, Value>,
     ) -> std::result::Result<ExecuteOutcome, StrictCypherReadError> {
-        self.ensure_workspace_graph_fresh();
+        self.ensure_graph_fresh();
         if let Some(failure) = self.workspace_rebuild_failure() {
             return Err(StrictCypherReadError::StaleGraph(failure));
         }
