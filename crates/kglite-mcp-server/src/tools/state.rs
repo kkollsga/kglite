@@ -195,7 +195,13 @@ impl GraphState {
         let generation = guard
             .as_ref()
             .map_or(1, |active| active.generation.saturating_add(1));
-        *guard = Some(ActiveGraph {
+        // Take the outgoing graph *out* of the slot rather than letting the
+        // assignment free it in place: dropping a large graph (petgraph arenas,
+        // columnar buffers, mmap teardown) is not free, and doing it under the
+        // write lock stalls every reader for the duration. The swap itself is
+        // the only work that needs the lock — `previous` is released after the
+        // guard, off-lock, below.
+        let previous = guard.replace(ActiveGraph {
             kg,
             source_path: Some(path.to_path_buf()),
             writer_lease,
@@ -204,7 +210,27 @@ impl GraphState {
             built_at: SystemTime::now(),
             generation,
         });
+        drop(guard);
+        drop(previous);
         Ok(opened.disposition)
+    }
+
+    /// The file (or disk-graph directory) the active graph was opened from —
+    /// the path `save_graph` writes to and `reload_graph` re-reads. `None` when
+    /// no graph is active, or when it was built without a backing path.
+    pub(crate) fn source_path(&self) -> Option<std::path::PathBuf> {
+        read_lock(&self.inner)
+            .as_ref()
+            .and_then(|active| active.source_path.clone())
+    }
+
+    /// Monotonic identity of the installed graph — bumped by every swap.
+    /// Reported by `reload_graph` so a caller can tell a completed re-read
+    /// apart from a response about the graph it already had.
+    pub(crate) fn generation(&self) -> Option<u64> {
+        read_lock(&self.inner)
+            .as_ref()
+            .map(|active| active.generation)
     }
 
     /// Save the active graph to an explicit `path` and rebind the active

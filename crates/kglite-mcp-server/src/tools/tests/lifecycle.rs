@@ -205,6 +205,126 @@ fn load_graph_swaps_active() {
     let _ = std::fs::remove_file(&pb);
 }
 
+// ── reload: re-opening the active graph's own source path ───────────────────
+//
+// What the `reload_graph` tool does, at the state level: `open_or_create` on
+// the path already active, with `requested_mode: None`. These pin the three
+// properties the tool's contract rests on — the new bytes win, the writer
+// lease and the bound embedder survive, and a failed re-read leaves the
+// previous graph serving.
+
+/// Build a graph of `nodes` nodes at `path`, then release it.
+fn seed_with_nodes(path: &std::path::Path, nodes: u64) {
+    let s = GraphState::default();
+    s.create_in_mode(path, StorageMode::Memory).unwrap();
+    for i in 0..nodes {
+        s.with_active_mut(|a| write(a, &format!("CREATE (:N {{id:'{i}'}})"), None))
+            .unwrap()
+            .unwrap();
+    }
+    s.save_as(path).unwrap();
+}
+
+/// The active graph's generation counter — bumped by every swap. Reads the
+/// same accessor the `reload_graph` response reports from.
+fn generation(state: &GraphState) -> u64 {
+    state.generation().expect("a graph must be active")
+}
+
+#[test]
+fn reload_serves_an_externally_rewritten_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("reloaded.kgl");
+    let outside = tmp.path().join("rebuilt.kgl");
+    seed_with_nodes(&p, 1);
+    seed_with_nodes(&outside, 3);
+
+    let s = GraphState::default();
+    s.bind_embedder(Arc::new(TestEmbedder)).unwrap();
+    s.open_or_create(&p, None).unwrap();
+    assert_eq!(s.schema().unwrap().0, 1);
+    let generation_before = generation(&s);
+
+    // An external producer republishes the served path. kglite's own save is a
+    // rename-over, and the writer lease lives on a `<path>.lock` sidecar, so
+    // this is the same on-disk event a real rebuild produces.
+    std::fs::rename(&outside, &p).unwrap();
+    assert_eq!(
+        s.schema().unwrap().0,
+        1,
+        "a rewritten file must not change the served graph until it is re-read"
+    );
+
+    s.open_or_create(&p, None).unwrap();
+
+    assert_eq!(s.schema().unwrap().0, 3, "reload must serve the new bytes");
+    assert_eq!(
+        generation(&s),
+        generation_before + 1,
+        "a reload installs a new graph and must bump the generation"
+    );
+    // Re-opening the path already active reuses the held lease rather than
+    // dropping and re-acquiring it — the path stays owned across the swap.
+    assert!(
+        read_lock(&s.inner)
+            .as_ref()
+            .is_some_and(|active| active.writer_lease.is_some()),
+        "the writer lease must be carried across a same-path reload"
+    );
+    assert!(
+        kglite::api::io::GraphWriterLease::acquire(&p, Duration::ZERO).is_err(),
+        "the reloaded graph must still hold the path's writer lease"
+    );
+    // A reload is a graph swap, so it inherits the B2 fix: the boot-bound
+    // embedder is re-applied to the fresh handle.
+    assert!(
+        s.with_kg(|kg| kg.embedder().is_some()).unwrap(),
+        "the bound embedder must survive a reload"
+    );
+    let after = text_score_result(&s);
+    assert!(
+        !missing_embedder(&after),
+        "text_score must still resolve after a reload, got {after:?}"
+    );
+}
+
+#[test]
+fn a_failed_reload_keeps_the_previous_graph_serving() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("torn.kgl");
+    seed_with_nodes(&p, 2);
+
+    let s = GraphState::default();
+    s.open_or_create(&p, None).unwrap();
+    assert_eq!(s.schema().unwrap().0, 2);
+    let generation_before = generation(&s);
+
+    // A producer writing the file non-atomically (or a truncated copy) leaves
+    // bytes that cannot be opened.
+    std::fs::write(&p, b"not a kgl file").unwrap();
+    let error = s
+        .open_or_create(&p, None)
+        .expect_err("an unreadable file must not be installed")
+        .to_string();
+    assert!(
+        error.contains("kglite graph open/create failed"),
+        "the failure must carry the core reason: {error}"
+    );
+
+    // Every load failure returns *before* the write lock is taken, so the
+    // previous graph is untouched — still serving, still the same generation.
+    assert_eq!(
+        s.schema().unwrap().0,
+        2,
+        "a failed reload must leave the old graph active"
+    );
+    assert_eq!(
+        generation(&s),
+        generation_before,
+        "a failed reload installs nothing and must not bump the generation"
+    );
+}
+
 #[test]
 fn write_path_creates_and_reads_back() {
     let mut a = fresh_active();

@@ -15,6 +15,16 @@ skills, value codecs, an embedder, and CSV-over-localhost export. Point MCP
 clients at the absolute executable path to avoid an older PATH-shadowing
 installation.
 
+## Refreshing a rebuilt graph
+
+The graph is read once at boot and served from memory, so a `.kgl` rebuilt by
+another process — a nightly ingest, an external producer — does not reach a
+running server on its own. `--graph` mode registers a no-argument
+`reload_graph` tool (read-only servers included) that re-reads the served path
+and reports the new node/edge counts. A failed re-read keeps the current graph
+serving and returns the error; on a `--writable` server a reload discards
+unsaved in-memory changes, so call `save_graph` first.
+
 ## Writable workbench
 
 ```bash

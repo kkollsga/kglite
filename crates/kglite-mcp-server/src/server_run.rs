@@ -323,6 +323,13 @@ pub(crate) async fn run_async(
         csv_http_arc.clone(),
         source_roots_provider,
     )?;
+    if matches!(mode, Mode::Graph { .. }) {
+        // `reload_graph` is graph-mode-only: it re-reads *the* served file, an
+        // identity no other mode has. Registered from here rather than inside
+        // `tools::register` because the mode is not otherwise visible there —
+        // same shape as the `repo_management` and code-tool decisions above.
+        tools::register_graph_mode_tools(&mut server, graph_state.clone());
+    }
     if gate_code_tools {
         // Disable, never skip registration: an unregistered name is absent
         // from `router.map`, and `apply_bundled_tool_overrides` hard-errors on

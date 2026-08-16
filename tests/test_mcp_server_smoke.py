@@ -1303,6 +1303,54 @@ class TestCodeToolGating:
         assert "cypher_query" in names
 
 
+# ── Test: reload_graph (the --graph refresh affordance) ───────────────────
+
+
+class TestReloadGraph:
+    """`reload_graph` re-reads the served `.kgl` from disk, replacing the
+    in-memory graph. It is the refresh affordance for a file rebuilt by an
+    external process, and is registered only in `--graph` mode (no other mode
+    has a single source file to re-read)."""
+
+    def test_reload_picks_up_an_external_rewrite(self, graph_fixture: Path):
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            assert "reload_graph" in {t["name"] for t in client.list_tools()}
+            counted = _text_content(
+                client.call_tool("cypher_query", {"query": "MATCH (p:Person) RETURN count(p) AS n"})
+            )
+            assert "4" in counted, counted
+
+            # An external producer rebuilds the file (kglite's save is a
+            # rename-over, so this is exactly the atomic-republish shape).
+            g = kglite.KnowledgeGraph()
+            g.add_nodes(pd.DataFrame({"id": [9], "title": ["Zoe"], "city": ["Tromso"]}), "Person", "id", "title")
+            g.save(str(graph_fixture))
+
+            reloaded = _text_content(client.call_tool("reload_graph"))
+            assert "1 nodes" in reloaded and "0 edges" in reloaded, reloaded
+            assert str(graph_fixture) in reloaded, reloaded
+            # The generation bump is what distinguishes a completed re-read
+            # from a reply about the graph the server already had.
+            assert "Graph generation 2." in reloaded, reloaded
+
+            after = _text_content(client.call_tool("cypher_query", {"query": "MATCH (p:Person) RETURN p.title AS t"}))
+            assert "Zoe" in after and "Alice" not in after, after
+        finally:
+            client.shutdown()
+
+    def test_absent_outside_graph_mode(self, tmp_path: Path):
+        """No other mode serves a single source file, so the tool would have
+        nothing to re-read — it must not be advertised there."""
+        manifest = tmp_path / "bare_reload_mcp.yaml"
+        manifest.write_text("name: Bare Reload\n", encoding="utf-8")
+        client = _spawn(["--mcp-config", str(manifest)])
+        try:
+            assert "reload_graph" not in {t["name"] for t in client.list_tools()}
+        finally:
+            client.shutdown()
+
+
 # ── Test: runtime graph-over-grep steering footers (mcp-methods 0.3.46 hook) ──
 
 

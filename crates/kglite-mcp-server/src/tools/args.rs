@@ -72,6 +72,9 @@ pub(crate) struct LoadGraphArgs {
     pub path: String,
 }
 
+#[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
+pub(crate) struct ReloadGraphArgs {}
+
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum StorageArg {

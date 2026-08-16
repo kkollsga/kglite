@@ -93,6 +93,54 @@ pub(crate) fn prepare_overview(
     is_bare
 }
 
+/// Register the tools that only make sense when the server was pointed at one
+/// graph file (`--graph`): currently `reload_graph`.
+///
+/// Separate from [`register`] because the mode is a boot fact this module does
+/// not otherwise see, and every other mode either has no source file to
+/// re-read (bare) or owns its own freshness lifecycle (workspace modes rebuild
+/// lazily from a producer). Called from `run_async`, which already does
+/// mode-conditional router work.
+///
+/// Registered for read-only servers too — a read-only deployment is precisely
+/// the one whose graph is rebuilt by *someone else*, so it needs the refresh
+/// affordance most.
+pub fn register_graph_mode_tools(server: &mut McpServer, state: GraphState) {
+    server.register_typed_tool::<ReloadGraphArgs, _>(
+        "reload_graph",
+        "Re-read the served graph file from disk, replacing the in-memory graph — use this \
+         when the file has been rebuilt by another process and queries are returning stale \
+         results. Takes no arguments; the path is the one this server was started on. On a \
+         write-enabled server any unsaved in-memory changes are discarded (call save_graph \
+         first to keep them). If the re-read fails, the current graph stays active and the \
+         error is returned.",
+        move |_| match state.source_path() {
+            // `open_or_create(path, None)`: no storage mode is requested, so a
+            // reload never re-runs the boot `--storage` conversion — it serves
+            // whatever the (possibly newly written) checkpoint records, exactly
+            // as `load_graph` does. A load failure returns before the write
+            // lock is taken, so the old graph provably stays active.
+            Some(path) => match state.open_or_create(&path, None) {
+                Ok(_) => {
+                    let path = path.display();
+                    let generation = state
+                        .generation()
+                        .map(|g| format!(" Graph generation {g}."))
+                        .unwrap_or_default();
+                    match state.schema() {
+                        Some((n, e)) => {
+                            format!("Reloaded {path} ({n} nodes, {e} edges).{generation}")
+                        }
+                        None => format!("Reloaded {path}.{generation}"),
+                    }
+                }
+                Err(e) => format!("reload_graph error: {e}"),
+            },
+            None => format!("reload_graph error: {NO_GRAPH}"),
+        },
+    );
+}
+
 pub fn register(
     server: &mut McpServer,
     state: GraphState,

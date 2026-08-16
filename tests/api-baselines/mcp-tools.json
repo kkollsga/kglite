@@ -247,6 +247,15 @@
         ],
         "type": "object"
       }
+    },
+    {
+      "name": "reload_graph",
+      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. Takes no arguments; the path is the one this server was started on. On a write-enabled server any unsaved in-memory changes are discarded (call save_graph first to keep them). If the re-read fails, the current graph stays active and the error is returned.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "ReloadGraphArgs",
+        "type": "object"
+      }
     }
   ],
   "graph_writable": [
@@ -677,6 +686,15 @@
         "required": [
           "file_path"
         ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "reload_graph",
+      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. Takes no arguments; the path is the one this server was started on. On a write-enabled server any unsaved in-memory changes are discarded (call save_graph first to keep them). If the re-read fails, the current graph stays active and the error is returned.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "ReloadGraphArgs",
         "type": "object"
       }
     },
@@ -1365,6 +1383,15 @@
         "required": [
           "file_path"
         ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "reload_graph",
+      "description": "Re-read the served graph file from disk, replacing the in-memory graph \u2014 use this when the file has been rebuilt by another process and queries are returning stale results. Takes no arguments; the path is the one this server was started on. On a write-enabled server any unsaved in-memory changes are discarded (call save_graph first to keep them). If the re-read fails, the current graph stays active and the error is returned.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "ReloadGraphArgs",
         "type": "object"
       }
     }

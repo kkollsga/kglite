@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`reload_graph` — a no-argument MCP tool that re-reads the served graph file
+  from disk.** A `--graph` server holds its graph in memory for the life of the
+  process, so a `.kgl` rebuilt by another process (a nightly ingest, an
+  external producer, a `kglite` script) left every query answering from the
+  bytes loaded at boot with no way to catch up short of restarting the server —
+  and restarting is not something an agent-facing client can generally do.
+  `reload_graph` re-opens the same path, reports the new node/edge counts, and
+  is registered in `--graph` mode on read-only servers as well as writable ones
+  (a read-only deployment is precisely the one whose graph someone else
+  rebuilds). It requests no storage mode, so a reload never re-runs a boot
+  `--storage` conversion, and a failed re-read leaves the current graph
+  serving and returns the error. On a write-enabled server it discards unsaved
+  in-memory changes — call `save_graph` first.
+
 ### Changed
 
 - **A read-only `--graph` MCP server no longer offers `explore` or
