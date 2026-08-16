@@ -883,6 +883,41 @@
     },
     {
       "group": null,
+      "name": "test_bench_return_id_10k",
+      "fullname": "tests/benchmarks/test_bench_core.py::test_bench_return_id_10k",
+      "params": null,
+      "param": null,
+      "extra_info": {},
+      "options": {
+        "disable_gc": false,
+        "timer": "perf_counter",
+        "min_rounds": 100,
+        "max_time": 1.0,
+        "min_time": 5e-06,
+        "warmup": 20
+      },
+      "stats": {
+        "min": 0.001971362702540223,
+        "max": 0.0024030165952864824,
+        "mean": 0.0020444666378585104,
+        "stddev": 5.5862607606078225e-05,
+        "rounds": 306,
+        "median": 0.002034216450308555,
+        "iqr": 4.0961110684020925e-05,
+        "q1": 0.0032976248767226934,
+        "q3": 0.0033646670635789633,
+        "iqr_outliers": 16,
+        "stddev_outliers": 32,
+        "outliers": "32;16",
+        "ld15iqr": 0.003226584056392312,
+        "hd15iqr": 0.0034659579396247864,
+        "ops": 298.8433004192254,
+        "total": 1.0239480007439852,
+        "iterations": 1
+      }
+    },
+    {
+      "group": null,
       "name": "test_bench_return_node_rel_node_100",
       "fullname": "tests/benchmarks/test_bench_core.py::test_bench_return_node_rel_node_100",
       "params": null,
