@@ -446,6 +446,24 @@ pub struct DirGraph {
     /// `version` alone does not distinguish them: siblings bump in lockstep.
     #[serde(skip, default = "next_graph_id")]
     pub graph_id: u64,
+    /// Change-data-capture log, when a caller has enabled it — the bounded
+    /// ring of published [`CdcEvent`](crate::graph::cdc::CdcEvent)s plus its
+    /// `(epoch, seq)` addressing.
+    ///
+    /// **Never serialized**, like `graph_id` and for the same reason: it is a
+    /// runtime identity a consumer holds cursors into, and a `.kgl` that
+    /// carried one would hand those cursors to a *copy* of the data in another
+    /// process, where the same `seq` means something else. A load therefore
+    /// starts with capture off. The `DirGraph` serde derive is vestigial for
+    /// the data itself (a `.kgl` persists the backend, columns and file
+    /// metadata), so this field costs nothing at save either way.
+    ///
+    /// **Shared by `Clone`** — a copy-on-write view, a transaction fork and
+    /// the graph they came from publish into one log, which is what makes a
+    /// commit taken over a held reader land exactly once. `independent_copy`
+    /// re-mints a fresh log with a new epoch, as it re-mints `graph_id`.
+    #[serde(skip)]
+    pub(crate) cdc: Option<crate::graph::cdc::CdcHandle>,
     /// High-water mark for engine-minted node ids — see
     /// [`DirGraph::next_auto_node_id`]. Never serialized: it is re-derived
     /// from `node_bound()` on first use, so a loaded `.kgl` starts above the
@@ -569,6 +587,17 @@ impl DirGraph {
     /// [`Self::version`] to form the Cypher plan-cache key.
     pub fn graph_id(&self) -> u64 {
         self.graph_id
+    }
+
+    /// This graph's change-data-capture log, or `None` when capture is off.
+    /// Lifecycle and publishing live in [`crate::graph::cdc`].
+    pub fn cdc_log(&self) -> Option<&crate::graph::cdc::CdcHandle> {
+        self.cdc.as_ref()
+    }
+
+    /// Whether change data capture is enabled on this graph.
+    pub fn cdc_enabled(&self) -> bool {
+        self.cdc.is_some()
     }
 
     /// Mint the next **engine-assigned** node id, for a `CREATE` that supplied
@@ -695,6 +724,7 @@ impl DirGraph {
     pub fn new() -> Self {
         DirGraph {
             graph_id: next_graph_id(),
+            cdc: None,
             next_auto_id: 0,
             graph: GraphBackend::new(),
             type_indices: TypeIndexStore::new(),
@@ -755,6 +785,7 @@ impl DirGraph {
     pub fn from_graph(graph: GraphBackend) -> Self {
         DirGraph {
             graph_id: next_graph_id(),
+            cdc: None,
             next_auto_id: 0,
             graph,
             type_indices: TypeIndexStore::new(),

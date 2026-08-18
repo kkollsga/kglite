@@ -254,6 +254,11 @@ impl Session {
     pub(super) fn log_working_commit(&self, working: &mut DirGraph) -> Result<(), String> {
         let mut slot = self.durable.lock().unwrap_or_else(|p| p.into_inner());
         let Some(ds) = slot.as_mut() else {
+            // Not durable — but this is still the commit boundary, and it is
+            // where a change-data-capture log gets its events (and where the
+            // capture buffer of a CDC-only graph is discarded, so it stays
+            // bounded). A no-op on a graph carrying no capture layer.
+            crate::graph::cdc::drain_at_commit(working);
             return Ok(());
         };
         if ds.diverged {
@@ -292,6 +297,12 @@ impl Session {
             .map_err(|e| e.to_string())?;
         // Only a frame that reached the log consumes its LSN.
         ds.next_lsn = lsn + 1;
+        // Published from the same drained ops the frame was built from, so the
+        // two views of this commit cannot disagree about what it changed — and
+        // *after* the append, because an append failure aborts the commit
+        // (`Session::commit` skips the `Arc` swap): publishing first would put
+        // a change into the stream that the caller was told did not happen.
+        crate::graph::cdc::publish_drained(working, &raw);
         Ok(())
     }
 
@@ -365,8 +376,12 @@ impl Session {
         Ok(())
     }
 
+    /// Inject a write-ahead-append failure. Test-only, and `pub(crate)`
+    /// rather than `pub(super)` because the durability failure path is also
+    /// what the change-data-capture tests use to prove a refused commit
+    /// publishes nothing.
     #[cfg(test)]
-    pub(super) fn set_fail_append(&self, fail: bool) {
+    pub(crate) fn set_fail_append(&self, fail: bool) {
         if let Some(ds) = self
             .durable
             .lock()

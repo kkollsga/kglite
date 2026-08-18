@@ -27,6 +27,20 @@ impl DirGraph {
     pub fn independent_copy(&self) -> Self {
         let mut copy = self.clone();
         copy.graph_id = next_graph_id();
+        // A change stream is addressed by `(epoch, seq)`, so an independent
+        // lineage needs an independent epoch: the copy's events describe
+        // *its* writes, and a cursor from the original must be refused rather
+        // than resolved against them. Capacity carries over; the ring does not
+        // (the copy has published nothing).
+        copy.cdc = self.cdc.as_ref().map(|handle| {
+            let capacity = handle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .capacity();
+            std::sync::Arc::new(std::sync::Mutex::new(crate::graph::cdc::CdcLog::new(
+                capacity,
+            )))
+        });
         copy.wkt_cache = copy_cache(&self.wkt_cache);
         // The two edge-derived caches need nothing here: they are
         // `ForkPrivateCache`, so `self.clone()` above already gave the copy its

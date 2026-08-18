@@ -45,6 +45,24 @@ use petgraph::Direction;
 use std::collections::HashMap;
 use std::time::Instant;
 
+/// Which `GraphWrite` method produced an upsert: the entity came into
+/// existence (`add_node` / `add_edge`) or an existing one was mutated.
+///
+/// The WAL does not care — [`MutationOp::UpsertNode`] is add-or-replace either
+/// way, which is what makes replay idempotent — so this is **in-memory capture
+/// state only** and never reaches a [`WalFrame`](crate::graph::wal::WalFrame).
+/// Change data capture *does* care: "created" and "updated" are different
+/// events to a consumer, and the method boundary is the only place that knows
+/// which one happened. Keeping the marker here rather than in `MutationOp`
+/// is what lets CDC distinguish them without moving `WAL_FORMAT_VERSION`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureOrigin {
+    /// `add_node` / `add_edge` — the entity did not exist before this op.
+    Create,
+    /// A property/title/label write on an entity that already existed.
+    Update,
+}
+
 /// A buffered, unresolved mutation. Keyed by petgraph index (for
 /// upserts, resolved against the final graph state at flush) or by the
 /// pre-removal logical identity (for removes, since the entry is gone by
@@ -53,11 +71,11 @@ use std::time::Instant;
 pub enum RawOp {
     /// A node was added or property-mutated. Resolve its full final
     /// state at flush; drop if the node was later removed in the batch.
-    UpsertNode(NodeIndex),
+    UpsertNode(NodeIndex, CaptureOrigin),
     /// A node was removed. Its logical identity, captured before removal.
     RemoveNode { node_type: InternedKey, id: Value },
     /// An edge was added or property-mutated. Resolve at flush.
-    UpsertEdge(EdgeIndex),
+    UpsertEdge(EdgeIndex, CaptureOrigin),
     /// An edge was removed. Logical identity captured before removal.
     RemoveEdge {
         conn_type: InternedKey,
@@ -80,16 +98,54 @@ pub enum RawOp {
 pub struct RecordingGraph<G: GraphRead> {
     inner: G,
     ops: Vec<RawOp>,
+    /// Whether a **write-ahead log owner** installed this wrapper.
+    ///
+    /// The wrapper has two consumers now: durability (which drains the buffer
+    /// into WAL frames) and change data capture (which derives events from the
+    /// same buffer). Only the first claims ownership, and three decisions read
+    /// that claim rather than the mere presence of the wrapper:
+    ///
+    /// 1. [`crate::graph::durability::open_log`] refuses a second durable
+    ///    owner — the refusal must fire for another *log* owner, not for a CDC
+    ///    consumer, or enabling CDC would lock the graph out of durability.
+    /// 2. The Cypher create path refuses a duplicate `(type, id)` on a durable
+    ///    graph, because the log cannot represent two nodes under one identity.
+    ///    Enabling CDC must not silently impose that refusal on graphs that
+    ///    keep no log.
+    /// 3. The commit-boundary drain hands the ops to the log owner when there
+    ///    is one, and discards them after publishing when there is not — which
+    ///    is what keeps the buffer bounded on a CDC-only graph.
+    ///
+    /// Preserved by `Clone` (a fork of a durable graph is still under durable
+    /// ownership) and never serialized.
+    wal_owner: bool,
 }
 
 impl<G: GraphRead> RecordingGraph<G> {
-    /// Wrap `inner` in a fresh-buffer `RecordingGraph`.
+    /// Wrap `inner` in a fresh-buffer `RecordingGraph` that no write-ahead log
+    /// owns. The durable path calls [`claim_wal_ownership`](Self::claim_wal_ownership)
+    /// on top; see the [`wal_owner`](Self::is_wal_owner) contract.
     #[inline]
     pub fn new(inner: G) -> Self {
         Self {
             inner,
             ops: Vec::new(),
+            wal_owner: false,
         }
+    }
+
+    /// Mark this wrapper as owned by a write-ahead log. Idempotent, and never
+    /// released: ownership ends with the graph.
+    #[inline]
+    pub(crate) fn claim_wal_ownership(&mut self) {
+        self.wal_owner = true;
+    }
+
+    /// Whether a write-ahead log owns this wrapper's buffer. See the field
+    /// docs for the three decisions that read it.
+    #[inline]
+    pub fn is_wal_owner(&self) -> bool {
+        self.wal_owner
     }
 
     /// Borrow the wrapped backend.
@@ -111,7 +167,7 @@ impl<G: GraphRead> RecordingGraph<G> {
     /// other [`RawOp::UpsertNode`].
     #[inline]
     pub fn note_node_upsert(&mut self, idx: NodeIndex) {
-        self.ops.push(RawOp::UpsertNode(idx));
+        self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Update));
     }
 
     /// Record that node `idx`'s secondary labels changed. Labels live in
@@ -166,6 +222,10 @@ impl<G: GraphRead + Clone> Clone for RecordingGraph<G> {
         Self {
             inner: self.inner.clone(),
             ops: Vec::new(),
+            // Ownership follows the data: a transaction fork or a copy-on-write
+            // view of a durably-owned graph is still durably owned, and its
+            // commit drains into the same log.
+            wal_owner: self.wal_owner,
         }
     }
 }
@@ -208,7 +268,7 @@ pub fn resolve_ops(
     let mut out = Vec::with_capacity(raw.len());
     for op in raw {
         match op {
-            RawOp::UpsertNode(idx) => {
+            RawOp::UpsertNode(idx, _) => {
                 if let Some(nd) = graph.node_view(*idx) {
                     out.push(MutationOp::UpsertNode {
                         node_type: nd.node_type_str(interner).to_string(),
@@ -224,7 +284,7 @@ pub fn resolve_ops(
                     id: id.clone(),
                 });
             }
-            RawOp::UpsertEdge(eidx) => {
+            RawOp::UpsertEdge(eidx, _) => {
                 if let (Some((a, b)), Some(ed)) =
                     (graph.edge_endpoints(*eidx), graph.edge_weight(*eidx))
                 {
@@ -657,7 +717,7 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         value: Value,
     ) {
         if self.inner.node_weight(idx).is_some() {
-            self.ops.push(RawOp::UpsertNode(idx));
+            self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Update));
         }
         self.inner.set_node_property(idx, key, value);
     }
@@ -668,7 +728,7 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
     #[inline]
     fn set_node_title(&mut self, idx: NodeIndex, value: Value) {
         if self.inner.node_weight(idx).is_some() {
-            self.ops.push(RawOp::UpsertNode(idx));
+            self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Update));
         }
         self.inner.set_node_title(idx, value);
     }
@@ -681,7 +741,7 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         value: Value,
     ) {
         if self.inner.node_weight(idx).is_some() {
-            self.ops.push(RawOp::UpsertNode(idx));
+            self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Update));
         }
         self.inner.set_node_property_if_absent(idx, key, value);
     }
@@ -693,7 +753,7 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         key: crate::graph::schema::InternedKey,
     ) -> Option<Value> {
         if self.inner.node_weight(idx).is_some() {
-            self.ops.push(RawOp::UpsertNode(idx));
+            self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Update));
         }
         self.inner.remove_node_property(idx, key)
     }
@@ -705,7 +765,7 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         key: crate::graph::schema::InternedKey,
     ) -> Option<Value> {
         if self.inner.node_weight(idx).is_some() {
-            self.ops.push(RawOp::UpsertNode(idx));
+            self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Update));
         }
         self.inner.clear_node_property(idx, key)
     }
@@ -717,7 +777,7 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         pairs: Vec<(crate::graph::schema::InternedKey, Value)>,
     ) {
         if self.inner.node_weight(idx).is_some() {
-            self.ops.push(RawOp::UpsertNode(idx));
+            self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Update));
         }
         self.inner.replace_node_properties(idx, pairs);
     }
@@ -731,7 +791,7 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         // would otherwise hold all of `self`). Only record when the node
         // exists (a None borrow changes nothing).
         if self.inner.node_weight(idx).is_some() {
-            self.ops.push(RawOp::UpsertNode(idx));
+            self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Update));
         }
         self.inner.node_weight_mut(idx)
     }
@@ -749,7 +809,7 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
     #[inline]
     fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
         if self.inner.edge_weight(idx).is_some() {
-            self.ops.push(RawOp::UpsertEdge(idx));
+            self.ops.push(RawOp::UpsertEdge(idx, CaptureOrigin::Update));
         }
         self.inner.edge_weight_mut(idx)
     }
@@ -757,7 +817,7 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
     #[inline]
     fn add_node(&mut self, data: NodeData) -> NodeIndex {
         let idx = self.inner.add_node(data);
-        self.ops.push(RawOp::UpsertNode(idx));
+        self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Create));
         idx
     }
 
@@ -780,7 +840,8 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
     #[inline]
     fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
         let eidx = self.inner.add_edge(a, b, data);
-        self.ops.push(RawOp::UpsertEdge(eidx));
+        self.ops
+            .push(RawOp::UpsertEdge(eidx, CaptureOrigin::Create));
         eidx
     }
 

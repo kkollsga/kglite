@@ -182,7 +182,9 @@ pub(super) fn create_identity(
 /// 1. **PRIMARY KEY** (opt-in, every storage mode). When this node type declares
 ///    a primary key via `define_schema`, a CREATE that would duplicate it is
 ///    rejected — MERGE is the explicit upsert path.
-/// 2. **Durable capture** (any `Recording` backend). The write-ahead log names
+/// 2. **Durable capture** (a `Recording` backend a write-ahead log owns —
+///    change data capture installs the same wrapper and deliberately does not
+///    trigger this). The write-ahead log names
 ///    every entity by its logical `(node_type, id)`, so a second node under a
 ///    live id is a write the log *cannot represent*: replay folds the two into
 ///    one and a node silently disappears across recovery. Refusing is the honest
@@ -205,7 +207,7 @@ pub(super) fn check_identity_uniqueness(
     id: &Value,
 ) -> Result<(), String> {
     let primary_key_on_id = graph.primary_key_for(label) == Some("id");
-    let durable = graph.graph.is_recording();
+    let durable = graph.graph.is_wal_owner();
     if !(primary_key_on_id || durable) || graph.lookup_by_id_readonly(label, id).is_none() {
         return Ok(());
     }

@@ -9,6 +9,7 @@
 
 pub mod algorithms;
 pub mod blueprint;
+pub mod cdc;
 pub mod constraints;
 pub mod core;
 pub(crate) mod cow;

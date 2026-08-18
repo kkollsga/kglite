@@ -209,11 +209,58 @@ impl GraphBackend {
     /// [`crate::graph::storage::recording::wrap_for_durability`] for the
     /// `DirGraph`-shaped entry point every binding calls.
     pub(crate) fn wrap_for_durability(&mut self) {
+        self.wrap_for_capture();
+        if let GraphBackend::Recording(rg) = self {
+            rg.claim_wal_ownership();
+        }
+    }
+
+    /// Wrap this backend in the write-capture layer **without** claiming
+    /// write-ahead-log ownership, idempotently — the change-data-capture
+    /// entry point (`graph::cdc::enable`).
+    ///
+    /// Same seam, different consumer: CDC derives events from the buffer the
+    /// wrapper fills, but keeps no log, so it must not present itself as a
+    /// durable owner. See [`RecordingGraph::is_wal_owner`].
+    pub(crate) fn wrap_for_capture(&mut self) {
         if self.is_recording() {
             return;
         }
         let inner = std::mem::replace(self, GraphBackend::new());
         *self = GraphBackend::Recording(Box::new(RecordingGraph::new(inner)));
+    }
+
+    /// Remove the write-capture layer, **unless** a write-ahead log owns it.
+    ///
+    /// The inverse of [`wrap_for_capture`](Self::wrap_for_capture), for
+    /// `cdc::disable`: capture is not free — a wrapped backend buffers a
+    /// `RawOp` per mutation and gives up the checkpoint-free mutation fast
+    /// path ([`supports_checkpoint_free_mutation`](Self::supports_checkpoint_free_mutation))
+    /// — so turning capture off has to actually turn it off, or "disable"
+    /// would leave a permanent tax behind.
+    ///
+    /// Refuses on a WAL-owned wrapper because unwrapping one silently stops
+    /// logging: the graph would keep committing and the log would keep
+    /// claiming to describe it. Any ops still buffered are dropped with the
+    /// wrapper, which is correct precisely because nothing owns them — a
+    /// WAL-owned buffer is never reached here.
+    pub(crate) fn unwrap_capture_if_unowned(&mut self) {
+        let GraphBackend::Recording(recording) = self else {
+            return;
+        };
+        if recording.is_wal_owner() {
+            return;
+        }
+        let inner = std::mem::replace(recording.inner_mut(), GraphBackend::new());
+        *self = inner;
+    }
+
+    /// Whether this backend's capture layer is owned by a write-ahead log
+    /// (as opposed to being installed for change data capture alone, or
+    /// absent). See [`RecordingGraph::is_wal_owner`].
+    #[inline]
+    pub(crate) fn is_wal_owner(&self) -> bool {
+        matches!(self, GraphBackend::Recording(rg) if rg.is_wal_owner())
     }
 
     /// Whether a proven-infallible mutation may commit without a full rollback

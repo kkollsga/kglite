@@ -155,7 +155,7 @@ pub fn open_log(
         return Ok(None);
     }
 
-    if graph.graph.is_recording() {
+    if graph.graph.is_wal_owner() {
         return Err(DurableOpenError::Refused(
             "this graph is already wrapped for durable capture, which means another \
              durable owner (a durable graph handle, or a Session) holds it. Two owners \
@@ -176,6 +176,16 @@ pub fn open_log(
     // capture buffer, or the next commit would log them all over again.
     let max_lsn = apply_frames(dir, &frames, checkpoint_lsn).map_err(DurableOpenError::Replay)?;
     wrap_for_durability(dir);
+    // A graph with change data capture enabled was *already* wrapped when the
+    // replay ran, so the replayed writes are sitting in the capture buffer.
+    // They describe frames this log already holds: handing them to the WAL at
+    // the next commit would log every recovered write a second time. Drop them
+    // — and with them the CDC events for changes a consumer of this graph's
+    // stream never saw happen live. (No-op on the ordinary path, where the
+    // wrap above is what created the buffer.)
+    if let Some(rg) = dir.graph.recording_mut() {
+        let _ = rg.take_ops();
+    }
 
     let wal = Wal::open(wpath.clone(), sync).map_err(|e| {
         DurableOpenError::Io(format!(
@@ -217,9 +227,10 @@ pub fn checkpoint_prologue(wal: &mut Wal, next_lsn: u64, graph: &mut DirGraph) -
 /// idempotent, so a crash between the two costs only a harmless re-apply on the
 /// next open.
 pub fn checkpoint_epilogue(wal: &mut Wal, graph: &mut DirGraph) -> io::Result<()> {
-    if let Some(rg) = graph.graph.recording_mut() {
-        let _ = rg.take_ops();
-    }
+    // Drained through the CDC seam: anything still buffered here describes
+    // committed changes that the checkpoint has now folded in, so a change
+    // stream must see them before they are dropped.
+    crate::graph::cdc::drain_at_commit(graph);
     wal.reset()
 }
 

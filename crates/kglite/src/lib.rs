@@ -471,6 +471,20 @@ pub mod api {
         pub use crate::graph::storage::MappedGraph;
     }
 
+    /// Change data capture — the opt-in in-process change stream a binding
+    /// exposes through `db.cdc.*`, plus the commit-boundary drain any owner of
+    /// a bare `DirGraph` must call for its commits to be published (the same
+    /// obligation the durable paths carry for `flush_wal`). Cypher-first: a
+    /// binding needs none of this to *read* the stream, only to say where its
+    /// commit boundaries are.
+    pub mod cdc {
+        pub use crate::graph::cdc::{
+            disable, drain_at_commit, enable, publish_drained, read, status, CdcChange, CdcEvent,
+            CdcEventKind, CdcHandle, CdcLog, CdcStatus, EdgeState, NodeState, DEFAULT_CAPACITY,
+            MAX_CAPACITY,
+        };
+    }
+
     /// Durable transactions — the write-ahead log (append / recover / replay)
     /// and the write-capture recording layer behind a binding's `durable()`
     /// feature. The in-process WAL mechanism (distinct from the checkpoint
@@ -488,7 +502,7 @@ pub mod api {
         };
         pub use crate::graph::mutation::wal_replay::apply_frames;
         pub use crate::graph::storage::recording::{
-            resolve_ops, wrap_for_durability, RecordingGraph,
+            resolve_ops, wrap_for_durability, CaptureOrigin, RawOp, RecordingGraph,
         };
         pub use crate::graph::wal::{recover, wal_path, DurabilityLevel, SyncMode, Wal, WalFrame};
     }
