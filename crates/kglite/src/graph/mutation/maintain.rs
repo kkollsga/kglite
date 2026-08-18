@@ -116,13 +116,15 @@ impl ConstraintColumns {
         }
     }
 
-    /// Gate one input row against the declared NOT NULL and UNIQUE constraints.
+    /// Gate one input row against the declared NOT NULL, UNIQUE and
+    /// property-type constraints.
     ///
-    /// Called before the row is queued onto the batch, so a violation aborts the
-    /// whole `add_nodes` call with the graph untouched — no rollback needed and
-    /// no half-applied load. `batch_claims` carries the tuples earlier rows of
-    /// this same input already claimed, so a repeat *within* one batch is
-    /// rejected even when neither row conflicts with stored data.
+    /// Called from [`gate_batch`], which runs over the whole frame *before*
+    /// `add_nodes` writes anything at all, so a violation aborts the call with
+    /// the graph untouched — no rollback needed and no half-applied load.
+    /// `batch_claims` carries the tuples earlier rows of this same input
+    /// already claimed, so a repeat *within* one batch is rejected even when
+    /// neither row conflicts with stored data.
     fn gate_row(
         &self,
         graph: &DirGraph,
@@ -158,6 +160,87 @@ impl ConstraintColumns {
         Ok(())
     }
 }
+/// Refuse the whole batch before anything is written, by checking every row's
+/// declared constraints (and, for a primary-key type, within-batch id repeats)
+/// in one pass ahead of the build loop.
+///
+/// # Why this is its own pass
+///
+/// Every refusal `add_nodes` can raise has to happen before the first byte of
+/// observed state lands, and the build loop is not a safe place for one: it
+/// commits the node type's metadata and columnar schema before it starts, and
+/// `BatchProcessor::add_action` *flushes a chunk into the graph* once a large
+/// frame passes the chunk threshold. A gate inside that loop therefore aborts
+/// with the type's schema already widened and, past the threshold, with rows
+/// already created — the half-applied load the gate exists to prevent.
+///
+/// Ordering the two phases instead of the two writes is what keeps the
+/// promise: the loop below may then assume every row is admissible.
+///
+/// Costs nothing for the common bulk path — an unconstrained type with no
+/// primary key returns before touching a row.
+#[allow(clippy::too_many_arguments)]
+fn gate_batch(
+    graph: &mut DirGraph,
+    node_type: &str,
+    df_data: &DataFrame,
+    columns: Option<&ConstraintColumns>,
+    pk_enforced: bool,
+    id_idx: usize,
+    title_idx: usize,
+    unique_id_field: &str,
+    title_field: &str,
+) -> Result<(), String> {
+    if columns.is_none() && !pk_enforced {
+        return Ok(());
+    }
+    let mut batch_claims: HashSet<(UniqueConstraintKey, CompositeValue)> = HashSet::new();
+    let mut seen_pk_ids: HashSet<Value> = if pk_enforced {
+        HashSet::with_capacity(df_data.row_count())
+    } else {
+        HashSet::new()
+    };
+    for row_idx in 0..df_data.row_count() {
+        // A row the build loop skips is not loaded, so it is not gated either —
+        // the two passes agree on which rows exist by applying the same rule.
+        let Some(id) = df_data.get_value_by_index(row_idx, id_idx) else {
+            continue;
+        };
+        if matches!(id, Value::Null) {
+            continue;
+        }
+        if pk_enforced && !seen_pk_ids.insert(id.clone()) {
+            return Err(format!(
+                "duplicate primary key: node type '{node_type}' declares a primary key but \
+                 the input has more than one row with id {id}. Deduplicate the input before \
+                 add_nodes, or drop the primary-key declaration."
+            ));
+        }
+        let Some(columns) = columns else {
+            continue;
+        };
+        let title = df_data
+            .get_value_by_index(row_idx, title_idx)
+            .unwrap_or(Value::Null);
+        let existing_idx = graph.id_indices.lookup(node_type, &id);
+        columns.gate_row_parked(
+            graph,
+            node_type,
+            GateRow {
+                df_data,
+                row_idx,
+                id: &id,
+                title: &title,
+                id_field: unique_id_field,
+                title_field,
+            },
+            existing_idx,
+            &mut batch_claims,
+        )?;
+    }
+    Ok(())
+}
+
 fn check_data_validity(df_data: &DataFrame, unique_id_field: &str) -> Result<(), String> {
     // Remove strict UniqueId type verification to allow nulls
     if !df_data.verify_column(unique_id_field) {
@@ -532,16 +615,6 @@ pub fn add_nodes(
     // Track errors
     let mut errors = Vec::new();
 
-    install_node_type_metadata(
-        graph,
-        &node_type,
-        &df_data,
-        &unique_id_field,
-        &title_field,
-        should_update_title,
-        &mut errors,
-    );
-
     // The per-row conflict check reads the type's live id index. Building it
     // here (a no-op once it exists) replaces the `TypeLookup` snapshot, which
     // materialized every id of the type into an owned map on *every* call —
@@ -557,6 +630,33 @@ pub fn add_nodes(
     let title_idx = df_data
         .get_column_index(&title_field)
         .ok_or_else(|| format!("Column '{}' not found", title_field))?;
+
+    // Every refusal happens here, ahead of the first write. See `gate_batch`:
+    // the metadata install below and the build loop's chunk flushes are both
+    // observable, so a gate placed among them cannot leave the graph untouched.
+    let constraint_columns = ConstraintColumns::for_batch(graph, &node_type, &df_data);
+    let pk_enforced = graph.primary_key_for(&node_type).is_some();
+    gate_batch(
+        graph,
+        &node_type,
+        &df_data,
+        constraint_columns.as_ref(),
+        pk_enforced,
+        id_idx,
+        title_idx,
+        &unique_id_field,
+        &title_field,
+    )?;
+
+    install_node_type_metadata(
+        graph,
+        &node_type,
+        &df_data,
+        &unique_id_field,
+        &title_field,
+        should_update_title,
+        &mut errors,
+    );
 
     // OPTIMIZATION: Pre-compute property column info (name + index) to avoid repeated lookups
     // This avoids: 1) string comparisons in the loop, 2) HashMap lookups per property
@@ -588,21 +688,6 @@ pub fn add_nodes(
     let mut skipped_null_id = 0;
     let mut skipped_parse_fail = 0;
 
-    // For a declared-PRIMARY-KEY type, a within-batch duplicate id is a data
-    // error (the id-index would silently collapse it into a hidden duplicate),
-    // so reject it — consistent with Cypher CREATE's reject-on-dup. The
-    // conflict-handling modes still apply to duplicates vs. the *existing*
-    // graph (add_nodes is the upsert path, like MERGE); this only guards
-    // repeats *within the same input batch*. Gated on a declared PK, so the
-    // common bulk path allocates nothing.
-    let pk_enforced = graph.primary_key_for(&node_type).is_some();
-    let mut seen_pk_ids: std::collections::HashSet<Value> = if pk_enforced {
-        std::collections::HashSet::with_capacity(df_data.row_count())
-    } else {
-        std::collections::HashSet::new()
-    };
-
-    let constraint_columns = ConstraintColumns::for_batch(graph, &node_type, &df_data);
     let row_builder = RowBuilder {
         node_type: &node_type,
         interned_columns: &interned_columns,
@@ -611,11 +696,6 @@ pub fn add_nodes(
         should_update_title,
         conflict_mode,
     };
-
-    // Tuples claimed by earlier rows of this same batch: a repeat inside one
-    // input is refused even when neither row conflicts with stored data.
-    let mut batch_claims: std::collections::HashSet<(UniqueConstraintKey, CompositeValue)> =
-        std::collections::HashSet::new();
 
     let mut update_fold = UpdateFold::for_batch(graph, &node_type, df_data.row_count());
     // Loaded ids raise the engine's auto-id high-water mark (applied once
@@ -642,38 +722,12 @@ pub fn add_nodes(
 
         note_loaded_id(&mut max_loaded_id, &id);
 
-        if pk_enforced && !seen_pk_ids.insert(id.clone()) {
-            return Err(format!(
-                "duplicate primary key: node type '{node_type}' declares a primary key but \
-                 the input has more than one row with id {id}. Deduplicate the input before \
-                 add_nodes, or drop the primary-key declaration."
-            ));
-        }
-
         let title = df_data
             .get_value_by_index(row_idx, title_idx)
             .unwrap_or(Value::Null);
 
-        // Constraint gates. Run here, before the row is queued onto the batch,
-        // so a violation aborts the whole call with the graph untouched — no
-        // rollback needed and no half-applied load.
+        // Every row here already passed `gate_batch` above.
         let existing_idx = graph.id_indices.lookup(&node_type, &id);
-        if let Some(columns) = &constraint_columns {
-            columns.gate_row_parked(
-                graph,
-                &node_type,
-                GateRow {
-                    df_data: &df_data,
-                    row_idx,
-                    id: &id,
-                    title: &title,
-                    id_field: &unique_id_field,
-                    title_field: &title_field,
-                },
-                existing_idx,
-                &mut batch_claims,
-            )?;
-        }
 
         update_fold.observe(graph, &node_type, existing_idx);
         let action = row_builder.action(&df_data, row_idx, id, title, existing_idx);

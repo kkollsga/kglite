@@ -485,3 +485,34 @@ def test_bulk_violation_writes_nothing_at_all(mode, tmp_path):
         kg.add_nodes(df, "Person", "id")
 
     assert _snapshot(kg, "Person") == before
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_refused_bulk_load_records_no_observed_metadata(mode, tmp_path):
+    """ "Writes nothing at all" includes the *schema* a load would have recorded.
+
+    A refused batch used to leave the rejected column's observed type behind,
+    so the next conforming load warned about a type mismatch against a schema
+    the user never accepted — and `describe()` reported it as if the load had
+    happened.
+    """
+    import warnings
+
+    kg = _fresh(mode, tmp_path)
+    kg.add_nodes(pd.DataFrame({"id": [1], "email": ["a@b.c"], "age": [30]}), "Person", "id")
+    kg.cypher("CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS NOT NULL")
+    before = kg.describe()
+
+    # No email (refused by NOT NULL) *and* an `age` whose type disagrees with
+    # the recorded one — the column that must not be recorded on the way out.
+    with pytest.raises(Exception):
+        kg.add_nodes(pd.DataFrame({"id": [2], "age": ["thirty"]}), "Person", "id")
+
+    assert kg.describe() == before, "a refused load left observed metadata behind"
+
+    # The user-visible consequence: the next conforming load is clean.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        kg.add_nodes(pd.DataFrame({"id": [3], "email": ["c@b.c"], "age": [61]}), "Person", "id")
+    mismatches = [w for w in caught if "Type mismatch" in str(w.message)]
+    assert not mismatches, [str(w.message) for w in mismatches]

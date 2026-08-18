@@ -48,6 +48,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A bulk load refused by a constraint no longer records the rejected data's
+  schema.** `add_nodes` merged the incoming frame's column types (and its
+  id/title field aliases) into the node type's observed metadata *before*
+  checking any row against the declared constraints, so a load the gate refused
+  still left the rejected column's type behind. `describe()` then reported a
+  schema the user never accepted, it was saved into the `.kgl`, and the next
+  conforming load warned about a type mismatch against it — for example loading
+  a string `age` into a type whose `age` is an integer was rejected, yet flipped
+  the recorded type to string anyway. Constraint checking now runs as its own
+  pass over the frame *before* any of that state is written, which is what "a
+  rejected load needs no rollback" already claimed; the within-batch
+  duplicate-primary-key check moved into the same pass, since it aborts the
+  call the same way. Accepted loads are unaffected, and a type that declares
+  neither a constraint nor a primary key does no extra work.
+
 - **A `CREATE CONSTRAINT ... IS NOT NULL` declaration no longer loses its
   protection when the graph is saved and reloaded.** The list a presence
   constraint is enforced from lives inside the schema, so KGLite records
