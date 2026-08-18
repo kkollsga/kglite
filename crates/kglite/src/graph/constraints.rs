@@ -48,6 +48,19 @@ pub enum ConstraintKind {
     NotNull,
     /// The type's primary key: unique **and** not null.
     NodeKey,
+    /// Every value written to the property must have the declared type.
+    ///
+    /// The type itself is not carried here — a `ConstraintKind` is a `Copy`
+    /// discriminator that several structures store per declaration, and the
+    /// declared type lives with the declaration
+    /// (`DirGraph::ddl_property_type_constraints`, and
+    /// [`crate::graph::property_types::DeclaredType`] for the vocabulary).
+    ///
+    /// **New in the persisted format**: a `.kgl` file containing a named
+    /// property-type constraint does not load on a binary that predates this
+    /// variant, because serde cannot resolve the unknown name. That is the
+    /// deliberate one-way format posture, not an accident.
+    PropertyType,
 }
 
 impl ConstraintKind {
@@ -58,6 +71,13 @@ impl ConstraintKind {
             ConstraintKind::Unique => "UNIQUE",
             ConstraintKind::NotNull => "NOT NULL",
             ConstraintKind::NodeKey => "NODE KEY",
+            // `IS :: <TYPE>` is the Cypher spelling of the *declaration*, but
+            // it cannot stand alone in prose ("the IS :: constraint on …"), and
+            // the type it names is reported separately by every message that
+            // raises this kind. `PROPERTY TYPE` is what Neo4j calls it in
+            // `SHOW CONSTRAINTS` (`NODE_PROPERTY_TYPE`), so a reader who greps
+            // their Neo4j-era notes finds the same phrase.
+            ConstraintKind::PropertyType => "PROPERTY TYPE",
         }
     }
 }
@@ -85,6 +105,32 @@ pub enum ConstraintFailure {
     /// "N tuples collide", and reporting one as the other sends the reader
     /// looking for duplicates that do not exist.
     PreexistingMissing { nodes: usize },
+    /// The write would store a value whose type is not the one declared for the
+    /// property. `expected` and `actual` are vocabulary names
+    /// ([`crate::graph::property_types::DeclaredType::name`] /
+    /// `value_type_name`), never Rust variant names — the message must read in
+    /// the same words the constraint was written in.
+    ///
+    /// Null is not a mismatch: a type constraint is not an existence
+    /// constraint, so a null value never reaches here.
+    TypeMismatch {
+        property: String,
+        expected: String,
+        actual: String,
+    },
+    /// Declaring a property-type constraint failed because existing nodes hold
+    /// a value of another type. Pairs with [`ConstraintFailure::TypeMismatch`]
+    /// exactly as [`ConstraintFailure::PreexistingMissing`] pairs with
+    /// [`ConstraintFailure::Missing`]: the write-time and declaration-time
+    /// facts are different facts, and reporting one as the other tells the
+    /// reader to fix the wrong thing. `actual` is one offending type, so the
+    /// message is actionable without enumerating every row.
+    PreexistingTypeMismatch {
+        property: String,
+        expected: String,
+        actual: String,
+        nodes: usize,
+    },
 }
 
 /// A constraint under the name its author gave it.
@@ -178,12 +224,60 @@ impl ConstraintViolation {
         }
     }
 
+    /// A write supplied a value of the wrong type.
+    ///
+    /// The kind is fixed rather than taken: only a property-type declaration
+    /// can raise a type mismatch, and a caller that passed the wrong kind would
+    /// produce a message naming a constraint the user never wrote.
+    pub fn type_mismatch(
+        node_type: impl Into<String>,
+        property: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        let property = property.into();
+        Self {
+            kind: ConstraintKind::PropertyType,
+            node_type: node_type.into(),
+            properties: vec![property.clone()],
+            failure: ConstraintFailure::TypeMismatch {
+                property,
+                expected: expected.into(),
+                actual: actual.into(),
+            },
+        }
+    }
+
+    /// Declaring a property-type constraint failed against existing data.
+    pub fn preexisting_type_mismatch(
+        node_type: impl Into<String>,
+        property: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+        nodes: usize,
+    ) -> Self {
+        let property = property.into();
+        Self {
+            kind: ConstraintKind::PropertyType,
+            node_type: node_type.into(),
+            properties: vec![property.clone()],
+            failure: ConstraintFailure::PreexistingTypeMismatch {
+                property,
+                expected: expected.into(),
+                actual: actual.into(),
+                nodes,
+            },
+        }
+    }
+
     /// Whether this reports a failed *declaration* rather than a failed write.
     /// The two carry different Neo4j status codes.
     pub fn is_declaration_failure(&self) -> bool {
         matches!(
             self.failure,
-            ConstraintFailure::Preexisting { .. } | ConstraintFailure::PreexistingMissing { .. }
+            ConstraintFailure::Preexisting { .. }
+                | ConstraintFailure::PreexistingMissing { .. }
+                | ConstraintFailure::PreexistingTypeMismatch { .. }
         )
     }
 
@@ -298,6 +392,33 @@ impl fmt::Display for ConstraintViolation {
                     self.node_type,
                 )
             }
+            ConstraintFailure::TypeMismatch {
+                property,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "a node with label '{}' must have a {expected} value for the property \
+                 '{property}', but the write supplies {actual} — the {kind} constraint on \
+                 {descriptor} rejects it. Supply a {expected} value, or drop the constraint.",
+                self.node_type,
+            ),
+            ConstraintFailure::PreexistingTypeMismatch {
+                property,
+                expected,
+                actual,
+                nodes,
+            } => {
+                let plural = if *nodes == 1 { "node" } else { "nodes" };
+                write!(
+                    f,
+                    "cannot declare a {kind} constraint on {descriptor}: {nodes} existing \
+                     {plural} of type '{}' hold a value for '{property}' that is not \
+                     {expected} (for example {actual}). Convert or delete those nodes before \
+                     declaring the constraint.",
+                    self.node_type,
+                )
+            }
         }
     }
 }
@@ -363,6 +484,37 @@ mod tests {
         let message = violation.to_string();
         assert!(message.contains("2 duplicate values"), "{message}");
         assert!(message.contains("Deduplicate"), "{message}");
+    }
+
+    /// The write-time message has to answer three questions at once: which
+    /// property, what was required, what arrived.
+    #[test]
+    fn type_mismatch_message_names_property_expected_and_actual() {
+        let violation = ConstraintViolation::type_mismatch("Person", "age", "INTEGER", "STRING");
+        let message = violation.to_string();
+        assert!(message.contains("'age'"), "{message}");
+        assert!(message.contains("INTEGER"), "{message}");
+        assert!(message.contains("STRING"), "{message}");
+        assert!(
+            message.contains("PROPERTY TYPE constraint on Person.age"),
+            "{message}"
+        );
+        assert!(!violation.is_declaration_failure());
+        assert_eq!(violation.kind, ConstraintKind::PropertyType);
+    }
+
+    /// A failed *declaration* must not read like a failed write: it reports how
+    /// many rows are in the way and what to do about them.
+    #[test]
+    fn preexisting_type_mismatch_is_flagged_as_a_declaration_failure() {
+        let violation =
+            ConstraintViolation::preexisting_type_mismatch("Person", "age", "INTEGER", "STRING", 3);
+        assert!(violation.is_declaration_failure());
+        let message = violation.to_string();
+        assert!(message.contains("3 existing nodes"), "{message}");
+        assert!(message.contains("not INTEGER"), "{message}");
+        assert!(message.contains("STRING"), "{message}");
+        assert!(message.contains("Convert or delete"), "{message}");
     }
 
     #[test]

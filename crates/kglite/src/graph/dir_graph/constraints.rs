@@ -48,6 +48,7 @@ use crate::datatypes::values::Value;
 use crate::graph::constraints::{
     normalize_properties, ConstraintKind, ConstraintViolation, NamedConstraint, UniqueConstraintKey,
 };
+use crate::graph::property_types::{self, DeclaredType};
 use crate::graph::schema::{
     CompositeValue, NodeSchemaDefinition, SchemaDefinition, PROVISIONAL_KEY,
 };
@@ -888,6 +889,236 @@ impl DirGraph {
     }
 
     // ========================================================================
+    // PROPERTY TYPE
+    // ========================================================================
+    //
+    // The declaration store (`ddl_property_type_constraints`) *is* the
+    // constraint, the way `unique_indices` is for uniqueness: there is no
+    // second copy inside the schema, so no schema install can withdraw one and
+    // no `reapply_*` pass is needed to put it back.
+    //
+    // Cost per write is the same shape the other kinds pay: one
+    // `BTreeMap::is_empty` for a graph that declares nothing, one further map
+    // probe for a type that declares nothing, and one predicate call per
+    // declared property otherwise. No allocation on any of those paths.
+    //
+    // Provisional stubs need no exemption here, unlike NOT NULL. A stub carries
+    // only its id, and an absent property satisfies a type constraint, so
+    // enforcement never blocks auto-vivification.
+
+    /// Whether the graph declares any property-type constraint at all. The
+    /// write-path fast-out: one `BTreeMap::is_empty`, no allocation.
+    #[inline]
+    pub(crate) fn has_property_type_constraints(&self) -> bool {
+        !self.ddl_property_type_constraints.is_empty()
+    }
+
+    /// The type declared for `node_type.property`, if one is.
+    pub(crate) fn property_type_for(
+        &self,
+        node_type: &str,
+        property: &str,
+    ) -> Option<DeclaredType> {
+        self.ddl_property_type_constraints
+            .get(node_type)?
+            .get(property)
+            .copied()
+    }
+
+    /// Reject one property write whose value has the wrong type.
+    ///
+    /// `value` is the value *the write will store*. Null passes — a type
+    /// constraint is not an existence constraint (see
+    /// [`crate::graph::property_types`]) — so a caller that nulls a property
+    /// only has to consult NOT NULL.
+    pub(crate) fn check_property_type(
+        &self,
+        node_type: &str,
+        property: &str,
+        value: &Value,
+    ) -> Result<(), ConstraintViolation> {
+        if !self.has_property_type_constraints() {
+            return Ok(());
+        }
+        let Some(declared) = self.property_type_for(node_type, property) else {
+            return Ok(());
+        };
+        Self::type_violation(declared, node_type, property, value)
+    }
+
+    /// Reject a whole row's worth of property writes.
+    ///
+    /// `read` is called with each *constrained* property name and returns its
+    /// value as the write will leave it — the same contract
+    /// [`Self::check_required_fields`] uses, so a choke point that already
+    /// composes pending values over stored ones can reuse the closure it has.
+    /// Only declared properties are read, so an unconstrained type costs one
+    /// map probe and calls `read` zero times.
+    pub(crate) fn check_property_types<F>(
+        &self,
+        node_type: &str,
+        read: F,
+    ) -> Result<(), ConstraintViolation>
+    where
+        F: Fn(&str) -> Option<Value>,
+    {
+        if !self.has_property_type_constraints() {
+            return Ok(());
+        }
+        let Some(declared) = self.ddl_property_type_constraints.get(node_type) else {
+            return Ok(());
+        };
+        for (property, expected) in declared {
+            // An absent property passes, exactly as a null one does.
+            let Some(value) = read(property) else {
+                continue;
+            };
+            Self::type_violation(*expected, node_type, property, &value)?;
+        }
+        Ok(())
+    }
+
+    /// The violation `value` raises against `declared`, or `Ok` when it
+    /// satisfies it. The single place the predicate is consulted, so the
+    /// write-path and row-path checks cannot disagree about what passes.
+    fn type_violation(
+        declared: DeclaredType,
+        node_type: &str,
+        property: &str,
+        value: &Value,
+    ) -> Result<(), ConstraintViolation> {
+        if declared.accepts(value) {
+            return Ok(());
+        }
+        Err(ConstraintViolation::type_mismatch(
+            node_type,
+            property,
+            declared.name(),
+            property_types::value_type_name(value),
+        ))
+    }
+
+    /// Declare `property` on `node_type` to hold only `declared` values.
+    ///
+    /// Returns the number of nodes of the type that were checked.
+    ///
+    /// Fails with [`ConstraintViolation::preexisting_type_mismatch`] when
+    /// existing nodes hold a value of another type, and installs nothing in
+    /// that case — mirroring [`Self::create_not_null_constraint`], because a
+    /// constraint that exempts the rows already present is worse than a
+    /// rejected declaration.
+    ///
+    /// Idempotent: re-declaring the same type re-verifies it and changes
+    /// nothing. Declaring a *different* type for a property that already has
+    /// one replaces it, and only when the existing data satisfies the new type
+    /// — the caller owns the "a constraint already exists here" policy
+    /// (`IF NOT EXISTS` and the already-declared rejection both live in the DDL
+    /// executor, as they do for the other kinds).
+    pub(crate) fn create_property_type_constraint(
+        &mut self,
+        node_type: &str,
+        property: &str,
+        declared: DeclaredType,
+    ) -> Result<usize, ConstraintViolation> {
+        let (checked, violations, sample) =
+            self.count_type_violations(node_type, property, declared);
+        if violations > 0 {
+            return Err(ConstraintViolation::preexisting_type_mismatch(
+                node_type,
+                property,
+                declared.name(),
+                sample.unwrap_or("a value of another type"),
+                violations,
+            ));
+        }
+        self.ddl_property_type_constraints
+            .entry(node_type.to_string())
+            .or_default()
+            .insert(property.to_string(), declared);
+        Ok(checked)
+    }
+
+    /// Withdraw a property-type declaration. Reports whether one was removed.
+    ///
+    /// Removes the node type's entry once its last declaration goes, so
+    /// [`Self::has_property_type_constraints`] returns to `false` — and the
+    /// write path to its zero-cost early-out — once every constraint is
+    /// dropped.
+    pub(crate) fn drop_property_type_constraint(
+        &mut self,
+        node_type: &str,
+        property: &str,
+    ) -> bool {
+        let Some(declared) = self.ddl_property_type_constraints.get_mut(node_type) else {
+            return false;
+        };
+        let removed = declared.remove(property).is_some();
+        if declared.is_empty() {
+            self.ddl_property_type_constraints.remove(node_type);
+        }
+        removed
+    }
+
+    /// Every declared property-type constraint as `(node_type, property, type)`,
+    /// in deterministic order. Backs `SHOW CONSTRAINTS` alongside
+    /// [`Self::list_unique_constraints`] and
+    /// [`Self::list_not_null_constraints`].
+    pub(crate) fn list_property_type_constraints(&self) -> Vec<(String, String, DeclaredType)> {
+        self.ddl_property_type_constraints
+            .iter()
+            .flat_map(|(node_type, declared)| {
+                declared
+                    .iter()
+                    .map(move |(property, kind)| (node_type.clone(), property.clone(), *kind))
+            })
+            .collect()
+    }
+
+    /// `(nodes_checked, nodes_violating, one_offending_type_name)` for a
+    /// candidate declaration.
+    ///
+    /// `type` is the node's label rather than a stored value: it is a string on
+    /// every node by construction, and no write can make it anything else. So a
+    /// `STRING` declaration on it is satisfied for free, and any other
+    /// declaration is refused here rather than installed as a constraint that
+    /// would enforce nothing on the write path.
+    fn count_type_violations(
+        &mut self,
+        node_type: &str,
+        property: &str,
+        declared: DeclaredType,
+    ) -> (usize, usize, Option<&'static str>) {
+        if property == "type" {
+            let checked = self
+                .type_indices
+                .get(node_type)
+                .map_or(0, |nodes| nodes.iter().count());
+            let label_is_accepted = declared.accepts(&Value::String(node_type.to_string()));
+            let violations = if label_is_accepted { 0 } else { checked };
+            return (checked, violations, Some("STRING"));
+        }
+        let reader = self.property_reader(node_type, property);
+        let Some(node_indices) = self.type_indices.get(node_type) else {
+            return (0, 0, None);
+        };
+        let indices: Vec<NodeIndex> = node_indices.iter().collect();
+        let mut violations = 0usize;
+        let mut sample = None;
+        for idx in &indices {
+            // Absent and null both satisfy a type constraint, so neither blocks
+            // the declaration — the presence question belongs to NOT NULL.
+            let Some(value) = self.read_indexed(&reader, *idx) else {
+                continue;
+            };
+            if !declared.accepts(&value) {
+                violations += 1;
+                sample.get_or_insert_with(|| property_types::value_type_name(&value));
+            }
+        }
+        (indices.len(), violations, sample)
+    }
+
+    // ========================================================================
     // Named constraints
     // ========================================================================
 
@@ -977,6 +1208,14 @@ impl DirGraph {
                         .iter()
                         .all(|property| self.has_not_null_constraint(&declared.node_type, property))
             }
+            // The declared *type* is not part of the name registration, so a
+            // re-declaration that changes the type keeps the name — which is
+            // right: the name points at the property, and the property is still
+            // constrained.
+            ConstraintKind::PropertyType => declared.properties.iter().all(|property| {
+                self.property_type_for(&declared.node_type, property)
+                    .is_some()
+            }),
         }
     }
 
@@ -1405,5 +1644,297 @@ mod constraint_name_registry_tests {
         let mut sorted = graph.unique_constraint_keys.clone();
         sorted.sort();
         assert_eq!(graph.unique_constraint_keys, sorted);
+    }
+}
+
+#[cfg(test)]
+mod property_type_declaration_tests {
+    use super::*;
+    use crate::graph::schema::NodeData;
+    use crate::graph::storage::GraphWrite;
+
+    /// `Person` nodes carrying exactly the properties each row supplies, so a
+    /// row can hold a value of the wrong type — or omit the property.
+    fn person_graph(rows: &[&[(&str, Value)]]) -> DirGraph {
+        let mut graph = DirGraph::new();
+        for (row, properties) in rows.iter().enumerate() {
+            let props: HashMap<String, Value> = properties
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), value.clone()))
+                .collect();
+            let node = NodeData::new(
+                Value::UniqueId(row as u32 + 1),
+                Value::String(format!("person-{row}")),
+                "Person".to_string(),
+                props,
+                &mut graph.interner,
+            );
+            let idx = graph.graph.add_node(node);
+            graph
+                .type_indices
+                .entry_or_default("Person".to_string())
+                .push(idx);
+        }
+        graph
+    }
+
+    /// A reader that answers with one property's value and nothing else, the
+    /// shape a write-path choke point composes.
+    fn supplying(property: &'static str, value: Value) -> impl Fn(&str) -> Option<Value> {
+        move |name| (name == property).then(|| value.clone())
+    }
+
+    #[test]
+    fn declaring_a_type_on_clean_data_installs_and_enforces_it() {
+        let mut graph = person_graph(&[&[("age", Value::Int64(41))], &[("age", Value::Int64(9))]]);
+        assert_eq!(
+            graph
+                .create_property_type_constraint("Person", "age", DeclaredType::Integer)
+                .unwrap(),
+            2
+        );
+        assert!(graph.has_property_type_constraints());
+        assert_eq!(
+            graph.property_type_for("Person", "age"),
+            Some(DeclaredType::Integer)
+        );
+        assert_eq!(
+            graph.list_property_type_constraints(),
+            vec![(
+                "Person".to_string(),
+                "age".to_string(),
+                DeclaredType::Integer
+            )]
+        );
+
+        // A conforming write passes, through both the single-value and the
+        // row-shaped check.
+        graph
+            .check_property_type("Person", "age", &Value::Int64(1))
+            .expect("an integer satisfies an INTEGER declaration");
+        graph
+            .check_property_types("Person", supplying("age", Value::Int64(1)))
+            .expect("an integer satisfies an INTEGER declaration");
+
+        // A non-conforming one is rejected, by both, with the same facts.
+        for violation in [
+            graph
+                .check_property_type("Person", "age", &Value::String("41".to_string()))
+                .expect_err("a string must not satisfy an INTEGER declaration"),
+            graph
+                .check_property_types("Person", supplying("age", Value::String("41".to_string())))
+                .expect_err("a string must not satisfy an INTEGER declaration"),
+        ] {
+            assert_eq!(violation.kind, ConstraintKind::PropertyType);
+            assert!(!violation.is_declaration_failure());
+            let message = violation.to_string();
+            assert!(message.contains("'age'"), "{message}");
+            assert!(message.contains("INTEGER"), "{message}");
+            assert!(message.contains("STRING"), "{message}");
+        }
+    }
+
+    /// A constraint that exempted the rows already present would report success
+    /// and enforce less than it claims, so the declaration is refused instead.
+    #[test]
+    fn a_declaration_is_refused_when_existing_data_violates_it() {
+        let mut graph = person_graph(&[
+            &[("age", Value::Int64(41))],
+            &[("age", Value::String("nine".to_string()))],
+            &[("age", Value::String("ten".to_string()))],
+        ]);
+        let violation = graph
+            .create_property_type_constraint("Person", "age", DeclaredType::Integer)
+            .expect_err("existing strings must block an INTEGER declaration");
+
+        assert!(violation.is_declaration_failure());
+        let message = violation.to_string();
+        assert!(message.contains("2 existing nodes"), "{message}");
+        assert!(message.contains("not INTEGER"), "{message}");
+        assert!(message.contains("STRING"), "{message}");
+
+        // Nothing was installed, so the write path keeps its early-out.
+        assert!(!graph.has_property_type_constraints());
+        assert_eq!(graph.property_type_for("Person", "age"), None);
+    }
+
+    /// Neo4j semantics: a type constraint is not an existence constraint.
+    #[test]
+    fn null_and_absent_values_block_neither_a_declaration_nor_a_write() {
+        let mut graph = person_graph(&[
+            &[("age", Value::Int64(41))],
+            &[("age", Value::Null)],
+            &[("name", Value::String("no age at all".to_string()))],
+        ]);
+        assert_eq!(
+            graph
+                .create_property_type_constraint("Person", "age", DeclaredType::Integer)
+                .unwrap(),
+            3
+        );
+        graph
+            .check_property_type("Person", "age", &Value::Null)
+            .expect("null satisfies every declared type");
+        graph
+            .check_property_types("Person", |_| Some(Value::Null))
+            .expect("null satisfies every declared type");
+        graph
+            .check_property_types("Person", |_| None)
+            .expect("an absent property satisfies every declared type");
+    }
+
+    /// `UniqueId` is an id's compact encoding, not a second numeric type — so
+    /// the single most obvious declaration anyone writes must not be refused by
+    /// the graph's own ids.
+    #[test]
+    fn an_integer_declaration_accepts_auto_assigned_ids() {
+        let mut graph = person_graph(&[&[("name", Value::String("Alice".to_string()))]]);
+        assert_eq!(
+            graph
+                .create_property_type_constraint("Person", "id", DeclaredType::Integer)
+                .unwrap(),
+            1
+        );
+        graph
+            .check_property_type("Person", "id", &Value::UniqueId(7))
+            .expect("an auto-assigned id is an INTEGER");
+        graph
+            .check_property_type("Person", "id", &Value::Int64(7))
+            .expect("an explicit numeric id is an INTEGER");
+        graph
+            .check_property_type("Person", "id", &Value::Float64(7.0))
+            .expect_err("a float id is not an INTEGER");
+    }
+
+    /// A graph that declares nothing must not read a single value, and neither
+    /// must a type that declares nothing — the reader panics if either does.
+    #[test]
+    fn an_unconstrained_type_reads_nothing() {
+        let mut graph = person_graph(&[&[("age", Value::Int64(41))]]);
+        assert!(!graph.has_property_type_constraints());
+        graph
+            .check_property_types("Person", |name| {
+                panic!("read {name} on an unconstrained graph")
+            })
+            .expect("a graph with no type constraints checks nothing");
+
+        graph
+            .create_property_type_constraint("Person", "age", DeclaredType::Integer)
+            .unwrap();
+        graph
+            .check_property_types("Company", |name| {
+                panic!("read {name} on an unconstrained type")
+            })
+            .expect("a type with no type constraints checks nothing");
+        graph
+            .check_property_type("Person", "nickname", &Value::Int64(1))
+            .expect("an unconstrained property is not checked");
+    }
+
+    #[test]
+    fn dropping_the_last_declaration_restores_the_zero_cost_early_out() {
+        let mut graph = person_graph(&[&[("age", Value::Int64(41))]]);
+        graph
+            .create_property_type_constraint("Person", "age", DeclaredType::Integer)
+            .unwrap();
+        graph
+            .create_property_type_constraint("Person", "name", DeclaredType::String)
+            .unwrap();
+
+        assert!(graph.drop_property_type_constraint("Person", "age"));
+        assert!(
+            !graph.drop_property_type_constraint("Person", "age"),
+            "dropping twice must report the second as a no-op"
+        );
+        assert!(!graph.drop_property_type_constraint("Company", "age"));
+        assert!(
+            graph.has_property_type_constraints(),
+            "the surviving declaration keeps enforcement on"
+        );
+
+        assert!(graph.drop_property_type_constraint("Person", "name"));
+        assert!(
+            !graph.has_property_type_constraints(),
+            "the empty node-type entry must go with its last declaration, or the \
+             write path never returns to its early-out"
+        );
+        graph
+            .check_property_type("Person", "age", &Value::String("x".to_string()))
+            .expect("a dropped constraint enforces nothing");
+    }
+
+    /// Re-declaring is how a user corrects a type; it must still be verified
+    /// against the data, and must not half-install on failure.
+    #[test]
+    fn redeclaring_replaces_the_type_only_when_the_data_agrees() {
+        let mut graph = person_graph(&[&[("age", Value::Int64(41))]]);
+        graph
+            .create_property_type_constraint("Person", "age", DeclaredType::Integer)
+            .unwrap();
+
+        graph
+            .create_property_type_constraint("Person", "age", DeclaredType::String)
+            .expect_err("the stored integer must block a STRING re-declaration");
+        assert_eq!(
+            graph.property_type_for("Person", "age"),
+            Some(DeclaredType::Integer),
+            "a refused re-declaration must leave the old one in force"
+        );
+
+        graph
+            .create_property_type_constraint("Person", "age", DeclaredType::Integer)
+            .expect("re-declaring the same type is idempotent");
+        assert_eq!(
+            graph.property_type_for("Person", "age"),
+            Some(DeclaredType::Integer)
+        );
+    }
+
+    /// The label is a string on every node by construction, so a non-STRING
+    /// declaration on it can never be enforced by a write and is refused at
+    /// declaration time rather than installed as a no-op.
+    #[test]
+    fn declaring_a_type_on_the_label_field_accepts_only_string() {
+        let mut graph = person_graph(&[&[("age", Value::Int64(41))]]);
+        let violation = graph
+            .create_property_type_constraint("Person", "type", DeclaredType::Integer)
+            .expect_err("the label is never an integer");
+        assert!(violation.is_declaration_failure());
+        assert!(!graph.has_property_type_constraints());
+
+        assert_eq!(
+            graph
+                .create_property_type_constraint("Person", "type", DeclaredType::String)
+                .unwrap(),
+            1
+        );
+    }
+
+    /// The name registry is a lookup aid, so a name whose type declaration went
+    /// away must not survive into the next save.
+    #[test]
+    fn a_property_type_name_is_pruned_when_its_declaration_goes() {
+        let mut graph = person_graph(&[&[("age", Value::Int64(41))]]);
+        graph
+            .create_property_type_constraint("Person", "age", DeclaredType::Integer)
+            .unwrap();
+        graph.register_constraint_name(
+            "person_age_typed",
+            NamedConstraint {
+                kind: ConstraintKind::PropertyType,
+                node_type: "Person".to_string(),
+                properties: vec!["age".to_string()],
+            },
+        );
+
+        graph.prune_constraint_names();
+        assert!(graph.constraint_by_name("person_age_typed").is_some());
+
+        graph.drop_property_type_constraint("Person", "age");
+        graph.prune_constraint_names();
+        assert!(
+            graph.constraint_by_name("person_age_typed").is_none(),
+            "a name with no declaration behind it must be pruned"
+        );
     }
 }

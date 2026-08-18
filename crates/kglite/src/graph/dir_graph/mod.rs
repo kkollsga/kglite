@@ -8,6 +8,7 @@ use self::index_layer::LayeredIndex;
 use self::range_index_layer::LayeredRangeIndex;
 use crate::datatypes::values::Value;
 use crate::graph::constraints::{NamedConstraint, UniqueConstraintKey};
+use crate::graph::property_types::DeclaredType;
 use crate::graph::schema::{
     CompositeIndexKey, CompositeValue, ConnectionTypeInfo, ConnectivityTriple, EdgeData,
     EmbeddingStore, GraphBackend, IndexKey, InternedKey, NodeData, PropertyStorage, SaveMetadata,
@@ -166,6 +167,26 @@ pub struct DirGraph {
     /// exactly as they are today.
     #[serde(default)]
     pub(crate) ddl_not_null_constraints: std::collections::BTreeSet<(String, String)>,
+    /// Declared property-type constraints (`CREATE CONSTRAINT … IS :: T`), as
+    /// `node_type -> property -> type`.
+    ///
+    /// Unlike the presence half, this needs no `reapply_*` counterpart: it is
+    /// the enforcement structure *and* the provenance record, and it lives
+    /// outside `SchemaDefinition`, so installing a schema cannot silently
+    /// un-enforce it — the same arrangement uniqueness gets from
+    /// `unique_indices`.
+    ///
+    /// Nested `BTreeMap` rather than the flat `BTreeSet` of tuples its sibling
+    /// uses, for three reasons: a declaration carries a *value* (the type),
+    /// lookup is per `(node_type, property)` on the write path rather than a
+    /// membership test, and string keys keep the shape serialisable as JSON as
+    /// well as postcard (a tuple key is not a JSON object key). Ordered, so the
+    /// persisted bytes are deterministic. Additive serde field — older `.kgl`
+    /// files load with an empty map, i.e. no type constraints, which is the
+    /// pre-existing behaviour.
+    #[serde(default)]
+    pub(crate) ddl_property_type_constraints:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, DeclaredType>>,
     /// Fast O(1) lookup by node ID: node_type -> TypeIdIndex
     /// Lazily built on first use for each node type, skipped during serialization.
     /// Uses compact u32 HashMap when all IDs are UniqueId (e.g., Wikidata mapped mode).
@@ -674,6 +695,7 @@ impl DirGraph {
             unique_constraint_keys: Vec::new(),
             constraint_names: HashMap::new(),
             ddl_not_null_constraints: std::collections::BTreeSet::new(),
+            ddl_property_type_constraints: std::collections::BTreeMap::new(),
             id_indices: IdIndexStore::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: Arc::new(HashMap::new()),
@@ -733,6 +755,7 @@ impl DirGraph {
             unique_constraint_keys: Vec::new(),
             constraint_names: HashMap::new(),
             ddl_not_null_constraints: std::collections::BTreeSet::new(),
+            ddl_property_type_constraints: std::collections::BTreeMap::new(),
             id_indices: IdIndexStore::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: Arc::new(HashMap::new()),

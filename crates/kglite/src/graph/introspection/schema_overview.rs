@@ -522,6 +522,7 @@ impl ConstraintInfo {
             ConstraintKind::Unique => "UNIQUENESS",
             ConstraintKind::NodeKey => "NODE_KEY",
             ConstraintKind::NotNull => "NODE_PROPERTY_EXISTENCE",
+            ConstraintKind::PropertyType => "NODE_PROPERTY_TYPE",
         }
     }
 }
