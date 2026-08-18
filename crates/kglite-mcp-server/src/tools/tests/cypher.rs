@@ -211,3 +211,55 @@ fn single_rev_via_revs_reads_as_snapshot_and_dedups() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The write tool's commit boundary is the statement, so this is where a
+/// change stream learns about a write an agent made through it.
+///
+/// Without the drain in `run_cypher_write`, every statement below still
+/// succeeds and `db.cdc.query()` reports zero rows — a stream that is silently
+/// empty rather than wrong — while the undrained capture buffer grows by one
+/// op per mutation for the life of the server. Asserting the exact row set is
+/// what makes both halves visible: too few rows is the missing drain, too many
+/// is a double publish.
+#[test]
+fn cdc_publishes_every_write_made_through_the_write_tool() {
+    let mut active = fresh_active();
+    write(&mut active, "CALL db.cdc.enable()", None).expect("enable capture");
+    write(&mut active, "CREATE (:P {id: 1, score: 1})", None).expect("create");
+    write(&mut active, "MATCH (n:P {id: 1}) SET n.score = 2", None).expect("set");
+    write(&mut active, "MATCH (n:P {id: 1}) DELETE n", None).expect("delete");
+
+    let state = state_with_active(active);
+    let outcome = state
+        .execute_cypher_read("CALL db.cdc.query() YIELD seq, operation", HashMap::new())
+        .unwrap_or_else(|error| panic!("reading the change stream failed: {error}"));
+
+    let operations: Vec<String> = outcome
+        .result
+        .rows
+        .iter()
+        .map(|row| match &row[1] {
+            Value::String(text) => text.clone(),
+            other => panic!("operation column is not a string: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        operations,
+        vec!["create", "update", "delete"],
+        "each committed write publishes exactly once, in order"
+    );
+}
+
+/// Capture stays opt-in on this path too: a server that never enabled it pays
+/// nothing and reports the opt-in explanation rather than an empty stream.
+#[test]
+fn cdc_is_off_until_enabled_on_the_write_tool() {
+    let mut active = fresh_active();
+    write(&mut active, "CREATE (:P {id: 1})", None).expect("create");
+    let error = write(&mut active, "CALL db.cdc.query()", None)
+        .expect_err("reading an unenabled stream must explain, not return rows");
+    assert!(
+        error.contains("not enabled on this graph"),
+        "unexpected error: {error}"
+    );
+}

@@ -98,6 +98,13 @@ pub(crate) fn run_cypher_write(
     // through verbatim rather than re-prefixing (which produced the triple wrap).
     let outcome =
         kglite::api::session::execute_mut(dir, query, &opts).map_err(|e| e.to_string())?;
+    // This tool call is the server's commit boundary, so this is where a change
+    // stream learns about the write — a no-op unless `CALL db.cdc.enable()` has
+    // been run. A statement that *failed* returned above, having already rolled
+    // its captured ops back, so nothing uncommitted can be published from here;
+    // and draining is what keeps the capture buffer from growing for the life
+    // of a long-running server.
+    kglite::api::cdc::drain_at_commit(dir);
     // A mutation with no RETURN yields no rows — acknowledge with a write
     // summary (nodes/edges/props changed) instead of the bare "No results."
     // that a *read* matching nothing returns, so an agent can tell a
