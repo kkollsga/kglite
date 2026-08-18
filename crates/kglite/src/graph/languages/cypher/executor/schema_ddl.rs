@@ -825,6 +825,13 @@ fn execute_create_constraint(
         reject_structural_uniqueness(graph, &label, &create.properties)?;
     }
 
+    // A declared type on a structural field is likewise decided structurally —
+    // before the existing-data scan, which cannot answer it. See
+    // `reject_unsatisfiable_structural_type`.
+    if let ConstraintPlan::PropertyType(declared) = plan {
+        reject_unsatisfiable_structural_type(graph, &label, &create.properties, declared)?;
+    }
+
     // Schema-locked graphs accept mutations only against the declared schema, so
     // constraining an undeclared property would install a constraint the schema
     // says cannot exist. Same guard index DDL applies.
@@ -1047,6 +1054,65 @@ fn reject_structural_uniqueness(
              primary key — `define_schema({{'nodes': {{'{label}': {{'primary_key': 'id'}}}}}})` \
              — which probes the per-type id index on every write path. `MERGE` is the \
              idempotent alternative to CREATE."
+        ));
+    }
+    Ok(())
+}
+
+/// `IS :: <TYPE>` on a structural field, decided by the data model rather than
+/// by the rows that happen to exist.
+///
+/// `id`, `title`, and the primary type a node reads back as `type` are not
+/// stored properties: their types are fixed, so whether a declaration can ever
+/// hold is a property of the *field*, not of the data. Deciding it by scanning
+/// got both directions wrong, and an empty label got them both at once:
+///
+/// * **Reports success, enforces nothing.** No row violates a declaration on a
+///   label with no rows, so `p.type IS :: INTEGER` installed — and then never
+///   fired, because the write path checks stored properties and the primary
+///   type is not one. The user builds integrity assumptions on a constraint
+///   that cannot fail.
+/// * **Reports success, refuses everything.** `p.id IS :: STRING` installed on
+///   an empty label and then rejected every subsequent write, because the id a
+///   write supplies is an integer and always will be — bricking the node type.
+///
+/// Same reasoning as [`reject_structural_uniqueness`], applied to types instead
+/// of uniqueness: refuse at declaration, where the answer is knowable, rather
+/// than discover it per-write. An accepted declaration here is one the field
+/// satisfies by construction, so it is true rather than merely installed.
+fn reject_unsatisfiable_structural_type(
+    graph: &DirGraph,
+    label: &str,
+    properties: &[String],
+    declared: DeclaredType,
+) -> Result<(), String> {
+    for property in properties {
+        // Aliases resolve first: `add_nodes(df, 'Person', 'pid', 'pname')` maps
+        // `pid`/`pname` onto id/title, so a declaration on the alias names the
+        // same structural field.
+        let (field, fixed) = match graph.resolve_alias(label, property) {
+            "id" => ("id", DeclaredType::Integer),
+            "title" => ("title", DeclaredType::String),
+            "type" => ("type", DeclaredType::String),
+            _ => continue,
+        };
+        if declared == fixed {
+            continue;
+        }
+        let detail = if field == "type" {
+            "the primary type is not a stored property, so no write path can check it and the \
+             constraint would report success while enforcing nothing"
+        } else {
+            "every write supplies that field with its own type, so the constraint would reject \
+             every subsequent write to this node type"
+        };
+        return Err(format!(
+            "CREATE CONSTRAINT ... IS :: {} on '{property}' is not supported: it resolves to the \
+             structural '{field}' field, which is always {} — {detail}. Constrain a stored \
+             property instead, or declare {} if the structural field is what you meant.",
+            declared.name(),
+            fixed.name(),
+            fixed.name(),
         ));
     }
     Ok(())

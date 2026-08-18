@@ -666,6 +666,48 @@ def test_a_declared_type_beats_the_schema_lock_validation_message() -> None:
     g.cypher("MATCH (p:Person) SET p.nickname = 'nick'")
 
 
+def test_a_declared_type_does_not_exempt_an_unknown_property_from_the_lock() -> None:
+    """The exemption skips the schema lock's *type* verdict, never its typo guard.
+
+    A type constraint can be declared on a property no node holds (nothing
+    violates it yet), which leaves the property absent from the observed schema
+    the lock validates against. The exemption then waved the write through, so a
+    locked graph accepted a property it does not know — the exact write
+    `lock_schema()` exists to refuse.
+    """
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame({"person_id": [1], "name": ["A"], "age": [30]}),
+        "Person",
+        "person_id",
+        "name",
+    )
+    # No Person holds `nickname`, so this installs cleanly.
+    g.cypher("CREATE CONSTRAINT nick_typed FOR (p:Person) REQUIRE p.nickname IS :: INTEGER")
+    g.lock_schema()
+
+    with pytest.raises(kglite.CypherExecutionError) as exc:
+        g.cypher("MATCH (p:Person) SET p.nickname = 7")
+    message = str(exc.value)
+    assert "Unknown property 'nickname'" in message, message
+
+    # Control: an ordinary typo hits the same guard, so the assertion above is
+    # not passing for some unrelated reason.
+    with pytest.raises(kglite.CypherExecutionError, match="Unknown property 'nickanme'"):
+        g.cypher("MATCH (p:Person) SET p.nickanme = 7")
+
+    # And a property the schema DOES know keeps the declaration's typed verdict
+    # (the exemption's whole purpose) — see the test above for the full case.
+    with pytest.raises(kglite.ConstraintViolationError):
+        g.cypher("CREATE CONSTRAINT age_typed FOR (p:Person) REQUIRE p.age IS :: INTEGER")
+        g.cypher("MATCH (p:Person) SET p.age = 'old'")
+
+    # The CREATE path carries no such exemption and never did; pinned here so
+    # the two write paths cannot drift into disagreeing about the same graph.
+    with pytest.raises(kglite.KgError, match="Unknown property 'nickname'"):
+        g.cypher("CREATE (:Person {person_id: 2, name: 'B', nickname: 7})")
+
+
 def test_describe_annotates_a_declared_property_type(graph) -> None:
     """An agent planning a write should see the requirement before attempting
     it, which is what the describe() annotation is for."""
@@ -696,3 +738,84 @@ def test_a_bulk_load_is_gated_by_a_declared_type(graph) -> None:
             "name",
             columns=["age"],
         )
+
+
+# ── structural fields ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("populated", [False, True], ids=["empty-label", "populated-label"])
+@pytest.mark.parametrize(
+    ("field", "declared", "accepted"),
+    [
+        # `type` reads as the node's primary type — always a string, and never a
+        # stored property, so the write path cannot see it at all.
+        ("type", "STRING", True),
+        ("type", "INTEGER", False),
+        ("type", "DATE", False),
+        # `id` is the structural identity: always an integer.
+        ("id", "INTEGER", True),
+        ("id", "STRING", False),
+        # `title` is the structural title: always a string.
+        ("title", "STRING", True),
+        ("title", "INTEGER", False),
+    ],
+)
+def test_a_type_constraint_on_a_structural_field_is_decided_structurally(
+    field: str, declared: str, accepted: bool, populated: bool
+) -> None:
+    """A structural field's type is fixed by the data model, so the verdict is
+    the same with or without rows — it must never be read off scanned data.
+
+    Scanning made an empty label say yes to anything: `p.type IS :: INTEGER`
+    installed, reported success, and then enforced nothing, because the label is
+    not a stored property the write path checks. The mirror failure is a
+    declaration that *can* be seen but can never be satisfied — `p.id IS ::
+    STRING` installed and then refused every subsequent write, bricking the
+    node type.
+    """
+    g = kglite.KnowledgeGraph()
+    if populated:
+        g.add_nodes(pd.DataFrame({"id": [1], "title": ["a"]}), "Person", "id", "title")
+    statement = f"CREATE CONSTRAINT c FOR (p:Person) REQUIRE p.{field} IS :: {declared}"
+
+    if accepted:
+        g.cypher(statement)
+        # An accepted declaration is one the field always satisfies, so the node
+        # type stays writable — the constraint is true, not merely installed.
+        g.cypher("CREATE (:Person {id: 99, title: 'z'})")
+        assert g.cypher("MATCH (p:Person) RETURN count(p) AS c").to_dicts()[0]["c"] >= 1
+    else:
+        with pytest.raises(kglite.KgError) as exc:
+            g.cypher(statement)
+        message = str(exc.value)
+        assert "structural" in message, message
+        assert declared in message, message
+        # Nothing was installed, so the node type is untouched and writable.
+        assert g.cypher("CALL db.constraints() YIELD name RETURN name").to_dicts() == []
+        g.cypher("CREATE (:Person {id: 99, title: 'z'})")
+
+
+def test_a_type_constraint_on_an_aliased_structural_field_resolves_through_the_alias() -> None:
+    """`add_nodes(df, 'Person', 'pid', 'pname')` maps `pid`/`pname` onto the
+    structural id/title, so a declaration on the alias must get the structural
+    verdict rather than the stored-property one."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(pd.DataFrame({"pid": [1], "pname": ["a"]}), "Person", "pid", "pname")
+
+    with pytest.raises(kglite.KgError, match="structural"):
+        g.cypher("CREATE CONSTRAINT c1 FOR (p:Person) REQUIRE p.pid IS :: STRING")
+    with pytest.raises(kglite.KgError, match="structural"):
+        g.cypher("CREATE CONSTRAINT c2 FOR (p:Person) REQUIRE p.pname IS :: INTEGER")
+
+    # The satisfiable spellings still install.
+    g.cypher("CREATE CONSTRAINT c3 FOR (p:Person) REQUIRE p.pid IS :: INTEGER")
+    g.cypher("CREATE CONSTRAINT c4 FOR (p:Person) REQUIRE p.pname IS :: STRING")
+
+
+def test_an_ordinary_property_still_gets_the_data_scan() -> None:
+    """The structural rule must not swallow the pre-existing-data refusal that
+    protects ordinary stored properties."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(pd.DataFrame({"id": [1], "title": ["a"], "age": ["thirty"]}), "Person", "id", "title")
+    with pytest.raises(kglite.ConstraintCreationError, match="existing"):
+        g.cypher("CREATE CONSTRAINT c FOR (p:Person) REQUIRE p.age IS :: INTEGER")
