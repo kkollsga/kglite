@@ -24,16 +24,41 @@ import csv
 import datetime as dt
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
+import time
+
+#: GitHub's API answers a small share of requests with a transient 5xx ("No
+#: server is currently available to service your request", HTTP 503) — a
+#: one-shot call turns that into a failed daily snapshot, and the traffic API
+#: keeps only 14 days, so a run lost to a blip is data lost for good once the
+#: gap ages out. Retry the retriable statuses; anything else (401/403/404 —
+#: token scope, wrong repo) is permanent and fails on the first try.
+RETRIABLE_HTTP = re.compile(r"\(HTTP (5\d\d|429)\)")
+RETRY_ATTEMPTS = 5
+RETRY_BACKOFF_SECONDS = 5
 
 
 def gh_api(path: str) -> dict | list:
-    """Call `gh api <path>` and return parsed JSON (exits on failure)."""
-    proc = subprocess.run(["gh", "api", path], capture_output=True, text=True)
-    if proc.returncode != 0:
-        sys.exit(f"gh api {path} failed:\n{proc.stderr.strip()}")
-    return json.loads(proc.stdout)
+    """Call `gh api <path>` and return parsed JSON (exits on failure).
+
+    Transient GitHub failures (5xx, 429, and `gh`'s own network errors, which
+    it reports with no HTTP status at all) are retried with linear backoff.
+    """
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        proc = subprocess.run(["gh", "api", path], capture_output=True, text=True)
+        if proc.returncode == 0:
+            return json.loads(proc.stdout)
+        stderr = proc.stderr.strip()
+        status = re.search(r"\(HTTP (\d\d\d)\)", stderr)
+        retriable = RETRIABLE_HTTP.search(stderr) is not None or status is None
+        if not retriable or attempt == RETRY_ATTEMPTS:
+            sys.exit(f"gh api {path} failed after {attempt} attempt(s):\n{stderr}")
+        delay = RETRY_BACKOFF_SECONDS * attempt
+        print(f"gh api {path} failed (attempt {attempt}/{RETRY_ATTEMPTS}), retrying in {delay}s:\n{stderr}")
+        time.sleep(delay)
+    raise AssertionError("unreachable: the retry loop returns or exits")
 
 
 def upsert_timeseries(path: Path, rows: list[dict], fields: list[str]) -> dict[str, dict]:
