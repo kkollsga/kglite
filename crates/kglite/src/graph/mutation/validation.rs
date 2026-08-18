@@ -557,60 +557,90 @@ pub fn validate_edge_creation(
     Ok(())
 }
 
-/// Validate a SET property operation against the locked schema.
+/// The observed per-type property map these checks read, or `None` when no
+/// schema check applies to this write at all.
 ///
-/// Checks:
-/// 1. Property name must be known for the node type
-/// 2. Value type must match the expected type
-pub fn validate_property_set(
+/// Two cases exempt a write from both verdicts, and they are shared rather than
+/// repeated so the two checks can never disagree about scope: a **built-in
+/// field** (`id`/`title`/`name`/`type`) is structural rather than a stored
+/// property, and a **null** clears a property rather than asserting a type.
+/// A node type with no observed metadata is unknown to the schema, and an
+/// unknown type does not block SET on nodes a MATCH already found.
+fn observed_properties<'a>(
+    node_type: &str,
+    property: &str,
+    value: &Value,
+    node_type_metadata: &'a HashMap<String, HashMap<String, String>>,
+) -> Option<&'a HashMap<String, String>> {
+    if BUILTIN_FIELDS.contains(&property) || matches!(value, Value::Null) {
+        return None;
+    }
+    node_type_metadata.get(node_type)
+}
+
+/// The typo guard: is `property` a property this node type is known to have?
+///
+/// Split out from [`validate_property_type`] because a caller can legitimately
+/// want one verdict without the other — a property carrying a *declared* type
+/// constraint yields its type verdict to the declaration, but is still subject
+/// to this one. Folding both into one call is what let a schema-locked graph
+/// accept a property it did not know (see the SET path's schema-lock block).
+pub fn validate_property_known(
     node_type: &str,
     property: &str,
     value: &Value,
     node_type_metadata: &HashMap<String, HashMap<String, String>>,
     schema_def: Option<&SchemaDefinition>,
 ) -> Result<(), String> {
-    // Built-in fields are always allowed
-    if BUILTIN_FIELDS.contains(&property) {
+    let Some(type_props) = observed_properties(node_type, property, value, node_type_metadata)
+    else {
         return Ok(());
-    }
-
-    // Null values are always allowed (clearing a property)
-    if matches!(value, Value::Null) {
-        return Ok(());
-    }
-
-    let type_props = match node_type_metadata.get(node_type) {
-        Some(props) => props,
-        None => return Ok(()), // Unknown type — don't block SET on matched nodes
     };
-
-    // 1. Check property exists
-    if let Some(expected_type) = type_props.get(property) {
-        // 2. Check type matches
-        if !value_matches_type(value, expected_type) {
-            return Err(format!(
-                "Schema violation: {}.{} expects {}, got {}.",
-                node_type,
-                property,
-                normalize_type_name(expected_type),
-                get_value_type_name(value)
-            ));
-        }
-    } else if !property_is_declared(node_type, property, schema_def) {
-        let known: Vec<&str> = type_props.keys().map(|s| s.as_str()).collect();
-        let hint = did_you_mean(property, &known);
-        let mut sorted: Vec<&str> = known;
-        sorted.sort();
-        return Err(format!(
-            "Schema violation: Unknown property '{}' on {}.{}\n  Valid properties: {}",
-            property,
-            node_type,
-            hint,
-            sorted.join(", ")
-        ));
+    if type_props.contains_key(property) || property_is_declared(node_type, property, schema_def) {
+        return Ok(());
     }
+    let known: Vec<&str> = type_props.keys().map(|s| s.as_str()).collect();
+    let hint = did_you_mean(property, &known);
+    let mut sorted: Vec<&str> = known;
+    sorted.sort();
+    Err(format!(
+        "Schema violation: Unknown property '{}' on {}.{}\n  Valid properties: {}",
+        property,
+        node_type,
+        hint,
+        sorted.join(", ")
+    ))
+}
 
-    Ok(())
+/// The observed-type verdict: does `value` match the type this node type has
+/// been seen to store for `property`?
+///
+/// Says nothing about whether the property is known — an unrecorded property
+/// has no observed type to disagree with, so it passes here and is
+/// [`validate_property_known`]'s business.
+pub fn validate_property_type(
+    node_type: &str,
+    property: &str,
+    value: &Value,
+    node_type_metadata: &HashMap<String, HashMap<String, String>>,
+) -> Result<(), String> {
+    let Some(type_props) = observed_properties(node_type, property, value, node_type_metadata)
+    else {
+        return Ok(());
+    };
+    let Some(expected_type) = type_props.get(property) else {
+        return Ok(());
+    };
+    if value_matches_type(value, expected_type) {
+        return Ok(());
+    }
+    Err(format!(
+        "Schema violation: {}.{} expects {}, got {}.",
+        node_type,
+        property,
+        normalize_type_name(expected_type),
+        get_value_type_name(value)
+    ))
 }
 
 /// Normalize metadata type names to user-friendly names for error messages.

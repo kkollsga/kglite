@@ -120,6 +120,52 @@ struct LandedPropertyWrite<'a> {
     owed: RowBookkeeping,
 }
 
+/// The schema lock's verdict on one property write.
+///
+/// The lock carries two independent verdicts, and a declared type constraint
+/// exempts exactly one of them:
+///
+/// * The **typo guard** always applies. A type constraint may be declared on a
+///   property no node holds — nothing violates it yet — and that leaves the
+///   property absent from the observed metadata the lock validates against.
+///   Exempting it here let a locked graph accept a property it does not know,
+///   which is the one write `lock_schema()` exists to refuse. (The DDL guard
+///   `validate_ddl_properties_declared` does not close this: it only runs when
+///   the graph is *already* locked, so a constraint declared before the lock
+///   never meets it.)
+/// * The **observed-type verdict** yields to the declaration: both answer the
+///   same question, one from observed metadata and one from what the user
+///   wrote, and the user's wins. Without that, a schema-locked graph reported
+///   the generic validation error for a value the user had explicitly
+///   constrained — naming a type they never declared and losing the typed
+///   `ConstraintViolationError` the constraint raises instead.
+fn enforce_schema_lock(
+    graph: &DirGraph,
+    node_type: &str,
+    property: &str,
+    value: &Value,
+) -> Result<(), String> {
+    if !graph.schema_locked {
+        return Ok(());
+    }
+    crate::graph::mutation::validation::validate_property_known(
+        node_type,
+        property,
+        value,
+        &graph.node_type_metadata,
+        graph.schema_definition.as_ref(),
+    )?;
+    if graph.property_type_for(node_type, property).is_none() {
+        crate::graph::mutation::validation::validate_property_type(
+            node_type,
+            property,
+            value,
+            &graph.node_type_metadata,
+        )?;
+    }
+    Ok(())
+}
+
 /// Apply one row's `SET n.property = value`, with all of its bookkeeping.
 ///
 /// Returns without writing when the binding no longer resolves to a live node —
@@ -212,27 +258,7 @@ pub(super) fn apply_node_property_set<'a>(
     // write whitelist.
     enforce_write_scope(graph, node_type_str)?;
 
-    // Schema lock validation for SET.
-    //
-    // A property carrying a *declared* type constraint is exempt: the two
-    // checks answer the same question, one from observed metadata and one from
-    // what the user wrote, and the declaration wins. Without this, a
-    // schema-locked graph reported the generic validation error for a value the
-    // user had explicitly constrained — naming a type they never declared and
-    // losing the typed `ConstraintViolationError` the constraint would have
-    // raised a few lines below. The property is known to the schema either way:
-    // installing a constraint on a schema-locked graph already required it to
-    // be declared (`validate_ddl_properties_declared`), so the exemption cannot
-    // let an undeclared property through the typo guard.
-    if graph.schema_locked && graph.property_type_for(node_type_str, property).is_none() {
-        crate::graph::mutation::validation::validate_property_set(
-            node_type_str,
-            property,
-            &value,
-            &graph.node_type_metadata,
-            graph.schema_definition.as_ref(),
-        )?;
-    }
+    enforce_schema_lock(graph, node_type_str, property, &value)?;
 
     // Declared UNIQUE / NOT NULL gates. Planned before the write so a violation
     // returns without mutating storage; the returned plan is redeemed after the
