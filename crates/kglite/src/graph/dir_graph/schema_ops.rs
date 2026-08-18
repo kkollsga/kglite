@@ -102,7 +102,7 @@ impl DirGraph {
                     // same unchanged data; ignore rather than mask the real error.
                     let _ = self.create_unique_constraint(node_type, &refs);
                 }
-                return Err(violation.into());
+                return Err((*violation).into());
             }
         }
         Ok(())

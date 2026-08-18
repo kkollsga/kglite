@@ -462,9 +462,9 @@
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",
       "qualified_name": "crate::add_nodes",
-      "lines": 231,
-      "branches": 18,
-      "nesting": 3
+      "lines": 202,
+      "branches": 15,
+      "nesting": 2
     },
     {
       "path": "crates/kglite/src/graph/mutation/maintain.rs",

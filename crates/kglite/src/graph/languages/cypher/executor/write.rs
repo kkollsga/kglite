@@ -945,7 +945,7 @@ fn create_node(
     // so the immutable borrow held by the check must end at the semicolon.
     let required = graph.check_required_fields(&label, constraint_read);
     if let Err(violation) = required {
-        return Err(graph.record_constraint_violation(violation));
+        return Err(graph.record_constraint_violation(*violation));
     }
     // Declared property types. Checked here — before the schema-lock
     // validation further down — so a user who declared a type constraint gets
@@ -953,12 +953,12 @@ fn create_node(
     // for the same value.
     let typed = graph.check_property_types(&label, constraint_read);
     if let Err(violation) = typed {
-        return Err(graph.record_constraint_violation(violation));
+        return Err(graph.record_constraint_violation(*violation));
     }
     let unique_claims = graph.unique_claims(&label, constraint_read);
     let unique = graph.check_unique_claims(&unique_claims, None);
     if let Err(violation) = unique {
-        return Err(graph.record_constraint_violation(violation));
+        return Err(graph.record_constraint_violation(*violation));
     }
 
     // Clone the id for incremental index maintenance below (it is moved into

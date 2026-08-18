@@ -393,6 +393,110 @@ pub fn kglite::api::blueprint::TimeseriesSpec::deserialize<__D>(__deserializer: 
 pub fn kglite::api::blueprint::build(graph: &mut kglite::api::DirGraph, blueprint: kglite::api::blueprint::Blueprint, blueprint_dir: &std::path::Path) -> core::result::Result<kglite::api::blueprint::BuildReport, alloc::string::String>
 pub fn kglite::api::blueprint::from_records(graph: &mut kglite::api::DirGraph, spec: &serde_json::value::Value) -> core::result::Result<kglite::api::blueprint::RecordsReport, alloc::string::String>
 pub fn kglite::api::blueprint::load_blueprint_file(path: &std::path::Path) -> core::result::Result<kglite::api::blueprint::Blueprint, alloc::string::String>
+pub mod kglite::api::cdc
+pub enum kglite::api::cdc::CdcChange
+pub kglite::api::cdc::CdcChange::Edge
+pub kglite::api::cdc::CdcChange::Edge::after: core::option::Option<kglite::api::cdc::EdgeState>
+pub kglite::api::cdc::CdcChange::Edge::conn_type: alloc::string::String
+pub kglite::api::cdc::CdcChange::Edge::src_id: kglite::datatypes::values::Value
+pub kglite::api::cdc::CdcChange::Edge::src_type: alloc::string::String
+pub kglite::api::cdc::CdcChange::Edge::tgt_id: kglite::datatypes::values::Value
+pub kglite::api::cdc::CdcChange::Edge::tgt_type: alloc::string::String
+pub kglite::api::cdc::CdcChange::Node
+pub kglite::api::cdc::CdcChange::Node::after: core::option::Option<kglite::api::cdc::NodeState>
+pub kglite::api::cdc::CdcChange::Node::id: kglite::datatypes::values::Value
+pub kglite::api::cdc::CdcChange::Node::node_type: alloc::string::String
+impl kglite::api::cdc::CdcChange
+pub fn kglite::api::cdc::CdcChange::element(&self) -> &'static str
+impl core::clone::Clone for kglite::api::cdc::CdcChange
+pub fn kglite::api::cdc::CdcChange::clone(&self) -> kglite::api::cdc::CdcChange
+impl core::cmp::PartialEq for kglite::api::cdc::CdcChange
+pub fn kglite::api::cdc::CdcChange::eq(&self, other: &kglite::api::cdc::CdcChange) -> bool
+impl core::fmt::Debug for kglite::api::cdc::CdcChange
+pub fn kglite::api::cdc::CdcChange::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::cdc::CdcChange
+pub enum kglite::api::cdc::CdcEventKind
+pub kglite::api::cdc::CdcEventKind::Create
+pub kglite::api::cdc::CdcEventKind::Delete
+pub kglite::api::cdc::CdcEventKind::Update
+impl kglite::api::cdc::CdcEventKind
+pub fn kglite::api::cdc::CdcEventKind::as_str(&self) -> &'static str
+impl core::clone::Clone for kglite::api::cdc::CdcEventKind
+pub fn kglite::api::cdc::CdcEventKind::clone(&self) -> kglite::api::cdc::CdcEventKind
+impl core::cmp::Eq for kglite::api::cdc::CdcEventKind
+impl core::cmp::PartialEq for kglite::api::cdc::CdcEventKind
+pub fn kglite::api::cdc::CdcEventKind::eq(&self, other: &kglite::api::cdc::CdcEventKind) -> bool
+impl core::fmt::Debug for kglite::api::cdc::CdcEventKind
+pub fn kglite::api::cdc::CdcEventKind::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::cdc::CdcEventKind
+impl core::marker::StructuralPartialEq for kglite::api::cdc::CdcEventKind
+pub struct kglite::api::cdc::CdcEvent
+pub kglite::api::cdc::CdcEvent::change: kglite::api::cdc::CdcChange
+pub kglite::api::cdc::CdcEvent::kind: kglite::api::cdc::CdcEventKind
+pub kglite::api::cdc::CdcEvent::seq: u64
+impl core::clone::Clone for kglite::api::cdc::CdcEvent
+pub fn kglite::api::cdc::CdcEvent::clone(&self) -> kglite::api::cdc::CdcEvent
+impl core::cmp::PartialEq for kglite::api::cdc::CdcEvent
+pub fn kglite::api::cdc::CdcEvent::eq(&self, other: &kglite::api::cdc::CdcEvent) -> bool
+impl core::fmt::Debug for kglite::api::cdc::CdcEvent
+pub fn kglite::api::cdc::CdcEvent::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::cdc::CdcEvent
+pub struct kglite::api::cdc::CdcLog
+impl kglite::api::cdc::CdcLog
+pub fn kglite::api::cdc::CdcLog::capacity(&self) -> usize
+pub fn kglite::api::cdc::CdcLog::current(&self) -> u64
+pub fn kglite::api::cdc::CdcLog::earliest(&self) -> u64
+pub fn kglite::api::cdc::CdcLog::epoch(&self) -> u64
+pub fn kglite::api::cdc::CdcLog::is_empty(&self) -> bool
+pub fn kglite::api::cdc::CdcLog::len(&self) -> usize
+pub fn kglite::api::cdc::CdcLog::since(&self, from: u64, limit: core::option::Option<usize>) -> alloc::vec::Vec<&kglite::api::cdc::CdcEvent>
+pub fn kglite::api::cdc::CdcLog::status(&self) -> kglite::api::cdc::CdcStatus
+impl core::fmt::Debug for kglite::api::cdc::CdcLog
+pub fn kglite::api::cdc::CdcLog::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct kglite::api::cdc::CdcStatus
+pub kglite::api::cdc::CdcStatus::buffered: usize
+pub kglite::api::cdc::CdcStatus::capacity: usize
+pub kglite::api::cdc::CdcStatus::current: u64
+pub kglite::api::cdc::CdcStatus::earliest: u64
+pub kglite::api::cdc::CdcStatus::epoch: u64
+impl core::clone::Clone for kglite::api::cdc::CdcStatus
+pub fn kglite::api::cdc::CdcStatus::clone(&self) -> kglite::api::cdc::CdcStatus
+impl core::cmp::Eq for kglite::api::cdc::CdcStatus
+impl core::cmp::PartialEq for kglite::api::cdc::CdcStatus
+pub fn kglite::api::cdc::CdcStatus::eq(&self, other: &kglite::api::cdc::CdcStatus) -> bool
+impl core::fmt::Debug for kglite::api::cdc::CdcStatus
+pub fn kglite::api::cdc::CdcStatus::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::cdc::CdcStatus
+impl core::marker::StructuralPartialEq for kglite::api::cdc::CdcStatus
+pub struct kglite::api::cdc::EdgeState
+pub kglite::api::cdc::EdgeState::properties: alloc::vec::Vec<(alloc::string::String, kglite::datatypes::values::Value)>
+impl core::clone::Clone for kglite::api::cdc::EdgeState
+pub fn kglite::api::cdc::EdgeState::clone(&self) -> kglite::api::cdc::EdgeState
+impl core::cmp::PartialEq for kglite::api::cdc::EdgeState
+pub fn kglite::api::cdc::EdgeState::eq(&self, other: &kglite::api::cdc::EdgeState) -> bool
+impl core::fmt::Debug for kglite::api::cdc::EdgeState
+pub fn kglite::api::cdc::EdgeState::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::cdc::EdgeState
+pub struct kglite::api::cdc::NodeState
+pub kglite::api::cdc::NodeState::labels: alloc::vec::Vec<alloc::string::String>
+pub kglite::api::cdc::NodeState::properties: alloc::vec::Vec<(alloc::string::String, kglite::datatypes::values::Value)>
+pub kglite::api::cdc::NodeState::title: kglite::datatypes::values::Value
+impl core::clone::Clone for kglite::api::cdc::NodeState
+pub fn kglite::api::cdc::NodeState::clone(&self) -> kglite::api::cdc::NodeState
+impl core::cmp::PartialEq for kglite::api::cdc::NodeState
+pub fn kglite::api::cdc::NodeState::eq(&self, other: &kglite::api::cdc::NodeState) -> bool
+impl core::fmt::Debug for kglite::api::cdc::NodeState
+pub fn kglite::api::cdc::NodeState::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::cdc::NodeState
+pub const kglite::api::cdc::DEFAULT_CAPACITY: usize
+pub const kglite::api::cdc::MAX_CAPACITY: usize
+pub fn kglite::api::cdc::disable(graph: &mut kglite::api::DirGraph) -> bool
+pub fn kglite::api::cdc::drain_at_commit(graph: &mut kglite::api::DirGraph) -> alloc::vec::Vec<kglite::api::durable::RawOp>
+pub fn kglite::api::cdc::enable(graph: &mut kglite::api::DirGraph, capacity: core::option::Option<usize>) -> core::result::Result<kglite::api::cdc::CdcStatus, kglite::error::KgError>
+pub fn kglite::api::cdc::publish_drained(graph: &kglite::api::DirGraph, raw: &[kglite::api::durable::RawOp])
+pub fn kglite::api::cdc::read(graph: &kglite::api::DirGraph, from: u64, limit: core::option::Option<usize>) -> core::option::Option<alloc::vec::Vec<kglite::api::cdc::CdcEvent>>
+pub fn kglite::api::cdc::status(graph: &kglite::api::DirGraph) -> core::option::Option<kglite::api::cdc::CdcStatus>
+pub type kglite::api::cdc::CdcHandle = alloc::sync::Arc<std::sync::poison::mutex::Mutex<kglite::api::cdc::CdcLog>>
 pub mod kglite::api::code_entities
 pub enum kglite::api::code_entities::CodeContextLookup
 pub kglite::api::code_entities::CodeContextLookup::Ambiguous(alloc::vec::Vec<kglite::api::NodeInfo>)
@@ -757,6 +861,18 @@ pub fn kglite::api::cypher::resolve_node_property(node: kglite::api::NodeView<'_
 pub fn kglite::api::cypher::rewrite_text_score(query: &mut kglite::api::cypher::CypherQuery, params: &std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> core::result::Result<kglite::api::cypher::planner::simplification::TextScoreRewrite, alloc::string::String>
 pub fn kglite::api::cypher::validate_schema(query: &kglite::api::cypher::CypherQuery, graph: &kglite::api::DirGraph) -> core::result::Result<(), kglite::api::cypher::planner::schema_check::SchemaError>
 pub mod kglite::api::durable
+pub enum kglite::api::durable::CaptureOrigin
+pub kglite::api::durable::CaptureOrigin::Create
+pub kglite::api::durable::CaptureOrigin::Update
+impl core::clone::Clone for kglite::api::durable::CaptureOrigin
+pub fn kglite::api::durable::CaptureOrigin::clone(&self) -> kglite::api::durable::CaptureOrigin
+impl core::cmp::Eq for kglite::api::durable::CaptureOrigin
+impl core::cmp::PartialEq for kglite::api::durable::CaptureOrigin
+pub fn kglite::api::durable::CaptureOrigin::eq(&self, other: &kglite::api::durable::CaptureOrigin) -> bool
+impl core::fmt::Debug for kglite::api::durable::CaptureOrigin
+pub fn kglite::api::durable::CaptureOrigin::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::durable::CaptureOrigin
+impl core::marker::StructuralPartialEq for kglite::api::durable::CaptureOrigin
 pub enum kglite::api::durable::DurabilityLevel
 pub kglite::api::durable::DurabilityLevel::Full
 pub kglite::api::durable::DurabilityLevel::Normal
@@ -789,6 +905,26 @@ impl core::fmt::Debug for kglite::api::durable::DurableOpenError
 pub fn kglite::api::durable::DurableOpenError::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::fmt::Display for kglite::api::durable::DurableOpenError
 pub fn kglite::api::durable::DurableOpenError::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum kglite::api::durable::RawOp
+pub kglite::api::durable::RawOp::RemoveEdge
+pub kglite::api::durable::RawOp::RemoveEdge::conn_type: kglite::api::InternedKey
+pub kglite::api::durable::RawOp::RemoveEdge::src_id: kglite::datatypes::values::Value
+pub kglite::api::durable::RawOp::RemoveEdge::src_type: kglite::api::InternedKey
+pub kglite::api::durable::RawOp::RemoveEdge::tgt_id: kglite::datatypes::values::Value
+pub kglite::api::durable::RawOp::RemoveEdge::tgt_type: kglite::api::InternedKey
+pub kglite::api::durable::RawOp::RemoveNode
+pub kglite::api::durable::RawOp::RemoveNode::id: kglite::datatypes::values::Value
+pub kglite::api::durable::RawOp::RemoveNode::node_type: kglite::api::InternedKey
+pub kglite::api::durable::RawOp::SetNodeLabels(petgraph::graph_impl::NodeIndex)
+pub kglite::api::durable::RawOp::UpsertEdge(petgraph::graph_impl::EdgeIndex, kglite::api::durable::CaptureOrigin)
+pub kglite::api::durable::RawOp::UpsertNode(petgraph::graph_impl::NodeIndex, kglite::api::durable::CaptureOrigin)
+impl core::clone::Clone for kglite::api::durable::RawOp
+pub fn kglite::api::durable::RawOp::clone(&self) -> kglite::api::durable::RawOp
+impl core::cmp::PartialEq for kglite::api::durable::RawOp
+pub fn kglite::api::durable::RawOp::eq(&self, other: &kglite::api::durable::RawOp) -> bool
+impl core::fmt::Debug for kglite::api::durable::RawOp
+pub fn kglite::api::durable::RawOp::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::durable::RawOp
 pub enum kglite::api::durable::SyncMode
 pub kglite::api::durable::SyncMode::Barrier
 pub kglite::api::durable::SyncMode::PageCache
@@ -805,11 +941,12 @@ pub struct kglite::api::durable::RecordingGraph<G: kglite::api::GraphRead>
 impl<G: kglite::api::GraphRead> kglite::api::durable::RecordingGraph<G>
 pub fn kglite::api::durable::RecordingGraph<G>::inner(&self) -> &G
 pub fn kglite::api::durable::RecordingGraph<G>::inner_mut(&mut self) -> &mut G
+pub fn kglite::api::durable::RecordingGraph<G>::is_wal_owner(&self) -> bool
 pub fn kglite::api::durable::RecordingGraph<G>::new(inner: G) -> Self
 pub fn kglite::api::durable::RecordingGraph<G>::note_node_labels(&mut self, idx: petgraph::graph_impl::NodeIndex)
 pub fn kglite::api::durable::RecordingGraph<G>::note_node_upsert(&mut self, idx: petgraph::graph_impl::NodeIndex)
 pub fn kglite::api::durable::RecordingGraph<G>::ops_len(&self) -> usize
-pub fn kglite::api::durable::RecordingGraph<G>::take_ops(&mut self) -> alloc::vec::Vec<kglite::graph::storage::recording::RawOp>
+pub fn kglite::api::durable::RecordingGraph<G>::take_ops(&mut self) -> alloc::vec::Vec<kglite::api::durable::RawOp>
 impl<'de, G> serde_core::de::Deserialize<'de> for kglite::api::durable::RecordingGraph<G> where G: kglite::api::GraphRead + serde_core::de::Deserialize<'de>
 pub fn kglite::api::durable::RecordingGraph<G>::deserialize<D: serde_core::de::Deserializer<'de>>(de: D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
 impl<G: core::default::Default + kglite::api::GraphRead> core::default::Default for kglite::api::durable::RecordingGraph<G>
@@ -916,7 +1053,7 @@ pub fn kglite::api::durable::checkpoint_prologue(wal: &mut kglite::api::durable:
 pub fn kglite::api::durable::ensure_recovered(checkpoint_path: &std::path::Path, checkpoint_lsn: u64) -> core::result::Result<(), kglite::api::durable::DurableOpenError>
 pub fn kglite::api::durable::open_log(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>, checkpoint_path: &std::path::Path, level: kglite::api::durable::DurabilityLevel) -> core::result::Result<core::option::Option<(kglite::api::durable::Wal, u64)>, kglite::api::durable::DurableOpenError>
 pub fn kglite::api::durable::recover(path: &std::path::Path) -> core::io::error::Result<alloc::vec::Vec<kglite::api::durable::WalFrame>>
-pub fn kglite::api::durable::resolve_ops(raw: &[kglite::graph::storage::recording::RawOp], graph: &impl kglite::api::GraphRead, interner: &kglite::api::StringInterner, secondary_labels: impl core::ops::function::Fn(petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<alloc::string::String>) -> alloc::vec::Vec<kglite::graph::wal::MutationOp>
+pub fn kglite::api::durable::resolve_ops(raw: &[kglite::api::durable::RawOp], graph: &impl kglite::api::GraphRead, interner: &kglite::api::StringInterner, secondary_labels: impl core::ops::function::Fn(petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<alloc::string::String>) -> alloc::vec::Vec<kglite::graph::wal::MutationOp>
 pub fn kglite::api::durable::wal_path(checkpoint: &std::path::Path) -> std::path::PathBuf
 pub fn kglite::api::durable::wrap_for_durability(dir: &mut kglite::api::DirGraph)
 pub mod kglite::api::embeddings
@@ -2320,6 +2457,8 @@ pub fn kglite::api::DirGraph::begin_read_pass(&self) -> core::option::Option<kgl
 pub fn kglite::api::DirGraph::build_connection_types_cache(&mut self)
 pub fn kglite::api::DirGraph::build_id_index(&mut self, node_type: &str)
 pub fn kglite::api::DirGraph::bump_version(&mut self)
+pub fn kglite::api::DirGraph::cdc_enabled(&self) -> bool
+pub fn kglite::api::DirGraph::cdc_log(&self) -> core::option::Option<&kglite::api::cdc::CdcHandle>
 pub fn kglite::api::DirGraph::check_auto_vacuum(&mut self) -> core::option::Option<kglite::api::NodeRemap>
 pub fn kglite::api::DirGraph::clear_column_stores(&mut self)
 pub fn kglite::api::DirGraph::column_store(&self, node_type: &str) -> core::option::Option<&alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>>

@@ -50,6 +50,14 @@ pub struct CdcStatus {
 
 /// Bounded ring of published change events.
 ///
+/// **Reads are public, writes are not.** A binding reaches this through
+/// [`DirGraph::cdc_log`](crate::graph::dir_graph::DirGraph::cdc_log) and may
+/// ask it anything — epoch, watermarks, retained events — but cannot append,
+/// resize or construct one. Events enter only through
+/// [`publish_drained`](super::publish_drained), from a drained capture buffer,
+/// which is what makes "every event describes a committed change" a property
+/// of the type rather than a convention callers are asked to respect.
+///
 /// **Not persisted, by construction.** The log lives behind a `#[serde(skip)]`
 /// field (see [`DirGraph::cdc`](crate::graph::dir_graph::DirGraph)), so a
 /// `.kgl` save writes none of it and a load starts a new epoch. That is a
@@ -68,7 +76,7 @@ pub struct CdcLog {
 
 impl CdcLog {
     /// A fresh, empty log with a new process-unique epoch.
-    pub fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         Self {
             epoch: next_epoch(),
             next_seq: 1,
@@ -122,7 +130,7 @@ impl CdcLog {
 
     /// Publish one commit's events, assigning sequence numbers and evicting
     /// the oldest to stay within capacity.
-    pub fn append(&mut self, pending: Vec<PendingEvent>) {
+    pub(crate) fn append(&mut self, pending: Vec<PendingEvent>) {
         for event in pending {
             self.events.push_back(CdcEvent {
                 seq: self.next_seq,
@@ -143,7 +151,7 @@ impl CdcLog {
     /// Keeping the epoch is what makes a re-`enable` non-destructive to
     /// consumers: their cursors stay valid, and a shrink is reported by
     /// [`earliest`](Self::earliest) advancing, exactly as ordinary eviction is.
-    pub fn resize(&mut self, capacity: usize) {
+    pub(crate) fn resize(&mut self, capacity: usize) {
         self.capacity = capacity.max(1);
         while self.events.len() > self.capacity {
             self.events.pop_front();

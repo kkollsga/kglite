@@ -46,7 +46,8 @@ use super::indexes::PropertyReader;
 use super::DirGraph;
 use crate::datatypes::values::Value;
 use crate::graph::constraints::{
-    normalize_properties, ConstraintKind, ConstraintViolation, NamedConstraint, UniqueConstraintKey,
+    normalize_properties, ConstraintKind, ConstraintResult, ConstraintViolation, NamedConstraint,
+    UniqueConstraintKey,
 };
 use crate::graph::property_types::{self, DeclaredType};
 use crate::graph::schema::{
@@ -179,17 +180,17 @@ impl DirGraph {
         &mut self,
         node_type: &str,
         properties: &[&str],
-    ) -> Result<usize, ConstraintViolation> {
+    ) -> ConstraintResult<usize> {
         if properties.is_empty() {
             // A constraint over no properties would claim one global slot and
             // reject the type's second node. Reject the declaration instead.
-            return Err(ConstraintViolation::preexisting(
+            return Err(Box::new(ConstraintViolation::preexisting(
                 ConstraintKind::Unique,
                 node_type,
                 Vec::new(),
                 0,
                 Vec::new(),
-            ));
+            )));
         }
         let owned: Vec<String> = properties.iter().map(|p| (*p).to_string()).collect();
         // Re-declaring replaces the previous spelling of the same constraint,
@@ -201,13 +202,13 @@ impl DirGraph {
         let key: UniqueConstraintKey = (node_type.to_string(), owned.clone());
         let (index, duplicates, sample) = self.build_unique_index(node_type, &owned);
         if duplicates > 0 {
-            return Err(ConstraintViolation::preexisting(
+            return Err(Box::new(ConstraintViolation::preexisting(
                 self.unique_kind_for(node_type, &owned),
                 node_type,
                 owned,
                 duplicates,
                 sample,
-            ));
+            )));
         }
 
         let count = index.len();
@@ -392,19 +393,19 @@ impl DirGraph {
         &self,
         claims: &[UniqueClaim],
         holder: Option<NodeIndex>,
-    ) -> Result<(), ConstraintViolation> {
+    ) -> ConstraintResult<()> {
         for claim in claims {
             let Some(index) = self.unique_indices.get(&claim.key) else {
                 continue;
             };
             match index.get(&claim.value) {
                 Some(occupant) if Some(*occupant) != holder => {
-                    return Err(ConstraintViolation::duplicate(
+                    return Err(Box::new(ConstraintViolation::duplicate(
                         self.unique_kind_for(&claim.key.0, &claim.key.1),
                         claim.key.0.clone(),
                         claim.key.1.clone(),
                         claim.value.0.clone(),
-                    ));
+                    )));
                 }
                 _ => {}
             }
@@ -475,10 +476,10 @@ impl DirGraph {
         node_idx: NodeIndex,
         property: &str,
         new_value: Option<&Value>,
-    ) -> Result<PropertyWritePlan, ConstraintViolation> {
+    ) -> ConstraintResult<PropertyWritePlan> {
         let planned = self.plan_property_write_uncaught(node_type, node_idx, property, new_value);
         if let Err(violation) = &planned {
-            self.record_constraint_violation(violation.clone());
+            self.record_constraint_violation(violation.as_ref().clone());
         }
         planned
     }
@@ -489,7 +490,7 @@ impl DirGraph {
         node_idx: NodeIndex,
         property: &str,
         new_value: Option<&Value>,
-    ) -> Result<PropertyWritePlan, ConstraintViolation> {
+    ) -> ConstraintResult<PropertyWritePlan> {
         // A declared property type is a pure predicate on the incoming value:
         // no read-back, no claim bookkeeping, nothing to redeem afterwards. It
         // is checked *before* the uniqueness early-out below because that
@@ -693,11 +694,7 @@ impl DirGraph {
     /// refuses a spec that declares `_provisional` as a user property
     /// (`blueprint::build`), which is where a user would most plausibly do it by
     /// accident.
-    pub(crate) fn check_required_fields<F>(
-        &self,
-        node_type: &str,
-        read: F,
-    ) -> Result<(), ConstraintViolation>
+    pub(crate) fn check_required_fields<F>(&self, node_type: &str, read: F) -> ConstraintResult<()>
     where
         F: Fn(&str) -> Option<Value>,
     {
@@ -714,11 +711,11 @@ impl DirGraph {
             }
             match read(property) {
                 Some(Value::Null) | None => {
-                    return Err(ConstraintViolation::missing(
+                    return Err(Box::new(ConstraintViolation::missing(
                         self.required_kind_for(node_type, property),
                         node_type,
                         property,
-                    ));
+                    )));
                 }
                 Some(_) => {}
             }
@@ -760,15 +757,15 @@ impl DirGraph {
         &mut self,
         node_type: &str,
         property: &str,
-    ) -> Result<usize, ConstraintViolation> {
+    ) -> ConstraintResult<usize> {
         let (checked, missing) = self.count_missing_property(node_type, property);
         if missing > 0 {
-            return Err(ConstraintViolation::preexisting_missing(
+            return Err(Box::new(ConstraintViolation::preexisting_missing(
                 self.required_kind_for(node_type, property),
                 node_type,
                 property,
                 missing,
-            ));
+            )));
         }
         self.ddl_not_null_constraints
             .insert((node_type.to_string(), property.to_string()));
@@ -959,7 +956,7 @@ impl DirGraph {
         node_type: &str,
         property: &str,
         value: &Value,
-    ) -> Result<(), ConstraintViolation> {
+    ) -> ConstraintResult<()> {
         if !self.has_property_type_constraints() {
             return Ok(());
         }
@@ -977,11 +974,7 @@ impl DirGraph {
     /// composes pending values over stored ones can reuse the closure it has.
     /// Only declared properties are read, so an unconstrained type costs one
     /// map probe and calls `read` zero times.
-    pub(crate) fn check_property_types<F>(
-        &self,
-        node_type: &str,
-        read: F,
-    ) -> Result<(), ConstraintViolation>
+    pub(crate) fn check_property_types<F>(&self, node_type: &str, read: F) -> ConstraintResult<()>
     where
         F: Fn(&str) -> Option<Value>,
     {
@@ -1009,16 +1002,16 @@ impl DirGraph {
         node_type: &str,
         property: &str,
         value: &Value,
-    ) -> Result<(), ConstraintViolation> {
+    ) -> ConstraintResult<()> {
         if declared.accepts(value) {
             return Ok(());
         }
-        Err(ConstraintViolation::type_mismatch(
+        Err(Box::new(ConstraintViolation::type_mismatch(
             node_type,
             property,
             declared.name(),
             property_types::value_type_name(value),
-        ))
+        )))
     }
 
     /// Declare `property` on `node_type` to hold only `declared` values.
@@ -1042,17 +1035,17 @@ impl DirGraph {
         node_type: &str,
         property: &str,
         declared: DeclaredType,
-    ) -> Result<usize, ConstraintViolation> {
+    ) -> ConstraintResult<usize> {
         let (checked, violations, sample) =
             self.count_type_violations(node_type, property, declared);
         if violations > 0 {
-            return Err(ConstraintViolation::preexisting_type_mismatch(
+            return Err(Box::new(ConstraintViolation::preexisting_type_mismatch(
                 node_type,
                 property,
                 declared.name(),
                 sample.unwrap_or("a value of another type"),
                 violations,
-            ));
+            )));
         }
         self.ddl_property_type_constraints
             .entry(node_type.to_string())

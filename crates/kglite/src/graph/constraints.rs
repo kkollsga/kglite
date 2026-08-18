@@ -158,6 +158,18 @@ pub struct NamedConstraint {
     pub properties: Vec<String>,
 }
 
+/// Result of a constraint check.
+///
+/// The error is **boxed**: a [`ConstraintViolation`] is 136 bytes (a kind, a
+/// node type, a property tuple and a failure payload), which puts it over
+/// clippy's `result_large_err` threshold and, more to the point, would make
+/// every constrained write path carry that much stack for the case that does
+/// not happen. Boxing moves the cost onto the failure, which is the rare one.
+/// Crate-internal on purpose — the public error surface stays
+/// [`crate::error::KgError`], reached through the unboxed
+/// `From<ConstraintViolation>`.
+pub(crate) type ConstraintResult<T> = Result<T, Box<ConstraintViolation>>;
+
 /// A declared constraint that a write (or a declaration) violated.
 ///
 /// Carried structured rather than pre-formatted so each binding can render it

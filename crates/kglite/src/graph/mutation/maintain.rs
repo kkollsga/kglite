@@ -1,6 +1,6 @@
 // src/graph/maintain.rs
 use crate::datatypes::{DataFrame, Value};
-use crate::graph::constraints::{ConstraintViolation, UniqueConstraintKey};
+use crate::graph::constraints::{ConstraintResult, UniqueConstraintKey};
 use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOperationReport};
 use crate::graph::mutation::batch::{
     BatchProcessor, BatchStats, ConflictHandling, ConnectionBatchProcessor, NodeAction,
@@ -93,7 +93,7 @@ impl ConstraintColumns {
         let gated = self.gate_row(graph, node_type, row, existing_idx, batch_claims);
         match gated {
             Ok(()) => Ok(()),
-            Err(violation) => Err(graph.record_constraint_violation(violation)),
+            Err(violation) => Err(graph.record_constraint_violation(*violation)),
         }
     }
 
@@ -132,7 +132,7 @@ impl ConstraintColumns {
         row: GateRow<'_>,
         existing_idx: Option<NodeIndex>,
         batch_claims: &mut HashSet<(UniqueConstraintKey, CompositeValue)>,
-    ) -> Result<(), ConstraintViolation> {
+    ) -> ConstraintResult<()> {
         // Both identity spellings are accepted, and identity wins over a
         // same-named ordinary column — matching `DirGraph::resolve_alias` on the
         // read side.
@@ -154,7 +154,7 @@ impl ConstraintColumns {
         graph.check_unique_claims(&claims, existing_idx)?;
         for claim in &claims {
             if !batch_claims.insert((claim.key.clone(), claim.value.clone())) {
-                return Err(graph.unique_batch_conflict(claim));
+                return Err(Box::new(graph.unique_batch_conflict(claim)));
             }
         }
         Ok(())

@@ -143,15 +143,21 @@ fn load_person(graph: &mut DirGraph, df: DataFrame) -> Result<(), String> {
     .map(|_| ())
 }
 
+/// A type's observed property catalogue: `(node_type, [(property, type)])`.
+type ObservedMetadata = Vec<(String, Vec<(String, String)>)>;
+
+/// Everything a refused load must not disturb, as one comparable snapshot:
+/// the observed property catalogue, the id-field aliases, and the title-field
+/// aliases.
+type ObservedState = (
+    ObservedMetadata,
+    Vec<(String, String)>,
+    Vec<(String, String)>,
+);
+
 /// Everything a refused load must not disturb, as one comparable snapshot.
-fn observed_state(
-    graph: &DirGraph,
-) -> (
-    Vec<(String, Vec<(String, String)>)>,
-    Vec<(String, String)>,
-    Vec<(String, String)>,
-) {
-    let mut metadata: Vec<(String, Vec<(String, String)>)> = graph
+fn observed_state(graph: &DirGraph) -> ObservedState {
+    let mut metadata: ObservedMetadata = graph
         .node_type_metadata
         .iter()
         .map(|(node_type, props)| {

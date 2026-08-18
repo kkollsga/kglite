@@ -897,7 +897,7 @@ fn declare_unique(graph: &mut DirGraph, label: &str, properties: &[String]) -> R
     let declared = graph.create_unique_constraint(label, &refs);
     match declared {
         Ok(_) => Ok(()),
-        Err(violation) => Err(graph.record_constraint_violation(violation)),
+        Err(violation) => Err(graph.record_constraint_violation(*violation)),
     }
 }
 
@@ -916,7 +916,7 @@ fn declare_not_null<'p>(
     for property in properties {
         let declared = graph.create_not_null_constraint(label, property);
         if let Err(violation) = declared {
-            return Err(graph.record_constraint_violation(violation));
+            return Err(graph.record_constraint_violation(*violation));
         }
         installed.push(property);
     }
@@ -942,7 +942,7 @@ fn declare_property_type(
             for property in installed {
                 graph.drop_property_type_constraint(label, property);
             }
-            return Err(graph.record_constraint_violation(violation));
+            return Err(graph.record_constraint_violation(*violation));
         }
         installed.push(property);
     }

@@ -213,6 +213,10 @@
       "classification": "test"
     },
     {
+      "identity": "crates/kglite/src/graph/cdc/mod.rs::fn:enable:pub fn enable(graph: &mut DirGraph, capacity: Option<usize>) -> Result<CdcStatus, KgError>::clippy::result_large_err",
+      "classification": "api-shape"
+    },
+    {
       "identity": "crates/kglite/src/graph/core/data_retrieval.rs::fn:get_connections:pub fn get_connections( graph: &DirGraph, selection: &CurrentSelection, level_index: Option<usize>, indices: Option<&[usize]>, include_node_properties: bool, ) -> Vec<LevelConnections>::clippy::type_complexity",
       "classification": "transitional"
     },
@@ -390,6 +394,10 @@
     },
     {
       "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:add_connections:pub fn add_connections( graph: &mut DirGraph, df_data: DataFrame, connection_type: String, source_type: String, source_id_field: String, target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>, conflict_handling: Option<String>, ) -> Resul::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:gate_batch:fn gate_batch( graph: &mut DirGraph, node_type: &str, df_data: &DataFrame, columns: Option<&ConstraintColumns>, pk_enforced: bool, id_idx: usize, title_idx: usize, unique_id_field: &str, title_field: &str, ) -> Result<(), String>::clippy::too_many_arguments",
       "classification": "transitional"
     },
     {
