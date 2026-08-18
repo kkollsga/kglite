@@ -391,26 +391,35 @@ impl KnowledgeGraph {
             .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(e)))
     }
 
-    /// Drain the capture buffer, resolve it to logical ops, and append a
-    /// durably-`fsync`'d WAL frame. No-op for a non-durable graph or when
-    /// no ops are pending. Called after each mutation on a durable graph;
-    /// the `fsync` inside makes the committed mutation crash-safe before
-    /// control returns to the caller.
+    /// Drain the capture buffer at this commit boundary: publish its changes
+    /// to the change stream, and — for a durable graph — resolve them to
+    /// logical ops and append a durably-`fsync`'d WAL frame. No-op for a graph
+    /// that is neither durable nor capturing, and when no ops are pending. The
+    /// `fsync` inside makes a committed mutation on a durable graph crash-safe
+    /// before control returns to the caller.
+    ///
+    /// **Two owners want this drain, and either alone is reason to run it.**
+    /// The write-ahead log is the older one; change data capture is the other,
+    /// and a CDC-enabled *non-durable* in-memory graph is the modal CDC
+    /// deployment, so gating the drain on durability would have left the
+    /// stream permanently empty for it. The publish itself lives in
+    /// `api::cdc::drain_at_commit` — the wheel only says *where* its commits
+    /// are, which is the one thing core cannot know.
     pub(crate) fn flush_wal(&mut self) -> std::io::Result<()> {
-        if self.lifecycle.durable.is_none() {
+        let durable = self.lifecycle.durable.is_some();
+        if !durable && !self.inner.cdc_enabled() {
             return Ok(());
         }
         // Drain + resolve in a scope so the `self.inner` borrow ends before
         // we touch the `self.lifecycle.durable` field (disjoint, but keep it clean).
         let ops = {
             let dir = get_graph_mut(&mut self.inner);
-            let raw = match &mut dir.graph {
-                kglite_core::api::storage::GraphBackend::Recording(rg) => rg.take_ops(),
-                // Not wrapped — durable state without a recording backend
-                // shouldn't happen, but treat it as nothing to flush.
-                _ => return Ok(()),
-            };
-            if raw.is_empty() {
+            // Publishes this commit's CDC events and hands the raw ops back;
+            // yields nothing for a graph carrying no capture layer (durable
+            // state without a recording backend shouldn't happen, but reads
+            // here as nothing to flush).
+            let raw = kglite_core::api::cdc::drain_at_commit(dir);
+            if raw.is_empty() || !durable {
                 return Ok(());
             }
             // Secondary labels are read back through `dir` because they are

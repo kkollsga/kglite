@@ -40,6 +40,7 @@ surface at a glance — most of what you'd reach for is here, in-process:
 | **Temporal** | `date()` / `datetime()` / `localdatetime()`, `duration(…)`, `duration.between`, date arithmetic, `valid_at` / `valid_during` — see [Temporal](#temporal-functions) |
 | **Value types** | int, float, string, bool, **date**, **timestamp** (date + time), duration, point, list, map, node, relationship, path |
 | **Transactions** | multi-statement with snapshot isolation + rollback (`Session` / `Transaction`) |
+| **Change data capture** | opt-in change stream with stateless cursors — `CALL db.cdc.enable/current/earliest/query/disable`, see [Change data capture](#change-data-capture-call-dbcdc) |
 | **Storage** | identical Cypher across in-memory, mmap, and on-disk modes (1B+ edges) |
 
 Per-write `UNIQUE` / `NOT NULL` / NODE KEY constraints **are** supported and
@@ -1613,7 +1614,9 @@ sidebars; `SHOW PROCEDURES` feeds autocomplete.
 
 Procedure names are case-insensitive on dispatch (Neo4j convention
 preserves camelCase in docs: `db.relationshipTypes`, not
-`db.relationship_types`). YIELD columns are case-sensitive.
+`db.relationship_types`). YIELD columns are case-sensitive. The other `db.*`
+family is the change stream — see
+[Change data capture](#change-data-capture-call-dbcdc).
 
 **Standalone CALL.** `YIELD` is optional when the `CALL` is the entire
 statement: `CALL db.labels()` returns every declared column in declared
@@ -1686,6 +1689,108 @@ introspection helper, so output stays in sync. Use `db.indexes()`
 from a Bolt client or inside a Cypher pipeline; use `list_indexes()`
 from Python code where you'd rather have a Python list of dicts than
 a `cypher()` result.
+
+## Change data capture (`CALL db.cdc.*`)
+
+An opt-in stream of the changes the graph publishes, read from Cypher — so
+every binding (Python, the CLI shell, a Bolt client, the C ABI) gets it
+without a method of its own. Capture is **off until you ask for it**; nothing
+that happened before `enable` is in the log.
+
+| Procedure | YIELD columns | Does |
+|-----------|---------------|------|
+| `CALL db.cdc.enable({capacity})` | `enabled`, `epoch`, `capacity`, `cursor` | Start capturing (or resize a running log in place). `capacity` is optional — the retention in events, default 65536. `cursor` is the position to start consuming from |
+| `CALL db.cdc.disable()` | `enabled`, `wasEnabled` | Stop capturing and discard the log. Idempotent; `wasEnabled` says whether it had been running |
+| `CALL db.cdc.current()` | `id` | Cursor addressing the newest published change — start here to see only what happens *next* |
+| `CALL db.cdc.earliest()` | `id` | Cursor addressing the oldest change still retained — start here to read the whole retained log |
+| `CALL db.cdc.query({from})` | `id`, `seq`, `operation`, `elementType`, `nodeType`, `nodeId`, `relationshipType`, `srcType`, `srcId`, `tgtType`, `tgtId`, `state` | Changes published *after* the `from` cursor, oldest first. Omit `from` to read everything retained |
+
+```python
+graph.cypher("CALL db.cdc.enable()")
+
+# Consume from "now": remember the cursor, poll, remember again.
+cursor = graph.cypher("CALL db.cdc.current()").to_dicts()[0]["id"]
+
+graph.cypher("CREATE (:Person {id: 1, name: 'ann'})")
+graph.cypher("MATCH (p:Person {id: 1}) SET p.name = 'anne'")
+
+rows = graph.cypher(
+    "CALL db.cdc.query({from: $c}) YIELD id, operation, nodeType, nodeId, state",
+    params={"c": cursor},
+).to_dicts()
+for row in rows:
+    print(row["operation"], row["nodeType"], row["nodeId"], row["state"])
+# create Person 1 {'labels': [], 'properties': {'name': 'ann'}, 'title': 'ann'}
+# update Person 1 {'labels': [], 'properties': {'name': 'anne'}, 'title': 'anne'}
+
+cursor = rows[-1]["id"]  # the row's own id is the cursor for the next poll
+```
+
+**Rows.** `operation` is `create`, `update` or `delete`; `elementType` is
+`node` or `relationship`. A node row carries `(nodeType, nodeId)` and null
+relationship columns; a relationship row carries
+`(relationshipType, srcType, srcId, tgtType, tgtId)` and null node columns —
+logical identity, not an internal index, so a cursor's events stay meaningful
+after a compaction. `state` is the **after-image**: `{title, labels,
+properties}` for a node, `{properties}` for a relationship, and `null` for a
+delete (v1 keeps no before-image, so a delete genuinely has nothing to report;
+an empty map would read as "an entity with no properties").
+
+**Cursors are opaque and exclusive.** Pass back the string you were given
+rather than constructing one — the encoding may change. Exclusive means a
+cursor names what you have *already seen*, so polling with the last row's `id`
+never re-delivers it, and `current()` immediately followed by `query` returns
+nothing.
+
+**A cursor addresses one log, and the log says so.** Each log carries an
+*epoch*; a cursor from a different epoch is refused rather than resolved
+against different data. A new epoch is minted by `enable` on a graph that had
+capture off — including after `disable`, after a `.kgl` **load** (the log is
+process-local runtime state and is deliberately never saved, so a loaded graph
+starts with capture off), and on an independent copy. Re-`enable` on a *running*
+log only resizes it and **keeps** the epoch, so live consumers survive a
+capacity change. The three refusals are distinct because the fix differs:
+a malformed cursor means fix the call, a foreign epoch means re-acquire, and a
+cursor older than retention means resync and accept the gap.
+
+**Retention is a bounded ring.** The oldest events are evicted as it fills, and
+`earliest()` advances to match. A consumer that falls further behind than the
+capacity gets a typed refusal naming both remedies — resync from `earliest()`,
+or raise the retention with `CALL db.cdc.enable({capacity: <larger>})` — never
+a silently truncated answer.
+
+**A change that was not committed never appears.** Events are derived from the
+same write-capture buffer the write-ahead log uses, at the same commit
+boundaries. A statement that failed, and a transaction that was rolled back,
+contribute *no event at all* — not a filtered-out one. A `Transaction`
+publishes its whole batch at `commit()`, and nothing before it. A held
+`ResultView` forces the next write to fork copy-on-write; the fork shares the
+one log, so that write publishes exactly once.
+
+**Storage modes.** In-memory and `storage='mapped'` serve the stream
+identically, durable or not. `storage='disk'` **refuses** `enable`: a disk
+graph commits by publishing an immutable generation, so the per-commit write
+capture this stream is derived from does not describe its change boundary, and
+serving it would report a stream that silently missed writes.
+
+### Divergences from Neo4j's `db.cdc.*`
+
+KGLite matches the names its model has a concept for and drops the rest — an
+absent column is better than an empty one, because a consumer writes code
+against it.
+
+| Neo4j | KGLite |
+|-------|--------|
+| `id` | Same meaning: the opaque cursor addressing a change |
+| `seq` | **Wider.** Neo4j orders events *within* a transaction; KGLite's is the log-wide sequence, monotonic across commits, and it is what the cursor carries |
+| `txId` | **Absent.** KGLite publishes at commit boundaries but assigns no durable transaction identity, so any value would be invented |
+| `metadata` | **Absent.** Neo4j reports executing user, connection client and transaction start time; the engine holds none of that |
+| `event` (nested map) | **Flattened into columns**, so `YIELD nodeType, operation` filters in Cypher without map traversal. Nesting survives only where it carries structure: `state` |
+| `state: {before, after}` | **After-image only.** Before-images are a future release |
+| — | `db.cdc.enable` / `db.cdc.disable` have no Neo4j counterpart: enablement there is a database option (`ALTER DATABASE … SET OPTION txLogEnrichment`) |
+
+Arguments are passed as a **map** (`{capacity: N}`, `{from: cursor}`);
+positional arguments are a parse error.
 
 ## Code-graph analysis
 

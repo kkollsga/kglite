@@ -40,7 +40,13 @@ pub fn execute(
     opts.modified_by = options.modified_by.as_deref();
 
     let g = make_dir_graph_mut(graph);
-    Ok(execute_mut(g, query, &opts)?)
+    let outcome = execute_mut(g, query, &opts)?;
+    // The CLI's commit boundary is the statement, so this is where a change
+    // stream learns about it — a no-op unless `CALL db.cdc.enable()` has been
+    // run. A statement that *failed* returns above, having already rolled its
+    // captured ops back, so nothing uncommitted can be published from here.
+    kglite::api::cdc::drain_at_commit(g);
+    Ok(outcome)
 }
 
 /// Execute one read-only Cypher statement.

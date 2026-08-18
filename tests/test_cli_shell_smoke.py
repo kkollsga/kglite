@@ -444,3 +444,34 @@ def test_read_runs_a_cypher_file(tmp_path):
     out = _run(f".read {script}\nMATCH (p:Person) RETURN count(p) AS n;\n.quit\n")
     assert "(1 row)" in out
     assert "2" in out  # the count after seeding
+
+
+def test_cdc_stream_is_readable_from_the_shell():
+    """The shell's commit boundary is the statement, and the change stream has
+    to see it.
+
+    A binding publishes CDC events by draining the capture buffer where it
+    knows a commit happened; the engine cannot know that for it. Without that
+    call in the shell's execute path, every one of these statements succeeds
+    and `db.cdc.query()` still reports zero rows — a stream that is silently
+    empty rather than wrong. This is the test that can tell the difference.
+    """
+    out = _run(
+        "CALL db.cdc.enable();\n"
+        "CREATE (:Person {id: 1, name: 'Alice'});\n"
+        "MATCH (p:Person {id: 1}) SET p.name = 'Alicia';\n"
+        "MATCH (p:Person {id: 1}) DELETE p;\n"
+        "CALL db.cdc.query() YIELD seq, operation, nodeType, nodeId;\n"
+        ".quit\n"
+    )
+    assert "65536" in out, f"enable did not report its capacity: {out}"
+    assert "(3 rows)" in out, f"expected create/update/delete in the stream: {out}"
+    for operation in ('"create"', '"update"', '"delete"'):
+        assert operation in out, f"{operation} missing from the stream: {out}"
+
+
+def test_cdc_is_off_until_enabled():
+    """Capture is opt-in — reading before `enable` explains that rather than
+    reporting an empty stream."""
+    out = _run("CREATE (:Person {id: 1});\nCALL db.cdc.query();\n.quit\n")
+    assert "not enabled on this graph" in out

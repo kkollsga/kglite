@@ -320,6 +320,39 @@ def test_property_type_constraint_parity(tmp_path):
         assert "STRING" in refusals[mode], f"{mode}: {refusals[mode]}"
 
 
+def test_cdc_mode_parity(tmp_path):
+    """The change stream is backend-agnostic where it is served at all.
+
+    Memory and mapped must publish the *same* events for the same writes — the
+    capture seam sits above storage, but each mode reaches the write path
+    differently, so "the same ops are buffered" is a claim to test. Disk is the
+    documented refusal: its change boundary is the generation publish, not the
+    per-commit capture this stream is derived from, so enabling would report a
+    stream that silently missed writes.
+    """
+    import kglite
+
+    published: dict[str, list] = {}
+    for mode in ("memory", "mapped"):
+        kg = _build_graph(mode)
+        kg.cypher("CALL db.cdc.enable()")
+        kg.cypher("CREATE (a:Widget {wid: 1, size: 1})-[:PAIRS {w: 2}]->(b:Widget {wid: 2})")
+        kg.cypher("MATCH (n:Widget) WHERE n.wid = 1 SET n.size = 2")
+        kg.cypher("MATCH (n:Widget) WHERE n.wid = 2 DETACH DELETE n")
+        published[mode] = [
+            (r["operation"], r["elementType"], r["nodeType"], r["nodeId"], r["relationshipType"], r["state"])
+            for r in kg.cypher("CALL db.cdc.query()").to_dicts()
+        ]
+
+    assert published["memory"], "the stream must not be empty — that would pass vacuously"
+    assert published["mapped"] == published["memory"], published
+
+    disk = _build_graph("disk", str(tmp_path / "cdc_disk"))
+    with pytest.raises(kglite.KgError) as exc:
+        disk.cypher("CALL db.cdc.enable()")
+    assert "not supported for storage='disk'" in str(exc.value)
+
+
 def test_save_load_round_trip(graphs, tmp_path):
     """Save memory, load back, assert identical query result.
 

@@ -84,6 +84,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which are not in this release. `db.cdc.enable`/`disable` have no Neo4j
   counterpart at all: enablement there is a database option.
 
+  **Every binding reaches it through Cypher** — there is no new Python or CLI
+  method. The wheel and the `kglite` shell now publish at each statement's
+  commit boundary, so `kg.cypher("CALL db.cdc.enable()")` followed by ordinary
+  writes fills the stream on a plain in-memory graph, not only on a durable
+  one; a `Transaction` publishes its whole batch at `commit()` and nothing on
+  `rollback()`, and a write behind a held `ResultView` (which forks the graph
+  copy-on-write) publishes exactly once. Bolt sessions already published
+  through the session commit path. In-memory and `storage='mapped'` graphs
+  serve identical streams.
+
 ### Fixed
 
 - **A failed `replace_connections` no longer destroys the edges it was going to

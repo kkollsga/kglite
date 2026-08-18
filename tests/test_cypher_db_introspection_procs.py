@@ -250,9 +250,17 @@ def test_zero_row_call_keeps_declared_columns(small_graph):
 def test_show_procedures_default_columns(small_graph):
     df = small_graph.cypher("SHOW PROCEDURES", to_df=True)
     assert list(df.columns) == ["name", "description", "mode", "worksOnSystem"]
-    assert (df["mode"] == "READ").all()
     names = set(df["name"])
     assert {"pagerank", "db.labels", "list_procedures"} <= names
+
+    # `mode` is READ for everything that only reads, and Neo4j's "SCHEMA" for
+    # the procedures that change capture configuration rather than data. The
+    # set is pinned both ways: a procedure that starts mutating without saying
+    # so, and a read procedure mislabelled as schema-changing, both fail here.
+    modes = dict(zip(df["name"], df["mode"]))
+    schema_changing = {name for name, mode in modes.items() if mode == "SCHEMA"}
+    assert schema_changing == {"db.cdc.enable", "db.cdc.disable"}, schema_changing
+    assert set(modes.values()) == {"READ", "SCHEMA"}
 
 
 def test_show_procedures_yield_projection_and_alias(small_graph):
