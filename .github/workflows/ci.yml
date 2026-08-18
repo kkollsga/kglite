@@ -8,6 +8,12 @@ on:
   schedule:
     # Heavy race/stress verification stays off the per-PR critical path.
     - cron: '23 3 * * 1'
+  # The schedule-only jobs below are otherwise unrunnable between Mondays, so a
+  # fix to one of them cannot be verified for up to a week. The thread-sanitizer
+  # job was broken from the day it was added and stayed red for five scheduled
+  # runs for exactly that reason. Manual dispatch runs the full workflow,
+  # scheduled-only jobs included.
+  workflow_dispatch: {}
 
 # A rapid follow-up push to a PR branch supersedes the in-flight run — cancel
 # it instead of finishing ~20 jobs whose verdict nobody will read. Runs on
@@ -942,23 +948,33 @@ jobs:
           cargo test -p kglite --lib --target x86_64-unknown-linux-gnu packed_primitives_decode_from_misaligned_little_endian_bytes
           cargo test -p kglite --lib --target x86_64-unknown-linux-gnu overlapping_query_guards_keep_materializations_alive
 
+  # `-Zbuild-std` is not an optimisation here, it is what makes the job compile
+  # at all. TSan is an ABI-changing sanitizer, and rustc rejects linking
+  # instrumented code against the *precompiled* std shipped with the toolchain
+  # ("mixing `-Zsanitizer` will cause an ABI mismatch in crate ..."). Building
+  # std from source under the same flag is also the only way the run means
+  # anything: an uninstrumented std hides the synchronisation TSan is here to
+  # observe. Do not silence the error with `-Cunsafe-allow-abi-mismatch` — that
+  # restores a build that links two ABIs and reports races it cannot see.
   scheduled-thread-sanitizer:
     name: Scheduled ThreadSanitizer Session checks
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
       - name: Run Session and disk concurrency models under TSan
         env:
           RUSTFLAGS: -Zsanitizer=thread
           RUSTDOCFLAGS: -Zsanitizer=thread
-        run: cargo test -p kglite --lib --target x86_64-unknown-linux-gnu graph::session
+        run: cargo test -Zbuild-std -p kglite --lib --target x86_64-unknown-linux-gnu graph::session
 
   dependency-maintenance:
     name: Scheduled dependency advisory report
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -979,7 +995,7 @@ jobs:
 
   scheduled-concurrency-stress:
     name: Scheduled bounded Session and Bolt stress
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:

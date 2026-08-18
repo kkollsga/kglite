@@ -48,6 +48,7 @@ collection error. It is declared in the ``python-tests`` install step of
 from __future__ import annotations
 
 from collections.abc import Iterator
+import json
 from pathlib import Path, PurePosixPath
 import re
 import shlex
@@ -100,6 +101,11 @@ def _load_workflow(path: Path) -> dict:
 
 
 CI = _load_workflow(CI_PATH)
+#: The three heavy jobs (thread sanitizer, dependency maintenance, concurrency
+#: stress) stay off every push and PR, but must remain reachable on demand — a
+#: schedule-only job that breaks is invisible until the next Monday, which is
+#: how the thread sanitizer stayed red for five consecutive scheduled runs.
+SCHEDULED_ONLY_IF = "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
 WHEELS = _load_workflow(WHEELS_PATH)
 CLI_WHEELS = _load_workflow(CLI_WHEELS_PATH)
 CRATES = _load_workflow(CRATES_PATH)
@@ -263,9 +269,10 @@ def test_ci_success_needs_every_job_defined_in_ci_yml() -> None:
     same shape one layer up: a job added to `ci.yml` and forgotten in `needs`
     was gated by nothing, and nothing noticed.
 
-    `skipped` stays a pass in the aggregate's shell on purpose — three jobs are
-    `if: github.event_name == 'schedule'` and skip on every push and PR. That
-    is a recorded trade-off, not something this test may tighten.
+    `skipped` stays a pass in the aggregate's shell on purpose — three jobs
+    run only on the schedule or a manual dispatch (`SCHEDULED_ONLY_IF`) and skip
+    on every push and PR. That is a recorded trade-off, not something this test
+    may tighten.
     """
     jobs = set(CI["jobs"])
     assert len(jobs) > 1, "ci.yml defines no jobs — the derivation is broken"
@@ -441,11 +448,38 @@ def test_loom_and_unsafe_jobs_use_the_intended_commands() -> None:
 
 def test_heavy_thread_sanitizer_is_scheduled_only() -> None:
     scheduled = _ci_job("scheduled-thread-sanitizer")
-    assert scheduled["if"] == "github.event_name == 'schedule'"
+    assert scheduled["if"] == SCHEDULED_ONLY_IF
     tsan_steps = [step for step in _steps(scheduled) if step.get("env", {}).get("RUSTFLAGS") == "-Zsanitizer=thread"]
     assert tsan_steps, "scheduled-thread-sanitizer runs no step under -Zsanitizer=thread"
     # PyYAML resolves the YAML 1.1 key `on` to the boolean True.
     assert "schedule" in CI[True], "ci.yml has no schedule trigger, so the scheduled-only jobs never run"
+    assert "workflow_dispatch" in CI[True], (
+        "ci.yml has no workflow_dispatch trigger, so a fix to a scheduled-only job cannot be verified "
+        "until the next scheduled run"
+    )
+
+
+def test_thread_sanitizer_builds_the_standard_library_from_source() -> None:
+    """TSan is ABI-changing, so a precompiled std makes the job un-compilable.
+
+    Without `-Zbuild-std` (and the `rust-src` component it needs) rustc rejects
+    the build outright — "mixing `-Zsanitizer` will cause an ABI mismatch" —
+    which is how this job managed to be red on every scheduled run from the day
+    it was added. `-Cunsafe-allow-abi-mismatch` would make it compile again
+    against an uninstrumented std, i.e. green without observing the
+    synchronisation it exists to check, so it is rejected here too.
+    """
+    scheduled = _ci_job("scheduled-thread-sanitizer")
+    toolchains = _steps_using(scheduled, "dtolnay/rust-toolchain@")
+    assert toolchains, "scheduled-thread-sanitizer installs no toolchain"
+    components = {c.strip() for step in toolchains for c in step.get("with", {}).get("components", "").split(",")}
+    assert "rust-src" in components, "-Zbuild-std needs the rust-src component"
+
+    tsan_steps = [step for step in _steps(scheduled) if step.get("env", {}).get("RUSTFLAGS") == "-Zsanitizer=thread"]
+    for step in tsan_steps:
+        assert "-Zbuild-std" in step["run"], f"TSan step does not rebuild std: {step['run']!r}"
+    job_text = json.dumps(scheduled)
+    assert "unsafe-allow-abi-mismatch" not in job_text, "the ABI-mismatch error must be fixed, not silenced"
 
 
 def test_live_github_smoke_requires_explicit_opt_in() -> None:
@@ -512,7 +546,7 @@ def test_scheduled_dependency_maintenance_is_report_first() -> None:
     assert group["update-types"] == ["minor", "patch"], "grouped cargo updates must exclude majors"
 
     maintenance = _ci_job("dependency-maintenance")
-    assert maintenance["if"] == "github.event_name == 'schedule'"
+    assert maintenance["if"] == SCHEDULED_ONLY_IF
     tools = [step.get("with", {}).get("tool") for step in _steps_using(maintenance, "taiki-e/install-action@")]
     assert tools == ["cargo-audit@0.22.2"]
     # Report-first: the two report steps tolerate failure, the policy check does
