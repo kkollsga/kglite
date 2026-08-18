@@ -28,7 +28,7 @@ surface at a glance — most of what you'd reach for is here, in-process:
 | **Writing** | `CREATE`, `MERGE` (+ `ON CREATE` / `ON MATCH SET`), `SET`, `DELETE` / `DETACH DELETE`, `REMOVE`, `FOREACH (x IN list \| …)` |
 | **Subqueries** | `CALL { … }` (correlated + uncorrelated), `EXISTS { … }`, `COUNT { … }` |
 | **Schema DDL** | `CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:L) ON (n.p, …)`, `DROP INDEX … [IF EXISTS]`, `SHOW INDEXES` — see [Cypher index DDL](#cypher-index-ddl) for the taxonomy mapping |
-| **Constraint DDL** | `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:L) REQUIRE n.p IS UNIQUE \| IS NOT NULL \| IS NODE KEY`, `DROP CONSTRAINT … [IF EXISTS]`, `SHOW CONSTRAINTS` — enforced on every write path, see [Cypher constraint DDL](#cypher-constraint-ddl) |
+| **Constraint DDL** | `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:L) REQUIRE n.p IS UNIQUE \| IS NOT NULL \| IS NODE KEY \| IS :: TYPE`, `DROP CONSTRAINT … [IF EXISTS]`, `SHOW CONSTRAINTS` — enforced on every write path, see [Cypher constraint DDL](#cypher-constraint-ddl) |
 | **Path finding** | variable-length `-[*1..n]->`, `shortestPath(…)`, `allShortestPaths(…)`, weighted shortest path (`CALL`) |
 | **Predicates** | `=, <>, <, >, <=, >=`, `AND` / `OR` / `NOT`, `IS [NOT] NULL`, `IN`, `CONTAINS` / `STARTS WITH` / `ENDS WITH`, regex `=~` |
 | **Expressions** | list comprehension `[x IN xs WHERE … \| …]`, `reduce(…)`, `CASE`, list/map literals, parameters `$p` |
@@ -1606,7 +1606,7 @@ sidebars; `SHOW PROCEDURES` feeds autocomplete.
 | `CALL db.labels()` | `label` | One row per node-type ("label") in the graph, sorted alphabetically |
 | `CALL db.relationshipTypes()` | `relationshipType` | One row per connection-type ("relationship type") in the graph, sorted alphabetically |
 | `CALL db.indexes()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties`, `state` | One row per index installed on the graph, sorted by `name`. `SHOW INDEXES` returns the same rows — see [Cypher index DDL](#cypher-index-ddl) |
-| `CALL db.constraints()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties` | One row per declared constraint, sorted by `name`. `SHOW CONSTRAINTS` returns the same rows — see [Cypher constraint DDL](#cypher-constraint-ddl) |
+| `CALL db.constraints()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties`, `propertyType` | One row per declared constraint, sorted by `name`. `SHOW CONSTRAINTS` returns the same rows — see [Cypher constraint DDL](#cypher-constraint-ddl) |
 | `CALL db.propertyKeys()` | `propertyKey` | One row per declared property name (node + relationship), sorted alphabetically |
 | `CALL db.schema()` | `nodeType`, `properties` | One row per node-type with its sorted list of property names — the in-language counterpart of Python `describe()` |
 | `CALL db.schema.visualization()` | `nodes`, `relationships` | One row: virtual nodes (one per label; `name`/`indexes`/`constraints` properties) and virtual relationships per observed (source label, type, target label) combination — what Neo4j Browser's schema tab renders |
@@ -2248,6 +2248,7 @@ CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE n.prop IS UNIQUE
 CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE (n.a, n.b) IS UNIQUE
 CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE n.prop IS NOT NULL
 CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE n.prop IS NODE KEY
+CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE n.prop IS :: INTEGER
 DROP CONSTRAINT <name> [IF EXISTS]
 SHOW CONSTRAINTS
 ```
@@ -2264,6 +2265,7 @@ The Neo4j 4 `ASSERT` spelling is accepted in place of `REQUIRE`, and the optiona
 | `REQUIRE (n.a, n.b) IS UNIQUE` | no two nodes share the *tuple* | one composite unique index |
 | `REQUIRE n.p IS NOT NULL` | every node of the type has a non-null `p` | the node type's required-field list |
 | `REQUIRE n.p IS NODE KEY` | both of the above, at once | a unique index **plus** a required field |
+| `REQUIRE n.p IS :: TYPE` | every value written to `p` has the declared type | a declared per-property type, checked before the write lands |
 
 A constraint declared over several properties constrains the **combination**, not
 each property — `REQUIRE (n.city, n.age) IS UNIQUE` permits many nodes in the
@@ -2277,6 +2279,48 @@ share "no email" while `email` is `UNIQUE`.
 two halves are installed **atomically** — if the presence half cannot be declared,
 the uniqueness half is rolled back, so a statement that reported failure has
 changed nothing. `DROP CONSTRAINT` on a node key likewise withdraws both halves.
+
+#### Property-type constraints (`IS :: T`)
+
+`REQUIRE n.prop IS :: TYPE` — and the equivalent `IS TYPED TYPE` spelling —
+declares the type every value written to that property must have. It is checked
+on the same three write paths as every other constraint, before the value lands.
+
+The accepted type names are the Neo4j 5 names with an **exact** KGLite value
+counterpart:
+
+| Declared | Accepts |
+|---|---|
+| `BOOLEAN` | `true` / `false` |
+| `STRING` | strings |
+| `INTEGER` | integers, including auto-assigned node ids |
+| `FLOAT` | floats **only** — an integer does not satisfy `FLOAT` |
+| `DATE` | a calendar date (no time of day) |
+| `LOCAL DATETIME` | a date *and* wall-clock time, with no timezone |
+| `DURATION` | a duration value |
+| `POINT` | a point value |
+
+Anything else — `LIST<...>`, unions, `ZONED DATETIME` / `LOCAL TIME` /
+`ZONED TIME`, and decorated forms like `STRING NOT NULL` — is **rejected by
+name**, and the error lists the names that do work. This is deliberate: KGLite
+has no timezone-aware or time-of-day-only value, so accepting `ZONED DATETIME`
+would promise a type it cannot represent, and a constraint that enforces
+something other than what was written is worse than one that was refused.
+For those shapes use `define_schema()` + `validate_schema()`, or `lock_schema()`.
+
+**A type constraint is not an existence constraint.** As in Neo4j, `null` and an
+absent property both satisfy it, and `REMOVE n.prop` is not a violation. Declare
+`IS NOT NULL` alongside it when a value is also required:
+
+```cypher
+CREATE CONSTRAINT age_typed   FOR (p:Person) REQUIRE p.age IS :: INTEGER;
+CREATE CONSTRAINT age_present FOR (p:Person) REQUIRE p.age IS NOT NULL;
+```
+
+A property carries at most one declared type: re-declaring it with a different
+one is rejected, so change it with `DROP CONSTRAINT` then a fresh declaration.
+Where a declared type and a `lock_schema()`-recorded property type both cover a
+property, **the declaration wins** and the error names the constraint you wrote.
 
 #### Declaring against dirty data fails
 
@@ -2323,16 +2367,18 @@ Returns the same rows and columns as `CALL db.constraints()`:
 | Column | Value |
 |---|---|
 | `name` | the declared name, or the canonical descriptor when unnamed |
-| `type` | `UNIQUENESS`, `NODE_KEY`, or `NODE_PROPERTY_EXISTENCE` |
+| `type` | `UNIQUENESS`, `NODE_KEY`, `NODE_PROPERTY_EXISTENCE`, or `NODE_PROPERTY_TYPE` |
 | `entityType` | always `NODE` |
 | `labelsOrTypes` | single-element list holding the node type |
 | `properties` | constrained property names, in declaration order |
+| `propertyType` | the declared type on a `NODE_PROPERTY_TYPE` row, `null` on every other kind |
 
 A node key is **one** row (`NODE_KEY`), not a uniqueness row plus an existence
-row. Neo4j 5 also returns `id`, `ownedIndex`, and `propertyType`; KGLite has no
-equivalent state — a unique constraint *is* its index rather than owning a
-separate one, and property-type constraints are rejected outright — so they are
-**omitted** rather than filled with invented values. For filtering and projection
+row. A declared property type is its own row, never folded into another: a
+property can be `UNIQUE` **and** typed. Neo4j 5 also returns `id` and
+`ownedIndex`; KGLite has no equivalent state for either — a unique constraint
+*is* its index rather than owning a separate one — so they are **omitted**
+rather than filled with invented values. For filtering and projection
 use `CALL db.constraints() YIELD …`; `SHOW CONSTRAINTS` rejects `YIELD` / `WHERE`
 / `BRIEF` / `VERBOSE` rather than accepting a filter it would ignore.
 
@@ -2343,17 +2389,16 @@ works — never a syntax error, and **never a success that enforces nothing**.
 
 | Statement | Why, and what to use |
 |---|---|
-| `REQUIRE n.p IS :: INTEGER` | No write-time property-type constraint exists. Accepting it would report success while enforcing nothing, so it is refused. `lock_schema()` rejects a write whose value disagrees with the node type's recorded property type; `validate_schema()` audits existing data against `define_schema`'s per-type `types` map |
-| `REQUIRE n.p IS TYPED STRING` | The same thing, spelled the Neo4j 5 way |
+| `REQUIRE n.p IS :: LIST<STRING>` | Only the type names with an exact KGLite value counterpart are accepted (see [Property-type constraints](#property-type-constraints-is--t)). Lists, unions, zoned temporal types and decorated forms are refused by name rather than approximated; the error lists the names that work. `validate_schema()` audits existing data against `define_schema`'s per-type `types` map, and `lock_schema()` rejects a write whose value disagrees with the recorded property type |
 | `REQUIRE n.id IS UNIQUE` / `IS NODE KEY` | Uniqueness over the identity field — under **any** spelling that resolves to it, `id` itself or the node type's own id column (`person_id`) — is refused. `id` is a `NodeData` field, not an entry in the property map, so the write-path claim is never produced and the constraint would admit duplicates while reporting success. Declare the node type's primary key instead: `define_schema({'nodes': {'Person': {'primary_key': 'id'}}})` probes the per-type id index on every write path, and `MERGE` is the idempotent alternative to `CREATE`. Only `id` is affected — `title`, a column aliased to `title`, and ordinary properties all enforce correctly. `IS NOT NULL` on `id` **is** accepted: it is present by construction, so the requirement is genuinely satisfied |
 | `FOR ()-[r:T]-() REQUIRE r.p IS UNIQUE` | KGLite constrains node properties only |
 | `REQUIRE …` with no properties | Nothing to constrain |
 | `CREATE CONSTRAINT <name> …` reusing a live name | Names are unique per graph; drop the existing one or choose another name |
 
-`IS :: TYPE` being refused rather than accepted is the single most important
-decision in this surface. A `CREATE CONSTRAINT` that returns cleanly is a promise
-users build data-integrity assumptions on; keeping that promise honest is worth
-an error.
+Refusing an *unmappable* type name, rather than approximating it, is the most
+important decision in this surface. A `CREATE CONSTRAINT` that returns cleanly is
+a promise users build data-integrity assumptions on; keeping that promise honest
+is worth an error.
 
 #### Guards
 
@@ -2785,6 +2830,6 @@ compatible subset.
 | Transactions | Snapshot isolation + OCC through `Session` / `Transaction` | Full ACID | Native session coordination is binding-independent; direct graph writes are in-place |
 | Indexing | Three separate structures — hash equality, composite, B-tree range — plus automatic type indexes and vector indexes | One general `RANGE` index serving equality, range, and ordering | An equality index cannot serve a range predicate, so KGLite exposes the distinction that Neo4j collapses. `CREATE INDEX` / `DROP INDEX` / `SHOW INDEXES` are supported — see [Cypher index DDL](#cypher-index-ddl) for exactly what each statement builds |
 | Index names | Canonical and derived: `Label.property`, `Label.(a,b)` | User-assigned, unique | A name in `CREATE INDEX <name> …` is accepted for script portability but not stored; the persisted `.kgl` index state is a list of `(label, property)` keys |
-| Constraint DDL | `IS UNIQUE`, `IS NOT NULL`, `IS NODE KEY` — enforced on every write path. `IS :: TYPE` rejected | `CREATE CONSTRAINT … IS UNIQUE / IS NOT NULL / IS NODE KEY / IS :: TYPE` | KGLite has no write-time property-type constraint, so `IS :: TYPE` is rejected rather than accepted-and-ignored; use `lock_schema()` or `validate_schema()`. See [Cypher constraint DDL](#cypher-constraint-ddl) |
+| Constraint DDL | `IS UNIQUE`, `IS NOT NULL`, `IS NODE KEY`, `IS :: TYPE` — enforced on every write path | `CREATE CONSTRAINT … IS UNIQUE / IS NOT NULL / IS NODE KEY / IS :: TYPE` | `IS :: TYPE` accepts the type names with an exact KGLite value counterpart (`BOOLEAN`, `STRING`, `INTEGER`, `FLOAT`, `DATE`, `LOCAL DATETIME`, `DURATION`, `POINT`); lists, unions and zoned temporal types are rejected by name rather than approximated. Constraints are node-only. See [Cypher constraint DDL](#cypher-constraint-ddl) |
 | Constraint names | Stored, so `DROP CONSTRAINT <name>` works | User-assigned, unique per database | The opposite decision to index names above: a ported schema script almost always drops constraints by name, and the `.kgl` metadata section is JSON, so the field was free. A constraint declared without a name is addressable by its canonical descriptor |
 | `LOAD CSV` source | Local files only — `file://` URLs and filesystem paths, gated by a per-caller capability | `file://` plus `http(s)://`, gated by an import-directory setting | The engine ships no HTTP client (network dependencies were removed in 0.14.x), so there is nothing to fetch a URL with. Filesystem access is granted per caller: on for in-process use, off for Bolt clients unless the server was started with `--allow-csv-import <DIR>` |

@@ -430,11 +430,19 @@ class TestSchemaDialectIsShared:
         graph = KnowledgeGraph()
         df = pd.DataFrame({"id": [1], "title": ["a"], "age": ["not an int"]})
         graph.add_nodes(df, "Person", "id", "title", columns=["age"])
+        # A type name KGLite cannot enforce exactly — the case that still
+        # routes the reader to the schema API. (`IS :: INTEGER` is now a real
+        # constraint, and against this data it fails with the
+        # preexisting-mismatch error instead, which carries no schema advice.)
         with pytest.raises(Exception) as excinfo:
-            graph.cypher("CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER")
+            graph.cypher("CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: LIST<INTEGER>")
         message = str(excinfo.value)
         assert "field_types" not in message, message
-        assert "'types': {'age': 'integer'}" in message, message
+        # The key, and the property it applies to. The *type* is a placeholder:
+        # the rejected name is by definition not a schema-dialect type, so
+        # echoing it back would be advice that does not work.
+        assert "'types': {'age':" in message, message
+        assert "field_types" not in message, message
 
         # And the key it names actually works.
         graph.define_schema({"nodes": {"Person": {"types": {"age": "integer"}}}})

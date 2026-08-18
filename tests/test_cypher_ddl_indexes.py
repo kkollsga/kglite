@@ -412,10 +412,14 @@ NEO4J_SCHEMA_SCRIPT: list[tuple[str, str | None]] = [
         "CREATE CONSTRAINT person_key IF NOT EXISTS FOR (p:Person) REQUIRE (p.name, p.age) IS NODE KEY",
         None,
     ),
-    # Property-type constraints have no write-time enforcement route, so they are
-    # rejected rather than accepted-and-ignored.
+    # Property-type constraints are declared and enforced; a type name with no
+    # exact value counterpart is still rejected rather than approximated.
     (
         "CREATE CONSTRAINT person_typed IF NOT EXISTS FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+        None,
+    ),
+    (
+        "CREATE CONSTRAINT person_listed IF NOT EXISTS FOR (p:Person) REQUIRE p.age IS :: LIST<INTEGER>",
         "is not supported",
     ),
     # Neo4j 4 spelled REQUIRE as ASSERT; a 4.x-era script must reach the same

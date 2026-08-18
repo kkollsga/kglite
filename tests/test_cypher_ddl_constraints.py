@@ -19,14 +19,14 @@ import pytest
 
 import kglite
 
-# Constraint violations raised through Cypher arrive as `CypherExecutionError`,
-# not as the typed `ConstraintViolationError`: the Cypher executor's error
-# channel is `Result<_, String>`, so the structured violation is rendered to text
-# before any binding sees it. That is a pre-existing gap (Sprint 3's
-# `tests/test_constraints.py` matches on message text for the same reason), not
-# something constraint DDL changed — the enforcement itself is identical. These
-# tests therefore assert on the message, which is the contract that actually
-# holds today.
+# Constraint violations raised through Cypher arrive as the typed
+# `ConstraintViolationError` (and a failed *declaration* as
+# `ConstraintCreationError`): the executor's error channel is
+# `Result<_, String>`, but the structured violation is parked on the graph
+# alongside the message it produced and re-attached when the binding raises, so
+# the type survives the string channel. Message matching below is therefore
+# about the *prose* being actionable, not about the type being unavailable —
+# the property-type tests assert both.
 UNIQUE_ERROR = "rejects the duplicate"
 NOT_NULL_ERROR = "must have the property"
 DECLARATION_ERROR = "cannot declare"
@@ -125,14 +125,22 @@ def test_if_not_exists_makes_a_duplicate_declaration_a_no_op(graph) -> None:
     assert graph.last_mutation_stats["constraints_added"] == 0
 
 
-def test_property_type_constraint_is_rejected_not_silently_accepted(graph) -> None:
-    """The one outcome worse than an error is a success that enforces nothing."""
-    with pytest.raises(kglite.CypherExecutionError) as exc:
-        graph.cypher("CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER")
-    message = str(exc.value)
-    assert "is not supported" in message, message
-    assert "lock_schema" in message, message
-    assert _constraint_rows(graph) == []
+def test_an_unmappable_property_type_is_rejected_not_silently_accepted(graph) -> None:
+    """The one outcome worse than an error is a success that enforces nothing.
+
+    The accept-list is closed: a type name with no exact KGLite value
+    counterpart is refused by name rather than approximated to a nearby one.
+    """
+    for declared in ("LIST<INTEGER>", "ZONED DATETIME", "NUMBER"):
+        with pytest.raises(kglite.CypherExecutionError) as exc:
+            graph.cypher(f"CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: {declared}")
+        message = str(exc.value)
+        assert "is not supported" in message, message
+        # The message names the set that does work, so the statement is fixable
+        # without leaving the terminal.
+        assert "INTEGER" in message, message
+        assert "LOCAL DATETIME" in message, message
+        assert _constraint_rows(graph) == []
 
 
 @pytest.mark.parametrize("property_name", ["person_id", "id"])
@@ -281,7 +289,14 @@ def test_show_constraints_columns_and_types(graph) -> None:
     graph.cypher("CREATE CONSTRAINT u FOR (p:Person) REQUIRE p.name IS UNIQUE")
     graph.cypher("CREATE CONSTRAINT e FOR (p:Person) REQUIRE p.age IS NOT NULL")
     rows = _constraint_rows(graph)
-    assert set(rows[0]) == {"name", "type", "entityType", "labelsOrTypes", "properties"}
+    assert set(rows[0]) == {
+        "name",
+        "type",
+        "entityType",
+        "labelsOrTypes",
+        "properties",
+        "propertyType",
+    }
     by_name = {row["name"]: row for row in rows}
     assert by_name["u"]["type"] == "UNIQUENESS"
     assert by_name["e"]["type"] == "NODE_PROPERTY_EXISTENCE"
@@ -301,8 +316,8 @@ def test_show_constraints_matches_db_constraints(graph) -> None:
     """One collector, two surfaces — they can never drift."""
     graph.cypher("CREATE CONSTRAINT u FOR (p:Person) REQUIRE p.name IS UNIQUE")
     procedure = graph.cypher(
-        "CALL db.constraints() YIELD name, type, entityType, labelsOrTypes, properties "
-        "RETURN name, type, entityType, labelsOrTypes, properties"
+        "CALL db.constraints() YIELD name, type, entityType, labelsOrTypes, properties, propertyType "
+        "RETURN name, type, entityType, labelsOrTypes, properties, propertyType"
     ).to_list()
     assert procedure == _constraint_rows(graph)
 
@@ -434,9 +449,14 @@ NEO4J_CONSTRAINT_SCRIPT: list[tuple[str, str | None]] = [
     ("CREATE CONSTRAINT person_nu IF NOT EXISTS FOR (p:Person) REQUIRE p.age IS NODE UNIQUE", None),
     # Neo4j 4 spellings.
     ("CREATE CONSTRAINT person_id_u4 FOR (p:Person) ASSERT p.age IS UNIQUE", None),
-    # Not served, and rejected rather than silently accepted.
-    ("CREATE CONSTRAINT person_t IF NOT EXISTS FOR (p:Person) REQUIRE p.age IS :: INTEGER", "is not supported"),
-    ("CREATE CONSTRAINT person_t2 IF NOT EXISTS FOR (p:Person) REQUIRE p.age IS TYPED STRING", "is not supported"),
+    # Property types: declared and enforced for the accepted names, refused by
+    # name for the rest.
+    ("CREATE CONSTRAINT person_t IF NOT EXISTS FOR (p:Person) REQUIRE p.age IS :: INTEGER", None),
+    ("CREATE CONSTRAINT person_t2 IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS TYPED STRING", None),
+    ("CREATE CONSTRAINT person_t3 IF NOT EXISTS FOR (p:Person) REQUIRE p.age IS :: LIST<INTEGER>", "is not supported"),
+    # A declaration the stored data already violates is refused, like every
+    # other kind.
+    ("CREATE CONSTRAINT person_t4 IF NOT EXISTS FOR (p:Person) REQUIRE p.age IS :: STRING", "cannot declare"),
     (
         "CREATE CONSTRAINT knows_u IF NOT EXISTS FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE",
         "KNOWS",
@@ -461,7 +481,10 @@ def test_neo4j_constraint_script_statements_are_all_actionable(statement: str, e
         g.cypher(statement)
     except kglite.CypherSyntaxError as exc:  # pragma: no cover - failure path
         pytest.fail(f"`{statement}` raised a syntax error, not a feature error: {exc}")
-    except kglite.CypherExecutionError as exc:
+    except (kglite.CypherExecutionError, kglite.ConstraintError) as exc:
+        # A declaration refused against dirty data raises the typed
+        # `ConstraintCreationError`, which is an actionable failure too — the
+        # bar here is "specific and fixable", not "one exception class".
         assert expected_error is not None, f"`{statement}` should have succeeded: {exc}"
         assert expected_error in str(exc), f"`{statement}`: {exc}"
     else:
@@ -520,3 +543,156 @@ def test_every_declared_constraint_actually_rejects_a_violating_write(
     assert _constraint_rows(g), f"`{declaration}` declared nothing visible"
     with pytest.raises(Exception, match="constraint on"):
         g.cypher(violating_write)
+
+
+# ── Property-type constraints (IS :: T) ──────────────────────────────
+
+
+def test_a_declared_property_type_raises_the_typed_error_on_a_violating_write(graph) -> None:
+    """The type matters as much as the message: a binding's `except` clause is
+    what a user actually writes, and it must catch the same class every other
+    constraint raises."""
+    graph.cypher("CREATE CONSTRAINT age_typed FOR (p:Person) REQUIRE p.age IS :: INTEGER")
+    assert graph.last_mutation_stats["constraints_added"] == 1
+
+    for statement in (
+        "CREATE (p:Person {person_id: 9, age: 'old'})",
+        "MERGE (p:Person {person_id: 10, age: 'old'})",
+        "MATCH (p:Person) SET p.age = 'old'",
+        "MATCH (p:Person) SET p += {age: 'old'}",
+    ):
+        with pytest.raises(kglite.ConstraintViolationError) as exc:
+            graph.cypher(statement)
+        message = str(exc.value)
+        assert "INTEGER" in message, f"{statement}: {message}"
+        assert "STRING" in message, f"{statement}: {message}"
+
+    # A conforming write is untouched.
+    graph.cypher("CREATE (p:Person {person_id: 11, age: 44})")
+
+
+def test_a_declaration_against_violating_data_raises_the_creation_error() -> None:
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame({"person_id": [1, 2], "name": ["A", "B"], "nickname": ["x", "y"]}),
+        "Person",
+        "person_id",
+        "name",
+    )
+    with pytest.raises(kglite.ConstraintCreationError, match="cannot declare"):
+        g.cypher("CREATE CONSTRAINT FOR (p:Person) REQUIRE p.nickname IS :: INTEGER")
+    assert _constraint_rows(g) == [], "a refused declaration must install nothing"
+
+
+def test_null_and_absent_values_satisfy_a_declared_type(graph) -> None:
+    """Neo4j semantics: a type constraint is not an existence constraint."""
+    graph.cypher("CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER")
+    graph.cypher("MATCH (p:Person) SET p.age = null")
+    graph.cypher("MATCH (p:Person) REMOVE p.age")
+    graph.cypher("CREATE (p:Person {person_id: 12})")
+
+
+def test_dropping_a_property_type_constraint_restores_the_write(graph) -> None:
+    graph.cypher("CREATE CONSTRAINT age_typed FOR (p:Person) REQUIRE p.age IS :: INTEGER")
+    with pytest.raises(kglite.ConstraintViolationError):
+        graph.cypher("MATCH (p:Person) SET p.age = 'old'")
+
+    graph.cypher("DROP CONSTRAINT age_typed")
+    assert graph.last_mutation_stats["constraints_removed"] == 1
+    assert _constraint_rows(graph) == []
+    graph.cypher("MATCH (p:Person) SET p.age = 'old'")
+
+
+def test_an_unnamed_property_type_constraint_drops_by_its_descriptor(graph) -> None:
+    """`SHOW CONSTRAINTS` output must paste straight into `DROP CONSTRAINT`."""
+    graph.cypher("CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER")
+    assert _names(graph) == {"Person.age"}
+    graph.cypher("DROP CONSTRAINT `Person.age`")
+    assert _constraint_rows(graph) == []
+
+
+def test_show_constraints_reports_the_property_type_column(graph) -> None:
+    graph.cypher("CREATE CONSTRAINT age_typed FOR (p:Person) REQUIRE p.age IS :: INTEGER")
+    graph.cypher("CREATE CONSTRAINT name_unique FOR (p:Person) REQUIRE p.name IS UNIQUE")
+
+    rows = {row["name"]: row for row in _constraint_rows(graph)}
+    assert rows["age_typed"]["type"] == "NODE_PROPERTY_TYPE"
+    assert rows["age_typed"]["propertyType"] == "INTEGER"
+    # Present-but-null on every other kind, exactly as in Neo4j 5.
+    assert "propertyType" in rows["name_unique"]
+    assert rows["name_unique"]["propertyType"] is None
+
+
+def test_db_constraints_yields_the_same_property_type(graph) -> None:
+    """One collector, two surfaces — they cannot be allowed to drift."""
+    graph.cypher("CREATE CONSTRAINT age_typed FOR (p:Person) REQUIRE p.age IS :: INTEGER")
+    yielded = graph.cypher("CALL db.constraints() YIELD name, type, propertyType").to_list()
+    assert yielded == [{"name": "age_typed", "type": "NODE_PROPERTY_TYPE", "propertyType": "INTEGER"}]
+
+
+def test_a_declared_property_type_survives_save_and_load(graph, tmp_path) -> None:
+    """The declaration has no second home — if the file loses it, the reloaded
+    graph silently stops enforcing."""
+    graph.cypher("CREATE CONSTRAINT age_typed FOR (p:Person) REQUIRE p.age IS :: INTEGER")
+    path = tmp_path / "typed.kgl"
+    graph.save(str(path))
+
+    reloaded = kglite.load(str(path))
+    rows = {row["name"]: row for row in _constraint_rows(reloaded)}
+    assert rows["age_typed"]["propertyType"] == "INTEGER"
+    with pytest.raises(kglite.ConstraintViolationError):
+        reloaded.cypher("MATCH (p:Person) SET p.age = 'old'")
+
+
+def test_a_declared_type_beats_the_schema_lock_validation_message() -> None:
+    """Two checks cover the same property; the one the user *wrote* wins, so the
+    error names their constraint rather than a type they never declared."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame({"person_id": [1], "name": ["A"], "nickname": ["x"]}),
+        "Person",
+        "person_id",
+        "name",
+    )
+    g.cypher("CREATE CONSTRAINT nick_typed FOR (p:Person) REQUIRE p.nickname IS :: STRING")
+    g.lock_schema()
+
+    with pytest.raises(kglite.ConstraintViolationError) as exc:
+        g.cypher("MATCH (p:Person) SET p.nickname = 7")
+    message = str(exc.value)
+    assert "PROPERTY TYPE constraint" in message, message
+    assert "schema is locked" not in message, message
+    # And the declaration's own verdict is what applies to an accepted value.
+    g.cypher("MATCH (p:Person) SET p.nickname = 'nick'")
+
+
+def test_describe_annotates_a_declared_property_type(graph) -> None:
+    """An agent planning a write should see the requirement before attempting
+    it, which is what the describe() annotation is for."""
+    assert "declared_type" not in graph.describe()
+    graph.cypher("CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER")
+    assert 'declared_type="INTEGER"' in graph.describe()
+
+
+def test_a_bulk_load_is_gated_by_a_declared_type(graph) -> None:
+    """`add_nodes` never touches the Cypher executor, so it is its own choke
+    point — a constraint the bulk path bypassed would be theatre."""
+    graph.cypher("CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER")
+    # Conforming first: a refused load leaves the observed column-type metadata
+    # behind (pre-existing `add_nodes` behaviour, unrelated to constraints), and
+    # ordering around it keeps this test about the gate rather than that.
+    graph.add_nodes(
+        pd.DataFrame({"person_id": [51], "name": ["Y"], "age": [61]}),
+        "Person",
+        "person_id",
+        "name",
+        columns=["age"],
+    )
+    with pytest.raises(kglite.ConstraintViolationError, match="INTEGER"):
+        graph.add_nodes(
+            pd.DataFrame({"person_id": [50], "name": ["Z"], "age": ["old"]}),
+            "Person",
+            "person_id",
+            "name",
+            columns=["age"],
+        )

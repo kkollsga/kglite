@@ -278,8 +278,15 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
     ProcedureSpec {
         name: "db.constraints",
         aliases: &[],
-        description: "All declared constraints (UNIQUENESS, NODE_KEY, NODE_PROPERTY_EXISTENCE), sorted by name",
-        columns: &["name", "type", "entityType", "labelsOrTypes", "properties"],
+        description: "All declared constraints (UNIQUENESS, NODE_KEY, NODE_PROPERTY_EXISTENCE, NODE_PROPERTY_TYPE), sorted by name",
+        columns: &[
+            "name",
+            "type",
+            "entityType",
+            "labelsOrTypes",
+            "properties",
+            "propertyType",
+        ],
     },
     ProcedureSpec {
         name: "db.propertyKeys",

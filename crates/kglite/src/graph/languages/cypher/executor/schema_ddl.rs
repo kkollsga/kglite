@@ -1074,13 +1074,12 @@ fn unsupported_property_type_message(label: &str, properties: &[String], declare
          report success while enforcing nothing (or, worse, enforcing a different type). \
          Declare one of the supported types instead. For a shape they cannot express (a list, \
          a union, a zoned temporal type), `define_schema({{'nodes': {{'{label}': {{'types': \
-         {{'{}': '{}'}}}}}}}})` plus `validate_schema()` reports every existing violation, and \
-         `lock_schema()` rejects a write whose value disagrees with the node type's recorded \
-         property type. Use `REQUIRE {}{} IS NOT NULL` if presence, rather than type, is what \
-         you need.",
+         {{'{}': '<type>'}}}}}}}})` plus `validate_schema()` reports every existing violation, \
+         and `lock_schema()` rejects a write whose value disagrees with the node type's \
+         recorded property type. Use `REQUIRE {}{} IS NOT NULL` if presence, rather than type, \
+         is what you need.",
         DeclaredType::accepted_names().join(", "),
         properties.first().map(String::as_str).unwrap_or("prop"),
-        declared.to_lowercase(),
         if properties.len() == 1 { "n." } else { "(n." },
         if properties.len() == 1 {
             properties.join("")
@@ -1194,13 +1193,23 @@ fn unknown_constraint_message(graph: &DirGraph, name: &str) -> String {
 /// Columns `SHOW CONSTRAINTS` projects, in order. Identical to
 /// `CALL db.constraints()` — one collector, one row shape.
 ///
-/// Neo4j 5's `SHOW CONSTRAINTS` also returns `id`, `ownedIndex`, and
-/// `propertyType`. KGLite has no equivalent state for any of them — a unique
-/// constraint *is* its index rather than owning a separate one, and
-/// property-type constraints are rejected outright — so they are omitted rather
-/// than filled with invented values. Documented in CYPHER.md.
-pub(crate) const SHOW_CONSTRAINTS_COLUMNS: &[&str] =
-    &["name", "type", "entityType", "labelsOrTypes", "properties"];
+/// Neo4j 5's `SHOW CONSTRAINTS` also returns `id` and `ownedIndex`. KGLite has
+/// no equivalent state for either — a unique constraint *is* its index rather
+/// than owning a separate one — so they are omitted rather than filled with
+/// invented values. `propertyType` *is* served: it carries the declared type of
+/// a `NODE_PROPERTY_TYPE` row and null for every other kind, matching Neo4j,
+/// and sits last exactly as it does there (Neo4j's order is
+/// `id, name, type, entityType, labelsOrTypes, properties, ownedIndex,
+/// propertyType` — dropping the two unserved columns leaves this).
+/// Documented in CYPHER.md.
+pub(crate) const SHOW_CONSTRAINTS_COLUMNS: &[&str] = &[
+    "name",
+    "type",
+    "entityType",
+    "labelsOrTypes",
+    "properties",
+    "propertyType",
+];
 
 /// `SHOW CONSTRAINTS` — a read, exactly as `SHOW INDEXES` is. Rows come from the
 /// same collector that backs `CALL db.constraints()`, so the two surfaces can
@@ -1243,6 +1252,15 @@ fn constraint_info_to_row(info: &ConstraintInfo) -> ResultRow {
     row.projected.insert(
         "properties".to_string(),
         Value::List(info.properties.iter().cloned().map(Value::String).collect()),
+    );
+    // Null for every kind that is not a declared property type — the column
+    // exists for all rows, as it does in Neo4j, rather than appearing only on
+    // the rows that fill it.
+    row.projected.insert(
+        "propertyType".to_string(),
+        info.property_type
+            .map(|declared| Value::String(declared.name().to_string()))
+            .unwrap_or(Value::Null),
     );
     row
 }
@@ -2164,6 +2182,78 @@ mod tests {
         assert!(
             types.contains(&"NODE_PROPERTY_EXISTENCE".to_string()),
             "got: {types:?}"
+        );
+    }
+
+    /// The `propertyType` column carries the declared type on a type row and
+    /// null on every other kind — the shape Neo4j 5 has, so a ported script's
+    /// result handling reads unchanged.
+    #[test]
+    fn show_constraints_reports_the_declared_property_type() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT age_typed FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+        )
+        .unwrap();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT name_unique FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        )
+        .unwrap();
+
+        // The column exists, and last — dropping Neo4j's two unserved columns
+        // from its order leaves exactly this.
+        assert_eq!(SHOW_CONSTRAINTS_COLUMNS.last(), Some(&"propertyType"));
+
+        let result = show_constraints_result_set(&graph);
+        let cell = |name: &str, column: &str| {
+            result
+                .rows
+                .iter()
+                .find(|row| row.projected.get("name") == Some(&Value::String(name.to_string())))
+                .unwrap_or_else(|| panic!("no row named {name}"))
+                .projected
+                .get(column)
+                .cloned()
+                .unwrap_or_else(|| panic!("no {column} cell on {name}"))
+        };
+
+        assert_eq!(
+            cell("age_typed", "type"),
+            Value::String("NODE_PROPERTY_TYPE".to_string())
+        );
+        assert_eq!(
+            cell("age_typed", "propertyType"),
+            Value::String("INTEGER".to_string())
+        );
+        // Null, not absent: the column is present on every row.
+        assert_eq!(cell("name_unique", "propertyType"), Value::Null);
+    }
+
+    /// `SHOW CONSTRAINTS` and `CALL db.constraints()` are required to be the
+    /// same rows; a column served by only one of them breaks that.
+    #[test]
+    fn db_constraints_yields_the_same_property_type() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT age_typed FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+        )
+        .unwrap();
+
+        let parsed = parse_cypher("CALL db.constraints() YIELD name, type, propertyType").unwrap();
+        let params = HashMap::new();
+        let executor = super::super::CypherExecutor::with_params(&graph, &params, None);
+        let result = executor.execute(&parsed).unwrap();
+        let idx = |column: &str| result.columns.iter().position(|c| c == column).unwrap();
+        assert_eq!(
+            result.rows[0][idx("type")],
+            Value::String("NODE_PROPERTY_TYPE".to_string())
+        );
+        assert_eq!(
+            result.rows[0][idx("propertyType")],
+            Value::String("INTEGER".to_string())
         );
     }
 

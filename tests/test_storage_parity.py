@@ -283,6 +283,43 @@ def test_db_indexes_parity(graphs):
         assert rows[mode] == [], f"db.indexes() {mode}: expected 0 rows, got {rows[mode]}"
 
 
+def test_property_type_constraint_parity(tmp_path):
+    """A declared property type is backend-agnostic: it must install, refuse the
+    same write, and report the same `SHOW CONSTRAINTS` row in every mode.
+
+    Constraints live above the storage layer, but each mode reaches the write
+    path differently (columnar master, mmap columns, CSR + overlay), so "the
+    predicate is shared" is a claim that has to be tested rather than assumed.
+    """
+    import kglite
+
+    installed: dict[str, list] = {}
+    refusals: dict[str, str] = {}
+    for mode in STORAGE_MODES:
+        path = str(tmp_path / f"ptc_{mode}") if mode == "disk" else None
+        kg = _build_graph(mode, path)
+
+        kg.cypher("CREATE CONSTRAINT rank_typed FOR (e:Entity) REQUIRE e.rank IS :: INTEGER")
+        installed[mode] = _rows(
+            kg.cypher("CALL db.constraints() YIELD name, type, propertyType RETURN name, type, propertyType")
+        )
+
+        with pytest.raises(kglite.ConstraintViolationError) as exc:
+            kg.cypher("MATCH (e:Entity) WHERE e.eid = 1 SET e.rank = 'high'")
+        refusals[mode] = str(exc.value)
+
+        # Null still passes, in every mode.
+        kg.cypher("MATCH (e:Entity) WHERE e.eid = 1 SET e.rank = null")
+
+    reference = installed["memory"]
+    assert reference and reference[0]["type"] == "NODE_PROPERTY_TYPE", reference
+    assert reference[0]["propertyType"] == "INTEGER", reference
+    for mode in STORAGE_MODES:
+        assert installed[mode] == reference, f"{mode} constraint listing diverged: {installed[mode]}"
+        assert "INTEGER" in refusals[mode], f"{mode}: {refusals[mode]}"
+        assert "STRING" in refusals[mode], f"{mode}: {refusals[mode]}"
+
+
 def test_save_load_round_trip(graphs, tmp_path):
     """Save memory, load back, assert identical query result.
 

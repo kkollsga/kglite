@@ -2,6 +2,7 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::constraints::ConstraintKind;
+use crate::graph::property_types::DeclaredType;
 use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::column_store::TypedColumn;
 use crate::graph::storage::GraphRead;
@@ -495,12 +496,11 @@ pub(crate) fn collect_indexes_structured(graph: &DirGraph) -> Vec<IndexInfo> {
 
 /// One constraint entry surfaced by `SHOW CONSTRAINTS` / `CALL db.constraints()`.
 ///
-/// Field shape mirrors Neo4j's `SHOW CONSTRAINTS` minimal subset:
-/// `name, type, entityType, labelsOrTypes, properties`. Neo4j also returns
-/// `id`, `ownedIndex`, and `propertyType`; KGLite has no equivalent state (a
-/// unique constraint *is* its index rather than owning a separate one, and
-/// property-type constraints are not served at all), so they are omitted rather
-/// than filled with invented values. Documented in CYPHER.md.
+/// Field shape mirrors Neo4j's `SHOW CONSTRAINTS` subset KGLite can answer:
+/// `name, type, entityType, labelsOrTypes, properties, propertyType`. Neo4j also
+/// returns `id` and `ownedIndex`; KGLite has no equivalent state for either (a
+/// unique constraint *is* its index rather than owning a separate one), so they
+/// are omitted rather than filled with invented values. Documented in CYPHER.md.
 #[derive(Debug, Clone)]
 pub(crate) struct ConstraintInfo {
     /// The name its author gave it, or the canonical `Label.property` /
@@ -512,6 +512,10 @@ pub(crate) struct ConstraintInfo {
     pub labels_or_types: Vec<String>,
     /// Constrained property names, in declaration order.
     pub properties: Vec<String>,
+    /// The declared type, for a `NODE_PROPERTY_TYPE` row; `None` for every
+    /// other kind — which is exactly what Neo4j 5 puts in the `propertyType`
+    /// column, so a ported script's result handling reads unchanged.
+    pub property_type: Option<DeclaredType>,
 }
 
 impl ConstraintInfo {
@@ -556,6 +560,7 @@ pub(crate) fn collect_constraints_structured(graph: &DirGraph) -> Vec<Constraint
             entity_type: "NODE",
             labels_or_types: vec![node_type.clone()],
             properties,
+            property_type: None,
         });
     }
 
@@ -570,6 +575,7 @@ pub(crate) fn collect_constraints_structured(graph: &DirGraph) -> Vec<Constraint
             entity_type: "NODE",
             labels_or_types: vec![node_type.clone()],
             properties,
+            property_type: None,
         });
     }
 
@@ -578,7 +584,7 @@ pub(crate) fn collect_constraints_structured(graph: &DirGraph) -> Vec<Constraint
     // reports each as a separate row. Listing them is also what makes an
     // unnamed one droppable — `DROP CONSTRAINT` resolves a canonical descriptor
     // through this collector.
-    for (node_type, property, _declared) in graph.list_property_type_constraints() {
+    for (node_type, property, declared) in graph.list_property_type_constraints() {
         let properties = vec![property];
         out.push(ConstraintInfo {
             name: constraint_name(graph, &node_type, &properties),
@@ -586,6 +592,7 @@ pub(crate) fn collect_constraints_structured(graph: &DirGraph) -> Vec<Constraint
             entity_type: "NODE",
             labels_or_types: vec![node_type.clone()],
             properties,
+            property_type: Some(declared),
         });
     }
 

@@ -1558,6 +1558,13 @@ pub(super) fn constraints_to_rows(
                 "properties" => {
                     Value::List(info.properties.iter().cloned().map(Value::String).collect())
                 }
+                // Null for every kind that is not a declared property type,
+                // matching both Neo4j and the `SHOW CONSTRAINTS` row shape this
+                // procedure is required to mirror exactly.
+                "propertyType" => info
+                    .property_type
+                    .map(|declared| Value::String(declared.name().to_string()))
+                    .unwrap_or(Value::Null),
                 _ => continue, // unreachable in practice (validator gate)
             };
             row.projected.insert(alias.to_string(), val);

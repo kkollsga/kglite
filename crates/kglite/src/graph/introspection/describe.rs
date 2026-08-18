@@ -856,6 +856,14 @@ fn property_attrs(
     if let Some(constraint) = describe_property_constraint(graph, node_type, &prop.property_name) {
         attrs.push_str(&format!(" constraint=\"{constraint}\""));
     }
+    // A declared property type is a separate fact from uniqueness/presence — a
+    // property can carry both — and a separate fact from the `type` attribute
+    // above, which reports what the stored values *are* rather than what a
+    // write *must* be. Two attributes rather than one overloaded string, which
+    // is the idiom every other fact here follows.
+    if let Some(declared) = graph.property_type_for(node_type, &prop.property_name) {
+        attrs.push_str(&format!(" declared_type=\"{}\"", declared.name()));
+    }
     if let Some(ref vals) = prop.values {
         if !vals.is_empty() {
             let val_strs: Vec<String> = vals
@@ -2070,6 +2078,10 @@ extensions:
 /// Single-property only. A composite tuple constrains the *combination*, so
 /// tagging its members individually would overstate what is enforced — `SHOW
 /// CONSTRAINTS` reports those in full.
+///
+/// A declared property type is *not* folded in here: it is orthogonal (a
+/// property can be unique **and** typed), so it renders as its own
+/// `declared_type` attribute rather than as a fourth value of this one.
 fn describe_property_constraint(
     graph: &DirGraph,
     node_type: &str,
@@ -2082,6 +2094,91 @@ fn describe_property_constraint(
         (true, false) => Some("unique"),
         (false, true) => Some("not_null"),
         (false, false) => None,
+    }
+}
+
+#[cfg(test)]
+mod declared_type_annotation_tests {
+    use super::*;
+    use crate::datatypes::values::Value;
+    use crate::graph::property_types::DeclaredType;
+    use crate::graph::schema::NodeData;
+    use crate::graph::storage::GraphWrite;
+    use std::collections::HashMap;
+
+    fn person_graph() -> DirGraph {
+        let mut graph = DirGraph::new();
+        for (id, age) in [(1u32, 30i64), (2, 25)] {
+            let node = NodeData::new(
+                Value::UniqueId(id),
+                Value::String(format!("p{id}")),
+                "Person".to_string(),
+                HashMap::from([("age".to_string(), Value::Int64(age))]),
+                &mut graph.interner,
+            );
+            let idx = graph.graph.add_node(node);
+            graph
+                .type_indices
+                .entry_or_default("Person".to_string())
+                .push(idx);
+        }
+        graph
+    }
+
+    fn describe(graph: &DirGraph) -> String {
+        compute_description(
+            graph,
+            None,
+            &ConnectionDetail::Off,
+            &CypherDetail::Off,
+            &FluentDetail::Off,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    /// An agent planning a write needs to know the value will be rejected
+    /// *before* attempting it, which is the whole reason `describe()` annotates
+    /// declared constraints at all.
+    #[test]
+    fn describe_annotates_a_declared_property_type() {
+        let mut graph = person_graph();
+        assert!(
+            !describe(&graph).contains("declared_type"),
+            "an unconstrained property must carry no annotation"
+        );
+
+        graph
+            .create_property_type_constraint("Person", "age", DeclaredType::Integer)
+            .unwrap();
+        let described = describe(&graph);
+        assert!(
+            described.contains("declared_type=\"INTEGER\""),
+            "got: {described}"
+        );
+    }
+
+    /// The two facts are orthogonal — a property can be unique *and* typed — so
+    /// the annotation must not replace the constraint one.
+    #[test]
+    fn a_typed_property_keeps_its_uniqueness_annotation() {
+        let mut graph = person_graph();
+        graph.create_unique_constraint("Person", &["age"]).unwrap();
+        graph
+            .create_property_type_constraint("Person", "age", DeclaredType::Integer)
+            .unwrap();
+
+        let described = describe(&graph);
+        assert!(
+            described.contains("constraint=\"unique\""),
+            "got: {described}"
+        );
+        assert!(
+            described.contains("declared_type=\"INTEGER\""),
+            "got: {described}"
+        );
     }
 }
 

@@ -30,9 +30,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type and a schema-locked graph's recorded property type both cover a property,
   the declaration wins and the error names the constraint.
 
+  `SHOW CONSTRAINTS` and `CALL db.constraints()` gain Neo4j 5's **`propertyType`
+  column** — the declared type on a `NODE_PROPERTY_TYPE` row, null on every
+  other kind — in Neo4j's position, last. A declared type is its own row, never
+  folded into a uniqueness or existence row, because a property can be `UNIQUE`
+  *and* typed. `describe()` annotates a constrained property with
+  `declared_type="INTEGER"` alongside its existing `constraint=` attribute, so
+  an agent sees the requirement before planning a write.
+
   **Format note**: a `.kgl` file containing a property-type constraint does not
   load on 0.16.3 or earlier. Files that declare none are byte-identical to
   before.
+
+  **Result-shape note**: any code reading `SHOW CONSTRAINTS` / `db.constraints()`
+  rows positionally, or asserting an exact column set, sees one additional
+  column.
 
 ### Fixed
 
