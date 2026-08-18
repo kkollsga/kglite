@@ -94,7 +94,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through the session commit path. In-memory and `storage='mapped'` graphs
   serve identical streams.
 
+  **What capture costs while it is on** (measured, release profile, Apple M4):
+  the cost is one buffered op per mutation plus the loss of the
+  checkpoint-free-mutation fast path, so it scales with ops written, not with
+  statements run. A bare `CREATE` pays **+33%** (2.25 -> 3.00 us), `MERGE` that
+  creates **+8%**, `SET` by id **+3-7%**, and a `MERGE` that matches an existing
+  row and writes nothing pays **0%**. Bulk loads pay most — **+52%** for a
+  1000-row `add_nodes` and **+82-88%** for a 1000-edge `add_connections`. The
+  default ring costs roughly **40 MB of resident memory** once full at its
+  65,536 events. A graph that has not called `db.cdc.enable()` pays none of
+  this.
+
 ### Fixed
+
+- **Change data capture now sees writes made through the MCP server.** The
+  server's write tool ran its mutation and returned without draining the
+  capture buffer, so a `--writable` server that had run `CALL db.cdc.enable()`
+  reported an empty stream no matter how much the agent changed — and, because
+  nothing drained it, the buffer grew by one entry per mutation for the life of
+  the process. The tool call is now the commit boundary it always was in
+  effect: each successful write publishes its events, and a failed statement
+  publishes nothing (its ops were already rolled back). The Python, CLI, and
+  Bolt paths were unaffected.
+
+- **A declared property type no longer exempts a write from the schema lock's
+  typo guard.** A type constraint can be declared on a property no node holds
+  yet, which leaves that property absent from the observed schema
+  `lock_schema()` validates against. The SET path treated the declaration as
+  covering both of the lock's verdicts, so a locked graph accepted
+  `SET p.nickname = 7` for a `nickname` it did not know — the one write the
+  lock exists to refuse. The declaration now yields only the *type* verdict, as
+  intended; the unknown-property check always applies. A property the schema
+  does know still reports the typed `ConstraintViolationError` rather than the
+  generic validation error, and the CREATE path (which never carried the
+  exemption) is unchanged.
+
+- **A property-type constraint on a structural field is now decided
+  structurally instead of by scanning data.** `id`, `title`, and the primary
+  type a node reads back as `type` are not stored properties, so an empty label
+  had no rows to contradict any declaration and accepted all of them. Two
+  opposite failures followed: `REQUIRE p.type IS :: INTEGER` installed and then
+  enforced nothing (no write path can check the primary type), while
+  `REQUIRE p.id IS :: STRING` installed and then rejected every subsequent
+  write, leaving the node type unwritable. Each structural field now has the
+  one type it can ever hold — `id` is `INTEGER`, `title` and `type` are
+  `STRING` — and a declaration that disagrees is refused at `CREATE
+  CONSTRAINT`, with or without rows, naming the field and what it always is.
+  Declarations that agree still install and are satisfied by construction, and
+  aliased id/title fields resolve through their alias. Ordinary stored
+  properties keep the existing-data scan unchanged.
 
 - **A failed `replace_connections` no longer destroys the edges it was going to
   replace.** The call deletes a source's existing edges of the given type and

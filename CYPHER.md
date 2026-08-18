@@ -1767,6 +1767,15 @@ publishes its whole batch at `commit()`, and nothing before it. A held
 `ResultView` forces the next write to fork copy-on-write; the fork shares the
 one log, so that write publishes exactly once.
 
+**Capture is not free while it is on.** Every mutation buffers an op, and an
+enabled graph gives up the checkpoint-free-mutation fast path, so the cost
+tracks ops written rather than statements run. Measured (release profile): a
+bare `CREATE` +33%, `MERGE` that creates +8%, `SET` by id +3-7%, a `MERGE` that
+matches and writes nothing **0%**, and bulk loads most of all — +52% for a
+1000-row `add_nodes`, +82-88% for 1000 `add_connections`. The default ring
+holds ~40 MB once full. A graph that never calls `db.cdc.enable()` is untouched
+by any of this.
+
 **Storage modes.** In-memory and `storage='mapped'` serve the stream
 identically, durable or not. `storage='disk'` **refuses** `enable`: a disk
 graph commits by publishing an immutable generation, so the per-commit write
