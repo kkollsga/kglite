@@ -30,6 +30,7 @@
 use crate::datatypes::values::Value;
 use crate::graph::constraints::{NamedConstraint, UniqueConstraintKey};
 use crate::graph::features::timeseries::{NodeTimeseries, TimeseriesConfig};
+use crate::graph::property_types::DeclaredType;
 use crate::graph::schema::{
     CompositeIndexKey, ConnectionTypeInfo, ConnectivityTriple, DirGraph, EmbeddingStore, IndexKey,
     PropertyStorage, SaveMetadata, SchemaDefinition, SerdeDeserializeGuard, SerdeSerializeGuard,
@@ -47,7 +48,7 @@ use crate::graph::storage::{GraphRead, GraphWrite};
 use memmap2::Mmap;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
 use std::path::Path;
@@ -149,6 +150,23 @@ pub(crate) struct FileMetadata {
     /// the field existed.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     ddl_not_null_constraints: BTreeSet<(String, String)>,
+    /// Declared property-type constraints (`CREATE CONSTRAINT ... IS :: T`), as
+    /// `node_type -> property -> type`.
+    ///
+    /// Unlike the presence half above, this map *is* the enforcement structure
+    /// rather than a provenance record for one — nothing else on the graph
+    /// remembers the declared type — so without it a reload silently stops
+    /// enforcing every type constraint the file was saved with. `DirGraph`'s own
+    /// serde derive does not persist it: the load path builds a fresh graph and
+    /// repopulates it from this struct (`from_graph` / `apply_to_with`).
+    ///
+    /// Additive, and skipped when empty so a graph that declares no type
+    /// constraint writes byte-identical output to one produced before the field
+    /// existed. A file that *does* carry one will not load on a build that
+    /// predates `ConstraintKind::PropertyType` — the deliberate one-way format
+    /// posture, documented in the CHANGELOG.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    ddl_property_type_constraints: BTreeMap<String, BTreeMap<String, DeclaredType>>,
     /// Node type metadata: node_type → { property_name → type_string }
     #[serde(default)]
     node_type_metadata: HashMap<String, HashMap<String, String>>,
@@ -291,6 +309,7 @@ impl FileMetadata {
             unique_constraint_keys: graph.unique_constraint_keys.clone(),
             constraint_names: graph.constraint_names.clone(),
             ddl_not_null_constraints: graph.ddl_not_null_constraints.clone(),
+            ddl_property_type_constraints: graph.ddl_property_type_constraints.clone(),
             node_type_metadata: (*graph.node_type_metadata).clone(),
             connection_type_metadata: (*graph.connection_type_metadata).clone(),
             id_field_aliases: (*graph.id_field_aliases).clone(),
@@ -351,6 +370,7 @@ impl FileMetadata {
         graph.unique_constraint_keys = self.unique_constraint_keys;
         graph.constraint_names = self.constraint_names;
         graph.ddl_not_null_constraints = self.ddl_not_null_constraints;
+        graph.ddl_property_type_constraints = self.ddl_property_type_constraints;
         graph.node_type_metadata = Arc::new(self.node_type_metadata);
         graph.connection_type_metadata = Arc::new(self.connection_type_metadata);
         graph.id_field_aliases = Arc::new(self.id_field_aliases);

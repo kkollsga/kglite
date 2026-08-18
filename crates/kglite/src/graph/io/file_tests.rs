@@ -1274,3 +1274,101 @@ mod ddl_provenance_roundtrip_tests {
         );
     }
 }
+
+/// A declared property type has no second home — unlike a presence constraint,
+/// whose enforced list rides the schema — so if the map does not survive a save
+/// the reload silently stops enforcing every declaration in the file.
+#[cfg(test)]
+mod property_type_roundtrip_tests {
+    use super::*;
+    use crate::datatypes::{DataFrame, Value};
+    use crate::graph::dir_graph::DirGraph;
+    use crate::graph::property_types::DeclaredType;
+
+    fn person_graph() -> DirGraph {
+        let mut graph = DirGraph::new();
+        let rows: Vec<Vec<Value>> = (1..=3)
+            .map(|i| {
+                vec![
+                    Value::Int64(i),
+                    Value::String(format!("p{i}")),
+                    Value::Int64(i * 10),
+                ]
+            })
+            .collect();
+        let df = DataFrame::from_cypher_rows(
+            vec!["id".to_string(), "title".to_string(), "age".to_string()],
+            rows,
+        )
+        .unwrap();
+        crate::graph::mutation::maintain::add_nodes(
+            &mut graph,
+            df,
+            "Person".to_string(),
+            "id".to_string(),
+            Some("title".to_string()),
+            None,
+        )
+        .unwrap();
+        graph
+    }
+
+    fn save_and_load(graph: DirGraph, dir: &std::path::Path) -> DirGraph {
+        let path = dir.join("typed.kgl");
+        let mut arc = Arc::new(graph);
+        prepare_save(&mut arc);
+        Arc::make_mut(&mut arc).enable_columnar();
+        write_kgl(&arc, path.to_str().unwrap()).unwrap();
+        Arc::unwrap_or_clone(load_file(path.to_str().unwrap()).unwrap())
+    }
+
+    #[test]
+    fn a_declared_type_still_refuses_a_violating_write_after_a_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut graph = person_graph();
+        graph
+            .create_property_type_constraint("Person", "age", DeclaredType::Integer)
+            .unwrap();
+
+        let loaded = save_and_load(graph, dir.path());
+
+        assert_eq!(
+            loaded.property_type_for("Person", "age"),
+            Some(DeclaredType::Integer),
+            "the declaration must survive the round-trip"
+        );
+        let violation = loaded
+            .check_property_type("Person", "age", &Value::String("old".to_string()))
+            .expect_err("a reloaded declaration must still refuse a wrong-typed write");
+        assert!(violation.to_string().contains("INTEGER"), "{violation}");
+        loaded
+            .check_property_type("Person", "age", &Value::Int64(1))
+            .expect("a conforming write is still allowed");
+    }
+
+    /// A graph that declares nothing must write the same bytes it wrote before
+    /// the field existed, or every `.kgl` shifts for a feature almost no graph
+    /// uses.
+    #[test]
+    fn an_untyped_graph_writes_no_property_types_into_the_metadata() {
+        let json = serde_json::to_string(&FileMetadata::from_graph(&person_graph())).unwrap();
+        assert!(
+            !json.contains("ddl_property_type_constraints"),
+            "the empty map must be skipped, or the golden byte digest moves: {json}"
+        );
+
+        let mut declared = person_graph();
+        declared
+            .create_property_type_constraint("Person", "age", DeclaredType::Integer)
+            .unwrap();
+        let json = serde_json::to_string(&FileMetadata::from_graph(&declared)).unwrap();
+        assert!(
+            json.contains("ddl_property_type_constraints"),
+            "a declared type must be written: {json}"
+        );
+        assert!(
+            json.contains("Integer"),
+            "the declared type must be written: {json}"
+        );
+    }
+}

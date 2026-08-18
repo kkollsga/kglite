@@ -398,9 +398,10 @@ impl fmt::Display for ConstraintViolation {
                 actual,
             } => write!(
                 f,
-                "a node with label '{}' must have a {expected} value for the property \
+                "a node with label '{}' must have a value of type {expected} for the property \
                  '{property}', but the write supplies {actual} — the {kind} constraint on \
-                 {descriptor} rejects it. Supply a {expected} value, or drop the constraint.",
+                 {descriptor} rejects it. Supply a value of type {expected}, or drop the \
+                 constraint.",
                 self.node_type,
             ),
             ConstraintFailure::PreexistingTypeMismatch {

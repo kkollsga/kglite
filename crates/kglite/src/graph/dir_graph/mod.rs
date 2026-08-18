@@ -191,11 +191,13 @@ pub struct DirGraph {
     /// well as postcard (a tuple key is not a JSON object key). Ordered, so the
     /// bytes are deterministic once it is persisted.
     ///
-    /// **Not persisted yet.** The `serde` attribute here does not survive a
-    /// save by itself: a `.kgl` load builds a fresh `DirGraph` and repopulates
-    /// it from `FileMetadata` (`io::file`: `from_graph` / `apply_to_with`), so
-    /// persistence means a field on *that* struct — which its NOT NULL sibling
-    /// now has and this one still needs.
+    /// **Persisted through `FileMetadata`, not through this derive.** A `.kgl`
+    /// load builds a fresh `DirGraph` and repopulates it from that struct
+    /// (`io::file`: `from_graph` / `apply_to_with`), so the `serde` attribute
+    /// here carries nothing across a save on its own. This map *is* the
+    /// enforcement structure — nothing else remembers the declared type — so
+    /// losing it across a save would silently stop enforcing every declaration
+    /// in the file.
     #[serde(default)]
     pub(crate) ddl_property_type_constraints:
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, DeclaredType>>,

@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Property-type constraints — `CREATE CONSTRAINT ... REQUIRE n.prop IS :: TYPE`
+  (and the `IS TYPED TYPE` spelling) are now declared and enforced.** The
+  statement previously parsed and was refused with an explanation; it now
+  installs a real constraint that every write path checks — Cypher `CREATE` and
+  `MERGE`, `SET`, and bulk `add_nodes` loads alike — and the declaration
+  survives save and reload. Declaring one scans the existing data first and
+  refuses if any row already disagrees, so a constraint never exempts the rows
+  that were there before it, and `DROP CONSTRAINT` (by name or by the canonical
+  `Label.property` descriptor) withdraws it.
+
+  The accepted types are `BOOLEAN`, `STRING`, `INTEGER`, `FLOAT`, `DATE`,
+  `LOCAL DATETIME`, `DURATION` and `POINT` — the Neo4j type names with an exact
+  KGLite value counterpart. Anything else (`LIST<...>`, unions, zoned temporal
+  types, decorated forms) keeps the explanatory rejection, which now names the
+  supported set: a name KGLite cannot enforce exactly is refused rather than
+  approximated. Matching is strict — an integer does not satisfy `FLOAT` — and,
+  as in Neo4j, a null or absent value satisfies every type, so combine the
+  constraint with `IS NOT NULL` when presence is also required. Where a declared
+  type and a schema-locked graph's recorded property type both cover a property,
+  the declaration wins and the error names the constraint.
+
+  **Format note**: a `.kgl` file containing a property-type constraint does not
+  load on 0.16.3 or earlier. Files that declare none are byte-identical to
+  before.
+
 ### Fixed
 
 - **A `CREATE CONSTRAINT ... IS NOT NULL` declaration no longer loses its

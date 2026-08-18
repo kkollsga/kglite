@@ -60,7 +60,8 @@ impl ConstraintColumns {
     /// The column lookup a batch of `node_type` rows needs, or `None` when the
     /// type declares no constraint at all.
     ///
-    /// UNIQUE / NOT NULL enforcement has to happen on the bulk path too: a
+    /// UNIQUE / NOT NULL / property-type enforcement has to happen on the bulk
+    /// path too: a
     /// constraint the batch engine bypassed would be theatre, since `add_nodes`
     /// is how blueprints, `from_records`, OKF, WAL replay and `extend_graph` all
     /// reach storage. Returning `None` for an unconstrained type is what keeps
@@ -70,8 +71,10 @@ impl ConstraintColumns {
         // Batch entry point: no violation parked by an earlier load may be
         // attributed to this one.
         graph.clear_pending_constraint_violation();
-        (graph.has_unique_constraints() || graph.has_required_fields(node_type))
-            .then(|| Self::new(df_data))
+        (graph.has_unique_constraints()
+            || graph.has_required_fields(node_type)
+            || graph.type_has_property_type_constraints(node_type))
+        .then(|| Self::new(df_data))
     }
 
     /// [`Self::gate_row`] for callers on the `Result<_, String>` channel: parks
@@ -144,6 +147,7 @@ impl ConstraintColumns {
         // violation, so it returns the structured value and lets `add_nodes`
         // decide how to render it.
         graph.check_required_fields(node_type, read)?;
+        graph.check_property_types(node_type, read)?;
         let claims = graph.unique_claims(node_type, read);
         graph.check_unique_claims(&claims, existing_idx)?;
         for claim in &claims {
@@ -2313,3 +2317,7 @@ mod incremental_index_tests;
 #[cfg(test)]
 #[path = "maintain_positional_delete_tests.rs"]
 mod positional_delete_tests;
+
+#[cfg(test)]
+#[path = "maintain_property_type_tests.rs"]
+mod property_type_tests;

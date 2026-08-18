@@ -78,6 +78,7 @@ use crate::graph::dir_graph::DirGraph;
 use crate::graph::introspection::schema_overview::{
     collect_constraints_structured, collect_indexes_structured, ConstraintInfo, IndexInfo,
 };
+use crate::graph::property_types::DeclaredType;
 
 /// Columns `SHOW INDEXES` projects, in order. Identical to `CALL db.indexes()`
 /// — one collector, one row shape.
@@ -760,6 +761,9 @@ enum ConstraintPlan {
     NotNull,
     /// Both — which is what a node key is.
     NodeKey,
+    /// Every value written to the property must have the declared type, via
+    /// `DirGraph::create_property_type_constraint`.
+    PropertyType(DeclaredType),
 }
 
 impl ConstraintPlan {
@@ -770,6 +774,7 @@ impl ConstraintPlan {
             ConstraintPlan::Unique => ConstraintKind::Unique,
             ConstraintPlan::NotNull => ConstraintKind::NotNull,
             ConstraintPlan::NodeKey => ConstraintKind::NodeKey,
+            ConstraintPlan::PropertyType(_) => ConstraintKind::PropertyType,
         }
     }
 }
@@ -794,13 +799,19 @@ fn execute_create_constraint(
         ConstraintRequirement::Unique => ConstraintPlan::Unique,
         ConstraintRequirement::NotNull => ConstraintPlan::NotNull,
         ConstraintRequirement::Key => ConstraintPlan::NodeKey,
-        ConstraintRequirement::PropertyType(declared) => {
-            return Err(unsupported_property_type_message(
-                &label,
-                &create.properties,
-                declared,
-            ))
-        }
+        ConstraintRequirement::PropertyType(declared) => match DeclaredType::resolve(declared) {
+            Some(resolved) => ConstraintPlan::PropertyType(resolved),
+            // An unmappable type name is refused rather than approximated: the
+            // accept-list is closed precisely so a constraint never enforces
+            // something other than what was written.
+            None => {
+                return Err(unsupported_property_type_message(
+                    &label,
+                    &create.properties,
+                    declared,
+                ))
+            }
+        },
     };
 
     // Uniqueness over a structural field is not served by the secondary index,
@@ -863,6 +874,9 @@ fn install_constraint(
     match plan {
         ConstraintPlan::Unique => declare_unique(graph, label, properties),
         ConstraintPlan::NotNull => declare_not_null(graph, label, properties, &mut Vec::new()),
+        ConstraintPlan::PropertyType(declared) => {
+            declare_property_type(graph, label, properties, declared)
+        }
         ConstraintPlan::NodeKey => {
             declare_unique(graph, label, properties)?;
             let mut installed: Vec<&String> = Vec::new();
@@ -909,6 +923,32 @@ fn declare_not_null<'p>(
     Ok(())
 }
 
+/// Declare every property to hold only `declared` values, unwinding the ones
+/// that landed if a later one is refused.
+///
+/// Neo4j has no composite type constraint, so `REQUIRE (n.a, n.b) IS :: INTEGER`
+/// cannot appear in a ported script; KGLite accepts the spelling and reads it as
+/// "each of these is INTEGER" — unambiguous and fully enforced — exactly as it
+/// reads the composite NOT NULL spelling.
+fn declare_property_type(
+    graph: &mut DirGraph,
+    label: &str,
+    properties: &[String],
+    declared: DeclaredType,
+) -> Result<(), String> {
+    let mut installed: Vec<&String> = Vec::new();
+    for property in properties {
+        if let Err(violation) = graph.create_property_type_constraint(label, property, declared) {
+            for property in installed {
+                graph.drop_property_type_constraint(label, property);
+            }
+            return Err(graph.record_constraint_violation(violation));
+        }
+        installed.push(property);
+    }
+    Ok(())
+}
+
 /// Whether the graph already carries everything `plan` would install.
 fn constraint_is_declared(
     graph: &DirGraph,
@@ -924,6 +964,13 @@ fn constraint_is_declared(
         ConstraintPlan::Unique => unique,
         ConstraintPlan::NotNull => present,
         ConstraintPlan::NodeKey => unique && present,
+        // Any declared type counts as "already declared", not just a matching
+        // one: a property carries at most one type, so re-declaring it with a
+        // *different* type must raise the already-exists error and tell the
+        // user to DROP first, rather than silently replacing what is enforced.
+        ConstraintPlan::PropertyType(_) => properties
+            .iter()
+            .all(|property| graph.property_type_for(label, property).is_some()),
     }
 }
 
@@ -1022,13 +1069,16 @@ fn reject_structural_uniqueness(
 /// would be wrong for most callers who read it.
 fn unsupported_property_type_message(label: &str, properties: &[String], declared: &str) -> String {
     format!(
-        "CREATE CONSTRAINT ... IS :: {declared} is not supported: KGLite has no write-time \
-         property-type constraint, so accepting this would report success while enforcing \
-         nothing. Two routes do enforce types: `lock_schema()` rejects a write whose value \
-         disagrees with the node type's recorded property type, and declaring \
-         `define_schema({{'nodes': {{'{label}': {{'types': {{'{}': '{}'}}}}}}}})` plus \
-         `validate_schema()` reports every existing violation. Use \
-         `REQUIRE {}{} IS NOT NULL` if presence, rather than type, is what you need.",
+        "CREATE CONSTRAINT ... IS :: {declared} is not supported: KGLite enforces a declared \
+         property type only for {}, and '{declared}' is not one of them — accepting it would \
+         report success while enforcing nothing (or, worse, enforcing a different type). \
+         Declare one of the supported types instead. For a shape they cannot express (a list, \
+         a union, a zoned temporal type), `define_schema({{'nodes': {{'{label}': {{'types': \
+         {{'{}': '{}'}}}}}}}})` plus `validate_schema()` reports every existing violation, and \
+         `lock_schema()` rejects a write whose value disagrees with the node type's recorded \
+         property type. Use `REQUIRE {}{} IS NOT NULL` if presence, rather than type, is what \
+         you need.",
+        DeclaredType::accepted_names().join(", "),
         properties.first().map(String::as_str).unwrap_or("prop"),
         declared.to_lowercase(),
         if properties.len() == 1 { "n." } else { "(n." },
@@ -1072,6 +1122,11 @@ fn execute_drop_constraint(
     if matches!(kind, ConstraintKind::NotNull | ConstraintKind::NodeKey) {
         for property in &properties {
             dropped |= graph.drop_not_null_constraint(&label, property);
+        }
+    }
+    if matches!(kind, ConstraintKind::PropertyType) {
+        for property in &properties {
+            dropped |= graph.drop_property_type_constraint(&label, property);
         }
     }
     graph.forget_constraint_name(name);
@@ -1631,25 +1686,32 @@ mod tests {
         assert!(!graph.has_unique_constraint("Person", &["age".to_string()]));
     }
 
-    /// `IS :: T` has no write-time enforcement route, so accepting it would
-    /// report success while enforcing nothing.
+    /// An unmappable type name keeps the explanatory rejection: the accept-list
+    /// is closed so a constraint never enforces something other than what was
+    /// written, and the message has to say which names *do* work.
     #[test]
-    fn property_type_constraints_are_rejected_with_the_routes_that_do_enforce() {
+    fn an_unsupported_property_type_names_the_supported_set() {
         let mut graph = person_graph();
         for query in [
-            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER",
-            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS TYPED INTEGER",
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: LIST<INTEGER>",
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS TYPED ZONED DATETIME",
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: NUMBER",
         ] {
             let err = run_err(&mut graph, query);
             assert!(err.contains("is not supported"), "for `{query}`: {err}");
-            assert!(err.contains("lock_schema"), "for `{query}`: {err}");
+            // The supported set, so the reader can fix the statement without
+            // hunting for documentation.
+            assert!(err.contains("INTEGER"), "for `{query}`: {err}");
+            assert!(err.contains("LOCAL DATETIME"), "for `{query}`: {err}");
+            // The schema route stays as the fallback for shapes no declared
+            // type can express.
             assert!(err.contains("validate_schema"), "for `{query}`: {err}");
             // The suggestion must name the key the schema parser actually
             // accepts. Until 0.16.1 it said `field_types` — the Rust field's
             // name, which the dialect ignores — so following the advice
             // declared nothing and validate_schema() then found no violations.
             assert!(
-                err.contains("'types': {'age': 'integer'}"),
+                err.contains("'types': {'age':"),
                 "the suggested key must be the dialect's, for `{query}`: {err}"
             );
             assert!(!err.contains("field_types"), "for `{query}`: {err}");
@@ -1658,8 +1720,275 @@ mod tests {
             // for most readers.
             assert!(!err.contains("kg."), "for `{query}`: {err}");
             assert!(
-                graph.get_schema().is_none(),
+                graph.property_type_for("Person", "age").is_none(),
                 "a rejected statement must declare nothing"
+            );
+        }
+    }
+
+    // ========================================================================
+    // Property-type constraints
+    // ========================================================================
+
+    /// The whole contract in one pass: the declaration installs, a conforming
+    /// write lands, a non-conforming one is refused with the constraint's own
+    /// prose, and the refusal is a typed violation rather than a bare string.
+    #[test]
+    fn a_declared_property_type_is_enforced_on_create() {
+        let mut graph = person_graph();
+        for query in [
+            "CREATE CONSTRAINT age_typed FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+            "CREATE CONSTRAINT age_typed2 FOR (p:Person) REQUIRE p.age IS TYPED INTEGER",
+        ] {
+            let mut graph = person_graph();
+            let stats = run(&mut graph, query).unwrap();
+            assert_eq!(stats.constraints_added, 1, "for `{query}`");
+            assert_eq!(
+                graph.property_type_for("Person", "age"),
+                Some(DeclaredType::Integer),
+                "for `{query}`"
+            );
+        }
+
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT age_typed FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+        )
+        .unwrap();
+
+        run(&mut graph, "CREATE (p:Person {id: 9, age: 41})")
+            .expect("an integer age satisfies the constraint");
+
+        let err = run_err(&mut graph, "CREATE (p:Person {id: 10, age: 'forty-one'})");
+        assert!(err.contains("'age'"), "got: {err}");
+        assert!(err.contains("INTEGER"), "got: {err}");
+        assert!(err.contains("STRING"), "got: {err}");
+        assert!(err.contains("PROPERTY TYPE constraint"), "got: {err}");
+
+        let violation = graph
+            .take_constraint_violation_for(&err)
+            .expect("the violation must be parked so bindings raise the typed error");
+        assert_eq!(violation.kind, ConstraintKind::PropertyType);
+    }
+
+    /// MERGE's create branch routes through the same node-creation path, so it
+    /// must be gated by the same declaration.
+    #[test]
+    fn a_declared_property_type_is_enforced_on_merge() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+        )
+        .unwrap();
+        let err = run_err(&mut graph, "MERGE (p:Person {id: 11, age: 'nope'})");
+        assert!(err.contains("INTEGER"), "got: {err}");
+        assert!(err.contains("PROPERTY TYPE constraint"), "got: {err}");
+    }
+
+    /// The SET path is the second choke point, and the one that already had a
+    /// constraint seam (`plan_property_write`).
+    #[test]
+    fn a_declared_property_type_is_enforced_on_set() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+        )
+        .unwrap();
+
+        run(&mut graph, "MATCH (p:Person) SET p.age = 44").expect("an integer age is accepted");
+
+        let err = run_err(&mut graph, "MATCH (p:Person) SET p.age = 'old'");
+        assert!(err.contains("INTEGER"), "got: {err}");
+        assert!(err.contains("STRING"), "got: {err}");
+        assert!(
+            graph.take_constraint_violation_for(&err).is_some(),
+            "SET violations must park the typed violation too"
+        );
+    }
+
+    /// A type constraint is not an existence constraint: clearing the property
+    /// is not a type violation. Declare NOT NULL alongside it if presence is
+    /// what is wanted.
+    #[test]
+    fn removing_or_nulling_a_typed_property_is_not_a_violation() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+        )
+        .unwrap();
+        run(&mut graph, "MATCH (p:Person) SET p.age = null").expect("null satisfies every type");
+        run(&mut graph, "MATCH (p:Person) REMOVE p.age").expect("absence satisfies every type");
+    }
+
+    /// A constraint that exempted the rows already present would enforce less
+    /// than it claims, so the declaration is refused and installs nothing.
+    #[test]
+    fn a_declaration_is_refused_against_violating_data() {
+        let mut graph = person_graph();
+        let err = run_err(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: STRING",
+        );
+        assert!(err.contains("cannot declare"), "got: {err}");
+        assert!(err.contains("2 existing nodes"), "got: {err}");
+        assert!(err.contains("STRING"), "got: {err}");
+        assert!(graph.property_type_for("Person", "age").is_none());
+
+        let violation = graph
+            .take_constraint_violation_for(&err)
+            .expect("a failed declaration is a typed violation too");
+        assert!(violation.is_declaration_failure());
+    }
+
+    /// A property carries at most one type, so a second declaration must not
+    /// silently replace what is enforced.
+    #[test]
+    fn redeclaring_reports_the_existing_constraint_and_if_not_exists_is_a_no_op() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+        )
+        .unwrap();
+
+        let err = run_err(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: STRING",
+        );
+        assert!(err.contains("already exists"), "got: {err}");
+        assert_eq!(
+            graph.property_type_for("Person", "age"),
+            Some(DeclaredType::Integer),
+            "the declared type must not change under a rejected statement"
+        );
+
+        let stats = run(
+            &mut graph,
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+        )
+        .unwrap();
+        assert_eq!(stats.constraints_added, 0);
+    }
+
+    /// Both addressing spellings must drop it: the author's name, and the
+    /// canonical descriptor an unnamed declaration reports itself under.
+    #[test]
+    fn dropping_a_property_type_constraint_restores_writability() {
+        for (create, drop) in [
+            (
+                "CREATE CONSTRAINT age_typed FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+                "DROP CONSTRAINT age_typed",
+            ),
+            (
+                "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+                "DROP CONSTRAINT `Person.age`",
+            ),
+        ] {
+            let mut graph = person_graph();
+            run(&mut graph, create).unwrap();
+            run_err(&mut graph, "MATCH (p:Person) SET p.age = 'old'");
+
+            let stats = run(&mut graph, drop).unwrap();
+            assert_eq!(stats.constraints_removed, 1, "for `{drop}`");
+            assert!(graph.property_type_for("Person", "age").is_none());
+            run(&mut graph, "MATCH (p:Person) SET p.age = 'old'")
+                .unwrap_or_else(|e| panic!("after `{drop}` the write must be allowed: {e}"));
+        }
+    }
+
+    /// `UniqueId` is the compact encoding of an auto-assigned id, so the most
+    /// obvious declaration anyone writes must not be refused by the graph's own
+    /// ids — end to end, through the real write path.
+    #[test]
+    fn an_integer_declaration_accepts_ids_end_to_end() {
+        let mut graph = person_graph();
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.id IS :: INTEGER",
+        )
+        .expect("existing UniqueId ids satisfy INTEGER");
+        run(&mut graph, "CREATE (p:Person {id: 7})").expect("a new integer id is an INTEGER");
+    }
+
+    /// Precedence (plan decision A3): where the schema lock's observed-metadata
+    /// check and a declared type constraint both cover a property, the
+    /// declaration wins — in both directions.
+    #[test]
+    fn a_declared_type_wins_over_the_schema_lock_metadata_check() {
+        let mut graph = person_graph();
+        graph.node_type_metadata_mut().insert(
+            "Person".to_string(),
+            HashMap::from([
+                ("age".to_string(), "int".to_string()),
+                ("nickname".to_string(), "string".to_string()),
+            ]),
+        );
+        run(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.nickname IS :: INTEGER",
+        )
+        .expect("no existing node has a nickname, so nothing blocks the declaration");
+        graph.schema_locked = true;
+
+        // The metadata says `nickname` is a string and would accept this; the
+        // declaration says INTEGER and refuses it. The user gets the
+        // constraint's error, naming the constraint they wrote.
+        let err = run_err(&mut graph, "MATCH (p:Person) SET p.nickname = 'nick'");
+        assert!(err.contains("PROPERTY TYPE constraint"), "got: {err}");
+        assert!(err.contains("INTEGER"), "got: {err}");
+        assert!(
+            !err.contains("schema is locked"),
+            "the generic validation error must not win: {err}"
+        );
+
+        // And the other direction: a value the metadata would reject is
+        // accepted when the declaration allows it.
+        run(&mut graph, "MATCH (p:Person) SET p.nickname = 7")
+            .expect("the declared INTEGER wins over the recorded 'string' metadata");
+    }
+
+    /// A declared type on a schema-locked graph still may not name a property
+    /// the schema does not declare — the exemption above is for the *value*
+    /// check, not for the typo guard.
+    #[test]
+    fn schema_lock_still_rejects_constraining_an_undeclared_property() {
+        let mut graph = person_graph();
+        graph.node_type_metadata_mut().insert(
+            "Person".to_string(),
+            HashMap::from([("age".to_string(), "int".to_string())]),
+        );
+        graph.schema_locked = true;
+        let err = run_err(
+            &mut graph,
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.nickname IS :: INTEGER",
+        );
+        assert!(err.contains("schema is locked"), "got: {err}");
+        assert!(graph.property_type_for("Person", "nickname").is_none());
+    }
+
+    /// Map assignment is a second SET spelling (`SET n = {…}` replaces the
+    /// property set, `SET n += {…}` merges into it). Both must be gated, or the
+    /// constraint is one keystroke away from being bypassed.
+    #[test]
+    fn map_assignment_is_gated_by_a_declared_type() {
+        for query in [
+            "MATCH (p:Person) SET p = {id: 1, age: 'old'}",
+            "MATCH (p:Person) SET p += {age: 'old'}",
+        ] {
+            let mut graph = person_graph();
+            run(
+                &mut graph,
+                "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.age IS :: INTEGER",
+            )
+            .unwrap();
+            let err = run_err(&mut graph, query);
+            assert!(err.contains("INTEGER"), "for `{query}`: {err}");
+            assert!(
+                err.contains("PROPERTY TYPE constraint"),
+                "for `{query}`: {err}"
             );
         }
     }

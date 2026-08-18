@@ -212,8 +212,19 @@ pub(super) fn apply_node_property_set<'a>(
     // write whitelist.
     enforce_write_scope(graph, node_type_str)?;
 
-    // Schema lock validation for SET
-    if graph.schema_locked {
+    // Schema lock validation for SET.
+    //
+    // A property carrying a *declared* type constraint is exempt: the two
+    // checks answer the same question, one from observed metadata and one from
+    // what the user wrote, and the declaration wins. Without this, a
+    // schema-locked graph reported the generic validation error for a value the
+    // user had explicitly constrained — naming a type they never declared and
+    // losing the typed `ConstraintViolationError` the constraint would have
+    // raised a few lines below. The property is known to the schema either way:
+    // installing a constraint on a schema-locked graph already required it to
+    // be declared (`validate_ddl_properties_declared`), so the exemption cannot
+    // let an undeclared property through the typo guard.
+    if graph.schema_locked && graph.property_type_for(node_type_str, property).is_none() {
         crate::graph::mutation::validation::validate_property_set(
             node_type_str,
             property,

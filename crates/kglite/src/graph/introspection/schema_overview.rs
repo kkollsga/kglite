@@ -573,6 +573,22 @@ pub(crate) fn collect_constraints_structured(graph: &DirGraph) -> Vec<Constraint
         });
     }
 
+    // A declared property type is its own constraint, never folded into the
+    // rows above: a property may be UNIQUE, NOT NULL *and* typed, and Neo4j
+    // reports each as a separate row. Listing them is also what makes an
+    // unnamed one droppable — `DROP CONSTRAINT` resolves a canonical descriptor
+    // through this collector.
+    for (node_type, property, _declared) in graph.list_property_type_constraints() {
+        let properties = vec![property];
+        out.push(ConstraintInfo {
+            name: constraint_name(graph, &node_type, &properties),
+            kind: ConstraintKind::PropertyType,
+            entity_type: "NODE",
+            labels_or_types: vec![node_type.clone()],
+            properties,
+        });
+    }
+
     out.sort_by(|a, b| {
         a.name
             .cmp(&b.name)

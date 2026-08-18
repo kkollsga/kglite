@@ -490,6 +490,21 @@ impl DirGraph {
         property: &str,
         new_value: Option<&Value>,
     ) -> Result<PropertyWritePlan, ConstraintViolation> {
+        // A declared property type is a pure predicate on the incoming value:
+        // no read-back, no claim bookkeeping, nothing to redeem afterwards. It
+        // is checked *before* the uniqueness early-out below because that
+        // early-out asks only about unique/NOT NULL declarations — a type that
+        // declares a property type and nothing else has no `constrained`
+        // properties, and folding the check in after the early-out would skip
+        // it exactly on the graphs where it is the only constraint.
+        //
+        // `None` is REMOVE, and a null value is a SET-to-null: both leave the
+        // property absent, which satisfies every declared type (the presence
+        // question belongs to NOT NULL).
+        if let Some(value) = new_value {
+            self.check_property_type(node_type, property, value)?;
+        }
+
         let constrained = self.constrained_properties(node_type);
         if constrained.is_empty() {
             return Ok(PropertyWritePlan::default());
@@ -911,6 +926,14 @@ impl DirGraph {
     #[inline]
     pub(crate) fn has_property_type_constraints(&self) -> bool {
         !self.ddl_property_type_constraints.is_empty()
+    }
+
+    /// Whether `node_type` declares any property type. The per-type companion
+    /// to [`Self::has_property_type_constraints`], for a caller deciding once
+    /// per batch whether a row gate is needed at all.
+    #[inline]
+    pub(crate) fn type_has_property_type_constraints(&self, node_type: &str) -> bool {
+        self.ddl_property_type_constraints.contains_key(node_type)
     }
 
     /// The type declared for `node_type.property`, if one is.

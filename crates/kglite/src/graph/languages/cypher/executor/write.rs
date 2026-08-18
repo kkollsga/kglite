@@ -947,6 +947,14 @@ fn create_node(
     if let Err(violation) = required {
         return Err(graph.record_constraint_violation(violation));
     }
+    // Declared property types. Checked here — before the schema-lock
+    // validation further down — so a user who declared a type constraint gets
+    // the constraint's own error rather than the generic observed-metadata one
+    // for the same value.
+    let typed = graph.check_property_types(&label, constraint_read);
+    if let Err(violation) = typed {
+        return Err(graph.record_constraint_violation(violation));
+    }
     let unique_claims = graph.unique_claims(&label, constraint_read);
     let unique = graph.check_unique_claims(&unique_claims, None);
     if let Err(violation) = unique {
