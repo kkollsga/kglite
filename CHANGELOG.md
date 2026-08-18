@@ -46,6 +46,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rows positionally, or asserting an exact column set, sees one additional
   column.
 
+- **Change data capture — an opt-in change stream, read through
+  `CALL db.cdc.*`.** `CALL db.cdc.enable()` starts recording; every committed
+  change to a node or relationship is then published to a bounded in-memory log
+  that `CALL db.cdc.query({from: <cursor>})` reads back, oldest first. Cursors
+  are opaque strings from `CALL db.cdc.current()` (the newest change — start
+  here to see only what happens next) and `CALL db.cdc.earliest()` (the oldest
+  still retained), so a consumer keeps its own position and the engine keeps no
+  per-consumer state. Events carry the operation (`create`/`update`/`delete`),
+  the element type, the logical identity — `(nodeType, nodeId)` for a node,
+  `(relationshipType, srcType, srcId, tgtType, tgtId)` for a relationship — and
+  the after-state as a map. Works on in-memory and mapped graphs, durable or
+  not; `storage='disk'` is refused, because a disk graph's change boundary is
+  its generation publish rather than the per-commit capture this is derived
+  from.
+
+  **A change that was not committed never appears.** Events are derived from the
+  same write-capture buffer the write-ahead log uses, at the same commit
+  boundaries, so a rolled-back statement or transaction contributes nothing —
+  not a filtered-out event, but no event at all.
+
+  Retention is a ring of 65536 events by default and configurable with
+  `CALL db.cdc.enable({capacity: N})`, which also resizes a running log in place
+  without invalidating live cursors. A consumer that falls further behind than
+  the retention gets a typed refusal naming both remedies (resync from
+  `earliest()`, or raise the capacity) rather than a silently truncated answer.
+  The log is process-local runtime state and is deliberately not saved into the
+  `.kgl`: a reloaded graph starts a new epoch, and a cursor from a different
+  epoch is refused rather than resolved against different data.
+
+  **Divergences from Neo4j's `db.cdc.*`**, which this deliberately tracks where
+  the concepts line up: `id` and `seq` mean the same things, but `txId` and
+  `metadata` are absent (KGLite assigns no durable transaction identity and
+  records no per-transaction metadata), the `event` map is flattened into
+  columns so `YIELD nodeType, operation` filters directly in Cypher, and `state`
+  is the after-image only — Neo4j's `{before, after}` shape needs before-images,
+  which are not in this release. `db.cdc.enable`/`disable` have no Neo4j
+  counterpart at all: enablement there is a database option.
+
 ### Fixed
 
 - **A failed `replace_connections` no longer destroys the edges it was going to

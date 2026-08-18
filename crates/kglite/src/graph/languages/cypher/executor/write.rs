@@ -57,6 +57,14 @@ pub(crate) fn clause_is_mutation(clause: &Clause) -> bool {
         // Nested sub-pipelines: a write inside the body makes the
         // enclosing query a mutation.
         Clause::CallSubquery { body, .. } => is_mutation_query(body),
+        // Most `CALL`s are reads, but the change-capture lifecycle verbs
+        // (`db.cdc.enable` / `db.cdc.disable`) change graph state, so they
+        // route to the write engine and sit behind the same read-only and
+        // rollback guards as any other mutation. The registry is the
+        // classifier — a name list here would be the second one.
+        Clause::Call(call) => {
+            super::procedure_registry::is_mutating_procedure(&call.procedure_name.to_lowercase())
+        }
         Clause::Union(u) => is_mutation_query(&u.query),
         // FOREACH is an updating clause by nature (its body holds only
         // update clauses), so it always routes to the mutable engine —
@@ -75,6 +83,52 @@ pub(crate) fn clause_is_mutation(clause: &Clause) -> bool {
         Clause::Schema(_) => true,
         _ => false,
     }
+}
+
+/// Run a change-capture lifecycle procedure (`db.cdc.enable` / `db.cdc.disable`)
+/// on the write engine.
+///
+/// Split out of the clause pipeline rather than inlined there: the pipeline is
+/// at its complexity ceiling, and this is a self-contained "evaluate the
+/// arguments, run the verb, shape the rows" step.
+fn execute_cdc_lifecycle_call(
+    graph: &mut DirGraph,
+    call: &crate::graph::languages::cypher::ast::CallClause,
+    params: &HashMap<String, Value>,
+    interrupt: &Interrupt,
+    budget: &super::budget::ExecutionBudget,
+) -> Result<ResultSet, String> {
+    let proc_name = call.procedure_name.to_lowercase();
+    // The registry answers "what does this yield?" for both engines, so a bare
+    // CALL expands and an unknown column is refused exactly as on the read path.
+    let yield_items = super::call_clause::resolve_yield_items(
+        &proc_name,
+        &call.procedure_name,
+        &call.yield_items,
+    )?;
+    // Arguments are evaluated by the read executor: a CALL argument is an
+    // ordinary expression over no rows, and duplicating that evaluation here is
+    // how the two paths would start accepting different argument forms.
+    let params_map = {
+        let executor = CypherExecutor::with_params(graph, params, interrupt.deadline)
+            .with_cancel(interrupt.cancel)
+            .with_budget(budget.clone());
+        executor.extract_call_params(&call.parameters)?
+    };
+    let rows = super::cdc_procedures::execute_mutating_procedure(
+        graph,
+        &proc_name,
+        &params_map,
+        &yield_items,
+    )?;
+    Ok(ResultSet {
+        columns: yield_items
+            .iter()
+            .map(|item| item.alias.clone().unwrap_or_else(|| item.name.clone()))
+            .collect(),
+        rows,
+        lazy_return_items: None,
+    })
 }
 
 /// Execute a mutation query against a mutable graph.
@@ -398,6 +452,19 @@ fn run_clause_pipeline(
                     .with_csv_import(ctx.csv_import.clone());
                 let declared = ctx.declared_before(clauses, i);
                 result_set = executor.execute_call_subquery(import, body, result_set, &declared)?;
+            }
+            // Change-capture lifecycle (`db.cdc.enable` / `db.cdc.disable`).
+            // Here rather than on the read engine for the same reason schema
+            // DDL is: it mutates graph state, so it must sit behind the
+            // read-only guard and the rollback checkpoint. Read CDC
+            // procedures fall through to the read executor below, like every
+            // other `CALL`.
+            Clause::Call(call)
+                if super::procedure_registry::is_mutating_procedure(
+                    &call.procedure_name.to_lowercase(),
+                ) =>
+            {
+                result_set = execute_cdc_lifecycle_call(graph, call, params, interrupt, budget)?;
             }
             // Schema DDL. Runs here — not on the read engine — because schema
             // is graph state, so it must sit behind the same read-only /

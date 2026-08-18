@@ -298,41 +298,29 @@ impl<'a> CypherExecutor<'a> {
             .unwrap_or(raw_proc_name.as_str())
             .to_string();
 
-        // Validate YIELD columns
-        let valid_yields = valid_yield_columns(proc_name.as_str(), &clause.procedure_name)?;
+        // Validate YIELD columns, expanding a bare `CALL proc()` to every
+        // declared column in declared order (Neo4j's semantics). Shared with
+        // the write engine's CDC-lifecycle path so the two cannot disagree
+        // about what a procedure yields — see `resolve_yield_items`.
+        let effective_yields = resolve_yield_items(
+            proc_name.as_str(),
+            &clause.procedure_name,
+            &clause.yield_items,
+        )?;
 
-        // Standalone `CALL proc()` (no YIELD): expand to every declared
-        // column in declared order — Neo4j's semantics for a bare CALL. The
-        // parser guarantees the bare form is the entire statement, so the
+        // The parser guarantees the bare form is the entire statement, so the
         // synthesized items can't shadow downstream bindings.
         let synthesized_clause;
         let clause = if clause.yield_items.is_empty() {
             synthesized_clause = CallClause {
                 procedure_name: clause.procedure_name.clone(),
                 parameters: clause.parameters.clone(),
-                yield_items: valid_yields
-                    .iter()
-                    .map(|name| YieldItem {
-                        name: (*name).to_string(),
-                        alias: None,
-                    })
-                    .collect(),
+                yield_items: effective_yields,
             };
             &synthesized_clause
         } else {
             clause
         };
-
-        for item in &clause.yield_items {
-            if !valid_yields.contains(&item.name.as_str()) {
-                return Err(format!(
-                    "Procedure '{}' does not yield '{}'. Available: {}",
-                    clause.procedure_name,
-                    item.name,
-                    valid_yields.join(", ")
-                ));
-            }
-        }
 
         // Fail-fast guard against unscoped procedure runs on large graphs.
         // These procedures all walk the full graph (no scope/projection arg
@@ -806,6 +794,18 @@ impl<'a> CypherExecutor<'a> {
             // distinct_count. Common pre-flight before declaring a
             // constraint.
             "db.property_uniqueness" => super::schema_procedures::execute_schema_procedure(
+                self,
+                &proc_name,
+                &params,
+                &clause.yield_items,
+            )?,
+            // The whole `db.cdc.*` family routes to one module, which sorts
+            // read verbs from the lifecycle verbs — the latter belong to the
+            // write engine and are refused here rather than falling into the
+            // `unreachable!()` below. Only registered names reach this match
+            // (`resolve_yield_items` rejected the rest), so the prefix test
+            // cannot swallow a typo.
+            other if other.starts_with("db.cdc.") => super::cdc_procedures::execute_cdc_procedure(
                 self,
                 &proc_name,
                 &params,
@@ -1476,6 +1476,42 @@ pub(super) fn names_to_rows(names: &[String], yield_items: &[YieldItem]) -> Vec<
 /// also feeds `list_procedures` and `SHOW PROCEDURES`, so the three can
 /// never drift apart again. `display_name` is the user's spelling, for the
 /// error message.
+/// Validate a CALL's YIELD list against the registry and expand the bare
+/// form, returning the columns the call will actually produce.
+///
+/// **Both engines call this.** A read `CALL` runs on the immutable executor
+/// and the CDC lifecycle verbs run on the write engine, but "does this
+/// procedure yield that column, and what does a bare call return?" is one
+/// question with one answer — the registry's. Answering it twice is how the
+/// two hand-maintained lists this module replaced drifted apart.
+pub(super) fn resolve_yield_items(
+    proc_name: &str,
+    display_name: &str,
+    requested: &[YieldItem],
+) -> Result<Vec<YieldItem>, String> {
+    let valid = valid_yield_columns(proc_name, display_name)?;
+    if requested.is_empty() {
+        return Ok(valid
+            .iter()
+            .map(|name| YieldItem {
+                name: (*name).to_string(),
+                alias: None,
+            })
+            .collect());
+    }
+    for item in requested {
+        if !valid.contains(&item.name.as_str()) {
+            return Err(format!(
+                "Procedure '{}' does not yield '{}'. Available: {}",
+                display_name,
+                item.name,
+                valid.join(", ")
+            ));
+        }
+    }
+    Ok(requested.to_vec())
+}
+
 fn valid_yield_columns(
     proc_name: &str,
     display_name: &str,

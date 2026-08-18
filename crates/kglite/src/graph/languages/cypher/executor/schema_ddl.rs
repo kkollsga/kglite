@@ -157,9 +157,9 @@ pub(crate) fn is_schema_read(command: &SchemaCommand) -> bool {
 }
 
 /// Default columns of `SHOW PROCEDURES` — Neo4j's default output shape, so a
-/// client reading positionally sees what it expects. `mode` is always "READ"
-/// (every KGLite procedure is a read; mutations are rejected upstream) and
-/// `worksOnSystem` is always false (there is no system database).
+/// client reading positionally sees what it expects. `mode` comes from the
+/// registry ("READ", or "SCHEMA" for the capture-lifecycle verbs)
+/// and `worksOnSystem` is always false (there is no system database).
 /// `signature` is yieldable but not in the default set, matching Neo4j —
 /// G.V() sends `SHOW PROCEDURES YIELD name, description, signature`
 /// (measured 2026-08-15).
@@ -203,7 +203,12 @@ fn show_procedures_result_set(yield_items: &[YieldItem]) -> Result<ResultSet, St
             let value = match item.name.as_str() {
                 "name" => Value::String(spec.name.to_string()),
                 "description" => Value::String(spec.description.to_string()),
-                "mode" => Value::String("READ".to_string()),
+                // Read from the registry, not hard-coded: the CDC lifecycle
+                // verbs mutate, and reporting them as READ would tell a client
+                // it can run them on a read-only connection.
+                "mode" => {
+                    Value::String(super::procedure_registry::procedure_mode(spec.name).to_string())
+                }
                 "worksOnSystem" => Value::Boolean(false),
                 // Neo4j-style signature. KGLite procedures take one optional
                 // config map, so the input side is uniform; outputs are the

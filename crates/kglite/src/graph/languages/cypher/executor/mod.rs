@@ -910,6 +910,7 @@ mod analysis_procedures;
 pub(crate) mod budget;
 pub mod call_clause;
 pub mod call_subquery;
+mod cdc_procedures;
 mod centrality_procedures;
 mod columnar_write;
 pub mod dead_code;

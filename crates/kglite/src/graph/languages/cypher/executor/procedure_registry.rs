@@ -348,7 +348,88 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
         description: "Uniqueness pre-flight for a (label, property): is it unique, and how many violations. Params: {node_type, property}",
         columns: &["is_unique", "violation_count", "distinct_count"],
     },
+    // ── Change data capture (db.cdc.*) ──
+    //
+    // Neo4j exposes `db.cdc.current/earliest/query`; enablement there is a
+    // database *option* (`ALTER DATABASE ... SET OPTION txLogEnrichment`),
+    // which KGLite has no equivalent of, so the two lifecycle verbs are
+    // KGLite-specific and carry no Neo4j column shape to match.
+    ProcedureSpec {
+        name: "db.cdc.enable",
+        aliases: &[],
+        description: "Start change data capture on this graph, or resize a running log in place. Params: {capacity} (events retained, default 65536). Refused in storage='disk'.",
+        columns: &["enabled", "epoch", "capacity", "cursor"],
+    },
+    ProcedureSpec {
+        name: "db.cdc.disable",
+        aliases: &[],
+        description: "Stop change data capture and discard the log. Idempotent; 'wasEnabled' reports whether it was running.",
+        columns: &["enabled", "wasEnabled"],
+    },
+    ProcedureSpec {
+        name: "db.cdc.current",
+        aliases: &[],
+        description: "Cursor addressing the newest published change — the position to start from to see only future changes",
+        columns: &["id"],
+    },
+    ProcedureSpec {
+        name: "db.cdc.earliest",
+        aliases: &[],
+        description: "Cursor addressing the oldest change still retained — the position to resync from after a cursor expires",
+        columns: &["id"],
+    },
+    ProcedureSpec {
+        name: "db.cdc.query",
+        aliases: &[],
+        description: "Changes published after a cursor, oldest first. Params: {from} (cursor from db.cdc.current/earliest; defaults to everything retained).",
+        columns: &[
+            "id",
+            "seq",
+            "operation",
+            "elementType",
+            "nodeType",
+            "nodeId",
+            "relationshipType",
+            "srcType",
+            "srcId",
+            "tgtType",
+            "tgtId",
+            "state",
+        ],
+    },
 ];
+
+/// The procedures that **mutate** and must therefore route to the write
+/// engine. Everything else in [`PROCEDURES`] is a read.
+///
+/// A name list rather than a field on [`ProcedureSpec`] because a field would
+/// have to be spelled out by all 51 entries to say "READ" 49 times; the drift
+/// this file exists to prevent is closed instead by
+/// `every_mutating_procedure_is_registered`, which fails if a name here has no
+/// spec. Two consumers read it: [`clause_is_mutation`](super::write::clause_is_mutation),
+/// which routes the query, and `SHOW PROCEDURES`, which reports the mode.
+pub(super) const MUTATING_PROCEDURES: &[&str] = &["db.cdc.enable", "db.cdc.disable"];
+
+/// Whether `name` (canonical spelling or alias, any case) is a mutating
+/// procedure.
+pub(super) fn is_mutating_procedure(name: &str) -> bool {
+    let Some(spec) = find_procedure(name) else {
+        return false;
+    };
+    MUTATING_PROCEDURES
+        .iter()
+        .any(|mutating| mutating.eq_ignore_ascii_case(spec.name))
+}
+
+/// Neo4j procedure mode for `SHOW PROCEDURES`. KGLite's mutating procedures
+/// change capture configuration rather than data, which is Neo4j's "SCHEMA".
+pub(super) fn procedure_mode(name: &str) -> &'static str {
+    if is_mutating_procedure(name) {
+        "SCHEMA"
+    } else {
+        "READ"
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -405,6 +486,43 @@ mod tests {
                 !spec.description.is_empty(),
                 "{} has no description",
                 spec.name
+            );
+        }
+    }
+    /// Every mutating name must name a real procedure — the drift guard that
+    /// lets `MUTATING_PROCEDURES` be a separate list. A typo here would
+    /// silently route a CDC lifecycle call to the read engine, where it
+    /// cannot mutate.
+    #[test]
+    fn every_mutating_procedure_is_registered() {
+        for name in MUTATING_PROCEDURES {
+            let spec = find_procedure(name)
+                .unwrap_or_else(|| panic!("MUTATING_PROCEDURES names unknown procedure {name}"));
+            assert_eq!(spec.name, *name, "use the canonical spelling");
+            assert!(is_mutating_procedure(name));
+            assert_eq!(procedure_mode(name), "SCHEMA");
+        }
+        assert!(!is_mutating_procedure("db.cdc.query"));
+        assert_eq!(procedure_mode("db.cdc.query"), "READ");
+        assert!(!is_mutating_procedure("db.labels"));
+        assert!(!is_mutating_procedure("no.such.procedure"));
+    }
+
+    /// The whole family must be reachable by name, or `SHOW PROCEDURES`
+    /// advertises calls that do not resolve.
+    #[test]
+    fn the_cdc_family_is_registered() {
+        for name in [
+            "db.cdc.enable",
+            "db.cdc.disable",
+            "db.cdc.current",
+            "db.cdc.earliest",
+            "db.cdc.query",
+        ] {
+            assert!(find_procedure(name).is_some(), "{name} is not registered");
+            assert!(
+                find_procedure(&name.to_uppercase()).is_some(),
+                "{name} must resolve case-insensitively"
             );
         }
     }
