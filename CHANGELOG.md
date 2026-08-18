@@ -48,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A failed `replace_connections` no longer destroys the edges it was going to
+  replace.** The call deletes a source's existing edges of the given type and
+  then re-adds them from the supplied frame, so a refusal raised *after* the
+  delete left the graph with neither the old edges nor the new ones. Column
+  presence was already validated up front for this reason, but two refusals
+  still landed on the far side: an unknown `conflict_handling` mode, and the
+  constraint check that runs when an edge to a missing endpoint auto-creates a
+  stub node. Both now happen before anything is deleted, so a rejected replace
+  leaves the graph exactly as it was. Successful replaces behave identically,
+  including the vivified-stub count they report.
+
 - **A bulk load refused by a constraint no longer records the rejected data's
   schema.** `add_nodes` merged the incoming frame's column types (and its
   id/title field aliases) into the node type's observed metadata *before*

@@ -1,4 +1,5 @@
 use super::*;
+use crate::graph::property_types::DeclaredType;
 
 fn doc_entity_graph() -> DirGraph {
     let mut g = DirGraph::new();
@@ -155,4 +156,153 @@ fn replace_validates_before_pruning() {
     assert!(err.is_err());
     // The pre-existing edge must not have been pruned.
     assert_eq!(count_edges_of_type(&g, "Doc", 1, "MENTIONS"), 1);
+}
+
+// ============================================================================
+// A failed replace leaves the old edges alone
+// ============================================================================
+//
+// `replace_connections` deletes the source's existing edges and then delegates
+// to `add_connections`. Every refusal therefore has to happen *before* the
+// delete, or the call destroys data and puts nothing back — the mirror image of
+// a load that half-applies. The function pre-validates the columns and the
+// interner for exactly this reason; these pin the paths that were still
+// reachable past the delete.
+
+/// Attempt a replace that is expected to fail, and report whether Doc 1 kept
+/// the edges it had.
+fn replace_expecting_failure(
+    graph: &mut DirGraph,
+    pairs: &[(i64, &str)],
+    conflict_handling: Option<String>,
+) -> String {
+    replace_connections(
+        graph,
+        edges_df(pairs),
+        "MENTIONS".to_string(),
+        "Doc".to_string(),
+        "s".to_string(),
+        "Entity".to_string(),
+        "t".to_string(),
+        None,
+        None,
+        conflict_handling,
+    )
+    .expect_err("the replace was expected to fail")
+}
+
+/// An unknown conflict-handling mode is rejected by `add_connections` — after
+/// `replace_connections` has already deleted the edges it was meant to replace.
+#[test]
+fn an_invalid_conflict_mode_does_not_destroy_the_existing_edges() {
+    let mut graph = doc_entity_graph();
+    add_mentions(&mut graph, &[(1, "A"), (1, "B")]);
+    assert_eq!(count_edges_of_type(&graph, "Doc", 1, "MENTIONS"), 2);
+
+    let error = replace_expecting_failure(&mut graph, &[(1, "C")], Some("bogus-mode".to_string()));
+    assert!(error.contains("conflict handling"), "got: {error}");
+
+    assert_eq!(
+        count_edges_of_type(&graph, "Doc", 1, "MENTIONS"),
+        2,
+        "a rejected replace must leave the edges it was going to replace"
+    );
+}
+
+/// An edge to a missing endpoint vivifies a stub node, and that stub goes
+/// through the node-side constraint gate. A refusal there aborts the add —
+/// again, after the delete.
+#[test]
+fn a_constraint_refused_stub_does_not_destroy_the_existing_edges() {
+    let mut graph = doc_entity_graph();
+    add_mentions(&mut graph, &[(1, "A"), (1, "B")]);
+    // Entity ids are strings, so requiring an integer id means any stub this
+    // load would vivify is refused.
+    graph
+        .create_property_type_constraint("Entity", "id", DeclaredType::Integer)
+        .expect_err("existing string ids already violate it");
+    // Declare it on a type whose ids *do* satisfy it, and point the edge at a
+    // missing endpoint of that type instead.
+    graph
+        .create_property_type_constraint("Doc", "id", DeclaredType::Integer)
+        .expect("Doc ids are integers");
+
+    let error = replace_connections(
+        &mut graph,
+        DataFrame::from_cypher_rows(
+            vec!["s".to_string(), "t".to_string()],
+            vec![vec![Value::Int64(1), Value::String("missing-doc".into())]],
+        )
+        .unwrap(),
+        "MENTIONS".to_string(),
+        "Doc".to_string(),
+        "s".to_string(),
+        // Target type is Doc, whose `id` must be an INTEGER — the string
+        // endpoint below cannot be vivified.
+        "Doc".to_string(),
+        "t".to_string(),
+        None,
+        None,
+        None,
+    )
+    .expect_err("a stub violating the declared id type must refuse the load");
+    assert!(error.contains("INTEGER"), "got: {error}");
+
+    assert_eq!(
+        count_edges_of_type(&graph, "Doc", 1, "MENTIONS"),
+        2,
+        "a rejected replace must leave the edges it was going to replace"
+    );
+}
+
+/// The same refusal reached through a plain `add_connections` (no delete
+/// involved): it must abort the call without leaving edges behind. Pass A
+/// buffers its edges into the batch and only `batch.execute` writes them, so a
+/// refusal in the later vivification pass never commits them.
+#[test]
+fn a_constraint_refused_stub_leaves_no_edges_from_a_plain_add() {
+    let mut graph = doc_entity_graph();
+    graph
+        .create_property_type_constraint("Doc", "id", DeclaredType::Integer)
+        .expect("Doc ids are integers");
+
+    let before = count_edges_of_type(&graph, "Doc", 1, "MENTIONS");
+    assert_eq!(before, 0);
+
+    let error = add_connections(
+        &mut graph,
+        DataFrame::from_cypher_rows(
+            vec!["s".to_string(), "t".to_string()],
+            vec![
+                // A row whose endpoints both exist — buffered by Pass A.
+                vec![Value::Int64(1), Value::Int64(2)],
+                // A row whose target is missing, so Pass B tries to vivify a
+                // stub whose id violates the declared type.
+                vec![Value::Int64(1), Value::String("missing".into())],
+            ],
+        )
+        .unwrap(),
+        "MENTIONS".to_string(),
+        "Doc".to_string(),
+        "s".to_string(),
+        "Doc".to_string(),
+        "t".to_string(),
+        None,
+        None,
+        None,
+    )
+    .expect_err("a stub violating the declared id type must refuse the load");
+    assert!(error.contains("INTEGER"), "got: {error}");
+
+    assert_eq!(
+        count_edges_of_type(&graph, "Doc", 1, "MENTIONS"),
+        0,
+        "a refused add must commit none of its edges, not even the valid rows"
+    );
+    assert!(
+        graph
+            .lookup_by_id_readonly("Doc", &Value::String("missing".into()))
+            .is_none(),
+        "the refused stub must not exist"
+    );
 }

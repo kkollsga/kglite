@@ -1787,10 +1787,51 @@ pub fn replace_connections(
         ));
     }
 
-    // --- Collect the distinct, non-null source ids present in the DataFrame ---
+    // --- Everything else that can refuse the call, also before the delete ---
+    //
+    // `replace_connections` destroys data and then rebuilds it, so any refusal
+    // raised past the delete leaves the graph with neither the old edges nor
+    // the new ones. Column presence and the interner were already checked
+    // above for exactly that reason; these are the two remaining refusals
+    // `add_connections` could still raise afterwards.
+    //
+    // 1. The conflict mode. An unknown one is a caller mistake, and it was
+    //    being discovered only after the edges were gone.
+    parse_conflict_mode(conflict_handling.as_deref())?;
+
     let source_id_idx = df_data
         .get_column_index(&source_id_field)
         .ok_or_else(|| format!("Source ID column '{}' not found", source_id_field))?;
+    let target_id_idx = df_data
+        .get_column_index(&target_id_field)
+        .ok_or_else(|| format!("Target ID column '{}' not found", target_id_field))?;
+
+    // 2. Stub vivification. An edge to a missing endpoint creates a stub node,
+    //    and that stub goes through the node-side constraint gate — a refusal
+    //    there aborts the add. Vivifying here means the gate fires while the
+    //    old edges are still intact; `add_connections` then resolves every
+    //    endpoint and vivifies nothing, so the graph ends up identical. The
+    //    stubs this creates are counted back into the report below, and an
+    //    endpoint resolution is a pass of index probes over the frame — paid
+    //    only on the replace path, never on plain `add_connections`.
+    let resolved = resolve_endpoints(
+        graph,
+        &df_data,
+        &source_type,
+        &target_type,
+        source_id_idx,
+        target_id_idx,
+    )?;
+    let mut stubs_vivified = 0usize;
+    if !resolved.missing_sources.is_empty() {
+        stubs_vivified += vivify_stubs(graph, &source_type, &resolved.missing_sources)?;
+    }
+    if !resolved.missing_targets.is_empty() {
+        stubs_vivified += vivify_stubs(graph, &target_type, &resolved.missing_targets)?;
+    }
+    drop(resolved);
+
+    // --- Collect the distinct, non-null source ids present in the DataFrame ---
     let mut seen: HashSet<Value> = HashSet::new();
     let mut distinct_sources: Vec<Value> = Vec::new();
     for row in 0..df_data.row_count() {
@@ -1834,7 +1875,7 @@ pub fn replace_connections(
     }
 
     // --- Add the edges the DataFrame describes ---
-    add_connections(
+    let mut report = add_connections(
         graph,
         df_data,
         connection_type,
@@ -1845,7 +1886,11 @@ pub fn replace_connections(
         source_title_field,
         target_title_field,
         conflict_handling,
-    )
+    )?;
+    // The stubs vivified above are this call's, so they belong in its count —
+    // `add_connections` found those endpoints already present and reported none.
+    report.stubs_vivified += stubs_vivified;
+    Ok(report)
 }
 
 /// Delete every node still marked `_provisional` — a stub vivified for
