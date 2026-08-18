@@ -1138,3 +1138,139 @@ mod save_while_forked_tests {
         );
     }
 }
+
+/// A DDL-declared NOT NULL constraint lives in two places: the enforced list
+/// (`SchemaDefinition::required_fields`) and the provenance record
+/// (`DirGraph::ddl_not_null_constraints`) that says *who* declared it. Only the
+/// provenance record distinguishes a constraint the user wrote in Cypher from
+/// one an incoming `define_schema` may replace, so it has to survive a save.
+#[cfg(test)]
+mod ddl_provenance_roundtrip_tests {
+    use super::*;
+    use crate::datatypes::{DataFrame, Value};
+    use crate::graph::dir_graph::DirGraph;
+    use crate::graph::schema::{NodeSchemaDefinition, SchemaDefinition, SchemaInstall};
+
+    /// `Person` nodes with an email on every row, so a NOT NULL declaration on
+    /// `email` installs cleanly.
+    fn person_graph() -> DirGraph {
+        let mut graph = DirGraph::new();
+        let rows: Vec<Vec<Value>> = (1..=3)
+            .map(|i| {
+                vec![
+                    Value::Int64(i),
+                    Value::String(format!("p{i}")),
+                    Value::String(format!("p{i}@example.com")),
+                ]
+            })
+            .collect();
+        let df = DataFrame::from_cypher_rows(
+            vec!["id".to_string(), "title".to_string(), "email".to_string()],
+            rows,
+        )
+        .unwrap();
+        crate::graph::mutation::maintain::add_nodes(
+            &mut graph,
+            df,
+            "Person".to_string(),
+            "id".to_string(),
+            Some("title".to_string()),
+            None,
+        )
+        .unwrap();
+        graph
+    }
+
+    /// A schema that declares `Person` but says nothing about `email` — the
+    /// shape an unrelated `define_schema()` call has.
+    fn schema_without_email() -> SchemaDefinition {
+        let mut schema = SchemaDefinition::new();
+        schema
+            .node_schemas
+            .insert("Person".to_string(), NodeSchemaDefinition::default());
+        schema
+    }
+
+    fn save_and_load(graph: DirGraph, dir: &std::path::Path) -> DirGraph {
+        let path = dir.join("g.kgl");
+        let mut arc = Arc::new(graph);
+        prepare_save(&mut arc);
+        Arc::make_mut(&mut arc).enable_columnar();
+        write_kgl(&arc, path.to_str().unwrap()).unwrap();
+        Arc::unwrap_or_clone(load_file(path.to_str().unwrap()).unwrap())
+    }
+
+    /// Before the save, the provenance record protects the declaration from an
+    /// unrelated schema install. This pins the behaviour the round-trip below
+    /// has to preserve — without it, a regression could make the round-trip
+    /// test pass by breaking the protection everywhere.
+    #[test]
+    fn a_declaration_survives_an_unrelated_schema_install_in_memory() {
+        let mut graph = person_graph();
+        graph.create_not_null_constraint("Person", "email").unwrap();
+
+        graph
+            .set_schema(schema_without_email(), SchemaInstall::Replace)
+            .unwrap();
+        assert!(
+            graph.has_not_null_constraint("Person", "email"),
+            "an unrelated define_schema must not withdraw a DDL-declared NOT NULL"
+        );
+    }
+
+    /// The regression: the provenance record is rebuilt from `FileMetadata` on
+    /// load, so a field missing from that struct comes back empty and the
+    /// declaration silently loses its protection — a `define_schema()` after a
+    /// reload un-enforces a constraint the user declared in Cypher, with no
+    /// error anywhere.
+    #[test]
+    fn a_declaration_keeps_its_provenance_across_a_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut graph = person_graph();
+        graph.create_not_null_constraint("Person", "email").unwrap();
+
+        let mut loaded = save_and_load(graph, dir.path());
+
+        assert!(
+            loaded.has_not_null_constraint("Person", "email"),
+            "the enforced list must survive the round-trip"
+        );
+        loaded
+            .set_schema(schema_without_email(), SchemaInstall::Replace)
+            .unwrap();
+        assert!(
+            loaded.has_not_null_constraint("Person", "email"),
+            "after a reload, an unrelated define_schema silently un-enforced a \
+             DDL-declared NOT NULL"
+        );
+        assert!(
+            loaded
+                .ddl_not_null_constraints
+                .contains(&("Person".to_string(), "email".to_string())),
+            "the DDL provenance record must survive the round-trip"
+        );
+    }
+
+    /// A graph that declares nothing must write the same bytes it wrote before
+    /// the provenance field existed, or every `.kgl` in the world shifts format
+    /// for a feature almost no graph uses.
+    #[test]
+    fn an_undeclared_graph_writes_no_provenance_into_the_metadata() {
+        let metadata = FileMetadata::from_graph(&person_graph());
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert!(
+            !json.contains("ddl_not_null_constraints"),
+            "the empty set must be skipped, or the golden byte digest moves: {json}"
+        );
+
+        let mut declared = person_graph();
+        declared
+            .create_not_null_constraint("Person", "email")
+            .unwrap();
+        let json = serde_json::to_string(&FileMetadata::from_graph(&declared)).unwrap();
+        assert!(
+            json.contains("ddl_not_null_constraints"),
+            "a declared constraint must be written: {json}"
+        );
+    }
+}

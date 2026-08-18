@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `CREATE CONSTRAINT ... IS NOT NULL` declaration no longer loses its
+  protection when the graph is saved and reloaded.** The list a presence
+  constraint is enforced from lives inside the schema, so KGLite records
+  separately which entries a DDL statement declared — that record is what stops
+  a later, unrelated `define_schema()` from replacing the schema and silently
+  un-enforcing the constraint. The record was not written to the `.kgl` file, so
+  it came back empty on load: after a reload, the next `define_schema()` dropped
+  a constraint the user had declared in Cypher, with no error anywhere. It is
+  now persisted alongside the other declarations. Files that declare no such
+  constraint are byte-identical to before, and files written by earlier versions
+  load unchanged (their DDL declarations remain indistinguishable from
+  schema-declared ones, as they were).
+
 ## [0.16.3] - 2026-08-16
 
 ### Added

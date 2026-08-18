@@ -47,7 +47,7 @@ use crate::graph::storage::{GraphRead, GraphWrite};
 use memmap2::Mmap;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
 use std::path::Path;
@@ -131,6 +131,24 @@ pub(crate) struct FileMetadata {
     /// output to one produced before the field existed.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     constraint_names: HashMap<String, NamedConstraint>,
+    /// Which `(node_type, property)` presence constraints were declared through
+    /// DDL (`CREATE CONSTRAINT ... IS NOT NULL`) rather than through a schema.
+    ///
+    /// The *enforced* list rides `schema_definition.required_fields` and needs
+    /// nothing here; what needs persisting is the **provenance**, because it is
+    /// the only thing that tells a later `define_schema()` it may not withdraw
+    /// the declaration (`DirGraph::reapply_ddl_not_null`, called from
+    /// `set_schema`). Without this field a reload rebuilt the graph with an
+    /// empty provenance set — `DirGraph`'s own serde derive is not the `.kgl`
+    /// payload, the load path builds a fresh graph and repopulates it from
+    /// *this* struct — so the first unrelated `define_schema()` after a reload
+    /// silently un-enforced a constraint the user had written in Cypher.
+    ///
+    /// Additive, and skipped when empty so a graph that declares no DDL
+    /// presence constraint writes byte-identical output to one produced before
+    /// the field existed.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    ddl_not_null_constraints: BTreeSet<(String, String)>,
     /// Node type metadata: node_type → { property_name → type_string }
     #[serde(default)]
     node_type_metadata: HashMap<String, HashMap<String, String>>,
@@ -272,6 +290,7 @@ impl FileMetadata {
             range_index_keys: graph.range_index_keys.clone(),
             unique_constraint_keys: graph.unique_constraint_keys.clone(),
             constraint_names: graph.constraint_names.clone(),
+            ddl_not_null_constraints: graph.ddl_not_null_constraints.clone(),
             node_type_metadata: (*graph.node_type_metadata).clone(),
             connection_type_metadata: (*graph.connection_type_metadata).clone(),
             id_field_aliases: (*graph.id_field_aliases).clone(),
@@ -331,6 +350,7 @@ impl FileMetadata {
         graph.range_index_keys = self.range_index_keys;
         graph.unique_constraint_keys = self.unique_constraint_keys;
         graph.constraint_names = self.constraint_names;
+        graph.ddl_not_null_constraints = self.ddl_not_null_constraints;
         graph.node_type_metadata = Arc::new(self.node_type_metadata);
         graph.connection_type_metadata = Arc::new(self.connection_type_metadata);
         graph.id_field_aliases = Arc::new(self.id_field_aliases);

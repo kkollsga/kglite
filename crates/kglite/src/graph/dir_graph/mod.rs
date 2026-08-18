@@ -161,10 +161,18 @@ pub struct DirGraph {
     /// the schema and silently un-enforce a DDL declaration — the asymmetry that
     /// does not exist for uniqueness, whose index lives outside the schema.
     /// `set_schema` replays this set over the newly installed schema. A
-    /// `BTreeSet` so the persisted bytes are deterministic. Additive serde field
-    /// — older `.kgl` files load with an empty set, which only means their DDL
+    /// `BTreeSet` so the persisted bytes are deterministic.
+    ///
+    /// **Persisted through `FileMetadata`, not through this derive.** A `.kgl`
+    /// load builds a *fresh* `DirGraph` and repopulates it from the metadata
+    /// struct (`io::file`: `from_graph` / `apply_to_with`), so a `serde`
+    /// attribute here carries nothing across a save on its own — the field was
+    /// silently lost on every reload until `FileMetadata` gained its
+    /// counterpart, which let the first `define_schema()` after a load
+    /// un-enforce a DDL-declared constraint. Additive there: a file written
+    /// before that field loads with an empty set, which only means its DDL
     /// presence constraints are indistinguishable from schema-declared ones,
-    /// exactly as they are today.
+    /// exactly as they were.
     #[serde(default)]
     pub(crate) ddl_not_null_constraints: std::collections::BTreeSet<(String, String)>,
     /// Declared property-type constraints (`CREATE CONSTRAINT … IS :: T`), as
@@ -181,9 +189,13 @@ pub struct DirGraph {
     /// lookup is per `(node_type, property)` on the write path rather than a
     /// membership test, and string keys keep the shape serialisable as JSON as
     /// well as postcard (a tuple key is not a JSON object key). Ordered, so the
-    /// persisted bytes are deterministic. Additive serde field — older `.kgl`
-    /// files load with an empty map, i.e. no type constraints, which is the
-    /// pre-existing behaviour.
+    /// bytes are deterministic once it is persisted.
+    ///
+    /// **Not persisted yet.** The `serde` attribute here does not survive a
+    /// save by itself: a `.kgl` load builds a fresh `DirGraph` and repopulates
+    /// it from `FileMetadata` (`io::file`: `from_graph` / `apply_to_with`), so
+    /// persistence means a field on *that* struct — which its NOT NULL sibling
+    /// now has and this one still needs.
     #[serde(default)]
     pub(crate) ddl_property_type_constraints:
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, DeclaredType>>,
