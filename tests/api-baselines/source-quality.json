@@ -63,7 +63,7 @@
     {
       "path": "crates/kglite-py/src/graph/pyapi/kg_core.rs",
       "qualified_name": "crate::KnowledgeGraph::cypher",
-      "lines": 334,
+      "lines": 337,
       "branches": 33,
       "nesting": 4
     },
@@ -224,9 +224,9 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/aggregation/materialized.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_return_with_aggregation",
-      "lines": 237,
-      "branches": 34,
-      "nesting": 5
+      "lines": 241,
+      "branches": 25,
+      "nesting": 4
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/call_clause.rs",
@@ -245,28 +245,28 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause/fused_match.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_fused_match_return_aggregate",
-      "lines": 964,
+      "lines": 968,
       "branches": 149,
       "nesting": 7
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause/fused_match.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_fused_match_with_aggregate",
-      "lines": 284,
+      "lines": 295,
       "branches": 35,
       "nesting": 3
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause/fused_match.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_fused_node_scan_aggregate",
-      "lines": 312,
-      "branches": 41,
+      "lines": 258,
+      "branches": 29,
       "nesting": 7
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_execution.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_match",
-      "lines": 479,
+      "lines": 484,
       "branches": 81,
       "nesting": 9
     },
@@ -329,14 +329,14 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/shortest_path.rs",
       "qualified_name": "crate::CypherExecutor<'a>::execute_shortest_path_match",
-      "lines": 243,
+      "lines": 245,
       "branches": 35,
       "nesting": 3
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/where_clause.rs",
       "qualified_name": "crate::CypherExecutor<'a>::evaluate_predicate_tristate",
-      "lines": 310,
+      "lines": 312,
       "branches": 84,
       "nesting": 6
     },

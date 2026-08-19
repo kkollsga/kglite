@@ -1329,3 +1329,4 @@ impl<'a> CypherExecutor<'a> {
 }
 
 include!("match_clause/fused_match.rs");
+include!("match_clause/fused_scan_aggregate.rs");
