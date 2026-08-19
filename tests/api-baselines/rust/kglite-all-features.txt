@@ -472,6 +472,16 @@ pub fn kglite::api::cdc::CdcLog::since(&self, from: u64, limit: core::option::Op
 pub fn kglite::api::cdc::CdcLog::status(&self) -> kglite::api::cdc::CdcStatus
 impl core::fmt::Debug for kglite::api::cdc::CdcLog
 pub fn kglite::api::cdc::CdcLog::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct kglite::api::cdc::CdcSelector
+impl core::clone::Clone for kglite::api::cdc::CdcSelector
+pub fn kglite::api::cdc::CdcSelector::clone(&self) -> kglite::api::cdc::CdcSelector
+impl core::cmp::PartialEq for kglite::api::cdc::CdcSelector
+pub fn kglite::api::cdc::CdcSelector::eq(&self, other: &kglite::api::cdc::CdcSelector) -> bool
+impl core::default::Default for kglite::api::cdc::CdcSelector
+pub fn kglite::api::cdc::CdcSelector::default() -> kglite::api::cdc::CdcSelector
+impl core::fmt::Debug for kglite::api::cdc::CdcSelector
+pub fn kglite::api::cdc::CdcSelector::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::cdc::CdcSelector
 pub struct kglite::api::cdc::CdcStatus
 pub kglite::api::cdc::CdcStatus::buffered: usize
 pub kglite::api::cdc::CdcStatus::capacity: usize
@@ -513,8 +523,10 @@ pub const kglite::api::cdc::MAX_CAPACITY: usize
 pub fn kglite::api::cdc::disable(graph: &mut kglite::api::DirGraph) -> bool
 pub fn kglite::api::cdc::drain_at_commit(graph: &mut kglite::api::DirGraph) -> alloc::vec::Vec<kglite::api::durable::RawOp>
 pub fn kglite::api::cdc::enable(graph: &mut kglite::api::DirGraph, capacity: core::option::Option<usize>, enrichment: kglite::api::cdc::CdcEnrichment) -> core::result::Result<kglite::api::cdc::CdcStatus, kglite::error::KgError>
+pub fn kglite::api::cdc::needs_before_images(selectors: &[kglite::api::cdc::CdcSelector]) -> bool
+pub fn kglite::api::cdc::parse_selectors(value: &kglite::datatypes::values::Value) -> core::result::Result<alloc::vec::Vec<kglite::api::cdc::CdcSelector>, alloc::string::String>
 pub fn kglite::api::cdc::publish_drained(graph: &kglite::api::DirGraph, raw: &[kglite::api::durable::RawOp])
-pub fn kglite::api::cdc::read(graph: &kglite::api::DirGraph, from: u64, limit: core::option::Option<usize>) -> core::option::Option<alloc::vec::Vec<kglite::api::cdc::CdcEvent>>
+pub fn kglite::api::cdc::read(graph: &kglite::api::DirGraph, from: u64, limit: core::option::Option<usize>, selectors: &[kglite::api::cdc::CdcSelector]) -> core::option::Option<alloc::vec::Vec<kglite::api::cdc::CdcEvent>>
 pub fn kglite::api::cdc::status(graph: &kglite::api::DirGraph) -> core::option::Option<kglite::api::cdc::CdcStatus>
 pub type kglite::api::cdc::CdcHandle = alloc::sync::Arc<std::sync::poison::mutex::Mutex<kglite::api::cdc::CdcLog>>
 pub mod kglite::api::code_entities

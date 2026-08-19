@@ -312,7 +312,7 @@ fn a_refused_write_captures_nothing() {
             assert!(!error.is_empty());
             cdc::drain_at_commit(&mut graph);
 
-            let published = cdc::read(&graph, from, None).expect("enabled");
+            let published = cdc::read(&graph, from, None, &[]).expect("enabled");
             assert!(
                 published.is_empty(),
                 "`{query}` was refused under {enrichment:?} but published {published:?}"
@@ -353,7 +353,7 @@ fn a_refused_bulk_frame_captures_nothing() {
     assert!(error.contains("'since'"), "{error}");
     cdc::drain_at_commit(&mut graph);
 
-    let published = cdc::read(&graph, from, None).expect("enabled");
+    let published = cdc::read(&graph, from, None, &[]).expect("enabled");
     assert!(
         published.is_empty(),
         "a refused frame published {published:?}"

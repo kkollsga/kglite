@@ -395,7 +395,7 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
     ProcedureSpec {
         name: "db.cdc.query",
         aliases: &[],
-        description: "Changes published after a cursor, oldest first. Params: {from} (cursor from db.cdc.current/earliest; defaults to everything retained).",
+        description: "Changes published after a cursor, oldest first. Params: {from} (cursor from db.cdc.current/earliest; defaults to everything retained), {selectors} (list of filter maps, matching any one of them is enough; keys elementType/operation/nodeType/relationshipType/srcType/tgtType/nodeId/srcId/tgtId/labels/changesTo), {maxRows} (row cap, applied after filtering).",
         columns: &[
             "id",
             "seq",

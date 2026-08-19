@@ -1570,6 +1570,37 @@ fn journal_bucket_evictions(
 /// Clearing `connection_types` matters on disk graphs: the lazy
 /// `has_connection_type` cache would otherwise report a still-live
 /// type as gone after a delete.
+/// Remove each doomed node from storage, carrying the two pieces of state
+/// that live *above* storage and so cannot be recovered afterwards.
+///
+/// Both are read while the node still exists and are lost the moment it does
+/// not, which is why they are here rather than in the sweeps below:
+///
+/// - **The change-capture before-image's labels.** The capture wrapper reads
+///   the node's properties and title as it removes it, but secondary labels
+///   live in `DirGraph::secondary_label_index`, one layer above the backend.
+///   A delete is the one event whose only informative half is `before`, so an
+///   image missing its labels is the whole loss.
+/// - **The dropped timeseries entry.** `timeseries_store` is O(V) and so is
+///   deliberately not part of the checkpoint's schema clone; statement
+///   rollback recovers it from the undo journal instead.
+fn remove_doomed_nodes(graph: &mut DirGraph, nodes_to_delete: &HashSet<NodeIndex>) {
+    let captures_before = graph.graph.captures_before_images();
+    for &node_idx in nodes_to_delete {
+        let doomed_labels = captures_before.then(|| graph.secondary_label_names(node_idx));
+        GraphWrite::remove_node(&mut graph.graph, node_idx);
+        if let Some(labels) = doomed_labels {
+            graph.graph.backfill_node_before_labels(node_idx, labels);
+        }
+        let Some(prior) = graph.timeseries_store.remove(&node_idx.index()) else {
+            continue;
+        };
+        if let Some(journal) = graph.graph.undo_journal_mut() {
+            journal.note_timeseries_removed(node_idx.index(), prior);
+        }
+    }
+}
+
 pub(crate) fn detach_delete_nodes(
     graph: &mut DirGraph,
     nodes_to_delete: &HashSet<NodeIndex>,
@@ -1659,30 +1690,7 @@ pub(crate) fn detach_delete_nodes(
         .cloned()
         .collect();
 
-    for &node_idx in nodes_to_delete {
-        // Change data capture's before-image for a delete: the wrapper reads
-        // the node's properties and title as it removes it, but labels live
-        // in `secondary_label_index` above storage, so they have to be read
-        // here — while the node is still in its buckets — and handed down.
-        // A delete is the one event whose only informative half is `before`,
-        // so an incomplete image is the whole loss.
-        let doomed_labels = graph
-            .graph
-            .captures_before_images()
-            .then(|| graph.secondary_label_names(node_idx));
-        GraphWrite::remove_node(&mut graph.graph, node_idx);
-        if let Some(labels) = doomed_labels {
-            graph.graph.backfill_node_before_labels(node_idx, labels);
-        }
-        if let Some(prior) = graph.timeseries_store.remove(&node_idx.index()) {
-            // Statement-rollback capture: `timeseries_store` is O(V) and so is
-            // deliberately not part of the checkpoint's schema clone; the
-            // journal carries the dropped value instead.
-            if let Some(journal) = graph.graph.undo_journal_mut() {
-                journal.note_timeseries_removed(node_idx.index(), prior);
-            }
-        }
-    }
+    remove_doomed_nodes(graph, nodes_to_delete);
 
     // Where each doomed member sits in its type bucket, resolved once for both
     // the journal and the edit. `remove_node` above does not touch

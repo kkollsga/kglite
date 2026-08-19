@@ -447,6 +447,160 @@ def test_a_rolled_back_transaction_captures_no_before_image(full_graph):
     assert events(full_graph, cur)[0]["state"]["before"]["properties"] == {"x": 1}
 
 
+# ── selectors ──────────────────────────────────────────────────────────────
+
+
+def _seeded_selector_graph():
+    g = kglite.KnowledgeGraph()
+    g.cypher("CALL db.cdc.enable()")
+    g.cypher("CREATE (:P {id: 1, name: 'one'})")
+    g.cypher("CREATE (:Q {id: 2})")
+    g.cypher("MATCH (p:P {id: 1}) SET p:Featured")
+    g.cypher("MATCH (a:P {id: 1}), (b:Q {id: 2}) CREATE (a)-[:R {w: 1}]->(b)")
+    g.cypher("MATCH (q:Q {id: 2}) DETACH DELETE q")
+    return g
+
+
+def _selected(graph, selectors: str, extra: str = ""):
+    return graph.cypher(
+        f"CALL db.cdc.query({{selectors: {selectors}{extra}}}) YIELD operation, elementType, nodeType"
+    ).to_dicts()
+
+
+def test_selectors_parse_as_a_nested_list_of_maps_through_real_cypher():
+    """The argument is a list of maps inside a map — pinned because nothing
+    else in the procedure surface nests that deep, and a parser that could not
+    would make the whole feature unreachable."""
+    g = _seeded_selector_graph()
+    rows = _selected(g, "[{operation: 'delete'}, {nodeType: 'P'}]")
+    assert rows, "the nested literal must parse and match"
+    assert {r["operation"] for r in rows} >= {"delete"}
+
+
+def test_a_malformed_selector_nesting_errors_cleanly():
+    g = _seeded_selector_graph()
+    # A map where a list belongs.
+    with pytest.raises(kglite.CypherExecutionError, match="must be a list of maps"):
+        g.cypher("CALL db.cdc.query({selectors: {nodeType: 'P'}})")
+    # A scalar where a map belongs.
+    with pytest.raises(kglite.CypherExecutionError, match="must be a map of constraints"):
+        g.cypher("CALL db.cdc.query({selectors: ['P']})")
+    # A typo one level in must not silently widen the filter.
+    with pytest.raises(kglite.CypherExecutionError, match="unknown selector key 'nodeTyp'"):
+        g.cypher("CALL db.cdc.query({selectors: [{nodeTyp: 'P'}]})")
+    # An empty map constrains nothing.
+    with pytest.raises(kglite.CypherExecutionError, match="constrains nothing"):
+        g.cypher("CALL db.cdc.query({selectors: [{}]})")
+
+
+def test_each_dimension_filters_and_misses():
+    g = _seeded_selector_graph()
+    assert all(r["elementType"] == "relationship" for r in _selected(g, "[{elementType: 'relationship'}]"))
+    assert all(r["operation"] == "delete" for r in _selected(g, "[{operation: 'delete'}]"))
+    assert all(r["nodeType"] == "P" for r in _selected(g, "[{nodeType: 'P'}]"))
+    assert _selected(g, "[{nodeType: 'Absent'}]") == []
+    assert _selected(g, "[{relationshipType: 'NOPE'}]") == []
+    assert _selected(g, "[{srcType: 'P', tgtType: 'Q'}]"), "endpoint types select the edge"
+    assert _selected(g, "[{srcType: 'Q', tgtType: 'P'}]") == [], "endpoints are directional"
+    assert _selected(g, "[{nodeId: 1}]"), "id equality selects"
+    assert _selected(g, "[{nodeId: 404}]") == []
+
+
+def test_labels_requires_all_of_them():
+    g = kglite.KnowledgeGraph()
+    g.cypher("CALL db.cdc.enable()")
+    g.cypher("CREATE (:P {id: 1})")
+    g.cypher("MATCH (n:P {id: 1}) SET n:Archived:Cold")
+    g.cypher("CREATE (:P {id: 2})")
+    g.cypher("MATCH (n:P {id: 2}) SET n:Archived")
+
+    one = graph_ids(g, "[{labels: ['Archived', 'Cold']}]")
+    assert one == [1], "every listed label must be present"
+    assert sorted(set(graph_ids(g, "[{labels: ['Archived']}]"))) == [1, 2]
+    assert graph_ids(g, "[{labels: ['P']}]") == [], "the primary type is nodeType's job"
+
+
+def graph_ids(graph, selectors: str):
+    return [r["nodeId"] for r in graph.cypher(f"CALL db.cdc.query({{selectors: {selectors}}}) YIELD nodeId").to_dicts()]
+
+
+def test_changes_to_needs_full_enrichment_and_says_so(graph):
+    graph.cypher("CREATE (:P {id: 1, qty: 1})")
+    with pytest.raises(kglite.CypherExecutionError, match="changesTo"):
+        graph.cypher("CALL db.cdc.query({selectors: [{changesTo: ['qty']}]})")
+
+
+def test_changes_to_selects_the_properties_that_moved(full_graph):
+    full_graph.cypher("CREATE (:P {id: 1, name: 'one', qty: 1})")
+    cur = cursor(full_graph)
+    full_graph.cypher("MATCH (n:P {id: 1}) SET n.qty = 2")
+
+    moved = full_graph.cypher(
+        "CALL db.cdc.query({from: $c, selectors: [{changesTo: ['qty']}]}) YIELD nodeId",
+        params={"c": cur},
+    ).to_dicts()
+    assert len(moved) == 1
+    still = full_graph.cypher(
+        "CALL db.cdc.query({from: $c, selectors: [{changesTo: ['name']}]}) YIELD nodeId",
+        params={"c": cur},
+    ).to_dicts()
+    assert still == [], "name did not move"
+
+
+def test_max_rows_caps_matches_not_scanned_rows(graph):
+    for i in range(10):
+        graph.cypher(f"CREATE (:Filler {{id: {i}}})")
+    graph.cypher("CREATE (:Wanted {id: 99})")
+    rows = graph.cypher("CALL db.cdc.query({selectors: [{nodeType: 'Wanted'}], maxRows: 1}) YIELD nodeId").to_dicts()
+    assert rows == [{"nodeId": 99}], "the cap counts matches, not the window they came from"
+
+
+def test_a_selective_consumer_loop_neither_repeats_nor_skips(graph):
+    """The documented polling shape: take `current()` first, then read up to it.
+
+    The point is the rounds that match *nothing* — a filtered poll returning
+    zero rows must still advance the consumer, which is why the cursor is taken
+    before the query rather than from the last row returned.
+    """
+    seen: list[int] = []
+    cur = cursor(graph)
+    for round_no in range(1, 5):
+        graph.cypher(f"CREATE (:Noise {{id: {round_no}}})")
+        if round_no % 2 == 0:
+            graph.cypher(f"CREATE (:Wanted {{id: {round_no}}})")
+        nxt = cursor(graph)
+        batch = graph.cypher(
+            "CALL db.cdc.query({from: $c, selectors: [{nodeType: 'Wanted'}]}) YIELD nodeId",
+            params={"c": cur},
+        ).to_dicts()
+        seen.extend(r["nodeId"] for r in batch)
+        cur = nxt
+    assert seen == [2, 4], "each wanted row exactly once, across empty polls"
+
+
+def test_selectors_work_in_mapped_mode():
+    g = kglite.KnowledgeGraph(storage="mapped")
+    g.cypher("CALL db.cdc.enable()")
+    g.cypher("CREATE (:P {id: 1, name: 'one'})")
+    g.cypher("CREATE (:Q {id: 2})")
+    g.cypher("MATCH (n:P {id: 1}) SET n.name = 'uno'")
+
+    rows = g.cypher(
+        "CALL db.cdc.query({selectors: [{nodeType: 'P', operation: 'update'}]}) YIELD nodeId, operation"
+    ).to_dicts()
+    assert rows == [{"nodeId": 1, "operation": "update"}]
+
+
+def test_a_filtered_row_keeps_its_unfiltered_cursor_id(graph):
+    graph.cypher("CREATE (:P {id: 1})")
+    graph.cypher("CREATE (:Q {id: 2})")
+    everything = {r["seq"]: r["id"] for r in graph.cypher("CALL db.cdc.query()").to_dicts()}
+    filtered = graph.cypher("CALL db.cdc.query({selectors: [{nodeType: 'Q'}]}) YIELD id, seq").to_dicts()
+    assert filtered, "non-vacuous"
+    for row in filtered:
+        assert everything[row["seq"]] == row["id"], "a cursor addresses the log, not the view"
+
+
 # ── cursors ────────────────────────────────────────────────────────────────
 
 

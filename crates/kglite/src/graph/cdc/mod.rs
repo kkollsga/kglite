@@ -43,11 +43,13 @@
 
 mod event;
 mod log;
+mod selector;
 #[cfg(test)]
 mod tests;
 
 pub use event::{CdcChange, CdcEvent, CdcEventKind, EdgeState, NodeState};
 pub use log::{CdcEnrichment, CdcLog, CdcStatus, DEFAULT_CAPACITY, MAX_CAPACITY};
+pub use selector::{needs_before_images, parse_selectors, CdcSelector};
 
 use crate::error::KgError;
 use crate::graph::dir_graph::DirGraph;
@@ -193,16 +195,29 @@ pub fn status(graph: &DirGraph) -> Option<CdcStatus> {
     graph.cdc.as_ref().map(|handle| lock(handle).status())
 }
 
-/// Read events after the cursor position `from` (exclusive), oldest first.
+/// Read events after the cursor position `from` (exclusive), oldest first,
+/// keeping only those any of `selectors` matches.
 ///
-/// `None` when capture is off. The events are cloned out of the ring so the
-/// lock is not held across the caller's work — B2's `db.cdc.query` builds its
-/// rows from this.
-pub fn read(graph: &DirGraph, from: u64, limit: Option<usize>) -> Option<Vec<CdcEvent>> {
+/// `None` when capture is off. An empty `selectors` is no filter.
+///
+/// **Filtering happens before the clone-out, and `limit` after the
+/// filtering.** Both matter: an event the caller did not ask for is never
+/// copied out of the ring, and `limit` bounds the rows the caller *receives*
+/// rather than the window they were drawn from — a limit applied first would
+/// make a selective query return nothing while its matches sat one event past
+/// the window, with no way for the caller to tell that from "caught up".
+pub fn read(
+    graph: &DirGraph,
+    from: u64,
+    limit: Option<usize>,
+    selectors: &[CdcSelector],
+) -> Option<Vec<CdcEvent>> {
     graph.cdc.as_ref().map(|handle| {
         lock(handle)
-            .since(from, limit)
+            .since(from, None)
             .into_iter()
+            .filter(|event| selector::selected(selectors, event))
+            .take(limit.unwrap_or(usize::MAX))
             .cloned()
             .collect()
     })

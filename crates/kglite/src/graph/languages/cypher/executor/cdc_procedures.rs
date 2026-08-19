@@ -305,7 +305,42 @@ pub(super) fn execute_cdc_procedure(
             })])
         }
         "db.cdc.query" => {
-            reject_unknown_keys("db.cdc.query", params, &["from"])?;
+            reject_unknown_keys("db.cdc.query", params, &["from", "selectors", "maxRows"])?;
+            let selectors = match params.get("selectors") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(value) => cdc::parse_selectors(value)?,
+            };
+            // `changesTo` asks what changed, which only a before-image can
+            // answer. Under `off` there is none, and every listed property
+            // would read as newly set — a filter that silently matches far
+            // more than it was asked to. Refuse instead, naming the fix.
+            if cdc::needs_before_images(&selectors) && status.enrichment != CdcEnrichment::Full {
+                return Err(format!(
+                    "db.cdc.query: the 'changesTo' selector compares an event's before- and \
+                     after-images, and this log captures no before-image (enrichment is \
+                     '{}'). Every listed property would read as newly set, so the filter \
+                     would match changes it was not asked for. Restart capture with \
+                     CALL db.cdc.enable({{enrichment: 'full'}}) — it keeps the epoch, so live \
+                     cursors survive — and changes committed after that carry both halves.",
+                    status.enrichment.as_str()
+                ));
+            }
+            // Named `maxRows` rather than `limit` because LIMIT is a reserved
+            // clause word that the map-key grammar deliberately keeps reserved
+            // (see `keyword_name_token`), so `{limit: 10}` is a parse error
+            // rather than an argument. The name also says what it bounds: rows
+            // returned after filtering, not a window scanned before it.
+            let max_rows = match params.get("maxRows") {
+                None | Some(Value::Null) => None,
+                Some(Value::Int64(n)) if *n > 0 => Some(*n as usize),
+                Some(Value::UniqueId(n)) => Some(*n as usize),
+                Some(other) => {
+                    return Err(format!(
+                        "db.cdc.query: 'maxRows' must be a positive integer number of rows, got \
+                         {other:?}."
+                    ))
+                }
+            };
             let from = match params.get("from") {
                 // No cursor: everything still retained. Friendlier than
                 // erroring, and exactly what `earliest()` would have given.
@@ -318,7 +353,7 @@ pub(super) fn execute_cdc_procedure(
                     ))
                 }
             };
-            let events = cdc::read(graph, from, None).unwrap_or_default();
+            let events = cdc::read(graph, from, max_rows, &selectors).unwrap_or_default();
             Ok(events
                 .iter()
                 .map(|event| event_row(event, status.epoch, yield_items))
@@ -1125,6 +1160,451 @@ mod tests {
         let mut graph = enabled(None);
         let error = fails(&mut graph, "CALL db.cdc.status({capacity: 4})");
         assert!(error.contains("takes no parameters"), "{error}");
+    }
+
+    // ── selectors ────────────────────────────────────────────────────
+
+    /// A graph with one of everything the selector dimensions address.
+    fn selector_fixture() -> DirGraph {
+        let mut graph = enabled(None);
+        write(&mut graph, "CREATE (:Item {id: 1, name: 'one', qty: 1})");
+        write(&mut graph, "CREATE (:Widget {id: 2, name: 'two'})");
+        write(&mut graph, "MATCH (i:Item {id: 1}) SET i.qty = 2");
+        write(&mut graph, "MATCH (i:Item {id: 1}) SET i:Featured");
+        write(
+            &mut graph,
+            "MATCH (a:Item {id: 1}), (b:Widget {id: 2}) CREATE (a)-[:LINKS {w: 1}]->(b)",
+        );
+        write(&mut graph, "MATCH (w:Widget {id: 2}) DETACH DELETE w");
+        graph
+    }
+
+    /// Rows a selector list yields, as `(operation, elementType)` pairs.
+    fn selected(graph: &mut DirGraph, selectors: &str) -> Vec<(String, String)> {
+        let rows = rows(
+            graph,
+            &format!("CALL db.cdc.query({{selectors: {selectors}}}) YIELD operation, elementType"),
+        );
+        rows.iter()
+            .map(|row| (string_cell(row, 0), string_cell(row, 1)))
+            .collect()
+    }
+
+    /// Every dimension, matching and missing, on one fixture.
+    #[test]
+    fn each_selector_dimension_filters_on_what_its_column_reports() {
+        let mut graph = selector_fixture();
+
+        assert!(selected(&mut graph, "[{elementType: 'relationship'}]")
+            .iter()
+            .all(|(_, element)| element == "relationship"));
+        assert!(selected(&mut graph, "[{elementType: 'node'}]")
+            .iter()
+            .all(|(_, element)| element == "node"));
+
+        assert!(selected(&mut graph, "[{operation: 'delete'}]")
+            .iter()
+            .all(|(operation, _)| operation == "delete"));
+        assert!(
+            !selected(&mut graph, "[{operation: 'delete'}]").is_empty(),
+            "a filter that matches nothing would pass every assertion above vacuously"
+        );
+
+        // nodeType selects nodes only — a relationship has none, so a
+        // nodeType constraint cannot hold for one.
+        assert!(selected(&mut graph, "[{nodeType: 'Item'}]")
+            .iter()
+            .all(|(_, element)| element == "node"));
+        assert_eq!(selected(&mut graph, "[{nodeType: 'Nothing'}]"), Vec::new());
+
+        assert!(selected(&mut graph, "[{relationshipType: 'LINKS'}]")
+            .iter()
+            .all(|(_, element)| element == "relationship"));
+        assert_eq!(
+            selected(&mut graph, "[{relationshipType: 'ABSENT'}]"),
+            Vec::new()
+        );
+
+        assert!(!selected(&mut graph, "[{srcType: 'Item', tgtType: 'Widget'}]").is_empty());
+        assert_eq!(
+            selected(&mut graph, "[{srcType: 'Widget', tgtType: 'Item'}]"),
+            Vec::new(),
+            "endpoints are directional"
+        );
+
+        assert!(!selected(&mut graph, "[{nodeId: 1}]").is_empty());
+        assert_eq!(selected(&mut graph, "[{nodeId: 404}]"), Vec::new());
+        assert!(!selected(&mut graph, "[{srcId: 1, tgtId: 2}]").is_empty());
+        assert_eq!(selected(&mut graph, "[{srcId: 2, tgtId: 1}]"), Vec::new());
+    }
+
+    /// The list is a disjunction: any selector matching is enough.
+    #[test]
+    fn several_selectors_are_an_any_match() {
+        let mut graph = selector_fixture();
+        let either = selected(
+            &mut graph,
+            "[{operation: 'delete'}, {relationshipType: 'LINKS'}]",
+        );
+        assert!(
+            either.iter().any(|(operation, _)| operation == "delete")
+                && either.iter().any(|(_, element)| element == "relationship"),
+            "both selectors must contribute rows: {either:?}"
+        );
+        // And each alone yields a strict subset of the union.
+        let deletes = selected(&mut graph, "[{operation: 'delete'}]");
+        assert!(deletes.len() < either.len());
+    }
+
+    /// An empty list is the absence of filters, not a filter that excludes
+    /// everything.
+    #[test]
+    fn an_empty_selector_list_is_no_filter() {
+        let mut graph = selector_fixture();
+        let all = rows(&mut graph, "CALL db.cdc.query() YIELD seq");
+        let with_empty = rows(&mut graph, "CALL db.cdc.query({selectors: []}) YIELD seq");
+        assert_eq!(with_empty.len(), all.len());
+        assert!(!all.is_empty());
+    }
+
+    /// `labels` is a conjunction, and it reads the secondary label set — the
+    /// one `state.labels` reports. The primary type is `nodeType`'s job.
+    #[test]
+    fn the_labels_selector_requires_every_listed_label() {
+        let mut graph = enabled(None);
+        write(&mut graph, "CREATE (:Item {id: 1})");
+        write(&mut graph, "MATCH (i:Item {id: 1}) SET i:Archived:Cold");
+        write(&mut graph, "CREATE (:Item {id: 2})");
+        write(&mut graph, "MATCH (i:Item {id: 2}) SET i:Archived");
+
+        assert_eq!(
+            rows(
+                &mut graph,
+                "CALL db.cdc.query({selectors: [{labels: ['Archived']}]}) YIELD nodeId"
+            )
+            .len(),
+            2,
+            "both nodes carry Archived"
+        );
+        let both = rows(
+            &mut graph,
+            "CALL db.cdc.query({selectors: [{labels: ['Archived', 'Cold']}]}) YIELD nodeId",
+        );
+        assert_eq!(
+            both.iter().map(|row| row[0].clone()).collect::<Vec<_>>(),
+            vec![Value::Int64(1)],
+            "every listed label must be present, so only node 1 qualifies"
+        );
+        // The primary type is not a label here.
+        assert_eq!(
+            rows(
+                &mut graph,
+                "CALL db.cdc.query({selectors: [{labels: ['Item']}]}) YIELD nodeId"
+            ),
+            Vec::<Vec<Value>>::new(),
+            "the primary type is selected with nodeType, not labels"
+        );
+    }
+
+    /// A relationship has no labels, so a labels constraint excludes them
+    /// rather than matching vacuously.
+    #[test]
+    fn a_labels_selector_never_matches_a_relationship() {
+        let mut graph = selector_fixture();
+        assert!(selected(&mut graph, "[{labels: ['Featured']}]")
+            .iter()
+            .all(|(_, element)| element == "node"));
+    }
+
+    /// `changesTo` compares the two images, so it needs them.
+    #[test]
+    fn changes_to_matches_only_the_properties_that_moved() {
+        let mut graph = DirGraph::new();
+        run(&mut graph, "CALL db.cdc.enable({enrichment: 'full'})");
+        commit(&mut graph);
+        write(&mut graph, "CREATE (:Item {id: 1, name: 'one', qty: 1})");
+        let start = current_cursor(&mut graph);
+        write(&mut graph, "MATCH (i:Item {id: 1}) SET i.qty = 2");
+
+        let matched = rows(
+            &mut graph,
+            &format!(
+                "CALL db.cdc.query({{from: '{start}', selectors: [{{changesTo: ['qty']}}]}}) \
+                 YIELD nodeId"
+            ),
+        );
+        assert_eq!(matched.len(), 1, "qty moved from 1 to 2");
+        let missed = rows(
+            &mut graph,
+            &format!(
+                "CALL db.cdc.query({{from: '{start}', selectors: [{{changesTo: ['name']}}]}}) \
+                 YIELD nodeId"
+            ),
+        );
+        assert!(
+            missed.is_empty(),
+            "name was untouched, so the update must not match: {missed:?}"
+        );
+    }
+
+    /// Under `enrichment: 'off'` there is no before-image, so the comparison
+    /// is unanswerable — refused with the remedy rather than silently
+    /// matching every event that has the property.
+    #[test]
+    fn changes_to_is_refused_when_the_log_keeps_no_before_image() {
+        let mut graph = enabled(None);
+        write(&mut graph, "CREATE (:Item {id: 1, qty: 1})");
+        let error = fails(
+            &mut graph,
+            "CALL db.cdc.query({selectors: [{changesTo: ['qty']}]}) YIELD nodeId",
+        );
+        assert!(
+            error.contains("changesTo") && error.contains("enrichment is 'off'"),
+            "the refusal must name the selector and the mode: {error}"
+        );
+        assert!(
+            error.contains("enrichment: 'full'"),
+            "and the remedy: {error}"
+        );
+
+        // Non-vacuity: the remedy works, and the epoch survives it.
+        run(&mut graph, "CALL db.cdc.enable({enrichment: 'full'})");
+        commit(&mut graph);
+        let start = current_cursor(&mut graph);
+        write(&mut graph, "MATCH (i:Item {id: 1}) SET i.qty = 5");
+        let matched = rows(
+            &mut graph,
+            &format!(
+                "CALL db.cdc.query({{from: '{start}', selectors: [{{changesTo: ['qty']}}]}}) \
+                 YIELD nodeId"
+            ),
+        );
+        assert_eq!(matched.len(), 1, "{matched:?}");
+    }
+
+    /// `changesTo` is defined on the *pair*, with an absent image reading as
+    /// "the property was not there" — so it is total across operations: a
+    /// create matches a property it set, a delete one it had.
+    #[test]
+    fn changes_to_covers_creates_and_deletes_not_just_updates() {
+        let mut graph = DirGraph::new();
+        run(&mut graph, "CALL db.cdc.enable({enrichment: 'full'})");
+        commit(&mut graph);
+        write(&mut graph, "CREATE (:Item {id: 1, qty: 1})");
+        write(&mut graph, "MATCH (i:Item {id: 1}) DELETE i");
+
+        let matched = rows(
+            &mut graph,
+            "CALL db.cdc.query({selectors: [{changesTo: ['qty']}]}) YIELD operation",
+        );
+        assert_eq!(
+            matched
+                .iter()
+                .map(|row| string_cell(row, 0))
+                .collect::<Vec<_>>(),
+            vec!["create", "delete"],
+            "the create set qty and the delete removed it; both are changes to it"
+        );
+        let untouched = rows(
+            &mut graph,
+            "CALL db.cdc.query({selectors: [{changesTo: ['absent']}]}) YIELD operation",
+        );
+        assert!(
+            untouched.is_empty(),
+            "a property neither side ever had did not change: {untouched:?}"
+        );
+    }
+
+    /// `limit` bounds the rows the caller receives, so it is applied after
+    /// filtering — a limit applied to the pre-filter window would return
+    /// nothing whenever the matches sat past it, indistinguishable from
+    /// "caught up".
+    #[test]
+    fn max_rows_counts_matching_rows_not_scanned_ones() {
+        let mut graph = enabled(None);
+        for id in 1..=10 {
+            write(&mut graph, &format!("CREATE (:Filler {{id: {id}}})"));
+        }
+        write(&mut graph, "CREATE (:Wanted {id: 99})");
+        write(&mut graph, "CREATE (:Wanted {id: 98})");
+
+        let limited = rows(
+            &mut graph,
+            "CALL db.cdc.query({selectors: [{nodeType: 'Wanted'}], maxRows: 1}) YIELD nodeId",
+        );
+        assert_eq!(
+            limited.iter().map(|row| row[0].clone()).collect::<Vec<_>>(),
+            vec![Value::Int64(99)],
+            "the first *match*, not the first row scanned"
+        );
+        let both = rows(
+            &mut graph,
+            "CALL db.cdc.query({selectors: [{nodeType: 'Wanted'}], maxRows: 5}) YIELD nodeId",
+        );
+        assert_eq!(
+            both.len(),
+            2,
+            "a limit above the match count is not padding"
+        );
+    }
+
+    /// Filtered rows keep the ids they would have had unfiltered — the whole
+    /// point of filtering at read time.
+    #[test]
+    fn a_filtered_row_keeps_its_unfiltered_cursor_id() {
+        let mut graph = selector_fixture();
+        let unfiltered = rows(&mut graph, "CALL db.cdc.query() YIELD id, seq, elementType");
+        let filtered = rows(
+            &mut graph,
+            "CALL db.cdc.query({selectors: [{elementType: 'relationship'}]}) YIELD id, seq",
+        );
+        assert!(!filtered.is_empty());
+        for row in &filtered {
+            let matching = unfiltered
+                .iter()
+                .find(|full| full[1] == row[1])
+                .expect("every filtered row exists unfiltered");
+            assert_eq!(
+                string_cell(matching, 0),
+                string_cell(row, 0),
+                "a cursor addresses the log, not the filtered view"
+            );
+        }
+    }
+
+    /// **The empty-filtered-poll contract.** A selective consumer that takes
+    /// `current()` *before* querying never re-reads and never misses, even
+    /// across polls that match nothing — which is the whole reason cursors
+    /// stay selector-independent.
+    #[test]
+    fn the_documented_polling_loop_neither_repeats_nor_skips() {
+        let mut graph = enabled(None);
+        let mut cursor = current_cursor(&mut graph);
+        let mut seen: Vec<Value> = Vec::new();
+
+        for round in 1..=4 {
+            // Noise every round; a wanted row only on the even ones.
+            write(&mut graph, &format!("CREATE (:Noise {{id: {round}}})"));
+            if round % 2 == 0 {
+                write(&mut graph, &format!("CREATE (:Wanted {{id: {round}}})"));
+            }
+            // The advice: take the position first, then read up to it.
+            let next = current_cursor(&mut graph);
+            let batch = rows(
+                &mut graph,
+                &format!(
+                    "CALL db.cdc.query({{from: '{cursor}', selectors: [{{nodeType: 'Wanted'}}]}}) \
+                     YIELD nodeId"
+                ),
+            );
+            seen.extend(batch.iter().map(|row| row[0].clone()));
+            cursor = next;
+        }
+
+        assert_eq!(
+            seen,
+            vec![Value::Int64(2), Value::Int64(4)],
+            "each wanted row exactly once, despite polls that matched nothing"
+        );
+    }
+
+    // ── selector validation ──────────────────────────────────────────
+
+    #[test]
+    fn an_unknown_selector_key_is_refused_rather_than_ignored() {
+        let mut graph = enabled(None);
+        write(&mut graph, "CREATE (:Item {id: 1})");
+        let error = fails(
+            &mut graph,
+            "CALL db.cdc.query({selectors: [{nodeTyp: 'Item'}]}) YIELD nodeId",
+        );
+        assert!(
+            error.contains("unknown selector key 'nodeTyp'") && error.contains("nodeType"),
+            "a typo one level in must be refused, not silently match everything: {error}"
+        );
+    }
+
+    #[test]
+    fn a_wrongly_typed_selector_value_is_refused_by_key_name() {
+        let mut graph = enabled(None);
+        for (selectors, expected) in [
+            ("[{nodeType: 7}]", "'nodeType' must be a string"),
+            (
+                "[{labels: 'Featured'}]",
+                "'labels' must be a list of strings",
+            ),
+            ("[{nodeId: [1]}]", "'nodeId' must be a single id value"),
+            (
+                "[{operation: 'u'}]",
+                "must be 'create', 'update' or 'delete'",
+            ),
+            ("[{elementType: 'n'}]", "must be 'node' or 'relationship'"),
+            ("['nope']", "must be a map of constraints"),
+            ("'nope'", "'selectors' must be a list of maps"),
+        ] {
+            let error = fails(
+                &mut graph,
+                &format!("CALL db.cdc.query({{selectors: {selectors}}}) YIELD nodeId"),
+            );
+            assert!(
+                error.contains(expected),
+                "{selectors} must be refused with '{expected}', got: {error}"
+            );
+        }
+    }
+
+    /// An empty *map* is a filter that filters nothing — almost always a
+    /// selector built from an empty set of conditions, which would silently
+    /// widen the query to everything.
+    #[test]
+    fn an_empty_selector_map_is_refused() {
+        let mut graph = enabled(None);
+        let error = fails(
+            &mut graph,
+            "CALL db.cdc.query({selectors: [{}]}) YIELD nodeId",
+        );
+        assert!(
+            error.contains("constrains nothing"),
+            "an empty selector map must be refused: {error}"
+        );
+        let error = fails(
+            &mut graph,
+            "CALL db.cdc.query({selectors: [{labels: []}]}) YIELD nodeId",
+        );
+        assert!(error.contains("empty list"), "{error}");
+    }
+
+    #[test]
+    fn a_non_positive_max_rows_is_refused() {
+        let mut graph = enabled(None);
+        let error = fails(
+            &mut graph,
+            "CALL db.cdc.query({maxRows: 'two'}) YIELD nodeId",
+        );
+        assert!(
+            error.contains("'maxRows' must be a positive integer"),
+            "{error}"
+        );
+    }
+
+    /// The row cap is `maxRows`, not `limit`, and that is forced rather than
+    /// chosen: LIMIT is a reserved clause word which the map-key grammar
+    /// deliberately keeps reserved, so `{limit: 1}` cannot be written at all.
+    /// Pinned so the name is not "tidied" back to `limit` by someone who
+    /// assumes it was arbitrary.
+    #[test]
+    fn limit_is_not_spellable_as_a_map_key_which_is_why_the_key_is_max_rows() {
+        let mut graph = enabled(None);
+        let error = fails(&mut graph, "CALL db.cdc.query({limit: 1}) YIELD nodeId");
+        assert!(
+            error.contains("Expected property key"),
+            "the reserved-word grammar is the reason for the name: {error}"
+        );
+        write(&mut graph, "CREATE (:Item {id: 1})");
+        assert_eq!(
+            rows(&mut graph, "CALL db.cdc.query({maxRows: 1}) YIELD nodeId").len(),
+            1
+        );
     }
 
     // ── cursor errors ────────────────────────────────────────────────

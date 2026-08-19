@@ -213,7 +213,7 @@
       "classification": "test"
     },
     {
-      "identity": "crates/kglite/src/graph/cdc/mod.rs::fn:enable:pub fn enable(graph: &mut DirGraph, capacity: Option<usize>) -> Result<CdcStatus, KgError>::clippy::result_large_err",
+      "identity": "crates/kglite/src/graph/cdc/mod.rs::fn:enable:pub fn enable( graph: &mut DirGraph, capacity: Option<usize>, enrichment: CdcEnrichment, ) -> Result<CdcStatus, KgError>::clippy::result_large_err",
       "classification": "api-shape"
     },
     {

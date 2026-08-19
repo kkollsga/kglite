@@ -1705,7 +1705,7 @@ that happened before `enable` is in the log.
 | `CALL db.cdc.status()` | `enabled`, `epoch`, `capacity`, `enrichment`, `buffered`, `earliest`, `current` | How capture is configured and how much it is holding. The one read verb that **answers while capture is off** (`enabled: false`, every other column null) rather than failing |
 | `CALL db.cdc.current()` | `id` | Cursor addressing the newest published change — start here to see only what happens *next* |
 | `CALL db.cdc.earliest()` | `id` | Cursor addressing the oldest change still retained — start here to read the whole retained log |
-| `CALL db.cdc.query({from})` | `id`, `seq`, `operation`, `elementType`, `nodeType`, `nodeId`, `relationshipType`, `srcType`, `srcId`, `tgtType`, `tgtId`, `state` | Changes published *after* the `from` cursor, oldest first. Omit `from` to read everything retained |
+| `CALL db.cdc.query({from, selectors, maxRows})` | `id`, `seq`, `operation`, `elementType`, `nodeType`, `nodeId`, `relationshipType`, `srcType`, `srcId`, `tgtType`, `tgtId`, `state` | Changes published *after* the `from` cursor, oldest first. Omit `from` to read everything retained. `selectors` filters (below); `maxRows` caps the rows returned |
 
 ```python
 graph.cypher("CALL db.cdc.enable()")
@@ -1772,6 +1772,87 @@ whose `before` is what the transaction opened on and whose `after` is what it
 left — so the pair answers "what did this commit change", which is the
 question a mirror or an audit trail is asking. A label change is included on
 the node's side: `before.labels` is the set the commit replaced.
+
+### Selectors — filtering the stream
+
+`selectors` is a **list of filter maps**, and an event is returned if **any one
+of them** matches it — so one query serves "every delete, plus every change to
+a `Person`". Within a single map every key must hold, so
+`{nodeType: 'Person', operation: 'update'}` is "updates of Person".
+
+```cypher
+CALL db.cdc.query({
+  from: $cursor,
+  selectors: [{operation: 'delete'}, {nodeType: 'Person', operation: 'update'}],
+  maxRows: 100
+}) YIELD operation, nodeType, nodeId, state
+```
+
+| Key | Matches when | Example |
+|-----|--------------|---------|
+| `elementType` | the row's `elementType` equals it — `'node'` or `'relationship'` | `{elementType: 'relationship'}` |
+| `operation` | the row's `operation` equals it — `'create'`, `'update'` or `'delete'` | `{operation: 'create'}` |
+| `nodeType` | a **node** row whose `nodeType` equals it | `{nodeType: 'Person'}` |
+| `relationshipType` | a **relationship** row whose type equals it | `{relationshipType: 'KNOWS'}` |
+| `srcType` / `tgtType` | a relationship row whose endpoint type equals it (directional) | `{srcType: 'Person', tgtType: 'Company'}` |
+| `nodeId` | a node row whose `nodeId` equals it | `{nodeId: 42}` |
+| `srcId` / `tgtId` | a relationship row whose endpoint id equals it | `{srcId: 1, tgtId: 2}` |
+| `labels` | a node carrying **all** the listed secondary labels | `{labels: ['Archived', 'Cold']}` |
+| `changesTo` | **any** listed property differs across the commit — needs `enrichment: 'full'` | `{changesTo: ['email', 'phone']}` |
+
+**The vocabulary is the columns'.** `operation` takes `create`/`update`/`delete`
+and `elementType` takes `node`/`relationship` — the same strings the rows
+report, *not* Neo4j's single-letter `c`/`u`/`d`. A selector that spelled a
+concept differently from the column it filters would be a trap.
+
+**`labels` is a conjunction, over secondary labels only.**
+`{labels: ['Archived', 'Cold']}` selects nodes carrying both; use two selectors
+for "either". The primary type is not in this set — that is `nodeType`'s job —
+which keeps the key aligned with what `state.after.labels` reports. A
+relationship has no labels, so a `labels` constraint never matches one.
+
+**`changesTo` compares the two images**, so it requires
+`enrichment: 'full'`; on an `'off'` log it is **refused**, naming the fix,
+rather than silently matching every event that merely *has* the property. An
+absent image and an absent key read alike ("not there"), which makes the rule
+total across operations: a create matches a property it set, a delete one it
+had, an update one whose value moved. One caveat on a log switched from
+`'off'` to `'full'` mid-stream: events captured before the switch have no
+before-image, so every property they carry reads as newly set.
+
+**Validation is strict, one level in.** An unknown key *inside* a selector map
+(`{nodeTyp: 'Person'}`) is refused rather than ignored — a silently-dropped
+constraint would widen the query to everything while looking like a filter.
+Wrong-typed values are refused by key name. `selectors: []` is the *absence* of
+filters and returns everything; `selectors: [{}]` is refused, because an empty
+map is a filter that constrains nothing and is almost always a selector built
+from an empty set of conditions.
+
+**Filtering happens before the copy-out**, so an event you did not ask for is
+never cloned out of the ring, and `maxRows` is applied **after** filtering — it
+caps the rows you receive, not the window they were drawn from. (The key is
+`maxRows` and not `limit` because `LIMIT` is a reserved clause word that cannot
+be written as a bare map key.)
+
+**Polling with selectors: take the cursor first.** Rows keep the `id` they
+would have had unfiltered — a cursor addresses the log, not your filtered view
+— which is what lets two consumers with different selectors exchange cursors.
+The consequence is that a filtered poll can return **zero rows while the log
+has advanced**, so a consumer that advanced its cursor from "the last row I
+received" would re-scan the same events forever. Take `db.cdc.current()`
+*before* the query and adopt it after:
+
+```python
+cursor = graph.cypher("CALL db.cdc.current()").to_dicts()[0]["id"]
+while True:
+    nxt = graph.cypher("CALL db.cdc.current()").to_dicts()[0]["id"]
+    rows = graph.cypher(
+        "CALL db.cdc.query({from: $c, selectors: [{nodeType: 'Person'}]}) YIELD nodeId, state",
+        params={"c": cursor},
+    ).to_dicts()
+    handle(rows)          # may legitimately be empty
+    cursor = nxt          # advance regardless
+```
 
 **Cursors are opaque and exclusive.** Pass back the string you were given
 rather than constructing one — the encoding may change. Exclusive means a
@@ -1841,6 +1922,7 @@ against it.
 | `metadata` | **Absent.** Neo4j reports executing user, connection client and transaction start time; the engine holds none of that |
 | `event` (nested map) | **Flattened into columns**, so `YIELD nodeType, operation` filters in Cypher without map traversal. Nesting survives only where it carries structure: `state` |
 | `state: {before, after}` | **Same shape.** `after` is the post-commit image (null for a delete); `before` is the pre-commit one under `enrichment: 'full'` (null for a create, and null throughout under the default `'off'`) |
+| `selectors` | **Same idea, KGLite's vocabulary.** A list of maps, ANY-matched. Keys name the columns (`operation: 'update'`, `elementType: 'node'`) rather than Neo4j's `select: 'n'` / `operation: 'c'`, and `labels` / `changesTo` are supported. `maxRows` is a KGLite addition |
 | — | `db.cdc.enable` / `db.cdc.disable` / `db.cdc.status` have no Neo4j counterpart: enablement there is a database option (`ALTER DATABASE … SET OPTION txLogEnrichment`), whose `off` / `full` values `enable`'s `enrichment` argument mirrors — `diff` is refused, with the reason |
 
 Arguments are passed as a **map** (`{capacity: N}`, `{from: cursor}`);

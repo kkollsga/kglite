@@ -84,6 +84,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not the read the mode exists to avoid. Compute one from a `'full'` event,
   where both sides are present.
 
+- **Change-stream selectors — `CALL db.cdc.query({selectors, maxRows})`.**
+  `selectors` is a list of filter maps, and an event is returned if **any** of
+  them matches, so one query serves "every delete, plus every update to a
+  `Person`". The keys are `elementType`, `operation`, `nodeType`,
+  `relationshipType`, `srcType`/`tgtType`, `nodeId`/`srcId`/`tgtId`, `labels`
+  and `changesTo`, and their values are the **same strings the columns report**
+  — `operation: 'update'`, not Neo4j's `'u'`.
+
+  `labels` is a conjunction over a node's secondary labels (the primary type is
+  `nodeType`'s job); `changesTo` matches when any listed property differs
+  across the commit and is **refused on an `enrichment: 'off'` log**, naming
+  the fix, rather than silently matching every event that merely has the
+  property.
+
+  Filtering happens at read time and **before the copy-out**, so an event you
+  did not ask for is never cloned out of the ring, and rows keep the cursor
+  `id` they would have had unfiltered — a cursor addresses the log, not your
+  filtered view, so consumers with different selectors can exchange them. The
+  consequence is that a filtered poll may return zero rows while the log has
+  advanced: take `db.cdc.current()` *before* the query and adopt it after,
+  which `CYPHER.md` documents and a test pins.
+
+  Validation is strict one level in: an unknown key *inside* a selector map is
+  refused rather than ignored, wrong-typed values are refused by key name,
+  `selectors: []` means no filter, and `selectors: [{}]` is refused because an
+  empty map is a filter that constrains nothing. `maxRows` caps the rows
+  returned **after** filtering; it is spelled `maxRows` rather than `limit`
+  because `LIMIT` is a reserved clause word that cannot be a bare map key.
+
 - **`CALL db.cdc.status()` — read the change-capture configuration without
   changing it.** Yields `enabled`, `epoch`, `capacity`, `enrichment`,
   `buffered`, `earliest`, `current`. It is the one CDC read verb that answers

@@ -47,7 +47,7 @@ fn commit(graph: &mut DirGraph) {
 }
 
 fn events(graph: &DirGraph) -> Vec<CdcEvent> {
-    cdc::read(graph, 0, None).expect("capture must be enabled")
+    cdc::read(graph, 0, None, &[]).expect("capture must be enabled")
 }
 
 fn node_id(event: &CdcEvent) -> Value {
@@ -130,7 +130,7 @@ fn cursor(graph: &DirGraph) -> u64 {
 }
 
 fn since(graph: &DirGraph, from: u64) -> Vec<CdcEvent> {
-    cdc::read(graph, from, None).expect("enabled")
+    cdc::read(graph, from, None, &[]).expect("enabled")
 }
 
 // ── capture → event correctness ──────────────────────────────────────
@@ -527,7 +527,7 @@ fn eviction_bounds_the_ring_and_advances_the_earliest_watermark() {
     let retained = events(&graph);
     assert_eq!(retained.first().map(|event| event.seq), Some(37));
     assert_eq!(
-        cdc::read(&graph, 0, None).map(|read| read.len()),
+        cdc::read(&graph, 0, None, &[]).map(|read| read.len()),
         Some(4),
         "a cursor older than the watermark reads what survives; B2 turns that \
          into a typed 'cursor too old' refusal"
@@ -611,7 +611,7 @@ fn disable_drops_the_log_and_stops_publishing() {
     assert!(cdc::disable(&mut graph), "was enabled");
     assert!(!cdc::disable(&mut graph), "already off");
     assert!(cdc::status(&graph).is_none());
-    assert!(cdc::read(&graph, 0, None).is_none());
+    assert!(cdc::read(&graph, 0, None, &[]).is_none());
 
     assert!(
         !graph.graph.is_recording(),
@@ -683,13 +683,22 @@ fn disk_mode_refuses_enable() {
     assert!(!graph.cdc_enabled());
 }
 
-/// Mapped mode serves, and its **columnar** property write publishes too.
-/// That write reaches the capture seam through `note_recorded_node_upsert`
-/// rather than through a recorded `GraphWrite` borrow, so it is its own arm:
-/// a stream that silently dropped every mapped `SET` would otherwise look
-/// healthy.
+/// Mapped mode serves the stream: create, update and delete all publish.
+///
+/// **This does not exercise the columnar write path**, despite what it
+/// claimed until 2026-08-19. A node created by Cypher `CREATE` on a mapped
+/// graph keeps its properties in a `Map`, so its `SET` never reaches
+/// `write_column_master` and takes the ordinary recorded `GraphWrite` path —
+/// verified with a probe. The genuinely columnar arm is
+/// [`a_columnar_set_captures_the_value_it_overwrote`], whose fixture bulk-loads
+/// so the rows live in the master store, and which
+/// [`columnar_write_is_the_path_under_test`] guards against silently drifting
+/// back to the `Map` path.
+///
+/// Kept as-is because mapped-mode publishing is still worth pinning; only the
+/// claim about *which* path it covers was wrong.
 #[test]
-fn mapped_mode_serves_including_the_columnar_write_path() {
+fn mapped_mode_serves_the_stream() {
     let mut graph = new_dir_graph_in_mode(StorageMode::Mapped, None).expect("mapped graph");
     cdc::enable(&mut graph, None, CdcEnrichment::Off).expect("mapped must serve");
 
