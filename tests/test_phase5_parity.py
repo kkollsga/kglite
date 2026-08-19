@@ -336,7 +336,10 @@ def test_binary_size_regression():
         0.4.4 -> 0.4.5 bump (builtins.github opt-in gate).
 
 
-      - 0.16.4:       20,729,056 bytes (≈19.8 MB). Property-type + structural-field constraint enforcement, the CDC v1 subsystem (capture markers, ring log, db.cdc.* procedures), and the parallel runtime (dedicated pool, partitioned scan/aggregate paths, per-thread regex copies).
+      - 0.16.4:       20,729,056 bytes (≈19.8 MB). Property-type + structural-field
+      constraint enforcement, the CDC v1 subsystem (capture markers, ring
+      log, db.cdc.* procedures), and the parallel runtime (dedicated pool,
+      partitioned scan/aggregate paths, per-thread regex copies).
 
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise
