@@ -463,8 +463,33 @@ fn kgl_fixture_bytes() -> Vec<u8> {
     buf
 }
 
+/// Mask every occurrence of the crate version string in a saved buffer, so
+/// the digest below survives release bumps. The `.kgl` header embeds
+/// `CARGO_PKG_VERSION` (the same fact that makes `GOLDEN_V3_DIGEST` a
+/// release-refreshed constant); this golden's job is to catch REPRESENTATION
+/// changes, not version bumps, so the version bytes are normalized to a
+/// fixed-width placeholder before hashing. Caught live: the 0.16.5 release
+/// bump turned this golden red with zero code changes.
+fn mask_version_bytes(bytes: &[u8]) -> Vec<u8> {
+    let version = env!("CARGO_PKG_VERSION").as_bytes();
+    let mut out = bytes.to_vec();
+    let mut i = 0;
+    while i + version.len() <= out.len() {
+        if &out[i..i + version.len()] == version {
+            for b in &mut out[i..i + version.len()] {
+                *b = b'#';
+            }
+            i += version.len();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 /// **The N2 instrument.** The bytes a fresh save writes for a graph carrying
-/// every representative `Value` shape, pinned as a checked-in digest.
+/// every representative `Value` shape, pinned as a checked-in digest —
+/// version bytes masked so only representation changes move it.
 ///
 /// N2 changes how `NodeValue`/`RelValue` properties (and possibly
 /// `Value::Map`) are held in memory. If that change is byte-invisible — the
@@ -473,7 +498,7 @@ fn kgl_fixture_bytes() -> Vec<u8> {
 fn kgl_fresh_save_bytes_match_pinned_digest() {
     use sha2::{Digest, Sha256};
 
-    let bytes = kgl_fixture_bytes();
+    let bytes = mask_version_bytes(&kgl_fixture_bytes());
     let digest = hex(&Sha256::digest(&bytes));
 
     if regen_requested() {
@@ -765,4 +790,4 @@ fn kgl_reload_preserves_column_slot_order() {
 
 /// sha256 of the `.kgl` bytes for [`kgl_fixture_bytes`]. Regenerate only via
 /// `KGLITE_REGEN_VALUE_BYTE_GOLDEN=1`, and only for a deliberate format change.
-const KGL_FIXTURE_DIGEST: &str = "203370b24061a2dfda018a4d41310edc3219766fda1076b2f752a9d22b939fc8";
+const KGL_FIXTURE_DIGEST: &str = "0422e0c6707c5d91032914841c301fdf5f8ea14ca776e714a923ce8f0f874652";
