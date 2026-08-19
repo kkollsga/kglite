@@ -975,6 +975,7 @@ pub(crate) mod ordering;
 mod procedure_registry;
 pub mod refresh_stats;
 pub mod regex_cache;
+mod rel_constraint_ddl;
 pub mod return_clause;
 pub mod rev_procedures;
 pub mod rule_procedures;

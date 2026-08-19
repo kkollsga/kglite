@@ -167,6 +167,21 @@ pub(crate) struct FileMetadata {
     /// posture, documented in the CHANGELOG.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ddl_property_type_constraints: BTreeMap<String, BTreeMap<String, DeclaredType>>,
+    /// Declared relationship presence constraints, as
+    /// `(connection_type, property)`. Unlike its node counterpart this is not a
+    /// provenance record beside a schema list — a connection type has no
+    /// `required_fields` — so it *is* the declaration, and a reload without it
+    /// silently forgets every relationship presence constraint in the file.
+    ///
+    /// Additive, and skipped when empty so a graph declaring none writes
+    /// byte-identical output to one produced before the field existed.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    rel_ddl_not_null_constraints: BTreeSet<(String, String)>,
+    /// Declared relationship property-type constraints, as
+    /// `connection_type -> property -> type`. Same enforcement-structure role,
+    /// same additive-and-skipped-when-empty posture, as the two above.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    rel_ddl_property_type_constraints: BTreeMap<String, BTreeMap<String, DeclaredType>>,
     /// Node type metadata: node_type → { property_name → type_string }
     #[serde(default)]
     node_type_metadata: HashMap<String, HashMap<String, String>>,
@@ -310,6 +325,8 @@ impl FileMetadata {
             constraint_names: graph.constraint_names.clone(),
             ddl_not_null_constraints: graph.ddl_not_null_constraints.clone(),
             ddl_property_type_constraints: graph.ddl_property_type_constraints.clone(),
+            rel_ddl_not_null_constraints: graph.rel_ddl_not_null_constraints.clone(),
+            rel_ddl_property_type_constraints: graph.rel_ddl_property_type_constraints.clone(),
             node_type_metadata: (*graph.node_type_metadata).clone(),
             connection_type_metadata: (*graph.connection_type_metadata).clone(),
             id_field_aliases: (*graph.id_field_aliases).clone(),
@@ -371,6 +388,8 @@ impl FileMetadata {
         graph.constraint_names = self.constraint_names;
         graph.ddl_not_null_constraints = self.ddl_not_null_constraints;
         graph.ddl_property_type_constraints = self.ddl_property_type_constraints;
+        graph.rel_ddl_not_null_constraints = self.rel_ddl_not_null_constraints;
+        graph.rel_ddl_property_type_constraints = self.rel_ddl_property_type_constraints;
         graph.node_type_metadata = Arc::new(self.node_type_metadata);
         graph.connection_type_metadata = Arc::new(self.connection_type_metadata);
         graph.id_field_aliases = Arc::new(self.id_field_aliases);

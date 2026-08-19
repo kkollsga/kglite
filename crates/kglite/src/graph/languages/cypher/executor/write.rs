@@ -471,7 +471,7 @@ fn run_clause_pipeline(
             // rollback guards as a data mutation. `SHOW INDEXES` classifies as
             // a read and never reaches this arm.
             Clause::Schema(command) => {
-                schema_ddl::execute_schema_mutation(graph, command, stats)?;
+                schema_ddl::execute_schema_mutation(graph, command, stats, interrupt)?;
             }
             // Read clauses: create temporary immutable executor
             _ => {

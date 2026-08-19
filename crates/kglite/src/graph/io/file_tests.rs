@@ -1023,7 +1023,6 @@ mod atomic_save_tests {
 #[cfg(test)]
 mod save_while_forked_tests {
     use super::*;
-    use crate::datatypes::Value;
     use crate::graph::dir_graph::DirGraph;
     use crate::graph::handle::make_dir_graph_mut;
     use crate::graph::session::execute::{execute_mut, ExecuteOptions};
@@ -1369,6 +1368,129 @@ mod property_type_roundtrip_tests {
         assert!(
             json.contains("Integer"),
             "the declared type must be written: {json}"
+        );
+    }
+}
+
+/// Relationship constraints have no second home at all: no schema list carries
+/// the presence half, no index carries the type half. If the two metadata
+/// fields do not survive a save, a reload silently forgets every relationship
+/// constraint in the file.
+#[cfg(test)]
+mod rel_constraint_roundtrip_tests {
+    use super::*;
+    use crate::graph::algorithms::Interrupt;
+    use crate::graph::constraints::EntityKind;
+    use crate::graph::constraints::{ConstraintKind, NamedConstraint};
+    use crate::graph::dir_graph::DirGraph;
+    use crate::graph::property_types::DeclaredType;
+
+    /// Two `Person` nodes joined by a `KNOWS` relationship carrying `since`.
+    fn knows_graph() -> DirGraph {
+        let mut graph = DirGraph::new();
+        let query = "CREATE (a:Person {person_id: 1})-[:KNOWS {since: 2020}]->\
+                     (b:Person {person_id: 2})";
+        let parsed = crate::graph::languages::cypher::parser::parse_cypher(query).unwrap();
+        crate::graph::languages::cypher::executor::write::execute_mutable(
+            &mut graph,
+            &parsed,
+            std::collections::HashMap::new(),
+            Interrupt::default(),
+        )
+        .expect("fixture edge");
+        graph
+    }
+
+    fn save_and_load(graph: DirGraph, dir: &std::path::Path) -> DirGraph {
+        let path = dir.join("rel.kgl");
+        let mut arc = Arc::new(graph);
+        prepare_save(&mut arc);
+        Arc::make_mut(&mut arc).enable_columnar();
+        write_kgl(&arc, path.to_str().unwrap()).unwrap();
+        Arc::unwrap_or_clone(load_file(path.to_str().unwrap()).unwrap())
+    }
+
+    #[test]
+    fn declared_relationship_constraints_survive_a_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut graph = knows_graph();
+        graph
+            .create_rel_not_null_constraint("KNOWS", "since", &Interrupt::default())
+            .unwrap();
+        graph
+            .create_rel_property_type_constraint(
+                "KNOWS",
+                "since",
+                DeclaredType::Integer,
+                &Interrupt::default(),
+            )
+            .unwrap();
+        graph.register_constraint_name(
+            "knows_since",
+            NamedConstraint {
+                kind: ConstraintKind::NotNull,
+                entity: EntityKind::Relationship,
+                node_type: "KNOWS".to_string(),
+                properties: vec!["since".to_string()],
+            },
+        );
+
+        let loaded = save_and_load(graph, dir.path());
+
+        assert!(
+            loaded.has_rel_not_null_constraint("KNOWS", "since"),
+            "the presence declaration must survive the round-trip"
+        );
+        assert_eq!(
+            loaded.rel_property_type_for("KNOWS", "since"),
+            Some(DeclaredType::Integer),
+            "the type declaration must survive the round-trip"
+        );
+        // The name registry carries the entity across the save, so the reloaded
+        // name still resolves to a *relationship* constraint — and survives
+        // `prune_constraint_names`, which asks the relationship stores whether
+        // the declaration is still live.
+        let named = loaded
+            .constraint_by_name("knows_since")
+            .expect("a relationship constraint's name must survive the save");
+        assert_eq!(named.entity, EntityKind::Relationship);
+        assert_eq!(named.node_type, "KNOWS");
+    }
+
+    /// A graph that declares no relationship constraint must write the same
+    /// bytes it wrote before these fields existed.
+    #[test]
+    fn a_graph_without_relationship_constraints_writes_neither_field() {
+        let json = serde_json::to_string(&FileMetadata::from_graph(&knows_graph())).unwrap();
+        assert!(
+            !json.contains("rel_ddl_not_null_constraints"),
+            "the empty set must be skipped, or the golden byte digest moves: {json}"
+        );
+        assert!(
+            !json.contains("rel_ddl_property_type_constraints"),
+            "the empty map must be skipped, or the golden byte digest moves: {json}"
+        );
+
+        let mut declared = knows_graph();
+        declared
+            .create_rel_not_null_constraint("KNOWS", "since", &Interrupt::default())
+            .unwrap();
+        declared
+            .create_rel_property_type_constraint(
+                "KNOWS",
+                "since",
+                DeclaredType::Integer,
+                &Interrupt::default(),
+            )
+            .unwrap();
+        let json = serde_json::to_string(&FileMetadata::from_graph(&declared)).unwrap();
+        assert!(
+            json.contains("rel_ddl_not_null_constraints"),
+            "a declared presence constraint must be written: {json}"
+        );
+        assert!(
+            json.contains("rel_ddl_property_type_constraints"),
+            "a declared type must be written: {json}"
         );
     }
 }

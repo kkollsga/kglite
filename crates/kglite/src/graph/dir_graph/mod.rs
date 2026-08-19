@@ -72,6 +72,7 @@ mod labels;
 pub mod node_remap;
 mod node_write;
 pub mod range_index_layer;
+pub(crate) mod rel_constraints;
 pub(crate) mod rollback;
 pub(crate) mod schema_cow;
 mod schema_ops;
@@ -200,6 +201,28 @@ pub struct DirGraph {
     /// in the file.
     #[serde(default)]
     pub(crate) ddl_property_type_constraints:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, DeclaredType>>,
+    /// Declared *relationship* presence constraints, as
+    /// `(connection_type, property)`.
+    ///
+    /// Its own store rather than an entry in the node sibling: a connection
+    /// type and a node type share a namespace in neither direction, and the
+    /// two are read by different write paths. Unlike the node half this map
+    /// *is* the constraint — a connection type has no `required_fields` list
+    /// inside `SchemaDefinition` to mirror a declaration into, so nothing
+    /// needs a `reapply_*` pass and no schema install can withdraw one.
+    ///
+    /// **Persisted through `FileMetadata`**, like every constraint store here
+    /// (`io::file`: `from_graph` / `apply_to_with`); this derive carries
+    /// nothing across a save on its own.
+    #[serde(default)]
+    pub(crate) rel_ddl_not_null_constraints: std::collections::BTreeSet<(String, String)>,
+    /// Declared relationship property-type constraints, as
+    /// `connection_type -> property -> type`. The relationship counterpart of
+    /// [`Self::ddl_property_type_constraints`], with the same shape and the
+    /// same persistence model.
+    #[serde(default)]
+    pub(crate) rel_ddl_property_type_constraints:
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, DeclaredType>>,
     /// Fast O(1) lookup by node ID: node_type -> TypeIdIndex
     /// Lazily built on first use for each node type, skipped during serialization.
@@ -740,6 +763,8 @@ impl DirGraph {
             constraint_names: HashMap::new(),
             ddl_not_null_constraints: std::collections::BTreeSet::new(),
             ddl_property_type_constraints: std::collections::BTreeMap::new(),
+            rel_ddl_not_null_constraints: std::collections::BTreeSet::new(),
+            rel_ddl_property_type_constraints: std::collections::BTreeMap::new(),
             id_indices: IdIndexStore::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: Arc::new(HashMap::new()),
@@ -801,6 +826,8 @@ impl DirGraph {
             constraint_names: HashMap::new(),
             ddl_not_null_constraints: std::collections::BTreeSet::new(),
             ddl_property_type_constraints: std::collections::BTreeMap::new(),
+            rel_ddl_not_null_constraints: std::collections::BTreeSet::new(),
+            rel_ddl_property_type_constraints: std::collections::BTreeMap::new(),
             id_indices: IdIndexStore::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: Arc::new(HashMap::new()),

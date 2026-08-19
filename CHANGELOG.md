@@ -17,12 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are now refused, naming what was written, what the pattern targets, and what
   to write instead. The unscoped spellings (`IS UNIQUE`, `IS KEY`) are
   unchanged and still legal against either pattern.
-- **A `CREATE CONSTRAINT` on a relationship pattern is refused in constraint
-  words.** It reported KGLite's *index* limitation ("KGLite indexes node
-  properties only, so there is no index to create"), which answers a question
-  the statement never asked. `CREATE INDEX` keeps that message; the constraint
-  form now says there is no constraint to declare. Relationship constraints
-  remain unsupported.
+- **A `CREATE CONSTRAINT` on a relationship pattern no longer answers with an
+  index limitation.** It reported "KGLite indexes node properties only, so
+  there is no index to create" — a fact about a structure the statement never
+  mentioned. `CREATE INDEX` keeps that message; the constraint form now
+  explains itself in constraint terms.
 
 ## [0.16.4] - 2026-08-19
 

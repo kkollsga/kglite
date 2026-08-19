@@ -45,15 +45,11 @@ use petgraph::graph::NodeIndex;
 use super::indexes::PropertyReader;
 use super::DirGraph;
 use crate::datatypes::values::Value;
+use crate::graph::constraints::EntityKind;
 use crate::graph::constraints::{
     normalize_properties, ConstraintKind, ConstraintResult, ConstraintViolation, NamedConstraint,
     UniqueConstraintKey,
 };
-// Node-side enforcement raises node violations by construction, so the entity
-// vocabulary is only named here by the tests that build a `NamedConstraint`
-// literal. R2's relationship stores make this a plain import.
-#[cfg(test)]
-use crate::graph::constraints::EntityKind;
 use crate::graph::property_types::{self, DeclaredType};
 use crate::graph::schema::{
     CompositeValue, NodeSchemaDefinition, SchemaDefinition, PROVISIONAL_KEY,
@@ -1160,8 +1156,10 @@ impl DirGraph {
         self.constraint_names.remove(name);
     }
 
-    /// The name registered for `(node_type, properties)`, if the constraint was
-    /// declared with one. Property order is irrelevant, matching constraint
+    /// The name registered for `(entity, node_type, properties)`, if the
+    /// constraint was declared with one. A node label and a connection type can
+    /// share a name, so the entity is part of the lookup — without it a
+    /// relationship constraint on `KNOWS` could answer for a node one. Property order is irrelevant, matching constraint
     /// identity. Lets `SHOW CONSTRAINTS` report the author's name.
     ///
     /// Several names can point at one tuple — `CREATE CONSTRAINT u … IS UNIQUE`
@@ -1174,6 +1172,7 @@ impl DirGraph {
     /// which is what a listing an operator reads during a migration needs.
     pub(crate) fn name_for_constraint(
         &self,
+        entity: EntityKind,
         node_type: &str,
         properties: &[String],
     ) -> Option<&str> {
@@ -1181,7 +1180,8 @@ impl DirGraph {
         self.constraint_names
             .iter()
             .filter(|(_, declared)| {
-                declared.node_type == node_type
+                declared.entity == entity
+                    && declared.node_type == node_type
                     && normalize_properties(&declared.properties) == wanted
             })
             .map(|(name, _)| name.as_str())
@@ -1211,6 +1211,22 @@ impl DirGraph {
 
     /// Whether the declaration a registered name points at is still in force.
     fn constraint_is_declared(&self, declared: &NamedConstraint) -> bool {
+        // Relationship declarations live in their own stores, and neither
+        // uniqueness spelling can be installed on one — a name pointing at such
+        // a constraint can only have come from a hand-edited file, and is
+        // pruned rather than trusted.
+        if declared.entity == EntityKind::Relationship {
+            return match declared.kind {
+                ConstraintKind::NotNull => declared.properties.iter().all(|property| {
+                    self.has_rel_not_null_constraint(&declared.node_type, property)
+                }),
+                ConstraintKind::PropertyType => declared.properties.iter().all(|property| {
+                    self.rel_property_type_for(&declared.node_type, property)
+                        .is_some()
+                }),
+                ConstraintKind::Unique | ConstraintKind::NodeKey => false,
+            };
+        }
         match declared.kind {
             ConstraintKind::Unique => {
                 self.has_unique_constraint(&declared.node_type, &declared.properties)
@@ -1568,7 +1584,7 @@ mod constraint_name_registry_tests {
         );
         assert_eq!(graph.constraint_by_name("nope"), None);
         assert_eq!(
-            graph.name_for_constraint("Person", &["email".to_string()]),
+            graph.name_for_constraint(EntityKind::Node, "Person", &["email".to_string()]),
             Some("person_email_unique")
         );
     }
@@ -1585,7 +1601,11 @@ mod constraint_name_registry_tests {
             named(ConstraintKind::Unique, &["first", "last"]),
         );
         assert_eq!(
-            graph.name_for_constraint("Person", &["last".to_string(), "first".to_string()]),
+            graph.name_for_constraint(
+                EntityKind::Node,
+                "Person",
+                &["last".to_string(), "first".to_string()]
+            ),
             Some("full_name")
         );
     }

@@ -70,7 +70,9 @@
 
 use super::super::ast::*;
 use super::super::result::{MutationStats, ResultRow, ResultSet};
+use super::rel_constraint_ddl;
 use crate::datatypes::values::Value;
+use crate::graph::algorithms::Interrupt;
 use crate::graph::constraints::{
     descriptor, normalize_properties, ConstraintKind, EntityKind, NamedConstraint,
 };
@@ -340,8 +342,9 @@ pub(crate) fn execute_schema_mutation(
     graph: &mut DirGraph,
     command: &SchemaCommand,
     stats: &mut MutationStats,
+    interrupt: &Interrupt,
 ) -> Result<(), String> {
-    let ddl_stats = dispatch_schema_mutation(graph, command)?;
+    let ddl_stats = dispatch_schema_mutation(graph, command, interrupt)?;
     stats.indexes_added += ddl_stats.indexes_added;
     stats.indexes_removed += ddl_stats.indexes_removed;
     stats.constraints_added += ddl_stats.constraints_added;
@@ -352,6 +355,7 @@ pub(crate) fn execute_schema_mutation(
 fn dispatch_schema_mutation(
     graph: &mut DirGraph,
     command: &SchemaCommand,
+    interrupt: &Interrupt,
 ) -> Result<MutationStats, String> {
     match command {
         SchemaCommand::CreateIndex(create) => execute_create_index(graph, create),
@@ -360,7 +364,7 @@ fn dispatch_schema_mutation(
         }
         SchemaCommand::DropIndex(drop) => execute_drop_index(graph, drop),
         SchemaCommand::Constraint(ConstraintCommand::Create(create)) => {
-            execute_create_constraint(graph, create)
+            execute_create_constraint(graph, create, interrupt)
         }
         SchemaCommand::Constraint(ConstraintCommand::Drop { name, if_exists }) => {
             execute_drop_constraint(graph, name, *if_exists)
@@ -691,24 +695,6 @@ fn node_label(target: &DdlTarget, statement: &str) -> Result<String, String> {
     }
 }
 
-/// The node label a `CREATE CONSTRAINT` targets.
-///
-/// Relationship constraints parse (the grammar is Neo4j's) and are refused
-/// here, in the constraint's own vocabulary — the statement asked for a
-/// *constraint*, so an answer about indexes would name a thing it never
-/// mentioned.
-fn constraint_label(target: &DdlTarget) -> Result<String, String> {
-    match target {
-        DdlTarget::Node { label, .. } => Ok(label.clone()),
-        DdlTarget::Relationship { rel_type, .. } => Err(format!(
-            "CREATE CONSTRAINT on a relationship pattern is not supported: KGLite constrains \
-             node properties only, so there is no constraint to declare on relationship type \
-             '{rel_type}'. Relationship properties are still writable — they are unchecked, \
-             not constrained."
-        )),
-    }
-}
-
 fn already_exists_message(name: &str) -> String {
     format!(
         "an index named '{name}' already exists. Add IF NOT EXISTS to make this statement a \
@@ -809,8 +795,19 @@ impl ConstraintPlan {
 fn execute_create_constraint(
     graph: &mut DirGraph,
     create: &CreateConstraint,
+    interrupt: &Interrupt,
 ) -> Result<MutationStats, String> {
-    let label = constraint_label(&create.target)?;
+    // A relationship target is a different set of stores, a different existing
+    // -data scan and a different set of servable kinds, so it is a different
+    // function rather than a branch threaded through this one.
+    let label = match &create.target {
+        DdlTarget::Relationship { rel_type, .. } => {
+            return rel_constraint_ddl::execute_create_rel_constraint(
+                graph, create, rel_type, interrupt,
+            )
+        }
+        DdlTarget::Node { label, .. } => label.clone(),
+    };
     // A constraint is schema state for one node type, so a session restricted to
     // a write whitelist may not constrain a type outside it — the same rule
     // index DDL follows.
@@ -862,7 +859,7 @@ fn execute_create_constraint(
     }
 
     if let Some(name) = &create.name {
-        reject_name_collision(graph, name, &label, &create.properties)?;
+        reject_name_collision(graph, name, EntityKind::Node, &label, &create.properties)?;
     }
 
     if constraint_is_declared(graph, plan, &label, &create.properties) {
@@ -1015,16 +1012,22 @@ fn constraint_is_declared(
 /// re-pointing a name would make `DROP CONSTRAINT <name>` drop something other
 /// than what the reader expects. Re-declaring the *same* constraint under the
 /// same name is fine — that is the idempotent replay case.
-fn reject_name_collision(
+pub(super) fn reject_name_collision(
     graph: &DirGraph,
     name: &str,
+    entity: EntityKind,
     label: &str,
     properties: &[String],
 ) -> Result<(), String> {
     let Some(existing) = graph.constraint_by_name(name) else {
         return Ok(());
     };
-    let same = existing.node_type == label
+    // The entity is part of the identity: a node label and a connection type
+    // can share a name, so without this a `KNOWS` relationship constraint would
+    // read as a re-declaration of a `KNOWS` node one and quietly re-point the
+    // name at it.
+    let same = existing.entity == entity
+        && existing.node_type == label
         && normalize_properties(&existing.properties) == normalize_properties(properties);
     if same {
         return Ok(());
@@ -1197,29 +1200,40 @@ fn execute_drop_constraint(
     name: &str,
     if_exists: bool,
 ) -> Result<MutationStats, String> {
-    let Some((kind, label, properties)) = resolve_constraint_name(graph, name) else {
+    let Some((entity, kind, label, properties)) = resolve_constraint_name(graph, name) else {
         if if_exists {
             return Ok(MutationStats::default());
         }
         return Err(unknown_constraint_message(graph, name));
     };
 
-    super::write::enforce_write_scope(graph, &label)?;
+    // Write scopes name node types, so they gate the node half only — the same
+    // reason declaring a relationship constraint does not consult them.
+    if entity == EntityKind::Node {
+        super::write::enforce_write_scope(graph, &label)?;
+    }
 
     // Withdraw exactly what the declaration installed, so dropping a NODE KEY
     // does not leave its presence half quietly enforced.
     let mut dropped = false;
-    if matches!(kind, ConstraintKind::Unique | ConstraintKind::NodeKey) {
-        dropped |= graph.drop_unique_constraint(&label, &properties);
-    }
-    if matches!(kind, ConstraintKind::NotNull | ConstraintKind::NodeKey) {
+    if entity == EntityKind::Relationship {
         for property in &properties {
-            dropped |= graph.drop_not_null_constraint(&label, property);
+            dropped |= rel_constraint_ddl::drop_rel_property(graph, kind, &label, property);
         }
     }
-    if matches!(kind, ConstraintKind::PropertyType) {
-        for property in &properties {
-            dropped |= graph.drop_property_type_constraint(&label, property);
+    if entity == EntityKind::Node {
+        if matches!(kind, ConstraintKind::Unique | ConstraintKind::NodeKey) {
+            dropped |= graph.drop_unique_constraint(&label, &properties);
+        }
+        if matches!(kind, ConstraintKind::NotNull | ConstraintKind::NodeKey) {
+            for property in &properties {
+                dropped |= graph.drop_not_null_constraint(&label, property);
+            }
+        }
+        if matches!(kind, ConstraintKind::PropertyType) {
+            for property in &properties {
+                dropped |= graph.drop_property_type_constraint(&label, property);
+            }
         }
     }
     graph.forget_constraint_name(name);
@@ -1240,9 +1254,10 @@ fn execute_drop_constraint(
 fn resolve_constraint_name(
     graph: &DirGraph,
     name: &str,
-) -> Option<(ConstraintKind, String, Vec<String>)> {
+) -> Option<(EntityKind, ConstraintKind, String, Vec<String>)> {
     if let Some(declared) = graph.constraint_by_name(name) {
         return Some((
+            declared.entity,
             declared.kind,
             declared.node_type.clone(),
             declared.properties.clone(),
@@ -1253,6 +1268,7 @@ fn resolve_constraint_name(
         .find(|info| info.name == name)
         .map(|info| {
             (
+                info.entity,
                 info.kind,
                 info.labels_or_types
                     .first()
@@ -1359,7 +1375,7 @@ fn constraint_info_to_row(info: &ConstraintInfo) -> ResultRow {
     row
 }
 
-fn constraints_added(count: usize) -> MutationStats {
+pub(super) fn constraints_added(count: usize) -> MutationStats {
     MutationStats {
         constraints_added: count,
         ..MutationStats::default()
@@ -2102,38 +2118,6 @@ mod tests {
                 err.contains("PROPERTY TYPE constraint"),
                 "for `{query}`: {err}"
             );
-        }
-    }
-
-    /// A relationship constraint parses and is refused here — in the
-    /// constraint's own words. The index message is the wrong answer to a
-    /// statement that never mentioned an index: it sends the reader looking
-    /// for one to create.
-    #[test]
-    fn relationship_constraint_is_rejected_by_name() {
-        let mut graph = person_graph();
-        for requirement in [
-            "IS UNIQUE",
-            "IS RELATIONSHIP KEY",
-            "IS NOT NULL",
-            "IS :: INTEGER",
-        ] {
-            let err = run_err(
-                &mut graph,
-                &format!("CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since {requirement}"),
-            );
-            assert!(err.contains("KNOWS"), "for `{requirement}`: {err}");
-            assert!(
-                err.contains("CREATE CONSTRAINT"),
-                "for `{requirement}`: {err}"
-            );
-            assert!(
-                err.contains("no constraint to declare"),
-                "for `{requirement}`: {err}"
-            );
-            // The index vocabulary belongs to index DDL, which is a different
-            // statement with a different reason.
-            assert!(!err.contains("index"), "for `{requirement}`: {err}");
         }
     }
 

@@ -576,7 +576,7 @@ pub(crate) fn collect_constraints_structured(graph: &DirGraph) -> Vec<Constraint
             }
         }
         out.push(ConstraintInfo {
-            name: constraint_name(graph, &node_type, &properties),
+            name: constraint_name(graph, EntityKind::Node, &node_type, &properties),
             kind,
             entity: EntityKind::Node,
             labels_or_types: vec![node_type.clone()],
@@ -591,7 +591,7 @@ pub(crate) fn collect_constraints_structured(graph: &DirGraph) -> Vec<Constraint
         }
         let properties = vec![property];
         out.push(ConstraintInfo {
-            name: constraint_name(graph, &node_type, &properties),
+            name: constraint_name(graph, EntityKind::Node, &node_type, &properties),
             kind: ConstraintKind::NotNull,
             entity: EntityKind::Node,
             labels_or_types: vec![node_type.clone()],
@@ -608,10 +608,37 @@ pub(crate) fn collect_constraints_structured(graph: &DirGraph) -> Vec<Constraint
     for (node_type, property, declared) in graph.list_property_type_constraints() {
         let properties = vec![property];
         out.push(ConstraintInfo {
-            name: constraint_name(graph, &node_type, &properties),
+            name: constraint_name(graph, EntityKind::Node, &node_type, &properties),
             kind: ConstraintKind::PropertyType,
             entity: EntityKind::Node,
             labels_or_types: vec![node_type.clone()],
+            properties,
+            property_type: Some(declared),
+        });
+    }
+
+    // Relationship rows. Their stores are separate from the node ones and carry
+    // only presence and property type — the two kinds relationship DDL installs
+    // — so there is no NODE_KEY-style folding to do here.
+    for (rel_type, property) in graph.list_rel_not_null_constraints() {
+        let properties = vec![property];
+        out.push(ConstraintInfo {
+            name: constraint_name(graph, EntityKind::Relationship, &rel_type, &properties),
+            kind: ConstraintKind::NotNull,
+            entity: EntityKind::Relationship,
+            labels_or_types: vec![rel_type],
+            properties,
+            property_type: None,
+        });
+    }
+
+    for (rel_type, property, declared) in graph.list_rel_property_type_constraints() {
+        let properties = vec![property];
+        out.push(ConstraintInfo {
+            name: constraint_name(graph, EntityKind::Relationship, &rel_type, &properties),
+            kind: ConstraintKind::PropertyType,
+            entity: EntityKind::Relationship,
+            labels_or_types: vec![rel_type],
             properties,
             property_type: Some(declared),
         });
@@ -627,9 +654,14 @@ pub(crate) fn collect_constraints_structured(graph: &DirGraph) -> Vec<Constraint
 
 /// The author's name for a constraint when one was registered, else the
 /// canonical descriptor — the same fallback rule index names use.
-fn constraint_name(graph: &DirGraph, node_type: &str, properties: &[String]) -> String {
+fn constraint_name(
+    graph: &DirGraph,
+    entity: EntityKind,
+    node_type: &str,
+    properties: &[String],
+) -> String {
     graph
-        .name_for_constraint(node_type, properties)
+        .name_for_constraint(entity, node_type, properties)
         .map(str::to_string)
         .unwrap_or_else(|| crate::graph::constraints::descriptor(node_type, properties))
 }
@@ -1800,11 +1832,11 @@ mod constraint_row_vocabulary_tests {
         );
     }
 
-    /// Every row the collector emits today is a node row — the relationship
-    /// stores do not exist yet — and `SHOW CONSTRAINTS` must not start
-    /// claiming otherwise until they do.
+    /// A node declaration produces a node row and nothing else: the two halves
+    /// read separate stores, so a relationship row appearing here would mean
+    /// the collector is reporting a constraint nobody declared.
     #[test]
-    fn the_collector_still_emits_only_node_rows() {
+    fn a_node_declaration_produces_only_a_node_row() {
         let mut graph = DirGraph::new();
         graph
             .create_not_null_constraint("Person", "email")
@@ -1812,5 +1844,26 @@ mod constraint_row_vocabulary_tests {
         let rows = collect_constraints_structured(&graph);
         assert!(!rows.is_empty());
         assert!(rows.iter().all(|row| row.entity == EntityKind::Node));
+    }
+
+    /// A relationship declaration is reported under the relationship
+    /// vocabulary — the row `DROP CONSTRAINT <descriptor>` resolves against.
+    #[test]
+    fn a_relationship_declaration_is_reported_as_a_relationship_row() {
+        let mut graph = DirGraph::new();
+        graph
+            .create_rel_not_null_constraint(
+                "KNOWS",
+                "since",
+                &crate::graph::algorithms::Interrupt::default(),
+            )
+            .expect("declaration");
+        let rows = collect_constraints_structured(&graph);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].entity, EntityKind::Relationship);
+        assert_eq!(rows[0].name, "KNOWS.since");
+        assert_eq!(rows[0].labels_or_types, vec!["KNOWS".to_string()]);
+        assert_eq!(rows[0].neo4j_type(), "RELATIONSHIP_PROPERTY_EXISTENCE");
+        assert_eq!(rows[0].entity_type(), "RELATIONSHIP");
     }
 }
