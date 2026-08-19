@@ -1606,7 +1606,7 @@ pub(super) fn constraints_to_rows(
             let val = match item.name.as_str() {
                 "name" => Value::String(info.name.clone()),
                 "type" => Value::String(info.neo4j_type().to_string()),
-                "entityType" => Value::String(info.entity_type.to_string()),
+                "entityType" => Value::String(info.entity_type().to_string()),
                 "labelsOrTypes" => Value::List(
                     info.labels_or_types
                         .iter()

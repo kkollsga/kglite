@@ -24,6 +24,8 @@
 //! the AST and rejected in `executor/schema_ddl.rs`; the parser only errors on
 //! input it genuinely cannot read.
 
+use crate::graph::constraints::EntityKind;
+
 use super::super::ast::*;
 use super::super::tokenizer::CypherToken;
 use super::{soft_word_eq, CypherParser};
@@ -424,7 +426,7 @@ impl CypherParser {
         }
 
         let properties = self.parse_constraint_properties(&target)?;
-        let requirement = self.parse_constraint_requirement()?;
+        let requirement = self.parse_constraint_requirement(&target)?;
         self.expect_statement_end("CREATE CONSTRAINT")?;
 
         Ok(CreateConstraint {
@@ -472,7 +474,15 @@ impl CypherParser {
     /// The predicate half of `REQUIRE <props> …`: `IS UNIQUE`,
     /// `IS NOT NULL`, `IS [NODE|RELATIONSHIP] KEY`, `IS :: <TYPE>`,
     /// `IS TYPED <TYPE>`.
-    fn parse_constraint_requirement(&mut self) -> Result<ConstraintRequirement, String> {
+    ///
+    /// `target` is taken for the same reason
+    /// [`Self::parse_constraint_properties`] takes it: the requirement half can
+    /// contradict the `FOR` pattern, and a statement that contradicts itself is
+    /// refused here rather than resolved in favour of one half downstream.
+    fn parse_constraint_requirement(
+        &mut self,
+        target: &DdlTarget,
+    ) -> Result<ConstraintRequirement, String> {
         self.expect(&CypherToken::Is)?;
 
         if self.check(&CypherToken::Not) {
@@ -494,17 +504,65 @@ impl CypherParser {
             ));
         }
         // The optional `NODE` / `RELATIONSHIP` scope word before UNIQUE / KEY.
-        let _ = self.eat_soft_word("NODE") || self.eat_soft_word("RELATIONSHIP");
+        // It restates what the `FOR` pattern already said, so it is *checked*
+        // rather than discarded: `FOR ()-[r:T]-() REQUIRE r.p IS NODE KEY` asks
+        // for two different constraints in one statement, and silently keeping
+        // the pattern's answer would install something the author did not write.
+        let scope = if self.eat_soft_word("NODE") {
+            Some(EntityKind::Node)
+        } else if self.eat_soft_word("RELATIONSHIP") {
+            Some(EntityKind::Relationship)
+        } else {
+            None
+        };
         if self.eat_soft_word("UNIQUE") {
+            self.check_constraint_scope(scope, target, "UNIQUE")?;
             return Ok(ConstraintRequirement::Unique);
         }
         if self.eat_soft_word("KEY") {
+            self.check_constraint_scope(scope, target, "KEY")?;
             return Ok(ConstraintRequirement::Key);
         }
         Err(format!(
             "expected UNIQUE, NOT NULL, NODE KEY, or a property type after IS in \
              CREATE CONSTRAINT, found {:?}",
             self.peek()
+        ))
+    }
+
+    /// Reject an `IS <scope> <word>` requirement whose scope word disagrees
+    /// with the `FOR` pattern.
+    ///
+    /// This is a *parse* error rather than an executor rejection, and that is
+    /// the right side of this module's "syntax error vs unsupported feature"
+    /// line: the statement is not asking for something KGLite lacks, it is
+    /// asking for two different constraints at once, so there is nothing an
+    /// executor could serve however capable it became. An absent scope word is
+    /// legal for either target — plain `IS UNIQUE` / `IS KEY` mean "whatever
+    /// this pattern targets".
+    fn check_constraint_scope(
+        &self,
+        scope: Option<EntityKind>,
+        target: &DdlTarget,
+        word: &str,
+    ) -> Result<(), String> {
+        let Some(scope) = scope else {
+            return Ok(());
+        };
+        let targeted = target.entity();
+        if scope == targeted {
+            return Ok(());
+        }
+        let pattern = match targeted {
+            EntityKind::Node => "a node pattern, FOR (n:Label)",
+            EntityKind::Relationship => "a relationship pattern, FOR ()-[r:TYPE]-()",
+        };
+        Err(format!(
+            "IS {} {word} does not match the FOR pattern: it is {pattern}, targeting '{}'. \
+             Write IS {} {word} (or plain IS {word}) for it, or change the pattern.",
+            scope.keyword(),
+            target.type_name(),
+            targeted.keyword(),
         ))
     }
 
@@ -959,6 +1017,113 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The `NODE` / `RELATIONSHIP` scope word restates what `FOR` already
+    /// said. When the two disagree the statement asks for two different
+    /// constraints at once, so all four crossings are refused by name rather
+    /// than silently resolved in favour of the pattern.
+    #[test]
+    fn a_scope_word_contradicting_the_for_pattern_is_refused() {
+        for (input, wrote, should_write, targeted) in [
+            (
+                "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS RELATIONSHIP UNIQUE",
+                "IS RELATIONSHIP UNIQUE",
+                "IS NODE UNIQUE",
+                "Person",
+            ),
+            (
+                "CREATE CONSTRAINT FOR (p:Person) REQUIRE (p.a, p.b) IS RELATIONSHIP KEY",
+                "IS RELATIONSHIP KEY",
+                "IS NODE KEY",
+                "Person",
+            ),
+            (
+                "CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since IS NODE UNIQUE",
+                "IS NODE UNIQUE",
+                "IS RELATIONSHIP UNIQUE",
+                "KNOWS",
+            ),
+            (
+                "CREATE CONSTRAINT FOR ()-[r:KNOWS]->() REQUIRE r.since IS NODE KEY",
+                "IS NODE KEY",
+                "IS RELATIONSHIP KEY",
+                "KNOWS",
+            ),
+        ] {
+            let error = parse_error(input);
+            assert!(error.contains(wrote), "for `{input}`: {error}");
+            assert!(error.contains(should_write), "for `{input}`: {error}");
+            assert!(error.contains(targeted), "for `{input}`: {error}");
+        }
+    }
+
+    /// The matching scope word and no scope word at all are both legal, on
+    /// both target kinds — `IS UNIQUE` / `IS KEY` mean "whatever this pattern
+    /// targets". A relationship constraint parsing is the point: the parser
+    /// accepts it and the executor decides what it can serve.
+    #[test]
+    fn a_matching_or_absent_scope_word_parses_for_either_target() {
+        for (input, expected, entity) in [
+            (
+                "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE",
+                ConstraintRequirement::Unique,
+                EntityKind::Node,
+            ),
+            (
+                "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS NODE UNIQUE",
+                ConstraintRequirement::Unique,
+                EntityKind::Node,
+            ),
+            (
+                "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS KEY",
+                ConstraintRequirement::Key,
+                EntityKind::Node,
+            ),
+            (
+                "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS NODE KEY",
+                ConstraintRequirement::Key,
+                EntityKind::Node,
+            ),
+            (
+                "CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE",
+                ConstraintRequirement::Unique,
+                EntityKind::Relationship,
+            ),
+            (
+                "CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since IS RELATIONSHIP UNIQUE",
+                ConstraintRequirement::Unique,
+                EntityKind::Relationship,
+            ),
+            (
+                "CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since IS KEY",
+                ConstraintRequirement::Key,
+                EntityKind::Relationship,
+            ),
+            (
+                "CREATE CONSTRAINT FOR ()<-[r:KNOWS]-() REQUIRE r.since IS RELATIONSHIP KEY",
+                ConstraintRequirement::Key,
+                EntityKind::Relationship,
+            ),
+        ] {
+            match schema(input) {
+                SchemaCommand::Constraint(ConstraintCommand::Create(create)) => {
+                    assert_eq!(create.requirement, expected, "for `{input}`");
+                    assert_eq!(create.target.entity(), entity, "for `{input}`");
+                }
+                other => panic!("`{input}` parsed as {other:?}"),
+            }
+        }
+    }
+
+    /// The scope word is only legal where Neo4j puts it — before `UNIQUE` or
+    /// `KEY`. `IS NODE NOT NULL` is not a spelling, and must stay the parse
+    /// error it already was rather than becoming a scope mismatch.
+    #[test]
+    fn a_scope_word_before_not_null_is_still_a_syntax_error() {
+        let error =
+            parse_error("CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS NODE NOT NULL");
+        assert!(error.contains("expected UNIQUE"), "{error}");
     }
 
     #[test]

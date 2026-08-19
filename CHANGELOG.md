@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`CREATE CONSTRAINT … IS NODE KEY` / `IS RELATIONSHIP KEY` now has to agree
+  with the `FOR` pattern.** The optional `NODE` / `RELATIONSHIP` scope word was
+  parsed and discarded, so
+  `FOR (p:Person) REQUIRE p.email IS RELATIONSHIP KEY` silently installed a
+  *node* key — a constraint the statement did not ask for. All four crossings
+  are now refused, naming what was written, what the pattern targets, and what
+  to write instead. The unscoped spellings (`IS UNIQUE`, `IS KEY`) are
+  unchanged and still legal against either pattern.
+- **A `CREATE CONSTRAINT` on a relationship pattern is refused in constraint
+  words.** It reported KGLite's *index* limitation ("KGLite indexes node
+  properties only, so there is no index to create"), which answers a question
+  the statement never asked. `CREATE INDEX` keeps that message; the constraint
+  form now says there is no constraint to declare. Relationship constraints
+  remain unsupported.
+
 ## [0.16.4] - 2026-08-19
 
 ### Added

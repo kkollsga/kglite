@@ -49,6 +49,11 @@ use crate::graph::constraints::{
     normalize_properties, ConstraintKind, ConstraintResult, ConstraintViolation, NamedConstraint,
     UniqueConstraintKey,
 };
+// Node-side enforcement raises node violations by construction, so the entity
+// vocabulary is only named here by the tests that build a `NamedConstraint`
+// literal. R2's relationship stores make this a plain import.
+#[cfg(test)]
+use crate::graph::constraints::EntityKind;
 use crate::graph::property_types::{self, DeclaredType};
 use crate::graph::schema::{
     CompositeValue, NodeSchemaDefinition, SchemaDefinition, PROVISIONAL_KEY,
@@ -1540,6 +1545,7 @@ mod constraint_name_registry_tests {
     fn named(kind: ConstraintKind, properties: &[&str]) -> NamedConstraint {
         NamedConstraint {
             kind,
+            entity: EntityKind::Node,
             node_type: "Person".to_string(),
             properties: properties.iter().map(|p| (*p).to_string()).collect(),
         }
@@ -1938,6 +1944,7 @@ mod property_type_declaration_tests {
             "person_age_typed",
             NamedConstraint {
                 kind: ConstraintKind::PropertyType,
+                entity: EntityKind::Node,
                 node_type: "Person".to_string(),
                 properties: vec!["age".to_string()],
             },

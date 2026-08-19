@@ -72,7 +72,7 @@ use super::super::ast::*;
 use super::super::result::{MutationStats, ResultRow, ResultSet};
 use crate::datatypes::values::Value;
 use crate::graph::constraints::{
-    descriptor, normalize_properties, ConstraintKind, NamedConstraint,
+    descriptor, normalize_properties, ConstraintKind, EntityKind, NamedConstraint,
 };
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::introspection::schema_overview::{
@@ -674,7 +674,11 @@ fn index_name(label: &str, properties: &[String]) -> String {
     }
 }
 
-/// The node label a statement targets, rejecting relationship DDL by name.
+/// The node label an *index* statement targets, rejecting relationship DDL by
+/// name. Constraint DDL has its own [`constraint_label`]: the reason a
+/// relationship target is refused there is a different reason, and reporting it
+/// as an index limitation sends the reader looking for an index they never
+/// asked for.
 fn node_label(target: &DdlTarget, statement: &str) -> Result<String, String> {
     match target {
         DdlTarget::Node { label, .. } => Ok(label.clone()),
@@ -683,6 +687,24 @@ fn node_label(target: &DdlTarget, statement: &str) -> Result<String, String> {
              properties only, so there is no index to create on relationship type \
              '{rel_type}'. Relationship properties are still queryable — they are scanned, \
              not indexed."
+        )),
+    }
+}
+
+/// The node label a `CREATE CONSTRAINT` targets.
+///
+/// Relationship constraints parse (the grammar is Neo4j's) and are refused
+/// here, in the constraint's own vocabulary — the statement asked for a
+/// *constraint*, so an answer about indexes would name a thing it never
+/// mentioned.
+fn constraint_label(target: &DdlTarget) -> Result<String, String> {
+    match target {
+        DdlTarget::Node { label, .. } => Ok(label.clone()),
+        DdlTarget::Relationship { rel_type, .. } => Err(format!(
+            "CREATE CONSTRAINT on a relationship pattern is not supported: KGLite constrains \
+             node properties only, so there is no constraint to declare on relationship type \
+             '{rel_type}'. Relationship properties are still writable — they are unchecked, \
+             not constrained."
         )),
     }
 }
@@ -788,7 +810,7 @@ fn execute_create_constraint(
     graph: &mut DirGraph,
     create: &CreateConstraint,
 ) -> Result<MutationStats, String> {
-    let label = node_label(&create.target, "CREATE CONSTRAINT")?;
+    let label = constraint_label(&create.target)?;
     // A constraint is schema state for one node type, so a session restricted to
     // a write whitelist may not constrain a type outside it — the same rule
     // index DDL follows.
@@ -862,6 +884,7 @@ fn execute_create_constraint(
             name,
             NamedConstraint {
                 kind: plan.kind(),
+                entity: EntityKind::Node,
                 node_type: label.clone(),
                 properties: create.properties.clone(),
             },
@@ -1308,7 +1331,7 @@ fn constraint_info_to_row(info: &ConstraintInfo) -> ResultRow {
     );
     row.projected.insert(
         "entityType".to_string(),
-        Value::String(info.entity_type.to_string()),
+        Value::String(info.entity_type().to_string()),
     );
     row.projected.insert(
         "labelsOrTypes".to_string(),
@@ -2082,14 +2105,36 @@ mod tests {
         }
     }
 
+    /// A relationship constraint parses and is refused here — in the
+    /// constraint's own words. The index message is the wrong answer to a
+    /// statement that never mentioned an index: it sends the reader looking
+    /// for one to create.
     #[test]
     fn relationship_constraint_is_rejected_by_name() {
         let mut graph = person_graph();
-        let err = run_err(
-            &mut graph,
-            "CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE",
-        );
-        assert!(err.contains("KNOWS"), "got: {err}");
+        for requirement in [
+            "IS UNIQUE",
+            "IS RELATIONSHIP KEY",
+            "IS NOT NULL",
+            "IS :: INTEGER",
+        ] {
+            let err = run_err(
+                &mut graph,
+                &format!("CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since {requirement}"),
+            );
+            assert!(err.contains("KNOWS"), "for `{requirement}`: {err}");
+            assert!(
+                err.contains("CREATE CONSTRAINT"),
+                "for `{requirement}`: {err}"
+            );
+            assert!(
+                err.contains("no constraint to declare"),
+                "for `{requirement}`: {err}"
+            );
+            // The index vocabulary belongs to index DDL, which is a different
+            // statement with a different reason.
+            assert!(!err.contains("index"), "for `{requirement}`: {err}");
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Schema / property / neighbors / sample / join-candidate computation.
 
 use crate::datatypes::values::Value;
-use crate::graph::constraints::ConstraintKind;
+use crate::graph::constraints::{ConstraintKind, EntityKind};
 use crate::graph::property_types::DeclaredType;
 use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::column_store::TypedColumn;
@@ -507,8 +507,13 @@ pub(crate) struct ConstraintInfo {
     /// `Label.(a, b)` descriptor when it was declared without one.
     pub name: String,
     pub kind: ConstraintKind,
-    /// Always `"NODE"` — KGLite constrains node properties only.
-    pub entity_type: &'static str,
+    /// Whether the row describes a node constraint or a relationship one.
+    /// Every row the collector below emits is a node row today — the
+    /// relationship stores do not exist yet — but the `type` and `entityType`
+    /// columns are rendered from this rather than from a hard-coded `"NODE"`,
+    /// so the relationship half is a matter of building the row, not of
+    /// rewriting the vocabulary.
+    pub entity: EntityKind,
     pub labels_or_types: Vec<String>,
     /// Constrained property names, in declaration order.
     pub properties: Vec<String>,
@@ -522,12 +527,28 @@ impl ConstraintInfo {
     /// Neo4j-compatible `type` column value, using Neo4j 5's `ConstraintType`
     /// spellings so a ported script's result handling reads unchanged.
     pub(crate) fn neo4j_type(&self) -> &'static str {
-        match self.kind {
-            ConstraintKind::Unique => "UNIQUENESS",
-            ConstraintKind::NodeKey => "NODE_KEY",
-            ConstraintKind::NotNull => "NODE_PROPERTY_EXISTENCE",
-            ConstraintKind::PropertyType => "NODE_PROPERTY_TYPE",
+        match (self.entity, self.kind) {
+            (EntityKind::Node, ConstraintKind::Unique) => "UNIQUENESS",
+            (EntityKind::Node, ConstraintKind::NodeKey) => "NODE_KEY",
+            (EntityKind::Node, ConstraintKind::NotNull) => "NODE_PROPERTY_EXISTENCE",
+            (EntityKind::Node, ConstraintKind::PropertyType) => "NODE_PROPERTY_TYPE",
+            // Neo4j 5's relationship spellings. `RELATIONSHIP_UNIQUENESS`
+            // breaks the node side's `UNIQUENESS`/`NODE_KEY` asymmetry — it is
+            // Neo4j's naming, not a transcription slip.
+            (EntityKind::Relationship, ConstraintKind::Unique) => "RELATIONSHIP_UNIQUENESS",
+            (EntityKind::Relationship, ConstraintKind::NodeKey) => "RELATIONSHIP_KEY",
+            (EntityKind::Relationship, ConstraintKind::NotNull) => {
+                "RELATIONSHIP_PROPERTY_EXISTENCE"
+            }
+            (EntityKind::Relationship, ConstraintKind::PropertyType) => {
+                "RELATIONSHIP_PROPERTY_TYPE"
+            }
         }
+    }
+
+    /// Neo4j-compatible `entityType` column value.
+    pub(crate) fn entity_type(&self) -> &'static str {
+        self.entity.keyword()
     }
 }
 
@@ -557,7 +578,7 @@ pub(crate) fn collect_constraints_structured(graph: &DirGraph) -> Vec<Constraint
         out.push(ConstraintInfo {
             name: constraint_name(graph, &node_type, &properties),
             kind,
-            entity_type: "NODE",
+            entity: EntityKind::Node,
             labels_or_types: vec![node_type.clone()],
             properties,
             property_type: None,
@@ -572,7 +593,7 @@ pub(crate) fn collect_constraints_structured(graph: &DirGraph) -> Vec<Constraint
         out.push(ConstraintInfo {
             name: constraint_name(graph, &node_type, &properties),
             kind: ConstraintKind::NotNull,
-            entity_type: "NODE",
+            entity: EntityKind::Node,
             labels_or_types: vec![node_type.clone()],
             properties,
             property_type: None,
@@ -589,7 +610,7 @@ pub(crate) fn collect_constraints_structured(graph: &DirGraph) -> Vec<Constraint
         out.push(ConstraintInfo {
             name: constraint_name(graph, &node_type, &properties),
             kind: ConstraintKind::PropertyType,
-            entity_type: "NODE",
+            entity: EntityKind::Node,
             labels_or_types: vec![node_type.clone()],
             properties,
             property_type: Some(declared),
@@ -1700,5 +1721,96 @@ mod column_major_stats_probe {
                 row / col
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod constraint_row_vocabulary_tests {
+    use super::*;
+
+    fn info(entity: EntityKind, kind: ConstraintKind) -> ConstraintInfo {
+        ConstraintInfo {
+            name: "c".to_string(),
+            kind,
+            entity,
+            labels_or_types: vec!["T".to_string()],
+            properties: vec!["p".to_string()],
+            property_type: None,
+        }
+    }
+
+    /// The `type` column is Neo4j's `ConstraintType` vocabulary, and its two
+    /// halves are not a prefix apart: the node uniqueness spelling is bare
+    /// `UNIQUENESS` while the relationship one is `RELATIONSHIP_UNIQUENESS`.
+    /// A ported script matching on these strings sees the same words Neo4j
+    /// gave it.
+    #[test]
+    fn each_kind_reports_under_its_entity_s_neo4j_type() {
+        for (entity, kind, expected) in [
+            (EntityKind::Node, ConstraintKind::Unique, "UNIQUENESS"),
+            (EntityKind::Node, ConstraintKind::NodeKey, "NODE_KEY"),
+            (
+                EntityKind::Node,
+                ConstraintKind::NotNull,
+                "NODE_PROPERTY_EXISTENCE",
+            ),
+            (
+                EntityKind::Node,
+                ConstraintKind::PropertyType,
+                "NODE_PROPERTY_TYPE",
+            ),
+            (
+                EntityKind::Relationship,
+                ConstraintKind::Unique,
+                "RELATIONSHIP_UNIQUENESS",
+            ),
+            (
+                EntityKind::Relationship,
+                ConstraintKind::NodeKey,
+                "RELATIONSHIP_KEY",
+            ),
+            (
+                EntityKind::Relationship,
+                ConstraintKind::NotNull,
+                "RELATIONSHIP_PROPERTY_EXISTENCE",
+            ),
+            (
+                EntityKind::Relationship,
+                ConstraintKind::PropertyType,
+                "RELATIONSHIP_PROPERTY_TYPE",
+            ),
+        ] {
+            assert_eq!(
+                info(entity, kind).neo4j_type(),
+                expected,
+                "{entity:?} {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_entity_type_column_reads_from_the_entity() {
+        assert_eq!(
+            info(EntityKind::Node, ConstraintKind::Unique).entity_type(),
+            "NODE"
+        );
+        assert_eq!(
+            info(EntityKind::Relationship, ConstraintKind::Unique).entity_type(),
+            "RELATIONSHIP"
+        );
+    }
+
+    /// Every row the collector emits today is a node row — the relationship
+    /// stores do not exist yet — and `SHOW CONSTRAINTS` must not start
+    /// claiming otherwise until they do.
+    #[test]
+    fn the_collector_still_emits_only_node_rows() {
+        let mut graph = DirGraph::new();
+        graph
+            .create_not_null_constraint("Person", "email")
+            .expect("declaration");
+        let rows = collect_constraints_structured(&graph);
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|row| row.entity == EntityKind::Node));
     }
 }

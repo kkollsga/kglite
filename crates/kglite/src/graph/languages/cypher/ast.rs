@@ -2,6 +2,7 @@
 // Full Cypher AST definitions
 
 use crate::datatypes::values::Value;
+use crate::graph::constraints::EntityKind;
 use crate::graph::core::membership::MembershipSet;
 use crate::graph::core::pattern_matching::{ParamLabel, Pattern};
 
@@ -1041,6 +1042,25 @@ impl DdlTarget {
             DdlTarget::Node { variable, .. } | DdlTarget::Relationship { variable, .. } => {
                 variable.as_deref()
             }
+        }
+    }
+
+    /// Which entity kind the `FOR` pattern targets. This is the authority on
+    /// the question — the optional `NODE` / `RELATIONSHIP` scope word in the
+    /// requirement half is a restatement that is cross-checked against it, not
+    /// a second source of truth.
+    pub fn entity(&self) -> EntityKind {
+        match self {
+            DdlTarget::Node { .. } => EntityKind::Node,
+            DdlTarget::Relationship { .. } => EntityKind::Relationship,
+        }
+    }
+
+    /// The label or relationship type the pattern names.
+    pub fn type_name(&self) -> &str {
+        match self {
+            DdlTarget::Node { label, .. } => label,
+            DdlTarget::Relationship { rel_type, .. } => rel_type,
         }
     }
 }

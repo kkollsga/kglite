@@ -35,6 +35,99 @@ pub fn normalize_properties(properties: &[String]) -> Vec<String> {
     sorted
 }
 
+/// Which kind of graph entity a constraint is declared on.
+///
+/// Persisted as part of [`NamedConstraint`], so the variant names are part of
+/// the `.kgl` format. A file written before this field existed carries no
+/// `entity` key at all and loads as [`EntityKind::Node`] through the field's
+/// `#[serde(default)]` — which is exactly what every constraint those files can
+/// hold is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum EntityKind {
+    /// A constraint on the nodes of a label.
+    #[default]
+    Node,
+    /// A constraint on the relationships of a type.
+    Relationship,
+}
+
+impl EntityKind {
+    /// Whether this is the default, node side. Also the serde skip predicate
+    /// for [`NamedConstraint::entity`]: a node constraint writes exactly the
+    /// bytes it wrote before the field existed, which is the same posture
+    /// every other additive `.kgl` metadata field takes (see
+    /// [`crate::graph::io::file`]).
+    pub fn is_node(&self) -> bool {
+        matches!(self, EntityKind::Node)
+    }
+
+    /// `NODE` / `RELATIONSHIP` — the scope word Cypher accepts before
+    /// `UNIQUE` / `KEY`, and the prefix Neo4j 5 puts on its `SHOW CONSTRAINTS`
+    /// type names.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            EntityKind::Node => "NODE",
+            EntityKind::Relationship => "RELATIONSHIP",
+        }
+    }
+
+    /// The entity as a message introduces it: `a node with label 'Person'`,
+    /// `a relationship of type 'KNOWS'`. A relationship has no label, so the
+    /// node phrasing cannot simply be reused with a different noun.
+    pub(crate) fn subject(self, type_name: &str) -> String {
+        match self {
+            EntityKind::Node => format!("a node with label '{type_name}'"),
+            EntityKind::Relationship => format!("a relationship of type '{type_name}'"),
+        }
+    }
+
+    /// `node` / `nodes` (`relationship` / `relationships`), agreeing with
+    /// `count`.
+    pub(crate) fn noun(self, count: usize) -> &'static str {
+        match (self, count) {
+            (EntityKind::Node, 1) => "node",
+            (EntityKind::Node, _) => "nodes",
+            (EntityKind::Relationship, 1) => "relationship",
+            (EntityKind::Relationship, _) => "relationships",
+        }
+    }
+
+    /// `node type` / `relationship type` — the declaration's subject when the
+    /// advice is about the whole population rather than one entity.
+    pub(crate) fn type_noun(self) -> &'static str {
+        match self {
+            EntityKind::Node => "node type",
+            EntityKind::Relationship => "relationship type",
+        }
+    }
+
+    /// What to write instead of a second entity on an occupied unique tuple.
+    ///
+    /// A node has `MERGE`; a relationship `MERGE` needs both endpoints already
+    /// bound, so pointing a user at it from a relationship failure sends them
+    /// at a statement they cannot write from the facts the failure carries.
+    pub(crate) fn duplicate_advice(self) -> &'static str {
+        match self {
+            EntityKind::Node => "Use MERGE to upsert an existing node instead of CREATE.",
+            EntityKind::Relationship => {
+                "MATCH the existing relationship and SET its properties instead of creating a \
+                 second one."
+            }
+        }
+    }
+
+    /// The tail of the presence-failure advice. A node type carries a schema
+    /// whose `required_fields` *are* the declaration, so editing the schema is
+    /// a real route; a relationship constraint has no schema entry behind it,
+    /// and the constraint itself is the only thing there is to drop.
+    pub(crate) fn drop_presence_advice(self) -> &'static str {
+        match self {
+            EntityKind::Node => "or drop the requirement from the node type's schema.",
+            EntityKind::Relationship => "or drop the constraint.",
+        }
+    }
+}
+
 /// Which declared constraint a write ran into.
 ///
 /// Serialized as part of [`NamedConstraint`] in the `.kgl` JSON metadata, so the
@@ -80,6 +173,17 @@ impl ConstraintKind {
             ConstraintKind::PropertyType => "PROPERTY TYPE",
         }
     }
+
+    /// The Cypher spelling for a constraint on `entity`. A node key and a
+    /// relationship key are the same shape under two names, which is why one
+    /// `ConstraintKind` serves both — but a message must use the name the user
+    /// would have written, or it names a constraint they cannot find.
+    pub fn keyword_for(&self, entity: EntityKind) -> &'static str {
+        match (self, entity) {
+            (ConstraintKind::NodeKey, EntityKind::Relationship) => "RELATIONSHIP KEY",
+            _ => self.keyword(),
+        }
+    }
 }
 
 /// Why the constraint check failed.
@@ -98,8 +202,9 @@ pub enum ConstraintFailure {
         duplicate_tuples: usize,
         sample: Vec<Value>,
     },
-    /// Declaring a NOT NULL / NODE KEY constraint failed because existing nodes
-    /// of the type have no value for the property. The uniqueness counterpart of
+    /// Declaring a NOT NULL / NODE KEY constraint failed because existing
+    /// entities of the type have no value for the property. `nodes` counts
+    /// relationships when the violation is a relationship-side one. The uniqueness counterpart of
     /// this is [`ConstraintFailure::Preexisting`]; presence needs its own
     /// variant because "N nodes lack the property" is a different fact from
     /// "N tuples collide", and reporting one as the other sends the reader
@@ -118,8 +223,8 @@ pub enum ConstraintFailure {
         expected: String,
         actual: String,
     },
-    /// Declaring a property-type constraint failed because existing nodes hold
-    /// a value of another type. Pairs with [`ConstraintFailure::TypeMismatch`]
+    /// Declaring a property-type constraint failed because existing entities
+    /// hold a value of another type. Pairs with [`ConstraintFailure::TypeMismatch`]
     /// exactly as [`ConstraintFailure::PreexistingMissing`] pairs with
     /// [`ConstraintFailure::Missing`]: the write-time and declaration-time
     /// facts are different facts, and reporting one as the other tells the
@@ -153,6 +258,20 @@ pub enum ConstraintFailure {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NamedConstraint {
     pub kind: ConstraintKind,
+    /// Whether the declaration is on nodes or on relationships.
+    ///
+    /// Additive with a `Node` default: every `.kgl` written before relationship
+    /// constraints existed carries no `entity` key, and loads as the node
+    /// constraint it is. Skipped on the way out when it *is* a node one, so a
+    /// node constraint keeps writing byte-identical output — the same posture
+    /// the surrounding metadata fields take.
+    #[serde(default, skip_serializing_if = "EntityKind::is_node")]
+    pub entity: EntityKind,
+    /// The node type or relationship type the constraint is declared on.
+    ///
+    /// The field keeps its `node_type` name deliberately: it is a persisted
+    /// JSON key in every `.kgl` that carries a named constraint, and renaming
+    /// it would strand those files' names on load.
     pub node_type: String,
     /// The constrained property tuple, as declared.
     pub properties: Vec<String>,
@@ -179,7 +298,14 @@ pub(crate) type ConstraintResult<T> = Result<T, Box<ConstraintViolation>>;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConstraintViolation {
     pub kind: ConstraintKind,
-    /// The node type the constraint is declared on.
+    /// Whether the violated constraint is on nodes or on relationships. Every
+    /// constructor builds a node violation, because that is what the vast
+    /// majority of call sites raise; a relationship-side site restates it with
+    /// [`ConstraintViolation::on_entity`] rather than threading an extra
+    /// argument through six constructors that would read `EntityKind::Node` at
+    /// almost every one.
+    pub entity: EntityKind,
+    /// The node type or relationship type the constraint is declared on.
     pub node_type: String,
     /// The constrained property tuple, in declaration order.
     pub properties: Vec<String>,
@@ -187,6 +313,14 @@ pub struct ConstraintViolation {
 }
 
 impl ConstraintViolation {
+    /// Restate this violation as one on `entity`, which selects the vocabulary
+    /// its message is rendered in.
+    #[must_use]
+    pub fn on_entity(mut self, entity: EntityKind) -> Self {
+        self.entity = entity;
+        self
+    }
+
     /// A write hit an occupied unique tuple.
     pub fn duplicate(
         kind: ConstraintKind,
@@ -196,6 +330,7 @@ impl ConstraintViolation {
     ) -> Self {
         Self {
             kind,
+            entity: EntityKind::Node,
             node_type: node_type.into(),
             properties,
             failure: ConstraintFailure::Duplicate { values },
@@ -211,6 +346,7 @@ impl ConstraintViolation {
         let property = property.into();
         Self {
             kind,
+            entity: EntityKind::Node,
             node_type: node_type.into(),
             properties: vec![property.clone()],
             failure: ConstraintFailure::Missing { property },
@@ -227,6 +363,7 @@ impl ConstraintViolation {
     ) -> Self {
         Self {
             kind,
+            entity: EntityKind::Node,
             node_type: node_type.into(),
             properties,
             failure: ConstraintFailure::Preexisting {
@@ -250,6 +387,7 @@ impl ConstraintViolation {
         let property = property.into();
         Self {
             kind: ConstraintKind::PropertyType,
+            entity: EntityKind::Node,
             node_type: node_type.into(),
             properties: vec![property.clone()],
             failure: ConstraintFailure::TypeMismatch {
@@ -271,6 +409,7 @@ impl ConstraintViolation {
         let property = property.into();
         Self {
             kind: ConstraintKind::PropertyType,
+            entity: EntityKind::Node,
             node_type: node_type.into(),
             properties: vec![property.clone()],
             failure: ConstraintFailure::PreexistingTypeMismatch {
@@ -302,6 +441,7 @@ impl ConstraintViolation {
     ) -> Self {
         Self {
             kind,
+            entity: EntityKind::Node,
             node_type: node_type.into(),
             properties: vec![property.into()],
             failure: ConstraintFailure::PreexistingMissing { nodes },
@@ -350,8 +490,15 @@ fn render_pairs(properties: &[String], values: &[Value]) -> String {
 
 impl fmt::Display for ConstraintViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let kind = self.kind.keyword();
+        let entity = self.entity;
+        let kind = self.kind.keyword_for(entity);
         let descriptor = self.descriptor();
+        // `a node with label 'Person'` / `a relationship of type 'KNOWS'` —
+        // the whole message's subject, since a relationship has no label to
+        // put in the node phrasing.
+        let subject = entity.subject(&self.node_type);
+        // Advice about the population, not one entity, always reads plural.
+        let population = entity.noun(2);
         match &self.failure {
             ConstraintFailure::Duplicate { values } => {
                 let plural = if self.properties.len() == 1 {
@@ -361,20 +508,18 @@ impl fmt::Display for ConstraintViolation {
                 };
                 write!(
                     f,
-                    "a node with label '{}' and {plural} {} already exists — \
-                     the {kind} constraint on {descriptor} rejects the duplicate. \
-                     Use MERGE to upsert an existing node instead of CREATE.",
-                    self.node_type,
+                    "{subject} and {plural} {} already exists — \
+                     the {kind} constraint on {descriptor} rejects the duplicate. {}",
                     render_pairs(&self.properties, values),
+                    entity.duplicate_advice(),
                 )
             }
             ConstraintFailure::Missing { property } => write!(
                 f,
-                "a node with label '{}' must have the property '{property}' — \
+                "{subject} must have the property '{property}' — \
                  the {kind} constraint on {descriptor} rejects the write. \
-                 Supply a non-null '{property}', or drop the requirement from the \
-                 node type's schema.",
-                self.node_type,
+                 Supply a non-null '{property}', {}",
+                entity.drop_presence_advice(),
             ),
             ConstraintFailure::Preexisting {
                 duplicate_tuples,
@@ -389,18 +534,19 @@ impl fmt::Display for ConstraintViolation {
                     f,
                     "cannot declare a {kind} constraint on {descriptor}: the existing data \
                      already has {duplicate_tuples} duplicate {plural} \
-                     (for example {}). Deduplicate the node type before declaring the \
+                     (for example {}). Deduplicate the {} before declaring the \
                      constraint.",
                     render_pairs(&self.properties, sample),
+                    entity.type_noun(),
                 )
             }
             ConstraintFailure::PreexistingMissing { nodes } => {
-                let plural = if *nodes == 1 { "node" } else { "nodes" };
                 write!(
                     f,
                     "cannot declare a {kind} constraint on {descriptor}: {nodes} existing \
-                     {plural} of type '{}' have no value for it. Populate or delete those \
-                     nodes before declaring the constraint.",
+                     {} of type '{}' have no value for it. Populate or delete those \
+                     {population} before declaring the constraint.",
+                    entity.noun(*nodes),
                     self.node_type,
                 )
             }
@@ -410,11 +556,10 @@ impl fmt::Display for ConstraintViolation {
                 actual,
             } => write!(
                 f,
-                "a node with label '{}' must have a value of type {expected} for the property \
+                "{subject} must have a value of type {expected} for the property \
                  '{property}', but the write supplies {actual} — the {kind} constraint on \
                  {descriptor} rejects it. Supply a value of type {expected}, or drop the \
                  constraint.",
-                self.node_type,
             ),
             ConstraintFailure::PreexistingTypeMismatch {
                 property,
@@ -422,13 +567,13 @@ impl fmt::Display for ConstraintViolation {
                 actual,
                 nodes,
             } => {
-                let plural = if *nodes == 1 { "node" } else { "nodes" };
                 write!(
                     f,
                     "cannot declare a {kind} constraint on {descriptor}: {nodes} existing \
-                     {plural} of type '{}' hold a value for '{property}' that is not \
-                     {expected} (for example {actual}). Convert or delete those nodes before \
-                     declaring the constraint.",
+                     {} of type '{}' hold a value for '{property}' that is not \
+                     {expected} (for example {actual}). Convert or delete those {population} \
+                     before declaring the constraint.",
+                    entity.noun(*nodes),
                     self.node_type,
                 )
             }
@@ -528,6 +673,234 @@ mod tests {
         assert!(message.contains("not INTEGER"), "{message}");
         assert!(message.contains("STRING"), "{message}");
         assert!(message.contains("Convert or delete"), "{message}");
+    }
+
+    /// A `.kgl` written before relationship constraints existed carries no
+    /// `entity` key at all. It has to load as the node constraint it is — a
+    /// failure here would take the whole name registry with it, and
+    /// `DROP CONSTRAINT <name>` with that.
+    #[test]
+    fn a_named_constraint_written_before_entity_existed_loads_as_a_node_one() {
+        let older = r#"{"kind":"Unique","node_type":"Person","properties":["email"]}"#;
+        let declared: NamedConstraint = serde_json::from_str(older).expect("older file must load");
+        assert_eq!(declared.entity, EntityKind::Node);
+        assert_eq!(declared.node_type, "Person");
+        assert_eq!(declared.properties, vec!["email".to_string()]);
+        assert_eq!(declared.kind, ConstraintKind::Unique);
+    }
+
+    /// The persisted key stays `node_type` however the entity reads: it is in
+    /// every shipped file that carries a named constraint, so a rename would
+    /// strand them.
+    #[test]
+    fn a_named_constraint_persists_under_the_node_type_key_for_either_entity() {
+        let declared = NamedConstraint {
+            kind: ConstraintKind::NodeKey,
+            entity: EntityKind::Relationship,
+            node_type: "KNOWS".to_string(),
+            properties: vec!["since".to_string()],
+        };
+        let json = serde_json::to_string(&declared).unwrap();
+        assert!(json.contains(r#""node_type":"KNOWS""#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<NamedConstraint>(&json).unwrap(),
+            declared
+        );
+    }
+
+    /// The other half of the old-file contract: a *node* constraint must go on
+    /// writing the bytes it always wrote. A `.kgl` whose only constraints are
+    /// node ones is byte-identical across this change, so no golden digest and
+    /// no older reader moves.
+    #[test]
+    fn a_node_constraint_serializes_exactly_as_it_did_before_entity_existed() {
+        let declared = NamedConstraint {
+            kind: ConstraintKind::Unique,
+            entity: EntityKind::Node,
+            node_type: "Person".to_string(),
+            properties: vec!["email".to_string()],
+        };
+        assert_eq!(
+            serde_json::to_string(&declared).unwrap(),
+            r#"{"kind":"Unique","node_type":"Person","properties":["email"]}"#
+        );
+    }
+
+    /// Neo4j calls the relationship form RELATIONSHIP KEY. One
+    /// `ConstraintKind::NodeKey` serves both, so the message has to pick the
+    /// name the user actually wrote or it names a constraint they cannot find.
+    #[test]
+    fn a_key_constraint_is_named_for_the_entity_it_is_on() {
+        assert_eq!(
+            ConstraintKind::NodeKey.keyword_for(EntityKind::Node),
+            "NODE KEY"
+        );
+        assert_eq!(
+            ConstraintKind::NodeKey.keyword_for(EntityKind::Relationship),
+            "RELATIONSHIP KEY"
+        );
+        // Every other kind is spelled the same on both sides.
+        for kind in [
+            ConstraintKind::Unique,
+            ConstraintKind::NotNull,
+            ConstraintKind::PropertyType,
+        ] {
+            assert_eq!(
+                kind.keyword_for(EntityKind::Relationship),
+                kind.keyword(),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// No relationship message may leak the node vocabulary — the word "node"
+    /// appearing anywhere in one means a branch fell through to the node
+    /// phrasing, which is how this reads wrong without reading broken.
+    fn assert_reads_as_a_relationship(message: &str) {
+        assert!(
+            !message.contains("node"),
+            "node vocabulary leaked: {message}"
+        );
+        assert!(
+            message.contains("relationship"),
+            "not in relationship words: {message}"
+        );
+    }
+
+    /// MERGE is the node answer to a duplicate. A relationship MERGE needs both
+    /// endpoints already bound, so repeating that advice here would send the
+    /// reader at a statement they cannot write from what the failure knows.
+    #[test]
+    fn a_relationship_duplicate_advises_matching_rather_than_merging() {
+        let message = ConstraintViolation::duplicate(
+            ConstraintKind::Unique,
+            "KNOWS",
+            vec!["since".to_string()],
+            vec![Value::String("2020".to_string())],
+        )
+        .on_entity(EntityKind::Relationship)
+        .to_string();
+        assert_reads_as_a_relationship(&message);
+        assert!(
+            message.contains("a relationship of type 'KNOWS'"),
+            "{message}"
+        );
+        assert!(message.contains("'since' = '2020'"), "{message}");
+        assert!(
+            message.contains("UNIQUE constraint on KNOWS.since"),
+            "{message}"
+        );
+        assert!(!message.contains("MERGE"), "{message}");
+        assert!(
+            message.contains("MATCH the existing relationship"),
+            "{message}"
+        );
+    }
+
+    /// The node presence message points at the node type's schema. A
+    /// relationship constraint has no schema entry behind it, so that route
+    /// does not exist and must not be offered.
+    #[test]
+    fn a_relationship_presence_failure_points_at_the_constraint() {
+        let message = ConstraintViolation::missing(ConstraintKind::NotNull, "KNOWS", "since")
+            .on_entity(EntityKind::Relationship)
+            .to_string();
+        assert_reads_as_a_relationship(&message);
+        assert!(
+            message.contains("must have the property 'since'"),
+            "{message}"
+        );
+        assert!(message.contains("or drop the constraint."), "{message}");
+        assert!(!message.contains("schema"), "{message}");
+    }
+
+    #[test]
+    fn a_relationship_type_mismatch_reads_in_relationship_words() {
+        let message = ConstraintViolation::type_mismatch("KNOWS", "since", "INTEGER", "STRING")
+            .on_entity(EntityKind::Relationship)
+            .to_string();
+        assert_reads_as_a_relationship(&message);
+        assert!(message.contains("value of type INTEGER"), "{message}");
+        assert!(message.contains("supplies STRING"), "{message}");
+        assert!(
+            message.contains("PROPERTY TYPE constraint on KNOWS.since"),
+            "{message}"
+        );
+    }
+
+    /// The three declaration-time failures count a *population*, so each one
+    /// has to agree in number as well as in noun.
+    #[test]
+    fn relationship_declaration_failures_count_relationships() {
+        let duplicates = ConstraintViolation::preexisting(
+            ConstraintKind::Unique,
+            "KNOWS",
+            vec!["since".to_string()],
+            2,
+            vec![Value::String("2020".to_string())],
+        )
+        .on_entity(EntityKind::Relationship)
+        .to_string();
+        assert_reads_as_a_relationship(&duplicates);
+        assert!(duplicates.contains("2 duplicate values"), "{duplicates}");
+        assert!(
+            duplicates.contains("Deduplicate the relationship type"),
+            "{duplicates}"
+        );
+
+        let one_absent =
+            ConstraintViolation::preexisting_missing(ConstraintKind::NotNull, "KNOWS", "since", 1)
+                .on_entity(EntityKind::Relationship)
+                .to_string();
+        assert_reads_as_a_relationship(&one_absent);
+        assert!(
+            one_absent.contains("1 existing relationship of type 'KNOWS'"),
+            "{one_absent}"
+        );
+        assert!(
+            one_absent.contains("delete those relationships"),
+            "{one_absent}"
+        );
+
+        let many_absent =
+            ConstraintViolation::preexisting_missing(ConstraintKind::NodeKey, "KNOWS", "since", 4)
+                .on_entity(EntityKind::Relationship)
+                .to_string();
+        assert!(
+            many_absent.contains("4 existing relationships of type 'KNOWS'"),
+            "{many_absent}"
+        );
+        // The kind is named as the user would have written it.
+        assert!(
+            many_absent.contains("RELATIONSHIP KEY constraint"),
+            "{many_absent}"
+        );
+
+        let mistyped = ConstraintViolation::preexisting_type_mismatch(
+            "KNOWS", "since", "INTEGER", "STRING", 3,
+        )
+        .on_entity(EntityKind::Relationship)
+        .to_string();
+        assert_reads_as_a_relationship(&mistyped);
+        assert!(
+            mistyped.contains("3 existing relationships of type 'KNOWS'"),
+            "{mistyped}"
+        );
+        assert!(
+            mistyped.contains("Convert or delete those relationships"),
+            "{mistyped}"
+        );
+    }
+
+    /// Every constructor builds a node violation; only `on_entity` moves it.
+    #[test]
+    fn a_violation_is_a_node_one_until_told_otherwise() {
+        let violation = ConstraintViolation::missing(ConstraintKind::NotNull, "Person", "email");
+        assert_eq!(violation.entity, EntityKind::Node);
+        assert_eq!(
+            violation.on_entity(EntityKind::Relationship).entity,
+            EntityKind::Relationship
+        );
     }
 
     #[test]
