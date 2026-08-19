@@ -162,6 +162,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Re-saving a loaded `.kgl` now produces the same bytes every time.** Saving
+  a graph that was loaded from a `.kgl` wrote a different file on each run —
+  same data, different bytes — so backups never deduplicated, content hashes
+  were unusable as change detection, and byte-comparing two saves said nothing.
+
+  The loader rebuilt each type's column schema from a `HashMap`'s key order,
+  which Rust re-seeds per process. Column slot order *is* the order columns are
+  written into the file, so every load produced a differently-ordered save. The
+  packed column payload already records the order positionally, so the loader
+  now reads it from there and reproduces the order the file was written with.
+  The same unordered-iteration pattern was fixed in the four sibling paths that
+  build a type schema from a map (in-memory reload, disk-directory load, the
+  post-load schema rebuild, and the RDF loader), which now order by property
+  name — the canonical choice where the source records no order.
+
+  Data and values were never affected: reads resolve a property by name, so a
+  permuted-but-self-consistent order returned correct results, which is why
+  this stayed invisible. Freshly-saved bytes are unchanged.
+
+  A re-saved file is still slightly *larger* than a fresh save of the same
+  graph (79 bytes on a 6-node fixture), and that is intended: loading a file
+  warms the `type_connectivity` / `edge_type_counts` caches that make
+  `describe()` instant on large graphs, and a save persists a warm cache. The
+  round-trip reaches a fixed point after one cycle — every save from then on is
+  byte-identical.
+
 - **`UNWIND` over a collected list is no longer quadratic in memory.**
   `WITH collect(n) AS ns UNWIND ns AS m` expands one row into `n`, and every
   expanded row was a full copy of the source row — which still held the list

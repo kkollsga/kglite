@@ -1819,6 +1819,81 @@ impl ColumnStore {
         )
     }
 
+    /// The user column names carried by a packed payload, **in payload order**.
+    ///
+    /// The packed block is self-describing: [`write_packed_with_codec`]
+    /// emits `(name, type_tag, data)` per column, iterating `self.schema` in
+    /// slot order. So the payload — not the `.kgl` metadata sidecar, which is
+    /// an unordered map — is where a saved file records its column order.
+    ///
+    /// [`load_packed_inner`] places each column at `schema.slot(name)`, i.e.
+    /// the slot order of the schema it is *given*. Handing it a schema built
+    /// from this function reproduces the exact order the file was written
+    /// with; building one from the metadata map instead makes slot order a
+    /// `HashMap` iteration artefact that changes every process
+    /// (`RandomState`), which is what made re-saved `.kgl` bytes
+    /// non-deterministic.
+    ///
+    /// Skips the reserved pseudo-columns (`__id__`, `__title__`,
+    /// `__overflow_offsets__`, `__overflow_data__`) — they are not schema
+    /// slots. Walks headers only, seeking past each data blob.
+    pub(crate) fn packed_column_names(packed: &[u8]) -> io::Result<Vec<String>> {
+        use std::io::Read;
+
+        let mut names = Vec::new();
+        let mut cursor = std::io::Cursor::new(packed);
+        let mut u32_buf = [0u8; 4];
+        cursor.read_exact(&mut u32_buf)?;
+        let num_cols = u32::from_le_bytes(u32_buf);
+        if num_cols > 1_000_000 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "packed column store declares too many columns",
+            ));
+        }
+        let mut u16_buf = [0u8; 2];
+        let mut u64_buf = [0u8; 8];
+        for _ in 0..num_cols {
+            cursor.read_exact(&mut u16_buf)?;
+            let name_len = u16::from_le_bytes(u16_buf) as usize;
+            let mut name_bytes = vec![0u8; name_len];
+            cursor.read_exact(&mut name_bytes)?;
+            let col_name = String::from_utf8(name_bytes).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid column name: {e}"),
+                )
+            })?;
+
+            // Skip the type tag.
+            cursor.read_exact(&mut u16_buf)?;
+            let tag_len = u16::from_le_bytes(u16_buf) as u64;
+            cursor.set_position(cursor.position() + tag_len);
+
+            // Seek past the data blob.
+            cursor.read_exact(&mut u64_buf)?;
+            let data_len = u64::from_le_bytes(u64_buf);
+            let next = cursor.position().checked_add(data_len).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "packed column offset overflow")
+            })?;
+            if next > packed.len() as u64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("packed column '{col_name}' is truncated"),
+                ));
+            }
+            cursor.set_position(next);
+
+            if !matches!(
+                col_name.as_str(),
+                "__id__" | "__title__" | "__overflow_offsets__" | "__overflow_data__"
+            ) {
+                names.push(col_name);
+            }
+        }
+        Ok(names)
+    }
+
     pub(crate) fn load_packed_with_codec(
         schema: Arc<TypeSchema>,
         type_meta: &HashMap<String, String>,

@@ -1691,7 +1691,24 @@ impl DirGraph {
         // Phase 1: Build TypeSchemas from node_type_metadata (O(types), not O(N×P))
         let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
         for (node_type, props) in self.node_type_metadata.iter() {
-            let keys = props.keys().map(|name| self.interner.get_or_intern(name));
+            // SLOT-ORDER RULE: sorted by property name.
+            //
+            // `props` is a `HashMap`, so iterating it directly made a type's
+            // slot order a per-process `RandomState` artefact. Slot order is
+            // observable — it is the order columns are written into a `.kgl`
+            // payload — so a random order meant re-saving a loaded graph
+            // produced different bytes on every run.
+            //
+            // Nothing here records an intended order (unlike a packed column
+            // payload, which carries one positionally and is honoured by
+            // `io::file::load_portable_column_section`), so sorted-by-name is
+            // the canonical choice: deterministic, independent of insertion
+            // history, and stable across processes and platforms.
+            let mut names: Vec<&String> = props.keys().collect();
+            names.sort();
+            let keys = names
+                .into_iter()
+                .map(|name| self.interner.get_or_intern(name));
             schemas.insert(node_type.clone(), TypeSchema::from_keys(keys));
         }
 
@@ -1706,7 +1723,14 @@ impl DirGraph {
                     let type_str = node.node_type_str(&self.interner).to_string();
                     let schema = schemas.entry(type_str).or_insert_with(TypeSchema::new);
                     if let PropertyStorage::Map(map) = &node.properties {
-                        for &key in map.keys() {
+                        // Same slot-order rule: `map` is a `HashMap`, so sort
+                        // before adding. Sorting the interned keys (a stable
+                        // FNV `u64` of the name) is deterministic and avoids
+                        // resolving every key back to a string in this
+                        // per-node loop.
+                        let mut keys: Vec<InternedKey> = map.keys().copied().collect();
+                        keys.sort();
+                        for key in keys {
                             schema.add_key(key);
                         }
                     }
@@ -1725,7 +1749,24 @@ impl DirGraph {
         // Build TypeSchemas from metadata (O(types))
         let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
         for (node_type, props) in self.node_type_metadata.iter() {
-            let keys = props.keys().map(|name| self.interner.get_or_intern(name));
+            // SLOT-ORDER RULE: sorted by property name.
+            //
+            // `props` is a `HashMap`, so iterating it directly made a type's
+            // slot order a per-process `RandomState` artefact. Slot order is
+            // observable — it is the order columns are written into a `.kgl`
+            // payload — so a random order meant re-saving a loaded graph
+            // produced different bytes on every run.
+            //
+            // Nothing here records an intended order (unlike a packed column
+            // payload, which carries one positionally and is honoured by
+            // `io::file::load_portable_column_section`), so sorted-by-name is
+            // the canonical choice: deterministic, independent of insertion
+            // history, and stable across processes and platforms.
+            let mut names: Vec<&String> = props.keys().collect();
+            names.sort();
+            let keys = names
+                .into_iter()
+                .map(|name| self.interner.get_or_intern(name));
             schemas.insert(node_type.clone(), TypeSchema::from_keys(keys));
         }
 
@@ -1740,7 +1781,14 @@ impl DirGraph {
                     let type_str = node.node_type_str(&self.interner).to_string();
                     let schema = schemas.entry(type_str).or_insert_with(TypeSchema::new);
                     if let PropertyStorage::Map(map) = &node.properties {
-                        for &key in map.keys() {
+                        // Same slot-order rule: `map` is a `HashMap`, so sort
+                        // before adding. Sorting the interned keys (a stable
+                        // FNV `u64` of the name) is deterministic and avoids
+                        // resolving every key back to a string in this
+                        // per-node loop.
+                        let mut keys: Vec<InternedKey> = map.keys().copied().collect();
+                        keys.sort();
+                        for key in keys {
                             schema.add_key(key);
                         }
                     }

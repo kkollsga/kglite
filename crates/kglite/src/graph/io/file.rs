@@ -1309,7 +1309,13 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     let metadata = std::sync::Arc::clone(&graph.node_type_metadata);
     for (node_type, props) in metadata.iter() {
         let mut schema = crate::graph::schema::TypeSchema::new();
-        for prop_name in props.keys() {
+        // Sorted: `props` is a `HashMap` and this path has no recorded column
+        // order to recover (unlike the portable column sections, whose packed
+        // payload carries one). Name order is the canonical choice here — see
+        // `TypeSchema` slot-order rule in `dir_graph::rebuild_type_schemas`.
+        let mut prop_names: Vec<&String> = props.keys().collect();
+        prop_names.sort();
+        for prop_name in prop_names {
             let key = graph
                 .interner
                 .try_get_or_intern(prop_name)
@@ -1696,9 +1702,38 @@ fn load_portable_column_section(
             section_meta.type_name, section_meta.row_count
         )));
     }
-    let col_keys = section_meta
+    // Column slot order comes from the PAYLOAD, not from `section_meta.columns`.
+    //
+    // The packed block is self-describing and ordered — it carries
+    // `(name, type_tag, data)` per column in the writing store's slot order —
+    // whereas `section_meta.columns` is a `HashMap` that records only the key
+    // set and type tags (see the writer's own note that the loader "uses these
+    // entries only for their key set"). Building the schema from that map made
+    // slot order a `RandomState` artefact that differed on every load, so
+    // re-saving a file produced different bytes each run.
+    //
+    // Reading the order the file actually recorded makes a reload reproduce the
+    // schema the save was written from, so a re-save is byte-identical to the
+    // original rather than merely deterministic.
+    let mut ordered_names = ColumnStore::packed_column_names(&packed)?;
+    // A key the metadata declares but the payload does not carry has no
+    // recorded position; append such keys by name so they still get a slot and
+    // the result stays deterministic. Expected to be empty — writer and payload
+    // are built from the same schema — but silently dropping a declared column
+    // would be worse than an arbitrary-but-stable position.
+    let in_payload: std::collections::HashSet<&str> =
+        ordered_names.iter().map(String::as_str).collect();
+    let mut orphans: Vec<&String> = section_meta
         .columns
         .keys()
+        .filter(|name| !in_payload.contains(name.as_str()))
+        .collect();
+    orphans.sort();
+    let orphans: Vec<String> = orphans.into_iter().cloned().collect();
+    ordered_names.extend(orphans);
+
+    let col_keys = ordered_names
+        .iter()
         .map(|name| {
             dir_graph
                 .interner

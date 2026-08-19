@@ -1380,7 +1380,14 @@ fn assemble_column_stores(
 
         // Register schema from dense columns
         if !graph.type_schemas.contains_key(type_name) {
-            let schema = TypeSchema::from_keys(writer.col_map.keys().copied());
+            // Same slot-order rule as `dir_graph::rebuild_type_schemas`:
+            // `col_map` is a `HashMap`, so sort before building the schema or
+            // an RDF-loaded graph gets a per-process slot order.
+            let schema = {
+                let mut keys: Vec<InternedKey> = writer.col_map.keys().copied().collect();
+                keys.sort();
+                TypeSchema::from_keys(keys)
+            };
             graph
                 .type_schemas_mut()
                 .insert(type_name.clone(), Arc::new(schema));
