@@ -589,7 +589,7 @@
         },
         "cypher": {
           "kind": "method",
-          "signature": "(self, /, query, *, to_df=False, params=None, timeout_ms=None, max_rows=None, streaming=True, disable_optimizer=False, disabled_passes=None, write_scope=None, git_sha=None, modified_by=None)"
+          "signature": "(self, /, query, *, to_df=False, params=None, timeout_ms=None, max_rows=None, streaming=True, parallel=False, disable_optimizer=False, disabled_passes=None, write_scope=None, git_sha=None, modified_by=None)"
         },
         "date": {
           "kind": "method",

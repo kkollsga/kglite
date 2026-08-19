@@ -4753,6 +4753,7 @@ class KnowledgeGraph:
         timeout_ms: Optional[int] = None,
         max_rows: Optional[int] = None,
         streaming: bool = True,
+        parallel: bool = False,
         disable_optimizer: bool = False,
         disabled_passes: Optional[list[str]] = None,
         write_scope: Optional[list[str]] = None,
@@ -4859,6 +4860,23 @@ class KnowledgeGraph:
                 to force the materialized executor — useful for
                 debugging parity issues; behaviour should otherwise be
                 identical.
+            parallel: Opt this query in to the parallel runtime (default
+                ``False``). It is a **hint**, not an instruction: only
+                operators that can partition deterministically use it, and
+                each still applies its own runtime gate on candidate count
+                and per-row cost — a small query stays sequential however it
+                is flagged. Answers and row order are identical either way,
+                so this is a throughput knob and never a semantic one.
+
+                Worth it for one heavy analytical scan/aggregate over a large
+                graph; measured on a 1M-node graph and a 10-core Apple
+                Silicon machine, ``MATCH (p:Person) WHERE ... RETURN
+                count(*)`` runs 2.7x faster and the grouped form 3.7x. It is
+                off by default — and stays off in the Bolt and MCP servers —
+                because a server's cores belong to its concurrent clients:
+                turning it on trades across-query throughput for one query's
+                latency. Disk-mode graphs currently ignore it and run
+                sequentially.
             disable_optimizer: When ``True``, run the query with **all**
                 optimizer passes skipped — schema validation still
                 applies, but no predicate pushdown, fusion, reordering,

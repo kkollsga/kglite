@@ -109,6 +109,7 @@ impl FrozenGraph {
                     deadline,
                     max_rows,
                     lazy_eligible: false,
+                    parallel: false,
                     disabled_passes: None,
                     embedder,
                     value_codecs: None,

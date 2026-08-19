@@ -150,6 +150,22 @@ pub(super) struct ScanRuntime<'g> {
 }
 
 impl<'g> ScanRuntime<'g> {
+    /// A second runtime over the same compiled slots, with an empty memo.
+    ///
+    /// The compiled trees ([`ScanExpr`]/[`ScanPred`]) are immutable and shared;
+    /// the *runtime* is per-row mutable state (the route table and the store
+    /// handle), so a scan that fans out needs one per partition. Forking is
+    /// cheap — the slot names are `&str` into the folded query.
+    pub(super) fn fork(&self) -> ScanRuntime<'g> {
+        ScanRuntime {
+            names: self.names.clone(),
+            routes: Vec::with_capacity(self.names.len()),
+            current_type: None,
+            type_str: "",
+            store: None,
+        }
+    }
+
     /// `true` when no compiled node in this scan reads a property, so the
     /// caller can skip [`Self::bind`] entirely. On the disk backend that is
     /// always true — nothing compiles there — and it matters, because
@@ -321,6 +337,39 @@ impl StrOp {
             StrOp::StartsWith => value.starts_with(needle),
             StrOp::EndsWith => value.ends_with(needle),
             StrOp::Contains => value.contains(needle),
+        }
+    }
+}
+
+impl ScanExpr<'_> {
+    /// `false` if any node of this tree falls back to the interpreter. The
+    /// runtime parallel gate reads this as the expression's cost class: a
+    /// fully compiled tree is a column read plus arithmetic (tens of ns a
+    /// row), a `Generic` one re-enters `evaluate_expression`.
+    pub(super) fn is_compiled(&self) -> bool {
+        match self {
+            ScanExpr::Prop(_) | ScanExpr::Const(_) => true,
+            ScanExpr::Binary(_, lhs, rhs) => lhs.is_compiled() && rhs.is_compiled(),
+            ScanExpr::Negate(inner) => inner.is_compiled(),
+            ScanExpr::Generic(_) => false,
+        }
+    }
+}
+
+impl ScanPred<'_> {
+    /// `false` if any node of this predicate falls back to the interpreter.
+    /// See [`ScanExpr::is_compiled`].
+    pub(super) fn is_compiled(&self) -> bool {
+        match self {
+            ScanPred::And(lhs, rhs) | ScanPred::Or(lhs, rhs) | ScanPred::Xor(lhs, rhs) => {
+                lhs.is_compiled() && rhs.is_compiled()
+            }
+            ScanPred::Not(inner) => inner.is_compiled(),
+            ScanPred::Comparison { left, right, .. } => left.is_compiled() && right.is_compiled(),
+            ScanPred::StrCmp { .. } => true,
+            ScanPred::IsNull(expr) | ScanPred::IsNotNull(expr) => expr.is_compiled(),
+            ScanPred::InLiteralSet { expr, .. } => expr.is_compiled(),
+            ScanPred::Generic(_) => false,
         }
     }
 }

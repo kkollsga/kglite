@@ -85,11 +85,11 @@
       "classification": "api-shape"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/kg_core.rs::fn:cypher:fn cypher( slf: &Bound<'_, Self>, py: Python<'_>, query: &str, to_df: bool, params: Option<&Bound<'_, PyDict>>, timeout_ms: Option<u64>, max_rows: Option<usize>, streaming: bool, disable_optimizer: bool, disabled_passes: Option<Vec<String>>, write_scope: Option<Vec<String>>, git_sha: Option<String>,::clippy::result_large_err",
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_core.rs::fn:cypher:fn cypher( slf: &Bound<'_, Self>, py: Python<'_>, query: &str, to_df: bool, params: Option<&Bound<'_, PyDict>>, timeout_ms: Option<u64>, max_rows: Option<usize>, streaming: bool, parallel: bool, disable_optimizer: bool, disabled_passes: Option<Vec<String>>, write_scope: Option<Vec<String>>, git_sha:::clippy::result_large_err",
       "classification": "api-shape"
     },
     {
-      "identity": "crates/kglite-py/src/graph/pyapi/kg_core.rs::fn:cypher:fn cypher( slf: &Bound<'_, Self>, py: Python<'_>, query: &str, to_df: bool, params: Option<&Bound<'_, PyDict>>, timeout_ms: Option<u64>, max_rows: Option<usize>, streaming: bool, disable_optimizer: bool, disabled_passes: Option<Vec<String>>, write_scope: Option<Vec<String>>, git_sha: Option<String>,::clippy::too_many_arguments",
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_core.rs::fn:cypher:fn cypher( slf: &Bound<'_, Self>, py: Python<'_>, query: &str, to_df: bool, params: Option<&Bound<'_, PyDict>>, timeout_ms: Option<u64>, max_rows: Option<usize>, streaming: bool, parallel: bool, disable_optimizer: bool, disabled_passes: Option<Vec<String>>, write_scope: Option<Vec<String>>, git_sha:::clippy::too_many_arguments",
       "classification": "boundary"
     },
     {

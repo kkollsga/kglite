@@ -146,7 +146,7 @@ impl<'a> CypherExecutor<'a> {
             Ok(())
         };
 
-        if result_set.rows.len() >= RAYON_THRESHOLD {
+        if result_set.rows.len() >= parallel::PROJECTION_MIN_ROWS {
             // Dedicated pool (8 MiB worker stacks — `evaluate_expression`
             // recurses per expression level) + a per-chunk deadline/cancel
             // poll, so a 10M-row projection is interruptible.

@@ -60,6 +60,11 @@ enum Command {
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
         format: OutputFormat,
+        /// Opt in to the parallel runtime for this query. A hint: operators
+        /// that cannot partition deterministically, and queries below the
+        /// engine's runtime size gate, still run sequentially.
+        #[arg(long)]
+        parallel: bool,
     },
     /// Run a write-capable Cypher statement against a `.kgl` graph.
     Write {
@@ -245,9 +250,10 @@ where
         graph,
         query,
         format,
+        parallel,
     }) = &cli.command
     {
-        run_query(graph, query, (*format).into())?;
+        run_query(graph, query, (*format).into(), *parallel)?;
         return Ok(());
     }
     if let Some(Command::Write {
@@ -419,7 +425,7 @@ fn run_export_sqlite(graph_path: &Path, output: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn run_query(path: &Path, query: &str, mode: Mode) -> Result<()> {
+fn run_query(path: &Path, query: &str, mode: Mode, parallel: bool) -> Result<()> {
     let graph = load_graph(path)?;
     let (_, is_mutation) = kglite::api::cypher::parse_with_mutation_check(query)
         .map_err(|e| anyhow::anyhow!("Cypher parse error: {e}"))?;
@@ -427,7 +433,11 @@ fn run_query(path: &Path, query: &str, mode: Mode) -> Result<()> {
         anyhow::bail!("query is read-only; use `kglite write` for mutations");
     }
     let params: HashMap<String, Value> = HashMap::new();
-    let outcome = exec::execute_readonly(&graph, query, &params)
+    let options = QueryOptions {
+        parallel,
+        ..QueryOptions::default()
+    };
+    let outcome = exec::execute_readonly(&graph, query, &params, &options)
         .with_context(|| "Cypher execution failed")?;
     exec::write_stdout(&exec::render_outcome(mode, &outcome))?;
     Ok(())
@@ -487,7 +497,7 @@ fn run_ready_set(
          ORDER BY dependency_count, id",
         config.join(", ")
     );
-    run_query(path, &query, mode)
+    run_query(path, &query, mode, false)
 }
 
 struct DescribeOptions {
@@ -647,7 +657,7 @@ fn session_query(
         anyhow::bail!("query is read-only; use op=write for mutations");
     }
     let params = HashMap::new();
-    let outcome = exec::execute_readonly(graph, &query, &params)?;
+    let outcome = exec::execute_readonly(graph, &query, &params, &QueryOptions::default())?;
     Ok(session_outcome_response(mode, &outcome))
 }
 

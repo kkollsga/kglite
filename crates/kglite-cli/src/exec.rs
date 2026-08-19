@@ -21,6 +21,9 @@ pub struct QueryOptions {
     pub write_scope: Option<HashSet<String>>,
     pub git_sha: Option<String>,
     pub modified_by: Option<String>,
+    /// Opt in to the parallel Cypher runtime (`--parallel`). Off by default;
+    /// a hint the engine's own runtime gate may decline.
+    pub parallel: bool,
 }
 
 /// Execute one Cypher statement through the mutable session path.
@@ -38,6 +41,7 @@ pub fn execute(
     opts.write_scope = options.write_scope.as_ref();
     opts.git_sha = options.git_sha.as_deref();
     opts.modified_by = options.modified_by.as_deref();
+    opts.parallel = options.parallel;
 
     let g = make_dir_graph_mut(graph);
     let outcome = execute_mut(g, query, &opts)?;
@@ -54,8 +58,11 @@ pub fn execute_readonly(
     graph: &Arc<DirGraph>,
     query: &str,
     params: &HashMap<String, Value>,
+    options: &QueryOptions,
 ) -> Result<ExecuteOutcome> {
-    let opts = ExecuteOptions::new(params).with_csv_import(CsvImportPolicy::LocalFilesystem);
+    let opts = ExecuteOptions::new(params)
+        .with_csv_import(CsvImportPolicy::LocalFilesystem)
+        .with_parallel(options.parallel);
     Ok(execute_read(graph, query, &opts)?)
 }
 

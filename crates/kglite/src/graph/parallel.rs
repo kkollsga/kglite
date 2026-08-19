@@ -48,6 +48,68 @@ pub(crate) const QUERY_THREADS_ENV: &str = "KGLITE_QUERY_THREADS";
 /// [`languages::cypher::executor::INTERRUPT_POLL_INTERVAL`]: crate::graph::languages::cypher::executor
 pub(crate) const PARALLEL_POLL_INTERVAL: usize = 4096;
 
+/// How expensive one unit of a parallel region's per-row work is. The runtime
+/// gate is rows × cost class, not a raw row count: per-row cost across the
+/// shapes these regions serve varies by ~100× (a compiled `Int64` column
+/// compare against an interpreted `CONTAINS` on a relocated string column), so
+/// one row threshold is either far too eager for the cheap shape or far too
+/// shy for the expensive one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CostClass {
+    /// Every per-row expression and predicate compiled to a column route —
+    /// tens of nanoseconds a row. Needs a lot of rows to repay a fan-out.
+    Compiled,
+    /// At least one per-row expression routes through the interpreter —
+    /// hundreds of nanoseconds to microseconds a row.
+    Interpreted,
+}
+
+/// Row counts at which a scan/aggregate region is worth fanning out, by cost
+/// class. Measured on the 1M-node graphgen fixture (see
+/// `tests/benchmarks/test_bench_parallel_runtime.py`); both sit far above the
+/// point where rayon's own task overhead is repaid, because the thing that
+/// actually has to be repaid is the merge of per-partition state.
+pub(crate) const PARALLEL_MIN_ROWS_COMPILED: usize = 200_000;
+pub(crate) const PARALLEL_MIN_ROWS_INTERPRETED: usize = 20_000;
+
+/// The runtime gate. `rows` is the real candidate count, never a planner
+/// estimate — NDV goes blind above 200k nodes, which is exactly where this
+/// decision starts to matter.
+#[inline]
+pub(crate) fn should_fan_out(rows: usize, cost: CostClass) -> bool {
+    rows >= match cost {
+        CostClass::Compiled => PARALLEL_MIN_ROWS_COMPILED,
+        CostClass::Interpreted => PARALLEL_MIN_ROWS_INTERPRETED,
+    }
+}
+
+/// Minimum rows before the **projection-shaped** regions (RETURN/WITH
+/// projection, window projection, result materialisation) fan out.
+///
+/// 4096, not the 256 this was until 0.16.4. Those regions build one
+/// `Bindings` (a `Vec<(String, Value)>`) per row, so they are allocation-bound
+/// and a fan-out makes threads contend for the allocator rather than share the
+/// work — but only until there is enough work to amortise that. Measured
+/// release, median of the tracked core cells on a 4P+6E M4, sweeping this
+/// constant:
+///
+/// | cell (projected rows) | 256 | 4096 | 32768 | never |
+/// |---|---|---|---|---|
+/// | `cypher_where` (499)      | 221µs | **113µs** | 113µs | 113µs |
+/// | `return_id_10k` (10 000)  | 968µs | **981µs** | 1370µs | 1368µs |
+/// | `return_node_10k` (10 000)| 3151µs| **3178µs**| 4388µs | 4388µs |
+///
+/// So fanning out is a 1.96× **pessimisation** at 499 rows and a 1.40× win at
+/// 10 000: the crossover lies inside that interval and 4096 sits in it. The
+/// shipped 256 was on the wrong side of it for every small query — see the Q1
+/// measurement record in `parallel-cypher-runtime`.
+///
+/// A row count is a proxy for work, and an imperfect one: these cells project
+/// between two columns and a whole node per row. A cost-class gate like
+/// [`should_fan_out`]'s would model it better; that is scoped to the scan and
+/// aggregate operators, where per-row cost is knowable from the compiled tree.
+pub(crate) const PROJECTION_MIN_ROWS: usize = 4096;
+
 /// `None` only if the pool could not be built (thread-spawn failure under
 /// exhaustion). Callers then run the region on the calling thread, which is
 /// slower but always correct — a query is never failed over a pool.
@@ -96,6 +158,21 @@ where
         Some(p) => p.install(op),
         None => op(),
     }
+}
+
+/// Parallel scan regions entered, since process start. **Atomic, not
+/// `thread_local!`** — a meter that a worker thread cannot increment reads
+/// zero and turns its assertion into decoration (the R8 lesson). Tests read
+/// it to prove that a query above the gate really fanned out, and that one
+/// below it really did not.
+#[cfg(test)]
+pub(crate) static PARALLEL_SCANS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Snapshot of [`PARALLEL_SCANS`].
+#[cfg(test)]
+pub(crate) fn parallel_scans() -> usize {
+    PARALLEL_SCANS.load(Ordering::Relaxed)
 }
 
 /// The message used when a region reported failure without one — only

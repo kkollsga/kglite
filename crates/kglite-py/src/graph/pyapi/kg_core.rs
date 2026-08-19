@@ -1498,7 +1498,7 @@ impl KnowledgeGraph {
     ///     for row in result:
     ///         print(f"{row['person']}: {row['friends']} friends")
     ///     ```
-    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_rows=None, streaming=true, disable_optimizer=false, disabled_passes=None, write_scope=None, git_sha=None, modified_by=None))]
+    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_rows=None, streaming=true, parallel=false, disable_optimizer=false, disabled_passes=None, write_scope=None, git_sha=None, modified_by=None))]
     #[allow(clippy::too_many_arguments)]
     // The detached closure preserves the engine's structured KgError until PyErr conversion.
     #[allow(clippy::result_large_err)]
@@ -1511,6 +1511,7 @@ impl KnowledgeGraph {
         timeout_ms: Option<u64>,
         max_rows: Option<usize>,
         streaming: bool,
+        parallel: bool,
         disable_optimizer: bool,
         disabled_passes: Option<Vec<String>>,
         write_scope: Option<Vec<String>>,
@@ -1601,6 +1602,7 @@ impl KnowledgeGraph {
                 deadline,
                 max_rows: effective_max_rows,
                 lazy_eligible: streaming,
+                parallel,
                 disabled_passes: disabled_owned.as_ref(),
                 embedder: embedder_for_opts,
                 // value_codecs are an MCP-manifest feature, unused on this path.
@@ -1667,6 +1669,7 @@ impl KnowledgeGraph {
                 deadline,
                 max_rows: effective_max_rows,
                 lazy_eligible: streaming,
+                parallel,
                 disabled_passes: disabled_owned.as_ref(),
                 embedder: embedder_for_opts,
                 // value_codecs are an MCP-manifest feature, unused on this path.

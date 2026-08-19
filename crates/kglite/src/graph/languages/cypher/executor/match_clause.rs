@@ -3,13 +3,14 @@
 use super::super::ast::*;
 use super::helpers::*;
 use super::ordering::{SortSpec, TopKCollector};
-use super::scan_eval::{ScanCompiler, ScanExpr};
+use super::scan_eval::{ScanCompiler, ScanExpr, ScanPred, ScanRuntime};
 use super::*;
 use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::{
     EdgeDirection, EdgePattern, MatchBinding, NodePattern, Pattern, PatternElement,
     PatternExecutor, PatternMatch, PropertyMatcher,
 };
+use crate::graph::parallel::{self, ParallelInterrupt};
 use crate::graph::schema::InternedKey;
 use crate::graph::storage::{ColumnStore, GraphRead, NodeView};
 use petgraph::graph::{EdgeIndex, NodeIndex};

@@ -203,6 +203,7 @@ impl Transaction {
             // (mark_lazy off, streaming off) — no lazy materializer
             // is wired through the tx ResultView. Preserve that.
             lazy_eligible: false,
+            parallel: false,
             disabled_passes: None,
             embedder: None,
             value_codecs: None,

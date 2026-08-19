@@ -1409,7 +1409,7 @@ impl<'a> CypherExecutor<'a> {
         }
 
         // RETURN was specified - use its columns
-        let rows: Vec<Vec<Value>> = if result_set.rows.len() >= RAYON_THRESHOLD {
+        let rows: Vec<Vec<Value>> = if result_set.rows.len() >= parallel::PROJECTION_MIN_ROWS {
             let cols = &result_set.columns;
             let src = &result_set.rows;
             // Dedicated pool + per-chunk deadline/cancel poll: materialising

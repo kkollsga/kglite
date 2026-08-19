@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Opt-in parallel Cypher runtime — `kg.cypher(..., parallel=True)`, the CLI's
+  `kglite query --parallel`, and `ExecuteOptions::parallel` in Rust.** One heavy
+  analytical query may now use the whole machine. It is a *hint*, never a
+  semantic change: answers and row order are identical either way, only
+  operators that can partition deterministically use it, and each still applies
+  a runtime gate on candidate count and per-row cost, so a small query stays
+  sequential however it is flagged.
+
+  The first operator to honour it is the fused node-scan aggregate
+  (`MATCH (n:T) [WHERE ...] RETURN <group keys>, <aggregates>` over
+  `count`/`count(DISTINCT)`/`sum`/`avg`/`min`/`max`). Measured release-mode on a
+  1M-node graph and a 10-core Apple Silicon machine, two agreeing runs:
+  ungrouped scan+filter+count **2.7x** (33.9 ms → 12.5 ms), the grouped form
+  **3.7x** (69.4 ms → 18.3 ms). Group emission order is preserved exactly —
+  partitions are contiguous candidate ranges merged in candidate order, so
+  first-seen group order is unchanged.
+
+  Off by default everywhere, and deliberately *not* exposed by the Bolt or MCP
+  servers in this release: a server's cores belong to its concurrent clients, so
+  enabling it there would trade across-query throughput for one query's latency.
+  Disk-mode graphs and graphs with a spatial configuration ignore the flag and
+  run sequentially rather than refusing it, so portable code is unaffected.
+
 - **Property-type constraints — `CREATE CONSTRAINT ... REQUIRE n.prop IS :: TYPE`
   (and the `IS TYPED TYPE` spelling) are now declared and enforced.** The
   statement previously parsed and was refused with an explanation; it now
@@ -104,6 +127,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default ring costs roughly **40 MB of resident memory** once full at its
   65,536 events. A graph that has not called `db.cdc.enable()` pays none of
   this.
+
+### Changed
+
+- **Small and mid-size query projections no longer fan out, and got up to 2x
+  faster as a result.** The RETURN/WITH projection, window projection and result
+  materialisation loops parallelised at 256 rows. Those loops allocate a
+  bindings map per row, so at small row counts ten threads contended for the
+  allocator instead of sharing work — the fan-out was a net *pessimisation*.
+  Measured release-mode (median, 4P+6E Apple Silicon): a 499-row projection went
+  221 µs → 113 µs (**1.96x faster**) by staying sequential, while 10 000-row
+  projections keep fanning out and keep their 1.40x. The threshold is now 4096
+  rows, chosen inside the measured crossover.
 
 ### Fixed
 

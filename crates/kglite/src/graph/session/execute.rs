@@ -114,6 +114,19 @@ pub struct ExecuteOptions<'a> {
     /// [`CsvImportPolicy::Directory`] only when started with
     /// `--allow-csv-import <DIR>`; the MCP server grants nothing.
     pub csv_import: CsvImportPolicy,
+    /// Opt in to the parallel runtime for this query. Default `false`
+    /// everywhere, mirroring Neo4j's `CYPHER runtime=parallel` posture: one
+    /// heavy analytical query may use the whole machine, but a server's cores
+    /// belong to its concurrent clients, so nothing turns this on by
+    /// omission. Only operators that can partition deterministically honour
+    /// it, and each still applies its own runtime row × cost-class gate
+    /// ([`crate::graph::parallel::should_fan_out`]) — `true` is a permission,
+    /// not an instruction.
+    ///
+    /// The Bolt and MCP servers deliberately never set it (v1); the Python
+    /// wheel exposes it as `kg.cypher(parallel=True)` and the CLI as
+    /// `--parallel`.
+    pub parallel: bool,
 }
 
 impl<'a> ExecuteOptions<'a> {
@@ -156,6 +169,7 @@ impl<'a> ExecuteOptions<'a> {
             git_sha: None,
             modified_by: None,
             csv_import: CsvImportPolicy::Denied,
+            parallel: false,
         }
     }
 
@@ -165,6 +179,16 @@ impl<'a> ExecuteOptions<'a> {
     /// field assignment buried among defaults.
     pub fn with_csv_import(mut self, policy: CsvImportPolicy) -> Self {
         self.csv_import = policy;
+        self
+    }
+
+    /// Opt this execution in to the parallel runtime.
+    ///
+    /// Builder form for the same reason [`Self::with_csv_import`] has one: a
+    /// call-site reads as an explicit grant rather than a field assignment
+    /// buried among defaults.
+    pub fn with_parallel(mut self, parallel: bool) -> Self {
+        self.parallel = parallel;
         self
     }
 }
@@ -278,6 +302,7 @@ pub fn execute_read(
     let mut result = cypher::CypherExecutor::with_params(graph, &params, opts.deadline)
         .with_max_rows(opts.max_rows)
         .with_streaming(opts.lazy_eligible)
+        .with_parallel(opts.parallel)
         .with_cancel(opts.cancel)
         .with_csv_import(opts.csv_import.clone())
         .execute(&parsed)
@@ -462,6 +487,7 @@ pub fn execute_mut(
         cypher::CypherExecutor::with_params(graph, &params, opts.deadline)
             .with_max_rows(opts.max_rows)
             .with_streaming(opts.lazy_eligible)
+            .with_parallel(opts.parallel)
             .with_cancel(opts.cancel)
             .execute(&parsed)
             .map_err(|message| exec_err(opts, message))?

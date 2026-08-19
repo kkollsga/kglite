@@ -729,6 +729,7 @@ pub fn kglite::api::cypher::CypherExecutor<'a>::execute_single_clause(&self, cla
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_cancel(self, cancel: core::option::Option<&'static core::sync::atomic::AtomicBool>) -> Self
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_csv_import(self, policy: kglite::api::session::CsvImportPolicy) -> Self
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_max_rows(self, max_rows: core::option::Option<usize>) -> Self
+pub fn kglite::api::cypher::CypherExecutor<'a>::with_parallel(self, parallel: bool) -> Self
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_params(graph: &'a kglite::api::DirGraph, params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>, deadline: core::option::Option<std::time::Instant>) -> Self
 pub fn kglite::api::cypher::CypherExecutor<'a>::with_streaming(self, streaming: bool) -> Self
 impl<'a> kglite::api::cypher::CypherExecutor<'a>
@@ -1622,6 +1623,7 @@ pub kglite::api::session::ExecuteOptions::git_sha: core::option::Option<&'a str>
 pub kglite::api::session::ExecuteOptions::lazy_eligible: bool
 pub kglite::api::session::ExecuteOptions::max_rows: core::option::Option<usize>
 pub kglite::api::session::ExecuteOptions::modified_by: core::option::Option<&'a str>
+pub kglite::api::session::ExecuteOptions::parallel: bool
 pub kglite::api::session::ExecuteOptions::params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
 pub kglite::api::session::ExecuteOptions::value_codecs: core::option::Option<&'a [kglite::api::cypher::ValueCodec]>
 pub kglite::api::session::ExecuteOptions::write_scope: core::option::Option<&'a std::collections::hash::set::HashSet<alloc::string::String>>
@@ -1629,6 +1631,7 @@ impl<'a> kglite::api::session::ExecuteOptions<'a>
 pub fn kglite::api::session::ExecuteOptions<'a>::eager(params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> Self
 pub fn kglite::api::session::ExecuteOptions<'a>::new(params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> Self
 pub fn kglite::api::session::ExecuteOptions<'a>::with_csv_import(self, policy: kglite::api::session::CsvImportPolicy) -> Self
+pub fn kglite::api::session::ExecuteOptions<'a>::with_parallel(self, parallel: bool) -> Self
 pub struct kglite::api::session::ExecuteOutcome
 pub kglite::api::session::ExecuteOutcome::explain: bool
 pub kglite::api::session::ExecuteOutcome::is_mutation: bool

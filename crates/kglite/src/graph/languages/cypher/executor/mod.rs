@@ -46,9 +46,6 @@ thread_local! {
 use budget::ExecutionBudget;
 use execution_support::*;
 
-/// Minimum row count to switch from sequential to parallel iteration.
-/// Below this threshold, sequential is faster (avoids rayon thread pool overhead).
-pub(super) const RAYON_THRESHOLD: usize = 256;
 pub(super) const INTERRUPT_POLL_INTERVAL: usize = 4096;
 
 /// One shard of the executor's per-node spatial cache.
@@ -108,6 +105,11 @@ pub struct CypherExecutor<'a> {
     /// into the streaming pipeline ([`stream::pipeline::try_run_streaming`]).
     /// Default `true`; disabled per-query via `kg.cypher(streaming=False)`.
     streaming: bool,
+    /// Opt-in parallel runtime for this query (`ExecuteOptions::parallel`).
+    /// Default `false`. Operators that can partition deterministically check
+    /// this **and** their own runtime row × cost-class gate before fanning
+    /// out; nothing fans out on this flag alone.
+    pub(super) parallel: bool,
     /// Whether this execution may read local files through `LOAD CSV`, and
     /// from where. Default [`load_csv::CsvImportPolicy::Denied`] — a caller
     /// grants filesystem access explicitly, so a remote Bolt client never
@@ -140,6 +142,7 @@ impl<'a> CypherExecutor<'a> {
             spatial_node_cache: OnceLock::new(),
             alias_name_hashes: OnceLock::new(),
             streaming: true,
+            parallel: false,
             csv_import: load_csv::CsvImportPolicy::Denied,
             _arena_guard: graph.graph.begin_query(),
         }
@@ -212,6 +215,14 @@ impl<'a> CypherExecutor<'a> {
     /// `kg.cypher(streaming=…)` kwarg.
     pub fn with_streaming(mut self, streaming: bool) -> Self {
         self.streaming = streaming;
+        self
+    }
+
+    /// Opt this execution in to the parallel runtime — the Python boundary
+    /// exposes it as the `kg.cypher(parallel=…)` kwarg and the CLI as
+    /// `--parallel`. Off by default; see [`Self::parallel`].
+    pub fn with_parallel(mut self, parallel: bool) -> Self {
+        self.parallel = parallel;
         self
     }
 

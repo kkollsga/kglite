@@ -118,6 +118,7 @@ impl<'a> CypherExecutor<'a> {
         // honours the outer timeout.
         let sub = CypherExecutor::with_params(self.graph, self.params, self.deadline)
             .with_streaming(self.streaming)
+            .with_parallel(self.parallel)
             .with_cancel(self.cancel)
             .with_budget(self.budget.clone());
 
@@ -308,6 +309,7 @@ impl<'a> CypherExecutor<'a> {
         // differential corpus relies on this for body-level coverage).
         let sub = CypherExecutor::with_params(self.graph, self.params, self.deadline)
             .with_streaming(self.streaming)
+            .with_parallel(self.parallel)
             .with_cancel(self.cancel)
             .with_budget(self.budget.clone());
         let sub_result = sub.execute(body)?;

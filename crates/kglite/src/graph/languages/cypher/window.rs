@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use rayon::prelude::*;
 
 use super::ast::{is_window_expression, Expression, OrderItem, ReturnClause};
-use super::executor::{return_item_column_name, CypherExecutor, RAYON_THRESHOLD};
+use super::executor::{return_item_column_name, CypherExecutor};
 use super::result::{Bindings, ResultRow, ResultSet};
 use crate::datatypes::values::Value;
 use crate::graph::parallel::{self, ParallelInterrupt};
@@ -47,7 +47,7 @@ impl CypherExecutor<'_> {
             Ok(())
         };
 
-        if result_set.rows.len() >= RAYON_THRESHOLD {
+        if result_set.rows.len() >= parallel::PROJECTION_MIN_ROWS {
             // Same contract as the plain projection: dedicated pool for the
             // worker stacks, per-chunk deadline/cancel poll.
             let interrupt = ParallelInterrupt::new(|| self.check_deadline().err());
