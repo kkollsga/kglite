@@ -79,7 +79,7 @@ pub enum ConflictHandling {
 
 /// Add two Values if both are numeric. Mixed Int64+Float64 promotes to Float64.
 /// Non-numeric values fall back to Update behavior (new value overwrites).
-fn sum_values(existing: &Value, new: &Value) -> Value {
+pub(crate) fn sum_values(existing: &Value, new: &Value) -> Value {
     match (existing, new) {
         (Value::Int64(a), Value::Int64(b)) => Value::Int64(a.wrapping_add(*b)),
         (Value::Float64(a), Value::Float64(b)) => Value::Float64(a + b),

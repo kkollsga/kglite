@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Relationship constraints — `REQUIRE r.p IS NOT NULL` and
+  `REQUIRE r.p IS :: <TYPE>` on a relationship pattern.** Declared, enforced on
+  every write path, and persisted:
+
+  ```cypher
+  CREATE CONSTRAINT knows_since FOR ()-[r:KNOWS]-() REQUIRE r.since IS NOT NULL;
+  CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since IS :: INTEGER;
+  ```
+
+  Declaring one validates it against every existing relationship of the type
+  and refuses, installing nothing, if the data already violates it — the same
+  posture node constraints take. Enforcement covers Cypher `CREATE` (and
+  `MERGE`'s create branch), `SET r.p` in all three spellings (`SET r.p = v`,
+  `SET r = {…}`, `SET r += {…}`), `REMOVE r.p`, and the bulk
+  `add_connections` / `replace_connections` loaders. A refused write changes
+  nothing: no relationship, no connection-type metadata, and no entry in the
+  change-capture stream. Declarations survive save/load in the `.kgl` metadata,
+  and `SHOW CONSTRAINTS` / `CALL db.constraints()` report them under Neo4j 5's
+  `RELATIONSHIP_PROPERTY_EXISTENCE` / `RELATIONSHIP_PROPERTY_TYPE` names.
+
+  A bulk row is judged on the state it will actually leave behind, which is not
+  the row: under `preserve` a value the stored relationship already has is
+  discarded and therefore never refused, and under `sum` an addition that turns
+  an integer into a float *is* refused even though both operands are fine.
+  A frame is refused whole rather than row-by-row, matching the loaders'
+  existing validate-then-write contract, and `replace_connections` raises the
+  refusal *before* its delete, so a frame the constraint rejects never costs
+  the caller the relationships they already had.
+
+  **Not served:** `IS UNIQUE` and `IS RELATIONSHIP KEY` on a relationship,
+  refused by name. KGLite has no single answer for when two relationships of a
+  type are the same one — the bulk loader deduplicates `(type, source, target)`
+  while Cypher `CREATE` freely makes parallel edges — so a uniqueness
+  declaration would mean different things depending on which write path
+  produced the data. Relationship constraint DDL is allowed under any write
+  scope, since write scopes name node types.
+
 ### Fixed
 
 - **`CREATE CONSTRAINT … IS NODE KEY` / `IS RELATIONSHIP KEY` now has to agree

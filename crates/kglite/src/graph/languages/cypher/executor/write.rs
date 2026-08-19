@@ -6,6 +6,7 @@ use super::super::result::*;
 use super::columnar_write::{
     set_via_column_master, write_column_master, ColumnMasterWrite, MasterCell, PriorCell,
 };
+use super::edge_property_write::{remove_edge_property, set_edge_property};
 use super::identity_fields::{
     check_identity_uniqueness, create_identity, merge_expected_props, remove_write_field,
     CreatedIdentity, IdentityAliases,
@@ -905,6 +906,20 @@ fn create_pattern_edges(
             // opted in (before metadata/EdgeData pick up the props).
             graph.inject_edge_provenance(&edge_pat.connection_type, &mut edge_props);
 
+            // Declared relationship constraints, gated *before* anything is
+            // registered or written. A refused CREATE must leave
+            // `connection_type_metadata` exactly as it found it: registering
+            // first would teach the schema a connection type — and a property
+            // shape — that no successful write ever produced, and would leave
+            // `describe()` advertising it. It is also what keeps the change
+            // log free of phantoms, since every capture on this path happens
+            // downstream of here.
+            if graph.has_rel_constraints() {
+                graph.check_rel_row(&edge_pat.connection_type, |property| {
+                    edge_props.get(property).cloned()
+                })?;
+            }
+
             // Register the connection type fully — both the lightweight
             // cache (for `has_connection_type`) AND the metadata map.
             // The metadata is what `connection_types()`, the planner's
@@ -1366,55 +1381,18 @@ fn execute_set(
                     property,
                     expression,
                 } => {
-                    // Relationship property SET: the variable is bound as an
-                    // edge, not a node. Edges carry none of the node id/type
-                    // guards or columnar/index machinery below, so write the
-                    // property straight onto the edge and move on.
-                    if !row.node_bindings.contains_key(variable) {
-                        if let Some(edge_binding) = row.edge_bindings.get(variable) {
-                            let edge_index = edge_binding.edge_index;
-                            let value = {
-                                let executor = CypherExecutor::with_params(graph, params, None);
-                                executor.evaluate_expression(expression, row)?
-                            };
-                            let key = graph.interner.get_or_intern(property);
-                            if let Some(EdgeData {
-                                properties: edge_props,
-                                ..
-                            }) = GraphWrite::edge_weight_mut(&mut graph.graph, edge_index)
-                            {
-                                if let Some((_, existing)) =
-                                    edge_props.iter_mut().find(|(ek, _)| *ek == key)
-                                {
-                                    *existing = value;
-                                } else {
-                                    edge_props.push((key, value));
-                                }
-                                stats.properties_set += 1;
-                            }
-                            // Record for a post-loop updated_at bump if the edge
-                            // type opted in (skip writes to the reserved key).
-                            if property != "updated_at" {
-                                // Arena guard: edge_weight materializes on the
-                                // disk backend (protocol in disk/graph.rs);
-                                // scoped so the borrow ends before the next
-                                // item's &mut uses.
-                                let ct_key = {
-                                    let _arena_guard = graph.graph.begin_query();
-                                    graph
-                                        .graph
-                                        .edge_weight(edge_index)
-                                        .map(|e| e.connection_type)
-                                };
-                                if let Some(ct_key) = ct_key {
-                                    let ct = graph.interner.resolve(ct_key).to_string();
-                                    if graph.auto_timestamp_for_connection(&ct) {
-                                        edges_to_stamp.insert(edge_index);
-                                    }
-                                }
-                            }
-                            continue;
-                        }
+                    // Relationship property SET is its own path — edges carry
+                    // none of the node id/type guards, columnar routing or
+                    // index maintenance below.
+                    if set_edge_property(
+                        graph,
+                        row,
+                        (variable, property, expression),
+                        params,
+                        stats,
+                        &mut edges_to_stamp,
+                    )? {
+                        continue;
                     }
 
                     // Validate: cannot change id or type
@@ -1812,24 +1790,10 @@ fn execute_remove(
         for item in &remove.items {
             match item {
                 RemoveItem::Property { variable, property } => {
-                    // Relationship property REMOVE: edge variable, not a node.
-                    if !row.node_bindings.contains_key(variable) {
-                        if let Some(edge_binding) = row.edge_bindings.get(variable) {
-                            let edge_index = edge_binding.edge_index;
-                            let key = graph.interner.get_or_intern(property);
-                            if let Some(EdgeData {
-                                properties: edge_props,
-                                ..
-                            }) = GraphWrite::edge_weight_mut(&mut graph.graph, edge_index)
-                            {
-                                let before = edge_props.len();
-                                edge_props.retain(|(ek, _)| *ek != key);
-                                if edge_props.len() != before {
-                                    stats.properties_removed += 1;
-                                }
-                            }
-                            continue;
-                        }
+                    // Relationship property REMOVE is its own path, for the
+                    // same reasons the SET counterpart is.
+                    if remove_edge_property(graph, row, variable, property, stats)? {
+                        continue;
                     }
 
                     // Protect immutable fields
@@ -2306,6 +2270,10 @@ fn try_match_merge_pattern(
 #[cfg(test)]
 #[path = "write_remove_columnar_tests.rs"]
 mod remove_columnar_tests;
+
+#[cfg(test)]
+#[path = "write_rel_constraint_tests.rs"]
+mod rel_constraint_tests;
 
 #[cfg(test)]
 mod is_mutation_query_tests {

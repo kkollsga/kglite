@@ -1,4 +1,5 @@
 use super::*;
+use crate::graph::algorithms::Interrupt;
 use crate::graph::property_types::DeclaredType;
 
 fn doc_entity_graph() -> DirGraph {
@@ -304,5 +305,68 @@ fn a_constraint_refused_stub_leaves_no_edges_from_a_plain_add() {
             .lookup_by_id_readonly("Doc", &Value::String("missing".into()))
             .is_none(),
         "the refused stub must not exist"
+    );
+}
+
+/// The A3c contract, extended to relationship constraints: a frame the
+/// constraint refuses must not cost the caller the edges they already had.
+/// `add_connections` gates the same frame, but its gate runs after this
+/// function's delete — so the refusal has to be raised here too.
+#[test]
+fn a_constraint_violating_frame_does_not_destroy_the_existing_edges() {
+    let mut graph = doc_entity_graph();
+    // Seed with the property the constraint will require, so the declaration
+    // itself is clean and the *frame* is the only thing that violates it.
+    let seeded = DataFrame::from_cypher_rows(
+        vec!["s".to_string(), "t".to_string(), "since".to_string()],
+        vec![
+            vec![
+                Value::Int64(1),
+                Value::String("A".into()),
+                Value::Int64(2020),
+            ],
+            vec![
+                Value::Int64(1),
+                Value::String("B".into()),
+                Value::Int64(2021),
+            ],
+        ],
+    )
+    .unwrap();
+    add_connections(
+        &mut graph,
+        seeded,
+        "MENTIONS".to_string(),
+        "Doc".to_string(),
+        "s".to_string(),
+        "Entity".to_string(),
+        "t".to_string(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    graph
+        .create_rel_not_null_constraint("MENTIONS", "since", &Interrupt::default())
+        .expect("nothing stored violates it yet");
+
+    let error = replace_connections(
+        &mut graph,
+        edges_df(&[(1, "C")]),
+        "MENTIONS".to_string(),
+        "Doc".to_string(),
+        "s".to_string(),
+        "Entity".to_string(),
+        "t".to_string(),
+        None,
+        None,
+        None,
+    )
+    .expect_err("the frame carries no `since` for the edge it would create");
+    assert!(error.contains("'since'"), "got: {error}");
+    assert_eq!(
+        count_edges_of_type(&graph, "Doc", 1, "MENTIONS"),
+        2,
+        "the refused replace must leave the original edges in place"
     );
 }

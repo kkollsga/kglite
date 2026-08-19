@@ -10,6 +10,7 @@ pub mod batch;
 mod edge_props;
 pub mod extend;
 pub mod maintain;
+mod rel_constraint_gate;
 pub mod set_ops;
 pub mod subgraph;
 pub mod subgraph_streaming;

@@ -8,6 +8,7 @@ use crate::graph::mutation::batch::{
 use crate::graph::mutation::edge_props::{
     intern_edge_props, register_used_edge_property_names, resolve_edge_property_columns,
 };
+use crate::graph::mutation::rel_constraint_gate::ConnectionBatchGate;
 use crate::graph::schema::{
     CompositeValue, CurrentSelection, DirGraph, InternedKey, TypeSchema, PROVISIONAL_KEY,
     RESERVED_PROVENANCE_KEYS,
@@ -1088,6 +1089,36 @@ fn resolve_pairs(
     ))
 }
 
+/// Column indices for the optional endpoint title fields, `None` for a field
+/// that was not named or is not in the frame.
+fn title_column_indices(
+    df_data: &DataFrame,
+    source_title_field: Option<&str>,
+    target_title_field: Option<&str>,
+) -> (Option<usize>, Option<usize>) {
+    (
+        source_title_field.and_then(|field| df_data.get_column_index(field)),
+        target_title_field.and_then(|field| df_data.get_column_index(field)),
+    )
+}
+
+/// Append a line per endpoint field whose null ids cost rows.
+///
+/// Genuine skips only: a row whose endpoint is *missing* is vivified as a stub
+/// and replayed, not skipped, so it is never reported here.
+fn report_null_id_skips(errors: &mut Vec<String>, source: (usize, &str), target: (usize, &str)) {
+    for (skipped, field, side) in [
+        (source.0, source.1, "source"),
+        (target.0, target.1, "target"),
+    ] {
+        if skipped > 0 {
+            errors.push(format!(
+                "Skipped {skipped} rows: null values in {side} ID field '{field}'"
+            ));
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn add_connections(
     graph: &mut DirGraph,
@@ -1147,13 +1178,11 @@ pub fn add_connections(
         .get_column_index(&target_id_field)
         .ok_or_else(|| format!("Target ID column '{}' not found", target_id_field))?;
 
-    // Use as_ref() to borrow rather than move
-    let source_title_idx = source_title_field
-        .as_ref()
-        .and_then(|field| df_data.get_column_index(field));
-    let target_title_idx = target_title_field
-        .as_ref()
-        .and_then(|field| df_data.get_column_index(field));
+    let (source_title_idx, target_title_idx) = title_column_indices(
+        &df_data,
+        source_title_field.as_deref(),
+        target_title_field.as_deref(),
+    );
 
     // Endpoint resolution is its own pass over the frame, ahead of every
     // mutation, because the id-index probe borrows `graph.id_indices` while
@@ -1215,6 +1244,17 @@ pub fn add_connections(
         }
         properties
     };
+
+    ConnectionBatchGate {
+        connection_type: &connection_type,
+        df_data: &df_data,
+        property_columns: &property_columns,
+        matched: &matched,
+        deferred: &deferred,
+        conflict_mode,
+        skip_existence_check: is_initial_load,
+    }
+    .run(graph)?;
 
     // Pass A — connect the rows whose endpoints both exist (resolved above).
     for (row_idx, source_idx, target_idx) in matched {
@@ -1286,20 +1326,11 @@ pub fn add_connections(
         }
     }
 
-    // Report skip reasons — genuine skips only (null ids). Missing
-    // endpoints are vivified, not skipped.
-    if skipped_null_source > 0 {
-        errors.push(format!(
-            "Skipped {} rows: null values in source ID field '{}'",
-            skipped_null_source, source_id_field
-        ));
-    }
-    if skipped_null_target > 0 {
-        errors.push(format!(
-            "Skipped {} rows: null values in target ID field '{}'",
-            skipped_null_target, target_id_field
-        ));
-    }
+    report_null_id_skips(
+        &mut errors,
+        (skipped_null_source, &source_id_field),
+        (skipped_null_target, &target_id_field),
+    );
 
     register_used_edge_property_names(
         &mut graph.interner,
@@ -1797,7 +1828,7 @@ pub fn replace_connections(
     //
     // 1. The conflict mode. An unknown one is a caller mistake, and it was
     //    being discovered only after the edges were gone.
-    parse_conflict_mode(conflict_handling.as_deref())?;
+    let conflict_mode = parse_conflict_mode(conflict_handling.as_deref())?;
 
     let source_id_idx = df_data
         .get_column_index(&source_id_field)
@@ -1822,6 +1853,27 @@ pub fn replace_connections(
         source_id_idx,
         target_id_idx,
     )?;
+    // 3. Declared relationship constraints. `add_connections` gates them too,
+    //    but that gate runs *after* the delete below — so the frame is judged
+    //    here as well, against the state the replace will leave: the delete
+    //    removes whatever these pairs hold, which makes every row a create.
+    ConnectionBatchGate {
+        connection_type: &connection_type,
+        df_data: &df_data,
+        property_columns: &resolve_edge_property_columns(
+            &df_data,
+            &source_id_field,
+            &target_id_field,
+            source_title_field.as_deref(),
+            target_title_field.as_deref(),
+        ),
+        matched: &resolved.matched,
+        deferred: &resolved.deferred,
+        conflict_mode,
+        skip_existence_check: true,
+    }
+    .run(graph)?;
+
     let mut stubs_vivified = 0usize;
     if !resolved.missing_sources.is_empty() {
         stubs_vivified += vivify_stubs(graph, &source_type, &resolved.missing_sources)?;

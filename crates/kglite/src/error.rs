@@ -667,7 +667,11 @@ impl From<crate::graph::constraints::ConstraintViolation> for KgError {
     fn from(violation: crate::graph::constraints::ConstraintViolation) -> Self {
         let message = violation.to_string();
         let descriptor = violation.descriptor();
-        let kind = violation.kind.keyword();
+        // Entity-aware: one `ConstraintKind` serves both sides, and a
+        // relationship key is spelled RELATIONSHIP KEY. No relationship
+        // constraint can be a key today, so this changes no current message —
+        // it stops the first one that can from reporting the node spelling.
+        let kind = violation.kind.keyword_for(violation.entity);
         if violation.is_declaration_failure() {
             KgError::ConstraintCreationFailed {
                 kind,

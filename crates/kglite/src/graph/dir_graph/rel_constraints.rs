@@ -15,14 +15,18 @@
 //! node stores, so a graph that constrains only relationships pays nothing on
 //! the node write path, and vice versa.
 //!
-//! **Enforcement on new writes arrives with the write-path gates.** What lives
-//! here is declaration only: install (validated against the existing data),
-//! drop, and list. The per-type fast-out accessors a row gate needs land with
-//! that gate — added here first, they would be surface with no caller.
+//! **Two halves.** Declaration — install (validated against the existing
+//! data), drop, list — and the write-path gates the four edge choke points
+//! call. The gates are per-property predicates with no read-back: relationship
+//! constraints carry no composite tuple and no uniqueness, so unlike
+//! `plan_property_write` there is no stored state to reconstruct, and a gate
+//! costs one map probe plus one predicate per constrained property.
 
 use crate::datatypes::values::Value;
 use crate::graph::algorithms::Interrupt;
-use crate::graph::constraints::{ConstraintKind, ConstraintViolation, EntityKind};
+use crate::graph::constraints::{
+    ConstraintKind, ConstraintResult, ConstraintViolation, EntityKind,
+};
 use crate::graph::property_types::{self, DeclaredType};
 use crate::graph::storage::interner::InternedKey;
 
@@ -192,6 +196,202 @@ impl DirGraph {
             self.rel_ddl_property_type_constraints.remove(rel_type);
         }
         removed
+    }
+
+    // ========================================================================
+    // Write-path gates
+    // ========================================================================
+    //
+    // Cost for a graph that declares nothing: one `BTreeSet::is_empty` and one
+    // `BTreeMap::is_empty`, no allocation, no edge read. Cost for a graph that
+    // declares something on *another* type: two more probes. Only a write to a
+    // constrained type reads anything.
+
+    /// Whether the graph declares any relationship constraint at all. The
+    /// write-path fast-out every edge choke point takes first.
+    #[inline]
+    pub(crate) fn has_rel_constraints(&self) -> bool {
+        !self.rel_ddl_not_null_constraints.is_empty()
+            || !self.rel_ddl_property_type_constraints.is_empty()
+    }
+
+    /// Whether `rel_type` declares anything — the per-type companion, for a
+    /// caller deciding once per statement or per frame whether a row gate is
+    /// needed at all.
+    #[inline]
+    pub(crate) fn type_has_rel_constraints(&self, rel_type: &str) -> bool {
+        self.type_has_rel_not_null_constraints(rel_type)
+            || self.type_has_rel_property_type_constraints(rel_type)
+    }
+
+    /// Whether `rel_type` requires any property.
+    #[inline]
+    pub(crate) fn type_has_rel_not_null_constraints(&self, rel_type: &str) -> bool {
+        self.rel_required_properties(rel_type).next().is_some()
+    }
+
+    /// Whether `rel_type` declares any property type.
+    #[inline]
+    pub(crate) fn type_has_rel_property_type_constraints(&self, rel_type: &str) -> bool {
+        self.rel_ddl_property_type_constraints
+            .contains_key(rel_type)
+    }
+
+    /// The properties `rel_type` requires. A range over the ordered set, so a
+    /// type that requires nothing costs one lookup and no allocation.
+    pub(crate) fn rel_required_properties<'a>(
+        &'a self,
+        rel_type: &'a str,
+    ) -> impl Iterator<Item = &'a str> + 'a {
+        self.rel_ddl_not_null_constraints
+            .range((rel_type.to_string(), String::new())..)
+            .take_while(move |(declared, _)| declared == rel_type)
+            .map(|(_, property)| property.as_str())
+    }
+
+    /// The types `rel_type` declares, if any.
+    #[inline]
+    pub(crate) fn rel_declared_property_types(
+        &self,
+        rel_type: &str,
+    ) -> Option<&std::collections::BTreeMap<String, DeclaredType>> {
+        self.rel_ddl_property_type_constraints.get(rel_type)
+    }
+
+    /// Every property name any declared constraint on `rel_type` reads —
+    /// required properties plus declared types, deduplicated and sorted. What a
+    /// frame-level gate needs to know before it starts reading rows.
+    pub(crate) fn rel_constrained_properties(&self, rel_type: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .rel_required_properties(rel_type)
+            .map(str::to_string)
+            .collect();
+        if let Some(declared) = self.rel_declared_property_types(rel_type) {
+            names.extend(declared.keys().cloned());
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Gate a whole relationship's worth of properties — the shape `CREATE`
+    /// and the bulk loader hand over.
+    ///
+    /// `read` is called with each *constrained* property name and returns the
+    /// value as the write will leave it: `None` for absent. Only declared
+    /// properties are read, so an unconstrained type calls `read` zero times.
+    ///
+    /// The violation is parked ([`DirGraph::record_constraint_violation`])
+    /// before it is returned, so the typed error a binding raises carries the
+    /// constraint's kind, type and properties rather than only the prose.
+    pub(crate) fn check_rel_row<F>(&mut self, rel_type: &str, read: F) -> Result<(), String>
+    where
+        F: Fn(&str) -> Option<Value>,
+    {
+        match self.check_rel_row_uncaught(rel_type, read) {
+            Ok(()) => Ok(()),
+            Err(violation) => Err(self.record_constraint_violation(*violation)),
+        }
+    }
+
+    fn check_rel_row_uncaught<F>(&self, rel_type: &str, read: F) -> ConstraintResult<()>
+    where
+        F: Fn(&str) -> Option<Value>,
+    {
+        for property in self.rel_required_properties(rel_type) {
+            match read(property) {
+                Some(Value::Null) | None => {
+                    return Err(Box::new(
+                        ConstraintViolation::missing(ConstraintKind::NotNull, rel_type, property)
+                            .on_entity(EntityKind::Relationship),
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
+        let Some(declared) = self.rel_declared_property_types(rel_type) else {
+            return Ok(());
+        };
+        for (property, expected) in declared {
+            // An absent property passes, exactly as a null one does: a type
+            // constraint is not an existence constraint.
+            let Some(value) = read(property) else {
+                continue;
+            };
+            Self::rel_type_violation(*expected, rel_type, property, &value)?;
+        }
+        Ok(())
+    }
+
+    /// Gate one relationship property write — the shape `SET` and `REMOVE`
+    /// hand over.
+    ///
+    /// `new_value` is what the write will leave behind: `None` is a REMOVE and
+    /// `Some(Value::Null)` a SET-to-null, and a constraint treats the two
+    /// identically — so a required property refuses both, and a declared type
+    /// accepts both (the presence question belongs to NOT NULL). That is the
+    /// node rule, read off `plan_property_write`, and the two must not drift.
+    ///
+    /// No read-back of the stored edge: relationship constraints are
+    /// per-property, so the write's own value is the whole post-write state
+    /// this has to judge.
+    pub(crate) fn check_rel_property_write(
+        &mut self,
+        rel_type: &str,
+        property: &str,
+        new_value: Option<&Value>,
+    ) -> Result<(), String> {
+        match self.check_rel_property_write_uncaught(rel_type, property, new_value) {
+            Ok(()) => Ok(()),
+            Err(violation) => Err(self.record_constraint_violation(*violation)),
+        }
+    }
+
+    fn check_rel_property_write_uncaught(
+        &self,
+        rel_type: &str,
+        property: &str,
+        new_value: Option<&Value>,
+    ) -> ConstraintResult<()> {
+        match new_value {
+            Some(Value::Null) | None => {
+                if self.has_rel_not_null_constraint(rel_type, property) {
+                    return Err(Box::new(
+                        ConstraintViolation::missing(ConstraintKind::NotNull, rel_type, property)
+                            .on_entity(EntityKind::Relationship),
+                    ));
+                }
+                Ok(())
+            }
+            Some(value) => match self.rel_property_type_for(rel_type, property) {
+                Some(declared) => Self::rel_type_violation(declared, rel_type, property, value),
+                None => Ok(()),
+            },
+        }
+    }
+
+    /// The violation `value` raises against `declared`, or `Ok`. The single
+    /// place the predicate is consulted on the relationship side, so the
+    /// declaration scan and the write-path gates cannot disagree about what
+    /// passes.
+    fn rel_type_violation(
+        declared: DeclaredType,
+        rel_type: &str,
+        property: &str,
+        value: &Value,
+    ) -> ConstraintResult<()> {
+        if declared.accepts(value) {
+            return Ok(());
+        }
+        Err(Box::new(
+            ConstraintViolation::type_mismatch(
+                rel_type,
+                property,
+                declared.name(),
+                property_types::value_type_name(value),
+            )
+            .on_entity(EntityKind::Relationship),
+        ))
     }
 
     // ========================================================================

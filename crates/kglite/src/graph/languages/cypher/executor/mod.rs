@@ -964,6 +964,7 @@ mod cdc_procedures;
 mod centrality_procedures;
 mod columnar_write;
 pub mod dead_code;
+mod edge_property_write;
 mod execution_support;
 pub mod expression;
 pub mod helpers;
