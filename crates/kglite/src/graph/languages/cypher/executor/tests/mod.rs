@@ -12,6 +12,7 @@
 //!   result columns, `datetime()` time/zone, integer overflow and div-by-zero)
 //! - [`strings`] — string functions and procedure list arguments
 //! - [`vectors`] — `dot` / `cosine` / `norm` over list-valued data
+//! - [`parallel`] — deadline/cancel polling inside the rayon-parallel regions
 #![allow(clippy::approx_constant)]
 
 use super::helpers::*;
@@ -29,6 +30,7 @@ mod expressions;
 mod identifiers;
 mod lists;
 mod mutations;
+mod parallel;
 mod semantics;
 mod strings;
 mod vectors;

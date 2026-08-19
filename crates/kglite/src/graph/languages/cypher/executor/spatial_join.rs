@@ -59,7 +59,7 @@ impl<'a> CypherExecutor<'a> {
         let mut entries: Vec<IndexedContainer> = Vec::with_capacity(container_indices.len());
         for idx in container_indices.iter() {
             self.ensure_node_spatial_cached(idx);
-            let cache = self.spatial_node_cache.read().unwrap();
+            let cache = self.spatial_shard(idx.index()).read().unwrap();
             if let Some(Some(data)) = cache.get(&idx.index()) {
                 if let Some((geom, Some(bbox))) = &data.geometry {
                     entries.push(IndexedContainer {
@@ -84,7 +84,7 @@ impl<'a> CypherExecutor<'a> {
         for (probe_i, probe_idx) in probe_indices.iter().enumerate() {
             self.ensure_node_spatial_cached(probe_idx);
             let probe_point: Option<(f64, f64)> = {
-                let cache = self.spatial_node_cache.read().unwrap();
+                let cache = self.spatial_shard(probe_idx.index()).read().unwrap();
                 match cache.get(&probe_idx.index()) {
                     Some(Some(data)) => match probe_kind {
                         SpatialProbeKind::Location => data.location,

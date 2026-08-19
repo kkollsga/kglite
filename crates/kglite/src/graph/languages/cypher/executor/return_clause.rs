@@ -5,6 +5,7 @@ use super::helpers::*;
 use super::ordering::{compare_sort_keys, SortSpec, TopKCollector};
 use super::*;
 use crate::datatypes::values::Value;
+use crate::graph::parallel::{self, ParallelInterrupt};
 use crate::graph::schema::EmbeddingStore;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BinaryHeap, HashMap};
@@ -146,7 +147,17 @@ impl<'a> CypherExecutor<'a> {
         };
 
         if result_set.rows.len() >= RAYON_THRESHOLD {
-            result_set.rows.par_iter_mut().try_for_each(project_row)?;
+            // Dedicated pool (8 MiB worker stacks — `evaluate_expression`
+            // recurses per expression level) + a per-chunk deadline/cancel
+            // poll, so a 10M-row projection is interruptible.
+            let interrupt = ParallelInterrupt::new(|| self.check_deadline().err());
+            let rows = &mut result_set.rows;
+            parallel::install(|| {
+                rows.par_iter_mut().enumerate().try_for_each(|(i, row)| {
+                    interrupt.check(i)?;
+                    project_row(row)
+                })
+            })?;
         } else {
             for row in &mut result_set.rows {
                 project_row(row)?;

@@ -7,6 +7,7 @@
 //! on `PatternExecutor`, so the split is purely a file boundary.
 
 use super::*;
+use crate::graph::parallel::{self, ParallelInterrupt};
 
 /// Everything about one expansion hop that is invariant across the matches
 /// being expanded. Built once per hop by [`PatternExecutor::execute`] — the
@@ -302,73 +303,59 @@ impl<'a> PatternExecutor<'a> {
     /// `max_matches`: there is no early exit to honour, so every match is
     /// expanded and the caller truncates.
     ///
-    /// Errors (deadline, cancellation, expansion failure) are captured through
-    /// an `AtomicBool` and the first message is propagated after the parallel
-    /// section, so a 100M-source expansion cannot run past its deadline in a
-    /// worker thread.
+    /// Errors (deadline, cancellation, expansion failure) are captured by the
+    /// shared [`ParallelInterrupt`] latch and the first message is propagated
+    /// after the parallel section, so a 100M-source expansion cannot run past
+    /// its deadline in a worker thread. The region runs on the dedicated query
+    /// pool so its workers have `QUERY_THREAD_STACK_SIZE` stacks.
     fn expand_hop_parallel(
         &self,
         matches: &[PatternMatch],
         current_indices: &[NodeIndex],
         hop: &HopPlan<'_>,
     ) -> Result<(Vec<PatternMatch>, Vec<NodeIndex>), String> {
-        let had_error = std::sync::atomic::AtomicBool::new(false);
-        let first_error: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-        let results: Vec<(PatternMatch, NodeIndex)> = matches
-            .par_iter()
-            .zip(current_indices.par_iter())
-            .flat_map(|(current_match, &source_idx)| {
-                // Short-circuit once any thread has detected a timeout/error,
-                // and independently check the deadline from each thread.
-                if had_error.load(std::sync::atomic::Ordering::Relaxed) {
-                    return Vec::new();
-                }
-                if let Some(msg) = self.interrupt_reason() {
-                    if !had_error.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        *first_error.lock().unwrap() = Some(msg);
-                    }
-                    return Vec::new();
-                }
-                let expansions = match self.expand_from_node(
-                    source_idx,
-                    hop.edge,
-                    hop.node,
-                    None,
-                    self.bound_target(hop.node, current_match),
-                ) {
-                    Ok(exp) => exp,
-                    Err(e) => {
-                        if !had_error.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                            *first_error.lock().unwrap() = Some(e);
-                        }
+        let interrupt = ParallelInterrupt::new(|| self.interrupt_reason());
+        let results: Vec<(PatternMatch, NodeIndex)> = parallel::install(|| {
+            matches
+                .par_iter()
+                .zip(current_indices.par_iter())
+                .flat_map(|(current_match, &source_idx)| {
+                    // Short-circuit once any thread has detected a timeout/error,
+                    // and independently check the deadline from each thread.
+                    // One expansion dwarfs the probe, so poll on every match.
+                    if interrupt.check_each().is_err() {
                         return Vec::new();
                     }
-                };
-                expansions
-                    .into_iter()
-                    .filter_map(|(target_idx, edge_binding)| {
-                        if reuses_bound_relationship(current_match, &edge_binding) {
-                            return None;
-                        }
-                        if !self.target_satisfies_bindings(hop.node, current_match, target_idx) {
-                            return None;
-                        }
-                        Some((
-                            self.extend_match(current_match, hop, edge_binding, target_idx),
-                            target_idx,
-                        ))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+                    let Some(expansions) = interrupt.capture(self.expand_from_node(
+                        source_idx,
+                        hop.edge,
+                        hop.node,
+                        None,
+                        self.bound_target(hop.node, current_match),
+                    )) else {
+                        return Vec::new();
+                    };
+                    expansions
+                        .into_iter()
+                        .filter_map(|(target_idx, edge_binding)| {
+                            if reuses_bound_relationship(current_match, &edge_binding) {
+                                return None;
+                            }
+                            if !self.target_satisfies_bindings(hop.node, current_match, target_idx)
+                            {
+                                return None;
+                            }
+                            Some((
+                                self.extend_match(current_match, hop, edge_binding, target_idx),
+                                target_idx,
+                            ))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        });
         // Propagate any error that occurred during parallel expansion
-        if had_error.load(std::sync::atomic::Ordering::Relaxed) {
-            let err = first_error
-                .into_inner()
-                .unwrap()
-                .unwrap_or_else(|| "parallel expansion failed".to_string());
-            return Err(err);
-        }
+        interrupt.finish()?;
         // Apply distinct-target dedup for parallel results (the sequential
         // path does this inline, but the parallel path can't without
         // synchronization).

@@ -12,6 +12,7 @@ use super::ast::{is_window_expression, Expression, OrderItem, ReturnClause};
 use super::executor::{return_item_column_name, CypherExecutor, RAYON_THRESHOLD};
 use super::result::{Bindings, ResultRow, ResultSet};
 use crate::datatypes::values::Value;
+use crate::graph::parallel::{self, ParallelInterrupt};
 
 impl CypherExecutor<'_> {
     /// RETURN with window functions: project non-window items, then compute window values
@@ -47,7 +48,16 @@ impl CypherExecutor<'_> {
         };
 
         if result_set.rows.len() >= RAYON_THRESHOLD {
-            result_set.rows.par_iter_mut().try_for_each(project_row)?;
+            // Same contract as the plain projection: dedicated pool for the
+            // worker stacks, per-chunk deadline/cancel poll.
+            let interrupt = ParallelInterrupt::new(|| self.check_deadline().err());
+            let rows = &mut result_set.rows;
+            parallel::install(|| {
+                rows.par_iter_mut().enumerate().try_for_each(|(i, row)| {
+                    interrupt.check(i)?;
+                    project_row(row)
+                })
+            })?;
         } else {
             for row in &mut result_set.rows {
                 project_row(row)?;

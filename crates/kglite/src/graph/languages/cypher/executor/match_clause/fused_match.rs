@@ -1889,10 +1889,19 @@ impl<'a> CypherExecutor<'a> {
             Ok((idx, c))
         };
         let counts: Vec<(NodeIndex, i64)> = if group_keys.len() >= PARALLEL_COUNT_THRESHOLD {
-            group_keys
-                .par_iter()
-                .map(|&idx| count_one(idx))
-                .collect::<Result<_, _>>()?
+            // Dedicated pool + interrupt poll. Per-key work here is a whole
+            // pattern count, so poll on every key rather than per chunk.
+            let interrupt =
+                crate::graph::parallel::ParallelInterrupt::new(|| self.check_deadline().err());
+            let keys = &group_keys;
+            crate::graph::parallel::install(|| {
+                keys.par_iter()
+                    .map(|&idx| {
+                        interrupt.check_each()?;
+                        count_one(idx)
+                    })
+                    .collect::<Result<_, _>>()
+            })?
         } else {
             let mut sequential = Vec::with_capacity(group_keys.len());
             for &idx in &group_keys {

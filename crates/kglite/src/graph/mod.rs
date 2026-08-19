@@ -25,6 +25,7 @@ pub mod introspection;
 pub mod io;
 pub mod languages;
 pub mod mutation;
+pub(crate) mod parallel;
 pub mod property_types;
 pub mod schema;
 pub mod schema_json;

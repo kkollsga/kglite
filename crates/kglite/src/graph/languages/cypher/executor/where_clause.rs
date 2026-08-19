@@ -143,7 +143,7 @@ impl<'a> CypherExecutor<'a> {
                 self.ensure_node_spatial_cached(container_idx);
                 // Scope read lock: clone Arc + bbox, then drop lock
                 let container = {
-                    let cache = self.spatial_node_cache.read().unwrap();
+                    let cache = self.spatial_shard(container_idx.index()).read().unwrap();
                     cache
                         .get(&container_idx.index())
                         .and_then(|opt| opt.as_ref())
@@ -174,7 +174,7 @@ impl<'a> CypherExecutor<'a> {
                             None => return false,
                         };
                         self.ensure_node_spatial_cached(contained_idx);
-                        let cache = self.spatial_node_cache.read().unwrap();
+                        let cache = self.spatial_shard(contained_idx.index()).read().unwrap();
                         let resolved = cache
                             .get(&contained_idx.index())
                             .and_then(|opt| opt.as_ref())

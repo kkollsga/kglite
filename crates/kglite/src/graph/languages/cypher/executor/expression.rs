@@ -172,7 +172,7 @@ impl<'a> CypherExecutor<'a> {
             Expression::Variable(name) => {
                 if let Some(&idx) = row.node_bindings.get(name) {
                     self.ensure_node_spatial_cached(idx);
-                    let cache = self.spatial_node_cache.read().unwrap();
+                    let cache = self.spatial_shard(idx.index()).read().unwrap();
                     if let Some(cached) = cache.get(&idx.index()) {
                         return Ok(Self::pick_from_node_cache(cached, prefer_geometry));
                     }
@@ -185,7 +185,7 @@ impl<'a> CypherExecutor<'a> {
             Expression::PropertyAccess { variable, property } => {
                 if let Some(&idx) = row.node_bindings.get(variable) {
                     self.ensure_node_spatial_cached(idx);
-                    let cache = self.spatial_node_cache.read().unwrap();
+                    let cache = self.spatial_shard(idx.index()).read().unwrap();
                     if let Some(cached) = cache.get(&idx.index()) {
                         if let Some(result) = Self::pick_property_from_node_cache(cached, property)
                         {
@@ -246,17 +246,12 @@ impl<'a> CypherExecutor<'a> {
     #[inline]
     pub(super) fn ensure_node_spatial_cached(&self, idx: NodeIndex) {
         let idx_raw = idx.index();
-        {
-            let cache = self.spatial_node_cache.read().unwrap();
-            if cache.contains_key(&idx_raw) {
-                return;
-            }
+        let shard = self.spatial_shard(idx_raw);
+        if shard.read().unwrap().contains_key(&idx_raw) {
+            return;
         }
         let data = self.build_node_spatial_data(idx);
-        self.spatial_node_cache
-            .write()
-            .unwrap()
-            .insert(idx_raw, data);
+        shard.write().unwrap().insert(idx_raw, data);
     }
 
     /// Build the full spatial data for a node: geometry+bbox, location, named shapes/points.

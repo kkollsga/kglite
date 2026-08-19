@@ -3,6 +3,7 @@
 use super::helpers::*;
 use super::*;
 use crate::datatypes::values::Value;
+use crate::graph::parallel::{self, ParallelInterrupt};
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
@@ -1410,15 +1411,22 @@ impl<'a> CypherExecutor<'a> {
         // RETURN was specified - use its columns
         let rows: Vec<Vec<Value>> = if result_set.rows.len() >= RAYON_THRESHOLD {
             let cols = &result_set.columns;
-            result_set
-                .rows
-                .par_iter()
-                .map(|row| {
-                    cols.iter()
-                        .map(|col| row.projected.get(col).cloned().unwrap_or(Value::Null))
-                        .collect()
-                })
-                .collect()
+            let src = &result_set.rows;
+            // Dedicated pool + per-chunk deadline/cancel poll: materialising
+            // 10M rows of cells is as uninterruptible as projecting them.
+            let interrupt = ParallelInterrupt::new(|| self.check_deadline().err());
+            parallel::install(|| {
+                src.par_iter()
+                    .enumerate()
+                    .map(|(i, row)| {
+                        interrupt.check(i)?;
+                        Ok(cols
+                            .iter()
+                            .map(|col| row.projected.get(col).cloned().unwrap_or(Value::Null))
+                            .collect())
+                    })
+                    .collect::<Result<Vec<Vec<Value>>, String>>()
+            })?
         } else {
             // Move values out of rows (no cloning)
             let cols = &result_set.columns;

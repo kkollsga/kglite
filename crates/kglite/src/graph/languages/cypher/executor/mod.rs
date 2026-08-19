@@ -51,6 +51,9 @@ use execution_support::*;
 pub(super) const RAYON_THRESHOLD: usize = 256;
 pub(super) const INTERRUPT_POLL_INTERVAL: usize = 4096;
 
+/// One shard of the executor's per-node spatial cache.
+type SpatialCacheShard = RwLock<HashMap<usize, Option<NodeSpatialData>>>;
+
 /// Executes parsed Cypher queries against a `DirGraph`.
 ///
 /// Processes a pipeline of clauses (MATCH → WHERE → RETURN, etc.) by
@@ -72,7 +75,17 @@ pub struct CypherExecutor<'a> {
     pub(super) budget: ExecutionBudget,
     /// Per-node spatial data cache — populated on first access per NodeIndex.
     /// Eliminates redundant property/config/WKT lookups in cross-product queries.
-    spatial_node_cache: RwLock<HashMap<usize, Option<NodeSpatialData>>>,
+    ///
+    /// **Sharded**, because the projection loop resolves spatial arguments
+    /// from inside a rayon region: a single `RwLock` there is one contended
+    /// cache line taken twice per row (read to look up, write to fill), which
+    /// serialises the fan-out on the lock rather than on the work. Sixty-four
+    /// shards keyed by the low bits of the dense `NodeIndex` spread both.
+    ///
+    /// `OnceLock`: built on first spatial access, so the temporary
+    /// per-clause/per-row executors the mutable engine spins up (see
+    /// `executor/write.rs`) do not construct sixty-four maps each.
+    spatial_node_cache: OnceLock<Vec<SpatialCacheShard>>,
     /// Compiled regex cache — avoids recompiling the same pattern per row.
     /// FNV hashes of every registered id-/title-field-alias *name*
     /// (the values of `DirGraph::id_field_aliases` / `title_field_aliases`).
@@ -124,7 +137,7 @@ impl<'a> CypherExecutor<'a> {
             deadline,
             cancel: None,
             budget: ExecutionBudget::default(),
-            spatial_node_cache: RwLock::new(HashMap::new()),
+            spatial_node_cache: OnceLock::new(),
             alias_name_hashes: OnceLock::new(),
             streaming: true,
             csv_import: load_csv::CsvImportPolicy::Denied,
@@ -220,6 +233,22 @@ impl<'a> CypherExecutor<'a> {
     pub fn with_cancel(mut self, cancel: Option<&'static AtomicBool>) -> Self {
         self.cancel = cancel;
         self
+    }
+
+    /// The shard of [`Self::spatial_node_cache`] that owns `idx_raw`.
+    ///
+    /// Sharding is what keeps the per-node spatial cache usable from the
+    /// rayon-parallel projection loop: every resolve takes a read lock and
+    /// every first touch of a node takes a write lock, so one global lock
+    /// would serialise the region. `NodeIndex` values are dense, so the low
+    /// bits distribute evenly.
+    #[inline]
+    fn spatial_shard(&self, idx_raw: usize) -> &SpatialCacheShard {
+        const SHARDS: usize = 64;
+        let shards = self
+            .spatial_node_cache
+            .get_or_init(|| (0..SHARDS).map(|_| RwLock::new(HashMap::new())).collect());
+        &shards[idx_raw & (SHARDS - 1)]
     }
 
     #[inline]

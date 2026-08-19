@@ -193,6 +193,37 @@ fn budget_ceiling_query_fits_the_query_thread_stack() {
         .expect("budget-ceiling query overflowed the query-thread stack");
 }
 
+/// The same ceiling, on a **query-pool worker**.
+///
+/// The projection, window, `CALL` finalize, fused-count and hop-expansion
+/// regions all evaluate expressions inside a rayon region, so a worker's
+/// stack — not the caller's — is what a deep query recurses on. rayon's
+/// *global* pool sizes workers from the platform default (2 MiB), which is
+/// under half of what the `or` shape needs at the budget ceiling in a debug
+/// build; [`crate::graph::parallel::install`] is what puts those regions on
+/// workers built with [`QUERY_THREAD_STACK_SIZE`] instead. This test is the
+/// thing that would abort if that ever stopped being true.
+///
+/// Like its sibling above, the failure mode is a process abort rather than a
+/// clean assertion — that is the intended signal.
+#[test]
+fn budget_ceiling_query_fits_the_query_pool_worker_stack() {
+    let depth = MAX_EXPRESSION_DEPTH - 1;
+    let graph = seeded_graph();
+    crate::graph::parallel::install(|| {
+        assert!(
+            std::thread::current()
+                .name()
+                .is_some_and(|n| n.starts_with("kglite-query-")),
+            "install() did not hand the work to a query-pool worker, so this \
+             test would measure the caller's stack instead"
+        );
+        for shape in ALL_SHAPES {
+            run_full_pipeline(&graph, &query(shape, depth));
+        }
+    });
+}
+
 /// A query past the budget is refused by the parser, so no downstream walker
 /// ever sees it — and the refusal names the rewrite that actually works.
 #[test]
