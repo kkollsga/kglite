@@ -74,7 +74,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   images where it used to carry one. Measured (release profile, min of 7
   rounds, two runs) on 1000 autocommit `SET`s, which is the **worst case** for
   the read because every write is its own commit and therefore its own first
-  touch: **+2-3%** wall time versus `'off'` (4.66 ms -> 4.75-4.80 ms). The
+  touch: **+2-5%** wall time versus `'off'` (median +4.5% over three
+  interleaved pairs at the program's perf gate; 4.62-4.76 ms -> 4.83-4.86 ms).
+  The
   enrichment applies to writes rather than to the log, so switching a running
   log to `'full'` keeps its epoch and its retained events, and `before` starts
   appearing from the next commit.
@@ -158,13 +160,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ones.
 
   The motivation is clone cost: a materialised node's properties now travel
-  between rows for a refcount instead of a deep copy. Measured on a 10k-node
-  projection graph, release profile, two agreeing runs against unchanged-path
-  controls: **`ORDER BY n` +32%**, `WITH`-chain +7.5%, `RETURN p` (paths)
-  +4.2%, `collect(n)` at 10k +4.6%. Construction-bound shapes are flat
-  (`RETURN n` −1.1%, `properties(n)` −1.5%), and two cells regress slightly —
-  `collect(n)` at 100k −3.7% and the Python `.to_list()` round trip −2.5%.
-  Preliminary pending the phase's full perf gate.
+  between rows for a refcount instead of a deep copy. Measured at the program's
+  perf gate (release profile, three interleaved pairs against the same tree
+  with the container reverted, unchanged-path controls carried):
+  **`ORDER BY n` +36.6%** — the three pairs agree to within 0.6 points —
+  `collect(n)` at 10k **+9.8%**, a `WITH` chain **+9.6%**, `n {.*}` map
+  projection **+8.1%**, `RETURN p` over paths **+5.5%**, a map literal
+  **+4.7%**, `RETURN n` **+3.0%**, and `collect(n)` at 100k **+2.0%**.
+  `properties(n)` and the Python `.to_list()` round trip are flat. No cell
+  regressed.
 
 - **BREAKING: `db.cdc.query`'s `state` column is now the pair
   `{before, after}`.** CDC v1 (0.16.4) put the after-image directly in `state`;
@@ -414,9 +418,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   creates **+8%**, `SET` by id **+3-7%**, and a `MERGE` that matches an existing
   row and writes nothing pays **0%**. Bulk loads pay most — **+52%** for a
   1000-row `add_nodes` and **+82-88%** for a 1000-edge `add_connections`. The
-  default ring costs roughly **40 MB of resident memory** once full at its
-  65,536 events. A graph that has not called `db.cdc.enable()` pays none of
-  this.
+  default ring costs **~50-65 MB of resident memory** once full at its 65,536
+  events, depending on how many properties the changed entities carry (measured
+  as the resident-set delta against an identical workload with capture
+  disabled, with the ring verified exactly full). `enrichment: 'full'` adds the
+  before-images, and its cost tracks that same payload rather than a fixed
+  multiplier: **+0.7%** when the changed entities carry no properties beyond
+  their identity, **+32%** on 4-property nodes (~82 MB). A graph that has not
+  called `db.cdc.enable()` pays none of this.
 
 ### Changed
 

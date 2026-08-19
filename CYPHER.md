@@ -1900,15 +1900,20 @@ tracks ops written rather than statements run. Measured (release profile): a
 bare `CREATE` +33%, `MERGE` that creates +8%, `SET` by id +3-7%, a `MERGE` that
 matches and writes nothing **0%**, and bulk loads most of all — +52% for a
 1000-row `add_nodes`, +82-88% for 1000 `add_connections`. The default ring
-holds ~40 MB once full. A graph that never calls `db.cdc.enable()` is untouched
-by any of this.
+holds **~50-65 MB of resident memory** once full at its 65 536 events — the
+spread is the event payload, not measurement slack: identity-only changes sit
+near the bottom, 4-property nodes near the top. A graph that never calls
+`db.cdc.enable()` is untouched by any of this.
 
 `enrichment: 'full'` adds one whole-entity read per changed entity per commit
 — not per write, because the image is taken at each entity's first touch, and
-creates read nothing at all. Measured at **+2-3%** on 1000 autocommit `SET`s,
-which is the worst case for it: every write is its own commit and so its own
-first touch. An update or delete event then holds two images where it held
-one, so a ring of a given capacity retains more bytes; the default `capacity`
+creates read nothing at all. Measured at **+2-5%** (median +4.5%) on 1000
+autocommit `SET`s, which is the worst case for it: every write is its own
+commit and so its own first touch. An update or delete event then holds two
+images where it held one, so a ring of a given capacity retains more bytes —
+and that cost tracks the changed entity's property payload rather than a fixed
+multiplier: **+0.7%** of ring memory when the changes carry nothing beyond
+their identity, **+32%** (~82 MB) on 4-property nodes. The default `capacity`
 does not change with the mode, and is the knob to lower if that matters.
 
 **Storage modes.** In-memory and `storage='mapped'` serve the stream
