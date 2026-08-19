@@ -233,9 +233,20 @@ def test_the_id_alias_and_the_literal_id_spelling_cannot_disagree(graph) -> None
     assert graph.cypher("MATCH (p:Person {person_id: 7}) RETURN p.id AS id").to_list() == [{"id": 7}]
 
 
-def test_relationship_constraint_is_rejected_by_name(graph) -> None:
-    with pytest.raises(kglite.CypherExecutionError, match="KNOWS"):
-        graph.cypher("CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE")
+def test_relationship_uniqueness_is_still_rejected_by_name(graph) -> None:
+    """Presence and property type are served on a relationship; uniqueness is
+    not, and the refusal names why rather than reading as an unimplemented
+    feature. Full coverage lives in `test_cypher_rel_constraints.py`."""
+    for requirement in ("IS UNIQUE", "IS RELATIONSHIP KEY"):
+        with pytest.raises(kglite.CypherExecutionError, match="KNOWS"):
+            graph.cypher(f"CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since {requirement}")
+
+
+def test_relationship_presence_and_type_constraints_are_served(graph) -> None:
+    graph.cypher("CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since IS NOT NULL")
+    graph.cypher("CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.weight IS :: INTEGER")
+    types = {row["type"] for row in _constraint_rows(graph)}
+    assert types == {"RELATIONSHIP_PROPERTY_EXISTENCE", "RELATIONSHIP_PROPERTY_TYPE"}
 
 
 # ── names ────────────────────────────────────────────────────────────
@@ -301,6 +312,12 @@ def test_show_constraints_columns_and_types(graph) -> None:
     assert by_name["u"]["type"] == "UNIQUENESS"
     assert by_name["e"]["type"] == "NODE_PROPERTY_EXISTENCE"
     assert by_name["u"]["entityType"] == "NODE"
+    # The column is not a constant: a relationship declaration reports the
+    # other value, from the same collector and the same row shape.
+    graph.cypher("CREATE CONSTRAINT r_e FOR ()-[r:KNOWS]-() REQUIRE r.since IS NOT NULL")
+    relationship_rows = [row for row in _constraint_rows(graph) if row["name"] == "r_e"]
+    assert [row["entityType"] for row in relationship_rows] == ["RELATIONSHIP"]
+    assert relationship_rows[0]["labelsOrTypes"] == ["KNOWS"]
     assert by_name["u"]["labelsOrTypes"] == ["Person"]
     assert by_name["u"]["properties"] == ["name"]
 
@@ -457,8 +474,22 @@ NEO4J_CONSTRAINT_SCRIPT: list[tuple[str, str | None]] = [
     # A declaration the stored data already violates is refused, like every
     # other kind.
     ("CREATE CONSTRAINT person_t4 IF NOT EXISTS FOR (p:Person) REQUIRE p.age IS :: STRING", "cannot declare"),
+    # Relationship constraints: presence and property type execute; uniqueness
+    # is refused by name, and the refusal says why.
+    (
+        "CREATE CONSTRAINT knows_e IF NOT EXISTS FOR ()-[r:KNOWS]-() REQUIRE r.since IS NOT NULL",
+        None,
+    ),
+    (
+        "CREATE CONSTRAINT knows_t IF NOT EXISTS FOR ()-[r:KNOWS]-() REQUIRE r.since IS :: INTEGER",
+        None,
+    ),
     (
         "CREATE CONSTRAINT knows_u IF NOT EXISTS FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE",
+        "KNOWS",
+    ),
+    (
+        "CREATE CONSTRAINT knows_k IF NOT EXISTS FOR ()-[r:KNOWS]-() REQUIRE r.since IS RELATIONSHIP KEY",
         "KNOWS",
     ),
     ("SHOW CONSTRAINTS", None),

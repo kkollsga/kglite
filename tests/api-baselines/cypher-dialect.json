@@ -12,53 +12,421 @@
   "case_ids_definition": "Every covered or partial feature lists the tests/cypher_contract/cases.json case IDs that execute its claimed behavior; the contract test rejects claims with no executable case.",
   "coverage_gaps": [],
   "features": [
-    {"id": "clause.match", "syntax": "MATCH", "status": "partial", "case_ids": ["match.undirected", "match.variable_length", "create.relationship", "match.abbreviated_outgoing", "match.abbreviated_incoming", "match.abbreviated_undirected"], "note": "Core node, relationship, variable-length, shortest-path, abbreviated (-->, --, <--), and relationship-unique trail patterns are covered; not every openCypher pattern grammar form is implemented."},
-    {"id": "pattern.dynamic_names", "syntax": "(n:$label) / (n:$(label)) / -[:$type]->", "status": "covered", "case_ids": ["pattern.dynamic_label", "pattern.dynamic_label_parenthesised", "pattern.dynamic_relationship_type", "pattern.dynamic_label_value_is_a_name", "write.dynamic_label"], "note": "A parameter supplies a label or relationship type in MATCH, CREATE, MERGE, SET, REMOVE and the WHERE n:Label predicate, in both the bare ($label) and Neo4j 5 parenthesised ($(label)) spellings. The parameter is bound before planning, so the resolved query plans exactly as the literal spelling does, and the value is a name by construction - it can never re-enter the grammar. Divergences: $(...) takes a parameter name, not a general expression; the parameter must be a string, so the Neo4j list forms that expand to several labels or an alternation are rejected rather than expanded."},
-    {"id": "clause.optional_match", "syntax": "OPTIONAL MATCH", "status": "covered", "case_ids": ["match.optional_missing"], "note": "Null-extending optional pattern matches."},
-    {"id": "clause.where", "syntax": "WHERE", "status": "covered", "case_ids": ["where.three_valued_filter", "exists.cross_pattern_uniqueness"], "note": "Predicates preserve three-valued boolean, membership, and quantifier semantics; EXISTS subqueries enforce relationship uniqueness across their comma patterns."},
-    {"id": "clause.return", "syntax": "RETURN", "status": "covered", "case_ids": ["return.distinct", "merge.idempotent", "scalar.integer_addition"], "note": "Projection, aliases, DISTINCT, and aggregation."},
-    {"id": "clause.with", "syntax": "WITH", "status": "covered", "case_ids": ["with.aggregation"], "note": "Projection, aggregation, wildcard preservation, and strict post-projection scope validation."},
-    {"id": "clause.order", "syntax": "ORDER BY / SKIP / LIMIT", "status": "covered", "case_ids": ["unwind.order", "order.skip_limit"], "note": "Stable multi-key ordering and pagination."},
-    {"id": "clause.unwind", "syntax": "UNWIND", "status": "covered", "case_ids": ["unwind.order", "unwind.empty_list", "unwind.null"], "note": "List expansion including null and empty-list behavior."},
-    {"id": "clause.union", "syntax": "UNION / UNION ALL", "status": "covered", "case_ids": ["union.distinct", "union.all_duplicates"], "note": "Duplicate-removing and duplicate-preserving set composition."},
-    {"id": "clause.create", "syntax": "CREATE", "status": "covered", "case_ids": ["create.node", "create.relationship"], "note": "Node and relationship creation with inline properties."},
-    {"id": "clause.set", "syntax": "SET", "status": "covered", "case_ids": ["set.property"], "note": "Property, label, map merge, and mutable-property map replacement forms."},
-    {"id": "clause.delete", "syntax": "DELETE / DETACH DELETE / REMOVE", "status": "covered", "case_ids": ["delete.node", "delete.detach", "remove.property"], "note": "Entity deletion, detach deletion, and property/label removal."},
-    {"id": "clause.merge", "syntax": "MERGE", "status": "covered", "case_ids": ["merge.idempotent"], "note": "Pattern merge and ON CREATE/ON MATCH reject null property keys before mutation."},
-    {"id": "clause.foreach", "syntax": "FOREACH", "status": "covered", "case_ids": ["foreach.update"], "note": "Updating bodies and nested FOREACH are supported."},
-    {"id": "clause.call", "syntax": "CALL procedure()", "status": "partial", "case_ids": ["call.standalone_bare", "call.standalone_yield_alias"], "note": "Procedure invocation. A standalone CALL without YIELD returns every declared column in declared order and must be the entire statement; combined with any other clause, YIELD is required. Result columns follow YIELD order (alias-or-name), and a zero-row call still reports its declared columns. Divergence: a mid-pipeline CALL ... YIELD replaces the incoming row set rather than joining with it, so correlated per-row procedure calls are not supported."},
-    {"id": "clause.call_subquery", "syntax": "CALL { ... }", "status": "partial", "case_ids": ["call.subquery_correlated"], "note": "Read subqueries support correlated importing WITH; unit, write, UNION-body, and IN TRANSACTIONS forms are not supported."},
-    {"id": "clause.load_csv", "syntax": "LOAD CSV", "status": "partial", "case_ids": ["load_csv.headers_map", "load_csv.no_headers_list", "load_csv.field_terminator", "load_csv.empty_field_is_null"], "note": "LOAD CSV [WITH HEADERS] FROM <source> AS row [FIELDTERMINATOR <sep>] reads local files: file:// URLs and plain filesystem paths. WITH HEADERS binds each row as a map keyed by the header row, without it as a zero-indexed list; fields stay strings (CSV carries no types) and an empty field is null. The clause must lead the query, and the executor drives the remaining clauses over 1000-row batches so peak memory does not scale with file size. A downstream clause that reasons over the whole result (aggregate, ORDER BY, SKIP/LIMIT, DISTINCT, UNION, CALL) cannot be batched, so those queries read the file into one capped pass and fail with an explanation past 1000000 rows rather than exhausting memory. http(s):// is rejected by name — the engine ships no HTTP client. Reading local files is a capability the caller grants: on for in-process use, off for remote Bolt clients unless the server was started with --allow-csv-import <DIR>. The CALL { ... } IN TRANSACTIONS batching modifier (and the older USING PERIODIC COMMIT) is not supported: batching is automatic, so there is no commit interval to declare."},
-    {"id": "ddl.index", "syntax": "CREATE INDEX / DROP INDEX / SHOW INDEXES", "status": "intentional_divergence", "note": "Neo4j 5 index-DDL syntax executes, but builds KGLite's structures: one property gives a hash equality index, several give a composite index, and the RANGE keyword additionally builds the single-property B-tree, because Neo4j's one RANGE index serves both shapes. Index names are canonical and derived (Label.property, Label.(a,b)) - a name supplied to CREATE INDEX is accepted for script portability but not persisted. SHOW INDEXES returns the six columns db.indexes() returns and omits Neo4j's id, populationPercent, indexProvider, owningConstraint, lastRead, and readCount, for which KGLite holds no state. TEXT, POINT, FULLTEXT, VECTOR, LOOKUP, relationship indexes, and OPTIONS blocks parse and are rejected at execution with the applicable route."},
-    {"id": "ddl.show_procedures", "syntax": "SHOW PROCEDURES [YIELD ...]", "status": "intentional_divergence", "note": "Lists the procedure registry - the same table CALL YIELD validation and list_procedures() read, so the three surfaces cannot drift. Returns Neo4j's default columns (name, description, mode, worksOnSystem); mode is READ for every procedure that only reads, and SCHEMA for the two that change capture configuration rather than data (db.cdc.enable, db.cdc.disable); worksOnSystem is always false. Supports an optional YIELD projection with aliases; WHERE and other modifiers are rejected. db.checkpoint() and the dbms.* verbs are Bolt-server intercepts and deliberately not listed."},
-    {"id": "ddl.show_functions", "syntax": "SHOW FUNCTIONS [YIELD ...]", "status": "intentional_divergence", "note": "Lists the function registry. Returns Neo4j's default columns (name, category, description) and yields signature and aliases on request; categories are KGLite's own dispatch categories (string, numeric, temporal, graph, collection, spatial, timeseries, vector, utility, aggregate) rather than Neo4j's, and there is no isBuiltIn / isDeprecated / argumentDescription, for which KGLite holds no state. One row per canonical name: an accepted alternate spelling (toUpperCase for toUpper, ln for log, rels for relationships) is reported in that row's aliases list rather than as a row of its own. Every listed name is executed against the real dispatcher by a Rust test, so the listing cannot advertise a function the engine does not have. Supports an optional YIELD projection with aliases; WHERE and other modifiers are rejected. Functions and procedures are separate registries and separate namespaces - degree is deliberately in both, as the scalar RETURN degree(n) and the CALL degree() centrality procedure."},
-    {"id": "ddl.constraint", "syntax": "CREATE CONSTRAINT / DROP CONSTRAINT / SHOW CONSTRAINTS", "status": "intentional_divergence", "note": "Neo4j 5 constraint-DDL syntax executes and routes to real per-write enforcement. IS UNIQUE (single and composite) declares a unique constraint; IS NOT NULL declares presence via the node type's required fields; IS NODE KEY is served as the conjunction of the two, installed atomically; IS :: T (equivalently IS TYPED T) declares a property type, enforced on Cypher CREATE/MERGE/SET and on bulk loads alike. The Neo4j 4 ASSERT spelling and the optional NODE / RELATIONSHIP scope word are accepted. Constraint names ARE persisted - unlike index names - so DROP CONSTRAINT <name> works; a constraint declared without a name is addressable by its canonical descriptor (Label.property, Label.(a, b)). SHOW CONSTRAINTS is a read and returns the six columns db.constraints() returns, including propertyType (the declared type on a NODE_PROPERTY_TYPE row, null on every other kind) and omitting Neo4j's id and ownedIndex, for which KGLite holds no state. Divergence in the type vocabulary: IS :: accepts only the Neo4j type names with an exact KGLite value counterpart - BOOLEAN, STRING, INTEGER, FLOAT, DATE, LOCAL DATETIME, DURATION, POINT - and rejects LIST<...>, unions, zoned temporal types and decorated forms by name rather than approximating them. Matching is strict (an integer does not satisfy FLOAT), and, as in Neo4j, null and absent both satisfy a type constraint, so presence needs IS NOT NULL alongside it. Declaring any constraint the existing data already violates is refused and installs nothing."},
-    {"id": "ddl.constraint_relationship", "syntax": "CREATE CONSTRAINT FOR ()-[r:TYPE]-() REQUIRE ...", "status": "unsupported", "note": "Constraint DDL is node-only. A relationship constraint of any kind parses and is rejected at execution, naming the relationship type, because there is no per-edge enforcement path to route it to and accepting it would report success while enforcing nothing. The node-only restriction is deliberate and documented in CYPHER.md."},
-    {"id": "procedure.cdc", "syntax": "CALL db.cdc.enable/disable/current/earliest/query", "status": "intentional_divergence", "note": "An opt-in in-process change stream. Neo4j's db.cdc.current/earliest/query are matched by name and cursor semantics (opaque id, exclusive position), and the rest is deliberately different: seq is the log-wide sequence rather than a within-transaction one; txId and metadata are absent because the engine assigns no durable transaction identity and records no per-transaction metadata; the event map is flattened into columns (operation, elementType, nodeType, nodeId, relationshipType, srcType, srcId, tgtType, tgtId) so YIELD filters without map traversal; state is the after-image only, not Neo4j's {before, after}. db.cdc.enable/disable have no Neo4j counterpart at all - enablement there is a database option. Arguments are maps; positional arguments are a parse error. Refused for storage='disk'; the log is process-local and never persisted, so a loaded graph starts a new epoch."},
-    {"id": "expression.boolean", "syntax": "AND / OR / XOR / NOT", "status": "covered", "case_ids": ["boolean.three_valued"], "note": "Expression and predicate positions preserve three-valued results with standard precedence."},
-    {"id": "expression.in", "syntax": "IN", "status": "covered", "case_ids": ["in.null_membership"], "note": "Membership preserves unknown for null operands and null-containing no-match lists."},
-    {"id": "expression.list", "syntax": "list literals, indexing, slicing, concatenation", "status": "covered", "case_ids": ["list.literal", "list.index", "list.slice", "list.concatenation"], "note": "List composition supports list/list and element/list forms; indexes and slice bounds require integers."},
-    {"id": "expression.quantifiers", "syntax": "any / all / none / single", "status": "covered", "case_ids": ["quantifier.any", "quantifier.decisive"], "note": "Quantifiers preserve unknown unless a decisive true/false result exists."},
-    {"id": "expression.case", "syntax": "CASE", "status": "covered", "case_ids": ["case.generic", "case.simple", "case.predicate_result"], "note": "Simple and generic CASE forms; operand, WHEN, THEN, and ELSE positions accept full expressions including comparisons and pattern predicates."},
-    {"id": "expression.count_subquery", "syntax": "COUNT { ... }", "status": "covered", "case_ids": ["count_subquery.cross_pattern_uniqueness", "count_subquery.join_rows"], "note": "COUNT subqueries count the subquery's result rows: comma patterns within one clause group join on shared variables under relationship uniqueness (the trail rule), and separate MATCH clauses inside the subquery are independent clause scopes whose rows join/multiply, as at the top level."},
-    {"id": "expression.reserved_word_names", "syntax": "soft keywords as names", "status": "covered", "case_ids": ["names.soft_keyword_verbatim_case", "names.reserved_literal_schema_names"], "note": "Operator/sort/mutation keywords (CONTAINS, ORDER, IN, MERGE, ...) are accepted as labels, relationship types, property keys, map keys, and aliases, and keep their verbatim source spelling (0.12.14 and earlier canonicalized them to uppercase, so a graph written by an older release may store ORDER where a lowercase source now reads order). The value literals TRUE, FALSE and NULL are accepted in the schema-name positions too, per openCypher's SchemaName = SymbolicName | ReservedWord, and only there: a value position still reads the literal, and a bare one is not a variable (Variable = SymbolicName excludes them), which is what keeps CREATE and MATCH symmetric. Clause-flow and value-expression keywords stay reserved; backticks escape any name, in every parser."},
-    {"id": "path.values", "syntax": "nodes(p) / relationships(p)", "status": "covered", "case_ids": ["path.decomposition", "path.node_order"], "note": "Path values preserve exact node order, relationship identity, properties, and traversal direction, including parallel and incoming edges."},
-    {"id": "function.element_id", "syntax": "elementId(entity)", "status": "covered", "case_ids": ["function.element_id_string", "function.element_id_distinct_from_id"], "note": "Neo4j 5 element identity: an opaque string keyed off the graph slot, agreeing with the element_id the Bolt server packs on Node/Relationship structs so clients can round-trip it into predicates. Distinct from id(), which returns the logical (domain) identity. Stable for the lifetime of the loaded graph, not across a save/load rebuild."},
-    {"id": "function.id", "syntax": "id(entity)", "status": "covered", "case_ids": ["function.id_identity"], "note": "Returns KGLite logical node identity or stable relationship identity."},
-    {"id": "pattern.var_length_default_cap", "syntax": "-[*]-> / -[*N..]->", "status": "intentional_divergence", "case_ids": ["match.var_length_default_cap", "match.var_length_min_above_default_cap"], "note": "Open-ended variable-length patterns default to a 10-hop ceiling as a runaway-query guard (openCypher's * is unbounded). An explicit minimum above the ceiling raises it to that minimum so the range is never silently empty, and a range whose minimum exceeds its maximum is rejected at parse time."},
-    {"id": "model.labels", "syntax": "labels(n) / SET n:Label", "status": "intentional_divergence", "note": "KGLite stores one immutable primary type plus additive secondary labels; labels(n) returns primary type first."},
-    {"id": "transaction.model", "syntax": "transactions", "status": "intentional_divergence", "note": "Embedded snapshots and optimistic commit checking replace a remote database transaction service."}
+    {
+      "id": "clause.match",
+      "syntax": "MATCH",
+      "status": "partial",
+      "case_ids": [
+        "match.undirected",
+        "match.variable_length",
+        "create.relationship",
+        "match.abbreviated_outgoing",
+        "match.abbreviated_incoming",
+        "match.abbreviated_undirected"
+      ],
+      "note": "Core node, relationship, variable-length, shortest-path, abbreviated (-->, --, <--), and relationship-unique trail patterns are covered; not every openCypher pattern grammar form is implemented."
+    },
+    {
+      "id": "pattern.dynamic_names",
+      "syntax": "(n:$label) / (n:$(label)) / -[:$type]->",
+      "status": "covered",
+      "case_ids": [
+        "pattern.dynamic_label",
+        "pattern.dynamic_label_parenthesised",
+        "pattern.dynamic_relationship_type",
+        "pattern.dynamic_label_value_is_a_name",
+        "write.dynamic_label"
+      ],
+      "note": "A parameter supplies a label or relationship type in MATCH, CREATE, MERGE, SET, REMOVE and the WHERE n:Label predicate, in both the bare ($label) and Neo4j 5 parenthesised ($(label)) spellings. The parameter is bound before planning, so the resolved query plans exactly as the literal spelling does, and the value is a name by construction - it can never re-enter the grammar. Divergences: $(...) takes a parameter name, not a general expression; the parameter must be a string, so the Neo4j list forms that expand to several labels or an alternation are rejected rather than expanded."
+    },
+    {
+      "id": "clause.optional_match",
+      "syntax": "OPTIONAL MATCH",
+      "status": "covered",
+      "case_ids": [
+        "match.optional_missing"
+      ],
+      "note": "Null-extending optional pattern matches."
+    },
+    {
+      "id": "clause.where",
+      "syntax": "WHERE",
+      "status": "covered",
+      "case_ids": [
+        "where.three_valued_filter",
+        "exists.cross_pattern_uniqueness"
+      ],
+      "note": "Predicates preserve three-valued boolean, membership, and quantifier semantics; EXISTS subqueries enforce relationship uniqueness across their comma patterns."
+    },
+    {
+      "id": "clause.return",
+      "syntax": "RETURN",
+      "status": "covered",
+      "case_ids": [
+        "return.distinct",
+        "merge.idempotent",
+        "scalar.integer_addition"
+      ],
+      "note": "Projection, aliases, DISTINCT, and aggregation."
+    },
+    {
+      "id": "clause.with",
+      "syntax": "WITH",
+      "status": "covered",
+      "case_ids": [
+        "with.aggregation"
+      ],
+      "note": "Projection, aggregation, wildcard preservation, and strict post-projection scope validation."
+    },
+    {
+      "id": "clause.order",
+      "syntax": "ORDER BY / SKIP / LIMIT",
+      "status": "covered",
+      "case_ids": [
+        "unwind.order",
+        "order.skip_limit"
+      ],
+      "note": "Stable multi-key ordering and pagination."
+    },
+    {
+      "id": "clause.unwind",
+      "syntax": "UNWIND",
+      "status": "covered",
+      "case_ids": [
+        "unwind.order",
+        "unwind.empty_list",
+        "unwind.null"
+      ],
+      "note": "List expansion including null and empty-list behavior."
+    },
+    {
+      "id": "clause.union",
+      "syntax": "UNION / UNION ALL",
+      "status": "covered",
+      "case_ids": [
+        "union.distinct",
+        "union.all_duplicates"
+      ],
+      "note": "Duplicate-removing and duplicate-preserving set composition."
+    },
+    {
+      "id": "clause.create",
+      "syntax": "CREATE",
+      "status": "covered",
+      "case_ids": [
+        "create.node",
+        "create.relationship"
+      ],
+      "note": "Node and relationship creation with inline properties."
+    },
+    {
+      "id": "clause.set",
+      "syntax": "SET",
+      "status": "covered",
+      "case_ids": [
+        "set.property"
+      ],
+      "note": "Property, label, map merge, and mutable-property map replacement forms."
+    },
+    {
+      "id": "clause.delete",
+      "syntax": "DELETE / DETACH DELETE / REMOVE",
+      "status": "covered",
+      "case_ids": [
+        "delete.node",
+        "delete.detach",
+        "remove.property"
+      ],
+      "note": "Entity deletion, detach deletion, and property/label removal."
+    },
+    {
+      "id": "clause.merge",
+      "syntax": "MERGE",
+      "status": "covered",
+      "case_ids": [
+        "merge.idempotent"
+      ],
+      "note": "Pattern merge and ON CREATE/ON MATCH reject null property keys before mutation. One divergence, on the relationship half: MERGE matches a relationship on (source, type, target) alone, so MERGE (a)-[:T {p: 1}]->(b) treats an existing (a)-[:T {p: 2}]->(b) as the match and creates nothing, where openCypher matches the whole pattern and would create a second relationship. Held rather than fixed: whether two relationships of a type are the same one is the data-model question the deferred multi-edge program owns, and it is the same question that keeps ddl.constraint_relationship_unique unsupported. Pinned by the Rust test merge_matches_a_relationship_ignoring_its_properties, which is expected to flip when that program lands."
+    },
+    {
+      "id": "clause.foreach",
+      "syntax": "FOREACH",
+      "status": "covered",
+      "case_ids": [
+        "foreach.update"
+      ],
+      "note": "Updating bodies and nested FOREACH are supported."
+    },
+    {
+      "id": "clause.call",
+      "syntax": "CALL procedure()",
+      "status": "partial",
+      "case_ids": [
+        "call.standalone_bare",
+        "call.standalone_yield_alias"
+      ],
+      "note": "Procedure invocation. A standalone CALL without YIELD returns every declared column in declared order and must be the entire statement; combined with any other clause, YIELD is required. Result columns follow YIELD order (alias-or-name), and a zero-row call still reports its declared columns. Divergence: a mid-pipeline CALL ... YIELD replaces the incoming row set rather than joining with it, so correlated per-row procedure calls are not supported."
+    },
+    {
+      "id": "clause.call_subquery",
+      "syntax": "CALL { ... }",
+      "status": "partial",
+      "case_ids": [
+        "call.subquery_correlated"
+      ],
+      "note": "Read subqueries support correlated importing WITH; unit, write, UNION-body, and IN TRANSACTIONS forms are not supported."
+    },
+    {
+      "id": "clause.load_csv",
+      "syntax": "LOAD CSV",
+      "status": "partial",
+      "case_ids": [
+        "load_csv.headers_map",
+        "load_csv.no_headers_list",
+        "load_csv.field_terminator",
+        "load_csv.empty_field_is_null"
+      ],
+      "note": "LOAD CSV [WITH HEADERS] FROM <source> AS row [FIELDTERMINATOR <sep>] reads local files: file:// URLs and plain filesystem paths. WITH HEADERS binds each row as a map keyed by the header row, without it as a zero-indexed list; fields stay strings (CSV carries no types) and an empty field is null. The clause must lead the query, and the executor drives the remaining clauses over 1000-row batches so peak memory does not scale with file size. A downstream clause that reasons over the whole result (aggregate, ORDER BY, SKIP/LIMIT, DISTINCT, UNION, CALL) cannot be batched, so those queries read the file into one capped pass and fail with an explanation past 1000000 rows rather than exhausting memory. http(s):// is rejected by name \u2014 the engine ships no HTTP client. Reading local files is a capability the caller grants: on for in-process use, off for remote Bolt clients unless the server was started with --allow-csv-import <DIR>. The CALL { ... } IN TRANSACTIONS batching modifier (and the older USING PERIODIC COMMIT) is not supported: batching is automatic, so there is no commit interval to declare."
+    },
+    {
+      "id": "ddl.index",
+      "syntax": "CREATE INDEX / DROP INDEX / SHOW INDEXES",
+      "status": "intentional_divergence",
+      "note": "Neo4j 5 index-DDL syntax executes, but builds KGLite's structures: one property gives a hash equality index, several give a composite index, and the RANGE keyword additionally builds the single-property B-tree, because Neo4j's one RANGE index serves both shapes. Index names are canonical and derived (Label.property, Label.(a,b)) - a name supplied to CREATE INDEX is accepted for script portability but not persisted. SHOW INDEXES returns the six columns db.indexes() returns and omits Neo4j's id, populationPercent, indexProvider, owningConstraint, lastRead, and readCount, for which KGLite holds no state. TEXT, POINT, FULLTEXT, VECTOR, LOOKUP, relationship indexes, and OPTIONS blocks parse and are rejected at execution with the applicable route."
+    },
+    {
+      "id": "ddl.show_procedures",
+      "syntax": "SHOW PROCEDURES [YIELD ...]",
+      "status": "intentional_divergence",
+      "note": "Lists the procedure registry - the same table CALL YIELD validation and list_procedures() read, so the three surfaces cannot drift. Returns Neo4j's default columns (name, description, mode, worksOnSystem); mode is READ for every procedure that only reads, and SCHEMA for the two that change capture configuration rather than data (db.cdc.enable, db.cdc.disable); worksOnSystem is always false. Supports an optional YIELD projection with aliases; WHERE and other modifiers are rejected. db.checkpoint() and the dbms.* verbs are Bolt-server intercepts and deliberately not listed."
+    },
+    {
+      "id": "ddl.show_functions",
+      "syntax": "SHOW FUNCTIONS [YIELD ...]",
+      "status": "intentional_divergence",
+      "note": "Lists the function registry. Returns Neo4j's default columns (name, category, description) and yields signature and aliases on request; categories are KGLite's own dispatch categories (string, numeric, temporal, graph, collection, spatial, timeseries, vector, utility, aggregate) rather than Neo4j's, and there is no isBuiltIn / isDeprecated / argumentDescription, for which KGLite holds no state. One row per canonical name: an accepted alternate spelling (toUpperCase for toUpper, ln for log, rels for relationships) is reported in that row's aliases list rather than as a row of its own. Every listed name is executed against the real dispatcher by a Rust test, so the listing cannot advertise a function the engine does not have. Supports an optional YIELD projection with aliases; WHERE and other modifiers are rejected. Functions and procedures are separate registries and separate namespaces - degree is deliberately in both, as the scalar RETURN degree(n) and the CALL degree() centrality procedure."
+    },
+    {
+      "id": "ddl.constraint",
+      "syntax": "CREATE CONSTRAINT / DROP CONSTRAINT / SHOW CONSTRAINTS",
+      "status": "intentional_divergence",
+      "note": "Neo4j 5 constraint-DDL syntax executes and routes to real per-write enforcement. IS UNIQUE (single and composite) declares a unique constraint; IS NOT NULL declares presence via the node type's required fields; IS NODE KEY is served as the conjunction of the two, installed atomically; IS :: T (equivalently IS TYPED T) declares a property type, enforced on Cypher CREATE/MERGE/SET and on bulk loads alike. The Neo4j 4 ASSERT spelling is accepted, as is the optional NODE / RELATIONSHIP scope word - but the scope word must agree with the FOR pattern, so FOR (n:L) ... IS RELATIONSHIP KEY is refused as a self-contradicting statement rather than resolved in favour of one half. Constraint names ARE persisted - unlike index names - so DROP CONSTRAINT <name> works; a constraint declared without a name is addressable by its canonical descriptor (Label.property, Label.(a, b)). SHOW CONSTRAINTS is a read and returns the six columns db.constraints() returns, including propertyType (the declared type on a NODE_PROPERTY_TYPE row, null on every other kind) and omitting Neo4j's id and ownedIndex, for which KGLite holds no state. Divergence in the type vocabulary: IS :: accepts only the Neo4j type names with an exact KGLite value counterpart - BOOLEAN, STRING, INTEGER, FLOAT, DATE, LOCAL DATETIME, DURATION, POINT - and rejects LIST<...>, unions, zoned temporal types and decorated forms by name rather than approximating them. Matching is strict (an integer does not satisfy FLOAT), and, as in Neo4j, null and absent both satisfy a type constraint, so presence needs IS NOT NULL alongside it. Declaring any constraint the existing data already violates is refused and installs nothing."
+    },
+    {
+      "id": "ddl.constraint_relationship",
+      "syntax": "CREATE CONSTRAINT FOR ()-[r:TYPE]-() REQUIRE ...",
+      "status": "partial",
+      "case_ids": [
+        "ddl.constraint_relationship_existence",
+        "ddl.constraint_relationship_property_type"
+      ],
+      "note": "Two of the four requirement forms are served on a relationship pattern: IS NOT NULL and IS :: T (equivalently IS TYPED T). Declaring one validates it against every existing relationship of the type and refuses, installing nothing, if the stored data already violates it; once installed it is enforced on Cypher CREATE (and MERGE's create branch), SET r.p in all three spellings, REMOVE r.p, and the bulk add_connections / replace_connections loaders, with the refusal raised before replace_connections' delete. Declarations persist in the .kgl metadata and are reported by SHOW CONSTRAINTS / db.constraints() as RELATIONSHIP_PROPERTY_EXISTENCE and RELATIONSHIP_PROPERTY_TYPE with entityType RELATIONSHIP. The gap that keeps this partial rather than covered is uniqueness - see ddl.constraint_relationship_unique. Two smaller differences: the FOR pattern's direction and endpoints are ignored (a constraint is on the connection type), and relationship constraint DDL is allowed under any write scope because write scopes name node types."
+    },
+    {
+      "id": "ddl.constraint_relationship_unique",
+      "syntax": "CREATE CONSTRAINT FOR ()-[r:TYPE]-() REQUIRE r.p IS UNIQUE | IS RELATIONSHIP KEY",
+      "status": "unsupported",
+      "note": "Refused at execution, naming the relationship type and the reason. KGLite has no single answer for when two relationships of a type are the same one: the bulk loader deduplicates (type, source, target) while Cypher CREATE freely makes parallel edges, so a uniqueness declaration would mean different things depending on which write path produced the data. Settling that is a data-model decision, not a missing enforcement path, so the declaration is refused rather than served under one of the two readings. The same open question is why MERGE matches a relationship on (source, type, target) alone - see clause.merge."
+    },
+    {
+      "id": "procedure.cdc",
+      "syntax": "CALL db.cdc.enable/disable/current/earliest/query",
+      "status": "intentional_divergence",
+      "note": "An opt-in in-process change stream. Neo4j's db.cdc.current/earliest/query are matched by name and cursor semantics (opaque id, exclusive position), and the rest is deliberately different: seq is the log-wide sequence rather than a within-transaction one; txId and metadata are absent because the engine assigns no durable transaction identity and records no per-transaction metadata; the event map is flattened into columns (operation, elementType, nodeType, nodeId, relationshipType, srcType, srcId, tgtType, tgtId) so YIELD filters without map traversal; state is the after-image only, not Neo4j's {before, after}. db.cdc.enable/disable have no Neo4j counterpart at all - enablement there is a database option. Arguments are maps; positional arguments are a parse error. Refused for storage='disk'; the log is process-local and never persisted, so a loaded graph starts a new epoch."
+    },
+    {
+      "id": "expression.boolean",
+      "syntax": "AND / OR / XOR / NOT",
+      "status": "covered",
+      "case_ids": [
+        "boolean.three_valued"
+      ],
+      "note": "Expression and predicate positions preserve three-valued results with standard precedence."
+    },
+    {
+      "id": "expression.in",
+      "syntax": "IN",
+      "status": "covered",
+      "case_ids": [
+        "in.null_membership"
+      ],
+      "note": "Membership preserves unknown for null operands and null-containing no-match lists."
+    },
+    {
+      "id": "expression.list",
+      "syntax": "list literals, indexing, slicing, concatenation",
+      "status": "covered",
+      "case_ids": [
+        "list.literal",
+        "list.index",
+        "list.slice",
+        "list.concatenation"
+      ],
+      "note": "List composition supports list/list and element/list forms; indexes and slice bounds require integers."
+    },
+    {
+      "id": "expression.quantifiers",
+      "syntax": "any / all / none / single",
+      "status": "covered",
+      "case_ids": [
+        "quantifier.any",
+        "quantifier.decisive"
+      ],
+      "note": "Quantifiers preserve unknown unless a decisive true/false result exists."
+    },
+    {
+      "id": "expression.case",
+      "syntax": "CASE",
+      "status": "covered",
+      "case_ids": [
+        "case.generic",
+        "case.simple",
+        "case.predicate_result"
+      ],
+      "note": "Simple and generic CASE forms; operand, WHEN, THEN, and ELSE positions accept full expressions including comparisons and pattern predicates."
+    },
+    {
+      "id": "expression.count_subquery",
+      "syntax": "COUNT { ... }",
+      "status": "covered",
+      "case_ids": [
+        "count_subquery.cross_pattern_uniqueness",
+        "count_subquery.join_rows"
+      ],
+      "note": "COUNT subqueries count the subquery's result rows: comma patterns within one clause group join on shared variables under relationship uniqueness (the trail rule), and separate MATCH clauses inside the subquery are independent clause scopes whose rows join/multiply, as at the top level."
+    },
+    {
+      "id": "expression.reserved_word_names",
+      "syntax": "soft keywords as names",
+      "status": "covered",
+      "case_ids": [
+        "names.soft_keyword_verbatim_case",
+        "names.reserved_literal_schema_names"
+      ],
+      "note": "Operator/sort/mutation keywords (CONTAINS, ORDER, IN, MERGE, ...) are accepted as labels, relationship types, property keys, map keys, and aliases, and keep their verbatim source spelling (0.12.14 and earlier canonicalized them to uppercase, so a graph written by an older release may store ORDER where a lowercase source now reads order). The value literals TRUE, FALSE and NULL are accepted in the schema-name positions too, per openCypher's SchemaName = SymbolicName | ReservedWord, and only there: a value position still reads the literal, and a bare one is not a variable (Variable = SymbolicName excludes them), which is what keeps CREATE and MATCH symmetric. Clause-flow and value-expression keywords stay reserved; backticks escape any name, in every parser."
+    },
+    {
+      "id": "path.values",
+      "syntax": "nodes(p) / relationships(p)",
+      "status": "covered",
+      "case_ids": [
+        "path.decomposition",
+        "path.node_order"
+      ],
+      "note": "Path values preserve exact node order, relationship identity, properties, and traversal direction, including parallel and incoming edges."
+    },
+    {
+      "id": "function.element_id",
+      "syntax": "elementId(entity)",
+      "status": "covered",
+      "case_ids": [
+        "function.element_id_string",
+        "function.element_id_distinct_from_id"
+      ],
+      "note": "Neo4j 5 element identity: an opaque string keyed off the graph slot, agreeing with the element_id the Bolt server packs on Node/Relationship structs so clients can round-trip it into predicates. Distinct from id(), which returns the logical (domain) identity. Stable for the lifetime of the loaded graph, not across a save/load rebuild."
+    },
+    {
+      "id": "function.id",
+      "syntax": "id(entity)",
+      "status": "covered",
+      "case_ids": [
+        "function.id_identity"
+      ],
+      "note": "Returns KGLite logical node identity or stable relationship identity."
+    },
+    {
+      "id": "pattern.var_length_default_cap",
+      "syntax": "-[*]-> / -[*N..]->",
+      "status": "intentional_divergence",
+      "case_ids": [
+        "match.var_length_default_cap",
+        "match.var_length_min_above_default_cap"
+      ],
+      "note": "Open-ended variable-length patterns default to a 10-hop ceiling as a runaway-query guard (openCypher's * is unbounded). An explicit minimum above the ceiling raises it to that minimum so the range is never silently empty, and a range whose minimum exceeds its maximum is rejected at parse time."
+    },
+    {
+      "id": "model.labels",
+      "syntax": "labels(n) / SET n:Label",
+      "status": "intentional_divergence",
+      "note": "KGLite stores one immutable primary type plus additive secondary labels; labels(n) returns primary type first."
+    },
+    {
+      "id": "transaction.model",
+      "syntax": "transactions",
+      "status": "intentional_divergence",
+      "note": "Embedded snapshots and optimistic commit checking replace a remote database transaction service."
+    }
   ],
   "extensions": [
-    {"id": "extension.namespace", "kind": "naming", "canonical": "kglite.*", "legacy": "flat names", "note": "KGLite functions and procedures accept canonical namespaced spellings; historical flat spellings remain equivalent."},
-    {"id": "extension.analytics", "kind": "procedure_family", "canonical": "kglite.pagerank and related procedures", "legacy": "pagerank and related flat names", "note": "Graph algorithms, rules, code analysis, and statistics procedures."},
-    {"id": "extension.semantic", "kind": "function_family", "canonical": "kglite.text_score / kglite.vector_score", "legacy": "text_score / vector_score", "note": "Embedding-backed semantic scoring."},
-    {"id": "extension.spatial", "kind": "function_family", "canonical": "kglite.geom_* and KGLite spatial helpers", "legacy": "flat function names", "note": "Pragmatic geometry and spatial helpers beyond the compatible subset."},
-    {"id": "extension.timeseries", "kind": "function_family", "canonical": "kglite.ts_*", "legacy": "ts_*", "note": "Time-series channel functions."},
-    {"id": "extension.text", "kind": "function_family", "canonical": "kglite.text_*", "legacy": "text_*", "note": "Text normalization, matching, token, and distance helpers."},
-    {"id": "extension.having", "kind": "clause", "canonical": "HAVING", "legacy": null, "note": "Post-aggregation filter accepted as a KGLite extension."},
-    {"id": "extension.window", "kind": "expression", "canonical": "OVER", "legacy": null, "note": "Window functions are a KGLite/GQL-style extension."},
-    {"id": "extension.set_operators", "kind": "clause", "canonical": "INTERSECT / EXCEPT", "legacy": null, "note": "Additional set operators outside the claimed openCypher-compatible subset."},
-    {"id": "extension.explain_profile", "kind": "clause", "canonical": "EXPLAIN / PROFILE", "legacy": null, "note": "KGLite plan and execution diagnostics; output shape is KGLite-specific."}
+    {
+      "id": "extension.namespace",
+      "kind": "naming",
+      "canonical": "kglite.*",
+      "legacy": "flat names",
+      "note": "KGLite functions and procedures accept canonical namespaced spellings; historical flat spellings remain equivalent."
+    },
+    {
+      "id": "extension.analytics",
+      "kind": "procedure_family",
+      "canonical": "kglite.pagerank and related procedures",
+      "legacy": "pagerank and related flat names",
+      "note": "Graph algorithms, rules, code analysis, and statistics procedures."
+    },
+    {
+      "id": "extension.semantic",
+      "kind": "function_family",
+      "canonical": "kglite.text_score / kglite.vector_score",
+      "legacy": "text_score / vector_score",
+      "note": "Embedding-backed semantic scoring."
+    },
+    {
+      "id": "extension.spatial",
+      "kind": "function_family",
+      "canonical": "kglite.geom_* and KGLite spatial helpers",
+      "legacy": "flat function names",
+      "note": "Pragmatic geometry and spatial helpers beyond the compatible subset."
+    },
+    {
+      "id": "extension.timeseries",
+      "kind": "function_family",
+      "canonical": "kglite.ts_*",
+      "legacy": "ts_*",
+      "note": "Time-series channel functions."
+    },
+    {
+      "id": "extension.text",
+      "kind": "function_family",
+      "canonical": "kglite.text_*",
+      "legacy": "text_*",
+      "note": "Text normalization, matching, token, and distance helpers."
+    },
+    {
+      "id": "extension.having",
+      "kind": "clause",
+      "canonical": "HAVING",
+      "legacy": null,
+      "note": "Post-aggregation filter accepted as a KGLite extension."
+    },
+    {
+      "id": "extension.window",
+      "kind": "expression",
+      "canonical": "OVER",
+      "legacy": null,
+      "note": "Window functions are a KGLite/GQL-style extension."
+    },
+    {
+      "id": "extension.set_operators",
+      "kind": "clause",
+      "canonical": "INTERSECT / EXCEPT",
+      "legacy": null,
+      "note": "Additional set operators outside the claimed openCypher-compatible subset."
+    },
+    {
+      "id": "extension.explain_profile",
+      "kind": "clause",
+      "canonical": "EXPLAIN / PROFILE",
+      "legacy": null,
+      "note": "KGLite plan and execution diagnostics; output shape is KGLite-specific."
+    }
   ]
 }

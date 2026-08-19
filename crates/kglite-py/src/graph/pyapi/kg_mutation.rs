@@ -43,6 +43,38 @@ struct InlineConfig {
 /// the GIL through it starves every other Python thread for the duration
 /// of a bulk insert. Detach only spans like this one — anything touching
 /// `Bound`/`PyAny` must stay attached.
+/// Map a bulk-write failure onto the typed error it deserves.
+///
+/// The engine's write channel is `Result<_, String>`, but a constraint refusal
+/// parks the structured violation on the graph alongside the message it
+/// produced. Recovering it here is what makes a bulk write raise
+/// `kglite.ConstraintViolationError` rather than the generic `ArgumentError`.
+///
+/// Shared by every bulk entry point rather than written per call site: the
+/// connection loaders went without it until relationship constraints gave them
+/// a violation to raise, and the reason they went without it is that the step
+/// lived inline in `add_nodes`, where nothing else could reach it.
+fn bulk_write_err(graph: &mut DirGraph, message: String) -> pyo3::PyErr {
+    let error = graph
+        .take_constraint_error(&message)
+        .unwrap_or(crate::error::KgError::Argument(message));
+    crate::error_py::kg_to_pyerr(error)
+}
+
+/// Run a bulk write off-GIL and raise its typed error.
+///
+/// [`detach_mutation`]'s sibling for the paths that can raise a constraint
+/// violation: the graph is threaded through so [`bulk_write_err`] can recover
+/// the parked violation once the detached borrow has ended.
+fn detach_bulk_write<T, F>(py: Python<'_>, graph: &mut DirGraph, f: F) -> PyResult<T>
+where
+    F: pyo3::marker::Ungil + Send + FnOnce(&mut DirGraph) -> Result<T, String>,
+    T: pyo3::marker::Ungil + Send,
+{
+    let outcome = py.detach(|| f(graph));
+    outcome.map_err(|message| bulk_write_err(graph, message))
+}
+
 fn detach_mutation<T, F>(py: Python<'_>, f: F) -> PyResult<T>
 where
     F: pyo3::marker::Ungil + Send + FnOnce() -> Result<T, String>,
@@ -334,7 +366,7 @@ fn write_connections(
         let graph = get_graph_mut(&mut kg.inner);
 
         // Everything past this point is pure Rust — run off-GIL.
-        let result = detach_mutation(py, || {
+        let result = detach_bulk_write(py, graph, |graph| {
             graph.with_write_provenance(git_sha.as_deref(), modified_by.as_deref(), |graph| {
                 if replace {
                     kglite_core::api::mutation::replace_connections(
@@ -396,7 +428,7 @@ fn write_connections(
     let graph = get_graph_mut(&mut kg.inner);
 
     // The converted frame is pure Rust — apply the batch off-GIL.
-    let result = detach_mutation(py, || {
+    let result = detach_bulk_write(py, graph, |graph| {
         graph.with_write_provenance(git_sha.as_deref(), modified_by.as_deref(), |graph| {
             if replace {
                 kglite_core::api::mutation::replace_connections(
@@ -633,12 +665,7 @@ fn apply_node_batch(
     // violation `add_nodes` parked is recoverable here: a constraint failure
     // raises `kglite.ConstraintViolationError`, anything else keeps the
     // existing `ArgumentError`.
-    outcome.map_err(|message| {
-        let error = graph
-            .take_constraint_error(&message)
-            .unwrap_or(crate::error::KgError::Argument(message));
-        crate::error_py::kg_to_pyerr(error)
-    })
+    outcome.map_err(|message| bulk_write_err(graph, message))
 }
 
 fn register_feature_configs(

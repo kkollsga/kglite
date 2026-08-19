@@ -27,7 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing: no relationship, no connection-type metadata, and no entry in the
   change-capture stream. Declarations survive save/load in the `.kgl` metadata,
   and `SHOW CONSTRAINTS` / `CALL db.constraints()` report them under Neo4j 5's
-  `RELATIONSHIP_PROPERTY_EXISTENCE` / `RELATIONSHIP_PROPERTY_TYPE` names.
+  `RELATIONSHIP_PROPERTY_EXISTENCE` / `RELATIONSHIP_PROPERTY_TYPE` names, with
+  `entityType` reading `RELATIONSHIP`. `describe()` annotates a constrained edge
+  property with `constraint=` / `declared_type=`, in the same vocabulary it uses
+  on the node side.
 
   A bulk row is judged on the state it will actually leave behind, which is not
   the row: under `preserve` a value the stored relationship already has is
@@ -45,6 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   declaration would mean different things depending on which write path
   produced the data. Relationship constraint DDL is allowed under any write
   scope, since write scopes name node types.
+
+- **Bulk writes raise the typed constraint exception.** `add_connections` /
+  `replace_connections` reported every failure as `ArgumentError`, including a
+  constraint refusal whose structured violation was sitting on the graph
+  waiting to be recovered — the recovery step existed only inside `add_nodes`.
+  It is now shared, so every bulk entry point raises
+  `ConstraintViolationError` / `ConstraintCreationError` where one applies.
 
 ### Fixed
 

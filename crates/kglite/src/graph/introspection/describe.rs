@@ -566,47 +566,15 @@ fn write_connections_detail(
                     xml.push_str("    <properties>\n");
                     wrote_header = true;
                 }
-                let unique = stats.value_set.len();
-                let type_string = stats.type_name.unwrap_or("unknown");
-                let vals_attr = if unique > 0 && unique <= MAX_PROP_VALUES {
-                    let mut vals: Vec<Value> = stats.value_set.into_iter().collect();
-                    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                    let vals_str: Vec<String> = vals
-                        .iter()
-                        .map(|v| value_display_compact(v, truncate_at))
-                        .collect();
-                    format!(" vals=\"{}\"", xml_escape(&vals_str.join("|")))
-                } else if unique > 0 {
-                    // 0.9.30: when cardinality exceeds MAX_PROP_VALUES we
-                    // can't list every distinct value, but the agent
-                    // still benefits from seeing ONE concrete example.
-                    // Catches the operator-reported friction where
-                    // properties like `file_path` had hundreds of values
-                    // (no `vals=` attr), forcing the agent to guess
-                    // value shape from the property name alone. A
-                    // sample="..." attribute means the prop line always
-                    // self-documents whether it's a low-cardinality enum
-                    // (vals) or a high-cardinality field (sample).
-                    let sample = stats
-                        .value_set
-                        .iter()
-                        .next()
-                        .map(|v| value_display_compact(v, truncate_at));
-                    match sample {
-                        Some(s) => format!(" sample=\"{}\"", xml_escape(&s)),
-                        None => String::new(),
-                    }
-                } else {
-                    String::new()
-                };
-                xml.push_str(&format!(
-                    "      <prop name=\"{}\" type=\"{}\" non_null=\"{}\" unique=\"{}\"{}/>\n",
-                    xml_escape(&prop_name),
-                    xml_escape(type_string),
-                    stats.non_null,
-                    unique,
-                    vals_attr,
-                ));
+                write_connection_property(
+                    xml,
+                    graph,
+                    topic,
+                    &prop_name,
+                    stats,
+                    truncate_at,
+                    MAX_PROP_VALUES,
+                );
             }
             if wrote_header {
                 xml.push_str("    </properties>\n");
@@ -2097,6 +2065,93 @@ fn describe_property_constraint(
     }
 }
 
+/// Emit one `<prop .../>` line for an edge property.
+///
+/// Split out of the connections walk so that walk stays a walk: value-set
+/// rendering, the high-cardinality sample fallback and the declared-constraint
+/// annotations are three separate decisions about one line, and none of them
+/// is about which connection type comes next.
+#[allow(clippy::too_many_arguments)]
+fn write_connection_property(
+    xml: &mut String,
+    graph: &DirGraph,
+    rel_type: &str,
+    prop_name: &str,
+    stats: EdgePropertyAccum,
+    truncate_at: Option<usize>,
+    max_prop_values: usize,
+) {
+    let unique = stats.value_set.len();
+    let type_string = stats.type_name.unwrap_or("unknown");
+    let vals_attr = if unique > 0 && unique <= max_prop_values {
+        let mut vals: Vec<Value> = stats.value_set.into_iter().collect();
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let vals_str: Vec<String> = vals
+            .iter()
+            .map(|v| value_display_compact(v, truncate_at))
+            .collect();
+        format!(" vals=\"{}\"", xml_escape(&vals_str.join("|")))
+    } else if unique > 0 {
+        // 0.9.30: when cardinality exceeds max_prop_values we
+        // can't list every distinct value, but the agent
+        // still benefits from seeing ONE concrete example.
+        // Catches the operator-reported friction where
+        // properties like `file_path` had hundreds of values
+        // (no `vals=` attr), forcing the agent to guess
+        // value shape from the property name alone. A
+        // sample="..." attribute means the prop line always
+        // self-documents whether it's a low-cardinality enum
+        // (vals) or a high-cardinality field (sample).
+        let sample = stats
+            .value_set
+            .iter()
+            .next()
+            .map(|v| value_display_compact(v, truncate_at));
+        match sample {
+            Some(s) => format!(" sample=\"{}\"", xml_escape(&s)),
+            None => String::new(),
+        }
+    } else {
+        String::new()
+    };
+    // Declared relationship constraints, in the same two
+    // attributes the node idiom uses: an agent planning an edge
+    // write learns it will be rejected before attempting it, and
+    // learns it from the same vocabulary on both element kinds.
+    let mut constraint_attrs = String::new();
+    if let Some(constraint) = describe_rel_property_constraint(graph, rel_type, prop_name) {
+        constraint_attrs.push_str(&format!(" constraint=\"{constraint}\""));
+    }
+    if let Some(declared) = graph.rel_property_type_for(rel_type, prop_name) {
+        constraint_attrs.push_str(&format!(" declared_type=\"{}\"", declared.name()));
+    }
+    xml.push_str(&format!(
+        "      <prop name=\"{}\" type=\"{}\" non_null=\"{}\" unique=\"{}\"{}{}/>\n",
+        xml_escape(prop_name),
+        xml_escape(type_string),
+        stats.non_null,
+        unique,
+        vals_attr,
+        constraint_attrs,
+    ));
+}
+
+/// The declared presence constraint on a relationship property, in the same
+/// vocabulary [`describe_property_constraint`] uses for nodes.
+///
+/// Only `not_null` is reachable: uniqueness and RELATIONSHIP KEY are not served
+/// on relationships, so there is no `unique` or `key` answer to give — and
+/// inventing one would advertise a constraint the engine refuses to declare.
+fn describe_rel_property_constraint(
+    graph: &DirGraph,
+    rel_type: &str,
+    property: &str,
+) -> Option<&'static str> {
+    graph
+        .has_rel_not_null_constraint(rel_type, property)
+        .then_some("not_null")
+}
+
 #[cfg(test)]
 mod declared_type_annotation_tests {
     use super::*;
@@ -2154,6 +2209,63 @@ mod declared_type_annotation_tests {
             .create_property_type_constraint("Person", "age", DeclaredType::Integer)
             .unwrap();
         let described = describe(&graph);
+        assert!(
+            described.contains("declared_type=\"INTEGER\""),
+            "got: {described}"
+        );
+    }
+
+    /// The same two facts on the connection side. An agent planning
+    /// `CREATE (a)-[:KNOWS {since: …}]->(b)` needs the edge annotation for the
+    /// same reason it needs the node one — and in the same vocabulary, or it
+    /// has to learn two.
+    #[test]
+    fn describe_annotates_a_declared_relationship_constraint() {
+        use crate::graph::algorithms::Interrupt;
+        use crate::graph::languages::cypher::executor::write::execute_mutable;
+        use crate::graph::languages::cypher::parser::parse_cypher;
+
+        let mut graph = DirGraph::new();
+        let parsed = parse_cypher(
+            "CREATE (a:Person {person_id: 1})-[:KNOWS {since: 2020}]->(b:Person {person_id: 2})",
+        )
+        .unwrap();
+        execute_mutable(&mut graph, &parsed, HashMap::new(), Interrupt::default()).unwrap();
+
+        let with_connections = |graph: &DirGraph| {
+            compute_description(
+                graph,
+                None,
+                &ConnectionDetail::Topics(vec!["KNOWS".to_string()]),
+                &CypherDetail::Off,
+                &FluentDetail::Off,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        assert!(
+            !with_connections(&graph).contains("constraint="),
+            "an unconstrained edge property must carry no annotation"
+        );
+
+        graph
+            .create_rel_not_null_constraint("KNOWS", "since", &Interrupt::default())
+            .unwrap();
+        graph
+            .create_rel_property_type_constraint(
+                "KNOWS",
+                "since",
+                DeclaredType::Integer,
+                &Interrupt::default(),
+            )
+            .unwrap();
+        let described = with_connections(&graph);
+        assert!(
+            described.contains("constraint=\"not_null\""),
+            "got: {described}"
+        );
         assert!(
             described.contains("declared_type=\"INTEGER\""),
             "got: {described}"

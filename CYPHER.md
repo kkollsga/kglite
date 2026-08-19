@@ -28,7 +28,7 @@ surface at a glance — most of what you'd reach for is here, in-process:
 | **Writing** | `CREATE`, `MERGE` (+ `ON CREATE` / `ON MATCH SET`), `SET`, `DELETE` / `DETACH DELETE`, `REMOVE`, `FOREACH (x IN list \| …)` |
 | **Subqueries** | `CALL { … }` (correlated + uncorrelated), `EXISTS { … }`, `COUNT { … }` |
 | **Schema DDL** | `CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:L) ON (n.p, …)`, `DROP INDEX … [IF EXISTS]`, `SHOW INDEXES` — see [Cypher index DDL](#cypher-index-ddl) for the taxonomy mapping |
-| **Constraint DDL** | `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:L) REQUIRE n.p IS UNIQUE \| IS NOT NULL \| IS NODE KEY \| IS :: TYPE`, `DROP CONSTRAINT … [IF EXISTS]`, `SHOW CONSTRAINTS` — enforced on every write path, see [Cypher constraint DDL](#cypher-constraint-ddl) |
+| **Constraint DDL** | `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:L) REQUIRE n.p IS UNIQUE \| IS NOT NULL \| IS NODE KEY \| IS :: TYPE`, `FOR ()-[r:T]-() REQUIRE r.p IS NOT NULL \| IS :: TYPE`, `DROP CONSTRAINT … [IF EXISTS]`, `SHOW CONSTRAINTS` — enforced on every write path, see [Cypher constraint DDL](#cypher-constraint-ddl) |
 | **Path finding** | variable-length `-[*1..n]->`, `shortestPath(…)`, `allShortestPaths(…)`, weighted shortest path (`CALL`) |
 | **Predicates** | `=, <>, <, >, <=, >=`, `AND` / `OR` / `NOT`, `IS [NOT] NULL`, `IN`, `CONTAINS` / `STARTS WITH` / `ENDS WITH`, regex `=~` |
 | **Expressions** | list comprehension `[x IN xs WHERE … \| …]`, `reduce(…)`, `CASE`, list/map literals, parameters `$p` |
@@ -43,9 +43,10 @@ surface at a glance — most of what you'd reach for is here, in-process:
 | **Change data capture** | opt-in change stream with stateless cursors — `CALL db.cdc.enable/current/earliest/query/disable`, see [Change data capture](#change-data-capture-call-dbcdc) |
 | **Storage** | identical Cypher across in-memory, mmap, and on-disk modes (1B+ edges) |
 
-Per-write `UNIQUE` / `NOT NULL` / NODE KEY constraints **are** supported and
-enforced on every write path, including the bulk loader — declare them with
-[constraint DDL](#cypher-constraint-ddl) or `define_schema`. A graph that
+Per-write `UNIQUE` / `NOT NULL` / NODE KEY / `IS :: TYPE` constraints **are**
+supported and enforced on every write path, including the bulk loader — declare
+them with [constraint DDL](#cypher-constraint-ddl) or `define_schema`.
+Relationships carry `NOT NULL` and `IS :: TYPE` too. A graph that
 declares no constraint pays one `HashMap::is_empty` check per write, so the
 in-memory write path is untouched by the feature existing.
 
@@ -2443,13 +2444,19 @@ CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE (n.a, n.b) IS UNI
 CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE n.prop IS NOT NULL
 CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE n.prop IS NODE KEY
 CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE n.prop IS :: INTEGER
+CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR ()-[r:TYPE]-() REQUIRE r.prop IS NOT NULL
+CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR ()-[r:TYPE]-() REQUIRE r.prop IS :: INTEGER
 DROP CONSTRAINT <name> [IF EXISTS]
 SHOW CONSTRAINTS
 ```
 
-The Neo4j 4 `ASSERT` spelling is accepted in place of `REQUIRE`, and the optional
-`NODE` / `RELATIONSHIP` scope word before `UNIQUE` / `KEY` is tolerated, so a
-4.x-era script ports without edits.
+The Neo4j 4 `ASSERT` spelling is accepted in place of `REQUIRE`, so a 4.x-era
+script ports without edits. The optional `NODE` / `RELATIONSHIP` scope word
+before `UNIQUE` / `KEY` is accepted too, but it must **agree** with the `FOR`
+pattern: `FOR (n:Label) … IS RELATIONSHIP KEY` asks for two different
+constraints in one statement and is refused rather than resolved in favour of
+one half. Unscoped `IS UNIQUE` / `IS KEY` mean "whatever this pattern targets"
+and are legal against either.
 
 #### What each form enforces
 
@@ -2460,6 +2467,8 @@ The Neo4j 4 `ASSERT` spelling is accepted in place of `REQUIRE`, and the optiona
 | `REQUIRE n.p IS NOT NULL` | every node of the type has a non-null `p` | the node type's required-field list |
 | `REQUIRE n.p IS NODE KEY` | both of the above, at once | a unique index **plus** a required field |
 | `REQUIRE n.p IS :: TYPE` | every value written to `p` has the declared type | a declared per-property type, checked before the write lands |
+| `REQUIRE r.p IS NOT NULL` (on `FOR ()-[r:T]-()`) | every relationship of the type has a non-null `p` | a declared per-connection-type presence rule |
+| `REQUIRE r.p IS :: TYPE` (on `FOR ()-[r:T]-()`) | every value written to `r.p` has the declared type | a declared per-connection-type property type |
 
 A constraint declared over several properties constrains the **combination**, not
 each property — `REQUIRE (n.city, n.age) IS UNIQUE` permits many nodes in the
@@ -2473,6 +2482,46 @@ share "no email" while `email` is `UNIQUE`.
 two halves are installed **atomically** — if the presence half cannot be declared,
 the uniqueness half is rolled back, so a statement that reported failure has
 changed nothing. `DROP CONSTRAINT` on a node key likewise withdraws both halves.
+
+#### Relationship constraints
+
+A constraint on a relationship is written against a relationship pattern, and
+serves the two kinds that do not depend on relationship identity:
+
+```cypher
+CREATE CONSTRAINT knows_since FOR ()-[r:KNOWS]-() REQUIRE r.since IS NOT NULL
+CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since IS :: INTEGER
+DROP CONSTRAINT knows_since
+```
+
+Everything the node forms promise holds here. Declaring one **validates it
+against every existing relationship of the type** and refuses, installing
+nothing, if the data already violates it. Once installed it is enforced on
+`CREATE` (and `MERGE`'s create branch), `SET r.p` in all three spellings
+(`SET r.p = v`, `SET r = {…}`, `SET r += {…}`), `REMOVE r.p`, and the bulk
+`add_connections` / `replace_connections` loaders. A refused write changes
+nothing — no relationship, no connection-type metadata, and no entry in the
+change-capture stream. Declarations survive `save()` / `load()`.
+
+The pattern's direction and endpoints are ignored: `()-[r:T]-()`,
+`()-[r:T]->()` and `()<-[r:T]-()` all declare the same constraint on the
+connection type, exactly as they do for Neo4j.
+
+A bulk row is judged on the state it will actually leave behind, which is not
+always the row: under `conflict_handling='preserve'` a value the stored
+relationship already has is discarded and therefore never refused, and under
+`'sum'` an addition that turns an integer into a float **is** refused even
+though both operands satisfy the constraint on their own. A frame is refused
+whole rather than row-by-row, and `replace_connections` raises the refusal
+before its delete, so a rejected frame never costs the relationships already
+stored.
+
+**`IS UNIQUE` and `IS RELATIONSHIP KEY` on a relationship are refused.** This is
+a data-model gap, not a missing feature flag: the bulk loader deduplicates
+`(type, source, target)` while Cypher `CREATE` freely makes parallel edges, so
+KGLite has no single answer for when two relationships of a type are the same
+one — and a uniqueness declaration would mean different things depending on
+which write path produced the data. The refusal names that reason.
 
 #### Property-type constraints (`IS :: T`)
 
@@ -2561,11 +2610,11 @@ Returns the same rows and columns as `CALL db.constraints()`:
 | Column | Value |
 |---|---|
 | `name` | the declared name, or the canonical descriptor when unnamed |
-| `type` | `UNIQUENESS`, `NODE_KEY`, `NODE_PROPERTY_EXISTENCE`, or `NODE_PROPERTY_TYPE` |
-| `entityType` | always `NODE` |
-| `labelsOrTypes` | single-element list holding the node type |
+| `type` | `UNIQUENESS`, `NODE_KEY`, `NODE_PROPERTY_EXISTENCE`, `NODE_PROPERTY_TYPE`, `RELATIONSHIP_PROPERTY_EXISTENCE`, or `RELATIONSHIP_PROPERTY_TYPE` |
+| `entityType` | `NODE` or `RELATIONSHIP` |
+| `labelsOrTypes` | single-element list holding the node type — or the relationship type on a relationship row |
 | `properties` | constrained property names, in declaration order |
-| `propertyType` | the declared type on a `NODE_PROPERTY_TYPE` row, `null` on every other kind |
+| `propertyType` | the declared type on a `NODE_PROPERTY_TYPE` / `RELATIONSHIP_PROPERTY_TYPE` row, `null` on every other kind |
 
 A node key is **one** row (`NODE_KEY`), not a uniqueness row plus an existence
 row. A declared property type is its own row, never folded into another: a
@@ -2585,7 +2634,7 @@ works — never a syntax error, and **never a success that enforces nothing**.
 |---|---|
 | `REQUIRE n.p IS :: LIST<STRING>` | Only the type names with an exact KGLite value counterpart are accepted (see [Property-type constraints](#property-type-constraints-is--t)). Lists, unions, zoned temporal types and decorated forms are refused by name rather than approximated; the error lists the names that work. `validate_schema()` audits existing data against `define_schema`'s per-type `types` map, and `lock_schema()` rejects a write whose value disagrees with the recorded property type |
 | `REQUIRE n.id IS UNIQUE` / `IS NODE KEY` | Uniqueness over the identity field — under **any** spelling that resolves to it, `id` itself or the node type's own id column (`person_id`) — is refused. `id` is a `NodeData` field, not an entry in the property map, so the write-path claim is never produced and the constraint would admit duplicates while reporting success. Declare the node type's primary key instead: `define_schema({'nodes': {'Person': {'primary_key': 'id'}}})` probes the per-type id index on every write path, and `MERGE` is the idempotent alternative to `CREATE`. Only `id` is affected — `title`, a column aliased to `title`, and ordinary properties all enforce correctly. `IS NOT NULL` on `id` **is** accepted: it is present by construction, so the requirement is genuinely satisfied |
-| `FOR ()-[r:T]-() REQUIRE r.p IS UNIQUE` | KGLite constrains node properties only |
+| `FOR ()-[r:T]-() REQUIRE r.p IS UNIQUE` / `IS RELATIONSHIP KEY` | KGLite has no single answer for when two relationships of a type are the same one — the bulk loader deduplicates `(type, source, target)` while Cypher `CREATE` freely makes parallel edges — so a uniqueness declaration would mean different things depending on which write path produced the data. Presence and property type **are** served on relationships (see [Relationship constraints](#relationship-constraints)) |
 | `REQUIRE …` with no properties | Nothing to constrain |
 | `CREATE CONSTRAINT <name> …` reusing a live name | Names are unique per graph; drop the existing one or choose another name |
 
@@ -2599,9 +2648,13 @@ is worth an error.
 Schema is graph state, so `CREATE CONSTRAINT` / `DROP CONSTRAINT` are
 **mutations**: blocked on a read-only graph (`read_only(True)`), blocked in a
 read-only transaction, and rolled back with the rest of a failed statement. On a
-schema-locked graph, constraining an undeclared property is rejected — the same
-typo-guard writes get. A constraint belongs to one node type, so
-`write_scope=[...]` applies. A schema command is a standalone statement: it
+schema-locked graph, constraining an undeclared node property is rejected — the
+same typo-guard writes get; on the relationship side the lock gates the
+connection *type* but not the property, because the lock does not check edge
+property names on write either. A node constraint belongs to one node type, so
+`write_scope=[...]` applies to it. A **relationship** constraint is allowed under
+any write scope: scopes name node types, and there is no relationship spelling
+for one to name. A schema command is a standalone statement: it
 cannot follow another clause or appear inside a `CALL { }` body.
 
 `SHOW CONSTRAINTS` is unaffected by all of the above except the standalone rule —
@@ -3024,6 +3077,6 @@ compatible subset.
 | Transactions | Snapshot isolation + OCC through `Session` / `Transaction` | Full ACID | Native session coordination is binding-independent; direct graph writes are in-place |
 | Indexing | Three separate structures — hash equality, composite, B-tree range — plus automatic type indexes and vector indexes | One general `RANGE` index serving equality, range, and ordering | An equality index cannot serve a range predicate, so KGLite exposes the distinction that Neo4j collapses. `CREATE INDEX` / `DROP INDEX` / `SHOW INDEXES` are supported — see [Cypher index DDL](#cypher-index-ddl) for exactly what each statement builds |
 | Index names | Canonical and derived: `Label.property`, `Label.(a,b)` | User-assigned, unique | A name in `CREATE INDEX <name> …` is accepted for script portability but not stored; the persisted `.kgl` index state is a list of `(label, property)` keys |
-| Constraint DDL | `IS UNIQUE`, `IS NOT NULL`, `IS NODE KEY`, `IS :: TYPE` — enforced on every write path | `CREATE CONSTRAINT … IS UNIQUE / IS NOT NULL / IS NODE KEY / IS :: TYPE` | `IS :: TYPE` accepts the type names with an exact KGLite value counterpart (`BOOLEAN`, `STRING`, `INTEGER`, `FLOAT`, `DATE`, `LOCAL DATETIME`, `DURATION`, `POINT`); lists, unions and zoned temporal types are rejected by name rather than approximated. Constraints are node-only. See [Cypher constraint DDL](#cypher-constraint-ddl) |
+| Constraint DDL | `IS UNIQUE`, `IS NOT NULL`, `IS NODE KEY`, `IS :: TYPE` — enforced on every write path | `CREATE CONSTRAINT … IS UNIQUE / IS NOT NULL / IS NODE KEY / IS :: TYPE` | `IS :: TYPE` accepts the type names with an exact KGLite value counterpart (`BOOLEAN`, `STRING`, `INTEGER`, `FLOAT`, `DATE`, `LOCAL DATETIME`, `DURATION`, `POINT`); lists, unions and zoned temporal types are rejected by name rather than approximated. Relationship constraints cover `IS NOT NULL` and `IS :: TYPE`; `IS UNIQUE` / `IS RELATIONSHIP KEY` on a relationship are refused, because KGLite has no single answer for when two relationships of a type are the same one. See [Cypher constraint DDL](#cypher-constraint-ddl) |
 | Constraint names | Stored, so `DROP CONSTRAINT <name>` works | User-assigned, unique per database | The opposite decision to index names above: a ported schema script almost always drops constraints by name, and the `.kgl` metadata section is JSON, so the field was free. A constraint declared without a name is addressable by its canonical descriptor |
 | `LOAD CSV` source | Local files only — `file://` URLs and filesystem paths, gated by a per-caller capability | `file://` plus `http(s)://`, gated by an import-directory setting | The engine ships no HTTP client (network dependencies were removed in 0.14.x), so there is nothing to fetch a URL with. Filesystem access is granted per caller: on for in-process use, off for Bolt clients unless the server was started with `--allow-csv-import <DIR>` |

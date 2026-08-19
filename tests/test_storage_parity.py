@@ -320,6 +320,49 @@ def test_property_type_constraint_parity(tmp_path):
         assert "STRING" in refusals[mode], f"{mode}: {refusals[mode]}"
 
 
+def test_relationship_constraint_parity(tmp_path):
+    """The relationship half of the same claim. Its existing-data scan reads
+    edges through a backend-agnostic accessor whose disk arm is a different code
+    path from its petgraph arms, so "it installs and enforces" has to be
+    asserted per mode rather than inferred from the in-memory one.
+    """
+    import kglite
+
+    installed: dict[str, list] = {}
+    refusals: dict[str, str] = {}
+    for mode in STORAGE_MODES:
+        path = str(tmp_path / f"rel_{mode}") if mode == "disk" else None
+        kg = _build_graph(mode, path)
+        # `RELATED` edges carry no properties, so a presence constraint on one
+        # is refused by the existing data — that refusal is itself parity.
+        with pytest.raises(kglite.ConstraintCreationError):
+            kg.cypher("CREATE CONSTRAINT FOR ()-[r:RELATED]-() REQUIRE r.weight IS NOT NULL")
+
+        # A type constraint installs: absent values satisfy a declared type.
+        kg.cypher("CREATE CONSTRAINT rel_weight FOR ()-[r:RELATED]-() REQUIRE r.weight IS :: INTEGER")
+        installed[mode] = _rows(
+            kg.cypher(
+                "CALL db.constraints() YIELD name, type, entityType, propertyType "
+                "RETURN name, type, entityType, propertyType"
+            )
+        )
+
+        with pytest.raises(kglite.ConstraintViolationError) as exc:
+            kg.cypher("MATCH ()-[r:RELATED]->() SET r.weight = 'heavy'")
+        refusals[mode] = str(exc.value)
+
+        # Null still passes a type declaration, in every mode.
+        kg.cypher("MATCH ()-[r:RELATED]->() SET r.weight = null")
+
+    reference = installed["memory"]
+    assert reference and reference[0]["type"] == "RELATIONSHIP_PROPERTY_TYPE", reference
+    assert reference[0]["entityType"] == "RELATIONSHIP", reference
+    for mode in STORAGE_MODES:
+        assert installed[mode] == reference, f"{mode} constraint listing diverged: {installed[mode]}"
+        assert "INTEGER" in refusals[mode], f"{mode}: {refusals[mode]}"
+        assert "relationship of type 'RELATED'" in refusals[mode], f"{mode}: {refusals[mode]}"
+
+
 def test_cdc_mode_parity(tmp_path):
     """The change stream is backend-agnostic where it is served at all.
 

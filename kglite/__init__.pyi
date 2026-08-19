@@ -124,7 +124,8 @@ class ConstraintError(KgError):
     """
 
 class ConstraintViolationError(ConstraintError):
-    """A write violated a declared UNIQUE / NOT NULL / NODE KEY constraint.
+    """A write violated a declared UNIQUE / NOT NULL / NODE KEY / IS :: TYPE
+    constraint — on a node, or on a relationship (NOT NULL / IS :: TYPE).
 
     The write was rejected before touching storage, so the graph is unchanged.
     Raised by ``cypher()`` for ``CREATE`` / ``MERGE`` / ``SET`` / ``REMOVE`` and
@@ -4791,7 +4792,9 @@ class KnowledgeGraph:
         Index DDL counts as a mutation, so it is blocked on a read-only graph.
 
         Constraint DDL — ``CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:L)
-        REQUIRE n.p IS UNIQUE | IS NOT NULL | IS NODE KEY``,
+        REQUIRE n.p IS UNIQUE | IS NOT NULL | IS NODE KEY | IS :: TYPE``,
+        the relationship form ``FOR ()-[r:T]-() REQUIRE r.p IS NOT NULL |
+        IS :: TYPE``,
         ``DROP CONSTRAINT <name> [IF EXISTS]``, and ``SHOW CONSTRAINTS`` —
         declares constraints that are enforced on every write path, including
         the bulk loader. ``REQUIRE (n.a, n.b) IS UNIQUE`` constrains the tuple;
@@ -4800,12 +4803,16 @@ class KnowledgeGraph:
         and changes nothing. Unlike index names, constraint names **are**
         stored, so ``DROP CONSTRAINT <name>`` works; a constraint declared
         without a name is addressable by its canonical descriptor
-        (``Label.property``). ``IS :: TYPE`` / ``IS TYPED TYPE`` is rejected —
-        there is no write-time property-type enforcement, so accepting it would
-        report success while enforcing nothing; use ``lock_schema()`` or
-        ``validate_schema()``. ``IS UNIQUE`` / ``IS NODE KEY`` over the identity
-        field is rejected for the same reason, under any spelling that resolves
-        to it (``id`` itself or the node type's own id column): ``id`` is a
+        (``Label.property``, or ``TYPE.property`` for a relationship
+        constraint). ``IS :: TYPE`` / ``IS TYPED TYPE`` declares a per-property
+        type, checked before a write lands; only the type names with an exact
+        KGLite value counterpart are accepted, and the rest are rejected by name
+        rather than approximated (use ``lock_schema()`` / ``validate_schema()``
+        for those). ``IS UNIQUE`` / ``IS RELATIONSHIP KEY`` on a *relationship*
+        is rejected: KGLite has no single answer for when two relationships of a
+        type are the same one. ``IS UNIQUE`` / ``IS NODE KEY`` over the identity
+        field is rejected because it would enforce nothing, under any spelling
+        that resolves to it (``id`` itself or the node type's own id column): ``id`` is a
         structural field rather than a stored property, so the unique secondary
         index never sees the write. Declare ``primary_key`` through
         :meth:`define_schema` instead — it probes the per-type id index on every

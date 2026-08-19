@@ -618,6 +618,79 @@ fn test_merge_on_create_set() {
     assert_eq!(result.stats.as_ref().unwrap().properties_set, 1);
 }
 
+/// **Documented divergence from openCypher, pinned rather than fixed.**
+///
+/// openCypher's `MERGE` matches the *whole* pattern, properties included, so
+/// `MERGE (a)-[:KNOWS {since: 3000}]->(b)` against a stored
+/// `(a)-[:KNOWS {since: 2020}]->(b)` finds no match and creates a second
+/// relationship. KGLite matches on `(source, type, target)` alone and treats
+/// the stored edge as the match, creating nothing and leaving its properties
+/// as they were.
+///
+/// This is not an oversight to fix in passing: "when are two relationships the
+/// same one" is the exact question the deferred multi-edge-semantics program
+/// exists to answer, and it is the same question that keeps
+/// `REQUIRE r.p IS UNIQUE` unsupported. Changing `MERGE` here would settle that
+/// data-model question as a side effect of a constraints change, and would
+/// silently start producing parallel edges for every script relying on the
+/// current behaviour.
+///
+/// So this test asserts what the engine *does*, not what openCypher says. When
+/// the multi-edge program lands, this test is expected to flip — and its
+/// failure is the signal that the divergence was closed deliberately.
+#[test]
+fn merge_matches_a_relationship_ignoring_its_properties() {
+    let mut graph = DirGraph::new();
+    let seed = parser::parse_cypher(
+        "CREATE (a:Person {person_id: 1})-[:KNOWS {since: 2020}]->(b:Person {person_id: 2})",
+    )
+    .unwrap();
+    execute_mutable(
+        &mut graph,
+        &seed,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
+
+    let merge = parser::parse_cypher(
+        "MATCH (a:Person {person_id: 1}), (b:Person {person_id: 2}) \
+         MERGE (a)-[:KNOWS {since: 3000}]->(b)",
+    )
+    .unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &merge,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        result.stats.as_ref().unwrap().relationships_created,
+        0,
+        "current behaviour: the pattern's properties do not take part in the match"
+    );
+    assert_eq!(
+        graph.graph.edge_count(),
+        1,
+        "openCypher would have a second relationship here"
+    );
+    // The match branch runs only `ON MATCH SET`, so the pattern's property is
+    // not written onto the matched edge either — the statement is a complete
+    // no-op rather than a silent update.
+    let stored = graph
+        .graph
+        .edge_weight(petgraph::graph::EdgeIndex::new(0))
+        .unwrap();
+    let since = stored
+        .properties
+        .iter()
+        .find(|(key, _)| *key == crate::graph::schema::InternedKey::from_str("since"))
+        .map(|(_, value)| value.clone());
+    assert_eq!(since, Some(Value::Int64(2020)));
+}
+
 #[test]
 fn test_merge_on_match_set() {
     let mut graph = build_test_graph();

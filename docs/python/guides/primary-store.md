@@ -290,7 +290,10 @@ conformance suite per driver rather than a full protocol sweep, and note that
 every *other* driver — Go, .NET — remains untested: those clients may connect but
 can rely on features outside the documented wire and Cypher contracts.
 
-**Constraints cover uniqueness and presence, not arbitrary rules.** There is no
+**Constraints cover uniqueness, presence and property type, not arbitrary
+rules.** Nodes carry all three; relationships carry presence and property type
+(`FOR ()-[r:T]-() REQUIRE r.p IS NOT NULL` / `IS :: TYPE`) but not uniqueness.
+There is no
 `CHECK` constraint, and no standing referential-integrity constraint between node
 types: a relationship to an unknown endpoint auto-vivifies a provisional stub
 rather than being rejected. Stubs are *deferred*, not exempt — the `add_nodes`
@@ -334,9 +337,10 @@ setup no longer has to happen in Python or Rust. What to watch:
   construction.
 
 Forms KGLite cannot serve — `TEXT`, `POINT`, `FULLTEXT`, `VECTOR`, `LOOKUP`,
-relationship indexes, `OPTIONS { … }`, and `IS :: TYPE` constraints — fail with a
+relationship indexes, `OPTIONS { … }`, a property type outside the accepted
+names, and `IS UNIQUE` / `IS RELATIONSHIP KEY` on a relationship — fail with a
 specific unsupported-feature error naming the construct and the route that does
-work. That is the deliberate choice: a type constraint accepted and silently
+work. That is the deliberate choice: a constraint accepted and silently
 unenforced would be worse than an error, since it is exactly the kind of promise
 data-integrity assumptions get built on. Full grammar in
 {doc}`/reference/cypher-reference`.
