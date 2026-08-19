@@ -33,6 +33,10 @@ pub mod session;
 pub mod storage;
 pub mod wal;
 
+#[cfg(test)]
+#[path = "value_byte_identity_tests.rs"]
+mod value_byte_identity_tests;
+
 // Re-export DirGraph at the graph-mod top level — matches the
 // path the executor / planner / blueprint code uses
 // (`crate::graph::DirGraph`). Actual definition lives in

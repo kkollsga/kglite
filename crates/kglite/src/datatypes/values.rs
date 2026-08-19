@@ -1631,3 +1631,7 @@ mod tests {
         assert_eq!(df.get_column_index("c"), None);
     }
 }
+
+#[cfg(test)]
+#[path = "value_shape_tests.rs"]
+mod value_shape_tests;

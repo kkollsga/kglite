@@ -1,0 +1,650 @@
+//! Serialized-byte goldens for the value model — the Part N byte-invisibility
+//! harness.
+//!
+//! # N2 MUST PASS AGAINST THESE BYTES UNCHANGED
+//!
+//! Part N (`dev-docs/plans/arc-values-rel-constraints-cdc2.md`, amended N2)
+//! replaces `NodeValue`/`RelValue`'s `properties: BTreeMap<String, Value>` —
+//! and possibly `Value::Map`'s container — with an `Arc`'d sorted flat map
+//! with shared keys. The entire premise of that change is that it is
+//! **invisible to persistence**: serde's `rc` feature is already on, and a
+//! custom `Serialize`/`Deserialize` keeps postcard's map framing identical.
+//!
+//! This file is the instrument that proves it. The expectations below are
+//! checked-in hex literals and a checked-in `.kgl` digest. **N2 does not
+//! regenerate them** — that is the whole point of landing them in N1, before
+//! any representation change. A red line here during N2 means the container
+//! change altered the on-disk format, which requires a format bump and a
+//! deliberate decision, not a refreshed constant.
+//!
+//! # Regenerating (only for a deliberate format change)
+//!
+//! ```text
+//! KGLITE_REGEN_VALUE_BYTE_GOLDEN=1 cargo test -p kglite --lib value_byte_identity
+//! ```
+//!
+//! prints the full replacement table (and still fails, so a regeneration run
+//! can never be mistaken for a passing one). Copy the printed block over the
+//! literals below **and record why the format moved** in `CHANGELOG.md`.
+//! Mirrors the `tests/golden/regenerate.py` / `make refresh-release-constants`
+//! idiom used on the Python side: an explicit, named regeneration route that
+//! is never the default.
+//!
+//! # KNOWN DEFECTS found while building this harness (NOT Part N regressions)
+//!
+//! `.kgl` bytes are **not** stable across a `load → re-save` cycle — neither
+//! byte-identical nor even deterministic. Both causes are pre-existing, on
+//! `main`, and unrelated to the value representation. They are documented and
+//! reproducible at [`kgl_reload_resave_is_byte_identical`] (`#[ignore]`d).
+//! **N2 must not mistake either for its own regression.** The tests that do run
+//! pin the fresh-save path, which is deterministic.
+
+use crate::datatypes::values::{NodeValue, PathValue, RelValue, Value};
+use crate::graph::wal::{MutationOp, WalFrame};
+use crate::serde_codec::{encode_versioned, CURRENT_CODEC};
+use std::collections::BTreeMap;
+
+/// Environment switch that turns a failing golden run into a regeneration
+/// report. Named after the file so `grep` finds it from either direction.
+const REGEN_ENV: &str = "KGLITE_REGEN_VALUE_BYTE_GOLDEN";
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn encode<T: serde::Serialize>(v: &T) -> Vec<u8> {
+    encode_versioned(CURRENT_CODEC, v, u64::MAX).expect("encode fixture")
+}
+
+fn map(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), v.clone()))
+        .collect()
+}
+
+fn s(v: &str) -> Value {
+    Value::String(v.to_string())
+}
+
+// ============================================================================
+// Fixtures — one per shape whose bytes N2 could move.
+// ============================================================================
+
+fn sample_node_value() -> NodeValue {
+    NodeValue {
+        id: 42,
+        labels: vec!["Person".to_string(), "Employee".to_string()],
+        properties: map(&[
+            ("age", Value::Int64(30)),
+            ("city", s("Oslo")),
+            ("id", Value::Int64(7)),
+            ("nested", Value::Map(map(&[("k", s("v"))]))),
+            (
+                "scores",
+                Value::List(vec![Value::Int64(1), Value::Float64(2.5)]),
+            ),
+            ("title", s("Alice")),
+            ("type", s("Person")),
+        ]),
+    }
+}
+
+fn sample_rel_value() -> RelValue {
+    RelValue {
+        id: 3,
+        start_id: 42,
+        end_id: 43,
+        rel_type: "KNOWS".to_string(),
+        properties: map(&[
+            ("since", Value::Int64(2020)),
+            ("weight", Value::Float64(0.5)),
+        ]),
+    }
+}
+
+fn sample_path_value() -> PathValue {
+    PathValue {
+        nodes: vec![sample_node_value()],
+        rels: vec![sample_rel_value()],
+    }
+}
+
+/// A WAL frame whose ops carry `Value::Map` and `Value::List` payloads — the
+/// exact shape N2's container change would move if the custom serde impl were
+/// anything less than framing-identical.
+fn sample_wal_frame() -> WalFrame {
+    WalFrame {
+        lsn: 17,
+        ops: vec![
+            MutationOp::UpsertNode {
+                node_type: "Person".to_string(),
+                id: Value::Int64(1),
+                title: s("Alice"),
+                properties: vec![
+                    ("age".to_string(), Value::Int64(30)),
+                    ("meta".to_string(), Value::Map(map(&[("k", s("v"))]))),
+                    (
+                        "tags".to_string(),
+                        Value::List(vec![s("a"), s("b"), Value::Null]),
+                    ),
+                ],
+            },
+            MutationOp::UpsertEdge {
+                conn_type: "KNOWS".to_string(),
+                src_type: "Person".to_string(),
+                src_id: Value::Int64(1),
+                tgt_type: "Person".to_string(),
+                tgt_id: Value::Int64(2),
+                properties: vec![(
+                    "context".to_string(),
+                    Value::Map(map(&[("since", Value::Int64(2020))])),
+                )],
+            },
+            MutationOp::SetNodeLabels {
+                node_type: "Person".to_string(),
+                id: Value::Int64(1),
+                labels: vec!["Employee".to_string()],
+            },
+            MutationOp::RemoveNode {
+                node_type: "Person".to_string(),
+                id: Value::Int64(9),
+            },
+        ],
+    }
+}
+
+/// Every `Value` variant, in `disc` rank order, plus the composite shapes.
+/// `Value::Node` inside a property is included deliberately: the plan asks for
+/// "Node-valued properties if storable", and this proves they are.
+fn value_fixtures() -> Vec<(&'static str, Value)> {
+    use chrono::NaiveDate;
+    let date = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
+    vec![
+        ("null", Value::Null),
+        ("bool_true", Value::Boolean(true)),
+        ("unique_id", Value::UniqueId(4_294_967_295)),
+        ("int64_min", Value::Int64(i64::MIN)),
+        ("int64_max", Value::Int64(i64::MAX)),
+        ("float64", Value::Float64(-2.5)),
+        ("string_ascii", s("Oslo")),
+        ("string_unicode", s("Ålesund — 日本語")),
+        ("string_empty", s("")),
+        ("datetime", Value::DateTime(date)),
+        (
+            "duration",
+            Value::Duration {
+                months: 1,
+                days: -5,
+                seconds: 3600,
+            },
+        ),
+        (
+            "point",
+            Value::Point {
+                lat: 59.9139,
+                lon: 10.7522,
+            },
+        ),
+        ("noderef", Value::NodeRef(12)),
+        ("list_empty", Value::List(vec![])),
+        (
+            "list_mixed",
+            Value::List(vec![
+                Value::Int64(1),
+                s("two"),
+                Value::Null,
+                Value::List(vec![Value::Boolean(false)]),
+            ]),
+        ),
+        ("map_empty", Value::Map(BTreeMap::new())),
+        (
+            "map_nested",
+            Value::Map(map(&[
+                ("a", Value::Int64(1)),
+                ("b", Value::Map(map(&[("c", s("d"))]))),
+                ("z", Value::List(vec![Value::Float64(1.5)])),
+            ])),
+        ),
+        ("node", Value::Node(Box::new(sample_node_value()))),
+        (
+            "map_with_node_value",
+            Value::Map(map(&[("n", Value::Node(Box::new(sample_node_value())))])),
+        ),
+        (
+            "relationship",
+            Value::Relationship(Box::new(sample_rel_value())),
+        ),
+        ("path", Value::Path(Box::new(sample_path_value()))),
+        (
+            "timestamp",
+            Value::Timestamp(date.and_hms_opt(10, 30, 45).unwrap()),
+        ),
+    ]
+}
+
+// ============================================================================
+// CHECKED-IN GOLDEN — postcard-v1 encodings, hex. DO NOT REGENERATE IN N2.
+// ============================================================================
+
+const VALUE_BYTE_GOLDEN: &[(&str, &str)] = &[
+    ("null", "07"),
+    ("bool_true", "0401"),
+    ("unique_id", "00ffffffff0f"),
+    ("int64_min", "01ffffffffffffffffff01"),
+    ("int64_max", "01feffffffffffffffff01"),
+    ("float64", "0200000000000004c0"),
+    ("string_ascii", "03044f736c6f"),
+    ("string_unicode", "0316c3856c6573756e6420e2809420e697a5e69cace8aa9e"),
+    ("string_empty", "0300"),
+    ("datetime", "050a323032342d30332d3135"),
+    ("duration", "090209a038"),
+    ("point", "063ee8d9acfaf44d40371ac05b20812540"),
+    ("noderef", "080c"),
+    ("list_empty", "0d00"),
+    ("list_mixed", "0d040102030374776f070d010400"),
+    ("map_empty", "0e00"),
+    ("map_nested", "0e030161010201620e010163030164017a0d0102000000000000f83f"),
+    ("node", "0a2a0206506572736f6e08456d706c6f7965650703616765013c046369747903044f736c6f026964010e066e65737465640e01016b0301760673636f7265730d020102020000000000000440057469746c650305416c69636504747970650306506572736f6e"),
+    ("map_with_node_value", "0e01016e0a2a0206506572736f6e08456d706c6f7965650703616765013c046369747903044f736c6f026964010e066e65737465640e01016b0301760673636f7265730d020102020000000000000440057469746c650305416c69636504747970650306506572736f6e"),
+    ("relationship", "0b032a2b054b4e4f5753020573696e636501c81f0677656967687402000000000000e03f"),
+    ("path", "0c012a0206506572736f6e08456d706c6f7965650703616765013c046369747903044f736c6f026964010e066e65737465640e01016b0301760673636f7265730d020102020000000000000440057469746c650305416c69636504747970650306506572736f6e01032a2b054b4e4f5753020573696e636501c81f0677656967687402000000000000e03f"),
+    ("timestamp", "0f13323032342d30332d31355431303a33303a3435"),
+];
+
+/// Standalone struct encodings — the projection-boundary types serialized on
+/// their own (as `.kgl` node/edge records and CDC payloads carry them), not
+/// wrapped in a `Value` discriminant.
+const STRUCT_BYTE_GOLDEN: &[(&str, &str)] = &[
+    ("NodeValue", "2a0206506572736f6e08456d706c6f7965650703616765013c046369747903044f736c6f026964010e066e65737465640e01016b0301760673636f7265730d020102020000000000000440057469746c650305416c69636504747970650306506572736f6e"),
+    ("RelValue", "032a2b054b4e4f5753020573696e636501c81f0677656967687402000000000000e03f"),
+    ("PathValue", "012a0206506572736f6e08456d706c6f7965650703616765013c046369747903044f736c6f026964010e066e65737465640e01016b0301760673636f7265730d020102020000000000000440057469746c650305416c69636504747970650306506572736f6e01032a2b054b4e4f5753020573696e636501c81f0677656967687402000000000000e03f"),
+    ("WalFrame", "11040006506572736f6e01020305416c6963650303616765013c046d6574610e01016b03017604746167730d030301610301620702054b4e4f575306506572736f6e010206506572736f6e01040107636f6e746578740e010573696e636501c81f0406506572736f6e01020108456d706c6f7965650106506572736f6e0112"),
+];
+
+// ============================================================================
+// The tests
+// ============================================================================
+
+/// Report the current encodings in copy-pasteable form, then fail. Never
+/// silently succeeds, so `KGLITE_REGEN_VALUE_BYTE_GOLDEN=1` in a CI env can
+/// only ever turn a run red.
+fn regen_report(rows: &[(String, String)], table_name: &str) -> ! {
+    println!("\n// --- replacement block for {table_name} ---");
+    for (name, encoded) in rows {
+        println!("    ({name:?}, {encoded:?}),");
+    }
+    println!("// --- end replacement block ---\n");
+    panic!(
+        "{REGEN_ENV} was set: {table_name} regeneration report printed above. \
+         This run is deliberately red. N2 must NOT take this path — if a Part N \
+         representation change made these bytes move, the change is not \
+         byte-invisible and needs a format decision."
+    );
+}
+
+fn regen_requested() -> bool {
+    std::env::var_os(REGEN_ENV).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+#[test]
+fn value_byte_identity_golden() {
+    let rows: Vec<(String, String)> = value_fixtures()
+        .into_iter()
+        .map(|(name, v)| (name.to_string(), hex(&encode(&v))))
+        .collect();
+
+    if regen_requested() {
+        regen_report(&rows, "VALUE_BYTE_GOLDEN");
+    }
+
+    assert_eq!(
+        rows.len(),
+        VALUE_BYTE_GOLDEN.len(),
+        "fixture count drifted from the golden table — a new Value shape needs \
+         its own pinned encoding, not a resized table"
+    );
+    for ((name, got), (want_name, want)) in rows.iter().zip(VALUE_BYTE_GOLDEN) {
+        assert_eq!(name, want_name, "golden table order drifted");
+        assert_eq!(
+            got, want,
+            "postcard bytes moved for `{name}`. Re-read this file's header: \
+             N2 must pass against these bytes unchanged. Set {REGEN_ENV}=1 only \
+             for a deliberate, CHANGELOG-documented format change."
+        );
+    }
+}
+
+#[test]
+fn struct_byte_identity_golden() {
+    let rows: Vec<(String, String)> = vec![
+        ("NodeValue".to_string(), hex(&encode(&sample_node_value()))),
+        ("RelValue".to_string(), hex(&encode(&sample_rel_value()))),
+        ("PathValue".to_string(), hex(&encode(&sample_path_value()))),
+        ("WalFrame".to_string(), hex(&encode(&sample_wal_frame()))),
+    ];
+
+    if regen_requested() {
+        regen_report(&rows, "STRUCT_BYTE_GOLDEN");
+    }
+
+    assert_eq!(rows.len(), STRUCT_BYTE_GOLDEN.len());
+    for ((name, got), (want_name, want)) in rows.iter().zip(STRUCT_BYTE_GOLDEN) {
+        assert_eq!(name, want_name, "golden table order drifted");
+        assert_eq!(
+            got, want,
+            "postcard bytes moved for `{name}`. N2 must pass against these bytes \
+             unchanged — see this file's header."
+        );
+    }
+}
+
+/// A WAL frame carrying `Value::Map`s survives the real write→read path
+/// (length prefix + CRC + postcard payload), byte-for-byte and value-for-value.
+///
+/// The hex golden above pins the *payload*; this pins the framing around it,
+/// so a container change that somehow preserved payload bytes while moving the
+/// frame length still goes red.
+#[test]
+fn wal_frame_with_maps_round_trips_byte_identically() {
+    use std::io::Cursor;
+
+    let frame = sample_wal_frame();
+
+    let mut first = Vec::new();
+    crate::graph::wal::write_header(&mut first).unwrap();
+    crate::graph::wal::append_frame(&mut first, &frame).unwrap();
+
+    let len = first.len() as u64;
+    let recovered = crate::graph::wal::read_frames(Cursor::new(first.clone()), len).unwrap();
+    assert_eq!(recovered, vec![frame.clone()], "WAL frame lost fidelity");
+
+    // Re-serialize the *recovered* frame: the bytes a replay would write back.
+    let mut second = Vec::new();
+    crate::graph::wal::write_header(&mut second).unwrap();
+    crate::graph::wal::append_frame(&mut second, &recovered[0]).unwrap();
+    assert_eq!(
+        first, second,
+        "WAL re-serialization is not byte-stable across a decode/encode cycle"
+    );
+}
+
+// ============================================================================
+// `.kgl` snapshot byte identity
+// ============================================================================
+
+/// Build an in-memory graph carrying the representative `Value` shapes and
+/// return the `.kgl` bytes a save would write.
+fn kgl_fixture_bytes() -> Vec<u8> {
+    use crate::datatypes::DataFrame;
+    use crate::graph::dir_graph::DirGraph;
+    use chrono::NaiveDate;
+    use std::sync::Arc;
+
+    let date = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
+    let columns = vec![
+        "pid".to_string(),
+        "name".to_string(),
+        "age".to_string(),
+        "city".to_string(),
+        "score".to_string(),
+        "active".to_string(),
+        "joined".to_string(),
+        "seen_at".to_string(),
+        "tags".to_string(),
+        "meta".to_string(),
+        "missing".to_string(),
+    ];
+    let rows: Vec<Vec<Value>> = (0..6i64)
+        .map(|i| {
+            vec![
+                Value::Int64(i),
+                Value::String(format!("P{i}")),
+                Value::Int64(20 + i),
+                Value::String(format!("city_{}", i % 3)),
+                Value::Float64(i as f64 + 0.5),
+                Value::Boolean(i % 2 == 0),
+                Value::DateTime(date),
+                Value::Timestamp(date.and_hms_opt(10, 30, 45).unwrap()),
+                Value::List(vec![Value::Int64(i), s("t")]),
+                Value::Map(map(&[("k", s("v")), ("n", Value::Int64(i))])),
+                // Null on every row — exercises the null-omission path.
+                Value::Null,
+            ]
+        })
+        .collect();
+
+    let mut g = DirGraph::new();
+    let df = DataFrame::from_cypher_rows(columns, rows).unwrap();
+    crate::graph::mutation::maintain::add_nodes(
+        &mut g,
+        df,
+        "Person".to_string(),
+        "pid".to_string(),
+        Some("name".to_string()),
+        None,
+    )
+    .unwrap();
+
+    let edge_rows: Vec<Vec<Value>> = (0..5i64)
+        .map(|i| vec![Value::Int64(i), Value::Int64(i + 1), Value::Int64(2020 + i)])
+        .collect();
+    let edge_df = DataFrame::from_cypher_rows(
+        vec!["s".to_string(), "d".to_string(), "since".to_string()],
+        edge_rows,
+    )
+    .unwrap();
+    crate::graph::mutation::maintain::add_connections(
+        &mut g,
+        edge_df,
+        "KNOWS".to_string(),
+        "Person".to_string(),
+        "s".to_string(),
+        "Person".to_string(),
+        "d".to_string(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let mut arc = Arc::new(g);
+    crate::graph::io::file::prepare_save(&mut arc);
+    Arc::make_mut(&mut arc).enable_columnar();
+
+    let mut buf = Vec::new();
+    crate::graph::io::file::write_kgl_to(&arc, &mut buf).unwrap();
+    buf
+}
+
+/// **The N2 instrument.** The bytes a fresh save writes for a graph carrying
+/// every representative `Value` shape, pinned as a checked-in digest.
+///
+/// N2 changes how `NodeValue`/`RelValue` properties (and possibly
+/// `Value::Map`) are held in memory. If that change is byte-invisible — the
+/// entire premise of the amended N2 — this digest does not move.
+#[test]
+fn kgl_fresh_save_bytes_match_pinned_digest() {
+    use sha2::{Digest, Sha256};
+
+    let bytes = kgl_fixture_bytes();
+    let digest = hex(&Sha256::digest(&bytes));
+
+    if regen_requested() {
+        regen_report(
+            &[("KGL_FIXTURE_DIGEST".to_string(), digest.clone())],
+            "KGL_FIXTURE_DIGEST",
+        );
+    }
+
+    assert_eq!(
+        digest, KGL_FIXTURE_DIGEST,
+        "`.kgl` snapshot bytes moved for the value-shape fixture. N2 must pass \
+         against this digest unchanged; a genuine format change bumps the \
+         container magic (`graph/io/magic.rs`) and is documented in CHANGELOG.md."
+    );
+}
+
+/// Control cell for the digest above: two independently built, equivalent
+/// graphs must serialize identically. Without this, a digest failure cannot be
+/// told apart from the fixture simply not being deterministic.
+#[test]
+fn kgl_fresh_save_is_deterministic_across_equivalent_builds() {
+    let a = kgl_fixture_bytes();
+    let b = kgl_fixture_bytes();
+    assert_eq!(
+        a, b,
+        "the `.kgl` fixture is not deterministic across equivalent fresh builds \
+         — the pinned digest above would be measuring noise"
+    );
+}
+
+/// Reload fidelity: every value shape survives a `.kgl` round-trip with its
+/// exact type and content.
+///
+/// This is the half of "byte identity" that actually holds today across a
+/// reload (see the KNOWN DEFECTS note in this file's header for why the byte
+/// half does not), and it is the one N2 could break: a container change that
+/// silently coerced `Value::Map`, dropped a key, or reordered a `List` would
+/// show up here even though the fresh-save digest stayed put.
+#[test]
+fn kgl_reload_preserves_every_value_shape() {
+    use crate::graph::storage::GraphRead;
+
+    let bytes = kgl_fixture_bytes();
+    let reloaded = crate::graph::io::file::load_kgl_bytes(&bytes).unwrap();
+
+    assert_eq!(
+        reloaded.graph.node_count(),
+        6,
+        "node count changed on reload"
+    );
+    assert_eq!(
+        reloaded.graph.edge_count(),
+        5,
+        "edge count changed on reload"
+    );
+
+    // Walk every node and check each representative shape by type, not just by
+    // presence: a coercion (Map -> String, List -> String) keeps the key and
+    // loses the point.
+    let mut seen = 0usize;
+    for idx in reloaded.graph.node_indices() {
+        let Some(view) = reloaded.graph.node_view(idx) else {
+            continue;
+        };
+        let get = |k: &str| view.get_property_value(k);
+
+        assert!(
+            matches!(get("age"), Some(Value::Int64(_))),
+            "Int64 property lost its type on reload"
+        );
+        assert!(
+            matches!(get("city"), Some(Value::String(_))),
+            "String property lost its type on reload"
+        );
+        assert!(
+            matches!(get("score"), Some(Value::Float64(_))),
+            "Float64 property lost its type on reload"
+        );
+        assert!(
+            matches!(get("active"), Some(Value::Boolean(_))),
+            "Boolean property lost its type on reload"
+        );
+        assert!(
+            matches!(get("joined"), Some(Value::DateTime(_))),
+            "DateTime property lost its type on reload"
+        );
+        assert!(
+            matches!(get("seen_at"), Some(Value::Timestamp(_))),
+            "Timestamp property lost its type on reload"
+        );
+        match get("tags") {
+            Some(Value::List(items)) => {
+                assert_eq!(items.len(), 2, "List property changed length on reload");
+                assert!(
+                    matches!(items[1], Value::String(_)),
+                    "List element lost its type on reload"
+                );
+            }
+            other => panic!("List property did not survive reload: {other:?}"),
+        }
+        match get("meta") {
+            Some(Value::Map(m)) => {
+                assert_eq!(
+                    m.keys().map(String::as_str).collect::<Vec<_>>(),
+                    vec!["k", "n"],
+                    "Map property key set/order changed on reload"
+                );
+            }
+            other => panic!("Map property did not survive reload: {other:?}"),
+        }
+        assert!(
+            get("missing").is_none() || matches!(get("missing"), Some(Value::Null)),
+            "an all-null column resurrected a non-null value on reload"
+        );
+        seen += 1;
+    }
+    assert_eq!(seen, 6, "did not visit every node");
+}
+
+/// KNOWN DEFECT, pinned executably so it is reproducible in one command and
+/// cannot be rediscovered from scratch. **Not a Part N regression** — found
+/// while building this harness in N1, present on `main`, unrelated to the
+/// value representation.
+///
+/// `.kgl` bytes are not stable across a `load → re-save` cycle, in two
+/// independent ways:
+///
+/// 1. **Non-deterministic** (varies run to run). `load_portable_column_section`
+///    (`graph/io/file.rs`) builds a type's column `TypeSchema` from
+///    `PortableColumnSection.columns.keys()` — a `std::collections::HashMap`
+///    with `RandomState`, re-seeded per process. Column slot order after a load
+///    is therefore a random permutation of the order the file was written in,
+///    which lands in the re-saved compressed column block and changes its
+///    length. The metadata JSON hides it (it is canonicalized through a sorted
+///    map); only `compressed_size` moves. Sibling sites with the same pattern:
+///    `dir_graph/mod.rs`'s `rebuild_type_schemas` and the disk-directory load
+///    path in `file.rs`.
+/// 2. **Deterministic growth.** `FileMetadata::apply_to_with` materializes the
+///    lazy `type_connectivity` cache on load; it is `skip_serializing_if =
+///    "Option::is_none"` and so absent from a fresh save, but present on the
+///    re-save (+79 bytes for this fixture). `edge_type_counts` is the same
+///    shape.
+///
+/// Neither existing determinism test covers this edge: both
+/// `file_tests.rs::kgl_bytes_are_deterministic_across_equivalent_builds` and
+/// `tests/test_phase4_parity.py::test_kgl_v3_save_is_deterministic` are
+/// build→save only.
+///
+/// Run with `cargo test -p kglite --lib kgl_reload_resave -- --ignored`.
+#[test]
+#[ignore = "known pre-existing defect: .kgl load->re-save is neither byte-identical \
+            nor deterministic; see this test's doc comment for root cause"]
+fn kgl_reload_resave_is_byte_identical() {
+    use std::sync::Arc;
+
+    let first = kgl_fixture_bytes();
+    let mut sizes = Vec::new();
+    for _ in 0..3 {
+        let mut arc = crate::graph::io::file::load_kgl_bytes(&first).unwrap();
+        crate::graph::io::file::prepare_save(&mut arc);
+        Arc::make_mut(&mut arc).enable_columnar();
+        let mut second = Vec::new();
+        crate::graph::io::file::write_kgl_to(&arc, &mut second).unwrap();
+        sizes.push(second.len());
+    }
+    assert!(
+        sizes.iter().all(|s| *s == sizes[0]),
+        "`.kgl` re-save is non-deterministic across runs: {sizes:?} (defect 1)"
+    );
+    assert_eq!(
+        sizes[0],
+        first.len(),
+        "`.kgl` re-save is not byte-identical to the original save (defect 2)"
+    );
+}
+
+/// sha256 of the `.kgl` bytes for [`kgl_fixture_bytes`]. Regenerate only via
+/// `KGLITE_REGEN_VALUE_BYTE_GOLDEN=1`, and only for a deliberate format change.
+const KGL_FIXTURE_DIGEST: &str = "203370b24061a2dfda018a4d41310edc3219766fda1076b2f752a9d22b939fc8";

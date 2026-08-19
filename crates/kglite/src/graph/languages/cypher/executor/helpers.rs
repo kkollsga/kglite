@@ -1497,3 +1497,7 @@ pub(super) fn yield_alias(yield_items: &[YieldItem], expected: &str) -> Option<S
         .find(|y| y.name == expected)
         .map(|item| item.alias.clone().unwrap_or_else(|| expected.to_string()))
 }
+
+#[cfg(test)]
+#[path = "node_record_golden_tests.rs"]
+mod node_record_golden_tests;
