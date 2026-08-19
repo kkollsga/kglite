@@ -1177,6 +1177,36 @@ const EMBED_FORMAT_BREAK_MSG: &str =
      embed_texts()/add_embeddings() to rebuild the vectors, and save again. \
      (Embeddings are a rebuildable cache; only the vector section broke.)";
 
+/// Build `type_schemas` from `node_type_metadata`, which column loading needs.
+///
+/// The catalogue is `Arc`-shared (`dir_graph::schema_cow`), so holding a second
+/// handle for the walk costs a refcount and frees `graph` for the
+/// `type_schemas_mut()` writes inside it. Nothing in the loop writes the
+/// catalogue, so the handle and the field stay the same map throughout.
+fn rebuild_disk_type_schemas(graph: &mut DirGraph) -> io::Result<()> {
+    let metadata = std::sync::Arc::clone(&graph.node_type_metadata);
+    for (node_type, props) in metadata.iter() {
+        let mut schema = crate::graph::schema::TypeSchema::new();
+        // Sorted: `props` is a `HashMap` and this path has no recorded column
+        // order to recover (unlike the portable column sections, whose packed
+        // payload carries one). Name order is the canonical choice here — see
+        // `TypeSchema` slot-order rule in `dir_graph::rebuild_type_schemas`.
+        let mut prop_names: Vec<&String> = props.keys().collect();
+        prop_names.sort();
+        for prop_name in prop_names {
+            let key = graph
+                .interner
+                .try_get_or_intern(prop_name)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            schema.add_key(key);
+        }
+        graph
+            .type_schemas_mut()
+            .insert(node_type.clone(), std::sync::Arc::new(schema));
+    }
+    Ok(())
+}
+
 /// Load a disk-mode graph from a directory.
 fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     use crate::graph::io::load_timing::{log_stage, stage_timer};
@@ -1301,31 +1331,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     }
     log_stage("type_indices_load", t);
 
-    // Build type_schemas from node_type_metadata (needed for column loading).
-    // The catalogue is `Arc`-shared (`dir_graph::schema_cow`), so holding a
-    // second handle for the walk costs a refcount and frees `graph` for the
-    // `type_schemas_mut()` writes inside it. Nothing in the loop writes the
-    // catalogue, so the handle and the field stay the same map throughout.
-    let metadata = std::sync::Arc::clone(&graph.node_type_metadata);
-    for (node_type, props) in metadata.iter() {
-        let mut schema = crate::graph::schema::TypeSchema::new();
-        // Sorted: `props` is a `HashMap` and this path has no recorded column
-        // order to recover (unlike the portable column sections, whose packed
-        // payload carries one). Name order is the canonical choice here — see
-        // `TypeSchema` slot-order rule in `dir_graph::rebuild_type_schemas`.
-        let mut prop_names: Vec<&String> = props.keys().collect();
-        prop_names.sort();
-        for prop_name in prop_names {
-            let key = graph
-                .interner
-                .try_get_or_intern(prop_name)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            schema.add_key(key);
-        }
-        graph
-            .type_schemas_mut()
-            .insert(node_type.clone(), std::sync::Arc::new(schema));
-    }
+    rebuild_disk_type_schemas(&mut graph)?;
 
     load_disk_column_stores(dir, &mut graph)?;
 

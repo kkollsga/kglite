@@ -72,6 +72,35 @@ impl<'a> CypherExecutor<'a> {
         Ok(Some(Value::Null))
     }
 
+    /// `properties(r)` for a bound relationship: its user properties plus the
+    /// synthetic `type` entry, in one `PropMap`.
+    ///
+    /// Built as a pair buffer and sorted once, and walked over the stored pairs
+    /// directly: the old shape resolved each key and then called
+    /// `get_property(name)`, which re-hashed the name and rescanned the pair
+    /// vector to find the value it had just walked past.
+    fn edge_properties_map(&self, edge_data: &crate::graph::schema::EdgeData) -> PropMap {
+        let mut props: Vec<(PropKey, Value)> = Vec::with_capacity(edge_data.properties.len() + 1);
+        props.push((
+            PropKey::from("type"),
+            Value::String(
+                edge_data
+                    .connection_type_str(&self.graph.interner)
+                    .to_string(),
+            ),
+        ));
+        for (ik, val) in &edge_data.properties {
+            let Some(key) = self.graph.interner.try_resolve(*ik) else {
+                continue;
+            };
+            if crate::graph::schema::is_reserved_provenance_key(key) {
+                continue; // engine metadata, not user data
+            }
+            props.push((PropKey::from(key), val.clone()));
+        }
+        PropMap::from_pairs(props)
+    }
+
     pub(super) fn eval_graph_fn(
         &self,
         name: &str,
@@ -360,32 +389,7 @@ impl<'a> CypherExecutor<'a> {
                             let g = &self.graph.graph;
                             g.edge_weight(edge.edge_index)
                         } {
-                            // Built as a pair buffer and sorted once, and
-                            // walked over the stored pairs directly: the old
-                            // shape resolved each key and then called
-                            // `get_property(name)`, which re-hashed the name
-                            // and rescanned the pair vector to find the value
-                            // it had just walked past.
-                            let mut props: Vec<(PropKey, Value)> =
-                                Vec::with_capacity(edge_data.properties.len() + 1);
-                            props.push((
-                                PropKey::from("type"),
-                                Value::String(
-                                    edge_data
-                                        .connection_type_str(&self.graph.interner)
-                                        .to_string(),
-                                ),
-                            ));
-                            for (ik, val) in &edge_data.properties {
-                                let Some(key) = self.graph.interner.try_resolve(*ik) else {
-                                    continue;
-                                };
-                                if crate::graph::schema::is_reserved_provenance_key(key) {
-                                    continue; // engine metadata, not user data
-                                }
-                                props.push((PropKey::from(key), val.clone()));
-                            }
-                            return Ok(Some(Value::Map(PropMap::from_pairs(props))));
+                            return Ok(Some(Value::Map(self.edge_properties_map(edge_data))));
                         }
                     }
                 }

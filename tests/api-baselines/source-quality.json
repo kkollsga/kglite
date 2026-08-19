@@ -173,13 +173,6 @@
       "nesting": 5
     },
     {
-      "path": "crates/kglite/src/graph/io/file.rs",
-      "qualified_name": "crate::load_disk_dir",
-      "lines": 217,
-      "branches": 39,
-      "nesting": 6
-    },
-    {
       "path": "crates/kglite/src/graph/io/ntriples/column_builder.rs",
       "qualified_name": "crate::plan_layout",
       "lines": 208,
@@ -287,9 +280,9 @@
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/graph.rs",
       "qualified_name": "crate::CypherExecutor<'a>::eval_graph_fn",
-      "lines": 346,
-      "branches": 68,
-      "nesting": 6
+      "lines": 329,
+      "branches": 65,
+      "nesting": 5
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/numeric.rs",
