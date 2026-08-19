@@ -1387,3 +1387,75 @@ fn a_rolled_back_statement_discards_its_before_image_too() {
         "a truncated image must not survive into the next commit"
     );
 }
+
+// ── epoch handoff across a save ──────────────────────────────────────
+
+/// Save `graph` and load it back, as the next process would.
+fn round_trip(graph: &DirGraph, dir: &std::path::Path, name: &str) -> Arc<DirGraph> {
+    let path = dir.join(name);
+    let path = path.to_string_lossy().to_string();
+    crate::graph::io::file::write_kgl(graph, &path).expect("save");
+    crate::graph::io::file::load_file(&path).expect("load")
+}
+
+/// A save records where the running epoch had got to, and the load restores
+/// it — while leaving capture itself off.
+#[test]
+fn a_save_stamps_the_running_epochs_position_and_a_load_restores_it() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut graph = DirGraph::new();
+    cdc::enable(&mut graph, None, CdcEnrichment::Off).expect("enable");
+    run(&mut graph, "CREATE (:Item {id: 1})");
+    commit(&mut graph);
+    run(&mut graph, "CREATE (:Item {id: 2})");
+    commit(&mut graph);
+    let status = cdc::status(&graph).expect("enabled");
+
+    let loaded = round_trip(&graph, tmp.path(), "stamped.kgl");
+    assert_eq!(
+        loaded.cdc_handoff,
+        Some(crate::graph::cdc::CdcHandoff {
+            epoch: status.epoch,
+            last_seq: status.current,
+        }),
+        "the stamp must name the epoch and where it ended"
+    );
+    assert!(
+        !loaded.cdc_enabled(),
+        "the stamp is a diagnostic about a log that is gone, not a resumed one"
+    );
+}
+
+/// A graph that never captured writes no stamp — which is what keeps the
+/// golden digest stable for the overwhelmingly common save.
+#[test]
+fn a_graph_that_never_captured_stamps_nothing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut graph = DirGraph::new();
+    run(&mut graph, "CREATE (:Item {id: 1})");
+    let loaded = round_trip(&graph, tmp.path(), "unstamped.kgl");
+    assert_eq!(loaded.cdc_handoff, None);
+}
+
+/// Turning capture off does not un-record where its epoch ended: the claim
+/// stays true, and the next process's consumer still deserves it.
+#[test]
+fn a_save_after_disable_carries_the_earlier_stamp_forward() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut graph = DirGraph::new();
+    cdc::enable(&mut graph, None, CdcEnrichment::Off).expect("enable");
+    run(&mut graph, "CREATE (:Item {id: 1})");
+    commit(&mut graph);
+    let status = cdc::status(&graph).expect("enabled");
+    cdc::disable(&mut graph);
+
+    let loaded = round_trip(&graph, tmp.path(), "after-disable.kgl");
+    assert_eq!(
+        loaded.cdc_handoff.map(|handoff| handoff.epoch),
+        Some(status.epoch)
+    );
+
+    // And it survives a second hop, so a chain of saves keeps the diagnostic.
+    let again = round_trip(&loaded, tmp.path(), "second-hop.kgl");
+    assert_eq!(again.cdc_handoff, loaded.cdc_handoff);
+}

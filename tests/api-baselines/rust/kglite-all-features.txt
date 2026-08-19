@@ -459,6 +459,22 @@ pub fn kglite::api::cdc::CdcEvent::eq(&self, other: &kglite::api::cdc::CdcEvent)
 impl core::fmt::Debug for kglite::api::cdc::CdcEvent
 pub fn kglite::api::cdc::CdcEvent::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for kglite::api::cdc::CdcEvent
+pub struct kglite::api::cdc::CdcHandoff
+pub kglite::api::cdc::CdcHandoff::epoch: u64
+pub kglite::api::cdc::CdcHandoff::last_seq: u64
+impl core::clone::Clone for kglite::api::cdc::CdcHandoff
+pub fn kglite::api::cdc::CdcHandoff::clone(&self) -> kglite::api::cdc::CdcHandoff
+impl core::cmp::Eq for kglite::api::cdc::CdcHandoff
+impl core::cmp::PartialEq for kglite::api::cdc::CdcHandoff
+pub fn kglite::api::cdc::CdcHandoff::eq(&self, other: &kglite::api::cdc::CdcHandoff) -> bool
+impl core::fmt::Debug for kglite::api::cdc::CdcHandoff
+pub fn kglite::api::cdc::CdcHandoff::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::cdc::CdcHandoff
+impl core::marker::StructuralPartialEq for kglite::api::cdc::CdcHandoff
+impl serde_core::ser::Serialize for kglite::api::cdc::CdcHandoff
+pub fn kglite::api::cdc::CdcHandoff::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for kglite::api::cdc::CdcHandoff
+pub fn kglite::api::cdc::CdcHandoff::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub struct kglite::api::cdc::CdcLog
 impl kglite::api::cdc::CdcLog
 pub fn kglite::api::cdc::CdcLog::capacity(&self) -> usize
@@ -2482,6 +2498,7 @@ pub fn kglite::api::CurrentSelection::default() -> kglite::api::CurrentSelection
 pub struct kglite::api::DirGraph
 pub kglite::api::DirGraph::auto_vacuum_threshold: core::option::Option<f64>
 pub kglite::api::DirGraph::auto_vacuums_run: u64
+pub kglite::api::DirGraph::cdc_handoff: core::option::Option<kglite::api::cdc::CdcHandoff>
 pub kglite::api::DirGraph::checkpoint_lsn: u64
 pub kglite::api::DirGraph::composite_index_keys: alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<alloc::string::String>)>
 pub kglite::api::DirGraph::composite_indices: std::collections::hash::map::HashMap<(alloc::string::String, alloc::vec::Vec<alloc::string::String>), kglite::graph::dir_graph::index_layer::LayeredIndex<kglite::graph::schema::CompositeValue>>

@@ -312,6 +312,22 @@ pub struct DirGraph {
     /// carry the same LSN as a fresh one.
     #[serde(default)]
     pub checkpoint_lsn: u64,
+    /// What the last save recorded about the change log that was running then
+    /// — see [`CdcHandoff`](crate::graph::cdc::CdcHandoff).
+    ///
+    /// Restored from the file's metadata on load, like `checkpoint_lsn` above,
+    /// and read by exactly one thing: `db.cdc.query`'s wrong-epoch refusal,
+    /// which upgrades to naming where the old epoch ended when the cursor it
+    /// was handed belongs to the stamped one. Capture itself stays **off** on
+    /// load; this is a diagnostic about a log that is gone, never a means of
+    /// resuming it.
+    ///
+    /// `#[serde(default)]` for the same vestigial reason as its neighbours:
+    /// `DirGraph`'s own derive is not the `.kgl` payload — the load path
+    /// rebuilds the graph and repopulates it from `FileMetadata` — so the
+    /// attribute only keeps in-memory clones and older payloads working.
+    #[serde(default)]
+    pub cdc_handoff: Option<crate::graph::cdc::CdcHandoff>,
     /// Auto-vacuum threshold: if Some(t), vacuum() is triggered automatically after
     /// DELETE operations when fragmentation_ratio exceeds t and tombstones > 100.
     /// Default: Some(0.3). Set to None to disable.
@@ -776,6 +792,7 @@ impl DirGraph {
             graph_instructions: HashMap::new(),
             user_schema_version: 0,
             checkpoint_lsn: 0,
+            cdc_handoff: None,
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             auto_vacuums_run: 0,
             spatial_configs: HashMap::new(),
@@ -839,6 +856,7 @@ impl DirGraph {
             graph_instructions: HashMap::new(),
             user_schema_version: 0,
             checkpoint_lsn: 0,
+            cdc_handoff: None,
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             auto_vacuums_run: 0,
             spatial_configs: HashMap::new(),

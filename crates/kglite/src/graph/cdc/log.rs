@@ -2,6 +2,7 @@
 //! `(epoch, seq)` addressing a stateless consumer cursor is built from.
 
 use super::event::{CdcEvent, PendingEvent};
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 /// Source of process-unique CDC epochs. Starts at 1 so 0 can serve as a
@@ -66,6 +67,27 @@ impl CdcEnrichment {
             CdcEnrichment::Full => "full",
         }
     }
+}
+
+/// What a saved file records about the change log that was running when it
+/// was written: the epoch, and the last sequence number it had published.
+///
+/// **A diagnostic, not a durable cursor.** The log itself is deliberately not
+/// persisted (see [`CdcLog`]), so this cannot resume a stream — a cursor from
+/// the stamped epoch still addresses events that no longer exist anywhere.
+/// What it buys is that the refusal can say *what happened* instead of only
+/// *that something happened*: "epoch 7 ended at change 412 when this file was
+/// saved" is actionable, where "this cursor belongs to a different epoch" only
+/// tells the consumer to resync without saying whether it missed anything.
+///
+/// Additive and absent by default, so a graph that never enabled capture
+/// writes a byte-identical file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CdcHandoff {
+    /// The epoch that was live when the file was written.
+    pub epoch: u64,
+    /// The newest sequence number that epoch had published by then.
+    pub last_seq: u64,
 }
 
 /// A snapshot of the log's addressing state — what `db.cdc.current()` /

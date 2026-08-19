@@ -729,6 +729,49 @@ def test_the_log_survives_the_fork_a_held_view_forces(graph):
 # ── persistence boundary ───────────────────────────────────────────────────
 
 
+def test_a_stale_cursor_after_a_reload_is_told_where_its_epoch_ended(tmp_path):
+    """The epoch-handoff diagnostic, end to end through save/load.
+
+    The consumer holds a cursor, the graph is saved and reloaded in-process,
+    capture is restarted (a new epoch), and the old cursor now gets a refusal
+    that names where its epoch stopped rather than only that it is gone.
+    """
+    path = str(tmp_path / "handoff.kgl")
+    g = kglite.KnowledgeGraph()
+    g.cypher("CALL db.cdc.enable()")
+    g.cypher("CREATE (:P {id: 1})")
+    g.cypher("CREATE (:P {id: 2})")
+    stale = cursor(g)
+    last_seq = g.cypher("CALL db.cdc.status()").to_dicts()[0]["current"]
+    g.save(path)
+
+    reloaded = kglite.load(path)
+    assert reloaded.cypher("CALL db.cdc.status()").to_dicts()[0]["enabled"] is False, (
+        "a load still starts with capture off"
+    )
+    reloaded.cypher("CALL db.cdc.enable()")
+
+    with pytest.raises(kglite.CypherExecutionError) as exc:
+        reloaded.cypher("CALL db.cdc.query({from: $c})", params={"c": stale})
+    message = str(exc.value)
+    assert f"ended at change {last_seq}" in message, message
+    assert "caught up at that point" in message, message
+
+
+def test_a_graph_that_never_captured_says_nothing_about_epochs(tmp_path):
+    path = str(tmp_path / "plain.kgl")
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:P {id: 1})")
+    g.save(path)
+
+    reloaded = kglite.load(path)
+    reloaded.cypher("CALL db.cdc.enable()")
+    foreign = "cdc:" + "0" * 15 + "9:" + "0" * 16
+    with pytest.raises(kglite.CypherExecutionError) as exc:
+        reloaded.cypher("CALL db.cdc.query({from: $c})", params={"c": foreign})
+    assert "ended at change" not in str(exc.value), str(exc.value)
+
+
 def test_a_loaded_graph_starts_with_capture_off_and_a_new_epoch(tmp_path):
     g = enabled_graph()
     g.cypher("CREATE (:P {id: 1})")

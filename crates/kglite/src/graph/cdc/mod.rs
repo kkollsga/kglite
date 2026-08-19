@@ -48,7 +48,7 @@ mod selector;
 mod tests;
 
 pub use event::{CdcChange, CdcEvent, CdcEventKind, EdgeState, NodeState};
-pub use log::{CdcEnrichment, CdcLog, CdcStatus, DEFAULT_CAPACITY, MAX_CAPACITY};
+pub use log::{CdcEnrichment, CdcHandoff, CdcLog, CdcStatus, DEFAULT_CAPACITY, MAX_CAPACITY};
 pub use selector::{needs_before_images, parse_selectors, CdcSelector};
 
 use crate::error::KgError;
@@ -181,6 +181,16 @@ pub fn enable(
 /// belong to a commit boundary that has not been reached, so they were never
 /// publishable — and the log they would have gone to is being dropped.
 pub fn disable(graph: &mut DirGraph) -> bool {
+    // The epoch ends here, so this is where its end is worth recording: a
+    // consumer that arrives later holding one of its cursors gets told where
+    // it stopped rather than only that it is gone. Kept on the graph so a
+    // subsequent save carries it into the file too.
+    if let Some(status) = status(graph) {
+        graph.cdc_handoff = Some(CdcHandoff {
+            epoch: status.epoch,
+            last_seq: status.current,
+        });
+    }
     let was_enabled = graph.cdc.take().is_some();
     // A WAL-owned wrapper survives `unwrap_capture_if_unowned`, so clearing
     // the flag is what stops a durable graph paying for before-images once

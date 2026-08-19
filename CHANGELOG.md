@@ -113,6 +113,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returned **after** filtering; it is spelled `maxRows` rather than `limit`
   because `LIMIT` is a reserved clause word that cannot be a bare map key.
 
+- **A saved graph records where its change-stream epoch ended**, so a stale
+  cursor gets a useful refusal after a reload. `db.cdc.query` already refused a
+  cursor from a different epoch; when the file this graph was loaded from was
+  saved under *that* epoch, the message now names where it ended and whether
+  the consumer was caught up at the handoff or behind by a countable number of
+  changes that were never delivered. A wrong-epoch cursor the file knows
+  nothing about keeps the previous prose — nothing is known about it, so
+  nothing is claimed.
+
+  The stamp is written by every save (not only a durable checkpoint — the file
+  is what the next process loads), and by `db.cdc.disable()`, which is where an
+  epoch actually ends. It is a **diagnostic, not a durable cursor**: the log is
+  still never persisted, capture is still off after a load, and the remedy is
+  still to resync. Graphs that never enabled capture write no stamp at all and
+  are byte-identical to before.
+
 - **`CALL db.cdc.status()` — read the change-capture configuration without
   changing it.** Yields `enabled`, `epoch`, `capacity`, `enrichment`,
   `buffered`, `earliest`, `current`. It is the one CDC read verb that answers

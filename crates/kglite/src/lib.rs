@@ -481,8 +481,8 @@ pub mod api {
         pub use crate::graph::cdc::{
             disable, drain_at_commit, enable, needs_before_images, parse_selectors,
             publish_drained, read, status, CdcChange, CdcEnrichment, CdcEvent, CdcEventKind,
-            CdcHandle, CdcLog, CdcSelector, CdcStatus, EdgeState, NodeState, DEFAULT_CAPACITY,
-            MAX_CAPACITY,
+            CdcHandle, CdcHandoff, CdcLog, CdcSelector, CdcStatus, EdgeState, NodeState,
+            DEFAULT_CAPACITY, MAX_CAPACITY,
         };
     }
 

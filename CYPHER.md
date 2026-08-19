@@ -1871,6 +1871,15 @@ capacity or enrichment change. The three refusals are distinct because the fix d
 a malformed cursor means fix the call, a foreign epoch means re-acquire, and a
 cursor older than retention means resync and accept the gap.
 
+**A save records where the running epoch got to**, so the wrong-epoch refusal
+in the *next* process can say more than "that epoch is gone". Present a cursor
+from the epoch the file was saved under and the message names where it ended —
+and whether you were caught up at that point or behind by a countable number of
+changes that were never delivered. It is a diagnostic only: the log itself is
+never persisted, so nothing is resumable and the remedy is still to resync from
+`earliest()` or `current()`. A wrong-epoch cursor the file knows nothing about
+keeps the plain refusal, because nothing is known about it to report.
+
 **Retention is a bounded ring.** The oldest events are evicted as it fills, and
 `earliest()` advances to match. A consumer that falls further behind than the
 capacity gets a typed refusal naming both remedies — resync from `earliest()`,

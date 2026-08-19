@@ -40,7 +40,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::{CypherExecutor, ResultRow};
 use crate::datatypes::values::Value;
-use crate::graph::cdc::{self, CdcChange, CdcEnrichment, CdcEvent, CdcEventKind};
+use crate::graph::cdc::{self, CdcChange, CdcEnrichment, CdcEvent, CdcEventKind, CdcHandoff};
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::languages::cypher::ast::YieldItem;
 
@@ -68,7 +68,12 @@ pub(super) fn encode_cursor(epoch: u64, seq: u64) -> String {
 /// Returns the exclusive `from` sequence. The three failures are distinct
 /// because a consumer's correct response differs for each: fix the call,
 /// re-acquire a cursor, or resync and accept the gap.
-fn decode_cursor(raw: &str, epoch: u64, earliest: u64) -> Result<u64, String> {
+fn decode_cursor(
+    raw: &str,
+    epoch: u64,
+    earliest: u64,
+    handoff: Option<CdcHandoff>,
+) -> Result<u64, String> {
     let malformed = || {
         format!(
             "db.cdc.query: '{raw}' is not a change-stream cursor. A cursor is the opaque \
@@ -85,13 +90,7 @@ fn decode_cursor(raw: &str, epoch: u64, earliest: u64) -> Result<u64, String> {
     let seq = u64::from_str_radix(seq_hex, 16).map_err(|_| malformed())?;
 
     if cursor_epoch != epoch {
-        return Err(format!(
-            "db.cdc.query: this cursor belongs to change-stream epoch {cursor_epoch}, and this \
-             graph is serving epoch {epoch}. The log is in-process runtime state, so a new epoch \
-             means a different log: capture was restarted, the graph was loaded from a file, or \
-             this is an independent copy. Resync with db.cdc.earliest() — the changes the old \
-             cursor addressed are not in this log."
-        ));
+        return Err(foreign_epoch_error(cursor_epoch, epoch, seq, handoff));
     }
     // The cursor is exclusive, so `seq + 1` is the first event it asks for.
     // Anything below the watermark was evicted; reporting a short answer
@@ -107,6 +106,63 @@ fn decode_cursor(raw: &str, epoch: u64, earliest: u64) -> Result<u64, String> {
         ));
     }
     Ok(seq)
+}
+
+/// The wrong-epoch refusal, upgraded when the file this graph was loaded from
+/// recorded where the cursor's own epoch ended.
+///
+/// Without a matching stamp there is nothing to add: the epoch is simply not
+/// this one, and the consumer must resync. With one, the refusal can answer
+/// the question the consumer actually has — *did I miss anything?* — because
+/// the stamp says how far that epoch had published when the file was written.
+///
+/// The three cases are distinguished because the consumer's situation differs:
+/// caught up at the handoff (nothing lost up to it), behind by a known number
+/// of changes, or ahead of the stamp (the log kept running after that save, so
+/// the stamp does not describe the end of the epoch and no claim is made).
+fn foreign_epoch_error(
+    cursor_epoch: u64,
+    epoch: u64,
+    cursor_seq: u64,
+    handoff: Option<CdcHandoff>,
+) -> String {
+    let preamble = format!(
+        "db.cdc.query: this cursor belongs to change-stream epoch {cursor_epoch}, and this graph \
+         is serving epoch {epoch}. The log is in-process runtime state, so a new epoch means a \
+         different log: capture was restarted, the graph was loaded from a file, or this is an \
+         independent copy."
+    );
+    let Some(handoff) = handoff.filter(|handoff| handoff.epoch == cursor_epoch) else {
+        return format!(
+            "{preamble} Resync with db.cdc.earliest() — the changes the old cursor addressed are \
+             not in this log."
+        );
+    };
+    let last_seq = handoff.last_seq;
+    let standing = if cursor_seq >= last_seq {
+        // Ahead of the stamp only if the log kept publishing after that save,
+        // so the stamp is not the end of the epoch and cannot say what was
+        // missed. Equal means caught up, which it can.
+        if cursor_seq == last_seq {
+            " You were caught up at that point, so nothing published before the save was missed."
+                .to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        let missed = last_seq - cursor_seq;
+        let plural = if missed == 1 { "change" } else { "changes" };
+        format!(
+            " You had consumed up to change {cursor_seq}, so {missed} {plural} published before \
+             the save were never delivered — and are not recoverable, because the log is not \
+             persisted."
+        )
+    };
+    format!(
+        "{preamble} That epoch ended at change {last_seq}, recorded when this graph was last \
+         saved.{standing} Resync with db.cdc.earliest() to read what this log holds, or \
+         db.cdc.current() to take only what happens next."
+    )
 }
 
 /// Reject unknown keys in a procedure's config map.
@@ -345,7 +401,9 @@ pub(super) fn execute_cdc_procedure(
                 // No cursor: everything still retained. Friendlier than
                 // erroring, and exactly what `earliest()` would have given.
                 None | Some(Value::Null) => status.earliest.saturating_sub(1),
-                Some(Value::String(raw)) => decode_cursor(raw, status.epoch, status.earliest)?,
+                Some(Value::String(raw)) => {
+                    decode_cursor(raw, status.epoch, status.earliest, graph.cdc_handoff)?
+                }
                 Some(other) => {
                     return Err(format!(
                         "db.cdc.query: 'from' must be a cursor string from db.cdc.current() or \
@@ -1691,6 +1749,112 @@ mod tests {
         );
     }
 
+    /// **The epoch-handoff diagnostic.** A cursor from the epoch the loaded
+    /// file recorded gets told where that epoch ended, not merely that it is
+    /// not this one.
+    ///
+    /// Red-first: with the stamp comparison broken (matching any epoch, or
+    /// none), this falls back to the generic prose and the assertions on
+    /// "ended at change" fail.
+    #[test]
+    fn a_cursor_from_the_stamped_epoch_is_told_where_that_epoch_ended() {
+        let mut graph = enabled(None);
+        write(&mut graph, "CREATE (:Item {id: 1})");
+        write(&mut graph, "CREATE (:Item {id: 2})");
+        let stale = current_cursor(&mut graph);
+        let old = cdc::status(&graph).expect("enabled");
+
+        // The handoff a save would have recorded, as a load restores it.
+        cdc::disable(&mut graph);
+        cdc::enable(&mut graph, None, cdc::CdcEnrichment::Off).expect("a fresh epoch");
+        write(&mut graph, "CREATE (:Item {id: 3})");
+
+        let error = fails(
+            &mut graph,
+            &format!("CALL db.cdc.query({{from: '{stale}'}}) YIELD id"),
+        );
+        assert!(
+            error.contains(&format!("epoch {}", old.epoch)),
+            "the refusal still names the cursor's epoch: {error}"
+        );
+        assert!(
+            error.contains(&format!("ended at change {}", old.current)),
+            "and now says where that epoch ended: {error}"
+        );
+        assert!(
+            error.contains("caught up at that point"),
+            "the consumer was at the end, so it must be told it missed nothing: {error}"
+        );
+        assert!(
+            error.contains("db.cdc.earliest()") && error.contains("db.cdc.current()"),
+            "and both resync routes: {error}"
+        );
+    }
+
+    /// A consumer that was *behind* when the epoch ended is told by how much,
+    /// and that the gap is unrecoverable.
+    #[test]
+    fn a_cursor_behind_the_handoff_is_told_how_far_behind_it_was() {
+        let mut graph = enabled(None);
+        write(&mut graph, "CREATE (:Item {id: 1})");
+        let stale = current_cursor(&mut graph);
+        for id in 2..=4 {
+            write(&mut graph, &format!("CREATE (:Item {{id: {id}}})"));
+        }
+        cdc::disable(&mut graph);
+        cdc::enable(&mut graph, None, cdc::CdcEnrichment::Off).expect("a fresh epoch");
+
+        let error = fails(
+            &mut graph,
+            &format!("CALL db.cdc.query({{from: '{stale}'}}) YIELD id"),
+        );
+        assert!(
+            error.contains("3 changes published before the save were never delivered"),
+            "the gap must be quantified: {error}"
+        );
+        assert!(
+            error.contains("not recoverable"),
+            "and named as unrecoverable, since the log is not persisted: {error}"
+        );
+    }
+
+    /// A wrong-epoch cursor with **no** matching stamp keeps the original
+    /// prose — the upgrade must not fire on a guess.
+    #[test]
+    fn a_foreign_cursor_without_a_matching_stamp_keeps_the_generic_prose() {
+        let mut graph = enabled(None);
+        write(&mut graph, "CREATE (:Item {id: 1})");
+        let foreign = encode_cursor(999_999, 0);
+        let error = fails(
+            &mut graph,
+            &format!("CALL db.cdc.query({{from: '{foreign}'}}) YIELD id"),
+        );
+        assert!(
+            error.contains("epoch 999999") && error.contains("db.cdc.earliest()"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("ended at change"),
+            "nothing is known about epoch 999999, so nothing may be claimed: {error}"
+        );
+    }
+
+    /// A cursor *ahead* of the stamp: the log kept publishing after that save,
+    /// so the stamp is not the end of the epoch and no gap is claimed.
+    #[test]
+    fn a_cursor_past_the_stamp_gets_no_invented_gap() {
+        let handoff = CdcHandoff {
+            epoch: 7,
+            last_seq: 10,
+        };
+        let error = foreign_epoch_error(7, 9, 42, Some(handoff));
+        assert!(error.contains("ended at change 10"), "{error}");
+        assert!(
+            !error.contains("never delivered") && !error.contains("caught up"),
+            "the stamp predates the cursor, so it cannot say what was missed: {error}"
+        );
+    }
+
     /// A cursor that is exactly at the watermark is still valid — the
     /// off-by-one that would break a consumer polling at the retention edge.
     #[test]
@@ -1926,7 +2090,7 @@ mod tests {
     #[test]
     fn cursors_round_trip_and_order_lexicographically_within_an_epoch() {
         let cursor = encode_cursor(3, 42);
-        assert_eq!(decode_cursor(&cursor, 3, 1), Ok(42));
+        assert_eq!(decode_cursor(&cursor, 3, 1, None), Ok(42));
         assert!(
             encode_cursor(3, 41) < encode_cursor(3, 42),
             "fixed-width hex keeps string order and sequence order aligned"
@@ -1934,6 +2098,6 @@ mod tests {
         assert!(encode_cursor(3, 9) < encode_cursor(3, 10));
         // An empty log: `earliest` is one past `current`, and the cursor at
         // position 0 must still be readable.
-        assert_eq!(decode_cursor(&encode_cursor(7, 0), 7, 1), Ok(0));
+        assert_eq!(decode_cursor(&encode_cursor(7, 0), 7, 1, None), Ok(0));
     }
 }
