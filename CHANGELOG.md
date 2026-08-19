@@ -139,6 +139,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (Rust API): node, relationship and map properties are now a
+  `PropMap`, not a `BTreeMap<String, Value>`.** `NodeValue::properties`,
+  `RelValue::properties` and `Value::Map` all carry
+  `kglite::datatypes::PropMap` — an `Arc`'d, sorted flat map with the same
+  key-ordered iteration, equality, `Ord` and hashing a `BTreeMap` gave. Rust
+  embedders that named the field's type, or that matched `Value::Map(m)` and
+  used it as a `BTreeMap`, need the map-like API instead (`get`, `iter`,
+  `keys`, `values`, `len`, `contains_key`, `insert`, `remove`); `PropMap` also
+  converts both ways with `BTreeMap<String, Value>` via `From`. **Python,
+  Bolt, the CLI and the C ABI are unaffected** — all four already convert
+  properties at their boundary, and their output is byte-for-byte what it was.
+
+  **No file format changed.** `.kgl` snapshots, WAL frames and CDC payloads
+  serialize through postcard's identical map framing; the pinned byte goldens
+  and the `.kgl` digest in `value_byte_identity_tests` pass unchanged, so old
+  files load and new files are readable by any binary that could read the old
+  ones.
+
+  The motivation is clone cost: a materialised node's properties now travel
+  between rows for a refcount instead of a deep copy. Measured on a 10k-node
+  projection graph, release profile, two agreeing runs against unchanged-path
+  controls: **`ORDER BY n` +32%**, `WITH`-chain +7.5%, `RETURN p` (paths)
+  +4.2%, `collect(n)` at 10k +4.6%. Construction-bound shapes are flat
+  (`RETURN n` −1.1%, `properties(n)` −1.5%), and two cells regress slightly —
+  `collect(n)` at 100k −3.7% and the Python `.to_list()` round trip −2.5%.
+  Preliminary pending the phase's full perf gate.
+
 - **BREAKING: `db.cdc.query`'s `state` column is now the pair
   `{before, after}`.** CDC v1 (0.16.4) put the after-image directly in `state`;
   it now sits under `state.after`, matching Neo4j's CDC shape, with

@@ -38,10 +38,10 @@ where
 
 #[test]
 fn postcard_round_trips_value_graph_metadata_maps_and_wal() {
-    let nested_value = Value::Map(BTreeMap::from([
-        ("active".to_string(), Value::Boolean(true)),
+    let nested_value = Value::Map(crate::datatypes::PropMap::from_iter([
+        ("active", Value::Boolean(true)),
         (
-            "scores".to_string(),
+            "scores",
             Value::List(vec![Value::Int64(-7), Value::Float64(1.25)]),
         ),
     ]));

@@ -114,13 +114,13 @@ fn yaml_to_value(v: &yaml_rust2::Yaml) -> Value {
         Yaml::String(s) => Value::String(s.clone()),
         Yaml::Array(seq) => Value::List(seq.iter().map(yaml_to_value).collect()),
         Yaml::Hash(map) => {
-            let mut bt = BTreeMap::new();
+            let mut pairs: Vec<(crate::datatypes::PropKey, Value)> = Vec::with_capacity(map.len());
             for (k, val) in map {
                 if let Some(key) = k.as_str() {
-                    bt.insert(key.to_string(), yaml_to_value(val));
+                    pairs.push((crate::datatypes::PropKey::from(key), yaml_to_value(val)));
                 }
             }
-            Value::Map(bt)
+            Value::Map(crate::datatypes::PropMap::from_pairs(pairs))
         }
         Yaml::Alias(_) => Value::Null,
     }

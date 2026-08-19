@@ -178,10 +178,10 @@ impl StringInterner {
     #[inline]
     pub fn try_register(&mut self, key: InternedKey, s: &str) -> Result<(), InternerCollision> {
         if let Some(existing) = self.strings.get(&key) {
-            if existing != s {
+            if &**existing != s {
                 return Err(InternerCollision {
                     key: key.as_u64(),
-                    existing: existing.clone(),
+                    existing: existing.to_string(),
                     conflicting: s.to_string(),
                 });
             }
@@ -221,7 +221,7 @@ impl StringInterner {
 
         for name in names {
             let key = InternedKey::from_str(name);
-            if let Some(existing) = self.strings.get(&key).map(String::as_str) {
+            if let Some(existing) = self.strings.get(&key).map(|s| &**s) {
                 if existing != name {
                     return Err(InternerCollision {
                         key: key.as_u64(),
@@ -249,34 +249,35 @@ impl StringInterner {
     /// Resolve an InternedKey back to its string. Panics if the key is unknown.
     #[inline]
     pub fn resolve(&self, key: InternedKey) -> &str {
-        self.strings
-            .get(&key)
-            .map(|s| s.as_str())
-            .unwrap_or_else(|| {
-                panic!(
-                    "InternedKey {} not found in StringInterner ({} entries)",
-                    key.as_u64(),
-                    self.strings.len()
-                )
-            })
+        self.strings.get(&key).map(|s| &**s).unwrap_or_else(|| {
+            panic!(
+                "InternedKey {} not found in StringInterner ({} entries)",
+                key.as_u64(),
+                self.strings.len()
+            )
+        })
     }
 
     /// Iterate over all (key, string) pairs in the interner.
     pub fn iter(&self) -> impl Iterator<Item = (InternedKey, &str)> {
-        self.strings.iter().map(|(&k, v)| (k, v.as_str()))
+        self.strings.iter().map(|(&k, v)| (k, &**v))
     }
 
     /// Resolve an InternedKey back to its string, returning None if unknown.
     #[inline]
     pub fn try_resolve(&self, key: InternedKey) -> Option<&str> {
-        self.strings.get(&key).map(|s| s.as_str())
+        self.strings.get(&key).map(|s| &**s)
     }
 
     /// Compute the InternedKey for a string (if it exists in the interner).
     #[inline]
     pub fn try_resolve_to_key(&self, s: &str) -> Option<InternedKey> {
         let key = InternedKey::from_str(s);
-        if self.strings.get(&key).is_some_and(|existing| existing == s) {
+        if self
+            .strings
+            .get(&key)
+            .is_some_and(|existing| &**existing == s)
+        {
             Some(key)
         } else {
             None

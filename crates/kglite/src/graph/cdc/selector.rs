@@ -111,8 +111,8 @@ fn parse_selector(value: &Value) -> Result<CdcSelector, String> {
         );
     }
     let mut selector = CdcSelector::default();
-    for (key, value) in map {
-        match key.as_str() {
+    for (key, value) in map.iter() {
+        match key {
             "elementType" => {
                 selector.element_type = Some(match string_of(key, value)?.as_str() {
                     "node" => ElementType::Node,

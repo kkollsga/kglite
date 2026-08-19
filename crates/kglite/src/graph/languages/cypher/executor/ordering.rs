@@ -570,21 +570,23 @@ mod tests {
     /// of these against any other must reproduce this sequence exactly.
     fn one_of_every_rank_class() -> Vec<Value> {
         use crate::datatypes::values::{NodeValue, PathValue, RelValue};
-        use std::collections::BTreeMap;
         let node = NodeValue {
             id: 1,
             labels: vec!["N".into()],
-            properties: BTreeMap::new(),
+            properties: crate::datatypes::PropMap::new(),
         };
         let rel = RelValue {
             id: 1,
             start_id: 1,
             end_id: 2,
             rel_type: "R".into(),
-            properties: BTreeMap::new(),
+            properties: crate::datatypes::PropMap::new(),
         };
         vec![
-            Value::Map(BTreeMap::from([("k".to_string(), Value::Int64(1))])),
+            Value::Map(crate::datatypes::PropMap::from_iter([(
+                "k",
+                Value::Int64(1),
+            )])),
             Value::Node(Box::new(node.clone())),
             Value::NodeRef(3),
             Value::Relationship(Box::new(rel.clone())),

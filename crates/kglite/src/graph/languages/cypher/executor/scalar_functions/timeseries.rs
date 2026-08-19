@@ -145,17 +145,17 @@ impl<'a> CypherExecutor<'a> {
                 let (lo, hi) = self.resolve_ts_range(ts, &args[1..], row)?;
                 let mut entries: Vec<Value> = Vec::with_capacity(hi - lo);
                 for (date, &val) in ts.keys[lo..hi].iter().zip(&channel[lo..hi]) {
-                    let mut entry: std::collections::BTreeMap<String, Value> =
-                        std::collections::BTreeMap::new();
-                    entry.insert("time".to_string(), Value::String(date.to_string()));
-                    entry.insert(
-                        "value".to_string(),
-                        if val.is_finite() {
-                            Value::Float64(val)
-                        } else {
-                            Value::Null
-                        },
-                    );
+                    let entry = crate::datatypes::PropMap::from_iter([
+                        ("time", Value::String(date.to_string())),
+                        (
+                            "value",
+                            if val.is_finite() {
+                                Value::Float64(val)
+                            } else {
+                                Value::Null
+                            },
+                        ),
+                    ]);
                     entries.push(Value::Map(entry));
                 }
                 Ok(Value::List(entries))

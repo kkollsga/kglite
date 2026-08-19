@@ -42,6 +42,7 @@
 //! defect.
 
 use crate::datatypes::values::{NodeValue, PathValue, RelValue, Value};
+use crate::datatypes::PropMap;
 use crate::graph::wal::{MutationOp, WalFrame};
 use crate::serde_codec::{encode_versioned, CURRENT_CODEC};
 use std::collections::BTreeMap;
@@ -58,11 +59,14 @@ fn encode<T: serde::Serialize>(v: &T) -> Vec<u8> {
     encode_versioned(CURRENT_CODEC, v, u64::MAX).expect("encode fixture")
 }
 
-fn map(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
+/// N2 changed the property container's *type*; the fixtures below are the
+/// same data, and the pinned encodings they must produce are unchanged.
+fn map(pairs: &[(&str, Value)]) -> PropMap {
     pairs
         .iter()
         .map(|(k, v)| ((*k).to_string(), v.clone()))
-        .collect()
+        .collect::<BTreeMap<String, Value>>()
+        .into()
 }
 
 fn s(v: &str) -> Value {
@@ -199,7 +203,7 @@ fn value_fixtures() -> Vec<(&'static str, Value)> {
                 Value::List(vec![Value::Boolean(false)]),
             ]),
         ),
-        ("map_empty", Value::Map(BTreeMap::new())),
+        ("map_empty", Value::Map(PropMap::new())),
         (
             "map_nested",
             Value::Map(map(&[
@@ -574,7 +578,7 @@ fn kgl_reload_preserves_every_value_shape() {
         match get("meta") {
             Some(Value::Map(m)) => {
                 assert_eq!(
-                    m.keys().map(String::as_str).collect::<Vec<_>>(),
+                    m.keys().collect::<Vec<_>>(),
                     vec!["k", "n"],
                     "Map property key set/order changed on reload"
                 );

@@ -1499,7 +1499,7 @@ fn execute_set(
                         .into_iter()
                         .map(|(property, value)| SetItem::Property {
                             variable: variable.clone(),
-                            property,
+                            property: property.to_string(),
                             expression: Expression::Literal(value),
                         })
                         .collect();

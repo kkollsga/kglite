@@ -4,6 +4,7 @@ use super::super::ast::*;
 use super::helpers::*;
 use super::*;
 use crate::datatypes::values::Value;
+use crate::datatypes::{PropKey, PropMap};
 use crate::graph::schema::{soft_alias_fallback, SoftAliasFallback};
 use crate::graph::storage::GraphRead;
 use geo::BoundingRect;

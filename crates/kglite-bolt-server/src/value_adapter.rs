@@ -68,7 +68,7 @@ pub fn to_bolt(value: &Value) -> Result<BoltValue, BoltError> {
             .map(BoltValue::List),
         Value::Map(entries) => entries
             .iter()
-            .map(|(k, v)| to_bolt(v).map(|bv| (k.clone(), bv)))
+            .map(|(k, v)| to_bolt(v).map(|bv| (k.to_string(), bv)))
             .collect::<Result<HashMap<_, _>, _>>()
             .map(BoltValue::Dict),
 
@@ -162,12 +162,10 @@ pub fn to_bolt(value: &Value) -> Result<BoltValue, BoltError> {
 /// Convert a kglite property map to a Bolt dict. Recursive through
 /// `to_bolt` so nested lists / maps round-trip; surface conversion
 /// failure on the first bad value.
-fn props_to_bolt_dict(
-    props: &std::collections::BTreeMap<String, Value>,
-) -> Result<BoltDict, BoltError> {
+fn props_to_bolt_dict(props: &kglite::datatypes::PropMap) -> Result<BoltDict, BoltError> {
     props
         .iter()
-        .map(|(k, v)| to_bolt(v).map(|bv| (k.clone(), bv)))
+        .map(|(k, v)| to_bolt(v).map(|bv| (k.to_string(), bv)))
         .collect::<Result<HashMap<_, _>, _>>()
 }
 
@@ -291,8 +289,8 @@ pub fn from_bolt(value: &BoltValue) -> Result<Value, BoltError> {
             .map(Value::List),
         BoltValue::Dict(entries) => entries
             .iter()
-            .map(|(k, v)| from_bolt(v).map(|kv| (k.clone(), kv)))
-            .collect::<Result<std::collections::BTreeMap<_, _>, _>>()
+            .map(|(k, v)| from_bolt(v).map(|kv| (k.as_str(), kv)))
+            .collect::<Result<kglite::datatypes::PropMap, _>>()
             .map(Value::Map),
 
         // ---- Temporal / spatial ----------------------------------------
@@ -387,7 +385,6 @@ pub fn from_bolt(value: &BoltValue) -> Result<Value, BoltError> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
 
     use kglite::api::{NodeValue, PathValue, RelValue};
 
@@ -397,7 +394,7 @@ mod tests {
         NodeValue {
             id,
             labels: vec!["N".into()],
-            properties: BTreeMap::new(),
+            properties: kglite::datatypes::PropMap::new(),
         }
     }
 
@@ -407,7 +404,7 @@ mod tests {
             start_id,
             end_id,
             rel_type: "R".into(),
-            properties: BTreeMap::new(),
+            properties: kglite::datatypes::PropMap::new(),
         }
     }
 

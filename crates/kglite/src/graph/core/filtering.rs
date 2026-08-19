@@ -4,7 +4,7 @@ use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, SelectionOpe
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 /// Constant for the "type" field key used in type filtering
 const TYPE_FIELD: &str = "type";
@@ -457,7 +457,7 @@ fn cmp_sequence(a: &[Value], b: &[Value]) -> std::cmp::Ordering {
 }
 
 /// Map order: entries in key order, comparing key then value, shorter-is-less.
-fn cmp_map(a: &BTreeMap<String, Value>, b: &BTreeMap<String, Value>) -> std::cmp::Ordering {
+fn cmp_map(a: &crate::datatypes::PropMap, b: &crate::datatypes::PropMap) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let mut left = a.iter();
     let mut right = b.iter();

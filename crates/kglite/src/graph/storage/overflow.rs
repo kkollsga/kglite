@@ -192,7 +192,7 @@ fn encode_list(buf: &mut Vec<u8>, items: &[Value]) {
 }
 
 #[inline]
-fn encode_map(buf: &mut Vec<u8>, entries: &std::collections::BTreeMap<String, Value>) {
+fn encode_map(buf: &mut Vec<u8>, entries: &crate::datatypes::PropMap) {
     match crate::serde_codec::encode_versioned(
         crate::serde_codec::CURRENT_CODEC,
         entries,
@@ -290,14 +290,13 @@ pub fn read_value(blob: &[u8], pos: &mut usize, type_tag: u8) -> Option<Value> {
         TAG_MAP_POSTCARD => {
             let bytes = read_len_prefixed(blob, pos)?;
             let limits = crate::serde_codec::DecodeLimits::new(u32::MAX as u64, bytes.len() as u64);
-            let entries: std::collections::BTreeMap<String, Value> =
-                crate::serde_codec::decode_exact_with(
-                    crate::serde_codec::CodecVersion::PostcardV1,
-                    bytes,
-                    bytes.len() as u64,
-                    limits,
-                )
-                .ok()?;
+            let entries: crate::datatypes::PropMap = crate::serde_codec::decode_exact_with(
+                crate::serde_codec::CodecVersion::PostcardV1,
+                bytes,
+                bytes.len() as u64,
+                limits,
+            )
+            .ok()?;
             Some(Value::Map(entries))
         }
         _ => None,
@@ -521,7 +520,7 @@ where
                 };
                 let limits =
                     crate::serde_codec::DecodeLimits::new(u32::MAX as u64, bytes.len() as u64);
-                let entries: std::collections::BTreeMap<String, Value> =
+                let entries: crate::datatypes::PropMap =
                     match crate::serde_codec::decode_exact_with(
                         crate::serde_codec::CodecVersion::PostcardV1,
                         bytes,
@@ -616,12 +615,12 @@ mod tests {
             ),
             (
                 key(10),
-                Value::Map(std::collections::BTreeMap::from([
-                    ("count".into(), Value::Int64(2)),
+                Value::Map(crate::datatypes::PropMap::from_iter([
+                    ("count", Value::Int64(2)),
                     (
-                        "nested".into(),
-                        Value::List(vec![Value::Map(std::collections::BTreeMap::from([(
-                            "ok".into(),
+                        "nested",
+                        Value::List(vec![Value::Map(crate::datatypes::PropMap::from_iter([(
+                            "ok",
                             Value::Boolean(true),
                         )]))]),
                     ),
@@ -697,12 +696,12 @@ mod tests {
 
     #[test]
     fn borrowed_encoder_and_decoder_preserve_nested_map() {
-        let entries = std::collections::BTreeMap::from([
-            ("name".into(), Value::String("map".into())),
+        let entries = crate::datatypes::PropMap::from_iter([
+            ("name", Value::String("map".into())),
             (
-                "items".into(),
-                Value::List(vec![Value::Map(std::collections::BTreeMap::from([(
-                    "answer".into(),
+                "items",
+                Value::List(vec![Value::Map(crate::datatypes::PropMap::from_iter([(
+                    "answer",
                     Value::Int64(42),
                 )]))]),
             ),

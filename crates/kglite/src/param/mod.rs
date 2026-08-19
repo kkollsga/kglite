@@ -126,7 +126,7 @@ pub fn kglite_value_to_json(v: &Value) -> serde_json::Value {
         Value::List(items) => J::Array(items.iter().map(kglite_value_to_json).collect()),
         Value::Map(m) => J::Object(
             m.iter()
-                .map(|(k, v)| (k.clone(), kglite_value_to_json(v)))
+                .map(|(k, v)| (k.to_string(), kglite_value_to_json(v)))
                 .collect(),
         ),
         // Ids are opaque integers on every wire (Bolt encodes them as the
@@ -188,11 +188,11 @@ fn json_number(f: f64) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
-fn properties_to_json(props: &std::collections::BTreeMap<String, Value>) -> serde_json::Value {
+fn properties_to_json(props: &crate::datatypes::PropMap) -> serde_json::Value {
     serde_json::Value::Object(
         props
             .iter()
-            .map(|(k, v)| (k.clone(), kglite_value_to_json(v)))
+            .map(|(k, v)| (k.to_string(), kglite_value_to_json(v)))
             .collect(),
     )
 }
@@ -307,7 +307,7 @@ mod tests {
         let mut expected = std::collections::BTreeMap::new();
         expected.insert("a".to_string(), Value::Int64(1));
         expected.insert("b".to_string(), Value::String("x".to_string()));
-        assert_eq!(json_value_to_kglite_value(&v), Value::Map(expected));
+        assert_eq!(json_value_to_kglite_value(&v), Value::Map(expected.into()));
     }
 
     #[test]
@@ -346,7 +346,7 @@ mod tests {
     fn value_to_json_natural_nested_is_untagged() {
         let mut m = std::collections::BTreeMap::new();
         m.insert("id".to_string(), Value::Int64(7));
-        let v = Value::List(vec![Value::Int64(1), Value::Map(m)]);
+        let v = Value::List(vec![Value::Int64(1), Value::Map(m.into())]);
         // Untagged: `1` and `{"id":7}`, NOT `{"Int64":1}` / `{"Map":...}`.
         assert_eq!(kglite_value_to_json(&v), serde_json::json!([1, {"id": 7}]));
     }
@@ -367,7 +367,7 @@ mod tests {
         crate::datatypes::values::NodeValue {
             id: 7,
             labels: vec!["Person".to_string()],
-            properties: props,
+            properties: props.into(),
         }
     }
 
@@ -379,7 +379,7 @@ mod tests {
             start_id: 7,
             end_id: 8,
             rel_type: "KNOWS".to_string(),
-            properties: props,
+            properties: props.into(),
         }
     }
 
@@ -490,7 +490,7 @@ mod tests {
                 seconds: 1,
             },
             Value::List(vec![Value::Int64(1)]),
-            Value::Map(std::collections::BTreeMap::new()),
+            Value::Map(crate::datatypes::PropMap::new()),
             Value::Node(Box::new(sample_node())),
             Value::Relationship(Box::new(sample_rel())),
             Value::Path(Box::new(crate::datatypes::values::PathValue {

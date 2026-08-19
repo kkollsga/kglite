@@ -149,7 +149,7 @@ fn a_returned_node_serializes_as_an_object_not_a_debug_string() {
     let node = KgliteValue::Node(Box::new(kglite::api::NodeValue {
         id: 7,
         labels: vec!["Person".to_string()],
-        properties,
+        properties: properties.into(),
     }));
     let result = cypher_result(vec!["n"], vec![vec![node]]);
     let output = serde_json::to_value(serialize_success(&args(false), query, &result)).unwrap();

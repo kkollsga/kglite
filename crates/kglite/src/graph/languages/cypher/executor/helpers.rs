@@ -5,6 +5,7 @@
 use super::super::ast::*;
 use super::super::result::*;
 use crate::datatypes::values::Value;
+use crate::datatypes::{PropKey, PropMap};
 use crate::graph::schema::{soft_alias_fallback, DirGraph, InternedKey, SoftAliasFallback};
 use crate::graph::storage::{GraphRead, NodeView};
 use std::collections::{HashMap, HashSet};
@@ -549,22 +550,60 @@ fn is_virtual_or_reserved(key: &str) -> bool {
         || crate::graph::schema::is_reserved_provenance_key(key)
 }
 
-impl PropertySink for std::collections::BTreeMap<String, Value> {
+/// The value sink behind `RETURN n` / `properties(n)`: a flat pair buffer that
+/// is sorted **once**, at the end of the walk, into a [`PropMap`].
+///
+/// # Why append-then-sort rather than insert-sorted
+///
+/// The collection order is virtuals → stored columns → identity aliases →
+/// schema completion, which is not key order, so an insert-sorted vector would
+/// memmove on nearly every property. Appending is O(1) per property and the
+/// single terminal sort is over a handful of entries in one cache-resident
+/// allocation.
+///
+/// Duplicate keys are legal *during* collection — `type` is a soft alias, so a
+/// stored `type` column is appended over the structural virtual — and
+/// [`PropMap::from_pairs`]'s last-write-wins dedup is what makes that resolve
+/// the same way `BTreeMap::insert` did.
+struct PropsSink(Vec<(PropKey, Value)>);
+
+impl Default for PropsSink {
+    fn default() -> Self {
+        // Pre-sized for the three virtuals plus a typical property set. An
+        // empty `Vec` grows 0 -> 4 -> 8 during the walk, which is two
+        // allocations and a memmove on the per-row path.
+        Self(Vec::with_capacity(16))
+    }
+}
+
+impl PropsSink {
+    fn finish(self) -> PropMap {
+        PropMap::from_pairs(self.0)
+    }
+}
+
+impl PropertySink for PropsSink {
     const NEEDS_VALUES: bool = true;
 
     #[inline]
     fn insert_with(&mut self, key: &str, value: impl FnOnce() -> Value) {
-        self.insert(key.to_string(), value());
+        self.0.push((PropKey::from(key), value()));
     }
 
     #[inline]
     fn insert(&mut self, key: &str, value: Value) {
-        std::collections::BTreeMap::insert(self, key.to_string(), value);
+        self.0.push((PropKey::from(key), value));
     }
 
     #[inline]
     fn contains(&self, key: &str) -> bool {
-        self.contains_key(key)
+        // Linear over an unsorted buffer, and deliberately so: `contains` is
+        // reached at most a handful of times per node (two identity aliases
+        // plus the narrow completion candidate set), against a buffer of a few
+        // dozen entries at worst. Keeping the buffer sorted to make this a
+        // binary search would cost a memmove on every one of the far more
+        // numerous appends.
+        self.0.iter().any(|(k, _)| &**k == key)
     }
 
     fn absorb_stored(
@@ -577,6 +616,12 @@ impl PropertySink for std::collections::BTreeMap<String, Value> {
         // drops, and it silently discards a pair whose key the interner cannot
         // resolve — which is the one case the completion pass cannot derive
         // from the type's schema.
+        //
+        // Keys are owned per row, not shared out of the interner. That was
+        // measured, not assumed — see [`PropKey`]: handing out the interner's
+        // `Arc<str>` cost 15-19% on `return_node_10k`, because an atomic
+        // refcount pair per property per row is dearer on this platform than
+        // the short-string allocation it replaces.
         let mut unresolved_key = false;
         for (ik, val) in node.property_pairs() {
             let Some(key) = graph.interner.try_resolve(ik) else {
@@ -586,7 +631,7 @@ impl PropertySink for std::collections::BTreeMap<String, Value> {
             if is_virtual_or_reserved(key) {
                 continue;
             }
-            std::collections::BTreeMap::insert(self, key.to_string(), val);
+            self.0.push((PropKey::from(key), val));
         }
         unresolved_key
     }
@@ -806,10 +851,10 @@ fn node_value_from_view(
     graph: &crate::graph::DirGraph,
 ) -> crate::datatypes::values::NodeValue {
     use crate::datatypes::values::NodeValue;
-    use std::collections::BTreeMap;
     let node_type = node.node_type_str(&graph.interner).to_string();
-    let mut properties: BTreeMap<String, Value> = BTreeMap::new();
+    let mut properties = PropsSink::default();
     collect_node_properties(&mut properties, node, &node_type, graph);
+    let properties = properties.finish();
     // Full label set (primary + secondaries), not just the primary type —
     // so a materialised node (RETURN n, collect(n)[0], …) carries the same
     // labels `MATCH (n:Sec)` / `labels(n)` see. `node_labels` reads the
@@ -930,20 +975,26 @@ pub(crate) fn materialize_rel_value(
     graph: &crate::graph::DirGraph,
 ) -> Option<crate::datatypes::values::RelValue> {
     use crate::datatypes::values::RelValue;
-    use std::collections::BTreeMap;
     let edge_data = graph.graph.edge_weight(edge_idx)?;
     let (src, dst) = graph.graph.edge_endpoints(edge_idx)?;
-    let mut properties: BTreeMap<String, Value> = BTreeMap::new();
-    for key in edge_data.property_keys(&graph.interner) {
+    // Walk the stored pairs directly. The previous shape resolved every key to
+    // a name and then called `get_property(name)`, which re-hashes the name and
+    // **linearly scans** the pair vector to find the value it had just walked
+    // past — O(p^2) per edge for a p-property edge, on a path that runs once
+    // per relationship in `RETURN r` and once per hop in `RETURN p`.
+    let mut properties: Vec<(PropKey, Value)> = Vec::with_capacity(edge_data.properties.len());
+    for (ik, val) in &edge_data.properties {
+        let Some(key) = graph.interner.try_resolve(*ik) else {
+            continue;
+        };
         // Reserved provenance keys are engine metadata — kept out of the
         // materialised edge value (direct `r.updated_at` still resolves).
         if crate::graph::schema::is_reserved_provenance_key(key) {
             continue;
         }
-        if let Some(val) = edge_data.get_property(key) {
-            properties.insert(key.to_string(), val.clone());
-        }
+        properties.push((PropKey::from(key), val.clone()));
     }
+    let properties = PropMap::from_pairs(properties);
     Some(RelValue {
         id: edge_idx.index() as u32,
         start_id: src.index() as u32,

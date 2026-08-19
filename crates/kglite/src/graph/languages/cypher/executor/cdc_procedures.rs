@@ -36,10 +36,11 @@
 //!
 //! B3 carries these divergences into `CYPHER.md`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use super::{CypherExecutor, ResultRow};
 use crate::datatypes::values::Value;
+use crate::datatypes::PropMap;
 use crate::graph::cdc::{self, CdcChange, CdcEnrichment, CdcEvent, CdcEventKind, CdcHandoff};
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::languages::cypher::ast::YieldItem;
@@ -505,9 +506,9 @@ fn event_row(event: &CdcEvent, epoch: u64, yield_items: &[YieldItem]) -> ResultR
 /// no properties", which is a different fact. A create has no before, a delete
 /// has no after, and an update has both — once before-image capture is on.
 fn state_value(event: &CdcEvent) -> Value {
-    Value::Map(BTreeMap::from([
-        ("before".to_string(), before_value(event)),
-        ("after".to_string(), after_value(event)),
+    Value::Map(PropMap::from_iter([
+        ("before", before_value(event)),
+        ("after", after_value(event)),
     ]))
 }
 
@@ -537,20 +538,20 @@ fn after_value(event: &CdcEvent) -> Value {
 /// A node image: `{title, labels, properties}`. One shape for both halves —
 /// a consumer that can read `after` can read `before` with the same code.
 fn node_state_map(node: &crate::graph::cdc::NodeState) -> Value {
-    Value::Map(BTreeMap::from([
-        ("title".to_string(), node.title.clone()),
+    Value::Map(PropMap::from_iter([
+        ("title", node.title.clone()),
         (
-            "labels".to_string(),
+            "labels",
             Value::List(node.labels.iter().cloned().map(Value::String).collect()),
         ),
-        ("properties".to_string(), properties_map(&node.properties)),
+        ("properties", properties_map(&node.properties)),
     ]))
 }
 
 /// A relationship image: `{properties}`.
 fn edge_state_map(edge: &crate::graph::cdc::EdgeState) -> Value {
-    Value::Map(BTreeMap::from([(
-        "properties".to_string(),
+    Value::Map(PropMap::from_iter([(
+        "properties",
         properties_map(&edge.properties),
     )]))
 }
@@ -559,8 +560,8 @@ fn properties_map(properties: &[(String, Value)]) -> Value {
     Value::Map(
         properties
             .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect::<BTreeMap<_, _>>(),
+            .map(|(key, value)| (key.as_str(), value.clone()))
+            .collect(),
     )
 }
 
@@ -611,7 +612,7 @@ mod tests {
     /// Goes through the pair rather than around it: a `state` that regressed
     /// to the flat v1 map would fail here on the missing `after` key rather
     /// than silently reading the old shape's `properties`.
-    fn after_map(state: &Value) -> BTreeMap<String, Value> {
+    fn after_map(state: &Value) -> PropMap {
         let Value::Map(pair) = state else {
             panic!("state must be a map, got {state:?}");
         };
@@ -627,7 +628,7 @@ mod tests {
     }
 
     /// The properties of a row's after-image.
-    fn after_properties(state: &Value) -> BTreeMap<String, Value> {
+    fn after_properties(state: &Value) -> PropMap {
         match after_map(state).get("properties") {
             Some(Value::Map(properties)) => properties.clone(),
             other => panic!("state.after.properties must be a map, got {other:?}"),

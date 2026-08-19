@@ -49,7 +49,6 @@
 
 use super::schema::{ConnectionSchemaDefinition, NodeSchemaDefinition, SchemaDefinition};
 use crate::datatypes::values::Value;
-use std::collections::BTreeMap;
 
 /// Which class of mistake a [`SchemaParseError`] describes.
 ///
@@ -106,7 +105,7 @@ fn value_error(message: impl Into<String>) -> SchemaParseError {
 
 type ParseResult<T> = Result<T, SchemaParseError>;
 
-fn as_map(value: &Value) -> Option<&BTreeMap<String, Value>> {
+fn as_map(value: &Value) -> Option<&crate::datatypes::PropMap> {
     match value {
         Value::Map(map) => Some(map),
         _ => None,
@@ -148,7 +147,7 @@ fn parse_type_map(
                 type_val.type_name()
             ))
         })?;
-        into.insert(field.clone(), type_name.to_string());
+        into.insert(field.to_string(), type_name.to_string());
     }
     Ok(())
 }
@@ -188,7 +187,7 @@ pub fn schema_from_json(json: &str) -> ParseResult<SchemaDefinition> {
 /// Absent or non-map `nodes` is a no-op rather than an error, matching the
 /// long-standing behaviour of the Python walk this was lifted from.
 fn parse_node_schemas(
-    doc: &BTreeMap<String, Value>,
+    doc: &crate::datatypes::PropMap,
     schema: &mut SchemaDefinition,
 ) -> ParseResult<()> {
     let Some(nodes) = doc.get("nodes").and_then(as_map) else {
@@ -221,7 +220,7 @@ fn parse_node_schemas(
         }
 
         parse_node_declarations(node_type, node_schema_map, &mut node_schema)?;
-        schema.add_node_schema(node_type.clone(), node_schema);
+        schema.add_node_schema(node_type.to_string(), node_schema);
     }
     Ok(())
 }
@@ -229,7 +228,7 @@ fn parse_node_schemas(
 /// Parse the `connections` mapping into `schema`. The edge counterpart of
 /// [`parse_node_schemas`]; `source`/`target` are the only required keys.
 fn parse_connection_schemas(
-    doc: &BTreeMap<String, Value>,
+    doc: &crate::datatypes::PropMap,
     schema: &mut SchemaDefinition,
 ) -> ParseResult<()> {
     let Some(connections) = doc.get("connections").and_then(as_map) else {
@@ -282,14 +281,14 @@ fn parse_connection_schemas(
             )?;
         }
 
-        schema.add_connection_schema(conn_type.clone(), conn_schema);
+        schema.add_connection_schema(conn_type.to_string(), conn_schema);
     }
     Ok(())
 }
 
 /// One of a connection schema's two mandatory endpoint keys.
 fn required_endpoint(
-    conn_map: &BTreeMap<String, Value>,
+    conn_map: &crate::datatypes::PropMap,
     conn_type: &str,
     key: &str,
 ) -> ParseResult<String> {
@@ -324,7 +323,7 @@ fn as_bool(value: &Value, owner: &str, what: &str) -> ParseResult<bool> {
 /// `primary_key`, `unique`, `layer`, and `auto_timestamp`.
 fn parse_node_declarations(
     node_type: &str,
-    node_schema_map: &BTreeMap<String, Value>,
+    node_schema_map: &crate::datatypes::PropMap,
     node_schema: &mut NodeSchemaDefinition,
 ) -> ParseResult<()> {
     // Any property may be the primary key: `id` is enforced through the O(1)

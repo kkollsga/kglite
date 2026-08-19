@@ -65,58 +65,75 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
         }
         Value::Map(entries) => {
             let dict = PyDict::new(py);
-            for (k, v) in entries {
+            for (k, v) in entries.iter() {
                 dict.set_item(k, value_to_py(py, v)?)?;
             }
             Ok(dict.into_any().unbind())
         }
-        Value::Node(node_val) => {
-            let dict = PyDict::new(py);
-            dict.set_item("id", node_val.id)?;
-            // labels mirror Neo4j/Bolt shape: list of strings
-            let py_labels = PyList::new(py, &node_val.labels)?;
-            dict.set_item("labels", py_labels)?;
-            // properties as a nested dict — recursive value_to_py
-            // means nested Nodes/Lists/Maps round-trip cleanly.
-            let props_dict = PyDict::new(py);
-            for (k, v) in &node_val.properties {
-                props_dict.set_item(k, value_to_py(py, v)?)?;
-            }
-            dict.set_item("properties", props_dict)?;
-            Ok(dict.into_any().unbind())
-        }
-        Value::Relationship(rel_val) => {
-            let dict = PyDict::new(py);
-            dict.set_item("id", rel_val.id)?;
-            dict.set_item("start", rel_val.start_id)?;
-            dict.set_item("end", rel_val.end_id)?;
-            dict.set_item("type", &rel_val.rel_type)?;
-            let props_dict = PyDict::new(py);
-            for (k, v) in &rel_val.properties {
-                props_dict.set_item(k, value_to_py(py, v)?)?;
-            }
-            dict.set_item("properties", props_dict)?;
-            Ok(dict.into_any().unbind())
-        }
+        Value::Node(node_val) => Ok(node_to_py(py, node_val)?.into_any().unbind()),
+        Value::Relationship(rel_val) => Ok(rel_to_py(py, rel_val)?.into_any().unbind()),
         Value::Path(path_val) => {
             let dict = PyDict::new(py);
-            // Recurse into the Node/Rel conversions above so the
-            // path nests cleanly.
+            // Convert the members in place. This used to route each element
+            // back through `value_to_py` as `Value::Node(Box::new(n.clone()))`,
+            // which deep-cloned every node and relationship on the path — and
+            // boxed it — purely to re-enter a match arm. A path of k hops paid
+            // 2k+1 whole-entity clones to produce the same dicts.
             let py_nodes: PyResult<Vec<Py<PyAny>>> = path_val
                 .nodes
                 .iter()
-                .map(|n| value_to_py(py, &Value::Node(Box::new(n.clone()))))
+                .map(|n| node_to_py(py, n).map(|d| d.into_any().unbind()))
                 .collect();
             let py_rels: PyResult<Vec<Py<PyAny>>> = path_val
                 .rels
                 .iter()
-                .map(|r| value_to_py(py, &Value::Relationship(Box::new(r.clone()))))
+                .map(|r| rel_to_py(py, r).map(|d| d.into_any().unbind()))
                 .collect();
             dict.set_item("nodes", PyList::new(py, py_nodes?)?)?;
             dict.set_item("relationships", PyList::new(py, py_rels?)?)?;
             Ok(dict.into_any().unbind())
         }
     }
+}
+
+/// A materialised node as the Python dict `{id, labels, properties}`.
+///
+/// Borrows the node: the `Value::Node` arm and the path members both reach it
+/// without constructing an owned `Value` first.
+fn node_to_py<'py>(
+    py: Python<'py>,
+    node_val: &kglite_core::api::NodeValue,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("id", node_val.id)?;
+    // labels mirror Neo4j/Bolt shape: list of strings
+    dict.set_item("labels", PyList::new(py, &node_val.labels)?)?;
+    // properties as a nested dict — recursive value_to_py means nested
+    // Nodes/Lists/Maps round-trip cleanly.
+    let props_dict = PyDict::new(py);
+    for (k, v) in node_val.properties.iter() {
+        props_dict.set_item(k, value_to_py(py, v)?)?;
+    }
+    dict.set_item("properties", props_dict)?;
+    Ok(dict)
+}
+
+/// A materialised relationship as `{id, start, end, type, properties}`.
+fn rel_to_py<'py>(
+    py: Python<'py>,
+    rel_val: &kglite_core::api::RelValue,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("id", rel_val.id)?;
+    dict.set_item("start", rel_val.start_id)?;
+    dict.set_item("end", rel_val.end_id)?;
+    dict.set_item("type", &rel_val.rel_type)?;
+    let props_dict = PyDict::new(py);
+    for (k, v) in rel_val.properties.iter() {
+        props_dict.set_item(k, value_to_py(py, v)?)?;
+    }
+    dict.set_item("properties", props_dict)?;
+    Ok(dict)
 }
 
 /// Convert a HashMap<String, Value> to a Python dict

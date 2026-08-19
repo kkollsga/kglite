@@ -32,7 +32,8 @@ fn node(id: u32, labels: &[&str], props: &[(&str, Value)]) -> NodeValue {
         properties: props
             .iter()
             .map(|(k, v)| ((*k).to_string(), v.clone()))
-            .collect::<BTreeMap<String, Value>>(),
+            .collect::<BTreeMap<String, Value>>()
+            .into(),
     }
 }
 
@@ -45,7 +46,8 @@ fn rel(id: u32, start_id: u32, end_id: u32, rel_type: &str, props: &[(&str, Valu
         properties: props
             .iter()
             .map(|(k, v)| ((*k).to_string(), v.clone()))
-            .collect::<BTreeMap<String, Value>>(),
+            .collect::<BTreeMap<String, Value>>()
+            .into(),
     }
 }
 
@@ -362,7 +364,7 @@ fn value_cross_variant_rank_ladder_golden() {
         })),
         Value::Relationship(Box::new(rel(0, 0, 0, "R", &[]))),
         Value::Node(Box::new(node(0, &["N"], &[]))),
-        Value::Map(BTreeMap::new()),
+        Value::Map(super::PropMap::new()),
         Value::List(vec![]),
         Value::NodeRef(0),
         Value::Point { lat: 0.0, lon: 0.0 },

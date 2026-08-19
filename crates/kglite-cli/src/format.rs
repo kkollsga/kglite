@@ -259,7 +259,7 @@ mod tests {
         let node = kglite::api::NodeValue {
             id: 7,
             labels: vec!["Person".to_string()],
-            properties: props,
+            properties: props.into(),
         };
         let out = render_json(&["n".to_string()], &[vec![Value::Node(Box::new(node))]]);
         assert!(

@@ -41,12 +41,12 @@
 //! an explicit [`CsvImportPolicy::Directory`] when started with
 //! `--allow-csv-import <DIR>`.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::super::ast::{Clause, LoadCsvClause, ReturnClause, WithClause};
 use super::super::result::{ResultRow, ResultSet};
 use crate::datatypes::values::Value;
+use crate::datatypes::{PropKey, PropMap};
 
 /// Rows per batch handed to the downstream pipeline. Large enough that
 /// per-batch overhead (rebuilding the read executor, one `ResultSet`
@@ -408,7 +408,7 @@ impl RowReader {
     fn bind(&self, record: &csv::StringRecord) -> Value {
         match &self.headers {
             Some(names) => {
-                let mut map = BTreeMap::new();
+                let mut map: Vec<(PropKey, Value)> = Vec::with_capacity(names.len());
                 for (index, name) in names.iter().enumerate() {
                     let value = match record.get(index) {
                         // An empty field is null — otherwise every optional
@@ -416,9 +416,11 @@ impl RowReader {
                         Some("") | None => Value::Null,
                         Some(text) => Value::String(text.to_string()),
                     };
-                    map.insert(name.clone(), value);
+                    map.push((PropKey::from(name.as_str()), value));
                 }
-                Value::Map(map)
+                // Duplicate CSV header names keep the rightmost column, which
+                // is what the `BTreeMap` insert loop did.
+                Value::Map(PropMap::from_pairs(map))
             }
             None => Value::List(
                 record

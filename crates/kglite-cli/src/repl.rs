@@ -5,7 +5,7 @@
 //! rustyline keeps the terminal in raw mode, so SIGINT only fires while a
 //! query is executing).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -389,10 +389,11 @@ impl Shell {
                     return;
                 }
             };
-            let mut map: BTreeMap<String, Value> = BTreeMap::new();
-            for (h, cell) in headers.iter().zip(rec.iter()) {
-                map.insert(h.clone(), infer_value(cell));
-            }
+            let map: kglite::datatypes::PropMap = headers
+                .iter()
+                .zip(rec.iter())
+                .map(|(h, cell)| (h.as_str(), infer_value(cell)))
+                .collect();
             rows.push(Value::Map(map));
         }
         let n = rows.len();

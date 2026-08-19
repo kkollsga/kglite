@@ -5,6 +5,7 @@
 use super::super::helpers::*;
 use super::super::*;
 use crate::datatypes::values::Value;
+use crate::datatypes::{PropKey, PropMap};
 use crate::graph::storage::GraphRead;
 
 impl<'a> CypherExecutor<'a> {
@@ -293,7 +294,8 @@ impl<'a> CypherExecutor<'a> {
                     }
                     // Materialised node value (collect()[0] etc.) → its keys.
                     if let Ok(Value::Node(nv)) = self.evaluate_expression(arg, row) {
-                        let mut keys: Vec<String> = nv.properties.keys().cloned().collect();
+                        let mut keys: Vec<String> =
+                            nv.properties.keys().map(str::to_string).collect();
                         keys.sort();
                         keys.dedup();
                         return Ok(Some(Value::List(
@@ -358,25 +360,32 @@ impl<'a> CypherExecutor<'a> {
                             let g = &self.graph.graph;
                             g.edge_weight(edge.edge_index)
                         } {
-                            let mut props: std::collections::BTreeMap<String, Value> =
-                                std::collections::BTreeMap::new();
-                            props.insert(
-                                "type".to_string(),
+                            // Built as a pair buffer and sorted once, and
+                            // walked over the stored pairs directly: the old
+                            // shape resolved each key and then called
+                            // `get_property(name)`, which re-hashed the name
+                            // and rescanned the pair vector to find the value
+                            // it had just walked past.
+                            let mut props: Vec<(PropKey, Value)> =
+                                Vec::with_capacity(edge_data.properties.len() + 1);
+                            props.push((
+                                PropKey::from("type"),
                                 Value::String(
                                     edge_data
                                         .connection_type_str(&self.graph.interner)
                                         .to_string(),
                                 ),
-                            );
-                            for key in edge_data.property_keys(&self.graph.interner) {
+                            ));
+                            for (ik, val) in &edge_data.properties {
+                                let Some(key) = self.graph.interner.try_resolve(*ik) else {
+                                    continue;
+                                };
                                 if crate::graph::schema::is_reserved_provenance_key(key) {
                                     continue; // engine metadata, not user data
                                 }
-                                if let Some(val) = edge_data.get_property(key) {
-                                    props.insert(key.to_string(), val.clone());
-                                }
+                                props.push((PropKey::from(key), val.clone()));
                             }
-                            return Ok(Some(Value::Map(props)));
+                            return Ok(Some(Value::Map(PropMap::from_pairs(props))));
                         }
                     }
                 }

@@ -1155,14 +1155,14 @@ mod tests {
         meta.insert("payload".to_string(), "mixed".to_string());
         let key_payload = interner.get_or_intern("payload");
         let key_extra = interner.get_or_intern("extra");
-        let payload = std::collections::BTreeMap::from([
-            ("kind".into(), Value::String("mixed".into())),
-            ("values".into(), Value::List(vec![Value::Int64(1)])),
+        let payload = crate::datatypes::PropMap::from_iter([
+            ("kind", Value::String("mixed".into())),
+            ("values", Value::List(vec![Value::Int64(1)])),
         ]);
-        let extra = std::collections::BTreeMap::from([(
-            "nested".into(),
-            Value::Map(std::collections::BTreeMap::from([(
-                "ok".into(),
+        let extra = crate::datatypes::PropMap::from_iter([(
+            "nested",
+            Value::Map(crate::datatypes::PropMap::from_iter([(
+                "ok",
                 Value::Boolean(true),
             )])),
         )]);

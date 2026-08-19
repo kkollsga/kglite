@@ -4,7 +4,7 @@ use super::values::{ColumnData, ColumnType, DataFrame, FilterCondition, Value};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use pyo3::Bound;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 pub fn pydict_to_filter_conditions(
     dict: &Bound<'_, PyDict>,
@@ -309,7 +309,7 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
             // recursive `py_value_to_value` (the params path), so nested lists /
             // dicts inside the map keep their structure instead of stringifying.
             let py_list = py_list.cast::<PyList>()?;
-            let mut vec: Vec<Option<BTreeMap<String, Value>>> = Vec::with_capacity(length);
+            let mut vec: Vec<Option<kglite_core::datatypes::PropMap>> = Vec::with_capacity(length);
             for (i, &is_null) in null_mask.iter().enumerate() {
                 if is_null {
                     vec.push(None);
@@ -786,12 +786,21 @@ pub fn py_value_to_value(value: &Bound<'_, PyAny>) -> PyResult<Value> {
     // common batch-insert/update shape. Without this a dict param became
     // Value::Null and every `.key` access returned null.
     if let Ok(dict) = value.cast::<pyo3::types::PyDict>() {
-        let mut map = std::collections::BTreeMap::new();
+        // Built as a pair buffer and sorted once: a Python dict arrives in
+        // insertion order, so an insert-sorted container would memmove per key
+        // on the common already-ordered-by-nothing case.
+        let mut pairs: Vec<(kglite_core::datatypes::PropKey, Value)> =
+            Vec::with_capacity(dict.len());
         for (k, v) in dict.iter() {
             let key: String = k.extract()?;
-            map.insert(key, py_value_to_value(&v)?);
+            pairs.push((
+                kglite_core::datatypes::PropKey::from(key),
+                py_value_to_value(&v)?,
+            ));
         }
-        return Ok(Value::Map(map));
+        return Ok(Value::Map(kglite_core::datatypes::PropMap::from_pairs(
+            pairs,
+        )));
     }
 
     // list / tuple → native Value::List (recursive). UNWIND, `IN`, and

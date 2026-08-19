@@ -241,6 +241,9 @@ fn node_properties(graph: &DirGraph, idx: NodeIndex) -> BTreeMap<String, Value> 
     else {
         return BTreeMap::new();
     };
+    // The two edits below are the only in-place mutations of a materialised
+    // node's property map in the engine. They run against a map this function
+    // solely owns, so `PropMap`'s copy-on-write mutation does not copy.
     let structural_type = materialized
         .properties
         .get("type")
@@ -262,9 +265,12 @@ fn node_properties(graph: &DirGraph, idx: NodeIndex) -> BTreeMap<String, Value> 
     {
         properties.remove("type");
     } else {
-        properties.insert("type".to_string(), Value::String(structural_type));
+        properties.insert("type", Value::String(structural_type));
     }
-    properties
+    // SQL export speaks `BTreeMap` to `build_table`; this is a cold,
+    // whole-graph dump path, so the re-key is not worth threading a second
+    // container type through the table builder.
+    properties.into()
 }
 
 /// Group the exported nodes by type, sorted by type then by id, mirroring

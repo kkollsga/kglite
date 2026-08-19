@@ -167,7 +167,7 @@ fn expected_node_0_properties() -> Vec<(&'static str, Value)> {
 /// order is half of what this pins and a map compare would still pass if the
 /// container stopped being ordered.
 fn assert_properties_exactly(node: &NodeValue, expected: &[(&str, Value)], what: &str) {
-    let got_keys: Vec<&str> = node.properties.keys().map(String::as_str).collect();
+    let got_keys: Vec<&str> = node.properties.keys().collect();
     let want_keys: Vec<&str> = expected.iter().map(|(k, _)| *k).collect();
     assert_eq!(
         got_keys, want_keys,
@@ -177,7 +177,7 @@ fn assert_properties_exactly(node: &NodeValue, expected: &[(&str, Value)], what:
     for (k, want) in expected {
         let got = node
             .properties
-            .get(*k)
+            .get(k)
             .unwrap_or_else(|| panic!("{what}: key `{k}` vanished"));
         assert_eq!(got, want, "{what}: value for key `{k}` changed");
     }
@@ -270,7 +270,7 @@ fn keys_equals_keys_of_properties_golden() {
                 other => panic!("keys(n) yielded a non-string: {other:?}"),
             })
             .collect();
-        let prop_names: Vec<&str> = props.keys().map(String::as_str).collect();
+        let prop_names: Vec<&str> = props.keys().collect();
         assert_eq!(
             key_names, prop_names,
             "keys(n) != keys(properties(n)) — the shared collection pass has \
@@ -296,11 +296,7 @@ fn return_relationship_record_golden() {
     assert_eq!(rel.rel_type, "KNOWS");
     assert_eq!(rel.start_id, 0);
     assert_eq!(rel.end_id, 1);
-    let got: Vec<(&str, &Value)> = rel
-        .properties
-        .iter()
-        .map(|(k, v)| (k.as_str(), v))
-        .collect();
+    let got: Vec<(&str, &Value)> = rel.properties.iter().collect();
     assert_eq!(
         got,
         vec![("since", &Value::Int64(2020))],
@@ -500,7 +496,7 @@ fn keys_invariant_holds_across_both_property_storage_shapes() {
                     .collect();
                 assert_eq!(
                     key_names,
-                    props.keys().map(String::as_str).collect::<Vec<_>>(),
+                    props.keys().collect::<Vec<_>>(),
                     "mode={mode:?}: keys(n) != keys(properties(n)) for a {label} node"
                 );
             }

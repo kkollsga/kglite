@@ -1,7 +1,8 @@
 // src/datatypes/values.rs
+use super::prop_map::PropMap;
 use chrono::{NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
@@ -94,10 +95,15 @@ pub enum Value {
     /// A string-keyed map of values.
     ///
     /// `{key: val, ...}` in Cypher syntax; `properties(n)`,
-    /// `RETURN n.*` produce this. `BTreeMap` chosen over `HashMap`
-    /// so equality / hashing / serialisation are deterministic by
-    /// key order (Cypher consumers expect stable iteration order).
-    Map(BTreeMap<String, Value>),
+    /// `RETURN n.*` produce this. [`PropMap`] — a sorted, `Arc`'d flat map
+    /// with shared keys — so equality / hashing / serialisation stay
+    /// deterministic by key order (Cypher consumers expect stable iteration
+    /// order) while `properties(n)` is a refcount bump on the node's own
+    /// property map rather than a rebuild of it. The container is the same one
+    /// `NodeValue`/`RelValue` hold precisely so that conversion is free; it
+    /// serializes with `BTreeMap`'s exact map framing (see
+    /// [`crate::datatypes::prop_map`]).
+    Map(PropMap),
     /// A date *and* time-of-day, second precision (`NaiveDateTime`).
     ///
     /// Complements [`Value::DateTime`] (date-only `NaiveDate`): use
@@ -134,9 +140,12 @@ pub struct NodeValue {
     /// list shape matches Neo4j/Bolt's `labels` field and forward-
     /// compatible-with-multi-label work (ROADMAP §5).
     pub labels: Vec<String>,
-    /// Properties as a string-keyed map. Key order is stable
-    /// (BTreeMap), so equality/hash/serialisation are deterministic.
-    pub properties: BTreeMap<String, Value>,
+    /// Properties as a string-keyed map. Key order is stable (sorted), so
+    /// equality/hash/serialisation are deterministic — and cloning the node
+    /// shares the map instead of deep-copying it. See
+    /// [`crate::datatypes::prop_map`] for the representation and the byte
+    /// contract it has to keep.
+    pub properties: PropMap,
 }
 
 /// Owned, serialisable shape for a relationship value. See
@@ -148,7 +157,7 @@ pub struct RelValue {
     pub start_id: u32,
     pub end_id: u32,
     pub rel_type: String,
-    pub properties: BTreeMap<String, Value>,
+    pub properties: PropMap,
 }
 
 /// Owned, serialisable shape for a path value (sequence of nodes +
@@ -197,7 +206,7 @@ pub enum BorrowedValue<'a> {
     /// A borrowed map of owned values. Map cells use the same shape in
     /// mixed columns and the overflow property bag, so borrowing the map
     /// lets streaming-disk saves preserve them without cloning first.
-    Map(&'a BTreeMap<String, Value>),
+    Map(&'a PropMap),
 }
 
 impl<'a> BorrowedValue<'a> {
@@ -378,12 +387,11 @@ impl Hash for Value {
             // RelValue/PathValue all derive Hash.
             Value::List(v) => v.hash(state),
             Value::Map(v) => {
-                // BTreeMap doesn't implement Hash in std. Hash the
-                // length, then each (key, value) pair in iteration
-                // order (BTreeMap iterates in sorted key order, so
-                // this is deterministic).
+                // Length then each (key, value) pair in sorted key order —
+                // written out rather than delegated so the hash does not
+                // silently change shape if `PropMap`'s backing container does.
                 v.len().hash(state);
-                for (k, val) in v {
+                for (k, val) in v.iter() {
                     k.hash(state);
                     val.hash(state);
                 }
@@ -506,7 +514,7 @@ pub enum ColumnData {
     /// is the list; values are heterogeneous, mirroring `Value::List`.
     List(Vec<Option<Vec<Value>>>),
     /// One `Value::Map` payload per cell (None = null / non-map cell).
-    Map(Vec<Option<BTreeMap<String, Value>>>),
+    Map(Vec<Option<PropMap>>),
 }
 
 #[derive(Debug)]
@@ -1534,9 +1542,9 @@ mod tests {
 
     #[test]
     fn test_promotion_map_and_scalar_becomes_string() {
-        let mut m = BTreeMap::new();
+        let mut m = std::collections::BTreeMap::new();
         m.insert("k".to_string(), Value::Int64(1));
-        let df = one_col(vec![Value::Map(m), Value::Int64(2)]);
+        let df = one_col(vec![Value::Map(m.into()), Value::Int64(2)]);
         assert_eq!(df.get_column_type("c"), Some(ColumnType::String));
         assert_eq!(df.get_value(0, "c"), Some(Value::String("{k: 1}".into())));
         assert_eq!(df.get_value(1, "c"), Some(Value::String("2".into())));
@@ -1566,14 +1574,14 @@ mod tests {
         let node = NodeValue {
             id: 1,
             labels: vec!["L".to_string()],
-            properties: BTreeMap::new(),
+            properties: PropMap::new(),
         };
         let rel = RelValue {
             id: 1,
             start_id: 1,
             end_id: 2,
             rel_type: "R".to_string(),
-            properties: BTreeMap::new(),
+            properties: PropMap::new(),
         };
         let representatives = vec![
             Value::UniqueId(1),
@@ -1590,7 +1598,7 @@ mod tests {
                 seconds: 3,
             },
             Value::List(vec![Value::Int64(1)]),
-            Value::Map(BTreeMap::new()),
+            Value::Map(PropMap::new()),
             Value::Node(Box::new(node)),
             Value::Relationship(Box::new(rel.clone())),
             Value::Path(Box::new(PathValue {

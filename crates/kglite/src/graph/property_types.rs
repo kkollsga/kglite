@@ -227,7 +227,6 @@ pub fn value_type_name(value: &Value) -> &'static str {
 mod tests {
     use super::*;
     use chrono::{NaiveDate, NaiveDateTime};
-    use std::collections::BTreeMap;
 
     /// One value of every `Value` shape a stored property can carry, plus the
     /// projection-only shapes, so the matrix below is exhaustive by
@@ -260,7 +259,7 @@ mod tests {
             ),
             ("point", Value::Point { lat: 1.0, lon: 2.0 }),
             ("list", Value::List(vec![Value::Int64(1)])),
-            ("map", Value::Map(BTreeMap::new())),
+            ("map", Value::Map(crate::datatypes::PropMap::new())),
         ]
     }
 

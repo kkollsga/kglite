@@ -406,14 +406,18 @@ impl<'a> CypherExecutor<'a> {
             return Ok(Value::Null);
         };
 
-        let mut properties = std::collections::BTreeMap::new();
+        // Appended, then sorted once by `PropMap::from_pairs`, whose dedup
+        // keeps the last write for a repeated key — the same precedence
+        // `BTreeMap::insert`/`extend` gave, where a later item in the
+        // projection list overrides an earlier one.
+        let mut properties: Vec<(PropKey, Value)> = Vec::with_capacity(items.len());
         for item in items {
             match item {
                 MapProjectionItem::Property(property) => {
-                    properties.insert(
-                        property.clone(),
+                    properties.push((
+                        PropKey::from(property.as_str()),
                         resolve_node_property(node, property, self.graph),
-                    );
+                    ));
                 }
                 MapProjectionItem::AllProperties => {
                     // Materialization includes aliases and columnar metadata that
@@ -423,11 +427,14 @@ impl<'a> CypherExecutor<'a> {
                     }
                 }
                 MapProjectionItem::Alias { key, expr } => {
-                    properties.insert(key.clone(), self.evaluate_expression(expr, row)?);
+                    properties.push((
+                        PropKey::from(key.as_str()),
+                        self.evaluate_expression(expr, row)?,
+                    ));
                 }
             }
         }
-        Ok(Value::Map(properties))
+        Ok(Value::Map(PropMap::from_pairs(properties)))
     }
 
     fn evaluate_map_literal(
@@ -435,11 +442,14 @@ impl<'a> CypherExecutor<'a> {
         entries: &[(String, Expression)],
         row: &ResultRow,
     ) -> Result<Value, String> {
-        let mut properties = std::collections::BTreeMap::new();
+        let mut properties: Vec<(PropKey, Value)> = Vec::with_capacity(entries.len());
         for (key, expression) in entries {
-            properties.insert(key.clone(), self.evaluate_expression(expression, row)?);
+            properties.push((
+                PropKey::from(key.as_str()),
+                self.evaluate_expression(expression, row)?,
+            ));
         }
-        Ok(Value::Map(properties))
+        Ok(Value::Map(PropMap::from_pairs(properties)))
     }
 
     fn evaluate_index_access(
@@ -746,7 +756,7 @@ impl<'a> CypherExecutor<'a> {
             return Ok(Value::Node(Box::new(crate::datatypes::values::NodeValue {
                 id: idx.index() as u32,
                 labels: vec![],
-                properties: std::collections::BTreeMap::new(),
+                properties: PropMap::new(),
             })));
         }
         if let Some(edge) = row.edge_bindings.get(name) {
@@ -759,7 +769,7 @@ impl<'a> CypherExecutor<'a> {
                     start_id: edge.source.index() as u32,
                     end_id: edge.target.index() as u32,
                     rel_type: String::new(),
-                    properties: std::collections::BTreeMap::new(),
+                    properties: PropMap::new(),
                 },
             )));
         }

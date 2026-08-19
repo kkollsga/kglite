@@ -190,10 +190,11 @@ fn schema_visualization_rows(
             .filter(|info| info.labels_or_types.iter().any(|l| l == label))
             .map(|info| info.name.clone())
             .collect();
-        let mut properties = BTreeMap::new();
-        properties.insert("name".to_string(), Value::String(label.clone()));
-        properties.insert("indexes".to_string(), names_on(index_names));
-        properties.insert("constraints".to_string(), names_on(constraint_names));
+        let properties = crate::datatypes::PropMap::from_iter([
+            ("name", Value::String(label.clone())),
+            ("indexes", names_on(index_names)),
+            ("constraints", names_on(constraint_names)),
+        ]);
         nodes.push(Value::Node(Box::new(NodeValue {
             id: ordinal as u32,
             labels: vec![label.clone()],
@@ -215,7 +216,7 @@ fn schema_visualization_rows(
                         start_id,
                         end_id,
                         rel_type: stat.connection_type.clone(),
-                        properties: BTreeMap::new(),
+                        properties: crate::datatypes::PropMap::new(),
                     })));
                     rel_id += 1;
                 }

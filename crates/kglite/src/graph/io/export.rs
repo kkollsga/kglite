@@ -424,9 +424,9 @@ pub fn to_text(graph: &DirGraph) -> String {
             if let Some(nv) =
                 crate::graph::languages::cypher::executor::helpers::materialize_node_value(i, graph)
             {
-                for (k, v) in nv.properties {
+                for (k, v) in nv.properties.iter() {
                     if k != "id" && k != "title" && k != "type" {
-                        props.insert(k, raw_string(&v));
+                        props.insert(k.to_string(), raw_string(v));
                     }
                 }
             }
