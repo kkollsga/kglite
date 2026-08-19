@@ -297,6 +297,10 @@
       "classification": "transitional"
     },
     {
+      "identity": "crates/kglite/src/graph/introspection/describe.rs::fn:write_connection_property:fn write_connection_property( xml: &mut String, graph: &DirGraph, rel_type: &str, prop_name: &str, stats: EdgePropertyAccum, truncate_at: Option<usize>, max_prop_values: usize, )::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
       "identity": "crates/kglite/src/graph/introspection/reporting.rs::fn:new:pub fn new( operation_type: String, expression: String, nodes_processed: usize, nodes_updated: usize, nodes_with_errors: usize, processing_time_ms: f64, is_aggregation: bool, ) -> Self::clippy::enum_variant_names",
       "classification": "transitional"
     },

@@ -2071,6 +2071,9 @@ fn describe_property_constraint(
 /// rendering, the high-cardinality sample fallback and the declared-constraint
 /// annotations are three separate decisions about one line, and none of them
 /// is about which connection type comes next.
+// lint-allowance reason: transitional — extraction artifact of the R4
+// ceiling split; the argument bundle is the walk's loop state, and folding
+// it into a struct is describe-refactor material, not a review blocker.
 #[allow(clippy::too_many_arguments)]
 fn write_connection_property(
     xml: &mut String,
