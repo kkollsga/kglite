@@ -9,6 +9,36 @@
 use super::*;
 use crate::graph::core::membership::MembershipSet;
 
+// The fused MATCH+WHERE row loop below stays **sequential, on measurement.**
+//
+// It was implemented partitioned (`into_par_iter` over the match vector,
+// order-preserving, gated to `limit_hint.is_none()` + no `distinct_node_hint`
+// + an unbounded `max_rows` + non-disk + non-spatial) and then removed,
+// because it is a *regression*: release, 1M-node graphgen fixture, 792k
+// surviving rows, min of 7, four runs —
+//
+//   MATCH (p:Person) WHERE p.score > 0.99 RETURN p.name
+//     sequential 188-203 ms   partitioned 241-246 ms   = 0.78-0.84x
+//   ... RETURN p.name, p.age
+//     sequential 203 ms       partitioned 236 ms       = 0.86x
+//
+// `pattern_match_to_row` allocates a `ResultRow` (three `Bindings` vectors)
+// per match, so the loop is allocator-bound: ten threads contend for the
+// allocator instead of sharing work. It is the same shape, and the same
+// verdict, as the projection fan-out that Q2 measured at 1.96x *slower* below
+// its crossover — see `parallel::PROJECTION_MIN_ROWS`. The scan feeding this
+// loop *is* partitioned and wins 4-6x; the win is simply not here.
+//
+// Three correctness gates were worked out for that attempt and are recorded
+// because they constrain any future one: `distinct_node_hint` cannot be
+// partitioned as written (its dedup tests `seen` *before* evaluating the
+// predicate, so a duplicate the sequential path never evaluates would be
+// evaluated by a partition that has not seen the original — turning a
+// predicate error into a divergence); `max_rows` cannot reproduce the
+// sequential error message (which names the count at which the cap was
+// crossed, an offset a partition cannot know); and `limit_hint` has no
+// partitioned stopping point.
+
 impl<'a> CypherExecutor<'a> {
     // ========================================================================
     // Variable resolution for pattern properties
@@ -190,6 +220,7 @@ impl<'a> CypherExecutor<'a> {
                     }
                     .set_deadline(self.deadline)
                     .set_cancel(self.cancel)
+                    .set_parallel(self.parallel)
                     .set_distinct_target(matcher_distinct_target);
                     let matches = executor.execute(pattern)?;
                     self.budget.check_work(matches.len(), "MATCH expansion")?;
@@ -330,7 +361,9 @@ impl<'a> CypherExecutor<'a> {
                                 self.params,
                             )
                             .set_deadline(self.deadline)
-                            .set_cancel(self.cancel);
+                            .set_cancel(self.cancel)
+                            .set_parallel(self.parallel)
+                            .set_parallel(self.parallel);
                             executor.execute(pat)?
                         };
                         self.budget.check_work(matches.len(), "MATCH join")?;
@@ -501,7 +534,9 @@ impl<'a> CypherExecutor<'a> {
                             self.params,
                         )
                         .set_deadline(self.deadline)
-                        .set_cancel(self.cancel);
+                        .set_cancel(self.cancel)
+                        .set_parallel(self.parallel)
+                        .set_parallel(self.parallel);
                         let matches = executor.execute(pat)?;
                         self.budget.check_work(matches.len(), "MATCH join")?;
                         for m in &matches {

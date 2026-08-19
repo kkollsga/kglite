@@ -1409,27 +1409,42 @@ impl<'a> CypherExecutor<'a> {
         }
 
         // RETURN was specified - use its columns
+        // Both branches **move** the cell values out of their rows, and both
+        // leave the emptied rows to be dropped on *this* thread.
+        //
+        // Two measurements shaped this. The parallel branch used to `clone()`
+        // each value, because `par_iter()` only hands out shared references —
+        // algorithmically worse than the sequential branch, and at 792k rows
+        // of two string columns (1.6M extra allocations) the fan-out measured
+        // *slower* than staying sequential, 0.93x. Switching to
+        // `into_par_iter()` fixed that and broke something else: consuming the
+        // vector also drops every `ResultRow` — four `Vec`s apiece — on the
+        // workers, and `return_id_10k`, whose values are `UniqueId`s too small
+        // for the clone to have cost anything, regressed **+46%** on that
+        // deallocation storm alone (`return_node_10k`, with whole nodes in the
+        // cells, gained 10.9% over the same change). `par_iter_mut` + `remove`
+        // takes the values without taking the rows, so both cells win.
+        let columns = std::mem::take(&mut result_set.columns);
         let rows: Vec<Vec<Value>> = if result_set.rows.len() >= parallel::PROJECTION_MIN_ROWS {
-            let cols = &result_set.columns;
-            let src = &result_set.rows;
+            let cols = &columns;
             // Dedicated pool + per-chunk deadline/cancel poll: materialising
             // 10M rows of cells is as uninterruptible as projecting them.
             let interrupt = ParallelInterrupt::new(|| self.check_deadline().err());
+            let src = &mut result_set.rows;
             parallel::install(|| {
-                src.par_iter()
+                src.par_iter_mut()
                     .enumerate()
                     .map(|(i, row)| {
                         interrupt.check(i)?;
                         Ok(cols
                             .iter()
-                            .map(|col| row.projected.get(col).cloned().unwrap_or(Value::Null))
+                            .map(|col| row.projected.remove(col).unwrap_or(Value::Null))
                             .collect())
                     })
                     .collect::<Result<Vec<Vec<Value>>, String>>()
             })?
         } else {
-            // Move values out of rows (no cloning)
-            let cols = &result_set.columns;
+            let cols = &columns;
             result_set
                 .rows
                 .into_iter()
@@ -1442,7 +1457,7 @@ impl<'a> CypherExecutor<'a> {
         };
 
         Ok(CypherResult {
-            columns: result_set.columns,
+            columns,
             rows,
             stats: None,
             profile: None,

@@ -749,7 +749,9 @@ impl<'a> CypherExecutor<'a> {
                         self.params,
                     )
                     .set_deadline(self.deadline)
-                    .set_cancel(self.cancel);
+                    .set_cancel(self.cancel)
+                    .set_parallel(self.parallel)
+                    .set_parallel(self.parallel);
                     let matches = executor.execute(pat)?;
 
                     let mut next_rows: Vec<ResultRow> = Vec::new();

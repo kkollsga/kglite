@@ -18,6 +18,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+use crate::graph::parallel::{self, ParallelInterrupt};
+
 use super::column_filter::{self, ColumnFilter};
 use super::pattern::{
     AnchorSide, ConnTypeFilter, EdgeDirection, EdgePattern, MatchBinding, NodePattern, PathHop,
@@ -29,6 +31,11 @@ use super::pattern::{
 /// so rayon overhead only pays off for very large match sets. Also avoids
 /// contention when multiple queries run concurrently (shared thread pool).
 const EXPANSION_RAYON_THRESHOLD: usize = 8192;
+
+/// Candidate-scan partitions per worker. More than one so a partition holding
+/// the expensive rows cannot stall the scan, few enough that concatenating them
+/// stays a rounding error. Matches the fused scan aggregate's factor.
+const CANDIDATE_PARTITIONS_PER_WORKER: usize = 4;
 
 /// One property matcher with its field name already alias-resolved, and that
 /// name's interned key precomputed.
@@ -345,6 +352,11 @@ pub struct PatternExecutor<'a> {
     /// At the last hop expansion, paths leading to already-seen target nodes
     /// are skipped, avoiding PatternMatch cloning and allocation overhead.
     distinct_target_var: Option<String>,
+    /// Opt-in parallel runtime for this execution (`ExecuteOptions::parallel`,
+    /// threaded down like `cancel`). Default `false`. A permission, not an
+    /// instruction: the candidate scan still applies its own runtime row ×
+    /// cost-class gate before it fans out.
+    parallel: bool,
     /// Holds the disk materialization arenas alive for this executor's
     /// lifetime (arena protocol in `storage/disk/graph.rs`, enforced by a
     /// debug assert). Acquired in every constructor so pattern matching is
@@ -373,6 +385,7 @@ impl<'a> PatternExecutor<'a> {
             deadline: None,
             cancel: None,
             distinct_target_var: None,
+            parallel: false,
             _arena_guard: graph.graph.begin_query(),
         }
     }
@@ -392,6 +405,7 @@ impl<'a> PatternExecutor<'a> {
             deadline: None,
             cancel: None,
             distinct_target_var: None,
+            parallel: false,
             _arena_guard: graph.graph.begin_query(),
         }
     }
@@ -411,6 +425,7 @@ impl<'a> PatternExecutor<'a> {
             deadline: None,
             cancel: None,
             distinct_target_var: None,
+            parallel: false,
             _arena_guard: graph.graph.begin_query(),
         }
     }
@@ -424,6 +439,14 @@ impl<'a> PatternExecutor<'a> {
     /// Set the cooperative-cancellation flag. Returns self for chaining.
     pub fn set_cancel(mut self, cancel: Option<&'static AtomicBool>) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    /// Opt this execution in to the parallel runtime. Returns self for
+    /// chaining, mirroring [`Self::set_cancel`] — both are per-query
+    /// properties the Cypher executor threads down from `ExecuteOptions`.
+    pub fn set_parallel(mut self, parallel: bool) -> Self {
+        self.parallel = parallel;
         self
     }
 
@@ -525,10 +548,10 @@ impl<'a> PatternExecutor<'a> {
                     .try_index_lookup(node_type, props)
                     .or_else(|| self.try_global_index_lookup_typed(node_type, props))
                 {
-                    let mut out = self.filter_node_candidates(indexed, None, &extra_keys)?;
+                    let mut out = self.filter_node_candidates(&indexed, None, &extra_keys)?;
                     if let Some(secondary) = secondary {
                         out.extend(self.filter_node_candidates(
-                            secondary.iter().copied(),
+                            secondary.as_slice(),
                             Some(props),
                             &extra_keys,
                         )?);
@@ -555,7 +578,7 @@ impl<'a> PatternExecutor<'a> {
             if pattern.properties.is_none() && extra_keys.is_empty() {
                 return Ok(candidates);
             }
-            self.filter_node_candidates(candidates, pattern.properties.as_ref(), &extra_keys)
+            self.filter_node_candidates(&candidates, pattern.properties.as_ref(), &extra_keys)
         } else if let Some(ref props) = pattern.properties {
             // Fast path: untyped node with {id: X} — cross-type id lookup.
             // Tries lookup_by_id_readonly on each type. When id_indices are built,
@@ -679,18 +702,154 @@ impl<'a> PatternExecutor<'a> {
     /// rebuilds it whenever the primary type changes.
     fn filter_node_candidates<'p>(
         &'p self,
-        candidates: impl IntoIterator<Item = NodeIndex>,
+        candidates: &[NodeIndex],
         props: Option<&'p HashMap<String, PropertyMatcher>>,
         extra_keys: &[InternedKey],
     ) -> Result<Vec<NodeIndex>, String> {
+        if self.may_fan_out_candidate_scan(candidates, props) {
+            return self.filter_candidates_parallel(candidates, props, extra_keys);
+        }
+        let interrupt = ParallelInterrupt::new(|| self.check_scan_deadline().err());
+        self.filter_candidate_partition(candidates, props, extra_keys, &interrupt)
+    }
+
+    /// Whether the candidate scan may fan out.
+    ///
+    /// **Write-freedom (D4) is provable here rather than argued.** Unlike the
+    /// Cypher scan operators, this loop evaluates `PropertyMatcher`s, never
+    /// Cypher expressions, so it cannot re-enter the interpreter: every call it
+    /// makes — `node_has_label`, `interner::try_resolve`, `column_store`,
+    /// `resolve_alias`, `ColumnFilter::compile`, `node_view`, `value_matches` —
+    /// is a plain read on the memory and mapped backends. There is nothing to
+    /// pre-warm and no spatial exclusion to make: the per-node spatial cache
+    /// belongs to the Cypher executor and is unreachable from here.
+    ///
+    /// **Disk stays excluded.** The arena hazard the rest of the engine has on
+    /// disk is genuinely bypassed on this path (`owned_node_data` materialises
+    /// into the caller's frame rather than parking a record in the shared query
+    /// arena), so this loop is closer to safe than most — but D7 defers disk
+    /// mode wholesale to its own phase, and "closer to safe" is not the
+    /// standard. Keeping the exclusion uniform with the Q2 operators also means
+    /// one rule to state to users: disk ignores `parallel`.
+    fn may_fan_out_candidate_scan(
+        &self,
+        candidates: &[NodeIndex],
+        props: Option<&HashMap<String, PropertyMatcher>>,
+    ) -> bool {
+        if !self.parallel || self.graph.graph.is_disk() {
+            return false;
+        }
+        // The column-filter test overrides are thread-local *controls*: a
+        // worker would not see them, so a forced row route would silently stop
+        // being forced and the differential sweep would compare the compiled
+        // filter with itself. Refuse to fan out while one is set — that closes
+        // the hole by construction rather than by convention.
+        if column_filter::scan_overrides_active() {
+            return false;
+        }
+        parallel::should_fan_out(
+            candidates.len(),
+            self.candidate_scan_cost(candidates, props),
+        )
+    }
+
+    /// Which side of the runtime gate this scan's per-candidate work sits on.
+    ///
+    /// The memo's own column-vs-row split *is* the cost class: when
+    /// `ColumnFilter::compile` accepts every matcher the test is a typed column
+    /// read and a compare (tens of ns), and when it declines the candidate goes
+    /// through `node_matches_resolved` — a `NodeView`, a property fetch and a
+    /// `Value` comparison per matcher, which is where the ~100× spread lives.
+    /// Probing the first candidate's type is enough: a mixed stream rebuilds
+    /// the memo per type, but the overwhelming majority of a scan is one type,
+    /// and mis-classifying a mixed stream only moves a threshold.
+    fn candidate_scan_cost(
+        &self,
+        candidates: &[NodeIndex],
+        props: Option<&HashMap<String, PropertyMatcher>>,
+    ) -> parallel::CostClass {
+        let Some(props) = props else {
+            // No property matchers at all — the loop is a label check per
+            // candidate, the cheapest shape there is.
+            return parallel::CostClass::Compiled;
+        };
+        let compiled = candidates
+            .first()
+            .and_then(|&idx| self.graph.graph.node_weight(idx))
+            .and_then(|data| self.build_type_scan_memo(data.node_type, props))
+            .is_some_and(|memo| memo.filter.is_some());
+        if compiled {
+            parallel::CostClass::Compiled
+        } else {
+            parallel::CostClass::Interpreted
+        }
+    }
+
+    /// Fan the candidate scan across the query pool.
+    ///
+    /// Order-preserving by construction (D5): `par_chunks` partitions the
+    /// candidate vector by index range, `collect` on an indexed parallel
+    /// iterator restores partition order, and the partitions are concatenated
+    /// in that order — so the surviving candidates come back in exactly the
+    /// order the sequential scan would have produced. That matters more here
+    /// than almost anywhere else in the engine: bucket order of an
+    /// un-`ORDER BY`'d MATCH is a documented, test-gated invariant.
+    fn filter_candidates_parallel<'p>(
+        &'p self,
+        candidates: &[NodeIndex],
+        props: Option<&'p HashMap<String, PropertyMatcher>>,
+        extra_keys: &[InternedKey],
+    ) -> Result<Vec<NodeIndex>, String> {
+        #[cfg(test)]
+        parallel::PARALLEL_CANDIDATE_SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let interrupt = ParallelInterrupt::new(|| self.check_scan_deadline().err());
+        let partitions = (rayon::current_num_threads() * CANDIDATE_PARTITIONS_PER_WORKER).max(1);
+        let chunk_len = candidates.len().div_ceil(partitions).max(1);
+        let parts: Vec<(Vec<NodeIndex>, usize)> = parallel::install(|| {
+            candidates
+                .par_chunks(chunk_len)
+                .map(|chunk| {
+                    // Difference the compiled-filter meter around this
+                    // partition so the rows a worker answered for are folded
+                    // back into the measuring thread below. Compiles to
+                    // nothing outside `cfg(test)`.
+                    let before = column_filter::local_rows_filtered();
+                    let kept =
+                        self.filter_candidate_partition(chunk, props, extra_keys, &interrupt)?;
+                    Ok((kept, column_filter::local_rows_filtered() - before))
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })?;
+        let mut out = Vec::with_capacity(parts.iter().map(|(part, _)| part.len()).sum());
+        let mut filtered = 0usize;
+        for (part, rows) in parts {
+            filtered += rows;
+            out.extend(part);
+        }
+        column_filter::add_rows_filtered(filtered);
+        Ok(out)
+    }
+
+    /// Filter one contiguous range of candidates. Owns its [`TypeScanMemo`] —
+    /// the memo is per-node-type mutable state, so a partition cannot share
+    /// one.
+    fn filter_candidate_partition<'p, F>(
+        &'p self,
+        candidates: &[NodeIndex],
+        props: Option<&'p HashMap<String, PropertyMatcher>>,
+        extra_keys: &[InternedKey],
+        interrupt: &ParallelInterrupt<F>,
+    ) -> Result<Vec<NodeIndex>, String>
+    where
+        F: Fn() -> Option<String> + Sync,
+    {
         let mut out = Vec::new();
         let mut memo: Option<TypeScanMemo<'p>> = None;
         // Resolved once: only the disk backend materialises into an arena.
         let scoped_materialization = self.graph.graph.is_disk();
-        for (i, idx) in candidates.into_iter().enumerate() {
-            if i & 0xFFF == 0 {
-                self.check_scan_deadline()?;
-            }
+        for (i, &idx) in candidates.iter().enumerate() {
+            interrupt.check(i)?;
             if !extra_keys.is_empty()
                 && !extra_keys
                     .iter()

@@ -65,12 +65,29 @@ pub(crate) enum CostClass {
 }
 
 /// Row counts at which a scan/aggregate region is worth fanning out, by cost
-/// class. Measured on the 1M-node graphgen fixture (see
-/// `tests/benchmarks/test_bench_parallel_runtime.py`); both sit far above the
-/// point where rayon's own task overhead is repaid, because the thing that
-/// actually has to be repaid is the merge of per-partition state.
-pub(crate) const PARALLEL_MIN_ROWS_COMPILED: usize = 200_000;
-pub(crate) const PARALLEL_MIN_ROWS_INTERPRETED: usize = 20_000;
+/// class.
+///
+/// Both are measured crossovers, not guesses. Sweeping the gate open and
+/// timing `MATCH (n:Item {cat: …}) RETURN count(*)` (compiled) and
+/// `… WHERE n.name CONTAINS '77' RETURN count(*)` (interpreted) against the
+/// sequential path, release, min of 30, 4P+6E M4:
+///
+/// | rows | compiled | interpreted |
+/// |---|---|---|
+/// | 5 000   | 1.59x | 3.15x |
+/// | 10 000  | 2.10x | 3.47x |
+/// | 20 000  | 2.77x | 4.02x |
+/// | 50 000  | 3.99x | 5.10x |
+/// | 200 000 | 4.90x | 5.78x |
+/// | 500 000 | 5.21x | 6.13x |
+///
+/// The scan path wins at every size measured, so these thresholds are set
+/// where the win is unambiguous rather than where it first appears — the
+/// numbers above are scan-dominated shapes, and a query whose scan is a small
+/// fraction of its work would pay the pool hand-off without collecting the
+/// benefit.
+pub(crate) const PARALLEL_MIN_ROWS_COMPILED: usize = 20_000;
+pub(crate) const PARALLEL_MIN_ROWS_INTERPRETED: usize = 5_000;
 
 /// The runtime gate. `rows` is the real candidate count, never a planner
 /// estimate — NDV goes blind above 200k nodes, which is exactly where this
@@ -173,6 +190,19 @@ pub(crate) static PARALLEL_SCANS: std::sync::atomic::AtomicUsize =
 #[cfg(test)]
 pub(crate) fn parallel_scans() -> usize {
     PARALLEL_SCANS.load(Ordering::Relaxed)
+}
+
+/// Parallel *candidate-scan* regions entered (`filter_node_candidates`),
+/// counted separately from the aggregate's so a test can tell which operator
+/// fanned out. Atomic for the same reason as [`PARALLEL_SCANS`].
+#[cfg(test)]
+pub(crate) static PARALLEL_CANDIDATE_SCANS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Snapshot of [`PARALLEL_CANDIDATE_SCANS`].
+#[cfg(test)]
+pub(crate) fn parallel_candidate_scans() -> usize {
+    PARALLEL_CANDIDATE_SCANS.load(Ordering::Relaxed)
 }
 
 /// The message used when a region reported failure without one — only

@@ -323,12 +323,38 @@ impl<'a> ColumnFilter<'a> {
 #[cfg(test)]
 thread_local! {
     /// Force every scan back onto the row route.
+    ///
+    /// Deliberately still thread-local: it is a *control*, and two sweeps
+    /// running concurrently on different test threads must not see each
+    /// other's override. What that costs is that a scan reading it on a rayon
+    /// worker would see the default — which is why
+    /// `PatternExecutor::may_fan_out_candidate_scan` refuses to fan out while
+    /// either override is set. A forced row route that silently stopped
+    /// forcing would make the differential sweep compare the compiled filter
+    /// with itself.
     static FORCE_ROW_SCAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Compile without the numeric slice hoist — the A/B for that half alone.
+    /// Thread-local for the same reason as [`FORCE_ROW_SCAN`].
     static NO_SLICE_HOIST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Rows the compiled filter has answered for, on this thread. The
-    /// non-vacuity meter: a differential sweep whose queries never reach a
-    /// compiled filter compares the row route with itself.
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Rows the compiled filter has answered for, on this thread. The non-vacuity
+    /// meter: a differential sweep whose queries never reach a compiled filter
+    /// compares the row route with itself.
+    ///
+    /// **Still thread-local, deliberately — and the parallel scan folds its
+    /// workers' rows back into it** (see [`local_rows_filtered`] /
+    /// [`add_rows_filtered`]). R8 says a meter a worker cannot increment reads
+    /// zero and turns its assertion into decoration; the obvious fix is a global
+    /// `AtomicUsize`, and it was tried and reverted, because `sweep` asserts the
+    /// count is **byte-identical** across the forced row route — that *zero*
+    /// additional rows reached a compiled filter. `cargo test` runs ~2000 tests on
+    /// several threads, and any of them running a filtered scan bumps a global
+    /// counter inside that window; the assertion failed non-deterministically the
+    /// moment the two sweep tests ran together. Folding deltas keeps the meter
+    /// worker-visible *and* keeps every reading attributable to one thread.
     static ROWS_FILTERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -341,6 +367,42 @@ pub(crate) fn rows_filtered() -> usize {
 #[cfg(test)]
 pub(crate) fn reset_rows_filtered() {
     ROWS_FILTERED.set(0);
+}
+
+/// This thread's running count, for a parallel region to difference around one
+/// partition. Always `0` outside tests, so the fold compiles away entirely.
+#[inline]
+pub(super) fn local_rows_filtered() -> usize {
+    #[cfg(test)]
+    {
+        ROWS_FILTERED.get()
+    }
+    #[cfg(not(test))]
+    {
+        0
+    }
+}
+
+/// Fold a parallel region's workers' rows into the measuring thread's count.
+#[inline]
+pub(super) fn add_rows_filtered(_rows: usize) {
+    #[cfg(test)]
+    ROWS_FILTERED.set(ROWS_FILTERED.get() + _rows);
+}
+
+/// Whether either behaviour override is active on this thread. The candidate
+/// scan consults it before fanning out — see [`FORCE_ROW_SCAN`].
+#[cfg(test)]
+#[inline]
+pub(super) fn scan_overrides_active() -> bool {
+    FORCE_ROW_SCAN.get() || NO_SLICE_HOIST.get()
+}
+
+/// No overrides exist outside tests, so nothing constrains the fan-out.
+#[cfg(not(test))]
+#[inline]
+pub(super) fn scan_overrides_active() -> bool {
+    false
 }
 
 #[cfg(test)]

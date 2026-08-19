@@ -33,6 +33,25 @@ SCAN_AGG_COUNT = "MATCH (p:Person) WHERE p.score > 0.5 RETURN count(*) AS n"
 SCAN_AGG_GROUPED = "MATCH (p:Person) WHERE p.score > 0.5 RETURN p.joined_year AS y, count(*) AS n, avg(p.age) AS a"
 
 
+# Scan + filter. The first filters in the *candidate scan* (an inline property
+# map on the pattern is what the planner rewrites a scannable equality to); the
+# second keeps the predicate in the fused operator; the third adds a per-row
+# projection on top, which is the allocation-bound half.
+SCAN_FILTER_PROPERTY = "MATCH (p:Person {{joined_year: {year}}}) RETURN count(*) AS n"
+SCAN_FILTER_WHERE = "MATCH (p:Person) WHERE p.name CONTAINS 'a1' RETURN count(*) AS n"
+SCAN_FILTER_PROJECT = "MATCH (p:Person) WHERE p.score > 0.99 RETURN p.name AS nm, p.age AS a"
+
+
+@pytest.fixture(scope="session")
+def joined_year(parallel_graph):
+    """A `joined_year` the fixture actually carries, so the property scan is
+    not measuring an empty result."""
+    rows = parallel_graph.cypher(
+        "MATCH (p:Person) RETURN p.joined_year AS y, count(*) AS n ORDER BY n DESC LIMIT 1"
+    ).to_list()
+    return rows[0]["y"]
+
+
 @pytest.fixture(scope="session")
 def parallel_graph():
     """~1M nodes / ~11M edges. Session-scoped: the build dominates otherwise."""
@@ -73,3 +92,27 @@ def test_bench_across_query_throughput_control(benchmark, parallel_graph):
             thread.join()
 
     benchmark(eight_concurrent_readers)
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("parallel", [False, True], ids=["serial", "parallel"])
+def test_bench_parallel_scan_filter_property(benchmark, parallel_graph, joined_year, parallel):
+    """Filtering happens inside the partitioned candidate scan."""
+    query = SCAN_FILTER_PROPERTY.format(year=joined_year)
+    benchmark(parallel_graph.cypher, query, parallel=parallel)
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("parallel", [False, True], ids=["serial", "parallel"])
+def test_bench_parallel_scan_filter_where(benchmark, parallel_graph, parallel):
+    """Interpreted text predicate — the expensive-per-row cost class."""
+    benchmark(parallel_graph.cypher, SCAN_FILTER_WHERE, parallel=parallel)
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("parallel", [False, True], ids=["serial", "parallel"])
+def test_bench_parallel_scan_filter_project(benchmark, parallel_graph, parallel):
+    """Scan + filter + per-row projection. The projection half allocates a
+    bindings map per surviving row, so this cell is where the scan's win and
+    the row loop's allocation cost are visible together."""
+    benchmark(parallel_graph.cypher, SCAN_FILTER_PROJECT, parallel=parallel)

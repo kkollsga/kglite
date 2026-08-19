@@ -49,6 +49,27 @@ def _frame(rows: int) -> pd.DataFrame:
     )
 
 
+# The candidate scan's compiled cost class (a bulk-loaded graph puts property
+# matchers on a `ColumnStore`, which is the compiled route) needs 200_000
+# candidates before it fans out. Scan+filter shapes therefore get their own,
+# larger fixture; reusing the 25k one would compare two serial runs.
+SCAN_ROWS = 200_137
+
+# Scan + filter shapes, spanning both cost classes and the candidate sources
+# the scan can draw from: compiled equality and range predicates, interpreted
+# text predicates, an IN set, an id anchor, and a multi-label pattern.
+SCAN_QUERIES = [
+    "MATCH (n:Item {cat: 'cat_3'}) RETURN n.name AS nm",
+    "MATCH (n:Item) WHERE n.cat = 'cat_3' RETURN n.name AS nm",
+    "MATCH (n:Item) WHERE n.value > 500 RETURN n.name AS nm",
+    "MATCH (n:Item) WHERE n.value >= 100 AND n.value < 200 RETURN n.name AS nm",
+    "MATCH (n:Item) WHERE n.name STARTS WITH 'Item_19' RETURN n.name AS nm",
+    "MATCH (n:Item) WHERE n.name CONTAINS '999' RETURN n.name AS nm",
+    "MATCH (n:Item) WHERE n.cat IN ['cat_1', 'cat_5'] RETURN n.name AS nm",
+    "MATCH (n:Item) WHERE n.cat = 'cat_2' RETURN count(*) AS n",
+]
+
+
 def _build(storage: str | None = None) -> KnowledgeGraph:
     graph = KnowledgeGraph(storage=storage) if storage else KnowledgeGraph()
     graph.add_nodes(_frame(ROWS), "Item", "nid", "name")
@@ -103,3 +124,33 @@ def test_disk_mode_serves_parallel_requests_serially(tmp_path):
     graph.add_nodes(_frame(ROWS), "Item", "nid", "name")
     query = QUERIES[0]
     assert graph.cypher(query, parallel=True).to_list() == graph.cypher(query, parallel=False).to_list()
+
+
+@pytest.fixture(scope="module")
+def scan_graph() -> KnowledgeGraph:
+    """Above the *compiled* cost class's row gate — see `SCAN_ROWS`."""
+    graph = KnowledgeGraph()
+    graph.add_nodes(_frame(SCAN_ROWS), "Item", "nid", "name")
+    return graph
+
+
+@pytest.mark.parametrize("query", SCAN_QUERIES)
+def test_parallel_scan_filter_matches_serial(scan_graph, query):
+    """Scan + filter, in order.
+
+    Row order is the point: bucket order of an un-``ORDER BY``'d MATCH is a
+    documented invariant, and partitioning the candidate scan is exactly the
+    change that could reorder it while a set comparison stayed green. These are
+    list comparisons.
+    """
+    serial = scan_graph.cypher(query, parallel=False).to_list()
+    parallel = scan_graph.cypher(query, parallel=True).to_list()
+    assert serial == parallel
+    assert serial, "fixture produced no rows — the comparison would be vacuous"
+
+
+def test_parallel_scan_filter_id_anchor_is_unaffected(scan_graph):
+    """An id-anchored lookup never reaches the partitioned scan (it resolves
+    through the index), and must be identical regardless."""
+    query = "MATCH (n:Item {nid: 4242}) RETURN n.name AS nm"
+    assert scan_graph.cypher(query, parallel=True).to_list() == scan_graph.cypher(query, parallel=False).to_list()

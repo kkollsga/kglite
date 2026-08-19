@@ -32,6 +32,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Disk-mode graphs and graphs with a spatial configuration ignore the flag and
   run sequentially rather than refusing it, so portable code is unaffected.
 
+  The candidate **scan and filter** honours it too — the node scan behind
+  `MATCH (n:Label {prop: …})` and `MATCH (n:Label) WHERE …`. Measured
+  release-mode on a 1M-node graph, two agreeing runs: scan + filter + count
+  **5.4x** (35.4 ms → 6.6 ms), the same with a grouped aggregate **5.4x**
+  (69.1 ms → 12.8 ms), a property-filtered scan **5.2x** (8.2 ms → 1.6 ms), and
+  an interpreted text predicate **6.5x** (30.2 ms → 4.6 ms). Row order is
+  preserved exactly: partitions are contiguous candidate ranges concatenated in
+  candidate order, so the bucket order of an un-`ORDER BY`'d `MATCH` is
+  unchanged.
+
+  A query whose cost is dominated by *building* result rows rather than
+  scanning them sees little of this (1.08x on a 792k-row projecting query) —
+  row construction allocates per row and does not scale; the same reason the
+  projection fan-out has a row threshold.
+
 - **Property-type constraints — `CREATE CONSTRAINT ... REQUIRE n.prop IS :: TYPE`
   (and the `IS TYPED TYPE` spelling) are now declared and enforced.** The
   statement previously parsed and was refused with an explanation; it now
@@ -129,6 +144,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this.
 
 ### Changed
+
+- **Result materialisation is up to 1.5x faster on large result sets.** The
+  parallel branch that turns projected rows into output cells *cloned* every
+  value, where the sequential branch moved them — so above the fan-out
+  threshold it did strictly more work than below it. It now moves the values
+  without consuming the rows, which keeps their deallocation off the worker
+  threads: `RETURN n` over 10 000 nodes is **33.5% faster** (3.12 ms →
+  2.07 ms). (Consuming the rows as well was measured too, and made a
+  `RETURN id(n)` over the same nodes **46% slower** — the row shells' 40 000
+  deallocations landing on contending workers — so both halves of this are
+  load-bearing.)
 
 - **Small and mid-size query projections no longer fan out, and got up to 2x
   faster as a result.** The RETURN/WITH projection, window projection and result

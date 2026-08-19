@@ -161,7 +161,9 @@ fn parallel_result_materialisation_observes_the_cancel_flag() {
 
 // ── Parallel fused node-scan aggregate (Q2) ─────────────────────────────────
 
-use crate::graph::parallel::{parallel_scans, PARALLEL_MIN_ROWS_INTERPRETED};
+use crate::graph::parallel::{
+    parallel_scans, PARALLEL_MIN_ROWS_COMPILED, PARALLEL_MIN_ROWS_INTERPRETED,
+};
 
 /// [`parallel_scans`] is a process-global counter and `cargo test` runs these
 /// in parallel threads, so a bare before/after read is a race — one test's
@@ -374,4 +376,240 @@ fn parallel_is_off_in_the_default_execute_options() {
     // directly rather than going through a session.
     let graph = build_test_graph();
     assert!(!CypherExecutor::with_params(&graph, &params, None).parallel);
+}
+
+// ── Parallel candidate scan + filter (Q3) ───────────────────────────────────
+
+use crate::graph::parallel::parallel_candidate_scans;
+
+/// The same `Item` shape as [`scan_graph`], but bulk-loaded so the properties
+/// land in a `ColumnStore` — which is what lets `ColumnFilter::compile` accept
+/// the matcher and the scan take the column route. `scan_graph` adds nodes one
+/// at a time and stays on row storage.
+fn columnar_scan_graph(n: usize) -> DirGraph {
+    use crate::datatypes::DataFrame;
+    let mut graph = DirGraph::new();
+    let columns: Vec<String> = ["nid", "name", "value", "cat"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let rows: Vec<Vec<Value>> = (0..n)
+        .map(|i| {
+            vec![
+                Value::Int64(i as i64),
+                Value::String(format!("Item_{i}")),
+                Value::Int64((i % 1000) as i64),
+                Value::String(format!("cat_{}", i % 7)),
+            ]
+        })
+        .collect();
+    let df = DataFrame::from_cypher_rows(columns, rows).unwrap();
+    crate::graph::mutation::maintain::add_nodes(
+        &mut graph,
+        df,
+        "Item".to_string(),
+        "nid".to_string(),
+        Some("name".to_string()),
+        None,
+    )
+    .unwrap();
+    graph
+}
+
+/// Scan+filter shapes. Every one routes through `filter_node_candidates`: an
+/// inline property map on the node pattern is what a `WHERE` on a scanned
+/// property is rewritten to.
+const SCAN_FILTER_QUERIES: &[&str] = &[
+    "MATCH (n:Item {cat: 'cat_3'}) RETURN n.name AS nm",
+    "MATCH (n:Item) WHERE n.cat = 'cat_3' RETURN n.name AS nm",
+    "MATCH (n:Item) WHERE n.value > 500 RETURN n.name AS nm",
+    "MATCH (n:Item) WHERE n.name STARTS WITH 'Item_1' RETURN n.name AS nm",
+    "MATCH (n:Item) WHERE n.name CONTAINS '99' RETURN n.name AS nm",
+    "MATCH (n:Item) WHERE n.cat IN ['cat_1', 'cat_5'] RETURN n.name AS nm",
+    "MATCH (n:Item) WHERE n.value >= 100 AND n.value < 200 RETURN n.name AS nm",
+];
+
+/// **Row order is the assertion, not row content.** Bucket order of an
+/// un-`ORDER BY`'d MATCH is a documented, test-gated invariant, and a
+/// partitioned scan is exactly the change that could break it while every
+/// set-comparison stayed green. These compare `Vec`s, in order.
+#[test]
+fn parallel_candidate_scan_matches_serial_in_order() {
+    let _meter = meter_guard();
+    let graph = scan_graph(PARALLEL_MIN_ROWS_INTERPRETED + 137);
+    let before = parallel_candidate_scans();
+    for query in SCAN_FILTER_QUERIES {
+        let serial = run(&graph, query, false);
+        let parallel = run(&graph, query, true);
+        assert_eq!(serial.columns, parallel.columns, "columns differ: {query}");
+        assert_eq!(
+            serial.rows, parallel.rows,
+            "parallel candidate scan diverged from serial (values or ORDER): {query}"
+        );
+        assert!(!serial.rows.is_empty(), "vacuous fixture for {query}");
+    }
+    assert!(
+        parallel_candidate_scans() > before,
+        "no query fanned out its candidate scan — the order assertions above \
+         compared two serial runs"
+    );
+}
+
+/// Secondary labels union a second candidate bucket into the scan, and the
+/// union's order is part of the same invariant.
+#[test]
+fn parallel_candidate_scan_preserves_multi_label_order() {
+    let _meter = meter_guard();
+    let mut graph = scan_graph(PARALLEL_MIN_ROWS_INTERPRETED + 137);
+    // Give every seventh node a secondary label, so the scan walks the
+    // primary type index and then the secondary bucket.
+    let tagged: Vec<petgraph::graph::NodeIndex> = graph
+        .type_indices
+        .get("Item")
+        .expect("Item index")
+        .to_vec()
+        .into_iter()
+        .step_by(7)
+        .collect();
+    graph.secondary_label_index.insert(
+        crate::graph::schema::InternedKey::from_str("Tagged"),
+        tagged,
+    );
+    graph.has_secondary_labels = true;
+
+    let before = parallel_candidate_scans();
+    for query in [
+        "MATCH (n:Item:Tagged) RETURN n.name AS nm",
+        "MATCH (n:Item) WHERE n.value > 100 RETURN n.name AS nm",
+    ] {
+        assert_eq!(
+            run(&graph, query, false).rows,
+            run(&graph, query, true).rows,
+            "multi-label scan order diverged: {query}"
+        );
+    }
+    assert!(parallel_candidate_scans() > before, "nothing fanned out");
+}
+
+/// The gate, not the flag, decides — and opting out never fans out.
+#[test]
+fn candidate_scan_respects_the_gate_and_the_opt_in() {
+    let _meter = meter_guard();
+    let query = SCAN_FILTER_QUERIES[0];
+
+    let small = scan_graph(PARALLEL_MIN_ROWS_INTERPRETED - 1);
+    let before = parallel_candidate_scans();
+    run(&small, query, true);
+    assert_eq!(
+        parallel_candidate_scans(),
+        before,
+        "a below-gate candidate scan fanned out"
+    );
+
+    let large = scan_graph(PARALLEL_MIN_ROWS_INTERPRETED + 137);
+    let before = parallel_candidate_scans();
+    run(&large, query, false);
+    assert_eq!(
+        parallel_candidate_scans(),
+        before,
+        "parallel=false fanned out its candidate scan"
+    );
+}
+
+/// The compiled-filter meter must survive the fan-out.
+///
+/// `ROWS_FILTERED` is thread-local and the scan now runs on rayon workers, so
+/// without the delta fold in `filter_candidates_parallel` this reads zero and
+/// every differential that depends on it compares the row route with itself.
+#[test]
+fn compiled_filter_meter_sees_rows_answered_on_workers() {
+    let _meter = meter_guard();
+    // Columnar storage means the matcher compiles, which puts this scan on
+    // the *compiled* side of the gate — the higher row threshold.
+    let graph = columnar_scan_graph(PARALLEL_MIN_ROWS_COMPILED + 137);
+    let query = "MATCH (n:Item {cat: 'cat_3'}) RETURN n.name AS nm";
+
+    // Serial first: establishes that this query reaches a compiled filter at
+    // all, so a zero reading from the parallel run means the fold is broken
+    // rather than that the shape never compiles.
+    crate::graph::core::pattern_matching::column_filter::reset_rows_filtered();
+    let serial = run(&graph, query, false);
+    let serial_rows = crate::graph::core::pattern_matching::column_filter::rows_filtered();
+    assert!(
+        serial_rows > 0,
+        "the serial run never reached a compiled filter — pick another shape"
+    );
+
+    let before = parallel_candidate_scans();
+    crate::graph::core::pattern_matching::column_filter::reset_rows_filtered();
+    let parallel = run(&graph, query, true);
+    let parallel_rows = crate::graph::core::pattern_matching::column_filter::rows_filtered();
+    assert!(
+        parallel_candidate_scans() > before,
+        "the query did not fan out — this test is not measuring the worker fold"
+    );
+    assert_eq!(
+        parallel_rows, serial_rows,
+        "the compiled-filter meter lost rows answered on worker threads"
+    );
+    assert_eq!(serial.rows, parallel.rows);
+}
+
+/// The candidate scan's own interrupt poll.
+///
+/// Driven through `PatternExecutor::find_matching_nodes_pub` rather than a
+/// whole Cypher query, and deliberately so: routed through `execute`, a
+/// cancellation raised during the scan is *also* seen by the clause pipeline
+/// afterwards, so the test passed with the scan's poll deleted — it was
+/// measuring a later checkpoint. Calling the scan directly leaves its own poll
+/// as the only thing that can return this error.
+///
+/// The flipper spins on the candidate-scan meter, bumped immediately before
+/// the fan-out, so the flag is set with the whole scan still ahead.
+///
+/// Red-first: with `ParallelInterrupt::check` removed from
+/// `filter_candidate_partition` this returns nodes instead of `Err`.
+#[test]
+fn parallel_candidate_scan_is_interruptible_mid_scan() {
+    use crate::graph::core::pattern_matching::{NodePattern, PatternExecutor, PropertyMatcher};
+
+    let _meter = meter_guard();
+    static MID_SCAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    MID_SCAN.store(false, std::sync::atomic::Ordering::Relaxed);
+
+    let graph = scan_graph(PARALLEL_MIN_ROWS_INTERPRETED * 10);
+    let pattern = NodePattern {
+        variable: Some("n".to_string()),
+        node_type: Some("Item".to_string()),
+        extra_labels: Vec::new(),
+        properties: Some(HashMap::from([(
+            "cat".to_string(),
+            PropertyMatcher::Equals(Value::String("cat_3".to_string())),
+        )])),
+        label_params: Vec::new(),
+    };
+
+    let before = parallel_candidate_scans();
+    let flipper = std::thread::spawn(move || {
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while parallel_candidate_scans() == before && std::time::Instant::now() < give_up {
+            std::hint::spin_loop();
+        }
+        MID_SCAN.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    let outcome = PatternExecutor::new(&graph, None)
+        .set_parallel(true)
+        .set_cancel(Some(&MID_SCAN))
+        .find_matching_nodes_pub(&pattern);
+    flipper.join().expect("flipper thread");
+
+    assert!(
+        parallel_candidate_scans() > before,
+        "the scan never fanned out"
+    );
+    assert_eq!(
+        outcome.err(),
+        Some("Query cancelled".to_string()),
+        "the parallel candidate scan ran to completion through a mid-scan cancellation"
+    );
 }

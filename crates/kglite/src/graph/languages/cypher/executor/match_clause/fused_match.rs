@@ -66,7 +66,9 @@ impl<'a> CypherExecutor<'a> {
                         self.params,
                     )
                     .set_deadline(self.deadline)
-                    .set_cancel(self.cancel);
+                    .set_cancel(self.cancel)
+            .set_parallel(self.parallel)
+            .set_parallel(self.parallel);
                     let matches = executor.execute(pattern)?;
 
                     for m in &matches {
@@ -187,7 +189,9 @@ impl<'a> CypherExecutor<'a> {
         };
         let executor = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
             .set_deadline(self.deadline)
-            .set_cancel(self.cancel);
+            .set_cancel(self.cancel)
+            .set_parallel(self.parallel)
+            .set_parallel(self.parallel);
         let group_matches = executor.execute(&group_only_pattern)?;
         let mut total = 0i64;
 
@@ -480,7 +484,9 @@ impl<'a> CypherExecutor<'a> {
                 let executor =
                     PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
                         .set_deadline(self.deadline)
-                        .set_cancel(self.cancel);
+                        .set_cancel(self.cancel)
+            .set_parallel(self.parallel)
+            .set_parallel(self.parallel);
                 Some(executor.execute(&group_only_pattern)?)
             } else {
                 None
@@ -1163,7 +1169,9 @@ impl<'a> CypherExecutor<'a> {
                 let executor =
                     PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
                         .set_deadline(self.deadline)
-                        .set_cancel(self.cancel);
+                        .set_cancel(self.cancel)
+            .set_parallel(self.parallel)
+            .set_parallel(self.parallel);
                 let group_matches = executor.execute(&group_only_pattern)?;
                 let mut rows = Vec::with_capacity(group_matches.len());
                 for (scan_count, m) in group_matches.iter().enumerate() {
@@ -1214,6 +1222,7 @@ impl<'a> CypherExecutor<'a> {
         PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
             .set_deadline(self.deadline)
             .set_cancel(self.cancel)
+            .set_parallel(self.parallel)
             .find_matching_nodes_pub(node_pattern)
     }
 
@@ -1769,7 +1778,9 @@ impl<'a> CypherExecutor<'a> {
         // shared variable per group key.
         let executor = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
             .set_deadline(self.deadline)
-            .set_cancel(self.cancel);
+            .set_cancel(self.cancel)
+            .set_parallel(self.parallel)
+            .set_parallel(self.parallel);
         let count_pattern: &crate::graph::core::pattern_matching::Pattern =
             if let Some(m2) = secondary_match {
                 &m2.patterns[0]

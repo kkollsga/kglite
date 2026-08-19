@@ -186,7 +186,9 @@ impl<'a> CypherExecutor<'a> {
             let executor =
                 PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
                     .set_deadline(self.deadline)
-                    .set_cancel(self.cancel);
+                    .set_cancel(self.cancel)
+                    .set_parallel(self.parallel)
+                    .set_parallel(self.parallel);
             let source_nodes = executor.find_matching_nodes_pub(source_pattern)?;
             let target_nodes = executor.find_matching_nodes_pub(target_pattern)?;
             let mut out = Vec::with_capacity(source_nodes.len() * target_nodes.len());
