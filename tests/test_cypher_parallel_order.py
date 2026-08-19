@@ -158,3 +158,52 @@ def test_unordered_scan_preserves_bucket_order(graph):
     rows = both(graph, query)
     ids = [row["id"] for row in rows]
     assert ids == sorted(ids), "the partitioned scan reordered its candidates"
+
+
+# ── aggregation tie-breaks ──────────────────────────────────────────────────
+
+
+def test_min_max_over_a_mixed_type_column_per_group(graph):
+    """`min`/`max` fall back to the engine's total order across type classes.
+    Evaluated per group and now evaluated *across* groups in parallel, so this
+    pins that the per-group answer is unchanged by the fan-out."""
+    query = (
+        "MATCH (n:Item) WHERE n.nid < 5000 "
+        "RETURN n.grp AS g, min(n.mixed) AS lo, max(n.mixed) AS hi, collect(n.mixed) AS all"
+    )
+    rows = both(graph, query)
+    assert len(rows) == GROUPS
+    kinds = {type(row["lo"]).__name__ for row in rows} | {type(row["hi"]).__name__ for row in rows}
+    assert kinds, "no min/max values at all"
+
+
+def test_mode_first_seen_winner_is_per_group(graph):
+    """`mode`'s tie-break is "first-seen wins", and that state is per group —
+    across-group fan-out must not touch it."""
+    query = "MATCH (n:Item) WHERE n.nid < 20000 RETURN n.grp AS g, mode(n.score) AS m"
+    rows = both(graph, query)
+    assert len(rows) == GROUPS
+
+
+def test_median_and_percentile_per_group(graph):
+    """Whole-multiset aggregates stay sequential *within* a group; only the
+    groups themselves are evaluated in parallel."""
+    query = (
+        "MATCH (n:Item) RETURN n.grp AS g, median(n.score) AS md, "
+        "percentile_cont(n.score, 0.9) AS p90, percentile_disc(n.score, 0.25) AS p25"
+    )
+    rows = both(graph, query)
+    assert len(rows) == GROUPS
+    assert all(row["md"] is not None for row in rows)
+
+
+def test_collect_preserves_row_order_within_each_group(graph):
+    """The strongest order assertion available: `collect` exposes a group's row
+    order directly. `nid` ascends with scan order, so each group's collected
+    ids must be ascending."""
+    query = "MATCH (n:Item) WHERE n.nid < 30000 RETURN n.grp AS g, collect(n.nid) AS ids"
+    rows = both(graph, query)
+    assert len(rows) == GROUPS
+    for row in rows:
+        ids = row["ids"]
+        assert ids == sorted(ids), f"group {row['g']} collected out of row order"

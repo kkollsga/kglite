@@ -106,33 +106,35 @@ impl<'a> CypherExecutor<'a> {
         let group_limit = clause.group_limit_hint;
         let surrogate_cap = group_limit.map(|n| n.saturating_mul(2).max(n + 8));
 
+        // The grouping pass stays **sequential, on measurement.** It was
+        // implemented partitioned (per-partition group vector + index map,
+        // merged in partition order so first-seen order and every group's
+        // globally-ascending row-index list survived) and removed, because it
+        // is a net drag at every cardinality. Release, 1M-node graphgen
+        // fixture, min of 15, `collect`-grouped queries — parallel against the
+        // sequential path, with the across-group evaluation held constant:
+        //
+        //   cell        grouping-pass only   across-group only   both
+        //   low_card    0.94x                1.29x               1.17x
+        //   mid_card    0.98x                1.41x               1.30x
+        //   high_card   0.96x                1.09x               1.06x
+        //   percentile  0.93x                1.47x               1.42x
+        //
+        // Per-partition hash maps have to be allocated and then re-hashed into
+        // one on merge, and the per-row work they parallelise is a binding
+        // lookup and an integer hash — there is nothing there to win back. The
+        // across-group evaluation below is where the whole benefit is, and
+        // adding the grouping pass to it *subtracts* about ten points.
+        //
+        // A `group_limit_hint` would have excluded it anyway: a capped pass
+        // freezes its group set once the cap is reached and drops later rows
+        // that would open a new group, a decision that depends on how many
+        // groups the rows *before* them opened. A partition sees only its own
+        // prefix, so partitions would freeze at different points and keep
+        // different groups — a wrong answer, not a slower one.
         for (row_idx, row) in result_set.rows.iter().enumerate() {
             self.check_interrupt_periodic(row_idx)?;
-            // Group-key evaluation errors (missing parameter, overflow, …)
-            // must propagate exactly as they would without aggregation.
-            // Legitimate null groups (OPTIONAL MATCH miss, property access
-            // on null) still arrive as `Ok(Value::Null)` from the
-            // evaluator's normal null semantics — an `Err` here is a
-            // genuine error, never a null group.
-            let mut key_parts: Vec<GroupKeyPart> = Vec::with_capacity(strategies.len());
-            for (strategy, expr) in strategies.iter().zip(folded_group_exprs.iter()) {
-                let part = match strategy {
-                    GroupExprStrategy::NodeProp { variable, .. } => {
-                        if let Some(&idx) = row.node_bindings.get(variable) {
-                            GroupKeyPart::NodeProp(idx)
-                        } else {
-                            // Variable isn't a node binding for this row (e.g.
-                            // OPTIONAL MATCH null) — fall back to full evaluation.
-                            GroupKeyPart::Resolved(self.evaluate_expression(expr, row)?)
-                        }
-                    }
-                    GroupExprStrategy::Eval => {
-                        GroupKeyPart::Resolved(self.evaluate_expression(expr, row)?)
-                    }
-                };
-                key_parts.push(part);
-            }
-
+            let key_parts = self.surrogate_key_for_row(row, &strategies, &folded_group_exprs)?;
             if let Some(&idx) = surrogate_index.get(&key_parts) {
                 surrogate_groups[idx].1.push(row_idx);
             } else {
@@ -207,51 +209,53 @@ impl<'a> CypherExecutor<'a> {
 
         // Compute results for each group
         let carried_vars = grouping_variables(&clause.items);
-        let mut result_rows = Vec::with_capacity(groups.len());
+        let mut result_rows: Vec<ResultRow> =
+            if self.may_fan_out_group_evaluation(result_set.rows.len(), groups.len(), &strategies) {
+                // Across groups, not within one: every group's aggregate
+                // evaluation reads only its own rows, so the groups are
+                // independent. `par_iter().enumerate()` is indexed and
+                // `collect` restores index order, so the emission order is the
+                // group order — unchanged. Whole-multiset aggregates
+                // (median/mode/percentile) keep their per-group state and their
+                // per-group tie-breaks; nothing about them is shared across
+                // groups, so they ride along.
+                #[cfg(test)]
+                parallel::PARALLEL_AGGREGATIONS
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        for (group_idx, (group_key_values, row_indices)) in groups.iter().enumerate() {
-            self.check_interrupt_periodic(group_idx)?;
-            let group_rows: Vec<&ResultRow> =
-                row_indices.iter().map(|&i| &result_set.rows[i]).collect();
-
-            let mut projected = Bindings::with_capacity(clause.items.len());
-
-            // Add group key values
-            for (ki, &item_idx) in group_key_indices.iter().enumerate() {
-                let key = return_item_column_name(&clause.items[item_idx]);
-                projected.insert(key, group_key_values[ki].clone());
-            }
-
-            // Compute aggregations — try single-pass fusion first
-            if let Some(agg_results) =
-                self.try_fused_numeric_aggregation(clause, &group_key_indices, &group_rows)?
-            {
-                for (key, val) in agg_results {
-                    projected.insert(key, val);
-                }
+                let interrupt = ParallelInterrupt::new(|| self.check_deadline().err());
+                parallel::install(|| {
+                    groups
+                        .par_iter()
+                        .enumerate()
+                        .map(|(group_idx, (group_key_values, row_indices))| {
+                            interrupt.check(group_idx)?;
+                            self.group_result_row(
+                                clause,
+                                &group_key_indices,
+                                &carried_vars,
+                                &result_set.rows,
+                                group_key_values,
+                                row_indices,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, String>>()
+                })?
             } else {
-                for (item_idx, item) in clause.items.iter().enumerate() {
-                    if group_key_indices.contains(&item_idx) {
-                        continue; // Already added
-                    }
-                    let key = return_item_column_name(item);
-                    let val = self.evaluate_aggregate_with_rows(&item.expression, &group_rows)?;
-                    projected.insert(key, val);
+                let mut rows = Vec::with_capacity(groups.len());
+                for (group_idx, (group_key_values, row_indices)) in groups.iter().enumerate() {
+                    self.check_interrupt_periodic(group_idx)?;
+                    rows.push(self.group_result_row(
+                        clause,
+                        &group_key_indices,
+                        &carried_vars,
+                        &result_set.rows,
+                        group_key_values,
+                        row_indices,
+                    )?);
                 }
-            }
-
-            // Preserve node/edge/path bindings from the first row in the group
-            // for every variable the grouping keys read — not just keys spelled
-            // as a bare variable. `RETURN t.title AS title, count(c) AS n`
-            // groups by a property access, and dropping `t` here is what made
-            // a trailing `ORDER BY t.priority` silently return insertion order.
-            // Also lets subsequent MATCH/OPTIONAL MATCH clauses constrain
-            // patterns to the correct nodes.
-            let first_row = &result_set.rows[row_indices[0]];
-            let mut row = ResultRow::from_projected(projected);
-            carry_group_bindings(&carried_vars, first_row, &mut row);
-            result_rows.push(row);
-        }
+                rows
+            };
 
         // Handle DISTINCT
         if clause.distinct {
@@ -270,6 +274,145 @@ impl<'a> CypherExecutor<'a> {
             columns,
             lazy_return_items: None,
         })
+    }
+
+    /// The surrogate key for one row — the whole per-row body of the grouping
+    /// pass, shared by the sequential and partitioned drivers so the two
+    /// cannot drift apart on what a group *is*.
+    ///
+    /// Group-key evaluation errors (missing parameter, overflow, …) must
+    /// propagate exactly as they would without aggregation. Legitimate null
+    /// groups (OPTIONAL MATCH miss, property access on null) still arrive as
+    /// `Ok(Value::Null)` from the evaluator's normal null semantics — an `Err`
+    /// here is a genuine error, never a null group.
+    #[inline]
+    fn surrogate_key_for_row(
+        &self,
+        row: &ResultRow,
+        strategies: &[GroupExprStrategy],
+        folded_group_exprs: &[Expression],
+    ) -> Result<Vec<GroupKeyPart>, String> {
+        let mut key_parts: Vec<GroupKeyPart> = Vec::with_capacity(strategies.len());
+        for (strategy, expr) in strategies.iter().zip(folded_group_exprs.iter()) {
+            let part = match strategy {
+                GroupExprStrategy::NodeProp { variable, .. } => {
+                    if let Some(&idx) = row.node_bindings.get(variable) {
+                        GroupKeyPart::NodeProp(idx)
+                    } else {
+                        // Variable isn't a node binding for this row (e.g.
+                        // OPTIONAL MATCH null) — fall back to full evaluation.
+                        GroupKeyPart::Resolved(self.evaluate_expression(expr, row)?)
+                    }
+                }
+                GroupExprStrategy::Eval => {
+                    GroupKeyPart::Resolved(self.evaluate_expression(expr, row)?)
+                }
+            };
+            key_parts.push(part);
+        }
+        Ok(key_parts)
+    }
+
+    /// One group's output row. The whole per-group body, shared by the
+    /// sequential and across-group drivers.
+    fn group_result_row(
+        &self,
+        clause: &ReturnClause,
+        group_key_indices: &[usize],
+        carried_vars: &std::collections::HashSet<String>,
+        rows: &[ResultRow],
+        group_key_values: &[Value],
+        row_indices: &[usize],
+    ) -> Result<ResultRow, String> {
+        let group_rows: Vec<&ResultRow> = row_indices.iter().map(|&i| &rows[i]).collect();
+        let mut projected = Bindings::with_capacity(clause.items.len());
+
+        // Add group key values
+        for (ki, &item_idx) in group_key_indices.iter().enumerate() {
+            let key = return_item_column_name(&clause.items[item_idx]);
+            projected.insert(key, group_key_values[ki].clone());
+        }
+
+        // Compute aggregations — try single-pass fusion first
+        if let Some(agg_results) =
+            self.try_fused_numeric_aggregation(clause, group_key_indices, &group_rows)?
+        {
+            for (key, val) in agg_results {
+                projected.insert(key, val);
+            }
+        } else {
+            for (item_idx, item) in clause.items.iter().enumerate() {
+                if group_key_indices.contains(&item_idx) {
+                    continue; // Already added
+                }
+                let key = return_item_column_name(item);
+                let val = self.evaluate_aggregate_with_rows(&item.expression, &group_rows)?;
+                projected.insert(key, val);
+            }
+        }
+
+        // Preserve node/edge/path bindings from the first row in the group
+        // for every variable the grouping keys read — not just keys spelled
+        // as a bare variable. `RETURN t.title AS title, count(c) AS n`
+        // groups by a property access, and dropping `t` here is what made
+        // a trailing `ORDER BY t.priority` silently return insertion order.
+        // Also lets subsequent MATCH/OPTIONAL MATCH clauses constrain
+        // patterns to the correct nodes.
+        //
+        // `row_indices[0]` is the **globally** first row of the group. The
+        // partitioned grouping pass preserves that by merging partitions in
+        // partition order and concatenating each group's index list in the
+        // same order — a partition-local "first" would silently carry the
+        // wrong node here, which is what
+        // `parallel_aggregation_carries_the_global_first_row` pins.
+        let first_row = &rows[row_indices[0]];
+        let mut row = ResultRow::from_projected(projected);
+        carry_group_bindings(carried_vars, first_row, &mut row);
+        Ok(row)
+    }
+
+    /// Which side of the runtime gate the grouping pass sits on.
+    ///
+    /// A `NodeProp` strategy is a binding lookup and an integer hash — no
+    /// expression evaluation at all, which is the cheapest per-row work in the
+    /// engine. Any `Eval` strategy runs the interpreter per row.
+    fn aggregation_cost_class(strategies: &[GroupExprStrategy]) -> parallel::CostClass {
+        if strategies
+            .iter()
+            .all(|s| matches!(s, GroupExprStrategy::NodeProp { .. }))
+        {
+            parallel::CostClass::Compiled
+        } else {
+            parallel::CostClass::Interpreted
+        }
+    }
+
+    /// Shared half of both aggregation fan-out gates.
+    ///
+    /// Group keys and aggregate arguments are Cypher expressions evaluated
+    /// through the full interpreter, so this takes the Q2-style exclusions
+    /// (disk, spatial) rather than the candidate scan's provable-read-only
+    /// argument: an interpreted arm here really can reach a per-node cache.
+    fn may_fan_out_aggregation(&self, rows: usize, strategies: &[GroupExprStrategy]) -> bool {
+        self.parallel
+            && !self.graph.graph.is_disk()
+            && self.graph.spatial_configs.is_empty()
+            && parallel::should_fan_out(rows, Self::aggregation_cost_class(strategies))
+    }
+
+    /// Whether the per-group evaluation may fan out across groups.
+    ///
+    /// Needs at least two groups to have two tasks; with one group the whole
+    /// aggregate is one unit of work and the fan-out is pure overhead. Gated
+    /// on the *row* count rather than the group count because that is where
+    /// the work is — every row is read by exactly one group.
+    fn may_fan_out_group_evaluation(
+        &self,
+        rows: usize,
+        groups: usize,
+        strategies: &[GroupExprStrategy],
+    ) -> bool {
+        groups >= 2 && self.may_fan_out_aggregation(rows, strategies)
     }
 
     /// Resolve a grouping expression's value for a single NodeIndex. Used by

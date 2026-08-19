@@ -116,6 +116,26 @@ pub(crate) fn try_run_streaming<'q>(
     };
 
     // Build the streaming pipeline from the materialized upstream.
+    //
+    // **This pipeline stays sequential**, and not because its input resists
+    // partitioning — `RowStream` only ever wraps an already-materialized
+    // `Vec<ResultRow>` (every construction site in the crate does), so the
+    // rows could be split right here at no cost. Two reasons it is not:
+    //
+    // 1. *It would not pay.* Partitioning a grouped aggregation's row
+    //    consumption is the same shape as the materialized path's grouping
+    //    pass, which was implemented, measured at **0.93-0.98x** across four
+    //    cardinalities, and removed — see the comment in
+    //    `aggregation/materialized.rs`. Per-partition accumulator maps cost
+    //    more to allocate and merge than the per-row work they parallelise.
+    // 2. *It would change answers.* `AggState::merge` adds partial sums, so
+    //    partitioning reassociates `sum` and `avg` over `Float64` and moves
+    //    the last ULP. The `parallel` flag is documented as never changing a
+    //    result, and a float sum that depends on thread count is exactly the
+    //    kind of "identical except sometimes" that doctrine exists to prevent.
+    //
+    // The win for grouped aggregation is across *groups*, not across rows, and
+    // that is where `aggregation/materialized.rs` takes it.
     let upstream = RowStream::from_result_set(result_set);
     let mut current = aggregate::apply(
         executor,

@@ -116,3 +116,32 @@ def test_bench_parallel_scan_filter_project(benchmark, parallel_graph, parallel)
     bindings map per surviving row, so this cell is where the scan's win and
     the row loop's allocation cost are visible together."""
     benchmark(parallel_graph.cypher, SCAN_FILTER_PROJECT, parallel=parallel)
+
+
+# ── Grouped aggregation (materialized path) ─────────────────────────────────
+#
+# `collect` / `median` / `percentile_cont` are declined by the streaming
+# aggregate, which is what routes these to the materialized grouping path —
+# the one Q4 partitions. Cardinality is the axis that matters: the grouping
+# pass merges one partial map per partition, so many groups means a bigger
+# merge, and few groups means the across-group evaluation has few tasks.
+
+AGG_LOW_CARD = "MATCH (p:Person) RETURN p.joined_year AS y, collect(p.age) AS ages"
+AGG_MID_CARD = "MATCH (p:Person) RETURN p.city AS c, collect(p.age) AS ages"
+AGG_HIGH_CARD = "MATCH (p:Person) RETURN p.name AS nm, collect(p.age) AS ages"
+AGG_PERCENTILE = "MATCH (p:Person) RETURN p.joined_year AS y, median(p.age) AS m, percentile_cont(p.age, 0.9) AS p90"
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("parallel", [False, True], ids=["serial", "parallel"])
+@pytest.mark.parametrize(
+    ("label", "query"),
+    [
+        ("low_card", AGG_LOW_CARD),
+        ("mid_card", AGG_MID_CARD),
+        ("high_card", AGG_HIGH_CARD),
+        ("percentile", AGG_PERCENTILE),
+    ],
+)
+def test_bench_parallel_grouped_aggregation(benchmark, parallel_graph, label, query, parallel):
+    benchmark(parallel_graph.cypher, query, parallel=parallel)

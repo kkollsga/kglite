@@ -205,6 +205,18 @@ pub(crate) fn parallel_candidate_scans() -> usize {
     PARALLEL_CANDIDATE_SCANS.load(Ordering::Relaxed)
 }
 
+/// Parallel grouping passes entered (materialized aggregation). Atomic for the
+/// same reason as [`PARALLEL_SCANS`].
+#[cfg(test)]
+pub(crate) static PARALLEL_AGGREGATIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Snapshot of [`PARALLEL_AGGREGATIONS`].
+#[cfg(test)]
+pub(crate) fn parallel_aggregations() -> usize {
+    PARALLEL_AGGREGATIONS.load(Ordering::Relaxed)
+}
+
 /// The message used when a region reported failure without one — only
 /// reachable if a caller sets the flag without recording a reason.
 const UNKNOWN_REASON: &str = "parallel region failed";
@@ -274,9 +286,19 @@ where
     }
 
     /// Latch `reason` if nothing has failed yet.
+    ///
+    /// The mutex is taken **before** the flag is set, and held across it. The
+    /// obvious order — swap the flag, then store the reason — leaves a window
+    /// in which another worker sees `had_error` set, calls [`Self::recorded`],
+    /// finds `None`, and reports the placeholder instead of the real reason.
+    /// That is not theoretical: it surfaced as a cancelled query returning
+    /// "parallel region failed" once enough regions ran concurrently. Holding
+    /// the lock across the flag write means any reader that observes the flag
+    /// then blocks until the reason is there.
     pub(crate) fn fail(&self, reason: String) {
+        let mut slot = self.first_error.lock().unwrap();
         if !self.had_error.swap(true, Ordering::Relaxed) {
-            *self.first_error.lock().unwrap() = Some(reason);
+            *slot = Some(reason);
         }
     }
 

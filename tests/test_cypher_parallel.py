@@ -154,3 +154,46 @@ def test_parallel_scan_filter_id_anchor_is_unaffected(scan_graph):
     through the index), and must be identical regardless."""
     query = "MATCH (n:Item {nid: 4242}) RETURN n.name AS nm"
     assert scan_graph.cypher(query, parallel=True).to_list() == scan_graph.cypher(query, parallel=False).to_list()
+
+
+# Aggregation shapes that route to the *materialized* grouping path — the
+# streaming pipeline declines `collect`, `median`, `percentile_*`, `std` and
+# `mode`, which is exactly what sends them here. Q4 parallelises the per-group
+# evaluation across groups, so these exercise it.
+AGG_QUERIES = [
+    "MATCH (n:Item) RETURN n.cat AS c, collect(n.value) AS vals",
+    "MATCH (n:Item) RETURN n.cat AS c, collect(DISTINCT n.value) AS vals",
+    "MATCH (n:Item) RETURN n.cat AS c, median(n.value) AS m",
+    "MATCH (n:Item) RETURN n.cat AS c, mode(n.value) AS mo",
+    "MATCH (n:Item) RETURN n.cat AS c, percentile_cont(n.value, 0.9) AS p90",
+    "MATCH (n:Item) RETURN n.cat AS c, percentile_disc(n.value, 0.5) AS p50",
+    "MATCH (n:Item) RETURN n.cat AS c, std(n.value) AS sd, variance(n.value) AS vr",
+    "MATCH (n:Item) RETURN n.cat AS c, collect(n.value) AS vals, count(*) AS k",
+    "MATCH (n:Item) WHERE n.value > 100 RETURN n.cat AS c, collect(n.value) AS vals",
+    "MATCH (n:Item) RETURN n.cat AS c, collect(n.value) AS vals ORDER BY c DESC",
+    "MATCH (n:Item) WITH n.cat AS c, collect(n.value) AS vals RETURN c, size(vals) AS k",
+]
+
+
+@pytest.mark.parametrize("query", AGG_QUERIES)
+def test_parallel_aggregation_matches_serial(scan_graph, query):
+    """Grouped aggregation, in order.
+
+    `collect` is the order-sensitive one — it concatenates its group's values
+    in row order — so this is a list comparison of a list-valued column, not a
+    set comparison.
+    """
+    serial = scan_graph.cypher(query, parallel=False).to_list()
+    parallel = scan_graph.cypher(query, parallel=True).to_list()
+    assert serial == parallel
+    assert serial, "fixture produced no rows — the comparison would be vacuous"
+
+
+def test_parallel_aggregation_group_emission_order(scan_graph):
+    """No ORDER BY: groups come back first-seen. `cat_i` is assigned by
+    `nid % 7`, so first-seen order is `cat_0 … cat_6` — asserted absolutely,
+    not just against the serial run."""
+    query = "MATCH (n:Item) RETURN n.cat AS c, collect(n.value) AS vals"
+    for parallel in (False, True):
+        rows = scan_graph.cypher(query, parallel=parallel).to_list()
+        assert [row["c"] for row in rows] == [f"cat_{i}" for i in range(7)]

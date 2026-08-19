@@ -47,6 +47,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row construction allocates per row and does not scale; the same reason the
   projection fan-out has a row threshold.
 
+  **Grouped aggregation** honours it as well, by evaluating groups in parallel
+  with each other — the shape behind `collect`, `median`, `mode`,
+  `percentile_*`, `std` and `variance`, which the streaming aggregate declines.
+  Measured on the same 1M-node graph, two agreeing runs: 1.28x on a few large
+  groups, 1.38x on a few hundred, 1.42-1.46x for `median`/`percentile_cont`,
+  and 1.09x once the group count approaches the row count (800k groups), where
+  there is little left to share. Each group's aggregate is still computed over
+  its own rows in row order, so `collect` comes back in the same order and
+  float sums are not reassociated.
+
 - **Property-type constraints — `CREATE CONSTRAINT ... REQUIRE n.prop IS :: TYPE`
   (and the `IS TYPED TYPE` spelling) are now declared and enforced.** The
   statement previously parsed and was refused with an explanation; it now
@@ -167,6 +177,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rows, chosen inside the measured crossover.
 
 ### Fixed
+
+- **A cancelled or timed-out parallel query could report "parallel region
+  failed" instead of its real reason.** The first worker to notice set the
+  shared failure flag before storing the reason, so another worker that
+  observed the flag inside that window read an empty slot and substituted the
+  placeholder. The reason is now stored under the same lock acquisition that
+  sets the flag.
 
 - **Change data capture now sees writes made through the MCP server.** The
   server's write tool ran its mutation and returned without draining the

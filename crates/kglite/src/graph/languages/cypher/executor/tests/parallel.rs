@@ -386,6 +386,26 @@ use crate::graph::parallel::parallel_candidate_scans;
 /// land in a `ColumnStore` — which is what lets `ColumnFilter::compile` accept
 /// the matcher and the scan take the column route. `scan_graph` adds nodes one
 /// at a time and stays on row storage.
+/// `n` `Item` nodes plus one `LINKS` edge per node, so a two-element pattern
+/// produces `n` rows — enough to put the *materialized* grouping path (rather
+/// than the fused node-scan operator) above its row gate.
+fn linked_graph(n: usize) -> DirGraph {
+    let mut graph = scan_graph(n);
+    let indices: Vec<petgraph::graph::NodeIndex> =
+        graph.type_indices.get("Item").expect("Item index").to_vec();
+    for (i, &src) in indices.iter().enumerate() {
+        let dst = indices[(i * 7 + 13) % indices.len()];
+        let edge = crate::graph::schema::EdgeData::new(
+            "LINKS".to_string(),
+            HashMap::new(),
+            &mut graph.interner,
+        );
+        graph.graph.add_edge(src, dst, edge);
+    }
+    graph.register_connection_type("LINKS".to_string());
+    graph
+}
+
 fn columnar_scan_graph(n: usize) -> DirGraph {
     use crate::datatypes::DataFrame;
     let mut graph = DirGraph::new();
@@ -612,4 +632,148 @@ fn parallel_candidate_scan_is_interruptible_mid_scan() {
         Some("Query cancelled".to_string()),
         "the parallel candidate scan ran to completion through a mid-scan cancellation"
     );
+}
+
+// ── Parallel grouped aggregation (Q4) ───────────────────────────────────────
+
+use crate::graph::parallel::parallel_aggregations;
+
+/// Aggregation shapes routed through the *materialized* grouping path (a
+/// multi-element pattern keeps them off the fused node-scan operator).
+const AGG_QUERIES: &[&str] = &[
+    "MATCH (a:Item)-[:LINKS]->(b:Item) RETURN b.cat AS c, count(*) AS n",
+    "MATCH (a:Item)-[:LINKS]->(b:Item) RETURN b.cat AS c, sum(a.value) AS s, avg(a.value) AS av",
+    "MATCH (a:Item)-[:LINKS]->(b:Item) RETURN b.cat AS c, min(a.value) AS lo, max(a.value) AS hi",
+    "MATCH (a:Item)-[:LINKS]->(b:Item) RETURN b.cat AS c, count(DISTINCT a.value) AS d",
+    "MATCH (a:Item)-[:LINKS]->(b:Item) RETURN b.cat AS c, collect(a.value) AS vals",
+    "MATCH (a:Item)-[:LINKS]->(b:Item) RETURN b.cat AS c, collect(DISTINCT a.value) AS vals",
+    // Evaluated group key: one surrogate group per *value*, thousands of rows
+    // each, so the row-index list inside a group is observable through
+    // `collect`.
+    "MATCH (a:Item)-[:LINKS]->(b:Item) RETURN toUpper(b.cat) AS c, collect(a.value) AS v",
+    "MATCH (a:Item)-[:LINKS]->(b:Item) RETURN toUpper(b.cat) AS c, count(*) AS n, min(a.value) AS lo",
+];
+
+/// Every aggregate the materialized grouping path serves, including the ones
+/// the streaming pipeline declines (`collect`, `std`, `median`, `mode`,
+/// `percentile_*`) and therefore hands here.
+const AGG_QUERIES_EXTRA: &[&str] = &[
+    "MATCH (a:Item)-[:LINKS]->(b:Item) RETURN b.cat AS c, std(a.value) AS sd, variance(a.value) AS vr",
+    "MATCH (a:Item)-[:LINKS]->(b:Item) RETURN b.cat AS c, median(a.value) AS md, mode(a.value) AS mo",
+    "MATCH (a:Item)-[:LINKS]->(b:Item) RETURN b.cat AS c, percentile_cont(a.value, 0.9) AS p90, percentile_disc(a.value, 0.5) AS p50",
+    "MATCH (a:Item)-[:LINKS]->(b:Item) RETURN b.cat AS c, count(*) AS n ORDER BY n DESC, c ASC",
+    "MATCH (a:Item)-[:LINKS]->(b:Item) WITH b.cat AS c, count(*) AS n WHERE n > 1 RETURN c, n",
+];
+
+/// parallel == serial, with **exact row order** and exact values.
+///
+/// `collect` is the order-sensitive one: it concatenates its group's values in
+/// row order, and the partitioned grouping pass keeps every group's row-index
+/// list globally ascending precisely so that list is unchanged. A set
+/// comparison would not see a `collect` that came back permuted.
+#[test]
+fn parallel_aggregation_matches_serial_in_order() {
+    let _meter = meter_guard();
+    let graph = linked_graph(PARALLEL_MIN_ROWS_COMPILED * 2);
+    let before = parallel_aggregations();
+    for query in AGG_QUERIES.iter().chain(AGG_QUERIES_EXTRA) {
+        let serial = run(&graph, query, false);
+        let parallel = run(&graph, query, true);
+        assert_eq!(serial.columns, parallel.columns, "columns differ: {query}");
+        assert_eq!(
+            serial.rows, parallel.rows,
+            "parallel aggregation diverged from serial (values or group ORDER): {query}"
+        );
+        assert!(!serial.rows.is_empty(), "vacuous fixture for {query}");
+    }
+    assert!(
+        parallel_aggregations() > before,
+        "nothing fanned out — the assertions above compared two serial runs"
+    );
+}
+
+/// The carried first row must be the group's **globally** first, not the first
+/// its partition happened to see.
+///
+/// `carry_group_bindings` copies the grouping variables' node bindings off
+/// `rows[row_indices[0]]`, and a trailing `ORDER BY` on that variable's
+/// property is what makes the choice observable. Red-first: reverse the merge
+/// order, or prepend rather than append a partition's indices, and this fails
+/// while every count/sum assertion above stays green.
+#[test]
+fn parallel_aggregation_carries_the_global_first_row() {
+    let _meter = meter_guard();
+    let graph = linked_graph(PARALLEL_MIN_ROWS_COMPILED * 2);
+    // `nid` ascends with scan order, so the group's globally first row has the
+    // smallest one — a partition-local first would carry a larger `nid` for
+    // every group except the one the first partition opened.
+    // `collect` keeps this on the materialized path (the streaming pipeline
+    // declines it); the trailing ORDER BY reads a property of the *carried*
+    // grouping variable, which is only resolvable from the row the group kept.
+    // `toUpper(...)` makes the group key an *evaluated* one, so each surrogate
+    // group holds thousands of rows rather than a single node — a bare
+    // `b.cat` key is a `NodeProp` surrogate per distinct node, one row each,
+    // and nothing about index order is then observable. `collect` exposes the
+    // row order inside a group, and the trailing ORDER BY reads a property of
+    // the *carried* grouping variable, which is only resolvable from the row
+    // the group kept.
+    let query = "MATCH (a:Item)-[:LINKS]->(b:Item) \
+                 RETURN toUpper(b.cat) AS c, collect(a.value) AS v ORDER BY b.nid ASC";
+    let before = parallel_aggregations();
+    let serial = run(&graph, query, false);
+    let parallel = run(&graph, query, true);
+    assert!(
+        parallel_aggregations() > before,
+        "the query did not fan out its grouping pass"
+    );
+    assert_eq!(
+        serial.rows, parallel.rows,
+        "the partitioned grouping pass carried a partition-local first row"
+    );
+    assert!(
+        serial.rows.len() > 1,
+        "need several groups to be meaningful"
+    );
+}
+
+/// The gate and the opt-in, both directions.
+#[test]
+fn aggregation_respects_the_gate_and_the_opt_in() {
+    let _meter = meter_guard();
+    let query = AGG_QUERIES[1];
+
+    let small = linked_graph(PARALLEL_MIN_ROWS_INTERPRETED - 1);
+    let before = parallel_aggregations();
+    run(&small, query, true);
+    assert_eq!(
+        parallel_aggregations(),
+        before,
+        "a below-gate aggregation fanned out"
+    );
+
+    let large = linked_graph(PARALLEL_MIN_ROWS_COMPILED * 2);
+    let before = parallel_aggregations();
+    run(&large, query, false);
+    assert_eq!(
+        parallel_aggregations(),
+        before,
+        "parallel=false fanned out its grouping pass"
+    );
+}
+
+/// A single-group aggregation has one unit of work, so fanning out across
+/// groups would be pure hand-off cost: the gate requires at least two.
+#[test]
+fn single_group_aggregation_stays_serial() {
+    let _meter = meter_guard();
+    let graph = linked_graph(PARALLEL_MIN_ROWS_COMPILED * 2);
+    let query = "MATCH (a:Item)-[:LINKS]->(b:Item) RETURN 1 AS one, collect(a.value) AS v";
+    let before = parallel_aggregations();
+    let opted_in = run(&graph, query, true);
+    assert_eq!(
+        parallel_aggregations(),
+        before,
+        "a one-group aggregation fanned out across groups"
+    );
+    assert_eq!(opted_in.rows, run(&graph, query, false).rows);
 }
