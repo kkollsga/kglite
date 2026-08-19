@@ -25,11 +25,14 @@
 //!   flat columns below let `CALL … YIELD nodeType, operation` filter in
 //!   Cypher without map traversal, which is the common consumer shape. The
 //!   nesting survives only where it carries structure: `state`.
-//! - **`state`** — present, but **after-image only**. Neo4j's is
-//!   `{before, after}`; before-images are CDC v2 here (see `graph::cdc`).
-//! - **`db.cdc.enable` / `db.cdc.disable`** have no Neo4j counterpart at all:
-//!   enablement there is a database option (`ALTER DATABASE … SET OPTION
-//!   txLogEnrichment`), which KGLite has no equivalent of.
+//! - **`state`** — present, and shaped like Neo4j's: `{before, after}`. Each
+//!   half is the entity's image on that side of the commit, or null where the
+//!   log holds none.
+//! - **`db.cdc.enable` / `db.cdc.disable` / `db.cdc.status`** have no Neo4j
+//!   counterpart at all: enablement there is a database option (`ALTER
+//!   DATABASE … SET OPTION txLogEnrichment`), which KGLite has no equivalent
+//!   of. The `enrichment` argument is named after that option and takes two of
+//!   its three values; `diff` is refused, with the reason.
 //!
 //! B3 carries these divergences into `CYPHER.md`.
 
@@ -37,7 +40,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::{CypherExecutor, ResultRow};
 use crate::datatypes::values::Value;
-use crate::graph::cdc::{self, CdcChange, CdcEvent, CdcEventKind};
+use crate::graph::cdc::{self, CdcChange, CdcEnrichment, CdcEvent, CdcEventKind};
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::languages::cypher::ast::YieldItem;
 
@@ -131,6 +134,46 @@ fn reject_unknown_keys(
     Ok(())
 }
 
+/// Read `db.cdc.enable`'s `enrichment` argument.
+///
+/// Absent means [`CdcEnrichment::Off`], and that is deliberate on a re-enable
+/// too: `enable` is declarative, so an omitted key takes its default rather
+/// than preserving whatever the running log was configured with — the same
+/// rule `capacity` has always had.
+///
+/// `diff` is refused **by name** rather than falling into the unknown-value
+/// message, because a caller asking for it has the wrong model of what it
+/// would buy and needs that corrected, not a list of alternatives.
+fn parse_enrichment(value: Option<&Value>) -> Result<CdcEnrichment, String> {
+    let text = match value {
+        None | Some(Value::Null) => return Ok(CdcEnrichment::Off),
+        Some(Value::String(text)) => text,
+        Some(other) => {
+            return Err(format!(
+                "db.cdc.enable: 'enrichment' must be the string 'off' or 'full', got {other:?}."
+            ))
+        }
+    };
+    match text.to_ascii_lowercase().as_str() {
+        "off" => Ok(CdcEnrichment::Off),
+        "full" => Ok(CdcEnrichment::Full),
+        "diff" => Err(
+            "db.cdc.enable: 'enrichment' does not accept 'diff'. Neo4j's third \
+             txLogEnrichment value narrows the recorded before-image to the properties that \
+             changed, which saves ring bytes but not capture work — the diff is computed \
+             *from* the full before-image, so the read this mode exists to avoid still \
+             happens. KGLite offers the two modes whose cost differs: 'off' (after-image \
+             only) and 'full' (before and after). A consumer that wants a diff can compute \
+             one from a 'full' event, where both sides are present."
+                .to_string(),
+        ),
+        _ => Err(format!(
+            "db.cdc.enable: '{text}' is not a change-capture enrichment mode. Accepted: \
+             'off' (after-image only, the default), 'full' (before and after images)."
+        )),
+    }
+}
+
 /// Build one row from a value-per-column lookup, honouring YIELD aliases.
 fn build_row(
     yield_items: &[YieldItem],
@@ -159,7 +202,8 @@ pub(crate) fn execute_mutating_procedure(
 ) -> Result<Vec<ResultRow>, String> {
     match proc_name {
         "db.cdc.enable" => {
-            reject_unknown_keys("db.cdc.enable", params, &["capacity"])?;
+            reject_unknown_keys("db.cdc.enable", params, &["capacity", "enrichment"])?;
+            let enrichment = parse_enrichment(params.get("enrichment"))?;
             let capacity = match params.get("capacity") {
                 None | Some(Value::Null) => None,
                 Some(Value::Int64(n)) if *n > 0 => Some(*n as usize),
@@ -174,12 +218,14 @@ pub(crate) fn execute_mutating_procedure(
             // The engine owns the refusals (disk mode, capacity bounds) and
             // their prose; surfacing them verbatim keeps one explanation of
             // each rule rather than a Cypher-flavoured paraphrase.
-            let status = cdc::enable(graph, capacity).map_err(|error| error.to_string())?;
+            let status =
+                cdc::enable(graph, capacity, enrichment).map_err(|error| error.to_string())?;
             let cursor = encode_cursor(status.epoch, status.current);
             Ok(vec![build_row(yield_items, |column| match column {
                 "enabled" => Some(Value::Boolean(true)),
                 "epoch" => Some(Value::Int64(status.epoch as i64)),
                 "capacity" => Some(Value::Int64(status.capacity as i64)),
+                "enrichment" => Some(Value::String(status.enrichment.as_str().to_string())),
                 "cursor" => Some(Value::String(cursor.clone())),
                 _ => None,
             })])
@@ -199,7 +245,8 @@ pub(crate) fn execute_mutating_procedure(
     }
 }
 
-/// `db.cdc.current` / `db.cdc.earliest` / `db.cdc.query` — the read half.
+/// `db.cdc.status` / `db.cdc.current` / `db.cdc.earliest` / `db.cdc.query` —
+/// the read half.
 pub(super) fn execute_cdc_procedure(
     executor: &CypherExecutor<'_>,
     proc_name: &str,
@@ -223,6 +270,16 @@ pub(super) fn execute_cdc_procedure(
     }
 
     let graph = executor.graph;
+
+    // `status` is the one verb that must answer while capture is *off*. Every
+    // other read here refuses, because "no events" and "no log" are different
+    // answers a consumer must not confuse — but a probe whose entire job is to
+    // report whether the log exists cannot make its own subject an error.
+    if proc_name == "db.cdc.status" {
+        reject_unknown_keys("db.cdc.status", params, &[])?;
+        return Ok(vec![status_row(cdc::status(graph).as_ref(), yield_items)]);
+    }
+
     let status = cdc::status(graph).ok_or_else(|| {
         format!(
             "{proc_name}: change data capture is not enabled on this graph. Start it with \
@@ -271,6 +328,26 @@ pub(super) fn execute_cdc_procedure(
             "internal: '{other}' is not a CDC read procedure but was routed as one"
         )),
     }
+}
+
+/// The single `db.cdc.status` row — `None` when capture is off.
+///
+/// Off is reported as `enabled: false` with every other column null, rather
+/// than as zeros: a capacity of 0 and an epoch of 0 are values no live log can
+/// have, and a consumer that branches on them would be reading a configuration
+/// that does not exist.
+fn status_row(status: Option<&cdc::CdcStatus>, yield_items: &[YieldItem]) -> ResultRow {
+    let cell = |value: Option<Value>| Some(value.unwrap_or(Value::Null));
+    build_row(yield_items, |column| match column {
+        "enabled" => Some(Value::Boolean(status.is_some())),
+        "epoch" => cell(status.map(|s| Value::Int64(s.epoch as i64))),
+        "capacity" => cell(status.map(|s| Value::Int64(s.capacity as i64))),
+        "enrichment" => cell(status.map(|s| Value::String(s.enrichment.as_str().to_string()))),
+        "buffered" => cell(status.map(|s| Value::Int64(s.buffered as i64))),
+        "earliest" => cell(status.map(|s| Value::Int64(s.earliest as i64))),
+        "current" => cell(status.map(|s| Value::Int64(s.current as i64))),
+        _ => None,
+    })
 }
 
 /// One `db.cdc.query` row.
@@ -322,12 +399,37 @@ fn event_row(event: &CdcEvent, epoch: u64, yield_items: &[YieldItem]) -> ResultR
     })
 }
 
-/// The after-state map, or `Null` for a delete.
+/// The `{before, after}` state map — Neo4j's shape, and always a map.
 ///
-/// Null rather than an empty map on purpose: v1 keeps no before-image, so a
-/// delete genuinely has no state to report, and an empty map would read as
-/// "an entity with no properties".
+/// Always a map, never null, because the two questions a consumer asks are
+/// different: *did this row carry state?* is answered by the map's presence,
+/// and *what was the entity on this side of the commit?* by each half. A row
+/// whose `state` were null would force the consumer to null-check the
+/// container before it could ask either.
+///
+/// Each **half** is null where the log holds no image for that side, and null
+/// rather than an empty map on purpose: an empty map reads as "an entity with
+/// no properties", which is a different fact. A create has no before, a delete
+/// has no after, and an update has both — once before-image capture is on.
 fn state_value(event: &CdcEvent) -> Value {
+    Value::Map(BTreeMap::from([
+        ("before".to_string(), before_value(event)),
+        ("after".to_string(), after_value(event)),
+    ]))
+}
+
+/// The entity as the commit found it.
+///
+/// Always null today: capture keeps no pre-image, which is what the
+/// `enrichment` knob will select. The half is present in the shape now so a
+/// consumer writes `state.before` once rather than migrating a second time
+/// when it starts carrying data.
+fn before_value(_event: &CdcEvent) -> Value {
+    Value::Null
+}
+
+/// The entity as the commit left it — null for a delete, which left none.
+fn after_value(event: &CdcEvent) -> Value {
     if event.kind == CdcEventKind::Delete {
         return Value::Null;
     }
@@ -405,6 +507,34 @@ mod tests {
         }
     }
 
+    /// The `after` half of a row's `state`, which every non-delete row has.
+    ///
+    /// Goes through the pair rather than around it: a `state` that regressed
+    /// to the flat v1 map would fail here on the missing `after` key rather
+    /// than silently reading the old shape's `properties`.
+    fn after_map(state: &Value) -> BTreeMap<String, Value> {
+        let Value::Map(pair) = state else {
+            panic!("state must be a map, got {state:?}");
+        };
+        assert!(
+            pair.contains_key("before") && pair.contains_key("after"),
+            "state is the pair {{before, after}}, got keys {:?}",
+            pair.keys().collect::<Vec<_>>()
+        );
+        match pair.get("after") {
+            Some(Value::Map(after)) => after.clone(),
+            other => panic!("state.after must be a map, got {other:?}"),
+        }
+    }
+
+    /// The properties of a row's after-image.
+    fn after_properties(state: &Value) -> BTreeMap<String, Value> {
+        match after_map(state).get("properties") {
+            Some(Value::Map(properties)) => properties.clone(),
+            other => panic!("state.after.properties must be a map, got {other:?}"),
+        }
+    }
+
     /// The cursor `db.cdc.current()` reports.
     fn current_cursor(graph: &mut DirGraph) -> String {
         let rows = rows(graph, "CALL db.cdc.current()");
@@ -452,6 +582,7 @@ mod tests {
             ("CALL db.cdc.enable()", true),
             ("CALL db.cdc.enable({capacity: 10})", true),
             ("CALL db.cdc.disable()", true),
+            ("CALL db.cdc.status()", false),
             ("CALL db.cdc.current()", false),
             ("CALL db.cdc.earliest()", false),
             ("CALL db.cdc.query()", false),
@@ -479,13 +610,21 @@ mod tests {
     fn enable_yields_its_status_and_a_starting_cursor() {
         let mut graph = DirGraph::new();
         let (columns, rows) = run(&mut graph, "CALL db.cdc.enable()");
-        assert_eq!(columns, vec!["enabled", "epoch", "capacity", "cursor"]);
+        assert_eq!(
+            columns,
+            vec!["enabled", "epoch", "capacity", "enrichment", "cursor"]
+        );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][0], Value::Boolean(true));
         assert!(matches!(rows[0][1], Value::Int64(epoch) if epoch > 0));
         assert_eq!(rows[0][2], Value::Int64(cdc::DEFAULT_CAPACITY as i64));
+        assert_eq!(
+            string_cell(&rows[0], 3),
+            "off",
+            "capture is after-image only unless enrichment is asked for"
+        );
         assert!(
-            string_cell(&rows[0], 3).starts_with("cdc:"),
+            string_cell(&rows[0], 4).starts_with("cdc:"),
             "enable hands back the cursor to start consuming from"
         );
         assert!(graph.cdc_enabled());
@@ -634,12 +773,18 @@ mod tests {
         let Value::Map(state) = &row[11] else {
             panic!("state must be a map, got {:?}", row[11]);
         };
-        let Some(Value::Map(properties)) = state.get("properties") else {
-            panic!("state.properties must be a map: {state:?}");
-        };
+        assert_eq!(
+            state.get("before"),
+            Some(&Value::Null),
+            "a create had no before-image to report"
+        );
+        let properties = after_properties(&row[11]);
         assert_eq!(properties.get("name"), Some(&Value::String("seven".into())));
         assert_eq!(properties.get("qty"), Some(&Value::Int64(3)));
-        assert_eq!(state.get("title"), Some(&Value::String("seven".into())));
+        assert_eq!(
+            after_map(&row[11]).get("title"),
+            Some(&Value::String("seven".into()))
+        );
     }
 
     #[test]
@@ -667,17 +812,15 @@ mod tests {
         assert_eq!(row[3], Value::Int64(1));
         assert_eq!(string_cell(row, 4), "Item");
         assert_eq!(row[5], Value::Int64(2));
-        let Value::Map(state) = &row[6] else {
-            panic!("state must be a map");
-        };
-        let Some(Value::Map(properties)) = state.get("properties") else {
-            panic!("edge state carries its properties");
-        };
-        assert_eq!(properties.get("weight"), Some(&Value::Int64(5)));
+        assert_eq!(
+            after_properties(&row[6]).get("weight"),
+            Some(&Value::Int64(5)),
+            "a relationship's after-image carries its properties"
+        );
     }
 
     #[test]
-    fn a_delete_event_has_no_state() {
+    fn a_delete_event_carries_the_pair_with_both_halves_empty() {
         let mut graph = enabled(None);
         write(&mut graph, "CREATE (:Item {id: 1})");
         let before_delete = current_cursor(&mut graph);
@@ -691,10 +834,21 @@ mod tests {
         );
         assert_eq!(string_cell(&rows[0], 0), "delete");
         assert_eq!(rows[0][1], Value::Int64(1));
+        let Value::Map(state) = &rows[0][2] else {
+            panic!(
+                "state is the pair even when both halves are empty: {:?}",
+                rows[0][2]
+            );
+        };
         assert_eq!(
-            rows[0][2],
-            Value::Null,
-            "v1 keeps no before-image, so a delete has no state to report"
+            state.get("after"),
+            Some(&Value::Null),
+            "a delete left no entity, so there is no after-image"
+        );
+        assert_eq!(
+            state.get("before"),
+            Some(&Value::Null),
+            "capture keeps no pre-image yet, so the before half is empty too"
         );
     }
 
@@ -714,11 +868,9 @@ mod tests {
         );
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|row| string_cell(row, 0) == "update"));
-        let Value::Map(state) = &rows[1][1] else {
-            panic!("state map");
-        };
-        let Some(Value::List(labels)) = state.get("labels") else {
-            panic!("a node's state names its labels: {state:?}");
+        let after = after_map(&rows[1][1]);
+        let Some(Value::List(labels)) = after.get("labels") else {
+            panic!("a node's after-image names its labels: {after:?}");
         };
         let mut names: Vec<String> = labels
             .iter()
@@ -749,14 +901,224 @@ mod tests {
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(string_cell(&rows[0], 0), "update");
-        let Value::Map(state) = &rows[0][1] else {
-            panic!("state map");
-        };
-        let Some(Value::Map(properties)) = state.get("properties") else {
-            panic!("properties map");
-        };
+        let properties = after_properties(&rows[0][1]);
         assert_eq!(properties.get("name"), Some(&Value::String("two".into())));
         assert_eq!(properties.get("qty"), Some(&Value::Int64(9)));
+    }
+
+    /// The `{before, after}` pair is reachable *as a nested map* from Cypher,
+    /// not merely present in the row values.
+    ///
+    /// Non-vacuity: the assertion is written as `state.after.properties.name`,
+    /// a two-level map traversal. Against the flat v1 shape the same
+    /// expression resolves to null — the row still exists and every other
+    /// column still reads, so nothing but this test would notice. Against a
+    /// pair whose halves were lists, or whose `after` were a JSON string, it
+    /// fails too.
+    #[test]
+    fn the_state_pair_is_traversable_from_cypher() {
+        let mut graph = enabled(None);
+        write(&mut graph, "CREATE (:Item {id: 3, name: 'three'})");
+
+        let projected = rows(
+            &mut graph,
+            "CALL db.cdc.query() YIELD state \
+             RETURN state.after.properties.name AS name, state.before AS before",
+        );
+        assert_eq!(projected.len(), 1);
+        assert_eq!(
+            projected[0][0],
+            Value::String("three".into()),
+            "state.after.properties.<key> must resolve through both levels"
+        );
+        assert_eq!(
+            projected[0][1],
+            Value::Null,
+            "the before half is present and empty, not absent"
+        );
+    }
+
+    // ── enrichment ───────────────────────────────────────────────────
+
+    #[test]
+    fn enrichment_defaults_to_off_and_accepts_full() {
+        let mut graph = DirGraph::new();
+        let default = rows(&mut graph, "CALL db.cdc.enable() YIELD enrichment");
+        assert_eq!(string_cell(&default[0], 0), "off");
+
+        let full = rows(
+            &mut graph,
+            "CALL db.cdc.enable({enrichment: 'full'}) YIELD enrichment",
+        );
+        assert_eq!(string_cell(&full[0], 0), "full");
+
+        // Spelled as Neo4j spells its option values, too.
+        let shouted = rows(
+            &mut graph,
+            "CALL db.cdc.enable({enrichment: 'FULL'}) YIELD enrichment",
+        );
+        assert_eq!(string_cell(&shouted[0], 0), "full");
+    }
+
+    /// An enrichment change is a reconfiguration, not a restart: the epoch —
+    /// and therefore every live consumer cursor — survives it.
+    #[test]
+    fn changing_the_enrichment_keeps_the_epoch_and_the_retained_events() {
+        let mut graph = enabled(None);
+        write(&mut graph, "CREATE (:Item {id: 1})");
+        let before_change = current_cursor(&mut graph);
+        let epoch_before = rows(&mut graph, "CALL db.cdc.status() YIELD epoch")[0][0].clone();
+
+        run(
+            &mut graph,
+            "CALL db.cdc.enable({enrichment: 'full', capacity: 32})",
+        );
+        commit(&mut graph);
+
+        let status = rows(
+            &mut graph,
+            "CALL db.cdc.status() YIELD epoch, enrichment, buffered",
+        );
+        assert_eq!(
+            status[0][0], epoch_before,
+            "a mode change must not re-mint the epoch"
+        );
+        assert_eq!(string_cell(&status[0], 1), "full");
+        assert_eq!(status[0][2], Value::Int64(1), "the ring keeps what it held");
+
+        // The cursor taken before the change is still usable — which is the
+        // property the epoch guarantees.
+        write(&mut graph, "CREATE (:Item {id: 2})");
+        let tail = rows(
+            &mut graph,
+            &format!("CALL db.cdc.query({{from: '{before_change}'}}) YIELD nodeId"),
+        );
+        assert_eq!(
+            tail.iter().map(|row| row[0].clone()).collect::<Vec<_>>(),
+            vec![Value::Int64(2)]
+        );
+    }
+
+    /// `enable` is declarative: an omitted key takes its default rather than
+    /// preserving the running configuration. Pinned because the alternative
+    /// (merge into the live config) is the plausible-looking behaviour, and
+    /// the two disagree exactly here.
+    #[test]
+    fn an_omitted_enrichment_resets_it_the_way_an_omitted_capacity_does() {
+        let mut graph = DirGraph::new();
+        run(
+            &mut graph,
+            "CALL db.cdc.enable({enrichment: 'full', capacity: 8})",
+        );
+        let reset = rows(
+            &mut graph,
+            "CALL db.cdc.enable({capacity: 8}) YIELD enrichment",
+        );
+        assert_eq!(
+            string_cell(&reset[0], 0),
+            "off",
+            "what you pass is what the log is configured as"
+        );
+    }
+
+    #[test]
+    fn a_diff_enrichment_is_refused_with_the_reason_rather_than_a_value_list() {
+        let mut graph = DirGraph::new();
+        let error = fails(&mut graph, "CALL db.cdc.enable({enrichment: 'diff'})");
+        assert!(
+            error.contains("does not accept 'diff'"),
+            "the refusal must name the value it turned down: {error}"
+        );
+        assert!(
+            error.contains("computed") && error.contains("full"),
+            "and explain why, plus what to use instead: {error}"
+        );
+        assert!(!graph.cdc_enabled(), "a refused enable installs nothing");
+    }
+
+    #[test]
+    fn an_unknown_enrichment_is_refused_and_names_the_accepted_ones() {
+        let mut graph = DirGraph::new();
+        let error = fails(&mut graph, "CALL db.cdc.enable({enrichment: 'partial'})");
+        assert!(
+            error.contains("'partial' is not a change-capture enrichment mode")
+                && error.contains("'off'")
+                && error.contains("'full'"),
+            "{error}"
+        );
+
+        let error = fails(&mut graph, "CALL db.cdc.enable({enrichment: 3})");
+        assert!(
+            error.contains("must be the string 'off' or 'full'"),
+            "{error}"
+        );
+        assert!(!graph.cdc_enabled());
+    }
+
+    // ── status ───────────────────────────────────────────────────────
+
+    /// The one read verb that must answer while capture is off — the whole
+    /// point of a probe is to be callable before you know the answer.
+    #[test]
+    fn status_answers_while_capture_is_off() {
+        let mut graph = DirGraph::new();
+        let (columns, rows) = run(&mut graph, "CALL db.cdc.status()");
+        assert_eq!(
+            columns,
+            vec![
+                "enabled",
+                "epoch",
+                "capacity",
+                "enrichment",
+                "buffered",
+                "earliest",
+                "current"
+            ]
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Value::Boolean(false));
+        assert!(
+            rows[0][1..].iter().all(|cell| *cell == Value::Null),
+            "an off log has no configuration to report, and 0 is not 'none': {:?}",
+            rows[0]
+        );
+    }
+
+    #[test]
+    fn status_reports_the_running_configuration_and_the_watermarks() {
+        let mut graph = enabled(Some(2));
+        for id in 1..=3 {
+            write(&mut graph, &format!("CREATE (:Item {{id: {id}}})"));
+        }
+        let status = rows(&mut graph, "CALL db.cdc.status()");
+        assert_eq!(status[0][0], Value::Boolean(true));
+        assert!(matches!(status[0][1], Value::Int64(epoch) if epoch > 0));
+        assert_eq!(status[0][2], Value::Int64(2), "capacity");
+        assert_eq!(string_cell(&status[0], 3), "off");
+        assert_eq!(
+            status[0][4],
+            Value::Int64(2),
+            "buffered, bounded by capacity"
+        );
+        assert_eq!(
+            status[0][5],
+            Value::Int64(2),
+            "earliest survived the eviction"
+        );
+        assert_eq!(status[0][6], Value::Int64(3), "current is the newest seq");
+
+        // And it reports 'off' again once capture stops, rather than the last
+        // configuration it saw.
+        run(&mut graph, "CALL db.cdc.disable()");
+        let after = rows(&mut graph, "CALL db.cdc.status() YIELD enabled, capacity");
+        assert_eq!(after[0], vec![Value::Boolean(false), Value::Null]);
+    }
+
+    #[test]
+    fn status_takes_no_parameters() {
+        let mut graph = enabled(None);
+        let error = fails(&mut graph, "CALL db.cdc.status({capacity: 4})");
+        assert!(error.contains("takes no parameters"), "{error}");
     }
 
     // ── cursor errors ────────────────────────────────────────────────
@@ -996,6 +1358,7 @@ mod tests {
         for (name, mode) in [
             ("db.cdc.enable", "SCHEMA"),
             ("db.cdc.disable", "SCHEMA"),
+            ("db.cdc.status", "READ"),
             ("db.cdc.current", "READ"),
             ("db.cdc.earliest", "READ"),
             ("db.cdc.query", "READ"),

@@ -415,6 +415,22 @@ pub fn kglite::api::cdc::CdcChange::eq(&self, other: &kglite::api::cdc::CdcChang
 impl core::fmt::Debug for kglite::api::cdc::CdcChange
 pub fn kglite::api::cdc::CdcChange::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for kglite::api::cdc::CdcChange
+pub enum kglite::api::cdc::CdcEnrichment
+pub kglite::api::cdc::CdcEnrichment::Full
+pub kglite::api::cdc::CdcEnrichment::Off
+impl kglite::api::cdc::CdcEnrichment
+pub fn kglite::api::cdc::CdcEnrichment::as_str(&self) -> &'static str
+impl core::clone::Clone for kglite::api::cdc::CdcEnrichment
+pub fn kglite::api::cdc::CdcEnrichment::clone(&self) -> kglite::api::cdc::CdcEnrichment
+impl core::cmp::Eq for kglite::api::cdc::CdcEnrichment
+impl core::cmp::PartialEq for kglite::api::cdc::CdcEnrichment
+pub fn kglite::api::cdc::CdcEnrichment::eq(&self, other: &kglite::api::cdc::CdcEnrichment) -> bool
+impl core::default::Default for kglite::api::cdc::CdcEnrichment
+pub fn kglite::api::cdc::CdcEnrichment::default() -> kglite::api::cdc::CdcEnrichment
+impl core::fmt::Debug for kglite::api::cdc::CdcEnrichment
+pub fn kglite::api::cdc::CdcEnrichment::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::cdc::CdcEnrichment
+impl core::marker::StructuralPartialEq for kglite::api::cdc::CdcEnrichment
 pub enum kglite::api::cdc::CdcEventKind
 pub kglite::api::cdc::CdcEventKind::Create
 pub kglite::api::cdc::CdcEventKind::Delete
@@ -446,6 +462,7 @@ impl kglite::api::cdc::CdcLog
 pub fn kglite::api::cdc::CdcLog::capacity(&self) -> usize
 pub fn kglite::api::cdc::CdcLog::current(&self) -> u64
 pub fn kglite::api::cdc::CdcLog::earliest(&self) -> u64
+pub fn kglite::api::cdc::CdcLog::enrichment(&self) -> kglite::api::cdc::CdcEnrichment
 pub fn kglite::api::cdc::CdcLog::epoch(&self) -> u64
 pub fn kglite::api::cdc::CdcLog::is_empty(&self) -> bool
 pub fn kglite::api::cdc::CdcLog::len(&self) -> usize
@@ -458,6 +475,7 @@ pub kglite::api::cdc::CdcStatus::buffered: usize
 pub kglite::api::cdc::CdcStatus::capacity: usize
 pub kglite::api::cdc::CdcStatus::current: u64
 pub kglite::api::cdc::CdcStatus::earliest: u64
+pub kglite::api::cdc::CdcStatus::enrichment: kglite::api::cdc::CdcEnrichment
 pub kglite::api::cdc::CdcStatus::epoch: u64
 impl core::clone::Clone for kglite::api::cdc::CdcStatus
 pub fn kglite::api::cdc::CdcStatus::clone(&self) -> kglite::api::cdc::CdcStatus
@@ -492,7 +510,7 @@ pub const kglite::api::cdc::DEFAULT_CAPACITY: usize
 pub const kglite::api::cdc::MAX_CAPACITY: usize
 pub fn kglite::api::cdc::disable(graph: &mut kglite::api::DirGraph) -> bool
 pub fn kglite::api::cdc::drain_at_commit(graph: &mut kglite::api::DirGraph) -> alloc::vec::Vec<kglite::api::durable::RawOp>
-pub fn kglite::api::cdc::enable(graph: &mut kglite::api::DirGraph, capacity: core::option::Option<usize>) -> core::result::Result<kglite::api::cdc::CdcStatus, kglite::error::KgError>
+pub fn kglite::api::cdc::enable(graph: &mut kglite::api::DirGraph, capacity: core::option::Option<usize>, enrichment: kglite::api::cdc::CdcEnrichment) -> core::result::Result<kglite::api::cdc::CdcStatus, kglite::error::KgError>
 pub fn kglite::api::cdc::publish_drained(graph: &kglite::api::DirGraph, raw: &[kglite::api::durable::RawOp])
 pub fn kglite::api::cdc::read(graph: &kglite::api::DirGraph, from: u64, limit: core::option::Option<usize>) -> core::option::Option<alloc::vec::Vec<kglite::api::cdc::CdcEvent>>
 pub fn kglite::api::cdc::status(graph: &kglite::api::DirGraph) -> core::option::Option<kglite::api::cdc::CdcStatus>

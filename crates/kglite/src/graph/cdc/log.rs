@@ -29,6 +29,43 @@ pub const DEFAULT_CAPACITY: usize = 65_536;
 /// allocator will give you".
 pub const MAX_CAPACITY: usize = 10_000_000;
 
+/// How much of an entity's state each event carries.
+///
+/// The knob exists because before-images are not free: capturing one means
+/// reading the whole entity at first touch in a commit, and keeping it in the
+/// ring alongside the after-image. A consumer that only mirrors current state
+/// should not pay for a `before` it will not read, so capture is off unless
+/// asked for — the same posture the stream itself takes.
+///
+/// Neo4j's equivalent is the `txLogEnrichment` database option, whose third
+/// value (`DIFF`) KGLite deliberately does not offer: a diff still requires
+/// the full before-image to compute, so it would save ring bytes at the cost
+/// of a second event semantics for consumers to handle. See
+/// `db.cdc.enable`'s refusal prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CdcEnrichment {
+    /// After-image only: `state.before` is always null.
+    #[default]
+    Off,
+    /// Before *and* after images for every change the mode can capture.
+    ///
+    /// The mode is recorded and reported as soon as it is selected; the
+    /// before-image capture it turns on is the next piece of this work, so
+    /// `state.before` reads null under `Full` as well until that lands.
+    Full,
+}
+
+impl CdcEnrichment {
+    /// Stable lowercase wire name (`"off"` / `"full"`), as the Cypher surface
+    /// spells it in both directions.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CdcEnrichment::Off => "off",
+            CdcEnrichment::Full => "full",
+        }
+    }
+}
+
 /// A snapshot of the log's addressing state — what `db.cdc.current()` /
 /// `db.cdc.earliest()` report and what a status surface prints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +76,8 @@ pub struct CdcStatus {
     pub epoch: u64,
     /// Configured ring capacity in events.
     pub capacity: usize,
+    /// How much state each event carries — see [`CdcEnrichment`].
+    pub enrichment: CdcEnrichment,
     /// Events currently retained.
     pub buffered: usize,
     /// Sequence number of the oldest retained event; equals `current + 1`
@@ -71,16 +110,18 @@ pub struct CdcLog {
     /// cursor of 0 addresses "before everything".
     next_seq: u64,
     capacity: usize,
+    enrichment: CdcEnrichment,
     events: VecDeque<CdcEvent>,
 }
 
 impl CdcLog {
     /// A fresh, empty log with a new process-unique epoch.
-    pub(crate) fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize, enrichment: CdcEnrichment) -> Self {
         Self {
             epoch: next_epoch(),
             next_seq: 1,
             capacity: capacity.max(1),
+            enrichment,
             events: VecDeque::new(),
         }
     }
@@ -93,6 +134,11 @@ impl CdcLog {
     /// Configured capacity in events.
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// How much state this log captures per change.
+    pub fn enrichment(&self) -> CdcEnrichment {
+        self.enrichment
     }
 
     /// Sequence number of the newest published event, or 0 before the first.
@@ -122,6 +168,7 @@ impl CdcLog {
         CdcStatus {
             epoch: self.epoch,
             capacity: self.capacity,
+            enrichment: self.enrichment,
             buffered: self.events.len(),
             earliest: self.earliest(),
             current: self.current(),
@@ -146,13 +193,17 @@ impl CdcLog {
         }
     }
 
-    /// Resize the ring in place, keeping the epoch and the newest events.
+    /// Reconfigure the ring in place, keeping the epoch and the newest events.
     ///
     /// Keeping the epoch is what makes a re-`enable` non-destructive to
     /// consumers: their cursors stay valid, and a shrink is reported by
     /// [`earliest`](Self::earliest) advancing, exactly as ordinary eviction is.
-    pub(crate) fn resize(&mut self, capacity: usize) {
+    /// An enrichment change keeps it too — the events already in the ring are
+    /// still the same events, addressed the same way; only what the *next*
+    /// capture records changes.
+    pub(crate) fn reconfigure(&mut self, capacity: usize, enrichment: CdcEnrichment) {
         self.capacity = capacity.max(1);
+        self.enrichment = enrichment;
         while self.events.len() > self.capacity {
             self.events.pop_front();
         }

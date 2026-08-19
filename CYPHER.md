@@ -40,7 +40,7 @@ surface at a glance — most of what you'd reach for is here, in-process:
 | **Temporal** | `date()` / `datetime()` / `localdatetime()`, `duration(…)`, `duration.between`, date arithmetic, `valid_at` / `valid_during` — see [Temporal](#temporal-functions) |
 | **Value types** | int, float, string, bool, **date**, **timestamp** (date + time), duration, point, list, map, node, relationship, path |
 | **Transactions** | multi-statement with snapshot isolation + rollback (`Session` / `Transaction`) |
-| **Change data capture** | opt-in change stream with stateless cursors — `CALL db.cdc.enable/current/earliest/query/disable`, see [Change data capture](#change-data-capture-call-dbcdc) |
+| **Change data capture** | opt-in change stream with stateless cursors — `CALL db.cdc.enable/status/current/earliest/query/disable`, see [Change data capture](#change-data-capture-call-dbcdc) |
 | **Storage** | identical Cypher across in-memory, mmap, and on-disk modes (1B+ edges) |
 
 Per-write `UNIQUE` / `NOT NULL` / NODE KEY / `IS :: TYPE` constraints **are**
@@ -1700,8 +1700,9 @@ that happened before `enable` is in the log.
 
 | Procedure | YIELD columns | Does |
 |-----------|---------------|------|
-| `CALL db.cdc.enable({capacity})` | `enabled`, `epoch`, `capacity`, `cursor` | Start capturing (or resize a running log in place). `capacity` is optional — the retention in events, default 65536. `cursor` is the position to start consuming from |
+| `CALL db.cdc.enable({capacity, enrichment})` | `enabled`, `epoch`, `capacity`, `enrichment`, `cursor` | Start capturing (or reconfigure a running log in place). Both arguments are optional and **every omitted one takes its default**: `capacity` is the retention in events (default 65536), `enrichment` is `'off'` (default) or `'full'`. `cursor` is the position to start consuming from |
 | `CALL db.cdc.disable()` | `enabled`, `wasEnabled` | Stop capturing and discard the log. Idempotent; `wasEnabled` says whether it had been running |
+| `CALL db.cdc.status()` | `enabled`, `epoch`, `capacity`, `enrichment`, `buffered`, `earliest`, `current` | How capture is configured and how much it is holding. The one read verb that **answers while capture is off** (`enabled: false`, every other column null) rather than failing |
 | `CALL db.cdc.current()` | `id` | Cursor addressing the newest published change — start here to see only what happens *next* |
 | `CALL db.cdc.earliest()` | `id` | Cursor addressing the oldest change still retained — start here to read the whole retained log |
 | `CALL db.cdc.query({from})` | `id`, `seq`, `operation`, `elementType`, `nodeType`, `nodeId`, `relationshipType`, `srcType`, `srcId`, `tgtType`, `tgtId`, `state` | Changes published *after* the `from` cursor, oldest first. Omit `from` to read everything retained |
@@ -1721,8 +1722,8 @@ rows = graph.cypher(
 ).to_dicts()
 for row in rows:
     print(row["operation"], row["nodeType"], row["nodeId"], row["state"])
-# create Person 1 {'labels': [], 'properties': {'name': 'ann'}, 'title': 'ann'}
-# update Person 1 {'labels': [], 'properties': {'name': 'anne'}, 'title': 'anne'}
+# create Person 1 {'after': {'labels': [], 'properties': {'name': 'ann'}, 'title': 'ann'}, 'before': None}
+# update Person 1 {'after': {'labels': [], 'properties': {'name': 'anne'}, 'title': 'anne'}, 'before': None}
 
 cursor = rows[-1]["id"]  # the row's own id is the cursor for the next poll
 ```
@@ -1732,10 +1733,31 @@ cursor = rows[-1]["id"]  # the row's own id is the cursor for the next poll
 relationship columns; a relationship row carries
 `(relationshipType, srcType, srcId, tgtType, tgtId)` and null node columns —
 logical identity, not an internal index, so a cursor's events stay meaningful
-after a compaction. `state` is the **after-image**: `{title, labels,
-properties}` for a node, `{properties}` for a relationship, and `null` for a
-delete (v1 keeps no before-image, so a delete genuinely has nothing to report;
-an empty map would read as "an entity with no properties").
+after a compaction.
+
+**`state` is the pair `{before, after}`** — Neo4j's shape — and it is *always*
+a map, so a consumer reads `state["after"]` without null-checking the container
+first. Each half is the entity's image on that side of the commit, or `null`
+where the log holds none:
+
+- **`after`** — `{title, labels, properties}` for a node, `{properties}` for a
+  relationship, and `null` for a delete, which left no entity behind.
+- **`before`** — `null` in every row today. Capture keeps no pre-image yet;
+  the `enrichment` argument on `enable` is where selecting one will live, and
+  until it does, a consumer that needs the previous value keeps its own mirror.
+
+Each half is null rather than an empty map on purpose: an empty map reads as
+"an entity with no properties", which is a different fact.
+
+**Enrichment.** `enable({enrichment: 'off' | 'full'})` selects how much state
+each event carries; `'off'` — after-image only — is the default, and the only
+mode that changes what is captured today. The argument is named after Neo4j's
+`txLogEnrichment` database option and takes two of its three values: `'diff'`
+is **refused by name**, because a diff is computed *from* the full
+before-image, so it would save ring bytes rather than capture work, at the cost
+of a second event semantics for consumers to handle. Changing the mode on a
+running log **keeps the epoch**, exactly as a resize does, so live cursors
+survive it.
 
 **Cursors are opaque and exclusive.** Pass back the string you were given
 rather than constructing one — the encoding may change. Exclusive means a
@@ -1749,8 +1771,8 @@ against different data. A new epoch is minted by `enable` on a graph that had
 capture off — including after `disable`, after a `.kgl` **load** (the log is
 process-local runtime state and is deliberately never saved, so a loaded graph
 starts with capture off), and on an independent copy. Re-`enable` on a *running*
-log only resizes it and **keeps** the epoch, so live consumers survive a
-capacity change. The three refusals are distinct because the fix differs:
+log only reconfigures it and **keeps** the epoch, so live consumers survive a
+capacity or enrichment change. The three refusals are distinct because the fix differs:
 a malformed cursor means fix the call, a foreign epoch means re-acquire, and a
 cursor older than retention means resync and accept the gap.
 
@@ -1796,8 +1818,8 @@ against it.
 | `txId` | **Absent.** KGLite publishes at commit boundaries but assigns no durable transaction identity, so any value would be invented |
 | `metadata` | **Absent.** Neo4j reports executing user, connection client and transaction start time; the engine holds none of that |
 | `event` (nested map) | **Flattened into columns**, so `YIELD nodeType, operation` filters in Cypher without map traversal. Nesting survives only where it carries structure: `state` |
-| `state: {before, after}` | **After-image only.** Before-images are a future release |
-| — | `db.cdc.enable` / `db.cdc.disable` have no Neo4j counterpart: enablement there is a database option (`ALTER DATABASE … SET OPTION txLogEnrichment`) |
+| `state: {before, after}` | **Same shape.** `after` carries the post-commit image (null for a delete); `before` is present but null in every row today — capture keeps no pre-image yet |
+| — | `db.cdc.enable` / `db.cdc.disable` / `db.cdc.status` have no Neo4j counterpart: enablement there is a database option (`ALTER DATABASE … SET OPTION txLogEnrichment`), whose `off` / `full` values `enable`'s `enrichment` argument mirrors — `diff` is refused, with the reason |
 
 Arguments are passed as a **map** (`{capacity: N}`, `{from: cursor}`);
 positional arguments are a parse error.

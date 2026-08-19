@@ -56,6 +56,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It is now shared, so every bulk entry point raises
   `ConstraintViolationError` / `ConstraintCreationError` where one applies.
 
+- **`CALL db.cdc.status()` — read the change-capture configuration without
+  changing it.** Yields `enabled`, `epoch`, `capacity`, `enrichment`,
+  `buffered`, `earliest`, `current`. It is the one CDC read verb that answers
+  while capture is *off* — `enabled: false` with the rest null, rather than the
+  "not enabled on this graph" refusal the other read verbs give — so a consumer
+  can ask whether the stream exists before deciding to consume it. Until now
+  that information was only obtainable from `db.cdc.enable()`, which mutates.
+
+### Changed
+
+- **BREAKING: `db.cdc.query`'s `state` column is now the pair
+  `{before, after}`.** CDC v1 (0.16.4) put the after-image directly in `state`;
+  it now sits under `state.after`, matching Neo4j's CDC shape, with
+  `state.before` alongside it. **A v1 consumer reading `state.properties`,
+  `state.title` or `state.labels` must read `state.after.properties` (and so
+  on).** Two further consequences:
+
+  - `state` is now **always a map**, including for a delete, where it reads
+    `{before: null, after: null}`. A v1 consumer testing `state is None` to
+    detect a delete must switch to `operation == "delete"` (or
+    `state["after"] is None`), because the null it was testing is now one level
+    down.
+  - `state.before` is `null` in every row for now. The half is in the shape so
+    that consumers write `state.before` once rather than migrating a second
+    time when it starts carrying data.
+
+  The break is deliberate and taken now, one release after CDC shipped, rather
+  than left to grow a second consumer base: the pair is the shape the stream
+  was always heading for, and a `state` that means the after-image in one
+  version and the pair in the next is worse than a single documented move.
+
 ### Fixed
 
 - **`CREATE CONSTRAINT … IS NODE KEY` / `IS RELATIONSHIP KEY` now has to agree

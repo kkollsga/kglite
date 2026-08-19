@@ -75,6 +75,7 @@ def test_enable_reports_status_and_a_starting_cursor():
     assert rows[0]["enabled"] is True
     assert rows[0]["epoch"] > 0
     assert rows[0]["capacity"] == 65536
+    assert rows[0]["enrichment"] == "off"
     assert rows[0]["cursor"].startswith("cdc:")
 
 
@@ -125,6 +126,7 @@ def test_the_family_is_listed_in_show_procedures(graph):
     assert {
         "db.cdc.enable",
         "db.cdc.disable",
+        "db.cdc.status",
         "db.cdc.current",
         "db.cdc.earliest",
         "db.cdc.query",
@@ -162,21 +164,23 @@ def test_both_set_map_spellings_publish_an_update_with_the_after_image(graph):
     rows = events(graph)[1:]
     assert [r["operation"] for r in rows] == ["update", "update", "update"]
     # `+=` merges into the existing property set; `=` replaces it wholesale.
-    assert rows[0]["state"]["properties"] == {"x": 1, "y": 2}
-    assert rows[1]["state"]["properties"] == {"z": 3}
-    assert rows[2]["state"]["properties"] == {"z": 3, "w": 4}
+    assert rows[0]["state"]["after"]["properties"] == {"x": 1, "y": 2}
+    assert rows[1]["state"]["after"]["properties"] == {"z": 3}
+    assert rows[2]["state"]["after"]["properties"] == {"z": 3, "w": 4}
 
 
-def test_a_delete_carries_identity_but_no_state(graph):
+def test_a_delete_carries_identity_and_a_pair_with_both_halves_empty(graph):
     graph.cypher("CREATE (:P {id: 1, x: 1})")
     graph.cypher("MATCH (n:P {id: 1}) DELETE n")
     deleted = events(graph)[-1]
     assert deleted["operation"] == "delete"
     assert deleted["nodeType"] == "P"
     assert deleted["nodeId"] == 1
-    # v1 keeps no before-image, so there is genuinely nothing to report —
-    # null rather than an empty map, which would read as "no properties".
-    assert deleted["state"] is None
+    # The pair is always there — a consumer reads state["after"] without
+    # null-checking the container. Each half is null rather than an empty
+    # map, which would read as "an entity with no properties": the delete
+    # left no entity, and capture keeps no pre-image yet.
+    assert deleted["state"] == {"before": None, "after": None}
 
 
 def test_edge_rows_carry_endpoints_and_null_node_columns(graph):
@@ -186,7 +190,127 @@ def test_edge_rows_carry_endpoints_and_null_node_columns(graph):
     assert (edge["srcType"], edge["srcId"]) == ("P", 1)
     assert (edge["tgtType"], edge["tgtId"]) == ("Q", 9)
     assert edge["nodeType"] is None and edge["nodeId"] is None
-    assert edge["state"]["properties"] == {"w": 2}
+    assert edge["state"]["after"] == {"properties": {"w": 2}}
+    assert edge["state"]["before"] is None
+
+
+# ── the state pair ─────────────────────────────────────────────────────────
+
+
+def test_state_is_the_before_after_pair_for_every_row(graph):
+    """Every row's `state` is `{before, after}` — the shape, not just the keys.
+
+    Non-vacuity: the values are asserted through the nesting, so the flat v1
+    shape (`state["properties"]`) fails on the missing key rather than
+    passing on a coincidence. `test_the_pair_is_traversable_from_cypher`
+    covers the other direction, where flat would read as null instead.
+    """
+    graph.cypher("CREATE (:P {id: 1, name: 'one'})")
+    graph.cypher("MATCH (n:P {id: 1}) SET n.name = 'uno'")
+    graph.cypher("MATCH (a:P {id: 1}) CREATE (a)-[:R {w: 1}]->(:Q {id: 2})")
+    graph.cypher("MATCH (n:P {id: 1}) DETACH DELETE n")
+
+    rows = events(graph)
+    assert rows, "an empty stream would pass every assertion below vacuously"
+    for row in rows:
+        assert set(row["state"]) == {"before", "after"}, row
+        assert row["state"]["before"] is None, "before is empty until capture keeps a pre-image"
+
+    def pick(**match):
+        return [r for r in rows if all(r[key] == value for key, value in match.items())]
+
+    created = pick(operation="create", elementType="node", nodeId=1)[0]
+    assert set(created["state"]["after"]) == {"title", "labels", "properties"}
+    assert created["state"]["after"]["properties"] == {"name": "one"}
+    assert created["state"]["after"]["labels"] == []
+
+    updated = pick(operation="update", nodeId=1)[0]
+    assert updated["state"]["after"]["properties"] == {"name": "uno"}
+
+    edge = pick(operation="create", elementType="relationship")[0]
+    assert edge["state"]["after"] == {"properties": {"w": 1}}, "an edge image is properties only"
+
+    deleted = pick(operation="delete")
+    assert deleted, "the DETACH DELETE must publish"
+    assert all(r["state"]["after"] is None for r in deleted)
+
+
+def test_the_pair_is_traversable_from_cypher(graph):
+    """The nesting is real map structure, reachable with `.` in a projection.
+
+    This is the assertion that would have caught a `state` left flat: against
+    the v1 shape `state.after.properties.name` resolves to null, silently,
+    with every other column still correct.
+    """
+    graph.cypher("CREATE (:P {id: 1, name: 'one'})")
+    rows = graph.cypher(
+        "CALL db.cdc.query() YIELD state RETURN state.after.properties.name AS name, state.before AS before"
+    ).to_dicts()
+    assert rows == [{"name": "one", "before": None}]
+
+
+# ── enrichment and status ──────────────────────────────────────────────────
+
+
+def test_enrichment_defaults_to_off_and_accepts_full():
+    g = kglite.KnowledgeGraph()
+    assert g.cypher("CALL db.cdc.enable()").to_dicts()[0]["enrichment"] == "off"
+    assert g.cypher("CALL db.cdc.enable({enrichment: 'full'})").to_dicts()[0]["enrichment"] == "full"
+
+
+def test_changing_the_enrichment_keeps_the_epoch(graph):
+    """A mode change is a reconfiguration, so live cursors must survive it."""
+    graph.cypher("CREATE (:P {id: 1})")
+    held = cursor(graph)
+    before = graph.cypher("CALL db.cdc.status()").to_dicts()[0]
+
+    graph.cypher("CALL db.cdc.enable({enrichment: 'full'})")
+    after = graph.cypher("CALL db.cdc.status()").to_dicts()[0]
+    assert after["epoch"] == before["epoch"]
+    assert after["enrichment"] == "full"
+
+    graph.cypher("CREATE (:P {id: 2})")
+    assert [r["nodeId"] for r in events(graph, held)] == [2], "the held cursor still resolves"
+
+
+def test_an_omitted_enrichment_resets_it_like_an_omitted_capacity():
+    """`enable` is declarative: what you pass is what the log ends up as."""
+    g = kglite.KnowledgeGraph()
+    g.cypher("CALL db.cdc.enable({enrichment: 'full', capacity: 8})")
+    assert g.cypher("CALL db.cdc.enable({capacity: 8})").to_dicts()[0]["enrichment"] == "off"
+
+
+def test_a_diff_enrichment_is_refused_with_the_reason():
+    g = kglite.KnowledgeGraph()
+    with pytest.raises(kglite.CypherExecutionError, match="does not accept 'diff'"):
+        g.cypher("CALL db.cdc.enable({enrichment: 'diff'})")
+    with pytest.raises(kglite.CypherExecutionError, match="not a change-capture enrichment mode"):
+        g.cypher("CALL db.cdc.enable({enrichment: 'partial'})")
+    with pytest.raises(kglite.CypherExecutionError, match="unknown parameter 'enrichmnt'"):
+        g.cypher("CALL db.cdc.enable({enrichmnt: 'full'})")
+    assert g.cypher("CALL db.cdc.status()").to_dicts()[0]["enabled"] is False
+
+
+def test_status_answers_whether_capture_is_off_or_on():
+    g = kglite.KnowledgeGraph()
+    off = g.cypher("CALL db.cdc.status()").to_dicts()[0]
+    assert off == {
+        "enabled": False,
+        "epoch": None,
+        "capacity": None,
+        "enrichment": None,
+        "buffered": None,
+        "earliest": None,
+        "current": None,
+    }
+
+    g.cypher("CALL db.cdc.enable({capacity: 4})")
+    g.cypher("CREATE (:P {id: 1})")
+    on = g.cypher("CALL db.cdc.status()").to_dicts()[0]
+    assert on["enabled"] is True
+    assert on["epoch"] > 0
+    assert (on["capacity"], on["enrichment"], on["buffered"]) == (4, "off", 1)
+    assert (on["earliest"], on["current"]) == (1, 1)
 
 
 def test_yield_projects_and_aliases_like_any_procedure(graph):

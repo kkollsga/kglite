@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::datatypes::Value;
-use crate::graph::cdc;
+use crate::graph::cdc::{self, CdcEnrichment};
 use crate::graph::session::execute::{execute_mut, ExecuteOptions};
 use crate::graph::session::Session;
 use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
@@ -74,7 +74,7 @@ fn node_property(event: &CdcEvent, key: &str) -> Option<Value> {
 /// already drained so each test starts from an empty log.
 fn seeded() -> DirGraph {
     let mut graph = DirGraph::new();
-    cdc::enable(&mut graph, None).expect("enable on a plain in-memory graph");
+    cdc::enable(&mut graph, None, CdcEnrichment::Off).expect("enable on a plain in-memory graph");
     run(
         &mut graph,
         "CREATE (:Item {id: 1, name: 'one', qty: 10}), (:Item {id: 2, name: 'two', qty: 20})",
@@ -88,7 +88,7 @@ fn seeded() -> DirGraph {
     handle
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .resize(super::DEFAULT_CAPACITY);
+        .reconfigure(super::DEFAULT_CAPACITY, CdcEnrichment::Off);
     // Start each test from a known-empty ring without re-minting the epoch:
     // read everything, then assert the tests below only see what they cause.
     let drained = events(&graph).len();
@@ -477,7 +477,7 @@ fn a_rolled_back_statement_under_a_held_reader_publishes_nothing() {
 #[test]
 fn eviction_bounds_the_ring_and_advances_the_earliest_watermark() {
     let mut graph = DirGraph::new();
-    cdc::enable(&mut graph, Some(4)).expect("enable");
+    cdc::enable(&mut graph, Some(4), CdcEnrichment::Off).expect("enable");
 
     for id in 0..40 {
         run(&mut graph, &format!("CREATE (:Item {{id: {id}}})"));
@@ -509,7 +509,7 @@ fn eviction_bounds_the_ring_and_advances_the_earliest_watermark() {
 #[test]
 fn a_single_commit_larger_than_the_ring_is_still_bounded() {
     let mut graph = DirGraph::new();
-    cdc::enable(&mut graph, Some(8)).expect("enable");
+    cdc::enable(&mut graph, Some(8), CdcEnrichment::Off).expect("enable");
 
     let creates = (0..500)
         .map(|id| format!("(:Item {{id: {id}}})"))
@@ -527,13 +527,13 @@ fn a_single_commit_larger_than_the_ring_is_still_bounded() {
 #[test]
 fn re_enabling_resizes_in_place_and_keeps_the_epoch() {
     let mut graph = DirGraph::new();
-    let first = cdc::enable(&mut graph, Some(100)).expect("enable");
+    let first = cdc::enable(&mut graph, Some(100), CdcEnrichment::Off).expect("enable");
     for id in 0..10 {
         run(&mut graph, &format!("CREATE (:Item {{id: {id}}})"));
     }
     commit(&mut graph);
 
-    let resized = cdc::enable(&mut graph, Some(3)).expect("re-enable");
+    let resized = cdc::enable(&mut graph, Some(3), CdcEnrichment::Off).expect("re-enable");
     assert_eq!(
         resized.epoch, first.epoch,
         "a live consumer's cursors must survive a capacity change"
@@ -550,7 +550,8 @@ fn enable_wraps_a_plain_graph_without_claiming_the_write_ahead_log() {
     let mut graph = DirGraph::new();
     assert!(!graph.graph.is_recording());
 
-    let status = cdc::enable(&mut graph, None).expect("enable on a plain graph");
+    let status =
+        cdc::enable(&mut graph, None, CdcEnrichment::Off).expect("enable on a plain graph");
     assert_eq!(status.capacity, super::DEFAULT_CAPACITY);
     assert_eq!(status.current, 0);
     assert!(
@@ -569,7 +570,7 @@ fn enable_wraps_a_plain_graph_without_claiming_the_write_ahead_log() {
 #[test]
 fn enable_does_not_impose_the_durable_duplicate_id_refusal() {
     let mut graph = DirGraph::new();
-    cdc::enable(&mut graph, None).expect("enable");
+    cdc::enable(&mut graph, None, CdcEnrichment::Off).expect("enable");
     run(&mut graph, "CREATE (:Item {id: 1, name: 'first'})");
     run(&mut graph, "CREATE (:Item {id: 1, name: 'second'})");
     commit(&mut graph);
@@ -594,7 +595,7 @@ fn disable_drops_the_log_and_stops_publishing() {
     commit(&mut graph);
     assert!(cdc::status(&graph).is_none());
 
-    let restarted = cdc::enable(&mut graph, None).expect("re-enable");
+    let restarted = cdc::enable(&mut graph, None, CdcEnrichment::Off).expect("re-enable");
     assert_eq!(
         restarted.current, 0,
         "a restart is a new epoch and a new sequence: nothing from before it is \
@@ -618,7 +619,7 @@ fn disable_leaves_a_durable_graphs_capture_layer_alone() {
     let mut tx = session.begin();
     {
         let working = tx.working_mut().expect("writable tx");
-        cdc::enable(working, None).expect("enable");
+        cdc::enable(working, None, CdcEnrichment::Off).expect("enable");
         assert!(cdc::disable(working), "was enabled");
         assert!(
             working.graph.is_wal_owner(),
@@ -645,7 +646,7 @@ fn disable_leaves_a_durable_graphs_capture_layer_alone() {
 fn disk_mode_refuses_enable() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut graph = new_dir_graph_in_mode(StorageMode::Disk, Some(dir.path())).expect("disk graph");
-    let error = cdc::enable(&mut graph, None).expect_err("disk must refuse");
+    let error = cdc::enable(&mut graph, None, CdcEnrichment::Off).expect_err("disk must refuse");
     let message = error.to_string();
     assert!(
         message.contains("storage='disk'") && message.contains("generation"),
@@ -662,7 +663,7 @@ fn disk_mode_refuses_enable() {
 #[test]
 fn mapped_mode_serves_including_the_columnar_write_path() {
     let mut graph = new_dir_graph_in_mode(StorageMode::Mapped, None).expect("mapped graph");
-    cdc::enable(&mut graph, None).expect("mapped must serve");
+    cdc::enable(&mut graph, None, CdcEnrichment::Off).expect("mapped must serve");
 
     run(&mut graph, "CREATE (:Item {id: 1, name: 'one'})");
     commit(&mut graph);
@@ -696,7 +697,7 @@ fn a_bulk_load_publishes_one_create_per_row() {
     use crate::graph::mutation::maintain::add_nodes;
 
     let mut graph = DirGraph::new();
-    cdc::enable(&mut graph, None).expect("enable");
+    cdc::enable(&mut graph, None, CdcEnrichment::Off).expect("enable");
 
     let columns = vec!["id".to_string(), "name".to_string()];
     let rows: Vec<Vec<Value>> = (0..25)
@@ -728,10 +729,15 @@ fn a_bulk_load_publishes_one_create_per_row() {
 #[test]
 fn capacity_zero_and_oversize_are_refused() {
     let mut graph = DirGraph::new();
-    assert!(cdc::enable(&mut graph, Some(0)).is_err());
-    assert!(cdc::enable(&mut graph, Some(super::MAX_CAPACITY + 1)).is_err());
+    assert!(cdc::enable(&mut graph, Some(0), CdcEnrichment::Off).is_err());
+    assert!(cdc::enable(
+        &mut graph,
+        Some(super::MAX_CAPACITY + 1),
+        CdcEnrichment::Off
+    )
+    .is_err());
     assert!(!graph.cdc_enabled(), "a refused enable installs nothing");
-    assert!(cdc::enable(&mut graph, Some(super::MAX_CAPACITY)).is_ok());
+    assert!(cdc::enable(&mut graph, Some(super::MAX_CAPACITY), CdcEnrichment::Off).is_ok());
 }
 
 #[test]
@@ -787,7 +793,7 @@ fn a_cdc_enabled_graph_can_still_be_opened_durably() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("graph.kgl");
     let mut graph = DirGraph::new();
-    cdc::enable(&mut graph, None).expect("enable");
+    cdc::enable(&mut graph, None, CdcEnrichment::Off).expect("enable");
 
     let session = Session::open_durable(
         Arc::new(graph),
@@ -815,7 +821,12 @@ fn a_durable_commit_publishes_to_the_log_and_the_stream() {
     // Enabling on the working copy is exactly how B2's `CALL db.cdc.enable`
     // will run: a mutation statement against a transaction's graph.
     let mut tx = session.begin();
-    cdc::enable(tx.working_mut().expect("writable tx"), Some(16)).expect("enable");
+    cdc::enable(
+        tx.working_mut().expect("writable tx"),
+        Some(16),
+        CdcEnrichment::Off,
+    )
+    .expect("enable");
     run(
         tx.working_mut().expect("writable tx"),
         "CREATE (:Item {id: 1, name: 'durable'})",
@@ -859,7 +870,12 @@ fn a_durable_commit_that_could_not_be_logged_publishes_nothing() {
     .expect("durable open");
 
     let mut tx = session.begin();
-    cdc::enable(tx.working_mut().expect("writable tx"), None).expect("enable");
+    cdc::enable(
+        tx.working_mut().expect("writable tx"),
+        None,
+        CdcEnrichment::Off,
+    )
+    .expect("enable");
     session.commit(tx, false);
     let from = cursor(&session.snapshot());
 

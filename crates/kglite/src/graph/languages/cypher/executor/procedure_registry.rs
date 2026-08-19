@@ -357,14 +357,28 @@ pub(super) const PROCEDURES: &[ProcedureSpec] = &[
     ProcedureSpec {
         name: "db.cdc.enable",
         aliases: &[],
-        description: "Start change data capture on this graph, or resize a running log in place. Params: {capacity} (events retained, default 65536). Refused in storage='disk'.",
-        columns: &["enabled", "epoch", "capacity", "cursor"],
+        description: "Start change data capture on this graph, or reconfigure a running log in place. Params: {capacity} (events retained, default 65536), {enrichment} ('off' = after-image only, the default, or 'full'). Every omitted key takes its default. Refused in storage='disk'.",
+        columns: &["enabled", "epoch", "capacity", "enrichment", "cursor"],
     },
     ProcedureSpec {
         name: "db.cdc.disable",
         aliases: &[],
         description: "Stop change data capture and discard the log. Idempotent; 'wasEnabled' reports whether it was running.",
         columns: &["enabled", "wasEnabled"],
+    },
+    ProcedureSpec {
+        name: "db.cdc.status",
+        aliases: &[],
+        description: "How change data capture is configured on this graph, and how much it is holding. Answers with 'enabled: false' and null columns when capture is off, rather than failing.",
+        columns: &[
+            "enabled",
+            "epoch",
+            "capacity",
+            "enrichment",
+            "buffered",
+            "earliest",
+            "current",
+        ],
     },
     ProcedureSpec {
         name: "db.cdc.current",
@@ -504,6 +518,10 @@ mod tests {
         }
         assert!(!is_mutating_procedure("db.cdc.query"));
         assert_eq!(procedure_mode("db.cdc.query"), "READ");
+        // `status` only reads configuration, so it must stay off the write
+        // engine: a read-only graph has to be able to ask whether capture is on.
+        assert!(!is_mutating_procedure("db.cdc.status"));
+        assert_eq!(procedure_mode("db.cdc.status"), "READ");
         assert!(!is_mutating_procedure("db.labels"));
         assert!(!is_mutating_procedure("no.such.procedure"));
     }
@@ -515,6 +533,7 @@ mod tests {
         for name in [
             "db.cdc.enable",
             "db.cdc.disable",
+            "db.cdc.status",
             "db.cdc.current",
             "db.cdc.earliest",
             "db.cdc.query",

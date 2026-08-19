@@ -479,9 +479,9 @@ pub mod api {
     /// commit boundaries are.
     pub mod cdc {
         pub use crate::graph::cdc::{
-            disable, drain_at_commit, enable, publish_drained, read, status, CdcChange, CdcEvent,
-            CdcEventKind, CdcHandle, CdcLog, CdcStatus, EdgeState, NodeState, DEFAULT_CAPACITY,
-            MAX_CAPACITY,
+            disable, drain_at_commit, enable, publish_drained, read, status, CdcChange,
+            CdcEnrichment, CdcEvent, CdcEventKind, CdcHandle, CdcLog, CdcStatus, EdgeState,
+            NodeState, DEFAULT_CAPACITY, MAX_CAPACITY,
         };
     }
 

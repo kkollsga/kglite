@@ -7,7 +7,7 @@
 
 use crate::datatypes::Value;
 use crate::graph::algorithms::Interrupt;
-use crate::graph::cdc;
+use crate::graph::cdc::{self, CdcEnrichment};
 use crate::graph::constraints::{ConstraintKind, EntityKind};
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::property_types::DeclaredType;
@@ -299,7 +299,7 @@ fn a_refused_write_captures_nothing() {
         } else {
             required_graph()
         };
-        cdc::enable(&mut graph, None).expect("enable capture");
+        cdc::enable(&mut graph, None, CdcEnrichment::Off).expect("enable capture");
         let from = cdc::status(&graph).expect("enabled").current;
 
         let error = run_err(&mut graph, query);
@@ -322,7 +322,7 @@ fn a_refused_bulk_frame_captures_nothing() {
     use crate::graph::mutation::maintain::add_connections;
 
     let mut graph = required_graph();
-    cdc::enable(&mut graph, None).expect("enable capture");
+    cdc::enable(&mut graph, None, CdcEnrichment::Off).expect("enable capture");
     let from = cdc::status(&graph).expect("enabled").current;
 
     let frame = DataFrame::from_cypher_rows(

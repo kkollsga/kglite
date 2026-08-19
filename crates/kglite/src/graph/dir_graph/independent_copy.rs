@@ -30,15 +30,16 @@ impl DirGraph {
         // A change stream is addressed by `(epoch, seq)`, so an independent
         // lineage needs an independent epoch: the copy's events describe
         // *its* writes, and a cursor from the original must be refused rather
-        // than resolved against them. Capacity carries over; the ring does not
-        // (the copy has published nothing).
+        // than resolved against them. Configuration (capacity, enrichment)
+        // carries over; the ring does not (the copy has published nothing).
         copy.cdc = self.cdc.as_ref().map(|handle| {
-            let capacity = handle
+            let source = handle
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .capacity();
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let (capacity, enrichment) = (source.capacity(), source.enrichment());
+            drop(source);
             std::sync::Arc::new(std::sync::Mutex::new(crate::graph::cdc::CdcLog::new(
-                capacity,
+                capacity, enrichment,
             )))
         });
         copy.wkt_cache = copy_cache(&self.wkt_cache);

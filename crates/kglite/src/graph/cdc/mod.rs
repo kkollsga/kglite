@@ -33,10 +33,8 @@
 //! An unpublished commit is a *missing* event; there is no arrangement here
 //! that can invent one.
 //!
-//! ## What is deliberately not here (v1)
+//! ## What is deliberately not here
 //!
-//! - **Before-images.** Events carry after-state only; a consumer that needs
-//!   `{before, after}` (Neo4j's shape) must keep its own mirror. v2.
 //! - **Persistence.** The log is `#[serde(skip)]` runtime state: a `.kgl` save
 //!   writes none of it and a load starts a new epoch, so a cursor never
 //!   silently addresses different data. See [`CdcLog`].
@@ -49,7 +47,7 @@ mod log;
 mod tests;
 
 pub use event::{CdcChange, CdcEvent, CdcEventKind, EdgeState, NodeState};
-pub use log::{CdcLog, CdcStatus, DEFAULT_CAPACITY, MAX_CAPACITY};
+pub use log::{CdcEnrichment, CdcLog, CdcStatus, DEFAULT_CAPACITY, MAX_CAPACITY};
 
 use crate::error::KgError;
 use crate::graph::dir_graph::DirGraph;
@@ -78,9 +76,17 @@ fn lock(handle: &CdcHandle) -> std::sync::MutexGuard<'_, CdcLog> {
 /// and the durable-only duplicate-id refusal is not imposed on a graph that
 /// keeps no log ([`RecordingGraph::is_wal_owner`](crate::graph::storage::recording::RecordingGraph::is_wal_owner)).
 ///
-/// **Re-enabling an enabled log resizes it in place** and keeps the epoch, so
-/// live consumer cursors survive a capacity change; a shrink evicts from the
-/// front and shows up as `earliest` advancing, like any other eviction.
+/// **Re-enabling an enabled log reconfigures it in place** and keeps the epoch,
+/// so live consumer cursors survive a capacity or enrichment change; a shrink
+/// evicts from the front and shows up as `earliest` advancing, like any other
+/// eviction.
+///
+/// `enable` is **declarative, not incremental**: every argument it does not
+/// receive takes its default, so a re-enable that names only `capacity` also
+/// resets enrichment to [`CdcEnrichment::Off`]. That is the same rule capacity
+/// has always followed (a bare `enable()` on a running log resizes it to
+/// `DEFAULT_CAPACITY`), and one rule for both knobs is what keeps the call
+/// readable: what you pass is what the log ends up configured as.
 ///
 /// # Cost
 ///
@@ -100,7 +106,11 @@ fn lock(handle: &CdcHandle) -> std::sync::MutexGuard<'_, CdcLog> {
 // this one lifecycle call a different error type from every other engine entry
 // point a binding maps.
 #[allow(clippy::result_large_err)]
-pub fn enable(graph: &mut DirGraph, capacity: Option<usize>) -> Result<CdcStatus, KgError> {
+pub fn enable(
+    graph: &mut DirGraph,
+    capacity: Option<usize>,
+    enrichment: CdcEnrichment,
+) -> Result<CdcStatus, KgError> {
     if live_storage_mode(graph) == StorageMode::Disk {
         return Err(KgError::Argument(
             "change data capture is not supported for storage='disk'. A disk graph \
@@ -134,12 +144,12 @@ pub fn enable(graph: &mut DirGraph, capacity: Option<usize>) -> Result<CdcStatus
     match &graph.cdc {
         Some(handle) => {
             let mut log = lock(handle);
-            log.resize(capacity);
+            log.reconfigure(capacity, enrichment);
             Ok(log.status())
         }
         None => {
             graph.graph.wrap_for_capture();
-            let log = CdcLog::new(capacity);
+            let log = CdcLog::new(capacity, enrichment);
             let status = log.status();
             graph.cdc = Some(Arc::new(Mutex::new(log)));
             Ok(status)
