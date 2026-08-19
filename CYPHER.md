@@ -1742,22 +1742,36 @@ where the log holds none:
 
 - **`after`** — `{title, labels, properties}` for a node, `{properties}` for a
   relationship, and `null` for a delete, which left no entity behind.
-- **`before`** — `null` in every row today. Capture keeps no pre-image yet;
-  the `enrichment` argument on `enable` is where selecting one will live, and
-  until it does, a consumer that needs the previous value keeps its own mirror.
+- **`before`** — the same shape, under `enrichment: 'full'`: what the commit
+  found. `null` for a create (there was nothing before it), and `null` in
+  every row under the default `enrichment: 'off'`, which captures no
+  pre-image. A delete's `before` is the state it destroyed — the one event
+  whose only informative half is this one.
 
 Each half is null rather than an empty map on purpose: an empty map reads as
 "an entity with no properties", which is a different fact.
 
 **Enrichment.** `enable({enrichment: 'off' | 'full'})` selects how much state
-each event carries; `'off'` — after-image only — is the default, and the only
-mode that changes what is captured today. The argument is named after Neo4j's
-`txLogEnrichment` database option and takes two of its three values: `'diff'`
-is **refused by name**, because a diff is computed *from* the full
-before-image, so it would save ring bytes rather than capture work, at the cost
-of a second event semantics for consumers to handle. Changing the mode on a
-running log **keeps the epoch**, exactly as a resize does, so live cursors
-survive it.
+each event carries. `'off'` — after-image only — is the default; `'full'` adds
+the before-image. The argument is named after Neo4j's `txLogEnrichment`
+database option and takes two of its three values: `'diff'` is **refused by
+name**, because a diff is computed *from* the full before-image, so it would
+save ring bytes rather than capture work, at the cost of a second event
+semantics for consumers to handle. A consumer that wants a diff computes one
+from a `'full'` event, where both sides are present.
+
+Changing the mode on a running log **keeps the epoch**, exactly as a resize
+does, so live cursors survive it. It applies to *writes*, not to the log: the
+events already in the ring keep the shape they were captured with, so a
+consumer that switches to `'full'` starts seeing `before` from the next commit
+rather than retroactively.
+
+**`before` is the state at the start of the commit**, not before the most
+recent write. Three writes to one entity in one transaction publish one event,
+whose `before` is what the transaction opened on and whose `after` is what it
+left — so the pair answers "what did this commit change", which is the
+question a mirror or an audit trail is asking. A label change is included on
+the node's side: `before.labels` is the set the commit replaced.
 
 **Cursors are opaque and exclusive.** Pass back the string you were given
 rather than constructing one — the encoding may change. Exclusive means a
@@ -1799,6 +1813,14 @@ matches and writes nothing **0%**, and bulk loads most of all — +52% for a
 holds ~40 MB once full. A graph that never calls `db.cdc.enable()` is untouched
 by any of this.
 
+`enrichment: 'full'` adds one whole-entity read per changed entity per commit
+— not per write, because the image is taken at each entity's first touch, and
+creates read nothing at all. Measured at **+2-3%** on 1000 autocommit `SET`s,
+which is the worst case for it: every write is its own commit and so its own
+first touch. An update or delete event then holds two images where it held
+one, so a ring of a given capacity retains more bytes; the default `capacity`
+does not change with the mode, and is the knob to lower if that matters.
+
 **Storage modes.** In-memory and `storage='mapped'` serve the stream
 identically, durable or not. `storage='disk'` **refuses** `enable`: a disk
 graph commits by publishing an immutable generation, so the per-commit write
@@ -1818,7 +1840,7 @@ against it.
 | `txId` | **Absent.** KGLite publishes at commit boundaries but assigns no durable transaction identity, so any value would be invented |
 | `metadata` | **Absent.** Neo4j reports executing user, connection client and transaction start time; the engine holds none of that |
 | `event` (nested map) | **Flattened into columns**, so `YIELD nodeType, operation` filters in Cypher without map traversal. Nesting survives only where it carries structure: `state` |
-| `state: {before, after}` | **Same shape.** `after` carries the post-commit image (null for a delete); `before` is present but null in every row today — capture keeps no pre-image yet |
+| `state: {before, after}` | **Same shape.** `after` is the post-commit image (null for a delete); `before` is the pre-commit one under `enrichment: 'full'` (null for a create, and null throughout under the default `'off'`) |
 | — | `db.cdc.enable` / `db.cdc.disable` / `db.cdc.status` have no Neo4j counterpart: enablement there is a database option (`ALTER DATABASE … SET OPTION txLogEnrichment`), whose `off` / `full` values `enable`'s `enrichment` argument mirrors — `diff` is refused, with the reason |
 
 Arguments are passed as a **map** (`{capacity: N}`, `{from: cursor}`);

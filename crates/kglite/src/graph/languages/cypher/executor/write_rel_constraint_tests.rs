@@ -283,34 +283,41 @@ fn an_unconstrained_write_resolves_no_relationship_type() {
 /// the capture buffer empty. `edge_weight_mut` publishes an edge update
 /// whether or not a property lands, which is why the SET and REMOVE gates
 /// cannot be folded inside it.
+///
+/// Run under **both** enrichment modes. Before-image capture adds a read on
+/// the same write paths these gates guard, so "the gate precedes the capture"
+/// has to hold for the image as well as for the op — a refused write that
+/// captured an image would leave a `RawOp` behind and publish a phantom.
 #[test]
 fn a_refused_write_captures_nothing() {
-    for (query, constrain) in [
-        (
-            "MATCH (a:Person {person_id: 1}), (b:Person {person_id: 2}) \
-             CREATE (a)-[:KNOWS {since: 'yesterday'}]->(b)",
-            true,
-        ),
-        ("MATCH ()-[r:KNOWS]->() SET r.since = 'yesterday'", true),
-        ("MATCH ()-[r:KNOWS]->() REMOVE r.since", false),
-    ] {
-        let mut graph = if constrain {
-            typed_graph()
-        } else {
-            required_graph()
-        };
-        cdc::enable(&mut graph, None, CdcEnrichment::Off).expect("enable capture");
-        let from = cdc::status(&graph).expect("enabled").current;
+    for enrichment in [CdcEnrichment::Off, CdcEnrichment::Full] {
+        for (query, constrain) in [
+            (
+                "MATCH (a:Person {person_id: 1}), (b:Person {person_id: 2}) \
+                 CREATE (a)-[:KNOWS {since: 'yesterday'}]->(b)",
+                true,
+            ),
+            ("MATCH ()-[r:KNOWS]->() SET r.since = 'yesterday'", true),
+            ("MATCH ()-[r:KNOWS]->() REMOVE r.since", false),
+        ] {
+            let mut graph = if constrain {
+                typed_graph()
+            } else {
+                required_graph()
+            };
+            cdc::enable(&mut graph, None, enrichment).expect("enable capture");
+            let from = cdc::status(&graph).expect("enabled").current;
 
-        let error = run_err(&mut graph, query);
-        assert!(!error.is_empty());
-        cdc::drain_at_commit(&mut graph);
+            let error = run_err(&mut graph, query);
+            assert!(!error.is_empty());
+            cdc::drain_at_commit(&mut graph);
 
-        let published = cdc::read(&graph, from, None).expect("enabled");
-        assert!(
-            published.is_empty(),
-            "`{query}` was refused but published {published:?}"
-        );
+            let published = cdc::read(&graph, from, None).expect("enabled");
+            assert!(
+                published.is_empty(),
+                "`{query}` was refused under {enrichment:?} but published {published:?}"
+            );
+        }
     }
 }
 

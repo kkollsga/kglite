@@ -1,10 +1,24 @@
 //! CDC event vocabulary and its derivation from the write-capture buffer.
 //!
 //! An event describes **one entity's net change in one commit**: its logical
-//! identity, whether the commit created, updated or deleted it, and — for the
-//! first two — the entity's state *after* the commit. Before-images are
-//! deliberately out of scope for v1 (a documented divergence from Neo4j's
-//! `{before, after}` shape); nothing in this module keeps a pre-image.
+//! identity, whether the commit created, updated or deleted it, and the
+//! entity's state on each side of the commit.
+//!
+//! ## Where each half comes from
+//!
+//! They are read at opposite ends of the commit, and neither could be read at
+//! the other's:
+//!
+//! - **`after`** is resolved here, against *final* state, exactly as
+//!   [`resolve_ops`](crate::graph::storage::recording::resolve_ops) resolves
+//!   its upserts — so the two views of a commit cannot disagree.
+//! - **`before`** must be captured at the write, because by the time this runs
+//!   the old value is gone. It rides the
+//!   [`RawOp`](crate::graph::storage::recording::RawOp) as a
+//!   [`BeforeImage`], captured at each entity's **first touch** in the batch,
+//!   and only when the log asked for it
+//!   ([`CdcEnrichment::Full`](super::CdcEnrichment)). This module resolves the
+//!   interned image into a [`NodeState`]/[`EdgeState`]; it never reads one.
 //!
 //! ## Why derive rather than reuse `MutationOp`
 //!
@@ -17,7 +31,7 @@
 
 use crate::datatypes::Value;
 use crate::graph::schema::StringInterner;
-use crate::graph::storage::recording::{CaptureOrigin, RawOp};
+use crate::graph::storage::recording::{BeforeImage, CaptureOrigin, RawOp};
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
@@ -29,8 +43,8 @@ pub enum CdcEventKind {
     Create,
     /// An existing entity's properties, title or labels changed.
     Update,
-    /// The entity no longer exists. Carries identity only — v1 keeps no
-    /// before-image, so there is no final property set to report.
+    /// The entity no longer exists. Its `after` is `None`; its `before` is
+    /// the state the commit destroyed, when the log was capturing one.
     Delete,
 }
 
@@ -65,12 +79,16 @@ pub struct EdgeState {
 /// `NodeIndex`/`EdgeIndex`, which are storage addresses that a consumer
 /// outside the process cannot resolve and that a reload does not preserve.
 ///
-/// `after` is `Some` for creates and updates, `None` for deletes.
+/// `after` is `Some` for creates and updates, `None` for deletes. `before` is
+/// `Some` for updates and deletes **when the log captures before-images**, and
+/// `None` otherwise — including always for a create, which had no prior state
+/// to report.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CdcChange {
     Node {
         node_type: String,
         id: Value,
+        before: Option<NodeState>,
         after: Option<NodeState>,
     },
     Edge {
@@ -79,6 +97,7 @@ pub enum CdcChange {
         src_id: Value,
         tgt_type: String,
         tgt_id: Value,
+        before: Option<EdgeState>,
         after: Option<EdgeState>,
     },
 }
@@ -130,10 +149,12 @@ enum Entry {
     Upsert {
         key: SlotKey,
         kind: CdcEventKind,
+        before: Option<Box<BeforeImage>>,
     },
     RemoveNode {
         node_type: String,
         id: Value,
+        before: Option<Box<BeforeImage>>,
     },
     RemoveEdge {
         conn_type: String,
@@ -141,6 +162,7 @@ enum Entry {
         src_id: Value,
         tgt_type: String,
         tgt_id: Value,
+        before: Option<Box<BeforeImage>>,
     },
 }
 
@@ -179,29 +201,37 @@ pub(super) fn events_from_raw(
 
     for op in raw {
         match op {
-            RawOp::UpsertNode(idx, origin) => stage_upsert(
+            RawOp::UpsertNode(idx, origin, before) => stage_upsert(
                 &mut entries,
                 &mut slots,
                 SlotKey::Node(idx.index() as u32),
                 *origin,
+                before.clone(),
             ),
-            RawOp::SetNodeLabels(idx) => stage_upsert(
+            RawOp::SetNodeLabels(idx, before) => stage_upsert(
                 &mut entries,
                 &mut slots,
                 SlotKey::Node(idx.index() as u32),
                 // A label change is a change to an existing node; a node
                 // created with labels also has its `add_node` create op.
                 CaptureOrigin::Update,
+                before.clone(),
             ),
-            RawOp::UpsertEdge(eidx, origin) => stage_upsert(
+            RawOp::UpsertEdge(eidx, origin, before) => stage_upsert(
                 &mut entries,
                 &mut slots,
                 SlotKey::Edge(eidx.index() as u32),
                 *origin,
+                before.clone(),
             ),
-            RawOp::RemoveNode { node_type, id } => entries.push(Entry::RemoveNode {
+            RawOp::RemoveNode {
+                node_type,
+                id,
+                before,
+            } => entries.push(Entry::RemoveNode {
                 node_type: interner.resolve(*node_type).to_string(),
                 id: id.clone(),
+                before: before.clone(),
             }),
             RawOp::RemoveEdge {
                 conn_type,
@@ -209,12 +239,14 @@ pub(super) fn events_from_raw(
                 src_id,
                 tgt_type,
                 tgt_id,
+                before,
             } => entries.push(Entry::RemoveEdge {
                 conn_type: interner.resolve(*conn_type).to_string(),
                 src_type: interner.resolve(*src_type).to_string(),
                 src_id: src_id.clone(),
                 tgt_type: interner.resolve(*tgt_type).to_string(),
                 tgt_id: tgt_id.clone(),
+                before: before.clone(),
             }),
         }
     }
@@ -223,19 +255,34 @@ pub(super) fn events_from_raw(
     for entry in entries {
         let event = match entry {
             Entry::Vacated => continue,
-            Entry::Upsert { key, kind } => {
-                match resolve_upsert(key, graph, interner, &secondary_labels) {
+            Entry::Upsert { key, kind, before } => {
+                // A create had no prior state, whatever a reused storage slot
+                // may have left in the buffer. Dropping the image here rather
+                // than at capture keeps that rule in one place.
+                let before = match kind {
+                    CdcEventKind::Create => None,
+                    _ => before,
+                };
+                match resolve_upsert(key, graph, interner, &secondary_labels, before) {
                     Some(change) => PendingEvent { kind, change },
                     // Removed later in the same commit: its remove entry carries
                     // the outcome.
                     None => continue,
                 }
             }
-            Entry::RemoveNode { node_type, id } => PendingEvent {
+            Entry::RemoveNode {
+                node_type,
+                id,
+                before,
+            } => PendingEvent {
                 kind: CdcEventKind::Delete,
                 change: CdcChange::Node {
                     node_type,
                     id,
+                    // No index to fall back on: the node is gone, so a label
+                    // set the image does not carry cannot be recovered. The
+                    // delete choke point backfills it before the removal.
+                    before: before.map(|image| node_state_from(&image, interner, Vec::new)),
                     after: None,
                 },
             },
@@ -245,6 +292,7 @@ pub(super) fn events_from_raw(
                 src_id,
                 tgt_type,
                 tgt_id,
+                before,
             } => PendingEvent {
                 kind: CdcEventKind::Delete,
                 change: CdcChange::Edge {
@@ -253,6 +301,7 @@ pub(super) fn events_from_raw(
                     src_id,
                     tgt_type,
                     tgt_id,
+                    before: before.map(|image| edge_state_from(&image, interner)),
                     after: None,
                 },
             },
@@ -269,12 +318,13 @@ fn stage_upsert(
     slots: &mut HashMap<SlotKey, usize>,
     key: SlotKey,
     origin: CaptureOrigin,
+    before: Option<Box<BeforeImage>>,
 ) {
     let kind = match origin {
         CaptureOrigin::Create => CdcEventKind::Create,
         CaptureOrigin::Update => CdcEventKind::Update,
     };
-    let kind = match slots.get(&key) {
+    let (kind, before) = match slots.get(&key) {
         Some(&at) => {
             let previous = std::mem::replace(&mut entries[at], Entry::Vacated);
             match previous {
@@ -282,15 +332,21 @@ fn stage_upsert(
                 // property writes: the consumer must be told the entity is new.
                 Entry::Upsert {
                     kind: CdcEventKind::Create,
+                    before: earlier,
                     ..
-                } => CdcEventKind::Create,
-                _ => kind,
+                } => (CdcEventKind::Create, earlier.or(before)),
+                // The *earlier* image wins: first touch is the commit-start
+                // state, which is what a collapsed event must report.
+                Entry::Upsert {
+                    before: earlier, ..
+                } => (kind, earlier.or(before)),
+                _ => (kind, before),
             }
         }
-        None => kind,
+        None => (kind, before),
     };
     slots.insert(key, entries.len());
-    entries.push(Entry::Upsert { key, kind });
+    entries.push(Entry::Upsert { key, kind, before });
 }
 
 /// Read an upserted entity's identity and after-state out of the final graph,
@@ -300,6 +356,7 @@ fn resolve_upsert(
     graph: &impl GraphRead,
     interner: &StringInterner,
     secondary_labels: &impl Fn(NodeIndex) -> Vec<String>,
+    before: Option<Box<BeforeImage>>,
 ) -> Option<CdcChange> {
     match key {
         SlotKey::Node(raw) => {
@@ -308,6 +365,8 @@ fn resolve_upsert(
             Some(CdcChange::Node {
                 node_type: node.node_type_str(interner).to_string(),
                 id: node.id().into_owned(),
+                before: before
+                    .map(|image| node_state_from(&image, interner, || secondary_labels(idx))),
                 after: Some(NodeState {
                     title: node.title().into_owned(),
                     labels: secondary_labels(idx),
@@ -327,12 +386,57 @@ fn resolve_upsert(
                 src_id,
                 tgt_type,
                 tgt_id,
+                before: before.map(|image| edge_state_from(&image, interner)),
                 after: Some(EdgeState {
                     properties: edge.properties_cloned(interner).into_iter().collect(),
                 }),
             })
         }
     }
+}
+
+/// Resolve a captured node image into the wire-facing [`NodeState`].
+///
+/// `final_labels` is the **fallback** for an image whose labels were never
+/// captured, and it is sound for exactly one reason: the label choke point
+/// fills the image in whenever a commit edits labels, so an uncaptured label
+/// set means no label edit happened — and then the final set *is* the
+/// commit-start set. It is a closure because resolving it costs a scan of the
+/// secondary-label index, which the common case (labels captured, or a delete)
+/// never needs.
+fn node_state_from(
+    image: &BeforeImage,
+    interner: &StringInterner,
+    final_labels: impl FnOnce() -> Vec<String>,
+) -> NodeState {
+    NodeState {
+        title: image.title.clone(),
+        labels: image.labels.clone().unwrap_or_else(final_labels),
+        properties: resolve_properties(&image.properties, interner),
+    }
+}
+
+/// Resolve a captured edge image. Edges carry no title and no labels.
+fn edge_state_from(image: &BeforeImage, interner: &StringInterner) -> EdgeState {
+    EdgeState {
+        properties: resolve_properties(&image.properties, interner),
+    }
+}
+
+/// Interned property pairs to named ones, dropping any key the interner no
+/// longer knows — the same tolerance `property_pairs_named` applies.
+fn resolve_properties(
+    properties: &[(crate::graph::schema::InternedKey, Value)],
+    interner: &StringInterner,
+) -> Vec<(String, Value)> {
+    properties
+        .iter()
+        .filter_map(|(key, value)| {
+            interner
+                .try_resolve(*key)
+                .map(|name| (name.to_string(), value.clone()))
+        })
+        .collect()
 }
 
 /// Resolve a node index to its logical `(node_type, id)`, or `None` if the

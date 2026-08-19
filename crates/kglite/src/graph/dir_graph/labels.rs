@@ -20,6 +20,48 @@ use petgraph::graph::NodeIndex;
 use crate::graph::schema::{DirGraph, InternedKey};
 
 impl DirGraph {
+    /// Capture a node's pre-edit state for change data capture, **before** a
+    /// label edit lands.
+    ///
+    /// This is the label half of the side-channel rule: the capture wrapper
+    /// sits below storage and cannot see the label index at all, and
+    /// `note_recorded_node_labels` fires *after* the bucket edit — so a
+    /// before-image read from there would report the post-edit label set under
+    /// the name `before`. Reading here, ahead of the edit, is the only place
+    /// the old set still exists.
+    ///
+    /// Two cases, and the second is why this is not just "capture if absent":
+    ///
+    /// - The node has no image yet (this label edit is its first touch in the
+    ///   commit): capture the whole entity, labels included.
+    /// - The node was first touched by a *property* write, whose image could
+    ///   not see labels: backfill just the labels. They are still the
+    ///   commit-start set, because this is the commit's first label edit on
+    ///   the node — a later one finds `labels` already filled and leaves it.
+    fn capture_label_before_image(&mut self, idx: NodeIndex) {
+        if !self.graph.captures_before_images() {
+            return;
+        }
+        let labels = self.secondary_label_names(idx);
+        if !self.graph.needs_node_before_image(idx) {
+            self.graph.backfill_node_before_labels(idx, labels);
+            return;
+        }
+        use crate::graph::storage::GraphRead;
+        let Some(image) =
+            self.graph
+                .node_view(idx)
+                .map(|view| crate::graph::storage::recording::BeforeImage {
+                    title: view.title().into_owned(),
+                    properties: view.property_pairs(),
+                    labels: Some(labels),
+                })
+        else {
+            return;
+        };
+        self.graph.note_node_before_image(idx, image);
+    }
+
     /// Add a secondary label to a node. Choke-point API for label
     /// mutations — every mutation site routes through here so the
     /// `secondary_label_index` stays canonical across all three
@@ -38,11 +80,22 @@ impl DirGraph {
             return false;
         }
         let bucket_was_new = !self.secondary_label_index.contains_key(&label);
-        let bucket = self.secondary_label_index.entry(label).or_default();
-        if bucket.contains(&idx) {
+        if self
+            .secondary_label_index
+            .get(&label)
+            .is_some_and(|bucket| bucket.contains(&idx))
+        {
+            // Idempotent: the node already carries the label, so nothing is
+            // written and nothing may be captured.
             return false;
         }
-        bucket.push(idx);
+        // Before the edit, and only now that one is certain: the label set
+        // this write is about to change is what a `before` image must report.
+        self.capture_label_before_image(idx);
+        self.secondary_label_index
+            .entry(label)
+            .or_default()
+            .push(idx);
         self.has_secondary_labels = true;
         // Statement-rollback capture: the label index lives above storage, so
         // the backend's `GraphWrite` seam cannot see this edit.
@@ -81,13 +134,24 @@ impl DirGraph {
                     .to_string(),
             );
         }
-        let Some(bucket) = self.secondary_label_index.get_mut(&label) else {
+        let Some(bucket) = self.secondary_label_index.get(&label) else {
             return Ok(false);
         };
         // Positional removal rather than `retain`: `add_node_label` rejects
         // duplicates, so there is at most one match, and the position is what
         // statement rollback needs to restore the bucket's original order.
         let position = bucket.iter().position(|&i| i == idx);
+        if position.is_some() {
+            // Before the edit, and only when there is one to make: a REMOVE of
+            // a label the node never had changes nothing, so it must capture
+            // nothing — an image offered here would claim a first touch for a
+            // write that is not going to happen.
+            self.capture_label_before_image(idx);
+        }
+        let bucket = self
+            .secondary_label_index
+            .get_mut(&label)
+            .expect("bucket present, just read above");
         if let Some(pos) = position {
             bucket.remove(pos);
         }

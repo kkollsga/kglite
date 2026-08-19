@@ -70,6 +70,34 @@ fn node_property(event: &CdcEvent, key: &str) -> Option<Value> {
     }
 }
 
+/// A property of an event's **before**-image.
+fn node_before_property(event: &CdcEvent, key: &str) -> Option<Value> {
+    match &event.change {
+        CdcChange::Node { before, .. } => before.as_ref().and_then(|state| {
+            state
+                .properties
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        }),
+        other => panic!("expected a node event, got {other:?}"),
+    }
+}
+
+fn node_after(event: &CdcEvent) -> Option<crate::graph::cdc::NodeState> {
+    match &event.change {
+        CdcChange::Node { after, .. } => after.clone(),
+        other => panic!("expected a node event, got {other:?}"),
+    }
+}
+
+fn node_before(event: &CdcEvent) -> Option<crate::graph::cdc::NodeState> {
+    match &event.change {
+        CdcChange::Node { before, .. } => before.clone(),
+        other => panic!("expected a node event, got {other:?}"),
+    }
+}
+
 /// An enabled graph holding two `Item` nodes and one edge, with the stream
 /// already drained so each test starts from an empty log.
 fn seeded() -> DirGraph {
@@ -917,5 +945,436 @@ fn cdc_does_not_move_the_wal_format_version() {
         WAL_FORMAT_VERSION, 3,
         "CDC derives create-vs-update from an in-memory capture marker; if this \
          constant moved, a `MutationOp` gained a field it did not need"
+    );
+}
+
+// ── before-images (CdcEnrichment::Full) ──────────────────────────────
+
+/// **The columnar hazard, pinned on the backend that has it.**
+///
+/// A mapped graph whose rows came from the bulk loader stores its properties
+/// in the master `ColumnStore`, so a `SET` writes straight into that store and
+/// tells the capture seam *afterwards*, through `note_recorded_node_upsert`.
+/// A before-image read there is read after the value it is supposed to
+/// describe has already been overwritten, so it reports the new value under
+/// the name `before` — a lie every other assertion in this file passes
+/// through happily, because the `after` half and the event kinds stay right.
+///
+/// The fixture loads in bulk on purpose: a Cypher `CREATE` on a mapped graph
+/// leaves the node's properties in a `Map`, which never reaches
+/// `write_column_master` at all. `columnar_write_is_the_path_under_test`
+/// pins that this fixture does reach it.
+///
+/// Red-first: with the capture left at `note_recorded_node_upsert` instead of
+/// at the `write_column_master` choke point, this fails with
+/// `before.name == "renamed"`.
+#[test]
+fn a_columnar_set_captures_the_value_it_overwrote() {
+    let mut graph = columnar_mapped_graph();
+    // `qty`, not the title column: `set_via_column_master` bails on
+    // `title`/`name`, so a title write would silently take the ordinary
+    // recorded path and test the wrong thing.
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i.qty = 99");
+    commit(&mut graph);
+
+    let published = events(&graph);
+    let update = published.last().expect("the SET must publish");
+    assert_eq!(update.kind, CdcEventKind::Update);
+    assert_eq!(
+        node_before_property(update, "qty"),
+        Some(Value::Int64(10)),
+        "before must be the value the write destroyed, not the one it wrote"
+    );
+    assert_eq!(
+        node_property(update, "qty"),
+        Some(Value::Int64(99)),
+        "and after must still be the new value"
+    );
+    assert_eq!(
+        node_before(update).map(|state| state.title),
+        Some(Value::String("one".into())),
+        "the image is the whole entity, not just the touched cell"
+    );
+}
+
+/// The fixture above is only a columnar test if the write actually goes
+/// through the master store. Pinned separately because the failure mode is
+/// silent: a `Map`-stored node takes the ordinary recorded path, where the
+/// before-image is correct for free and the hazard cannot appear.
+#[test]
+fn columnar_write_is_the_path_under_test() {
+    use crate::graph::storage::GraphRead;
+    let graph = columnar_mapped_graph();
+    let idx = graph
+        .graph
+        .node_indices()
+        .find(|idx| {
+            graph
+                .graph
+                .node_view(*idx)
+                .is_some_and(|view| view.id().as_ref() == &Value::Int64(1))
+        })
+        .expect("the fixture's node");
+    assert!(
+        graph
+            .graph
+            .node_weight(idx)
+            .and_then(|node| node.properties.columnar_row_id())
+            .is_some(),
+        "the fixture must leave the node columnar, or `set_via_column_master` \
+         bails and this file's columnar arm tests nothing"
+    );
+}
+
+/// A mapped graph whose `Item` rows live in the master column store, with
+/// full-enrichment capture on and the stream drained.
+fn columnar_mapped_graph() -> DirGraph {
+    use crate::datatypes::DataFrame;
+    use crate::graph::mutation::maintain::add_nodes;
+
+    let mut graph = new_dir_graph_in_mode(StorageMode::Mapped, None).expect("mapped graph");
+    let columns = vec!["id".to_string(), "name".to_string(), "qty".to_string()];
+    let rows: Vec<Vec<Value>> = vec![
+        vec![
+            Value::Int64(1),
+            Value::String("one".to_string()),
+            Value::Int64(10),
+        ],
+        vec![
+            Value::Int64(2),
+            Value::String("two".to_string()),
+            Value::Int64(20),
+        ],
+    ];
+    let frame = DataFrame::from_cypher_rows(columns, rows).expect("dataframe");
+    add_nodes(
+        &mut graph,
+        frame,
+        "Item".to_string(),
+        "id".to_string(),
+        Some("name".to_string()),
+        None,
+    )
+    .expect("bulk load");
+    // Enable *after* the load so the fixture rows are not themselves events.
+    cdc::enable(&mut graph, None, CdcEnrichment::Full).expect("mapped must serve full capture");
+    commit(&mut graph);
+    graph
+}
+
+/// A full-capture graph, seeded and drained, on the heap backend.
+fn seeded_full() -> DirGraph {
+    let mut graph = DirGraph::new();
+    cdc::enable(&mut graph, None, CdcEnrichment::Full).expect("enable full");
+    run(
+        &mut graph,
+        "CREATE (:Item {id: 1, name: 'one', qty: 10}), (:Item {id: 2, name: 'two', qty: 20})",
+    );
+    run(
+        &mut graph,
+        "MATCH (a:Item {id: 1}), (b:Item {id: 2}) CREATE (a)-[:LINKS {weight: 1}]->(b)",
+    );
+    commit(&mut graph);
+    graph
+}
+
+/// Off is the default and it stays off: no read, no image, `before` absent.
+#[test]
+fn enrichment_off_captures_no_before_image() {
+    let mut graph = seeded();
+    let from = cursor(&graph);
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i.name = 'renamed'");
+    commit(&mut graph);
+
+    let published = since(&graph, from);
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].kind, CdcEventKind::Update);
+    assert_eq!(
+        node_before(&published[0]),
+        None,
+        "an off log must not pay for, or report, a before-image"
+    );
+    assert!(
+        node_property(&published[0], "name").is_some(),
+        "and the after half is unaffected"
+    );
+}
+
+/// A create has no before-image, by definition rather than by omission.
+#[test]
+fn a_create_has_no_before_image_even_under_full() {
+    let mut graph = seeded_full();
+    let from = cursor(&graph);
+    run(&mut graph, "CREATE (:Item {id: 3, name: 'three'})");
+    commit(&mut graph);
+
+    let published = since(&graph, from);
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].kind, CdcEventKind::Create);
+    assert_eq!(node_before(&published[0]), None);
+}
+
+/// An update reports both halves, and the before half is the whole entity.
+#[test]
+fn an_update_reports_the_state_on_both_sides_of_the_commit() {
+    let mut graph = seeded_full();
+    let from = cursor(&graph);
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i.qty = 99");
+    commit(&mut graph);
+
+    let update = &since(&graph, from)[0];
+    assert_eq!(node_before_property(update, "qty"), Some(Value::Int64(10)));
+    assert_eq!(node_property(update, "qty"), Some(Value::Int64(99)));
+    assert_eq!(
+        node_before_property(update, "name"),
+        Some(Value::String("one".into())),
+        "an untouched property is still part of the image"
+    );
+}
+
+/// A delete's before-image is the state the commit destroyed — the one event
+/// whose only informative half is `before`.
+#[test]
+fn a_delete_reports_the_state_it_destroyed() {
+    let mut graph = seeded_full();
+    let from = cursor(&graph);
+    run(&mut graph, "MATCH (i:Item {id: 2}) DETACH DELETE i");
+    commit(&mut graph);
+
+    let published = since(&graph, from);
+    let node_delete = published
+        .iter()
+        .find(|event| {
+            event.kind == CdcEventKind::Delete && matches!(event.change, CdcChange::Node { .. })
+        })
+        .expect("the node delete must publish");
+    assert_eq!(
+        node_before_property(node_delete, "name"),
+        Some(Value::String("two".into()))
+    );
+    assert_eq!(
+        node_before_property(node_delete, "qty"),
+        Some(Value::Int64(20))
+    );
+
+    let edge_delete = published
+        .iter()
+        .find(|event| {
+            event.kind == CdcEventKind::Delete && matches!(event.change, CdcChange::Edge { .. })
+        })
+        .expect("the detached edge must publish too");
+    let CdcChange::Edge { before, .. } = &edge_delete.change else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(
+        before.as_ref().and_then(|state| state
+            .properties
+            .iter()
+            .find(|(k, _)| k == "weight")
+            .cloned()),
+        Some(("weight".to_string(), Value::Int64(1))),
+        "a relationship's before-image carries its properties: {before:?}"
+    );
+}
+
+/// A delete of an entity the *same commit* already wrote to still reports the
+/// commit-start image.
+///
+/// Without the image moving from the superseded upsert onto the remove, this
+/// reports `None`: first-touch dedup put the image on the `SET`, and that op
+/// is dropped at resolve time because the node no longer exists.
+#[test]
+fn a_write_then_delete_in_one_commit_still_reports_the_before_image() {
+    let mut graph = seeded_full();
+    let from = cursor(&graph);
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i.qty = 55");
+    run(&mut graph, "MATCH (i:Item {id: 1}) DETACH DELETE i");
+    commit(&mut graph);
+
+    let published = since(&graph, from);
+    let node_delete = published
+        .iter()
+        .find(|event| {
+            event.kind == CdcEventKind::Delete && matches!(event.change, CdcChange::Node { .. })
+        })
+        .expect("the delete must publish");
+    assert_eq!(
+        node_before_property(node_delete, "qty"),
+        Some(Value::Int64(10)),
+        "the image is the state at the start of the commit, not after the SET"
+    );
+}
+
+/// **Before is the state at the start of the commit**, not before the last
+/// write — the property that makes a multi-statement transaction's event
+/// answer "what did this transaction change".
+#[test]
+fn before_is_the_commit_start_state_across_several_statements() {
+    let mut graph = seeded_full();
+    let from = cursor(&graph);
+
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i.qty = 11");
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i.qty = 12");
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i.qty = 13");
+    commit(&mut graph);
+
+    let published = since(&graph, from);
+    assert_eq!(published.len(), 1, "three writes, one entity, one event");
+    assert_eq!(
+        node_before_property(&published[0], "qty"),
+        Some(Value::Int64(10)),
+        "the first touch wins: 10 is what the commit found, 11 and 12 are interior"
+    );
+    assert_eq!(node_property(&published[0], "qty"), Some(Value::Int64(13)));
+}
+
+/// The same, through a real `Transaction`: the batch publishes at `commit()`
+/// with before-images from before the transaction opened.
+#[test]
+fn a_transaction_reports_the_pre_transaction_state() {
+    let session = Session::new(seeded_full());
+    let from = cursor(&session.snapshot());
+
+    let mut tx = session.begin();
+    {
+        let working = tx.working_mut().expect("writable tx");
+        run(working, "MATCH (i:Item {id: 1}) SET i.qty = 41");
+        run(working, "MATCH (i:Item {id: 1}) SET i.qty = 42");
+    }
+    session.commit(tx, false);
+
+    let published = since(&session.snapshot(), from);
+    assert_eq!(published.len(), 1, "{published:?}");
+    assert_eq!(
+        node_before_property(&published[0], "qty"),
+        Some(Value::Int64(10)),
+        "the transaction's before is the state it opened on"
+    );
+    assert_eq!(node_property(&published[0], "qty"), Some(Value::Int64(42)));
+}
+
+/// A label edit's before-image reports the **old** label set.
+///
+/// The label choke point is the second side channel: `note_recorded_node_labels`
+/// fires after the bucket edit, so the capture has to happen in
+/// `DirGraph::add_node_label` ahead of it. Without that, this reports the new
+/// set — the labels equivalent of the columnar hazard.
+#[test]
+fn a_label_write_reports_the_label_set_it_replaced() {
+    let mut graph = seeded_full();
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i:Featured");
+    commit(&mut graph);
+    let from = cursor(&graph);
+
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i:Archived");
+    commit(&mut graph);
+
+    let update = &since(&graph, from)[0];
+    assert_eq!(
+        node_before(update).map(|state| state.labels),
+        Some(vec!["Featured".to_string()]),
+        "before is the set the commit found, not the one it left"
+    );
+    let mut after_labels = node_after(update).expect("after").labels;
+    after_labels.sort();
+    assert_eq!(after_labels, vec!["Archived", "Featured"]);
+}
+
+/// A property write followed by a label write in the same commit: the image
+/// was opened by the property write, which cannot see labels, so the label
+/// choke point has to backfill them — and they must still be the
+/// commit-start set.
+#[test]
+fn a_property_write_before_a_label_write_still_reports_the_old_labels() {
+    let mut graph = seeded_full();
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i:Featured");
+    commit(&mut graph);
+    let from = cursor(&graph);
+
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i.qty = 77");
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i:Archived");
+    commit(&mut graph);
+
+    let update = &since(&graph, from)[0];
+    let before = node_before(update).expect("before");
+    assert_eq!(
+        before.labels,
+        vec!["Featured".to_string()],
+        "the property write opened the image; the label write filled its labels in"
+    );
+    assert_eq!(
+        before
+            .properties
+            .iter()
+            .find(|(k, _)| k == "qty")
+            .map(|(_, v)| v.clone()),
+        Some(Value::Int64(10)),
+        "and the property half is still the commit-start one"
+    );
+}
+
+/// A node with labels, deleted: the image keeps them, read at the delete
+/// choke point while the node is still in its buckets.
+#[test]
+fn a_deleted_nodes_before_image_keeps_its_labels() {
+    let mut graph = seeded_full();
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i:Featured");
+    commit(&mut graph);
+    let from = cursor(&graph);
+
+    run(&mut graph, "MATCH (i:Item {id: 1}) DETACH DELETE i");
+    commit(&mut graph);
+
+    let node_delete = since(&graph, from)
+        .into_iter()
+        .find(|event| {
+            event.kind == CdcEventKind::Delete && matches!(event.change, CdcChange::Node { .. })
+        })
+        .expect("the delete must publish");
+    assert_eq!(
+        node_before(&node_delete).map(|state| state.labels),
+        Some(vec!["Featured".to_string()]),
+        "labels live above storage, so a delete's image has to be filled in \
+         before the label index is swept"
+    );
+}
+
+/// A label REMOVE that removes nothing must leave no trace — the capture
+/// offer must not turn a no-op into an event.
+#[test]
+fn a_no_op_label_remove_publishes_nothing_under_full() {
+    let mut graph = seeded_full();
+    let from = cursor(&graph);
+    run(&mut graph, "MATCH (i:Item {id: 1}) REMOVE i:NeverHad");
+    commit(&mut graph);
+    assert_eq!(
+        since(&graph, from),
+        Vec::new(),
+        "offering a before-image must not invent a change"
+    );
+}
+
+/// No-phantom, under before-capture: a rolled-back statement's images are
+/// truncated with the ops that carried them, and the *next* write to the same
+/// entity re-images the restored state.
+#[test]
+fn a_rolled_back_statement_discards_its_before_image_too() {
+    let mut graph = seeded_full();
+    let from = cursor(&graph);
+
+    expect_failure(&mut graph, FAILS_AFTER_WRITING);
+    commit(&mut graph);
+    assert_eq!(since(&graph, from), Vec::new());
+
+    // The rollback restored `name`; the next commit's image must be the
+    // restored value, not the clobbered one the failed statement wrote.
+    let from = cursor(&graph);
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i.name = 'legit'");
+    commit(&mut graph);
+    let update = &since(&graph, from)[0];
+    assert_eq!(
+        node_before_property(update, "name"),
+        Some(Value::String("one".into())),
+        "a truncated image must not survive into the next commit"
     );
 }

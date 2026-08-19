@@ -1660,7 +1660,20 @@ pub(crate) fn detach_delete_nodes(
         .collect();
 
     for &node_idx in nodes_to_delete {
+        // Change data capture's before-image for a delete: the wrapper reads
+        // the node's properties and title as it removes it, but labels live
+        // in `secondary_label_index` above storage, so they have to be read
+        // here — while the node is still in its buckets — and handed down.
+        // A delete is the one event whose only informative half is `before`,
+        // so an incomplete image is the whole loss.
+        let doomed_labels = graph
+            .graph
+            .captures_before_images()
+            .then(|| graph.secondary_label_names(node_idx));
         GraphWrite::remove_node(&mut graph.graph, node_idx);
+        if let Some(labels) = doomed_labels {
+            graph.graph.backfill_node_before_labels(node_idx, labels);
+        }
         if let Some(prior) = graph.timeseries_store.remove(&node_idx.index()) {
             // Statement-rollback capture: `timeseries_store` is O(V) and so is
             // deliberately not part of the checkpoint's schema clone; the

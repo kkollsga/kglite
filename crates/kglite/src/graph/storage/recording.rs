@@ -63,19 +63,76 @@ pub enum CaptureOrigin {
     Update,
 }
 
+/// One entity's state as a commit found it — the raw half of change data
+/// capture's `before` image.
+///
+/// **Interner-keyed, like every other `RawOp` payload**, because the backend
+/// this is captured in does not own the `StringInterner`; resolution happens
+/// where `RemoveNode`'s type key is already resolved, at drain time.
+///
+/// Captured **at first touch** in a batch and never overwritten, so the image
+/// is the entity's state at the *start of the commit* rather than before the
+/// most recent write. That is the correct answer for a multi-statement
+/// transaction, whose consumer wants "what did this transaction change",
+/// not "what did its last statement change".
+#[derive(Debug, Clone, PartialEq)]
+pub struct BeforeImage {
+    /// The entity's title. `Value::Null` for an edge, which has none.
+    pub title: Value,
+    pub properties: Vec<(InternedKey, Value)>,
+    /// Secondary labels, when the capturing site could see them.
+    ///
+    /// `None` is not "no labels" — it is **"not captured here"**, and the two
+    /// must not be confused. Labels live in `DirGraph::secondary_label_index`,
+    /// one layer above this backend, so a property write captured inside the
+    /// wrapper cannot read them. The label choke point fills this in when a
+    /// label edit happens in the same commit; a `None` that survives to drain
+    /// time means no label edit occurred, so the *final* label set is also the
+    /// commit-start one and the resolver may use it.
+    pub labels: Option<Vec<String>>,
+}
+
+/// Identity of an entity within one capture batch, for first-touch dedup.
+///
+/// The storage address, matching `cdc::event`'s collapse key and for the same
+/// reason: it is stable for the batch's lifetime and cheap to hash, while
+/// logical identity is `PartialEq`-only by design (it carries floats).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BeforeSlot {
+    Node(u32),
+    Edge(u32),
+}
+
 /// A buffered, unresolved mutation. Keyed by petgraph index (for
 /// upserts, resolved against the final graph state at flush) or by the
 /// pre-removal logical identity (for removes, since the entry is gone by
 /// flush time). Turned into a [`MutationOp`] by [`resolve_ops`].
+///
+/// ## Why the before-image rides inside the op
+///
+/// It could have been a side table drained alongside the buffer. Inlining it
+/// keeps `take_ops`/`truncate_ops`/`resolve_ops` — and therefore all six drain
+/// sites — working on exactly one sequence: rollback truncates images with the
+/// ops that carried them, and a drain cannot hand out ops whose images it left
+/// behind. The `Box` keeps the enum small for the overwhelmingly common case
+/// (capture off, or a create), where the field is one null pointer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RawOp {
     /// A node was added or property-mutated. Resolve its full final
     /// state at flush; drop if the node was later removed in the batch.
-    UpsertNode(NodeIndex, CaptureOrigin),
-    /// A node was removed. Its logical identity, captured before removal.
-    RemoveNode { node_type: InternedKey, id: Value },
+    ///
+    /// The before-image is `Some` only on the **first** op that touched this
+    /// node in the batch, and only under `capture_before`.
+    UpsertNode(NodeIndex, CaptureOrigin, Option<Box<BeforeImage>>),
+    /// A node was removed. Its logical identity, captured before removal,
+    /// with its full state when before-images are on.
+    RemoveNode {
+        node_type: InternedKey,
+        id: Value,
+        before: Option<Box<BeforeImage>>,
+    },
     /// An edge was added or property-mutated. Resolve at flush.
-    UpsertEdge(EdgeIndex, CaptureOrigin),
+    UpsertEdge(EdgeIndex, CaptureOrigin, Option<Box<BeforeImage>>),
     /// An edge was removed. Logical identity captured before removal.
     RemoveEdge {
         conn_type: InternedKey,
@@ -83,12 +140,26 @@ pub enum RawOp {
         src_id: Value,
         tgt_type: InternedKey,
         tgt_id: Value,
+        before: Option<Box<BeforeImage>>,
     },
     /// A node's secondary-label set changed. Like the upserts this carries
     /// only the index and is resolved against final state, so several
     /// `SET n:A SET n:B` in one batch collapse to one op holding both.
     /// Dropped at resolve time if the node was later removed.
-    SetNodeLabels(NodeIndex),
+    SetNodeLabels(NodeIndex, Option<Box<BeforeImage>>),
+}
+
+/// A node index as a dedup slot. `u32` because petgraph indices are `u32`
+/// underneath and the map is per-batch — halving its key width matters more
+/// than the cast does.
+#[inline]
+fn node_slot(idx: NodeIndex) -> u32 {
+    idx.index() as u32
+}
+
+#[inline]
+fn edge_slot(idx: EdgeIndex) -> u32 {
+    idx.index() as u32
 }
 
 /// Wrapper that captures write invocations on `G` as [`RawOp`]s while
@@ -119,6 +190,30 @@ pub struct RecordingGraph<G: GraphRead> {
     /// Preserved by `Clone` (a fork of a durable graph is still under durable
     /// ownership) and never serialized.
     wal_owner: bool,
+    /// Whether writes capture a before-image.
+    ///
+    /// Off by default and set only by `cdc::enable` under
+    /// `CdcEnrichment::Full`, so a durable-only graph — the common wrapped
+    /// case — pays one predictable bool test per write and never a read.
+    capture_before: bool,
+    /// First touch per entity in this batch: slot -> index in `ops` of the op
+    /// that carries the entity's image.
+    ///
+    /// Both halves matter. It makes the image the **commit-start** state
+    /// (later writes to the same entity find an entry and capture nothing),
+    /// and it caps the read cost at one whole-entity read per changed entity
+    /// per commit rather than one per write.
+    before_touched: HashMap<BeforeSlot, usize>,
+    /// An image a side-channel choke point read *before* its write, waiting
+    /// for that write's op to claim it.
+    ///
+    /// Offered rather than pushed, for two reasons. A choke point that turns
+    /// out to write nothing (a `REMOVE n:Label` for a label the node lacks)
+    /// must leave no trace — pushing an op there would invent a change and
+    /// break the no-phantom invariant. And the write's own op is already
+    /// coming, so pushing a second one would double every label edit in the
+    /// write-ahead log.
+    pending_before: Option<(BeforeSlot, Box<BeforeImage>)>,
 }
 
 impl<G: GraphRead> RecordingGraph<G> {
@@ -131,6 +226,9 @@ impl<G: GraphRead> RecordingGraph<G> {
             inner,
             ops: Vec::new(),
             wal_owner: false,
+            capture_before: false,
+            before_touched: HashMap::new(),
+            pending_before: None,
         }
     }
 
@@ -161,13 +259,212 @@ impl<G: GraphRead> RecordingGraph<G> {
         &mut self.inner
     }
 
+    /// Whether this wrapper captures before-images.
+    #[inline]
+    pub fn captures_before(&self) -> bool {
+        self.capture_before
+    }
+
+    /// Turn before-image capture on or off.
+    ///
+    /// Takes effect from the next write; images already buffered are left
+    /// alone, which is what a consumer of the current batch expects — the
+    /// events it is about to read were captured under the old setting and
+    /// re-reading the graph now could not reconstruct them anyway.
+    #[inline]
+    pub(crate) fn set_capture_before(&mut self, on: bool) {
+        self.capture_before = on;
+    }
+
+    /// Whether `slot` still needs its first-touch image in this batch.
+    ///
+    /// Public so the two **side-channel choke points** (the columnar master
+    /// write and the label index, both of which mutate outside `GraphWrite`)
+    /// can ask before paying for a read they may not need. See
+    /// [`Self::note_node_before`].
+    #[inline]
+    pub fn needs_node_before(&self, idx: NodeIndex) -> bool {
+        self.capture_before
+            && !self
+                .before_touched
+                .contains_key(&BeforeSlot::Node(node_slot(idx)))
+    }
+
     /// Record that node `idx` was upserted by a mutation that wrote through
     /// a side channel (the columnar master `ColumnStore`) and so bypassed
     /// the recorded `GraphWrite::node_weight_mut`. Resolved at flush like any
     /// other [`RawOp::UpsertNode`].
     #[inline]
     pub fn note_node_upsert(&mut self, idx: NodeIndex) {
-        self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Update));
+        self.push_node_upsert(idx, CaptureOrigin::Update);
+    }
+
+    /// Record an entity's pre-write state from a **side-channel choke point**
+    /// — a site that mutates outside the `GraphWrite` seam and therefore has
+    /// to hand the image in rather than let this wrapper read it.
+    ///
+    /// Two such sites exist, and both must call this *before* their write:
+    /// the columnar master store (`executor::columnar_write`) and the
+    /// secondary-label index (`dir_graph::labels`). Calling it after would
+    /// record the post-write state under the name `before`, which is worse
+    /// than recording nothing.
+    ///
+    /// Ignored when the slot already has an image, so the first-touch rule
+    /// holds across the mixture of in-wrapper and choke-point captures.
+    pub fn note_node_before(&mut self, idx: NodeIndex, image: BeforeImage) {
+        if !self.capture_before {
+            return;
+        }
+        let slot = BeforeSlot::Node(node_slot(idx));
+        if self.before_touched.contains_key(&slot) {
+            return;
+        }
+        self.pending_before = Some((slot, Box::new(image)));
+    }
+
+    /// Fill in the label half of a node's already-captured image.
+    ///
+    /// The label choke point calls this when the node was first touched by a
+    /// *property* write, which could not see labels. The set it passes is
+    /// still the commit-start one: this is the commit's first label edit on
+    /// the node, or the image would already carry labels.
+    pub fn backfill_node_before_labels(&mut self, idx: NodeIndex, labels: Vec<String>) {
+        if !self.capture_before {
+            return;
+        }
+        let Some(&at) = self.before_touched.get(&BeforeSlot::Node(node_slot(idx))) else {
+            return;
+        };
+        let image = match self.ops.get_mut(at) {
+            Some(RawOp::UpsertNode(_, _, before)) => before,
+            Some(RawOp::SetNodeLabels(_, before)) => before,
+            Some(RawOp::RemoveNode { before, .. }) => before,
+            _ => return,
+        };
+        if let Some(image) = image {
+            if image.labels.is_none() {
+                image.labels = Some(labels);
+            }
+        }
+    }
+
+    /// Push an upsert op, capturing the node's first-touch image with it.
+    fn push_node_upsert(&mut self, idx: NodeIndex, origin: CaptureOrigin) {
+        let before = self.take_node_image(idx);
+        if before.is_some() {
+            self.before_touched
+                .insert(BeforeSlot::Node(node_slot(idx)), self.ops.len());
+        }
+        self.ops.push(RawOp::UpsertNode(idx, origin, before));
+    }
+
+    /// Push an edge upsert op, capturing the edge's first-touch image with it.
+    fn push_edge_upsert(&mut self, idx: EdgeIndex, origin: CaptureOrigin) {
+        let before = self.take_edge_image(idx);
+        if before.is_some() {
+            self.before_touched
+                .insert(BeforeSlot::Edge(edge_slot(idx)), self.ops.len());
+        }
+        self.ops.push(RawOp::UpsertEdge(idx, origin, before));
+    }
+
+    /// Move an already-captured image out of the earlier op that holds it.
+    ///
+    /// For a delete of an entity this commit *already* wrote to: first-touch
+    /// dedup put the image on that earlier upsert, and the upsert is about to
+    /// be dropped at resolve time because the entity no longer exists. Without
+    /// this move the commit-start image would be discarded with it and the
+    /// delete — the one event whose *only* informative half is `before` —
+    /// would carry nothing.
+    fn steal_node_image(&mut self, idx: NodeIndex) -> Option<Box<BeforeImage>> {
+        let &at = self.before_touched.get(&BeforeSlot::Node(node_slot(idx)))?;
+        match self.ops.get_mut(at)? {
+            RawOp::UpsertNode(_, _, before) => before.take(),
+            RawOp::SetNodeLabels(_, before) => before.take(),
+            _ => None,
+        }
+    }
+
+    fn steal_edge_image(&mut self, idx: EdgeIndex) -> Option<Box<BeforeImage>> {
+        let &at = self.before_touched.get(&BeforeSlot::Edge(edge_slot(idx)))?;
+        match self.ops.get_mut(at)? {
+            RawOp::UpsertEdge(_, _, before) => before.take(),
+            _ => None,
+        }
+    }
+
+    /// Forget any image held for `slot`, because the index now addresses a
+    /// different entity.
+    ///
+    /// petgraph reuses a freed index, so a create can land on a slot whose
+    /// deleted predecessor still owns a dedup entry. Leaving it would let a
+    /// later label backfill write the new entity's labels into the old
+    /// entity's image.
+    #[inline]
+    fn forget_slot(&mut self, slot: BeforeSlot) {
+        if self.capture_before {
+            self.before_touched.remove(&slot);
+        }
+    }
+
+    /// The node's current state as a before-image, or `None` when capture is
+    /// off, the batch already imaged it, or the node does not exist.
+    ///
+    /// Reads the whole entity, which is the cost the `Full` enrichment mode
+    /// buys: once per changed entity per commit, never once per write.
+    ///
+    /// Measured at **+2-3%** wall time on 1000 autocommit `SET`s (release
+    /// profile, min of 7 rounds, two agreeing runs, 2026-08-19). That shape is
+    /// the worst case for this read: every write is its own commit and so its
+    /// own first touch, so the dedup below never gets to amortise anything.
+    fn take_node_image(&mut self, idx: NodeIndex) -> Option<Box<BeforeImage>> {
+        if !self.needs_node_before(idx) {
+            return None;
+        }
+        // A choke point that already read the pre-write state wins: by the
+        // time this runs its write has landed, so reading here would report
+        // the new value under the name `before`. That is the failure mode the
+        // offer exists to prevent.
+        if let Some(offered) = self.claim_pending(BeforeSlot::Node(node_slot(idx))) {
+            return Some(offered);
+        }
+        let view = self.inner.node_view(idx)?;
+        Some(Box::new(BeforeImage {
+            title: view.title().into_owned(),
+            properties: view.property_pairs(),
+            // Not visible from here — `DirGraph`'s label choke point fills it
+            // in if the commit touches labels. See the field docs.
+            labels: None,
+        }))
+    }
+
+    /// The edge's current state as a before-image. Edges carry no title and
+    /// no labels, so the image is its property set.
+    /// Claim an offered image if it is for `slot`.
+    ///
+    /// An offer for a *different* slot is dropped rather than kept: it belongs
+    /// to a write that never reached its op, and holding it would risk
+    /// attaching it to some later write of that entity — by which time it
+    /// would no longer be a pre-write image.
+    fn claim_pending(&mut self, slot: BeforeSlot) -> Option<Box<BeforeImage>> {
+        let (offered_slot, image) = self.pending_before.take()?;
+        (offered_slot == slot).then_some(image)
+    }
+
+    fn take_edge_image(&mut self, idx: EdgeIndex) -> Option<Box<BeforeImage>> {
+        if !self.capture_before
+            || self
+                .before_touched
+                .contains_key(&BeforeSlot::Edge(edge_slot(idx)))
+        {
+            return None;
+        }
+        let edge = self.inner.edge_weight(idx)?;
+        Some(Box::new(BeforeImage {
+            title: Value::Null,
+            properties: edge.properties.clone(),
+            labels: None,
+        }))
     }
 
     /// Record that node `idx`'s secondary labels changed. Labels live in
@@ -176,13 +473,22 @@ impl<G: GraphRead> RecordingGraph<G> {
     /// instead. Resolved at flush like any other index-keyed op.
     #[inline]
     pub fn note_node_labels(&mut self, idx: NodeIndex) {
-        self.ops.push(RawOp::SetNodeLabels(idx));
+        let before = self.take_node_image(idx);
+        if before.is_some() {
+            self.before_touched
+                .insert(BeforeSlot::Node(node_slot(idx)), self.ops.len());
+        }
+        self.ops.push(RawOp::SetNodeLabels(idx, before));
     }
 
     /// Drain the buffered raw ops, leaving the buffer empty. Called at
     /// each commit/flush before [`resolve_ops`].
     #[inline]
     pub fn take_ops(&mut self) -> Vec<RawOp> {
+        // The dedup map addresses positions in the buffer being handed out,
+        // so it dies with it — the next batch starts its own first touches.
+        self.before_touched.clear();
+        self.pending_before = None;
         std::mem::take(&mut self.ops)
     }
 
@@ -209,6 +515,12 @@ impl<G: GraphRead> RecordingGraph<G> {
     #[inline]
     pub(crate) fn truncate_ops(&mut self, len: usize) {
         self.ops.truncate(len);
+        self.pending_before = None;
+        // The images of the discarded ops go with them, so the *next* write to
+        // an entity this statement touched captures a fresh first-touch image
+        // — of the restored state, which is what the surviving ops describe.
+        // Retaining is the expensive direction and rollback is the rare one.
+        self.before_touched.retain(|_, at| *at < len);
     }
 }
 
@@ -222,6 +534,11 @@ impl<G: GraphRead + Clone> Clone for RecordingGraph<G> {
         Self {
             inner: self.inner.clone(),
             ops: Vec::new(),
+            // A fork of a full-capture graph still captures: its commit
+            // publishes into the same log through the shared `Arc`.
+            capture_before: self.capture_before,
+            before_touched: HashMap::new(),
+            pending_before: None,
             // Ownership follows the data: a transaction fork or a copy-on-write
             // view of a durably-owned graph is still durably owned, and its
             // commit drains into the same log.
@@ -268,7 +585,7 @@ pub fn resolve_ops(
     let mut out = Vec::with_capacity(raw.len());
     for op in raw {
         match op {
-            RawOp::UpsertNode(idx, _) => {
+            RawOp::UpsertNode(idx, _, _) => {
                 if let Some(nd) = graph.node_view(*idx) {
                     out.push(MutationOp::UpsertNode {
                         node_type: nd.node_type_str(interner).to_string(),
@@ -278,13 +595,13 @@ pub fn resolve_ops(
                     });
                 }
             }
-            RawOp::RemoveNode { node_type, id } => {
+            RawOp::RemoveNode { node_type, id, .. } => {
                 out.push(MutationOp::RemoveNode {
                     node_type: interner.resolve(*node_type).to_string(),
                     id: id.clone(),
                 });
             }
-            RawOp::UpsertEdge(eidx, _) => {
+            RawOp::UpsertEdge(eidx, _, _) => {
                 if let (Some((a, b)), Some(ed)) =
                     (graph.edge_endpoints(*eidx), graph.edge_weight(*eidx))
                 {
@@ -309,6 +626,7 @@ pub fn resolve_ops(
                 src_id,
                 tgt_type,
                 tgt_id,
+                ..
             } => {
                 out.push(MutationOp::RemoveEdge {
                     conn_type: interner.resolve(*conn_type).to_string(),
@@ -318,7 +636,7 @@ pub fn resolve_ops(
                     tgt_id: tgt_id.clone(),
                 });
             }
-            RawOp::SetNodeLabels(idx) => {
+            RawOp::SetNodeLabels(idx, _) => {
                 // Resolved against final state, so repeated `SET n:A`/`SET
                 // n:B` in one batch collapse into a single whole-set op. A
                 // node removed later in the batch yields `None` and is
@@ -717,7 +1035,8 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         value: Value,
     ) {
         if self.inner.node_weight(idx).is_some() {
-            self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Update));
+            // Before the inner call, so the image is genuinely pre-write.
+            self.push_node_upsert(idx, CaptureOrigin::Update);
         }
         self.inner.set_node_property(idx, key, value);
     }
@@ -728,7 +1047,8 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
     #[inline]
     fn set_node_title(&mut self, idx: NodeIndex, value: Value) {
         if self.inner.node_weight(idx).is_some() {
-            self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Update));
+            // Before the inner call, so the image is genuinely pre-write.
+            self.push_node_upsert(idx, CaptureOrigin::Update);
         }
         self.inner.set_node_title(idx, value);
     }
@@ -741,7 +1061,8 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         value: Value,
     ) {
         if self.inner.node_weight(idx).is_some() {
-            self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Update));
+            // Before the inner call, so the image is genuinely pre-write.
+            self.push_node_upsert(idx, CaptureOrigin::Update);
         }
         self.inner.set_node_property_if_absent(idx, key, value);
     }
@@ -753,7 +1074,8 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         key: crate::graph::schema::InternedKey,
     ) -> Option<Value> {
         if self.inner.node_weight(idx).is_some() {
-            self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Update));
+            // Before the inner call, so the image is genuinely pre-write.
+            self.push_node_upsert(idx, CaptureOrigin::Update);
         }
         self.inner.remove_node_property(idx, key)
     }
@@ -765,7 +1087,8 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         key: crate::graph::schema::InternedKey,
     ) -> Option<Value> {
         if self.inner.node_weight(idx).is_some() {
-            self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Update));
+            // Before the inner call, so the image is genuinely pre-write.
+            self.push_node_upsert(idx, CaptureOrigin::Update);
         }
         self.inner.clear_node_property(idx, key)
     }
@@ -777,7 +1100,8 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         pairs: Vec<(crate::graph::schema::InternedKey, Value)>,
     ) {
         if self.inner.node_weight(idx).is_some() {
-            self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Update));
+            // Before the inner call, so the image is genuinely pre-write.
+            self.push_node_upsert(idx, CaptureOrigin::Update);
         }
         self.inner.replace_node_properties(idx, pairs);
     }
@@ -791,7 +1115,8 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         // would otherwise hold all of `self`). Only record when the node
         // exists (a None borrow changes nothing).
         if self.inner.node_weight(idx).is_some() {
-            self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Update));
+            // Before the inner call, so the image is genuinely pre-write.
+            self.push_node_upsert(idx, CaptureOrigin::Update);
         }
         self.inner.node_weight_mut(idx)
     }
@@ -809,7 +1134,7 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
     #[inline]
     fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
         if self.inner.edge_weight(idx).is_some() {
-            self.ops.push(RawOp::UpsertEdge(idx, CaptureOrigin::Update));
+            self.push_edge_upsert(idx, CaptureOrigin::Update);
         }
         self.inner.edge_weight_mut(idx)
     }
@@ -817,7 +1142,10 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
     #[inline]
     fn add_node(&mut self, data: NodeData) -> NodeIndex {
         let idx = self.inner.add_node(data);
-        self.ops.push(RawOp::UpsertNode(idx, CaptureOrigin::Create));
+        self.forget_slot(BeforeSlot::Node(node_slot(idx)));
+        // A create has nothing before it; the `None` is the fact, not a gap.
+        self.ops
+            .push(RawOp::UpsertNode(idx, CaptureOrigin::Create, None));
         idx
     }
 
@@ -828,10 +1156,23 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
             .inner
             .node_type_of(idx)
             .zip(self.inner.get_node_id(idx));
+        // A delete is the one change whose *only* informative half is the
+        // before-image, so it is read here — the last moment the node exists.
+        let before = self
+            .take_node_image(idx)
+            .or_else(|| self.steal_node_image(idx));
         let removed = self.inner.remove_node(idx);
         if removed.is_some() {
             if let Some((node_type, id)) = identity {
-                self.ops.push(RawOp::RemoveNode { node_type, id });
+                if before.is_some() {
+                    self.before_touched
+                        .insert(BeforeSlot::Node(node_slot(idx)), self.ops.len());
+                }
+                self.ops.push(RawOp::RemoveNode {
+                    node_type,
+                    id,
+                    before,
+                });
             }
         }
         removed
@@ -840,8 +1181,9 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
     #[inline]
     fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
         let eidx = self.inner.add_edge(a, b, data);
+        self.forget_slot(BeforeSlot::Edge(edge_slot(eidx)));
         self.ops
-            .push(RawOp::UpsertEdge(eidx, CaptureOrigin::Create));
+            .push(RawOp::UpsertEdge(eidx, CaptureOrigin::Create, None));
         eidx
     }
 
@@ -855,15 +1197,23 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
             let (tgt_type, tgt_id) = (self.inner.node_type_of(b)?, self.inner.get_node_id(b)?);
             Some((conn_type, src_type, src_id, tgt_type, tgt_id))
         });
+        let before = self
+            .take_edge_image(idx)
+            .or_else(|| self.steal_edge_image(idx));
         let removed = self.inner.remove_edge(idx);
         if removed.is_some() {
             if let Some((conn_type, src_type, src_id, tgt_type, tgt_id)) = identity {
+                if before.is_some() {
+                    self.before_touched
+                        .insert(BeforeSlot::Edge(edge_slot(idx)), self.ops.len());
+                }
                 self.ops.push(RawOp::RemoveEdge {
                     conn_type,
                     src_type,
                     src_id,
                     tgt_type,
                     tgt_id,
+                    before,
                 });
             }
         }

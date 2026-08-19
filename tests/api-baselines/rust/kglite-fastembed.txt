@@ -397,6 +397,7 @@ pub mod kglite::api::cdc
 pub enum kglite::api::cdc::CdcChange
 pub kglite::api::cdc::CdcChange::Edge
 pub kglite::api::cdc::CdcChange::Edge::after: core::option::Option<kglite::api::cdc::EdgeState>
+pub kglite::api::cdc::CdcChange::Edge::before: core::option::Option<kglite::api::cdc::EdgeState>
 pub kglite::api::cdc::CdcChange::Edge::conn_type: alloc::string::String
 pub kglite::api::cdc::CdcChange::Edge::src_id: kglite::datatypes::values::Value
 pub kglite::api::cdc::CdcChange::Edge::src_type: alloc::string::String
@@ -404,6 +405,7 @@ pub kglite::api::cdc::CdcChange::Edge::tgt_id: kglite::datatypes::values::Value
 pub kglite::api::cdc::CdcChange::Edge::tgt_type: alloc::string::String
 pub kglite::api::cdc::CdcChange::Node
 pub kglite::api::cdc::CdcChange::Node::after: core::option::Option<kglite::api::cdc::NodeState>
+pub kglite::api::cdc::CdcChange::Node::before: core::option::Option<kglite::api::cdc::NodeState>
 pub kglite::api::cdc::CdcChange::Node::id: kglite::datatypes::values::Value
 pub kglite::api::cdc::CdcChange::Node::node_type: alloc::string::String
 impl kglite::api::cdc::CdcChange
@@ -926,17 +928,19 @@ impl core::fmt::Display for kglite::api::durable::DurableOpenError
 pub fn kglite::api::durable::DurableOpenError::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub enum kglite::api::durable::RawOp
 pub kglite::api::durable::RawOp::RemoveEdge
+pub kglite::api::durable::RawOp::RemoveEdge::before: core::option::Option<alloc::boxed::Box<kglite::api::durable::BeforeImage>>
 pub kglite::api::durable::RawOp::RemoveEdge::conn_type: kglite::api::InternedKey
 pub kglite::api::durable::RawOp::RemoveEdge::src_id: kglite::datatypes::values::Value
 pub kglite::api::durable::RawOp::RemoveEdge::src_type: kglite::api::InternedKey
 pub kglite::api::durable::RawOp::RemoveEdge::tgt_id: kglite::datatypes::values::Value
 pub kglite::api::durable::RawOp::RemoveEdge::tgt_type: kglite::api::InternedKey
 pub kglite::api::durable::RawOp::RemoveNode
+pub kglite::api::durable::RawOp::RemoveNode::before: core::option::Option<alloc::boxed::Box<kglite::api::durable::BeforeImage>>
 pub kglite::api::durable::RawOp::RemoveNode::id: kglite::datatypes::values::Value
 pub kglite::api::durable::RawOp::RemoveNode::node_type: kglite::api::InternedKey
-pub kglite::api::durable::RawOp::SetNodeLabels(petgraph::graph_impl::NodeIndex)
-pub kglite::api::durable::RawOp::UpsertEdge(petgraph::graph_impl::EdgeIndex, kglite::api::durable::CaptureOrigin)
-pub kglite::api::durable::RawOp::UpsertNode(petgraph::graph_impl::NodeIndex, kglite::api::durable::CaptureOrigin)
+pub kglite::api::durable::RawOp::SetNodeLabels(petgraph::graph_impl::NodeIndex, core::option::Option<alloc::boxed::Box<kglite::api::durable::BeforeImage>>)
+pub kglite::api::durable::RawOp::UpsertEdge(petgraph::graph_impl::EdgeIndex, kglite::api::durable::CaptureOrigin, core::option::Option<alloc::boxed::Box<kglite::api::durable::BeforeImage>>)
+pub kglite::api::durable::RawOp::UpsertNode(petgraph::graph_impl::NodeIndex, kglite::api::durable::CaptureOrigin, core::option::Option<alloc::boxed::Box<kglite::api::durable::BeforeImage>>)
 impl core::clone::Clone for kglite::api::durable::RawOp
 pub fn kglite::api::durable::RawOp::clone(&self) -> kglite::api::durable::RawOp
 impl core::cmp::PartialEq for kglite::api::durable::RawOp
@@ -956,12 +960,27 @@ impl core::fmt::Debug for kglite::api::durable::SyncMode
 pub fn kglite::api::durable::SyncMode::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for kglite::api::durable::SyncMode
 impl core::marker::StructuralPartialEq for kglite::api::durable::SyncMode
+pub struct kglite::api::durable::BeforeImage
+pub kglite::api::durable::BeforeImage::labels: core::option::Option<alloc::vec::Vec<alloc::string::String>>
+pub kglite::api::durable::BeforeImage::properties: alloc::vec::Vec<(kglite::api::InternedKey, kglite::datatypes::values::Value)>
+pub kglite::api::durable::BeforeImage::title: kglite::datatypes::values::Value
+impl core::clone::Clone for kglite::api::durable::BeforeImage
+pub fn kglite::api::durable::BeforeImage::clone(&self) -> kglite::api::durable::BeforeImage
+impl core::cmp::PartialEq for kglite::api::durable::BeforeImage
+pub fn kglite::api::durable::BeforeImage::eq(&self, other: &kglite::api::durable::BeforeImage) -> bool
+impl core::fmt::Debug for kglite::api::durable::BeforeImage
+pub fn kglite::api::durable::BeforeImage::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::durable::BeforeImage
 pub struct kglite::api::durable::RecordingGraph<G: kglite::api::GraphRead>
 impl<G: kglite::api::GraphRead> kglite::api::durable::RecordingGraph<G>
+pub fn kglite::api::durable::RecordingGraph<G>::backfill_node_before_labels(&mut self, idx: petgraph::graph_impl::NodeIndex, labels: alloc::vec::Vec<alloc::string::String>)
+pub fn kglite::api::durable::RecordingGraph<G>::captures_before(&self) -> bool
 pub fn kglite::api::durable::RecordingGraph<G>::inner(&self) -> &G
 pub fn kglite::api::durable::RecordingGraph<G>::inner_mut(&mut self) -> &mut G
 pub fn kglite::api::durable::RecordingGraph<G>::is_wal_owner(&self) -> bool
+pub fn kglite::api::durable::RecordingGraph<G>::needs_node_before(&self, idx: petgraph::graph_impl::NodeIndex) -> bool
 pub fn kglite::api::durable::RecordingGraph<G>::new(inner: G) -> Self
+pub fn kglite::api::durable::RecordingGraph<G>::note_node_before(&mut self, idx: petgraph::graph_impl::NodeIndex, image: kglite::api::durable::BeforeImage)
 pub fn kglite::api::durable::RecordingGraph<G>::note_node_labels(&mut self, idx: petgraph::graph_impl::NodeIndex)
 pub fn kglite::api::durable::RecordingGraph<G>::note_node_upsert(&mut self, idx: petgraph::graph_impl::NodeIndex)
 pub fn kglite::api::durable::RecordingGraph<G>::ops_len(&self) -> usize
@@ -1695,10 +1714,14 @@ pub kglite::api::storage::GraphBackend::Memory(alloc::sync::Arc<kglite::graph::s
 pub kglite::api::storage::GraphBackend::Recording(alloc::boxed::Box<kglite::api::durable::RecordingGraph<kglite::api::storage::GraphBackend>>)
 impl kglite::api::storage::GraphBackend
 pub fn kglite::api::storage::GraphBackend::as_stable_digraph(&self) -> &petgraph::graph_impl::stable_graph::StableDiGraph<kglite::api::NodeData, kglite::api::EdgeData>
+pub fn kglite::api::storage::GraphBackend::backfill_node_before_labels(&mut self, idx: petgraph::graph_impl::NodeIndex, labels: alloc::vec::Vec<alloc::string::String>)
+pub fn kglite::api::storage::GraphBackend::captures_before_images(&self) -> bool
 pub fn kglite::api::storage::GraphBackend::for_each_edge_endpoint_key<F>(&self, f: F) where F: core::ops::function::FnMut(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, kglite::api::InternedKey)
 pub fn kglite::api::storage::GraphBackend::for_each_edge_of_conn_type<F>(&self, conn_type: kglite::api::InternedKey, f: F) where F: core::ops::function::FnMut(petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex, u32, &[(kglite::api::InternedKey, kglite::datatypes::values::Value)]) -> bool
 pub fn kglite::api::storage::GraphBackend::is_forked(&self) -> bool
+pub fn kglite::api::storage::GraphBackend::needs_node_before_image(&self, idx: petgraph::graph_impl::NodeIndex) -> bool
 pub fn kglite::api::storage::GraphBackend::new() -> Self
+pub fn kglite::api::storage::GraphBackend::note_node_before_image(&mut self, idx: petgraph::graph_impl::NodeIndex, image: kglite::api::durable::BeforeImage)
 pub fn kglite::api::storage::GraphBackend::note_recorded_node_labels(&mut self, idx: petgraph::graph_impl::NodeIndex)
 pub fn kglite::api::storage::GraphBackend::note_recorded_node_upsert(&mut self, idx: petgraph::graph_impl::NodeIndex)
 impl core::clone::Clone for kglite::api::storage::GraphBackend

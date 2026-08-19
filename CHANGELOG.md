@@ -56,6 +56,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It is now shared, so every bulk entry point raises
   `ConstraintViolationError` / `ConstraintCreationError` where one applies.
 
+- **Change-capture before-images — `CALL db.cdc.enable({enrichment: 'full'})`.**
+  Every event then carries `state.before` as well as `state.after`, in the same
+  `{title, labels, properties}` / `{properties}` shape, so a consumer can see
+  what a commit replaced without keeping its own mirror. A delete's `before` is
+  the state it destroyed — the one event whose only informative half is that
+  one. A create has none, and reports `null`.
+
+  **`before` is the state at the start of the commit**, not before the most
+  recent write: three writes to one entity in one transaction publish one
+  event whose `before` is what the transaction opened on. Label changes are
+  included, so `before.labels` is the set the commit replaced.
+
+  `'off'` remains the default and is unchanged in cost and output. `'full'`
+  adds one whole-entity read per changed entity per commit — at each entity's
+  first touch, not per write — so an update or delete event then carries two
+  images where it used to carry one. Measured (release profile, min of 7
+  rounds, two runs) on 1000 autocommit `SET`s, which is the **worst case** for
+  the read because every write is its own commit and therefore its own first
+  touch: **+2-3%** wall time versus `'off'` (4.66 ms -> 4.75-4.80 ms). The
+  enrichment applies to writes rather than to the log, so switching a running
+  log to `'full'` keeps its epoch and its retained events, and `before` starts
+  appearing from the next commit.
+
+  `'diff'` — Neo4j's third `txLogEnrichment` value — is refused by name: the
+  diff is computed *from* the full before-image, so it saves ring bytes but
+  not the read the mode exists to avoid. Compute one from a `'full'` event,
+  where both sides are present.
+
 - **`CALL db.cdc.status()` — read the change-capture configuration without
   changing it.** Yields `enabled`, `epoch`, `capacity`, `enrichment`,
   `buffered`, `earliest`, `current`. It is the one CDC read verb that answers

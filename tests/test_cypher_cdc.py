@@ -321,6 +321,132 @@ def test_yield_projects_and_aliases_like_any_procedure(graph):
     assert aliased == [{"s": 1}]
 
 
+# ── before-images (enrichment: full) ───────────────────────────────────────
+
+
+@pytest.fixture
+def full_graph():
+    """A graph capturing both halves of every change."""
+    g = kglite.KnowledgeGraph()
+    g.cypher("CALL db.cdc.enable({enrichment: 'full'})")
+    return g
+
+
+def test_full_capture_reports_both_halves_through_cypher(full_graph):
+    full_graph.cypher("CREATE (:P {id: 1, name: 'one', qty: 10})")
+    full_graph.cypher("MATCH (n:P {id: 1}) SET n.qty = 99")
+    full_graph.cypher("MATCH (n:P {id: 1}) DELETE n")
+
+    created, updated, deleted = events(full_graph)
+
+    assert created["state"]["before"] is None, "a create had no prior state"
+    assert created["state"]["after"]["properties"] == {"name": "one", "qty": 10}
+
+    assert updated["state"]["before"]["properties"] == {"name": "one", "qty": 10}
+    assert updated["state"]["after"]["properties"] == {"name": "one", "qty": 99}
+
+    assert deleted["state"]["after"] is None, "a delete left no entity"
+    assert deleted["state"]["before"]["properties"] == {"name": "one", "qty": 99}
+    assert deleted["state"]["before"]["title"] == "one"
+
+
+def test_the_before_half_is_traversable_from_cypher(full_graph):
+    """Both halves are real map structure, reachable with `.` in a projection."""
+    full_graph.cypher("CREATE (:P {id: 1, qty: 10})")
+    full_graph.cypher("MATCH (n:P {id: 1}) SET n.qty = 99")
+    rows = full_graph.cypher(
+        "CALL db.cdc.query() YIELD operation, state "
+        "WHERE operation = 'update' "
+        "RETURN state.before.properties.qty AS was, state.after.properties.qty AS now"
+    ).to_dicts()
+    assert rows == [{"was": 10, "now": 99}]
+
+
+def test_before_is_the_state_at_the_start_of_the_commit(full_graph):
+    """Three writes to one entity collapse to one event whose `before` is what
+    the commit found — not what the last write replaced."""
+    full_graph.cypher("CREATE (:P {id: 1, qty: 0})")
+    cur = cursor(full_graph)
+    with full_graph.begin() as tx:
+        tx.cypher("MATCH (n:P {id: 1}) SET n.qty = 1")
+        tx.cypher("MATCH (n:P {id: 1}) SET n.qty = 2")
+        tx.cypher("MATCH (n:P {id: 1}) SET n.qty = 3")
+
+    rows = events(full_graph, cur)
+    assert len(rows) == 1, rows
+    assert rows[0]["state"]["before"]["properties"]["qty"] == 0
+    assert rows[0]["state"]["after"]["properties"]["qty"] == 3
+
+
+def test_a_label_change_reports_the_label_set_it_replaced(full_graph):
+    full_graph.cypher("CREATE (:P {id: 1})")
+    full_graph.cypher("MATCH (n:P {id: 1}) SET n:Featured")
+    cur = cursor(full_graph)
+    full_graph.cypher("MATCH (n:P {id: 1}) SET n:Archived")
+
+    row = events(full_graph, cur)[0]
+    assert row["state"]["before"]["labels"] == ["Featured"]
+    assert sorted(row["state"]["after"]["labels"]) == ["Archived", "Featured"]
+
+
+def test_a_deleted_node_keeps_its_labels_in_the_before_image(full_graph):
+    full_graph.cypher("CREATE (:P {id: 1, x: 1})")
+    full_graph.cypher("MATCH (n:P {id: 1}) SET n:Featured")
+    cur = cursor(full_graph)
+    full_graph.cypher("MATCH (n:P {id: 1}) DELETE n")
+
+    row = events(full_graph, cur)[0]
+    assert row["operation"] == "delete"
+    assert row["state"]["before"]["labels"] == ["Featured"]
+    assert row["state"]["before"]["properties"] == {"x": 1}
+
+
+def test_relationship_before_images(full_graph):
+    full_graph.cypher("CREATE (:P {id: 1})-[:R {w: 1}]->(:Q {id: 2})")
+    cur = cursor(full_graph)
+    full_graph.cypher("MATCH ()-[r:R]->() SET r.w = 2")
+    full_graph.cypher("MATCH ()-[r:R]->() DELETE r")
+
+    updated, deleted = events(full_graph, cur)
+    assert updated["state"]["before"] == {"properties": {"w": 1}}
+    assert updated["state"]["after"] == {"properties": {"w": 2}}
+    assert deleted["state"]["before"] == {"properties": {"w": 2}}
+    assert deleted["state"]["after"] is None
+
+
+def test_off_mode_still_reports_no_before(graph):
+    """The default mode is unchanged by any of this — and pays for nothing."""
+    graph.cypher("CREATE (:P {id: 1, x: 1})")
+    graph.cypher("MATCH (n:P {id: 1}) SET n.x = 2")
+    assert all(row["state"]["before"] is None for row in events(graph))
+    assert graph.cypher("CALL db.cdc.status()").to_dicts()[0]["enrichment"] == "off"
+
+
+def test_switching_to_full_starts_capturing_from_the_next_write(graph):
+    """Enrichment applies to writes, not to the log: events already in the ring
+    keep the shape they were captured with."""
+    graph.cypher("CREATE (:P {id: 1, x: 1})")
+    graph.cypher("CALL db.cdc.enable({enrichment: 'full'})")
+    graph.cypher("MATCH (n:P {id: 1}) SET n.x = 2")
+
+    created, updated = events(graph)
+    assert created["state"]["before"] is None
+    assert updated["state"]["before"]["properties"] == {"x": 1}
+
+
+def test_a_rolled_back_transaction_captures_no_before_image(full_graph):
+    full_graph.cypher("CREATE (:P {id: 1, x: 1})")
+    cur = cursor(full_graph)
+    with pytest.raises(RuntimeError):
+        with full_graph.begin() as tx:
+            tx.cypher("MATCH (n:P {id: 1}) SET n.x = 2")
+            raise RuntimeError("abort")
+    assert events(full_graph, cur) == []
+    # And the next real write images the restored state.
+    full_graph.cypher("MATCH (n:P {id: 1}) SET n.x = 3")
+    assert events(full_graph, cur)[0]["state"]["before"]["properties"] == {"x": 1}
+
+
 # ── cursors ────────────────────────────────────────────────────────────────
 
 

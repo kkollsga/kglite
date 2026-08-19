@@ -502,7 +502,7 @@ pub mod api {
         };
         pub use crate::graph::mutation::wal_replay::apply_frames;
         pub use crate::graph::storage::recording::{
-            resolve_ops, wrap_for_durability, CaptureOrigin, RawOp, RecordingGraph,
+            resolve_ops, wrap_for_durability, BeforeImage, CaptureOrigin, RawOp, RecordingGraph,
         };
         pub use crate::graph::wal::{recover, wal_path, DurabilityLevel, SyncMode, Wal, WalFrame};
     }

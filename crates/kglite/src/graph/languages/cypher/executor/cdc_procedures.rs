@@ -420,12 +420,14 @@ fn state_value(event: &CdcEvent) -> Value {
 
 /// The entity as the commit found it.
 ///
-/// Always null today: capture keeps no pre-image, which is what the
-/// `enrichment` knob will select. The half is present in the shape now so a
-/// consumer writes `state.before` once rather than migrating a second time
-/// when it starts carrying data.
-fn before_value(_event: &CdcEvent) -> Value {
-    Value::Null
+/// Null under `enrichment: 'off'`, which captures no pre-image, and null for a
+/// create, which had none — the two read the same on the wire and are told
+/// apart by `db.cdc.status()`'s `enrichment` column, not by the row.
+fn before_value(event: &CdcEvent) -> Value {
+    match &event.change {
+        CdcChange::Node { before, .. } => before.as_ref().map_or(Value::Null, node_state_map),
+        CdcChange::Edge { before, .. } => before.as_ref().map_or(Value::Null, edge_state_map),
+    }
 }
 
 /// The entity as the commit left it — null for a delete, which left none.
@@ -433,27 +435,31 @@ fn after_value(event: &CdcEvent) -> Value {
     if event.kind == CdcEventKind::Delete {
         return Value::Null;
     }
-    let mut state = BTreeMap::new();
     match &event.change {
-        CdcChange::Node { after, .. } => {
-            let Some(node) = after else {
-                return Value::Null;
-            };
-            state.insert("title".to_string(), node.title.clone());
-            state.insert(
-                "labels".to_string(),
-                Value::List(node.labels.iter().cloned().map(Value::String).collect()),
-            );
-            state.insert("properties".to_string(), properties_map(&node.properties));
-        }
-        CdcChange::Edge { after, .. } => {
-            let Some(edge) = after else {
-                return Value::Null;
-            };
-            state.insert("properties".to_string(), properties_map(&edge.properties));
-        }
+        CdcChange::Node { after, .. } => after.as_ref().map_or(Value::Null, node_state_map),
+        CdcChange::Edge { after, .. } => after.as_ref().map_or(Value::Null, edge_state_map),
     }
-    Value::Map(state)
+}
+
+/// A node image: `{title, labels, properties}`. One shape for both halves —
+/// a consumer that can read `after` can read `before` with the same code.
+fn node_state_map(node: &crate::graph::cdc::NodeState) -> Value {
+    Value::Map(BTreeMap::from([
+        ("title".to_string(), node.title.clone()),
+        (
+            "labels".to_string(),
+            Value::List(node.labels.iter().cloned().map(Value::String).collect()),
+        ),
+        ("properties".to_string(), properties_map(&node.properties)),
+    ]))
+}
+
+/// A relationship image: `{properties}`.
+fn edge_state_map(edge: &crate::graph::cdc::EdgeState) -> Value {
+    Value::Map(BTreeMap::from([(
+        "properties".to_string(),
+        properties_map(&edge.properties),
+    )]))
 }
 
 fn properties_map(properties: &[(String, Value)]) -> Value {

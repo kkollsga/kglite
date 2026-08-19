@@ -378,7 +378,13 @@ def test_cdc_mode_parity(tmp_path):
     published: dict[str, list] = {}
     for mode in ("memory", "mapped"):
         kg = _build_graph(mode)
-        kg.cypher("CALL db.cdc.enable()")
+        # Full enrichment on purpose: `before` is the half the two backends
+        # capture *differently*. A mapped SET writes through the columnar
+        # master store and notifies the capture seam afterwards, so its
+        # before-image is read at a different site from memory's — and a site
+        # that read it too late would report the new value here, matching
+        # nothing.
+        kg.cypher("CALL db.cdc.enable({enrichment: 'full'})")
         kg.cypher("CREATE (a:Widget {wid: 1, size: 1})-[:PAIRS {w: 2}]->(b:Widget {wid: 2})")
         kg.cypher("MATCH (n:Widget) WHERE n.wid = 1 SET n.size = 2")
         kg.cypher("MATCH (n:Widget) WHERE n.wid = 2 DETACH DELETE n")
@@ -389,6 +395,9 @@ def test_cdc_mode_parity(tmp_path):
 
     assert published["memory"], "the stream must not be empty — that would pass vacuously"
     assert published["mapped"] == published["memory"], published
+    assert any(row[5]["before"] is not None for row in published["memory"]), (
+        "full enrichment must actually populate a before-image, or the parity is vacuous"
+    )
 
     disk = _build_graph("disk", str(tmp_path / "cdc_disk"))
     with pytest.raises(kglite.KgError) as exc:

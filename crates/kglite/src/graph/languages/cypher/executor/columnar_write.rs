@@ -196,6 +196,11 @@ pub(super) fn write_column_master(
         value,
     } = cell;
 
+    // (0) Change data capture's before-image, ahead of every mutation below.
+    // See `capture_cdc_before_image` for why it cannot ride the
+    // `note_recorded_node_upsert` at the end of this function.
+    capture_cdc_before_image(graph, node_idx);
+
     // (1) Pre-image first, and cell-grained: the journal takes the value this
     // write is about to destroy, never a handle on the store holding it.
     //
@@ -264,6 +269,46 @@ pub(super) fn write_column_master(
     );
     graph.graph.note_recorded_node_upsert(node_idx); // (4)
     Some(prior_value)
+}
+
+/// Hand the node's pre-write state to the change-capture seam, before this
+/// write destroys it.
+///
+/// **This is a choke point, not a hook, and the difference is the whole
+/// point.** A columnar write goes straight into the master `ColumnStore`, so
+/// no recorded `GraphWrite` call describes it and the seam is told after the
+/// fact, by the `note_recorded_node_upsert` at the end of
+/// [`write_column_master`]. A before-image read *there* is read after
+/// `set_at_slot` has already replaced the value it claims to describe: the
+/// event then reports the new value as `before`, while its `after` half and
+/// its kind stay correct, so nothing else in the stream looks wrong.
+/// `cdc::tests::a_columnar_set_captures_the_value_it_overwrote` fails with
+/// `before == after` if this call is removed.
+///
+/// The seam *offers*-then-claims rather than recording immediately, so a
+/// write that turns out not to happen leaves nothing behind — see
+/// `RecordingGraph::note_node_before`.
+///
+/// Costs one bool read when enrichment is off (the default) and one
+/// whole-entity read per changed entity per commit when it is on: repeat
+/// writes to the same node find its first-touch image already taken.
+#[inline]
+fn capture_cdc_before_image(graph: &mut DirGraph, node_idx: NodeIndex) {
+    if !graph.graph.needs_node_before_image(node_idx) {
+        return;
+    }
+    use crate::graph::storage::recording::BeforeImage;
+    use crate::graph::storage::GraphRead;
+    let Some(image) = graph.graph.node_view(node_idx).map(|view| BeforeImage {
+        title: view.title().into_owned(),
+        properties: view.property_pairs(),
+        // Labels are not backend state; the label choke point fills them in
+        // when the commit touches them.
+        labels: None,
+    }) else {
+        return;
+    };
+    graph.graph.note_node_before_image(node_idx, image);
 }
 
 /// The cold half of [`write_column_master`]: the type's store has no column for

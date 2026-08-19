@@ -141,20 +141,28 @@ pub fn enable(
         Some(requested) => requested,
     };
 
-    match &graph.cdc {
+    let status = match &graph.cdc {
         Some(handle) => {
             let mut log = lock(handle);
             log.reconfigure(capacity, enrichment);
-            Ok(log.status())
+            log.status()
         }
         None => {
             graph.graph.wrap_for_capture();
             let log = CdcLog::new(capacity, enrichment);
             let status = log.status();
             graph.cdc = Some(Arc::new(Mutex::new(log)));
-            Ok(status)
+            status
         }
-    }
+    };
+    // The wrapper, not the log, decides what a write captures: the read that
+    // builds a before-image happens at the write, long before anything looks
+    // at the log. Setting it here — after the log is installed — keeps the two
+    // in step through every re-enable.
+    graph
+        .graph
+        .set_capture_before(enrichment == CdcEnrichment::Full);
+    Ok(status)
 }
 
 /// Stop change data capture, discard the log, and hand back whether it was on.
@@ -172,6 +180,10 @@ pub fn enable(
 /// publishable — and the log they would have gone to is being dropped.
 pub fn disable(graph: &mut DirGraph) -> bool {
     let was_enabled = graph.cdc.take().is_some();
+    // A WAL-owned wrapper survives `unwrap_capture_if_unowned`, so clearing
+    // the flag is what stops a durable graph paying for before-images once
+    // the consumer that asked for them is gone.
+    graph.graph.set_capture_before(false);
     graph.graph.unwrap_capture_if_unowned();
     was_enabled
 }

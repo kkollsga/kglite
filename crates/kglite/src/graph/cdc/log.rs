@@ -47,11 +47,13 @@ pub enum CdcEnrichment {
     /// After-image only: `state.before` is always null.
     #[default]
     Off,
-    /// Before *and* after images for every change the mode can capture.
+    /// Before *and* after images.
     ///
-    /// The mode is recorded and reported as soon as it is selected; the
-    /// before-image capture it turns on is the next piece of this work, so
-    /// `state.before` reads null under `Full` as well until that lands.
+    /// Costs one whole-entity read per changed entity per commit — not per
+    /// write: the image is taken at the entity's **first touch** and repeat
+    /// writes find it already taken. Creates read nothing, having no prior
+    /// state. The ring then holds roughly twice as much per event, since most
+    /// events carry two images instead of one.
     Full,
 }
 

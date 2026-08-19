@@ -554,6 +554,64 @@ impl GraphBackend {
         }
     }
 
+    /// Turn before-image capture on or off on the write-capture wrapper.
+    /// No-op when there is no wrapper — a graph with no capture layer has
+    /// nothing to enrich.
+    #[inline]
+    pub(crate) fn set_capture_before(&mut self, on: bool) {
+        if let GraphBackend::Recording(rg) = self {
+            rg.set_capture_before(on);
+        }
+    }
+
+    /// Whether writes on this backend capture before-images.
+    ///
+    /// The gate the two **side-channel choke points** test before doing any
+    /// work: both sit on hot write paths and must cost a bool read, not a
+    /// state read, when enrichment is off (which is the default).
+    #[inline]
+    pub fn captures_before_images(&self) -> bool {
+        match self {
+            GraphBackend::Recording(rg) => rg.captures_before(),
+            _ => false,
+        }
+    }
+
+    /// Whether node `idx` still needs its first-touch before-image.
+    ///
+    /// Lets a choke point skip the whole-entity read for every write after the
+    /// first to the same entity in one commit.
+    #[inline]
+    pub fn needs_node_before_image(&self, idx: NodeIndex) -> bool {
+        match self {
+            GraphBackend::Recording(rg) => rg.needs_node_before(idx),
+            _ => false,
+        }
+    }
+
+    /// Hand a node's pre-write state to the capture wrapper, from a site that
+    /// mutates outside the `GraphWrite` seam. Must be called **before** that
+    /// site's write. See
+    /// [`RecordingGraph::note_node_before`](crate::graph::storage::recording::RecordingGraph::note_node_before).
+    #[inline]
+    pub fn note_node_before_image(
+        &mut self,
+        idx: NodeIndex,
+        image: crate::graph::storage::recording::BeforeImage,
+    ) {
+        if let GraphBackend::Recording(rg) = self {
+            rg.note_node_before(idx, image);
+        }
+    }
+
+    /// Fill in the label half of a node's already-captured before-image.
+    #[inline]
+    pub fn backfill_node_before_labels(&mut self, idx: NodeIndex, labels: Vec<String>) {
+        if let GraphBackend::Recording(rg) = self {
+            rg.backfill_node_before_labels(idx, labels);
+        }
+    }
+
     /// Record that node `idx`'s secondary labels changed, for the WAL
     /// capture wrapper. No-op unless this is the
     /// [`GraphBackend::Recording`] backend.
