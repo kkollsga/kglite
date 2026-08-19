@@ -447,6 +447,40 @@ def test_a_rolled_back_transaction_captures_no_before_image(full_graph):
     assert events(full_graph, cur)[0]["state"]["before"]["properties"] == {"x": 1}
 
 
+def test_a_rolled_back_delete_does_not_void_an_earlier_before_image(full_graph):
+    """A delete that is rolled back must not take the commit's before-image
+    with it.
+
+    The delete copies the commit-start image onto its own op, because that op
+    is normally the one published (the earlier write's op is dropped once the
+    entity is gone). When the statement fails, the node comes back and the
+    earlier write publishes after all — with its image intact.
+    """
+    full_graph.cypher("CREATE (:P {id: 1, name: 'orig'})")
+    cur = cursor(full_graph)
+
+    tx = full_graph.begin()
+    tx.cypher("MATCH (a:P {id: 1}) SET a.name = 'changed'")
+    with pytest.raises(kglite.KgError):
+        tx.cypher("MATCH (a:P {id: 1}) DETACH DELETE a WITH 1 AS x RETURN 1/0")
+    tx.commit()
+
+    rows = events(full_graph, cur)
+    assert [r["operation"] for r in rows] == ["update"], rows
+    assert rows[0]["state"]["before"]["properties"] == {"name": "orig"}
+    assert rows[0]["state"]["after"]["properties"] == {"name": "changed"}
+
+
+def test_a_cursor_past_the_newest_change_is_refused(graph):
+    """A syntactically valid cursor naming a change that does not exist is
+    refused — it used to overflow the retention arithmetic."""
+    graph.cypher("CREATE (:P {id: 1})")
+    epoch = graph.cypher("CALL db.cdc.status()").to_dicts()[0]["epoch"]
+    impossible = f"cdc:{epoch:016x}:{0xFFFFFFFFFFFFFFFF:016x}"
+    with pytest.raises(kglite.CypherExecutionError, match="has published only up to change"):
+        graph.cypher("CALL db.cdc.query({from: $c})", params={"c": impossible})
+
+
 # ── selectors ──────────────────────────────────────────────────────────────
 
 

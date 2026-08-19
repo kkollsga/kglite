@@ -1459,3 +1459,86 @@ fn a_save_after_disable_carries_the_earlier_stamp_forward() {
     let again = round_trip(&loaded, tmp.path(), "second-hop.kgl");
     assert_eq!(again.cdc_handoff, loaded.cdc_handoff);
 }
+
+// ── rollback of a delete that borrowed an earlier image ──────────────
+
+/// A statement that deletes and then fails, so rollback undoes the delete.
+const DELETE_THEN_FAILS: &str = "MATCH (i:Item {id: 1}) DETACH DELETE i \
+     WITH 1 AS x MATCH (m:Item {id: 2}) SET m.qty = duration({months: 2147483648})";
+
+/// **A rolled-back delete must not void an earlier op's before-image.**
+///
+/// The delete takes the commit-start image from the earlier `SET`'s op,
+/// because that op is normally dropped at resolve time (the node is gone) and
+/// the delete is the event that needs it. When the delete is rolled back the
+/// node comes *back*, its op is published after all — and must still carry the
+/// image the delete borrowed.
+#[test]
+fn a_rolled_back_delete_leaves_the_earlier_ops_before_image_intact() {
+    let mut graph = seeded_full();
+    let from = cursor(&graph);
+
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i.name = 'changed'");
+    expect_failure(&mut graph, DELETE_THEN_FAILS);
+    commit(&mut graph);
+
+    let published = since(&graph, from);
+    assert_eq!(
+        published.len(),
+        1,
+        "only the surviving update publishes: {published:?}"
+    );
+    assert_eq!(published[0].kind, CdcEventKind::Update);
+    assert_eq!(
+        node_before_property(&published[0], "name"),
+        Some(Value::String("one".into())),
+        "the image the rolled-back delete borrowed must still be here"
+    );
+    assert_eq!(
+        node_property(&published[0], "name"),
+        Some(Value::String("changed".into())),
+        "and the after half is the write that survived"
+    );
+}
+
+/// The control: without the delete, the same commit already worked. Present so
+/// a failure above is read as "the delete broke it", not "updates are broken".
+#[test]
+fn the_same_commit_without_a_delete_reports_its_before_image() {
+    let mut graph = seeded_full();
+    let from = cursor(&graph);
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i.name = 'changed'");
+    commit(&mut graph);
+
+    let published = since(&graph, from);
+    assert_eq!(
+        node_before_property(&published[0], "name"),
+        Some(Value::String("one".into()))
+    );
+}
+
+/// After the rollback recovers the image, a *later* delete in the same commit
+/// must attach the **commit-start** image — not the state the surviving
+/// earlier statement left behind.
+#[test]
+fn a_delete_after_a_rolled_back_delete_still_reports_the_commit_start_image() {
+    let mut graph = seeded_full();
+    let from = cursor(&graph);
+
+    run(&mut graph, "MATCH (i:Item {id: 1}) SET i.name = 'changed'");
+    expect_failure(&mut graph, DELETE_THEN_FAILS);
+    run(&mut graph, "MATCH (i:Item {id: 1}) DETACH DELETE i");
+    commit(&mut graph);
+
+    let node_delete = since(&graph, from)
+        .into_iter()
+        .find(|event| {
+            event.kind == CdcEventKind::Delete && matches!(event.change, CdcChange::Node { .. })
+        })
+        .expect("the second delete must publish");
+    assert_eq!(
+        node_before_property(&node_delete, "name"),
+        Some(Value::String("one".into())),
+        "before is the state the commit found, not what the surviving SET left"
+    );
+}

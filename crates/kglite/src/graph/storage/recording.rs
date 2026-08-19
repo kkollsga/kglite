@@ -149,6 +149,62 @@ pub enum RawOp {
     SetNodeLabels(NodeIndex, Option<Box<BeforeImage>>),
 }
 
+/// Where an entity's first-touch image lives in the op buffer.
+///
+/// Two indices, because a delete of an entity the commit already wrote to
+/// puts a **copy** of the image on its own op while leaving the original in
+/// place — see [`RecordingGraph::copy_node_image`]. `first_at` is the original
+/// and never moves; `latest_at` is the newest op carrying a copy, which is the
+/// one whose event will actually be published for a delete.
+///
+/// Keeping both is what makes rollback recoverable: dropping the copy restores
+/// `latest_at` to `first_at` rather than losing the slot's image entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImageSite {
+    first_at: usize,
+    latest_at: usize,
+}
+
+impl ImageSite {
+    #[inline]
+    fn at(at: usize) -> Self {
+        Self {
+            first_at: at,
+            latest_at: at,
+        }
+    }
+
+    /// Every op holding a copy of this slot's image, without duplicates.
+    #[inline]
+    fn carriers(&self) -> impl Iterator<Item = usize> {
+        let second = (self.latest_at != self.first_at).then_some(self.latest_at);
+        std::iter::once(self.first_at).chain(second)
+    }
+}
+
+/// The before-image slot of an op, for the ops that carry one.
+#[inline]
+fn op_image(op: &RawOp) -> Option<&BeforeImage> {
+    match op {
+        RawOp::UpsertNode(_, _, before)
+        | RawOp::UpsertEdge(_, _, before)
+        | RawOp::SetNodeLabels(_, before)
+        | RawOp::RemoveNode { before, .. }
+        | RawOp::RemoveEdge { before, .. } => before.as_deref(),
+    }
+}
+
+#[inline]
+fn op_image_mut(op: &mut RawOp) -> Option<&mut BeforeImage> {
+    match op {
+        RawOp::UpsertNode(_, _, before)
+        | RawOp::UpsertEdge(_, _, before)
+        | RawOp::SetNodeLabels(_, before)
+        | RawOp::RemoveNode { before, .. }
+        | RawOp::RemoveEdge { before, .. } => before.as_deref_mut(),
+    }
+}
+
 /// A node index as a dedup slot. `u32` because petgraph indices are `u32`
 /// underneath and the map is per-batch — halving its key width matters more
 /// than the cast does.
@@ -203,7 +259,7 @@ pub struct RecordingGraph<G: GraphRead> {
     /// (later writes to the same entity find an entry and capture nothing),
     /// and it caps the read cost at one whole-entity read per changed entity
     /// per commit rather than one per write.
-    before_touched: HashMap<BeforeSlot, usize>,
+    before_touched: HashMap<BeforeSlot, ImageSite>,
     /// An image a side-channel choke point read *before* its write, waiting
     /// for that write's op to claim it.
     ///
@@ -214,6 +270,18 @@ pub struct RecordingGraph<G: GraphRead> {
     /// coming, so pushing a second one would double every label edit in the
     /// write-ahead log.
     pending_before: Option<(BeforeSlot, Box<BeforeImage>)>,
+    /// Sites dropped by [`RecordingGraph::forget_slot`], with the buffer
+    /// length at the moment they were dropped, so a rollback can put them
+    /// back.
+    ///
+    /// Needed because statement rollback restores a deleted node by *adding*
+    /// it again (`dir_graph::rollback::undo_node_removed` →
+    /// `GraphWrite::add_node`), and that runs **before** `truncate_ops`. The
+    /// add looks exactly like a create landing on a reused index, so the
+    /// forget fires and the entity's commit-start image becomes unreachable —
+    /// permanently, because truncation cannot put back what an earlier step
+    /// removed. Empty whenever nothing was forgotten, which is almost always.
+    forgotten_sites: Vec<(usize, BeforeSlot, ImageSite)>,
 }
 
 impl<G: GraphRead> RecordingGraph<G> {
@@ -229,6 +297,7 @@ impl<G: GraphRead> RecordingGraph<G> {
             capture_before: false,
             before_touched: HashMap::new(),
             pending_before: None,
+            forgotten_sites: Vec::new(),
         }
     }
 
@@ -332,28 +401,40 @@ impl<G: GraphRead> RecordingGraph<G> {
         if !self.capture_before {
             return;
         }
-        let Some(&at) = self.before_touched.get(&BeforeSlot::Node(node_slot(idx))) else {
+        let Some(&site) = self.before_touched.get(&BeforeSlot::Node(node_slot(idx))) else {
             return;
         };
-        let image = match self.ops.get_mut(at) {
-            Some(RawOp::UpsertNode(_, _, before)) => before,
-            Some(RawOp::SetNodeLabels(_, before)) => before,
-            Some(RawOp::RemoveNode { before, .. }) => before,
-            _ => return,
-        };
-        if let Some(image) = image {
+        // Every op holding a copy, not just one: a delete carries its own copy
+        // of the image alongside the original, and either may be the one that
+        // ends up published.
+        for at in site.carriers() {
+            let Some(image) = self.ops.get_mut(at).and_then(op_image_mut) else {
+                continue;
+            };
             if image.labels.is_none() {
-                image.labels = Some(labels);
+                image.labels = Some(labels.clone());
             }
         }
+    }
+
+    /// Note that the op about to be pushed at `at` carries `slot`'s image.
+    ///
+    /// A first touch creates the site; a later *copy* only advances
+    /// `latest_at`, leaving `first_at` — and the op it names — untouched, so a
+    /// rollback of the copy has somewhere to fall back to.
+    #[inline]
+    fn record_image_site(&mut self, slot: BeforeSlot, at: usize) {
+        self.before_touched
+            .entry(slot)
+            .and_modify(|site| site.latest_at = at)
+            .or_insert_with(|| ImageSite::at(at));
     }
 
     /// Push an upsert op, capturing the node's first-touch image with it.
     fn push_node_upsert(&mut self, idx: NodeIndex, origin: CaptureOrigin) {
         let before = self.take_node_image(idx);
         if before.is_some() {
-            self.before_touched
-                .insert(BeforeSlot::Node(node_slot(idx)), self.ops.len());
+            self.record_image_site(BeforeSlot::Node(node_slot(idx)), self.ops.len());
         }
         self.ops.push(RawOp::UpsertNode(idx, origin, before));
     }
@@ -362,35 +443,37 @@ impl<G: GraphRead> RecordingGraph<G> {
     fn push_edge_upsert(&mut self, idx: EdgeIndex, origin: CaptureOrigin) {
         let before = self.take_edge_image(idx);
         if before.is_some() {
-            self.before_touched
-                .insert(BeforeSlot::Edge(edge_slot(idx)), self.ops.len());
+            self.record_image_site(BeforeSlot::Edge(edge_slot(idx)), self.ops.len());
         }
         self.ops.push(RawOp::UpsertEdge(idx, origin, before));
     }
 
-    /// Move an already-captured image out of the earlier op that holds it.
+    /// Copy an already-captured image onto a delete's own op.
     ///
     /// For a delete of an entity this commit *already* wrote to: first-touch
-    /// dedup put the image on that earlier upsert, and the upsert is about to
-    /// be dropped at resolve time because the entity no longer exists. Without
-    /// this move the commit-start image would be discarded with it and the
-    /// delete — the one event whose *only* informative half is `before` —
-    /// would carry nothing.
-    fn steal_node_image(&mut self, idx: NodeIndex) -> Option<Box<BeforeImage>> {
-        let &at = self.before_touched.get(&BeforeSlot::Node(node_slot(idx)))?;
-        match self.ops.get_mut(at)? {
-            RawOp::UpsertNode(_, _, before) => before.take(),
-            RawOp::SetNodeLabels(_, before) => before.take(),
-            _ => None,
-        }
+    /// dedup put the image on an earlier op, and that op is normally dropped
+    /// at resolve time because the entity no longer exists — so the delete,
+    /// the one event whose *only* informative half is `before`, would carry
+    /// nothing.
+    ///
+    /// **Copied, not moved.** Moving it was a defect: a statement that deletes
+    /// and then fails is rolled back, the node comes *back*, and the earlier
+    /// op is published after all — with the image gone, because `truncate_ops`
+    /// can drop the delete's op but cannot put back what that op took. The
+    /// image is one entity's payload and is read-only once captured, so
+    /// duplicating it is the cheap half of that trade.
+    fn copy_node_image(&mut self, idx: NodeIndex) -> Option<Box<BeforeImage>> {
+        let site = *self.before_touched.get(&BeforeSlot::Node(node_slot(idx)))?;
+        op_image(self.ops.get(site.first_at)?)
+            .cloned()
+            .map(Box::new)
     }
 
-    fn steal_edge_image(&mut self, idx: EdgeIndex) -> Option<Box<BeforeImage>> {
-        let &at = self.before_touched.get(&BeforeSlot::Edge(edge_slot(idx)))?;
-        match self.ops.get_mut(at)? {
-            RawOp::UpsertEdge(_, _, before) => before.take(),
-            _ => None,
-        }
+    fn copy_edge_image(&mut self, idx: EdgeIndex) -> Option<Box<BeforeImage>> {
+        let site = *self.before_touched.get(&BeforeSlot::Edge(edge_slot(idx)))?;
+        op_image(self.ops.get(site.first_at)?)
+            .cloned()
+            .map(Box::new)
     }
 
     /// Forget any image held for `slot`, because the index now addresses a
@@ -402,8 +485,13 @@ impl<G: GraphRead> RecordingGraph<G> {
     /// entity's image.
     #[inline]
     fn forget_slot(&mut self, slot: BeforeSlot) {
-        if self.capture_before {
-            self.before_touched.remove(&slot);
+        if !self.capture_before {
+            return;
+        }
+        if let Some(site) = self.before_touched.remove(&slot) {
+            // Remembered, not discarded: this add may be a rollback restoring
+            // the very entity whose image the site points at.
+            self.forgotten_sites.push((self.ops.len(), slot, site));
         }
     }
 
@@ -475,8 +563,7 @@ impl<G: GraphRead> RecordingGraph<G> {
     pub fn note_node_labels(&mut self, idx: NodeIndex) {
         let before = self.take_node_image(idx);
         if before.is_some() {
-            self.before_touched
-                .insert(BeforeSlot::Node(node_slot(idx)), self.ops.len());
+            self.record_image_site(BeforeSlot::Node(node_slot(idx)), self.ops.len());
         }
         self.ops.push(RawOp::SetNodeLabels(idx, before));
     }
@@ -489,6 +576,7 @@ impl<G: GraphRead> RecordingGraph<G> {
         // so it dies with it — the next batch starts its own first touches.
         self.before_touched.clear();
         self.pending_before = None;
+        self.forgotten_sites.clear();
         std::mem::take(&mut self.ops)
     }
 
@@ -516,11 +604,49 @@ impl<G: GraphRead> RecordingGraph<G> {
     pub(crate) fn truncate_ops(&mut self, len: usize) {
         self.ops.truncate(len);
         self.pending_before = None;
-        // The images of the discarded ops go with them, so the *next* write to
-        // an entity this statement touched captures a fresh first-touch image
-        // — of the restored state, which is what the surviving ops describe.
-        // Retaining is the expensive direction and rollback is the rare one.
-        self.before_touched.retain(|_, at| *at < len);
+        // Two different outcomes, and conflating them was a defect:
+        //
+        // - the **original** capture is gone → the slot has no image left, so
+        //   the next write to that entity captures a fresh first-touch one, of
+        //   the restored state the surviving ops describe;
+        // - only a later **copy** is gone (a rolled-back delete) → the
+        //   original survives, so the site falls back to it. Forgetting the
+        //   slot here instead would let the next write re-capture, recording
+        //   whatever an earlier *surviving* statement had already written as
+        //   though it were the commit-start state.
+        //
+        // One pass, and the map is per-batch, so rollback stays cheap.
+        self.before_touched.retain(|_, site| {
+            if site.first_at >= len {
+                return false;
+            }
+            if site.latest_at >= len {
+                site.latest_at = site.first_at;
+            }
+            true
+        });
+        // Undo the forgets this statement made. The rollback's own
+        // `add_node` fired them while putting a deleted entity back, so the
+        // slot still means what it did before the statement ran — and its
+        // image is still on a surviving op.
+        while let Some(&(at, slot, site)) = self.forgotten_sites.last() {
+            if at < len {
+                break;
+            }
+            self.forgotten_sites.pop();
+            if site.first_at < len {
+                let recovered = ImageSite {
+                    first_at: site.first_at,
+                    // The later copy may itself be one of the truncated ops.
+                    latest_at: if site.latest_at < len {
+                        site.latest_at
+                    } else {
+                        site.first_at
+                    },
+                };
+                self.before_touched.entry(slot).or_insert(recovered);
+            }
+        }
     }
 }
 
@@ -539,6 +665,7 @@ impl<G: GraphRead + Clone> Clone for RecordingGraph<G> {
             capture_before: self.capture_before,
             before_touched: HashMap::new(),
             pending_before: None,
+            forgotten_sites: Vec::new(),
             // Ownership follows the data: a transaction fork or a copy-on-write
             // view of a durably-owned graph is still durably owned, and its
             // commit drains into the same log.
@@ -1160,13 +1287,12 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         // before-image, so it is read here — the last moment the node exists.
         let before = self
             .take_node_image(idx)
-            .or_else(|| self.steal_node_image(idx));
+            .or_else(|| self.copy_node_image(idx));
         let removed = self.inner.remove_node(idx);
         if removed.is_some() {
             if let Some((node_type, id)) = identity {
                 if before.is_some() {
-                    self.before_touched
-                        .insert(BeforeSlot::Node(node_slot(idx)), self.ops.len());
+                    self.record_image_site(BeforeSlot::Node(node_slot(idx)), self.ops.len());
                 }
                 self.ops.push(RawOp::RemoveNode {
                     node_type,
@@ -1199,13 +1325,12 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         });
         let before = self
             .take_edge_image(idx)
-            .or_else(|| self.steal_edge_image(idx));
+            .or_else(|| self.copy_edge_image(idx));
         let removed = self.inner.remove_edge(idx);
         if removed.is_some() {
             if let Some((conn_type, src_type, src_id, tgt_type, tgt_id)) = identity {
                 if before.is_some() {
-                    self.before_touched
-                        .insert(BeforeSlot::Edge(edge_slot(idx)), self.ops.len());
+                    self.record_image_site(BeforeSlot::Edge(edge_slot(idx)), self.ops.len());
                 }
                 self.ops.push(RawOp::RemoveEdge {
                     conn_type,
