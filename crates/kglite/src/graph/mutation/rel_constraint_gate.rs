@@ -25,6 +25,19 @@
 //! type already satisfies the constraint**, because installing the constraint
 //! scanned the existing data and every write since then came through a gate.
 //! That is why a mode which keeps stored values needs no verdict on them.
+//!
+//! **But a row is not always a merge.** The loader folds rows into edges two
+//! different ways, and the gate has to model whichever one will run — a gate
+//! that assumes merging admits a violating relationship on the path that does
+//! not merge, and one that assumes independence refuses legal writes on the
+//! path that does. The condition is `ConnectionBatchProcessor`'s
+//! `skip_existence_check`, and it maps onto [`RowFolding`] like this:
+//!
+//! | Caller | `skip_existence_check` | What the loader does | Gate models |
+//! |---|---|---|---|
+//! | `add_connections`, connection type absent from the metadata (initial load) | on | no lookup and no consolidation: **one relationship per row** (`batch.rs`, "within-chunk consolidation is the responsibility of the caller in that mode") | [`RowFolding::Independent`] |
+//! | `add_connections`, type already known | off | per-chunk lookup, mutated as rows land, so a row merges into a stored edge *or* into one an earlier row created | [`RowFolding::Merging`] with `read_stored` |
+//! | `replace_connections` | delegates to the above | its delete drops the stored edges for these pairs first, but leaves the type in the metadata — so rows still consolidate with each other while nothing stored survives | [`RowFolding::Merging`] **without** `read_stored` (or `Independent` when the type is new) |
 
 use std::collections::{HashMap, HashSet};
 
@@ -56,9 +69,49 @@ pub(crate) struct ConnectionBatchGate<'a> {
     /// row is the whole state, keyed by the ids because there is no index yet.
     pub deferred: &'a [(usize, Value, Value)],
     pub conflict_mode: ConflictHandling,
-    /// The initial-load fast path: the connection type is new, so no row can
-    /// be merging into anything.
-    pub skip_existence_check: bool,
+    /// How the loader will fold these rows into relationships.
+    pub folding: RowFolding,
+}
+
+/// How a frame's rows become relationships — the distinction the gate's
+/// post-merge model turns on. See the table in the module docs for which
+/// caller produces which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowFolding {
+    /// Every row becomes its own relationship. Nothing is looked up and
+    /// nothing is consolidated, so each row *is* the whole state of the edge it
+    /// creates and the conflict mode never comes into play.
+    Independent,
+    /// A row merges into whatever its pair already holds, per the conflict
+    /// mode: an edge an earlier row in this frame created, and — when
+    /// `read_stored` — one that was already stored.
+    Merging { read_stored: bool },
+}
+
+impl RowFolding {
+    /// The regime a plain `add_connections` will use. `skip_existence_check`
+    /// is the batch's own flag, set for the initial load of a connection type
+    /// nothing has written yet.
+    pub(crate) fn for_load(skip_existence_check: bool) -> Self {
+        if skip_existence_check {
+            RowFolding::Independent
+        } else {
+            RowFolding::Merging { read_stored: true }
+        }
+    }
+
+    /// The regime a `replace_connections` will use. Its delete drops the
+    /// stored edges for these pairs but leaves the connection type registered,
+    /// so rows still fold into each other while nothing stored survives — and
+    /// a type nothing has written yet takes the independent path, exactly as
+    /// the load below it will.
+    pub(crate) fn for_replace(graph: &DirGraph, connection_type: &str) -> Self {
+        if graph.connection_type_metadata.contains_key(connection_type) {
+            RowFolding::Merging { read_stored: false }
+        } else {
+            RowFolding::Independent
+        }
+    }
 }
 
 /// The constrained properties one pair holds, as the frame has computed them
@@ -89,6 +142,20 @@ impl ConnectionBatchGate<'_> {
                     .map(|(_, _, index)| *index)
             })
             .collect();
+
+        // Independent rows share no state, so there is nothing to key and
+        // nothing to seed: each row is judged as the relationship it creates.
+        if self.folding == RowFolding::Independent {
+            for (row_idx, ..) in self.matched {
+                let row = self.row_values(*row_idx, &columns);
+                self.verdict(graph, &names, &row)?;
+            }
+            for (row_idx, ..) in self.deferred {
+                let row = self.row_values(*row_idx, &columns);
+                self.verdict(graph, &names, &row)?;
+            }
+            return Ok(());
+        }
 
         let stored = self.stored_state(graph, &names);
         let mut matched_state: HashMap<(usize, usize), PairState> = HashMap::new();
@@ -135,7 +202,7 @@ impl ConnectionBatchGate<'_> {
         names: &[String],
     ) -> HashMap<(usize, usize), PairState> {
         let mut stored: HashMap<(usize, usize), PairState> = HashMap::new();
-        if self.skip_existence_check {
+        if self.folding != (RowFolding::Merging { read_stored: true }) {
             return stored;
         }
         let conn_key = InternedKey::from_str(self.connection_type);
@@ -181,14 +248,7 @@ impl ConnectionBatchGate<'_> {
         state: PairState,
         already_there: bool,
     ) -> PairState {
-        let row: PairState = columns
-            .iter()
-            .map(|column| {
-                column
-                    .and_then(|index| self.df_data.get_value_by_index(row_idx, index))
-                    .filter(|value| !matches!(value, Value::Null))
-            })
-            .collect();
+        let row = self.row_values(row_idx, columns);
 
         if !already_there {
             // A create: whatever the mode, the row is the whole edge.
@@ -226,6 +286,20 @@ impl ConnectionBatchGate<'_> {
                 })
                 .collect(),
         }
+    }
+
+    /// The constrained properties `row_idx` supplies. A missing column and a
+    /// null cell are the same thing — absent — which is what the loader's own
+    /// `extract_props` does with them.
+    fn row_values(&self, row_idx: usize, columns: &[Option<usize>]) -> PairState {
+        columns
+            .iter()
+            .map(|column| {
+                column
+                    .and_then(|index| self.df_data.get_value_by_index(row_idx, index))
+                    .filter(|value| !matches!(value, Value::Null))
+            })
+            .collect()
     }
 
     /// Judge one pair's post-merge state against the declared constraints.

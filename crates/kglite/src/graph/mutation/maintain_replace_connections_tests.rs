@@ -370,3 +370,73 @@ fn a_constraint_violating_frame_does_not_destroy_the_existing_edges() {
         "the refused replace must leave the original edges in place"
     );
 }
+
+/// `replace_connections` sits between the two row-folding regimes and must be
+/// modelled as neither of them alone.
+///
+/// Its delete drops the stored edges for these pairs — so a stored value must
+/// not be allowed to satisfy the constraint, which
+/// `a_constraint_violating_frame_does_not_destroy_the_existing_edges` pins.
+/// But it leaves the connection type in the metadata, so the `add_connections`
+/// that follows still folds rows into each other: two rows naming one pair
+/// land on one relationship, and the first row's value makes the second legal.
+/// Judging rows independently here would refuse a frame the loader performs
+/// correctly.
+#[test]
+fn a_replace_frame_still_consolidates_two_rows_onto_one_relationship() {
+    let mut graph = doc_entity_graph();
+    let seeded = DataFrame::from_cypher_rows(
+        vec!["s".to_string(), "t".to_string(), "since".to_string()],
+        vec![vec![
+            Value::Int64(1),
+            Value::String("A".into()),
+            Value::Int64(2020),
+        ]],
+    )
+    .unwrap();
+    add_connections(
+        &mut graph,
+        seeded,
+        "MENTIONS".to_string(),
+        "Doc".to_string(),
+        "s".to_string(),
+        "Entity".to_string(),
+        "t".to_string(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    graph
+        .create_rel_not_null_constraint("MENTIONS", "since", &Interrupt::default())
+        .expect("nothing stored violates it yet");
+
+    // Two rows for one new pair: the first carries `since`, the second does
+    // not, and they consolidate onto a single relationship that has it.
+    let frame = DataFrame::from_cypher_rows(
+        vec!["s".to_string(), "t".to_string(), "since".to_string()],
+        vec![
+            vec![
+                Value::Int64(1),
+                Value::String("B".into()),
+                Value::Int64(2021),
+            ],
+            vec![Value::Int64(1), Value::String("B".into()), Value::Null],
+        ],
+    )
+    .unwrap();
+    replace_connections(
+        &mut graph,
+        frame,
+        "MENTIONS".to_string(),
+        "Doc".to_string(),
+        "s".to_string(),
+        "Entity".to_string(),
+        "t".to_string(),
+        None,
+        None,
+        None,
+    )
+    .expect("the second row merges onto the relationship the first created");
+    assert_eq!(count_edges_of_type(&graph, "Doc", 1, "MENTIONS"), 1);
+}

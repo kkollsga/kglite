@@ -377,3 +377,64 @@ fn an_unconstrained_connection_type_is_not_gated() {
     .expect("nothing is declared, so nothing is judged");
     assert_eq!(edge_count(&graph, 1), 1);
 }
+
+// ── the loader's two row-folding regimes ─────────────────────────────
+
+/// **The regression this file exists to prevent.**
+///
+/// On an initial load of a new connection type the loader creates a
+/// relationship *per row* — no lookup, no merge, no consolidation between two
+/// rows naming the same pair. A gate that models rows as merging into one edge
+/// per pair therefore judges a post-state the loader will never produce: it
+/// sees `{since: 2020}` where the loader will store two relationships, the
+/// second of them carrying no `since` at all.
+///
+/// That admits a stored relationship violating its own constraint, which
+/// breaks the invariant `preserve` and `skip` lean on — that every stored edge
+/// of a constrained type is already legal.
+#[test]
+fn an_initial_load_judges_each_row_as_its_own_relationship() {
+    let mut graph = DirGraph::new();
+    nodes(&mut graph, "Doc", vec![Value::Int64(1)]);
+    nodes(&mut graph, "Entity", vec![Value::String("A".into())]);
+    // Declared before any MENTIONS edge exists, so the type is absent from the
+    // connection metadata and the load below takes the initial-load path.
+    graph
+        .create_rel_not_null_constraint("MENTIONS", "since", &Interrupt::default())
+        .expect("an empty type is vacuously clean");
+
+    let error = mentions(
+        &mut graph,
+        edges_df(
+            "since",
+            &[(1, "A", Some(Value::Int64(2020))), (1, "A", None)],
+        ),
+        Some("update"),
+    )
+    .expect_err("the second row becomes its own relationship, with no `since`");
+    assert!(error.contains("'since'"), "{error}");
+    assert_eq!(
+        edge_count(&graph, 1),
+        0,
+        "the refused frame must store neither relationship"
+    );
+}
+
+/// The same shape one load later. The type is now known, so the loader looks
+/// edges up and the two rows consolidate onto one relationship — which the
+/// first row made legal. Judging them independently here would refuse a write
+/// the loader performs correctly.
+#[test]
+fn a_known_type_still_consolidates_two_rows_onto_one_relationship() {
+    let mut graph = required_graph();
+    mentions(
+        &mut graph,
+        edges_df(
+            "since",
+            &[(1, "B", Some(Value::Int64(2021))), (1, "B", None)],
+        ),
+        Some("update"),
+    )
+    .expect("the first row supplies `since`; the second merges onto that edge");
+    assert_eq!(edge_count(&graph, 1), 2);
+}

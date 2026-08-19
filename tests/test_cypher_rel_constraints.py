@@ -340,3 +340,34 @@ def test_an_accepted_relationship_write_still_publishes():
     graph.cypher("MATCH ()-[r:KNOWS]->() SET r.weight = 42")
     events = graph.cypher("CALL db.cdc.query({from: $c})", params={"c": cursor}).to_list()
     assert [event["elementType"] for event in events] == ["relationship"], events
+
+
+def test_an_initial_load_judges_each_row_as_its_own_relationship():
+    """On the first load of a connection type the loader creates a
+    relationship per row — it does not look edges up, so two rows naming the
+    same pair become two parallel relationships rather than one merged edge.
+
+    A gate that modelled them as merging would see `{since: 2020}` and accept,
+    while the loader stored a second relationship carrying no `since` at all:
+    a stored relationship violating its own constraint.
+    """
+    graph = kglite.KnowledgeGraph()
+    graph.add_nodes(
+        pd.DataFrame({"person_id": [1, 2], "name": ["Alice", "Bob"]}),
+        "Person",
+        "person_id",
+        "name",
+    )
+    graph.cypher("CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since IS NOT NULL")
+
+    with pytest.raises(kglite.ConstraintViolationError):
+        graph.add_connections(
+            pd.DataFrame({"s": [1, 1], "t": [2, 2], "since": [2020, None]}),
+            "KNOWS",
+            "Person",
+            "s",
+            "Person",
+            "t",
+            conflict_handling="update",
+        )
+    assert graph.cypher("MATCH ()-[r:KNOWS]->() RETURN count(r) AS n").to_list() == [{"n": 0}]

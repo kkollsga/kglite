@@ -8,7 +8,7 @@ use crate::graph::mutation::batch::{
 use crate::graph::mutation::edge_props::{
     intern_edge_props, register_used_edge_property_names, resolve_edge_property_columns,
 };
-use crate::graph::mutation::rel_constraint_gate::ConnectionBatchGate;
+use crate::graph::mutation::rel_constraint_gate::{ConnectionBatchGate, RowFolding};
 use crate::graph::schema::{
     CompositeValue, CurrentSelection, DirGraph, InternedKey, TypeSchema, PROVISIONAL_KEY,
     RESERVED_PROVENANCE_KEYS,
@@ -1252,7 +1252,7 @@ pub fn add_connections(
         matched: &matched,
         deferred: &deferred,
         conflict_mode,
-        skip_existence_check: is_initial_load,
+        folding: RowFolding::for_load(is_initial_load),
     }
     .run(graph)?;
 
@@ -1891,7 +1891,8 @@ pub fn replace_connections(
         matched: &resolved.matched,
         deferred: &resolved.deferred,
         conflict_mode,
-        skip_existence_check: true,
+        // Why this regime and not the loader's: `RowFolding::for_replace`.
+        folding: RowFolding::for_replace(graph, &connection_type),
     }
     .run(graph)?;
 
