@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.5] - 2026-08-19
+
 ### Added
 
 - **Relationship constraints — `REQUIRE r.p IS NOT NULL` and
