@@ -69,10 +69,19 @@ pub(super) fn encode_cursor(epoch: u64, seq: u64) -> String {
 /// Returns the exclusive `from` sequence. The three failures are distinct
 /// because a consumer's correct response differs for each: fix the call,
 /// re-acquire a cursor, or resync and accept the gap.
+/// # Arithmetic on caller-controlled input
+///
+/// Every value below the prefix check comes from the caller's string, so no
+/// arithmetic here may assume a plausible magnitude. `seq` is bounded against
+/// the log's own high-water mark *before* it is used in a sum — a cursor of
+/// `u64::MAX` reached the watermark comparison and panicked on `seq + 1` in
+/// debug (killing a Bolt worker thread rather than answering the client) and
+/// wrapped to 0 in release, where "too old" then read as "caught up".
 fn decode_cursor(
     raw: &str,
     epoch: u64,
     earliest: u64,
+    current: u64,
     handoff: Option<CdcHandoff>,
 ) -> Result<u64, String> {
     let malformed = || {
@@ -93,17 +102,33 @@ fn decode_cursor(
     if cursor_epoch != epoch {
         return Err(foreign_epoch_error(cursor_epoch, epoch, seq, handoff));
     }
+    // A position this log never reached cannot have come from it: `current()`
+    // and `earliest()` only ever hand out positions at or below the newest
+    // published change. Checked here rather than left to the reader because
+    // the alternative is arithmetic on an unbounded caller-supplied number,
+    // and because answering such a cursor with zero rows would report
+    // "caught up" to a consumer that is holding something invalid.
+    if seq > current {
+        return Err(format!(
+            "db.cdc.query: this cursor addresses change {seq}, and this log has published only \
+             up to change {current}. A cursor is the opaque string db.cdc.current() or \
+             db.cdc.earliest() returns, and neither can name a change that does not exist — so \
+             this one was built, edited, or carried over from somewhere else. Pass back a cursor \
+             this log gave you."
+        ));
+    }
     // The cursor is exclusive, so `seq + 1` is the first event it asks for.
     // Anything below the watermark was evicted; reporting a short answer
-    // instead would be a silent gap.
-    if seq + 1 < earliest {
+    // instead would be a silent gap. `seq <= current` above bounds the sum,
+    // and the saturating form keeps that true without depending on it.
+    let asks_for = seq.saturating_add(1);
+    if asks_for < earliest {
         return Err(format!(
-            "db.cdc.query: this cursor is too old — it asks for change {} but the oldest change \
-             still retained is {earliest}. The log is a bounded ring, so a consumer that falls \
-             further behind than its capacity loses the gap for good. Resync with \
+            "db.cdc.query: this cursor is too old — it asks for change {asks_for} but the oldest \
+             change still retained is {earliest}. The log is a bounded ring, so a consumer that \
+             falls further behind than its capacity loses the gap for good. Resync with \
              db.cdc.earliest() and accept the gap, or raise the retention with \
-             CALL db.cdc.enable({{capacity: <larger>}}).",
-            seq + 1
+             CALL db.cdc.enable({{capacity: <larger>}})."
         ));
     }
     Ok(seq)
@@ -151,7 +176,11 @@ fn foreign_epoch_error(
             String::new()
         }
     } else {
-        let missed = last_seq - cursor_seq;
+        // Saturating although the branch above already proves `cursor_seq <
+        // last_seq`: `cursor_seq` is caller-controlled, and an arithmetic
+        // guarantee that depends on reading a neighbouring branch is one
+        // refactor away from being untrue.
+        let missed = last_seq.saturating_sub(cursor_seq);
         let plural = if missed == 1 { "change" } else { "changes" };
         format!(
             " You had consumed up to change {cursor_seq}, so {missed} {plural} published before \
@@ -402,9 +431,13 @@ pub(super) fn execute_cdc_procedure(
                 // No cursor: everything still retained. Friendlier than
                 // erroring, and exactly what `earliest()` would have given.
                 None | Some(Value::Null) => status.earliest.saturating_sub(1),
-                Some(Value::String(raw)) => {
-                    decode_cursor(raw, status.epoch, status.earliest, graph.cdc_handoff)?
-                }
+                Some(Value::String(raw)) => decode_cursor(
+                    raw,
+                    status.epoch,
+                    status.earliest,
+                    status.current,
+                    graph.cdc_handoff,
+                )?,
                 Some(other) => {
                     return Err(format!(
                         "db.cdc.query: 'from' must be a cursor string from db.cdc.current() or \
@@ -2086,12 +2119,51 @@ mod tests {
         );
     }
 
+    /// A cursor whose sequence number is past anything this log published is
+    /// refused, not arithmetic-overflowed.
+    ///
+    /// Red-first: with `seq + 1` in place of the checked comparison, the
+    /// maximum sequence number panics with an add overflow in debug — on a
+    /// Bolt worker that is a dead thread rather than an error the client can
+    /// read — and wraps silently in release, where it reads as "caught up".
+    #[test]
+    fn a_cursor_past_everything_published_is_refused_not_overflowed() {
+        let mut graph = enabled(None);
+        write(&mut graph, "CREATE (:Item {id: 1})");
+        let epoch = cdc::status(&graph).expect("enabled").epoch;
+
+        for seq in [u64::MAX, u64::MAX - 1, 5] {
+            let impossible = encode_cursor(epoch, seq);
+            let error = fails(
+                &mut graph,
+                &format!("CALL db.cdc.query({{from: '{impossible}'}}) YIELD id"),
+            );
+            assert!(
+                error.contains("has published only up to change 1"),
+                "seq {seq} must be refused against the log's own high-water mark: {error}"
+            );
+            assert!(
+                error.contains("db.cdc.current()"),
+                "and name where a real cursor comes from: {error}"
+            );
+        }
+
+        // Non-vacuity: the boundary itself — a cursor *at* the newest change —
+        // stays valid, so the check refuses only the impossible.
+        let newest = current_cursor(&mut graph);
+        assert!(rows(
+            &mut graph,
+            &format!("CALL db.cdc.query({{from: '{newest}'}}) YIELD id")
+        )
+        .is_empty());
+    }
+
     // ── cursor codec ─────────────────────────────────────────────────
 
     #[test]
     fn cursors_round_trip_and_order_lexicographically_within_an_epoch() {
         let cursor = encode_cursor(3, 42);
-        assert_eq!(decode_cursor(&cursor, 3, 1, None), Ok(42));
+        assert_eq!(decode_cursor(&cursor, 3, 1, 42, None), Ok(42));
         assert!(
             encode_cursor(3, 41) < encode_cursor(3, 42),
             "fixed-width hex keeps string order and sequence order aligned"
@@ -2099,6 +2171,6 @@ mod tests {
         assert!(encode_cursor(3, 9) < encode_cursor(3, 10));
         // An empty log: `earliest` is one past `current`, and the cursor at
         // position 0 must still be readable.
-        assert_eq!(decode_cursor(&encode_cursor(7, 0), 7, 1, None), Ok(0));
+        assert_eq!(decode_cursor(&encode_cursor(7, 0), 7, 1, 0, None), Ok(0));
     }
 }
