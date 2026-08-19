@@ -217,7 +217,23 @@ impl<'a> CypherExecutor<'a> {
         // Use into_iter to own rows — enables move-on-last optimization
         for (row_idx, mut row) in result_set.rows.into_iter().enumerate() {
             self.check_interrupt_periodic(row_idx)?;
-            let val = self.evaluate_expression(&clause.expression, &row)?;
+            // `consume_source` is the `narrow_unwind_source` planner pass's
+            // verdict that nothing downstream can observe this binding, so the
+            // list is taken OUT of the row rather than copied out of it. That
+            // is what keeps the expansion below linear: the per-element
+            // `row.clone()` would otherwise duplicate the whole list into each
+            // of the `n` rows it produces (n rows x n elements of identical
+            // data — 3.3 GB at 2 000 nodes before this).
+            //
+            // Falls back to evaluation whenever the take does not apply, so a
+            // stale or absent hint costs performance, never correctness.
+            let val = match (&clause.expression, clause.consume_source) {
+                (Expression::Variable(name), true) => match row.projected.remove(name.as_str()) {
+                    Some(taken) => taken,
+                    None => self.evaluate_expression(&clause.expression, &row)?,
+                },
+                _ => self.evaluate_expression(&clause.expression, &row)?,
+            };
             match val {
                 // Phase A.1 / C4 — native Value::List fast path.
                 // Replaces the prior JSON-string split, which only

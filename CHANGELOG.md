@@ -162,6 +162,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`UNWIND` over a collected list is no longer quadratic in memory.**
+  `WITH collect(n) AS ns UNWIND ns AS m` expands one row into `n`, and every
+  expanded row was a full copy of the source row — which still held the list
+  under its own name. The result was `n` rows each retaining an `n`-element
+  copy of *identical* data:
+
+  | rows | before | after |
+  |---|---|---|
+  | 500 | 213 MB | 5.3 MB |
+  | 1 000 | 837 MB | 6.4 MB |
+  | 2 000 | 3 334 MB | 8.7 MB |
+  | 10 000 | killed (out of memory) | 40.7 MB |
+
+  A new `narrow_unwind_source` planner pass marks the cases where nothing after
+  the `UNWIND` can observe the source binding, letting the executor take the
+  list out of the row instead of copying it into each expanded row. The pass is
+  deliberately conservative and keeps the old behaviour whenever the list is
+  still reachable — a later clause naming it, `RETURN *` / `WITH *` (which
+  observe every binding without naming one), a second `UNWIND` over the same
+  list, or any write/procedure clause downstream. Results are unchanged in
+  every case; it can be turned off with
+  `disabled_passes=["narrow_unwind_source"]`.
+
+  Not fixed by this change, and tracked separately: `FOREACH`, list
+  comprehensions, `reduce()` and the list quantifiers (`any`/`all`/`none`/
+  `single`) clone the source row per element too. Their copies are transient,
+  so peak memory stays flat, but the work is quadratic in *time* (measured at
+  2 000 elements: ~53 ms, growing 4x per doubling).
+
 - **`CREATE CONSTRAINT … IS NODE KEY` / `IS RELATIONSHIP KEY` now has to agree
   with the `FOR` pattern.** The optional `NODE` / `RELATIONSHIP` scope word was
   parsed and discarded, so

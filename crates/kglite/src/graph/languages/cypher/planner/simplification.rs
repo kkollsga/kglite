@@ -1753,3 +1753,232 @@ pub(crate) fn collect_expression_refs(expr: &Expression, out: &mut HashSet<Strin
         }
     }
 }
+
+// ===========================================================================
+// narrow_unwind_source
+// ===========================================================================
+
+/// Can the whole reference set of `clause` be enumerated by
+/// [`collect_clause_variables`]?
+///
+/// [`collect_clause_variables`] answers "which variables does this clause
+/// mention" for the clause kinds it models, and contributes **nothing** for
+/// the write clauses (`CREATE` / `SET` / `MERGE` / `DELETE` / `REMOVE` /
+/// `CALL`) and the fused shapes. For [`fold_pass_through_with`] that omission
+/// is harmless — a variable it would miss is one the query could not have had
+/// in scope anyway. For `narrow_unwind_source` it is **not**: a missed
+/// reference means dropping a binding that a later clause still reads, which
+/// is a wrong answer rather than a lost optimisation.
+///
+/// So this pass asks the stricter question and refuses to reason about any
+/// clause kind whose references are not fully enumerated. `false` here always
+/// costs at most an optimisation.
+fn unwind_scope_refs_are_enumerable(clause: &Clause) -> bool {
+    // `RETURN *` / `WITH *` name no variable in the AST: the executor expands
+    // the star from the *runtime row's* `projected.keys()`
+    // (`executor/return_clause.rs`). So a star item references every binding in
+    // scope, including the one this pass wants to drop, while
+    // `collect_clause_variables` reports nothing for it. Treat it as
+    // unenumerable — without this guard `UNWIND ns AS m RETURN *` silently
+    // loses its `ns` column.
+    let has_star = |items: &[ReturnItem]| {
+        items
+            .iter()
+            .any(|i| matches!(i.expression, Expression::Star))
+    };
+    match clause {
+        Clause::Return(r) if has_star(&r.items) => return false,
+        Clause::With(w) if has_star(&w.items) => return false,
+        _ => {}
+    }
+
+    matches!(
+        clause,
+        Clause::Match(_)
+            | Clause::OptionalMatch(_)
+            | Clause::Where(_)
+            | Clause::With(_)
+            | Clause::Return(_)
+            | Clause::OrderBy(_)
+            | Clause::Skip(_)
+            | Clause::Limit(_)
+            | Clause::Unwind(_)
+            | Clause::CallSubquery { .. }
+    )
+    // `Clause::Union` is deliberately absent. A UNION branch that ends without
+    // an explicit RETURN has its columns auto-detected from the *runtime row's*
+    // key set (`executor/call_clause.rs`), which is the same implicit,
+    // row-derived contract as `RETURN *`: dropping a binding silently changes
+    // the column set without any clause naming it. Cheap to refuse, and it
+    // removes the whole question.
+}
+
+/// **Pass helper:** mark each `UNWIND <var> AS alias` whose source binding no
+/// downstream clause can observe, so the executor takes the list by move
+/// instead of cloning it into every expanded row.
+///
+/// # Precondition
+/// The UNWIND source is a bare [`Expression::Variable`]. A computed source
+/// (`UNWIND range(..)`, `UNWIND $param`, `UNWIND [a, b]`) is already not bound
+/// in the row, so it never had the problem and is left alone.
+///
+/// # Pattern matched
+/// `... UNWIND v AS alias ...` where every clause after the UNWIND has fully
+/// enumerable references (see [`unwind_scope_refs_are_enumerable`]) and none
+/// of them mentions `v`.
+///
+/// # Rewrite
+/// Sets `UnwindClause::consume_source`. No clause is added, removed or
+/// reordered, and the rewrite is invisible to results — it only changes
+/// whether a dead binding is copied `n` times.
+///
+/// # Why bail
+/// - source is not a bare variable → nothing is duplicated; no win available.
+/// - `v == alias` → the alias rebinds the same name; downstream references
+///   mean the *element*, and the conservative check below already refuses,
+///   but the explicit guard keeps the reasoning local.
+/// - any downstream clause is a write / fused / procedure clause → its
+///   references are not enumerable, so we cannot prove `v` is dead.
+/// - `v` is mentioned downstream → the binding is live; copying is required.
+pub(super) fn narrow_unwind_source(query: &mut CypherQuery) {
+    for i in 0..query.clauses.len() {
+        let Clause::Unwind(u) = &query.clauses[i] else {
+            continue;
+        };
+        let Expression::Variable(var) = &u.expression else {
+            continue;
+        };
+        if *var == u.alias {
+            continue;
+        }
+        let var = var.clone();
+
+        let tail = &query.clauses[i + 1..];
+        if !tail.iter().all(unwind_scope_refs_are_enumerable) {
+            continue;
+        }
+        let mut downstream: HashSet<String> = HashSet::new();
+        for c in tail {
+            collect_clause_variables(c, &mut downstream);
+        }
+        if downstream.contains(&var) {
+            continue;
+        }
+
+        if let Clause::Unwind(u) = &mut query.clauses[i] {
+            u.consume_source = true;
+        }
+    }
+}
+
+#[cfg(test)]
+mod narrow_unwind_source_tests {
+    use super::*;
+    use crate::graph::languages::cypher::parser::parse_cypher;
+
+    /// Whether `narrow_unwind_source` marked the (single) UNWIND clause.
+    fn narrows(query: &str) -> bool {
+        let mut q = parse_cypher(query).expect("fixture parses");
+        narrow_unwind_source(&mut q);
+        let marks: Vec<bool> = q
+            .clauses
+            .iter()
+            .filter_map(|c| match c {
+                Clause::Unwind(u) => Some(u.consume_source),
+                _ => None,
+            })
+            .collect();
+        assert!(!marks.is_empty(), "fixture has no UNWIND clause");
+        marks[0]
+    }
+
+    #[test]
+    fn narrows_when_source_is_dead_after_the_unwind() {
+        assert!(narrows(
+            "MATCH (p:Person) WITH collect(p.age) AS ns UNWIND ns AS m RETURN m"
+        ));
+    }
+
+    #[test]
+    fn bails_when_source_is_read_downstream() {
+        assert!(
+            !narrows(
+                "MATCH (p:Person) WITH collect(p.age) AS ns UNWIND ns AS m \
+                 RETURN m, size(ns) AS c"
+            ),
+            "the source list is still read by RETURN — dropping it loses data"
+        );
+    }
+
+    /// `RETURN *` names no variable in the AST; the executor expands it from
+    /// the runtime row's `projected` keys. Without the star guard the pass
+    /// would call the binding dead and silently drop a returned column.
+    #[test]
+    fn bails_on_return_star() {
+        assert!(
+            !narrows("MATCH (p:Person) WITH collect(p.age) AS ns UNWIND ns AS m RETURN *"),
+            "RETURN * observes every binding, including the UNWIND source"
+        );
+    }
+
+    #[test]
+    fn bails_on_with_star() {
+        assert!(!narrows(
+            "MATCH (p:Person) WITH collect(p.age) AS ns UNWIND ns AS m WITH * RETURN m"
+        ));
+    }
+
+    #[test]
+    fn bails_when_a_later_unwind_rereads_the_list() {
+        assert!(!narrows(
+            "MATCH (p:Person) WITH collect(p.age) AS ns UNWIND ns AS a UNWIND ns AS b RETURN a, b"
+        ));
+    }
+
+    /// Write clauses contribute no references to `collect_clause_variables`
+    /// (see `unwind_scope_refs_are_enumerable`), so the pass must refuse to
+    /// reason about them rather than read the silence as "dead".
+    #[test]
+    fn bails_when_a_downstream_clause_has_unenumerable_refs() {
+        assert!(
+            !narrows(
+                "MATCH (p:Person) WITH collect(p.age) AS ns UNWIND ns AS m \
+                 CREATE (:Tag {v: m, all: ns})"
+            ),
+            "a write clause's references are not enumerable — cannot prove the source is dead"
+        );
+    }
+
+    /// A UNION branch without an explicit RETURN derives its columns from the
+    /// runtime row's keys, so dropping a binding changes the column set with no
+    /// clause naming it — the same implicit contract as `RETURN *`.
+    #[test]
+    fn bails_on_a_downstream_union() {
+        assert!(!narrows(
+            "MATCH (p:Person) WITH collect(p.age) AS ns UNWIND ns AS m RETURN m \
+             UNION MATCH (q:Person) RETURN q.age AS m"
+        ));
+    }
+
+    #[test]
+    fn ignores_a_computed_source() {
+        // Nothing is bound in the row, so there is nothing to narrow.
+        assert!(!narrows("UNWIND range(0, 10) AS m RETURN m"));
+        assert!(!narrows("UNWIND [1, 2, 3] AS m RETURN m"));
+    }
+
+    #[test]
+    fn ignores_a_self_rebinding_alias() {
+        assert!(!narrows(
+            "MATCH (p:Person) WITH collect(p.age) AS ns UNWIND ns AS ns RETURN ns"
+        ));
+    }
+
+    #[test]
+    fn narrows_when_only_the_alias_is_used_downstream() {
+        assert!(narrows(
+            "MATCH (p:Person) WITH collect(p.age) AS ns UNWIND ns AS m \
+             WITH m WHERE m > 2 RETURN collect(m) AS back"
+        ));
+    }
+}

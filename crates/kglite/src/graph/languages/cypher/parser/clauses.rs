@@ -191,7 +191,12 @@ impl CypherParser {
         let expression = self.parse_expression()?;
         self.expect(&CypherToken::As)?;
         let alias = self.try_consume_alias_name()?;
-        Ok(Clause::Unwind(UnwindClause { expression, alias }))
+        Ok(Clause::Unwind(UnwindClause {
+            expression,
+            alias,
+            // Planner-only hint; the parser never narrows scope.
+            consume_source: false,
+        }))
     }
 
     pub(super) fn parse_union_clause(&mut self) -> Result<Clause, String> {

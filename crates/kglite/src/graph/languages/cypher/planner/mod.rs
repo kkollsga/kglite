@@ -46,8 +46,8 @@ use node_anchor::anchor_element_id;
 use rel_predicate_pushdown::extract_pushable_rel_predicates_with_params;
 use simplification::{
     desugar_multi_match_return_aggregate, fold_or_to_in, fold_pass_through_with,
-    push_distinct_into_match, push_limit_into_aggregate, push_limit_into_match,
-    rewrite_count_bound_var_to_star,
+    narrow_unwind_source, push_distinct_into_match, push_limit_into_aggregate,
+    push_limit_into_match, rewrite_count_bound_var_to_star,
 };
 
 /// Carries the per-call inputs every pass might need. Passing this once
@@ -129,6 +129,11 @@ pub const PASSES: &[(&str, PassFn)] = &[
     // strip pass-through WITH BEFORE cross-clause MATCH reorder so the
     // latter sees a contiguous Match-Match span when a `WITH p` sat between.
     ("fold_pass_through_with", pass_fold_pass_through_with),
+    // Runs AFTER fold_pass_through_with: folding a pass-through WITH changes
+    // which clauses sit downstream of an UNWIND, and this pass's whole job is
+    // to read that downstream set. Running it first would decide against a
+    // stale clause list.
+    ("narrow_unwind_source", pass_narrow_unwind_source),
     // rewrites Match-Match-Return(group, agg) so the aggregate-fusion +
     // top-K pipeline can pick it up.
     (
@@ -498,6 +503,25 @@ fn pass_extract_pushable_rel_predicates(query: &mut CypherQuery, ctx: &PassCtx) 
 /// spans for cross-clause reorder; otherwise the WITH would block.
 fn pass_fold_pass_through_with(query: &mut CypherQuery, _ctx: &PassCtx) {
     fold_pass_through_with(query)
+}
+
+/// **Pass:** `narrow_unwind_source` — mark `UNWIND <var> AS alias` whose
+/// source binding is dead after the clause, letting the executor take the list
+/// out of the row by move instead of cloning it into all `n` expanded rows.
+///
+/// **Precondition:** the UNWIND source is a bare variable (a computed source is
+/// never bound in the row). **Pattern:** no clause after the UNWIND mentions
+/// the source variable, and every such clause has fully enumerable references.
+/// **Rewrite:** sets `UnwindClause::consume_source`; adds/removes/reorders
+/// nothing and cannot change results. **Why bail:** a write / fused /
+/// procedure clause downstream, whose references are not enumerable, or any
+/// downstream mention of the variable — either way the binding may still be
+/// read, so the copy is kept.
+///
+/// Fixes the quadratic memory of `WITH collect(x) AS xs UNWIND xs AS y`:
+/// `n` rows each retaining an `n`-element copy of the same list.
+fn pass_narrow_unwind_source(query: &mut CypherQuery, _ctx: &PassCtx) {
+    narrow_unwind_source(query)
 }
 
 /// **Pass:** `desugar_multi_match_return_aggregate` — Rewrite

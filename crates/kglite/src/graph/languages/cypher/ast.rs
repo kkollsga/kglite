@@ -730,6 +730,22 @@ pub struct LimitClause {
 pub struct UnwindClause {
     pub expression: Expression,
     pub alias: String,
+    /// Planner hint: the source expression is a bare variable whose binding is
+    /// **dead after this clause**, so the executor may take the list out of the
+    /// row by move instead of cloning it into every expanded row.
+    ///
+    /// `UNWIND` turns one row into `n`, and each expanded row is a clone of the
+    /// source row — which still holds the list under its own name. That makes
+    /// `WITH collect(x) AS xs UNWIND xs AS y` quadratic in memory: `n` rows
+    /// each retaining an `n`-element copy of identical data (measured: 3.3 GB
+    /// at 2 000 nodes, SIGKILL at 10 000). When nothing downstream can observe
+    /// the source binding, not duplicating it is semantically invisible and
+    /// makes the shape linear.
+    ///
+    /// Set only by the `narrow_unwind_source` planner pass, which is
+    /// deliberately conservative: `false` is always the safe value and yields
+    /// the original clone-per-row behaviour. Never set by the parser.
+    pub consume_source: bool,
 }
 
 /// `LOAD CSV [WITH HEADERS] FROM <source> AS <variable> [FIELDTERMINATOR <sep>]`

@@ -89,6 +89,49 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     ),
     ("distinct_property", "social_graph", "MATCH (p:Person) RETURN DISTINCT p.city AS c", None),
     ("budget_unwind_shape", "small_graph", "UNWIND [1, 2, 3] AS x RETURN x", None),
+    # ── narrow_unwind_source trigger shapes ──
+    # The pass lets UNWIND take a dead source list OUT of the row instead of
+    # cloning it into every expanded row (the fix for n rows x n-element list
+    # quadratic memory). Each shape below is a decision the pass has to get
+    # right; a divergence between the optimised and unoptimised paths means it
+    # dropped a binding something still reads.
+    (
+        # Fires: `ns` is dead after the UNWIND.
+        "narrow_unwind_source_dead",
+        "small_graph",
+        "MATCH (p:Person) WITH collect(p.age) AS ns UNWIND ns AS m RETURN m ORDER BY m",
+        None,
+    ),
+    (
+        # Bails: `ns` is still read by a later RETURN item.
+        "narrow_unwind_source_live",
+        "small_graph",
+        "MATCH (p:Person) WITH collect(p.age) AS ns UNWIND ns AS m RETURN m, size(ns) AS c ORDER BY m",
+        None,
+    ),
+    (
+        # Bails: `RETURN *` names no variable in the AST — the executor expands
+        # it from the runtime row, so the source binding is still observable.
+        "narrow_unwind_source_return_star",
+        "small_graph",
+        "MATCH (p:Person) WITH collect(p.age) AS ns UNWIND ns AS m RETURN * ORDER BY m",
+        None,
+    ),
+    (
+        # Bails: the second UNWIND re-reads the same list.
+        "narrow_unwind_source_double",
+        "small_graph",
+        "MATCH (p:Person) WITH collect(p.age) AS ns UNWIND ns AS a UNWIND ns AS b RETURN a, b ORDER BY a, b",
+        None,
+    ),
+    (
+        # Fires, then the alias is re-aggregated — pins that the moved list is
+        # not needed to rebuild an equivalent collection downstream.
+        "narrow_unwind_source_recollect",
+        "small_graph",
+        "MATCH (p:Person) WITH collect(p.age) AS ns UNWIND ns AS m WITH m WHERE m > 0 RETURN collect(m) AS back",
+        None,
+    ),
     (
         "budget_union_all_shape",
         "small_graph",
@@ -3101,6 +3144,7 @@ PASS_TRIGGER_CASES: dict[str, tuple[str, str]] = {
     "push_where_into_match.2": ("differential", "or_chain_to_in"),
     "extract_pushable_rel_predicates": ("differential", "rel_property_filter"),
     "fold_pass_through_with": ("differential", "pass_through_with"),
+    "narrow_unwind_source": ("differential", "narrow_unwind_source_dead"),
     "desugar_multi_match_return_aggregate": ("differential", "multi_match_group_agg"),
     "fuse_spatial_join": ("specialized", "spatial_join"),
     "reorder_match_clauses": ("specialized", "reorder_match_clauses"),
