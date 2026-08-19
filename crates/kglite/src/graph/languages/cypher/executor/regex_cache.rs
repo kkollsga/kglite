@@ -86,7 +86,83 @@ impl RegexCache {
 
 static CACHE: LazyLock<RegexCache> = LazyLock::new(|| RegexCache::new(CACHE_CAPACITY));
 
-/// Look up `pattern` in the process-wide cache; compile and insert on miss.
+/// Per-thread front cache in front of [`CACHE`].
+///
+/// A `=~` predicate resolves its pattern **once per row**, and the shared
+/// cache answers a hit under an `RwLock` read — one atomic read-modify-write
+/// on a single cache line. That is cheap on one thread and catastrophic on
+/// ten: with the parallel runtime enabled, an 800k-row `=~` scan measured
+/// **6.3x slower than sequential** (49 ms → 305 ms, release, 10-core M4)
+/// purely from threads queuing on that line, while the identical query
+/// written with `CONTAINS` — same per-row work, no shared lookup — gained
+/// 6.5x. The front cache removes the shared access from the steady state
+/// entirely: a repeated pattern is a short slice scan of `&str` comparisons
+/// and an `Arc` clone, with no atomics beyond the refcount.
+///
+/// Safe to key per thread because the entries are immutable compiled
+/// programs: which thread compiled one cannot change what it matches. Bounded
+/// like its parent so a stream of unique patterns cannot grow per-thread
+/// memory; the shared cache remains the backing store and the eviction
+/// authority.
+const LOCAL_CAPACITY: usize = 8;
+
+thread_local! {
+    static LOCAL: std::cell::RefCell<Vec<(String, Regex)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Populate the per-thread front cache for `pattern` if it is not already
+/// there.
+fn ensure_local(pattern: &str) -> Result<(), regex::Error> {
+    if LOCAL.with(|local| local.borrow().iter().any(|(cached, _)| cached == pattern)) {
+        return Ok(());
+    }
+    // Cloned, deliberately: a `Regex` carries an internal pool of scratch
+    // space, and threads that share one `Regex` serialise on it. Cloning gives
+    // each thread its own pool over the same automaton, which is what turns
+    // the parallel `=~` scan from a regression into a win — see the module
+    // note above. The clone happens once per thread per pattern; the shared
+    // cache still does the compiling.
+    let compiled = CACHE.get_or_compile(pattern)?;
+    LOCAL.with(|local| {
+        let mut local = local.borrow_mut();
+        if local.len() >= LOCAL_CAPACITY {
+            local.remove(0);
+        }
+        local.push((pattern.to_owned(), (*compiled).clone()));
+    });
+    Ok(())
+}
+
+/// Run `f` against the compiled `pattern`, **borrowing** it from the
+/// per-thread cache.
+///
+/// This is the per-row entry point, and the borrow is the point of it.
+/// [`get_or_compile`] hands back an `Arc`, and cloning one is an atomic
+/// increment on a refcount every thread shares — which is the same contended
+/// cache line the front cache was added to escape, just moved. Removing the
+/// clone took the parallel `=~` scan from 0.48x to parity-and-above; keeping
+/// it capped the win at half of sequential.
+///
+/// `f` must not re-enter this module: the thread-local is borrowed across the
+/// call, so a nested lookup would panic. Every caller passes a leaf operation
+/// (`is_match`, `replace_all`), which is why the borrow is safe to hold.
+pub fn with_compiled<R>(pattern: &str, f: impl FnOnce(&Regex) -> R) -> Result<R, regex::Error> {
+    ensure_local(pattern)?;
+    Ok(LOCAL.with(|local| {
+        let local = local.borrow();
+        let compiled = local
+            .iter()
+            .find(|(cached, _)| cached == pattern)
+            .map(|(_, compiled)| compiled)
+            .expect("invariant: ensure_local just inserted this pattern");
+        f(compiled)
+    }))
+}
+
+/// Look up `pattern` in the per-thread front cache, then the process-wide
+/// cache; compile and insert on miss. Prefer [`with_compiled`] on any path
+/// that runs per row — see its note on the shared refcount.
 pub fn get_or_compile(pattern: &str) -> Result<Arc<Regex>, regex::Error> {
     CACHE.get_or_compile(pattern)
 }

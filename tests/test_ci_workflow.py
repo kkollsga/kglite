@@ -459,6 +459,24 @@ def test_heavy_thread_sanitizer_is_scheduled_only() -> None:
     )
 
 
+def test_thread_sanitizer_covers_the_parallel_runtime():
+    """TSan's selection is substring filters, and the parallel Cypher runtime's
+    tests do not live under `graph::session`.
+
+    The parallel runtime fans a shared `&DirGraph` across rayon workers, so its
+    tests are precisely the ones a thread sanitizer exists to run. A filter
+    that silently misses them leaves the job green while checking none of it.
+    """
+    tsan = _ci_job("scheduled-thread-sanitizer")
+    runs = " ".join(step.get("run", "") for step in tsan["steps"])
+    for module_filter in ("graph::session", "graph::parallel", "executor::tests::parallel"):
+        assert module_filter in runs, (
+            f"ThreadSanitizer does not run `{module_filter}` — its `cargo test` "
+            "filters are substrings of the full test path, so a module it does "
+            "not name is not covered."
+        )
+
+
 def test_thread_sanitizer_builds_the_standard_library_from_source() -> None:
     """TSan is ABI-changing, so a precompiled std makes the job un-compilable.
 

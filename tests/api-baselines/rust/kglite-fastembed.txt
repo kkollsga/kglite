@@ -1196,6 +1196,7 @@ pub fn kglite::api::fluent::PatternExecutor<'a>::node_matches_properties_pub(&se
 pub fn kglite::api::fluent::PatternExecutor<'a>::set_cancel(self, cancel: core::option::Option<&'static core::sync::atomic::AtomicBool>) -> Self
 pub fn kglite::api::fluent::PatternExecutor<'a>::set_deadline(self, deadline: core::option::Option<std::time::Instant>) -> Self
 pub fn kglite::api::fluent::PatternExecutor<'a>::set_distinct_target(self, var: core::option::Option<alloc::string::String>) -> Self
+pub fn kglite::api::fluent::PatternExecutor<'a>::set_parallel(self, parallel: bool) -> Self
 pub fn kglite::api::fluent::PatternExecutor<'a>::with_bindings_and_params(graph: &'a kglite::api::DirGraph, max_matches: core::option::Option<usize>, pre_bindings: &'a kglite::graph::languages::cypher::result::Bindings<petgraph::graph_impl::NodeIndex>, params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> Self
 pub struct kglite::api::fluent::PatternMatch
 pub kglite::api::fluent::PatternMatch::bindings: alloc::vec::Vec<(alloc::string::String, kglite::api::fluent::MatchBinding)>

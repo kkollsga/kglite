@@ -2185,6 +2185,86 @@ set-operation, subquery-join, procedure, and mutation loops poll cooperatively.
 Use `Session.execute()` or `Transaction` when a failed/timed-out mutation must
 roll back; direct `KnowledgeGraph.cypher()` writes execute in place.
 
+## Parallel runtime
+
+One heavy analytical query can use the whole machine. Off by default; opt in
+per call:
+
+```python
+result = graph.cypher(
+    "MATCH (p:Person) WHERE p.score > 0.5 RETURN p.city AS city, count(*) AS n",
+    parallel=True,
+)
+```
+
+`parallel=True` is a **hint, not an instruction**. It never changes an answer:
+values, row order, and group order are identical either way. Only operators
+that can partition deterministically use it, and each applies its own runtime
+gate on candidate count and per-row cost — so a small query stays sequential
+however it is flagged, and there is no threshold to tune.
+
+What parallelises:
+
+- **Scan + filter** — the node scan behind `MATCH (n:Label {prop: ...})` and
+  `MATCH (n:Label) WHERE ...`. Partitions are contiguous candidate ranges
+  concatenated in candidate order, so the bucket order of an un-`ORDER BY`'d
+  `MATCH` is unchanged.
+- **Fused scan aggregates** — `MATCH (n:Label) [WHERE ...] RETURN <keys>,
+  <aggregates>` over `count` / `count(DISTINCT)` / `sum` / `avg` / `min` /
+  `max`. Groups are emitted first-seen, as always.
+- **Grouped aggregation, across groups** — each group's aggregate is computed
+  independently. Within a group nothing changes: rows are still folded in row
+  order, so `collect` returns the same list and `median` / `mode` /
+  `percentile_*` keep their per-group tie-breaks.
+- **`ORDER BY` sort keys** — the key computation only. The sort itself is
+  stable and stays sequential, so ties keep input order.
+
+What stays sequential, and why:
+
+- **Row construction and projection.** Building a result row allocates, and
+  allocation does not share: partitioning these was measured *slower* than not,
+  so it is gated by row count rather than by the flag.
+- **The streaming aggregate.** Partitioning it would reassociate `sum` and
+  `avg` over floating point and move the last bit of the result. A number that
+  depends on how many cores answered the query is not a number this engine
+  will return.
+- **Anything that would change an error.** A `LIMIT` pushed into a `MATCH`, a
+  `max_rows` budget, and a group-limited aggregation all have outcomes that
+  depend on where the sequential scan stopped, so they opt out.
+
+Scope:
+
+- **Storage modes** — memory and mapped fan out. Disk-mode graphs, and graphs
+  with a spatial configuration, ignore the flag and run sequentially rather
+  than refusing it, so code that runs against all three modes is unaffected.
+- **Servers** — the Bolt and MCP servers never enable it. A server's cores
+  belong to its concurrent clients; turning it on there would trade
+  across-query throughput for one query's latency.
+- **CLI** — `kglite query <graph> "<cypher>" --parallel`.
+
+Measured on a 1M-node / 11M-edge synthetic graph on a 10-core Apple Silicon
+machine (4 performance + 6 efficiency cores), release build, minimum of two
+agreeing runs. Numbers on other hardware will differ, and a machine with fewer
+performance cores will see less:
+
+| Query shape | Sequential | Parallel | |
+|---|---|---|---|
+| Scan + filter + `count(*)` | 34 ms | 6.5 ms | 5.2x |
+| Scan + filter + grouped aggregate | 68 ms | 13 ms | 5.2x |
+| Property-filtered scan | 7.6 ms | 1.5 ms | 5.0x |
+| Interpreted text predicate | 30 ms | 4.6 ms | 6.5x |
+| Regex (`=~`) predicate | 41 ms | 6.9 ms | 6.0x |
+| Grouped aggregation, few groups | 356 ms | 280 ms | 1.3x |
+| Grouped aggregation, 800k groups | 480 ms | 440 ms | 1.1x |
+| `ORDER BY` over 800k rows | 400 ms | 360 ms | 1.1x |
+| Scan + filter + 792k-row projection | 132 ms | 122 ms | 1.1x |
+
+The pattern is worth reading: shapes whose cost is *scanning* gain 5-6x, and
+shapes whose cost is *building rows* gain almost nothing, because the second
+kind is bound by the allocator rather than by arithmetic. Reach for
+`parallel=True` on an analytical scan or aggregate over a large graph; it will
+not speed up returning a million rows to Python.
+
 ## Indexes
 
 Create an equality index on a `(node_type, property)` pair to accelerate `MATCH (n:T {prop: value})` and `WHERE n.prop = value` to O(log N):

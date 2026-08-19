@@ -217,6 +217,17 @@ pub(crate) fn parallel_aggregations() -> usize {
     PARALLEL_AGGREGATIONS.load(Ordering::Relaxed)
 }
 
+/// Parallel ORDER BY sort-key precomputes entered.
+#[cfg(test)]
+pub(crate) static PARALLEL_SORT_KEYS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Snapshot of [`PARALLEL_SORT_KEYS`].
+#[cfg(test)]
+pub(crate) fn parallel_sort_keys() -> usize {
+    PARALLEL_SORT_KEYS.load(Ordering::Relaxed)
+}
+
 /// The message used when a region reported failure without one — only
 /// reachable if a caller sets the flag without recording a reason.
 const UNKNOWN_REASON: &str = "parallel region failed";

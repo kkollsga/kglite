@@ -145,3 +145,64 @@ AGG_PERCENTILE = "MATCH (p:Person) RETURN p.joined_year AS y, median(p.age) AS m
 )
 def test_bench_parallel_grouped_aggregation(benchmark, parallel_graph, label, query, parallel):
     benchmark(parallel_graph.cypher, query, parallel=parallel)
+
+
+# ── ORDER BY sort-key precompute, and the regex-cache contention probe ──────
+
+ORDER_BY_SORT = "MATCH (p:Person) RETURN p.name AS nm ORDER BY p.age DESC, p.name ASC"
+
+# R7 probe: `=~` resolves its compiled pattern through a process-global
+# RwLock-guarded cache on *every row*. `CONTAINS` does the same per-row work
+# without the lock, so the gap between these two speedups is the contention.
+REGEX_PREDICATE = "MATCH (p:Person) WHERE p.name =~ '.*a1.*' RETURN count(*) AS n"
+CONTAINS_PREDICATE = "MATCH (p:Person) WHERE p.name CONTAINS 'a1' RETURN count(*) AS n"
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("parallel", [False, True], ids=["serial", "parallel"])
+def test_bench_parallel_order_by_sort(benchmark, parallel_graph, parallel):
+    """800k rows sorted. Only the sort-key precompute can fan out; the sort
+    itself is stable and stays sequential."""
+    benchmark(parallel_graph.cypher, ORDER_BY_SORT, parallel=parallel)
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("parallel", [False, True], ids=["serial", "parallel"])
+def test_bench_parallel_regex_predicate(benchmark, parallel_graph, parallel):
+    benchmark(parallel_graph.cypher, REGEX_PREDICATE, parallel=parallel)
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("parallel", [False, True], ids=["serial", "parallel"])
+def test_bench_parallel_contains_predicate(benchmark, parallel_graph, parallel):
+    """Control for the regex cell: same shape, no global cache lookup."""
+    benchmark(parallel_graph.cypher, CONTAINS_PREDICATE, parallel=parallel)
+
+
+@pytest.mark.benchmark
+def test_bench_throughput_control_with_a_parallel_query_admitted(benchmark, parallel_graph):
+    """The composition cell: the same eight concurrent readers as the control
+    above, but with one `parallel=True` aggregate running alongside them.
+
+    This is the honesty meter for the program's claim — "one heavy analytical
+    query can use the machine; concurrent-client throughput is unchanged". The
+    two halves of that only compose if admitting a parallel query does not
+    wreck the readers, and a parallel query by definition takes cores the
+    readers were using. There is no gate here: the number is recorded so the
+    claim can be stated with its interference cost attached rather than
+    without.
+    """
+    query = "MATCH (p:Person) WHERE p.score > 0.9 RETURN count(*) AS n"
+    heavy = "MATCH (p:Person) WHERE p.score > 0.5 RETURN p.joined_year AS y, count(*) AS n"
+
+    def readers_alongside_one_parallel_query():
+        hog = threading.Thread(target=parallel_graph.cypher, args=(heavy,), kwargs={"parallel": True})
+        hog.start()
+        threads = [threading.Thread(target=parallel_graph.cypher, args=(query,)) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        hog.join()
+
+    benchmark(readers_alongside_one_parallel_query)

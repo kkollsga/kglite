@@ -966,11 +966,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
-      - name: Run Session and disk concurrency models under TSan
+      # Three filters, not one. `graph::session` covers the concurrency model
+      # this job was built for; the two `parallel` filters cover the opt-in
+      # parallel Cypher runtime, whose regions fan a read-only `&DirGraph`
+      # across rayon workers. Those tests are where a data race would show up,
+      # and a substring filter does not pick them up on its own.
+      - name: Run Session, disk and parallel-runtime concurrency models under TSan
         env:
           RUSTFLAGS: -Zsanitizer=thread
           RUSTDOCFLAGS: -Zsanitizer=thread
-        run: cargo test -Zbuild-std -p kglite --lib --target x86_64-unknown-linux-gnu graph::session
+        run: |
+          cargo test -Zbuild-std -p kglite --lib --target x86_64-unknown-linux-gnu graph::session
+          cargo test -Zbuild-std -p kglite --lib --target x86_64-unknown-linux-gnu graph::parallel
+          cargo test -Zbuild-std -p kglite --lib --target x86_64-unknown-linux-gnu executor::tests::parallel
 
   dependency-maintenance:
     name: Scheduled dependency advisory report

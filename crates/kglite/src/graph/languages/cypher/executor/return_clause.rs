@@ -211,6 +211,19 @@ impl<'a> CypherExecutor<'a> {
     // ORDER BY
     // ========================================================================
 
+    /// Whether the ORDER BY sort-key precompute may fan out.
+    ///
+    /// Sort keys are Cypher expressions evaluated through the interpreter, so
+    /// this takes the same exclusions as the other expression-evaluating
+    /// regions (disk, spatial). The sort that consumes them stays sequential
+    /// regardless — stability is a documented invariant.
+    fn may_fan_out_sort_keys(&self, rows: usize) -> bool {
+        self.parallel
+            && !self.graph.graph.is_disk()
+            && self.graph.spatial_configs.is_empty()
+            && parallel::should_fan_out(rows, parallel::CostClass::Interpreted)
+    }
+
     pub(super) fn execute_order_by(
         &self,
         clause: &OrderByClause,
@@ -224,17 +237,35 @@ impl<'a> CypherExecutor<'a> {
             .map(|item| self.fold_constants_expr(&item.expression))
             .collect();
 
-        // Pre-compute sort keys for each row to avoid repeated evaluation
-        let sort_keys: Vec<Vec<Value>> = result_set
-            .rows
-            .iter()
-            .map(|row| {
-                folded_sort_exprs
-                    .iter()
-                    .map(|expr| self.evaluate_expression(expr, row).unwrap_or(Value::Null))
-                    .collect()
-            })
-            .collect();
+        // Pre-compute sort keys for each row to avoid repeated evaluation.
+        // Positional — `sort_keys[i]` belongs to `rows[i]` — so an indexed
+        // parallel map is order-safe by construction. The *sort* itself stays
+        // sequential and stable: ties must keep input order, and `par_sort_by`
+        // is not stable.
+        let key_for = |row: &ResultRow| -> Vec<Value> {
+            folded_sort_exprs
+                .iter()
+                .map(|expr| self.evaluate_expression(expr, row).unwrap_or(Value::Null))
+                .collect()
+        };
+        let sort_keys: Vec<Vec<Value>> = if self.may_fan_out_sort_keys(result_set.rows.len()) {
+            #[cfg(test)]
+            parallel::PARALLEL_SORT_KEYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            let interrupt = ParallelInterrupt::new(|| self.check_deadline().err());
+            let src = &result_set.rows;
+            parallel::install(|| {
+                src.par_iter()
+                    .enumerate()
+                    .map(|(i, row)| {
+                        interrupt.check(i)?;
+                        Ok(key_for(row))
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })?
+        } else {
+            result_set.rows.iter().map(key_for).collect()
+        };
 
         // Direction + effective NULLS placement per item (explicit
         // NULLS FIRST/LAST wins; otherwise ASC → Last, DESC → First —

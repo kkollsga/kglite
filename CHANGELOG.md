@@ -57,6 +57,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its own rows in row order, so `collect` comes back in the same order and
   float sums are not reassociated.
 
+  Also parallelised: **`ORDER BY` sort-key precompute** (the key computation
+  only — the sort stays stable and sequential, so ties keep input order).
+
+  Numbers, release, 1M-node/11M-edge synthetic graph, 10-core Apple Silicon
+  (4P+6E), minimum of two agreeing runs: scan + filter + `count(*)` **5.2x**,
+  scan + filter + grouped aggregate **5.2x**, property-filtered scan **5.0x**,
+  interpreted text predicate **6.5x**, regex predicate **6.0x**, grouped
+  aggregation 1.1-1.4x depending on group count, `ORDER BY` over 800k rows
+  1.1x, 792k-row projection 1.1x. Concurrent-client throughput with the flag
+  off is unchanged. The shape of that table is the guidance: scanning
+  parallelises, building rows does not.
+
 - **Property-type constraints — `CREATE CONSTRAINT ... REQUIRE n.prop IS :: TYPE`
   (and the `IS TYPED TYPE` spelling) are now declared and enforced.** The
   statement previously parsed and was refused with an explanation; it now
@@ -177,6 +189,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rows, chosen inside the measured crossover.
 
 ### Fixed
+
+- **A regex (`=~`) predicate was 6x *slower* under the parallel runtime, and
+  is now 1.2x faster sequentially as well.** Every row resolved its compiled
+  pattern through a process-global cache behind an `RwLock`, and every row
+  then matched through a `Regex` whose internal scratch pool is shared between
+  threads — two contended cache lines per row. An 800k-row `=~` scan measured
+  49 ms sequential against 305 ms parallel. Patterns are now cached per thread,
+  compiled once per thread, and borrowed rather than reference-counted at the
+  row: the same scan is 41 ms sequential and 6.9 ms parallel.
 
 - **A cancelled or timed-out parallel query could report "parallel region
   failed" instead of its real reason.** The first worker to notice set the

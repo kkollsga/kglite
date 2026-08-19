@@ -358,9 +358,11 @@ pub(super) fn evaluate_comparison(
         )),
         ComparisonOp::RegexMatch => match (left, right) {
             (Value::String(text), Value::String(pattern)) => {
-                let re = super::regex_cache::get_or_compile(pattern)
-                    .map_err(|e| format!("Invalid regular expression '{}': {}", pattern, e))?;
-                Ok(re.is_match(text))
+                // Borrowed, not cloned: this runs once per row, and cloning
+                // the shared `Arc` here was measured to cost more than the
+                // match itself under the parallel runtime.
+                super::regex_cache::with_compiled(pattern, |re| re.is_match(text))
+                    .map_err(|e| format!("Invalid regular expression '{}': {}", pattern, e))
             }
             _ => Ok(false),
         },

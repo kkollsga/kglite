@@ -4868,15 +4868,22 @@ class KnowledgeGraph:
                 is flagged. Answers and row order are identical either way,
                 so this is a throughput knob and never a semantic one.
 
-                Worth it for one heavy analytical scan/aggregate over a large
-                graph; measured on a 1M-node graph and a 10-core Apple
-                Silicon machine, ``MATCH (p:Person) WHERE ... RETURN
-                count(*)`` runs 2.7x faster and the grouped form 3.7x. It is
-                off by default — and stays off in the Bolt and MCP servers —
-                because a server's cores belong to its concurrent clients:
-                turning it on trades across-query throughput for one query's
-                latency. Disk-mode graphs currently ignore it and run
-                sequentially.
+                Worth it for one heavy analytical **scan or aggregate** over
+                a large graph, and not worth it for returning many rows:
+                scanning parallelises, building result rows does not (it is
+                bound by the allocator). Measured on a 1M-node graph and a
+                10-core Apple Silicon machine, release, two agreeing runs:
+                scan + filter + ``count(*)`` **5.2x**, the grouped form
+                **5.2x**, a regex predicate **6.0x** — but a 792k-row
+                projection only 1.1x.
+
+                It is off by default, and stays off in the Bolt and MCP
+                servers, because a server's cores belong to its concurrent
+                clients: turning it on trades across-query throughput for one
+                query's latency. Disk-mode graphs, and graphs with a spatial
+                configuration, ignore the flag and run sequentially rather
+                than refusing it. See the "Parallel runtime" section of
+                ``CYPHER.md`` for what does and does not parallelise.
             disable_optimizer: When ``True``, run the query with **all**
                 optimizer passes skipped — schema validation still
                 applies, but no predicate pushdown, fusion, reordering,

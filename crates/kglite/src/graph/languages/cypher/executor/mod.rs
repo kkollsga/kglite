@@ -109,6 +109,16 @@ pub struct CypherExecutor<'a> {
     /// Default `false`. Operators that can partition deterministically check
     /// this **and** their own runtime row × cost-class gate before fanning
     /// out; nothing fans out on this flag alone.
+    ///
+    /// Note what is *absent* from this struct: an embedder. The parallel
+    /// runtime's rule is that nothing reachable from a fanned-out region may
+    /// call `ExecuteOptions::embedder` — an embedder is a caller-supplied
+    /// object with no documented thread-safety, and `text_score()` queries
+    /// resolve theirs at plan time. That rule needs no runtime check here
+    /// because the executor never holds one: the field does not exist, and
+    /// `text_score` reaching this layer is an error, not a call
+    /// (`scalar_functions::utility`). Keep it that way — adding an embedder
+    /// field would put a foreign object inside every parallel region.
     pub(super) parallel: bool,
     /// Whether this execution may read local files through `LOAD CSV`, and
     /// from where. Default [`load_csv::CsvImportPolicy::Denied`] — a caller

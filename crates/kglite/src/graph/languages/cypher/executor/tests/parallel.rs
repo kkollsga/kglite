@@ -777,3 +777,79 @@ fn single_group_aggregation_stays_serial() {
     );
     assert_eq!(opted_in.rows, run(&graph, query, false).rows);
 }
+
+// ── ORDER BY sort-key precompute + regex cache (Q5) ─────────────────────────
+
+use crate::graph::parallel::parallel_sort_keys;
+
+/// The sort-key precompute is positional, so a parallel map is order-safe;
+/// the sort that consumes it is stable and stays sequential. Ties must
+/// therefore keep input order in both modes — which is what a low-cardinality
+/// sort key checks.
+#[test]
+fn parallel_sort_keys_match_serial_in_order() {
+    let _meter = meter_guard();
+    let graph = scan_graph(PARALLEL_MIN_ROWS_INTERPRETED * 4);
+    let before = parallel_sort_keys();
+    for query in [
+        // `cat` has 7 values across 20k rows: almost every comparison is a
+        // tie, so an unstable sort would shuffle visibly.
+        "MATCH (n:Item) RETURN n.name AS nm, n.cat AS c ORDER BY n.cat ASC",
+        "MATCH (n:Item) RETURN n.name AS nm ORDER BY n.value DESC, n.name ASC",
+        "MATCH (n:Item) RETURN n.name AS nm ORDER BY toUpper(n.cat) ASC, n.nid ASC",
+    ] {
+        let serial = run(&graph, query, false);
+        let parallel = run(&graph, query, true);
+        assert_eq!(
+            serial.rows, parallel.rows,
+            "parallel sort keys changed the sorted order (stability?): {query}"
+        );
+        assert!(!serial.rows.is_empty(), "vacuous fixture for {query}");
+    }
+    assert!(
+        parallel_sort_keys() > before,
+        "no ORDER BY fanned out its sort-key precompute"
+    );
+}
+
+#[test]
+fn sort_keys_respect_the_gate_and_the_opt_in() {
+    let _meter = meter_guard();
+    let query = "MATCH (n:Item) RETURN n.name AS nm ORDER BY n.value DESC";
+
+    let small = scan_graph(PARALLEL_MIN_ROWS_INTERPRETED - 1);
+    let before = parallel_sort_keys();
+    run(&small, query, true);
+    assert_eq!(
+        parallel_sort_keys(),
+        before,
+        "a below-gate ORDER BY fanned out"
+    );
+
+    let large = scan_graph(PARALLEL_MIN_ROWS_INTERPRETED * 4);
+    let before = parallel_sort_keys();
+    run(&large, query, false);
+    assert_eq!(
+        parallel_sort_keys(),
+        before,
+        "parallel=false fanned out its sort keys"
+    );
+}
+
+/// The per-thread regex cache must answer identically to the shared one, and
+/// an invalid pattern must still surface its error rather than being cached.
+#[test]
+fn regex_predicate_matches_across_modes() {
+    let _meter = meter_guard();
+    let graph = scan_graph(PARALLEL_MIN_ROWS_INTERPRETED * 4);
+    for query in [
+        "MATCH (n:Item) WHERE n.name =~ '.*_1[0-9][0-9]$' RETURN count(*) AS n",
+        "MATCH (n:Item) WHERE n.cat =~ 'cat_[135]' RETURN n.name AS nm",
+        "MATCH (n:Item) WHERE NOT n.cat =~ 'cat_[135]' RETURN count(*) AS n",
+    ] {
+        let serial = run(&graph, query, false);
+        let parallel = run(&graph, query, true);
+        assert_eq!(serial.rows, parallel.rows, "regex diverged: {query}");
+        assert!(!serial.rows.is_empty(), "vacuous fixture for {query}");
+    }
+}
