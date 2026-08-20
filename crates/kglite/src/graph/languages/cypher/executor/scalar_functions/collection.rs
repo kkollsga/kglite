@@ -147,10 +147,10 @@ impl<'a> CypherExecutor<'a> {
                 };
                 let len = usize::try_from(len_i128)
                     .map_err(|_| "range() cardinality exceeds this platform's limits")?;
-                self.budget.check_work(len, "range()")?;
-                self.budget.consume_collection(len, "range()")?;
-                self.check_deadline()?;
-
+                // range()'s own byte ceiling is checked before the shared
+                // budget so that a single oversized range keeps reporting the
+                // more specific 256 MiB message; the budget below still sees
+                // every range and catches what accumulates *across* calls.
                 const MAX_RANGE_ALLOCATION_BYTES: usize = 256 * 1024 * 1024;
                 let allocation_bytes = len
                     .checked_mul(std::mem::size_of::<Value>())
@@ -161,6 +161,10 @@ impl<'a> CypherExecutor<'a> {
                          exceeding the 256 MiB collection safety limit"
                     ));
                 }
+
+                self.budget.check_work(len, "range()")?;
+                self.budget.consume_collection(len, "range()")?;
+                self.check_deadline()?;
 
                 // Phase A.1 / C4 — native Value::List of Value::Int64.
                 // `try_reserve_exact` turns impossible theoretical ranges into

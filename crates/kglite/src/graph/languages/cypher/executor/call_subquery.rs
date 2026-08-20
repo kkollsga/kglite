@@ -356,7 +356,7 @@ impl<'a> CypherExecutor<'a> {
             // first-clause, so the result is simply the S subquery rows.
             // R = 1 implicit empty outer row × S subquery rows = S rows.
             self.budget
-                .check_work(sub_rows.len(), "uncorrelated CALL subquery join")?;
+                .check_rows(sub_rows.len(), "uncorrelated CALL subquery join")?;
             combined_rows.reserve(sub_rows.len());
             for (sub_idx, sub_row) in sub_rows.iter().enumerate() {
                 self.check_interrupt_periodic(sub_idx)?;
@@ -374,8 +374,12 @@ impl<'a> CypherExecutor<'a> {
                 "Query row count overflow while executing uncorrelated CALL subquery join"
                     .to_string()
             })?;
+            // `total` rows are about to be reserved and filled, so this is a
+            // pre-sized row collection, not scan work: charging it as rows is
+            // what puts it under the no-max_rows backstop *before* the
+            // allocation rather than after the join has materialized.
             self.budget
-                .check_work(total, "uncorrelated CALL subquery join")?;
+                .check_rows(total, "uncorrelated CALL subquery join")?;
             combined_rows.reserve(total);
             let mut join_work = 0usize;
             for outer_row in outer_rows {

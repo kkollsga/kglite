@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A query that set no `max_rows` could materialize an unbounded intermediate
+  row set and get the host process killed.** `max_rows` is opt-in and unset by
+  default on every surface, which left every cardinality guard in the executor
+  inert on the path almost all callers take: a nested `UNWIND` cross-product
+  such as `UNWIND range(1,1000) AS a UNWIND range(1,1000) AS b UNWIND
+  range(1,1000) AS c RETURN count(*)` grew to hundreds of gigabytes of
+  intermediate rows until the operating system killed the process — and kglite
+  is embedded, so that process is the caller's application. The executor now
+  enforces an absolute row backstop when `max_rows` is unset (10,000,000 rows
+  or retained collection items, twice the largest row set any query in this
+  repository's own suites materializes by design). Crossing it raises a
+  quantified error naming the operator, the count, the ceiling, and the escape
+  hatch: an explicit `max_rows` — per query, or per graph/session via
+  `set_default_max_rows()` — still governs on its own, above or below the
+  backstop. Whole-graph scan work is deliberately exempt, so a fused
+  `count(*)` over a 124M-node disk graph is unaffected. The query above now
+  fails in seconds with a bounded footprint instead of taking the process
+  down.
+
 - **An invalid or unsupported regular expression in a `WHERE` clause silently
   returned zero rows on the fused execution paths.** The unfused path has
   always raised `Invalid regular expression '…'`; the fused node-scan

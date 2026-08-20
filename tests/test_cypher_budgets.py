@@ -1,5 +1,7 @@
 """Regression coverage for query-wide Cypher execution budgets."""
 
+import time
+
 import pandas as pd
 import pytest
 
@@ -185,3 +187,90 @@ def test_transaction_mutation_budget_rolls_back_only_failed_statement() -> None:
         {"id": "seed", "flag": False},
     ]
     tx.commit()
+
+
+# ---------------------------------------------------------------------------
+# Default path (no max_rows): the absolute backstop inside ExecutionBudget.
+#
+# `max_rows` is opt-in, so every check above used to be inert on the path
+# almost all callers take. An unbounded cross-product could therefore
+# materialize until the OS killed the *host* process. Ceiling and rationale:
+# `MAX_UNBOUNDED_ROWS` in crates/kglite/src/graph/languages/cypher/executor/
+# budget.rs. These queries are sized to cross it via a pre-sized or
+# accumulating check, so they fail without first materializing 10M rows.
+# ---------------------------------------------------------------------------
+
+BACKSTOP_ROWS = 10_000_000
+
+# 3200 x 3200 = 10,240,000 combined rows. The uncorrelated CALL subquery join
+# knows the product before it allocates, so the backstop stops it while only
+# 6,400 rows exist.
+UNBOUNDED_CROSS_PRODUCT = """
+UNWIND range(1, 3200) AS a
+CALL { UNWIND range(1, 3200) AS b RETURN b }
+RETURN count(*) AS n
+"""
+
+
+def test_default_path_backstops_an_unbounded_cross_product() -> None:
+    graph = kglite.KnowledgeGraph()
+
+    start = time.perf_counter()
+    with pytest.raises(kglite.CypherExecutionError) as excinfo:
+        graph.cypher(UNBOUNDED_CROSS_PRODUCT)
+    elapsed = time.perf_counter() - start
+
+    message = str(excinfo.value)
+    assert str(BACKSTOP_ROWS) in message, message
+    assert "max_rows" in message, message
+    assert "10240000" in message, message
+    # Incremental/pre-sized checks mean this must fail early, not after the
+    # cross-product has been built.
+    assert elapsed < 30.0, f"backstop took {elapsed:.1f}s — it is not failing early"
+
+
+def test_default_path_backstops_accumulated_collection_items() -> None:
+    """Rows stay small, but the collections built to produce them do not."""
+    graph = kglite.KnowledgeGraph()
+    query = "UNWIND range(1, 4000) AS a WITH size(range(1, 3000 + a)) AS s RETURN sum(s) AS total"
+
+    with pytest.raises(kglite.CypherExecutionError) as excinfo:
+        graph.cypher(query)
+
+    message = str(excinfo.value)
+    assert "collection items" in message, message
+    assert str(BACKSTOP_ROWS) in message, message
+
+
+def test_explicit_max_rows_still_governs_the_same_query() -> None:
+    """An explicit max_rows replaces the backstop — smaller or larger."""
+    graph = kglite.KnowledgeGraph()
+
+    with pytest.raises(kglite.CypherExecutionError, match="max_rows limit of 1000"):
+        graph.cypher(UNBOUNDED_CROSS_PRODUCT, max_rows=1000)
+
+    graph.set_default_max_rows(1000)
+    with pytest.raises(kglite.CypherExecutionError, match="max_rows limit of 1000"):
+        graph.cypher(UNBOUNDED_CROSS_PRODUCT)
+    graph.set_default_max_rows(None)
+
+
+def test_default_path_below_the_ceiling_is_unaffected() -> None:
+    graph = graph_with_types()
+
+    assert graph.cypher("UNWIND range(1, 200) AS a UNWIND range(1, 200) AS b RETURN count(*) AS n").to_list() == [
+        {"n": 40000}
+    ]
+    # A single collection an order of magnitude past any realistic result set
+    # is still built: the backstop is not a default max_rows.
+    assert graph.cypher("RETURN size(range(1, 1000000)) AS n").to_list() == [{"n": 1000000}]
+    # Scan work is exempt: a fused count charges the whole graph and allocates
+    # nothing, so it must never see the ceiling.
+    assert graph.cypher("MATCH (n) RETURN count(n) AS n").to_list() == [{"n": 3}]
+
+
+def test_oversized_range_still_reports_its_own_byte_ceiling() -> None:
+    """The range()-specific message stays the one a caller sees."""
+    graph = kglite.KnowledgeGraph()
+    with pytest.raises(kglite.CypherExecutionError, match="256 MiB"):
+        graph.cypher("RETURN range(0, 100000000) AS r")
